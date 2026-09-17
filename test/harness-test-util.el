@@ -43,6 +43,11 @@ Like `let' but tolerant of variables that are not yet defined."
      (unwind-protect
          (progn ,@body)
        (harness-test-reset-index)
+       ;; Tests never share a session with each other, and leaving them in the
+       ;; registry would change the counts the mode line and the browser show.
+       (when (boundp 'harness--sessions) (clrhash harness--sessions))
+       (when (boundp 'harness--session-tails) (clrhash harness--session-tails))
+       (when (boundp 'harness--message-ids) (clrhash harness--message-ids))
        (ignore-errors (delete-directory harness-test--directory t)))))
 
 (defun harness-test-wait-for (predicate &optional timeout interval)
