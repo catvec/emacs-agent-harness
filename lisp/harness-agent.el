@@ -74,6 +74,10 @@ This costs one extra request per session."
   "Hook run with the session just before each provider request.
 Functions may mutate the session (for example to compact the transcript).")
 
+(defvar harness-run-aborted-hook nil
+  "Hook run with the session after its run is aborted.
+Subagents use this to stop their children when the parent is abandoned.")
+
 (defvar harness-request-failed-hook nil
   "Hook run with (SESSION MESSAGE) when a request fails.")
 
@@ -108,6 +112,7 @@ Functions may mutate the session (for example to compact the transcript).")
       (dolist (call (plist-get run :calls))
         (harness-tool-call-cancel call "aborted by the user"))
       (harness-perms-abort-approvals session)
+      (run-hook-with-args 'harness-run-aborted-hook session)
       (harness-session-set-status session 'idle)
       (harness-agent--finish-run session)))
   session)
@@ -399,7 +404,7 @@ This is the degradation path for providers without native tool calling."
 (defun harness-agent-system-context (session)
   "Return project and tool context for SESSION's system prompt.
 Returns a string, as `harness-system-prompt-functions' requires."
-  (let ((root (or (harness-session-project-root session) default-directory)))
+  (let ((root (harness-session-cwd session)))
     (string-join
      (delq nil
            (list (format "Project: %s\nWorking directory: %s\nDate: %s"

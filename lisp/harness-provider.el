@@ -400,6 +400,21 @@ configuration plist into a provider object."
            (harness-provider-get harness-default-provider))
       (car (harness-provider-all))))
 
+(defun harness-model-provider-for (session model)
+  "Return the provider name to use for MODEL in SESSION.
+
+Static configuration wins, then whatever the session already uses, then the
+default provider.  This lives here rather than in the UI because subagents,
+the model picker and the agent loop all need the same answer."
+  (or (harness-plist-or-alist-get
+       :provider
+       (cl-find-if (lambda (spec)
+                     (equal (harness-plist-or-alist-get :id spec) model))
+                   harness-models))
+      (and session (harness-session-provider session))
+      (let ((default (harness-provider-default)))
+        (and default (harness-provider-name default)))))
+
 (defun harness-provider-for-model (model-id)
   "Return the provider that serves MODEL-ID."
   (or (when model-id

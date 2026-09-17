@@ -74,7 +74,8 @@
 (defvar harness-tool-enabled-functions nil
   "Abnormal hook deciding which tools a session may use.
 Each function is called with (TOOL SESSION) and returns non-nil when the tool
-should be offered.  Subagent personalities use this to restrict tools.")
+should be offered.  SESSION may be nil, meaning no particular session.
+Subagent personalities use this to restrict tools.")
 
 
 ;;; Data structures
@@ -84,7 +85,7 @@ should be offered.  Subagent personalities use this to restrict tools.")
 
 CATEGORY groups tools for permission policies (`read', `edit', `execute',
 `meta').  READ-ONLY is a hint for auto mode and parallel execution.  APPROVAL
-is the per-tool default permission: `ask', `allow' or `never'."
+is the per-tool default permission: `ask', `allow' or `deny'."
   (name nil)
   (label nil)
   (description "")
@@ -124,11 +125,33 @@ failed; the content is still shown to the model."
 (defvar harness-tool-registered-hook nil
   "Hook run with the tool after it is registered.")
 
+(defvar harness--tool-owners (make-hash-table :test #'equal)
+  "File that registered each tool, so a reload can remove them.
+Keyed by tool name.  This is what makes hot reload honest: without it,
+re-loading a plugin would accumulate registrations it no longer defines.")
+
 (defun harness-register-tool (tool)
   "Add TOOL to the registry, replacing any tool with the same name."
   (puthash (harness-tool-name tool) tool harness--tools)
+  (puthash (harness-tool-name tool)
+           (or load-file-name buffer-file-name (bound-and-true-p byte-compile-current-file))
+           harness--tool-owners)
   (run-hook-with-args 'harness-tool-registered-hook tool)
   tool)
+
+(defun harness-unregister-tool (name)
+  "Remove the tool named NAME from the registry."
+  (remhash name harness--tools)
+  (remhash name harness--tool-owners)
+  name)
+
+(defun harness-tools-for-file (file)
+  "Return the names of the tools registered by FILE."
+  (let (names)
+    (maphash (lambda (name owner)
+               (when (equal owner file) (push name names)))
+             harness--tool-owners)
+    names))
 
 (defun harness-tool-get (name)
   "Return the tool named NAME, or nil."
@@ -151,7 +174,7 @@ failed; the content is still shown to the model."
   "Define and register a tool called NAME.
 
 ARGS is a keyword list: `:description', `:parameters' (a plist), `:category',
-`:read-only', `:approval' (one of `ask', `allow', `never'), `:function'
+`:read-only', `:approval' (one of `ask', `allow', `deny'), `:function'
 \(called with the parsed arguments and a `harness-tool-context'), `:async'
 \(called with the arguments, the context and a DONE callback), `:render' and
 `:group'.  Exactly one of `:function' and `:async' is required."
@@ -181,7 +204,9 @@ ARGS is a keyword list: `:description', `:parameters' (a plist), `:category',
        :group ,group)))))
 
 (defun harness-tools-specs (&optional session)
-  "Return the model-facing tool list for SESSION in OpenAI format."
+  "Return the model-facing tool list for SESSION in OpenAI format.
+SESSION may be nil, which asks for the unrestricted list; hooks on
+`harness-tool-enabled-functions' must tolerate that."
   (harness-json-array
    (delq nil
          (mapcar
@@ -220,9 +245,10 @@ Accepts plists and alists, with symbol, keyword or string keys."
     (if (null value) default value)))
 
 (defun harness-tool-session-directory (session)
-  "Return the working directory for SESSION's tools."
-  (or (and session (harness-session-project-root session))
-      default-directory))
+  "Return the working directory for SESSION's tools.
+This is the session's working directory: normally the project root, but a git
+worktree or any other directory the session was pointed at."
+  (if session (harness-session-cwd session) default-directory))
 
 (defun harness-tools-resolve (path context)
   "Resolve PATH against CONTEXT's directory."

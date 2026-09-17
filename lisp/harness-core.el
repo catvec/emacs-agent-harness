@@ -89,6 +89,11 @@ This is intentionally cheap to check; nothing else in the code base may
   (when harness-debug
     (apply #'message (concat "[harness] " format-string) args)))
 
+(defvar harness-after-reload-hook nil
+  "Hook run after the harness or a plugin is reloaded.
+The UI uses this to re-render, so a changed renderer takes effect without
+restarting Emacs.  See DESIGN.md section 13.1.")
+
 (defvar harness--sessions (make-hash-table :test #'equal)
   "Registry of live sessions, keyed by session id.")
 
@@ -384,6 +389,10 @@ O(1); it is never serialised."
   (name nil)
   (project-root nil)
   (project-name nil)
+  ;; The directory every tool, `@' attachment and command resolves against.
+  ;; It starts at the project root and can be moved -- to a git worktree, for
+  ;; example -- without changing which project the session belongs to.
+  (working-directory nil)
   (file nil)
   (provider nil)
   (model nil)

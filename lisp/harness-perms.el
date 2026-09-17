@@ -247,7 +247,7 @@ approve every command of that tool.  Returns the rule."
 (defun harness-perms--classifier-request (tool-call session)
   "Return the user message sent to the auto mode classifier."
   (format "Working directory: %s\nTool: %s\nArguments: %s\n\nIs this safe to run without asking?"
-          (or (harness-session-project-root session) default-directory)
+          (harness-session-cwd session)
           (harness-tool-call-name tool-call)
           (let ((args (harness-tool-args tool-call)))
             (if args (harness-json-write args) "(none)"))))
@@ -342,19 +342,30 @@ CALLBACK receives (ALLOWED REASON).  The run loop is suspended until
     (harness-session-notify session 'approvals)
     approval))
 
-(defun harness-perms-resolve (approval decision)
-  "Resolve APPROVAL with DECISION, one of `allow', `allow-always' or `deny'."
-  (let* ((session (harness-approval-session approval))
-         (callback (harness-approval-callback approval))
-         (tool-call (harness-approval-tool-call approval)))
+(defun harness-approval-resolve (approval decision)
+  "Remove APPROVAL from its session and run its callback with DECISION.
+
+DECISION is whatever the approval is waiting for: `allow', `allow-always' or
+`deny' for a tool permission, or a list of answers for a question.  Resolving
+also lifts the session out of a blocked status, because a blocked session with
+nothing pending is a lie the UI would show."
+  (let ((session (harness-approval-session approval))
+        (callback (harness-approval-callback approval)))
     (setf (harness-session-approvals session)
           (delq approval (harness-session-approvals session)))
-    (when (and (eq decision 'allow-always) session tool-call)
-      (harness-perms-remember tool-call session))
+    (when (harness-status-blocked-p (harness-session-status session))
+      (harness-session-set-status session 'working))
     (run-hook-with-args 'harness-approval-resolved-hook session approval decision)
     (harness-session-notify session 'approvals)
     (when callback (funcall callback decision))
     approval))
+
+(defun harness-perms-resolve (approval decision)
+  "Resolve APPROVAL with DECISION, one of `allow', `allow-always' or `deny'."
+  (when (eq decision 'allow-always)
+    (harness-perms-remember (harness-approval-tool-call approval)
+                            (harness-approval-session approval)))
+  (harness-approval-resolve approval decision))
 
 (defun harness-approvals-pending ()
   "Return every pending approval, oldest first, across all sessions."

@@ -110,11 +110,37 @@ Each value is (MTIME . HEADER-PLIST).")
       nil t)
      "-+" "-+")))
 
-(defun harness-session-project-root (session)
-  "Return SESSION's project root, or its file's directory."
-  (or (harness-session-project-root session)
-      (and (harness-session-file session)
-           (file-name-directory (harness-session-file session)))))
+(defun harness-session-cwd (session)
+  "Return SESSION's working directory as an absolute path.
+
+Everything that touches the filesystem for a session -- tools, `@'
+attachments, git -- goes through this, so moving a session (to a git
+worktree, say) moves all of it at once."
+  (or (harness-session-working-directory session)
+      (harness-session-project-root session)
+      default-directory))
+
+(defun harness-session-set-working-directory (session directory)
+  "Point SESSION at DIRECTORY and persist the change."
+  (let ((expanded (file-name-as-directory (expand-file-name directory))))
+    (unless (file-directory-p expanded)
+      (user-error "No such directory: %s" expanded))
+    (setf (harness-session-working-directory session) expanded)
+    (harness-session-save-state session)
+    (harness-session-notify session 'meta)
+    (message "%s now works in %s" (harness-session-name session) expanded)
+    expanded))
+
+(declare-function harness-conversation-session "harness-ui-conversation" (&optional buffer))
+
+(defun harness-set-working-directory (directory &optional session)
+  "Change the working directory of SESSION."
+  (interactive
+   (list (read-directory-name "Working directory: " nil nil t)
+         (when (fboundp 'harness-conversation-session)
+           (harness-conversation-session))))
+  (let ((session (or session (harness-session--read-session "Directory for"))))
+    (harness-session-set-working-directory session directory)))
 
 (defun harness-session-in-project-p (session root)
   "Return non-nil when SESSION belongs to the project at ROOT."
@@ -204,6 +230,7 @@ never written to disk."
         (cons 'name (harness-session-name session))
         (cons 'project_root (harness-session-project-root session))
         (cons 'project_name (harness-session-project-name session))
+        (cons 'working_directory (harness-session-working-directory session))
         (cons 'provider (and (harness-session-provider session)
                              (symbol-name (harness-session-provider session))))
         (cons 'model (harness-session-model session))
@@ -216,6 +243,7 @@ never written to disk."
    session
    (list (cons 'type "meta")
          (cons 'name (harness-session-name session))
+         (cons 'working_directory (harness-session-working-directory session))
          (cons 'model (harness-session-model session))
          (cons 'provider (and (harness-session-provider session)
                               (symbol-name (harness-session-provider session))))
@@ -253,6 +281,10 @@ PLIST may contain `:name', `:directory', `:model', `:provider' and
                              (format "%s session" (cdr project)))
                    :project-root (car project)
                    :project-name (cdr project)
+                   :working-directory (file-name-as-directory
+                                       (expand-file-name
+                                        (or (plist-get plist :working-directory)
+                                            (car project))))
                    :file (harness-session--file-for id (car project))
                    :provider (or (plist-get plist :provider)
                                  harness-default-provider)
@@ -278,6 +310,17 @@ This is the single write path for transcripts."
   (harness-index-add-message session message)
   (run-hook-with-args 'harness-message-added-hook session message)
   (harness-session-notify session 'messages)
+  message)
+
+(defun harness-session-persist-message (session message)
+  "Write MESSAGE to SESSION's file, index it and announce it.
+
+Use this for a message that was already appended to the transcript before it
+was complete -- the assistant message being streamed -- so that finishing a
+message does not append it twice."
+  (harness-session--write-record session (harness-session--message-record message))
+  (harness-index-add-message session message)
+  (run-hook-with-args 'harness-message-added-hook session message)
   message)
 
 (defun harness-session-rename (session name)
@@ -384,6 +427,7 @@ Keys: `:file', `:id', `:name', `:project-root', `:project-name', `:model',
             :name (harness-alist-get :name header)
             :project-root (harness-alist-get :project_root header)
             :project-name (harness-alist-get :project_name header)
+            :working-directory (harness-alist-get :working_directory header)
             :model (harness-alist-get :model header)
             :provider (harness-alist-get :provider header)
             :created (harness-alist-get :created header)
@@ -449,6 +493,8 @@ Only the header is read, so this is nil unless the session is live."
     ("meta"
      (when-let* ((name (harness-alist-get :name record)))
        (setf (harness-session-name session) name))
+     (when-let* ((directory (harness-alist-get :working_directory record)))
+       (setf (harness-session-working-directory session) directory))
      (when-let* ((model (harness-alist-get :model record)))
        (setf (harness-session-model session) model))
      (when-let* ((provider (harness-alist-get :provider record)))
@@ -487,6 +533,7 @@ Only the header is read, so this is nil unless the session is live."
                    :name (or (harness-alist-get :name header) "session")
                    :project-root (harness-alist-get :project_root header)
                    :project-name (harness-alist-get :project_name header)
+                   :working-directory (harness-alist-get :working_directory header)
                    :file file
                    :provider (let ((provider (harness-alist-get :provider header)))
                                (and provider (intern provider)))
