@@ -159,6 +159,27 @@ Registry: `harness--sessions` is an `equal`-hash of id → `harness-session`.
 `harness-session-list` returns sessions sorted by `updated` descending.
 Registries are also defined for tools, providers, models, renderers.
 
+### 3.0 JSON encoding conventions
+
+Everything that crosses the wire or hits disk is encoded by
+`harness-json-write' and decoded by `harness-json-read'.  The mapping is:
+
+| JSON | Lisp |
+|---|---|
+| object | plist (keyword keys) or alist (symbol/string keys) |
+| array | **vector** when the elements are objects or arrays; a list is fine for arrays of scalars |
+| null | nil |
+| false | `:false` |
+| string/number/bool | the obvious thing |
+
+The vector rule is not stylistic.  `json-encode' decides whether a list is an
+object or an array by looking at its shape, so a one element array of objects
+(`({"a": 1})`) is indistinguishable from an object and is silently encoded as
+one.  `harness-json-array` (`vconcat`) is the explicit way to say "this is an
+array"; tool specs, wire tool calls and persisted queues all go through it.
+Decoding always produces lists for arrays, which is fine: reading is
+unambiguous.
+
 ### 3.1 Hooks (the extension contract)
 
 | Hook | Args | When |

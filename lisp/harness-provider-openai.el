@@ -125,8 +125,9 @@ Return nil for messages that must not be sent."
                    ;; backends reject requests that echo them back.
                    (when calls
                      (list (cons 'tool_calls
-                                 (mapcar #'harness-provider-openai--wire-tool-call
-                                         calls))))))))
+                                 (harness-json-array
+                                  (mapcar #'harness-provider-openai--wire-tool-call
+                                         calls)))))))))
       (_ nil))))
 
 (defun harness-provider-openai--wire-tool-call (tool-call)

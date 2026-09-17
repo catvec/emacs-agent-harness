@@ -111,9 +111,13 @@
       (should (equal (harness-alist-get :content wire) "hi"))
       (should-not (harness-alist-get :reasoning_content wire))
       (let ((calls (harness-alist-get :tool_calls wire)))
+        ;; Tool calls serialise as a vector because `json-encode' cannot tell a
+        ;; one element array of objects from an object.
+        (should (vectorp calls))
         (should (equal (length calls) 1))
-        (should (equal (harness-alist-get :id (car calls)) "c1"))
-        (should (equal (harness-alist-get :name (harness-alist-get :function (car calls)))
+        (should (equal (harness-alist-get :id (aref calls 0)) "c1"))
+        (should (equal (harness-alist-get :name
+                                          (harness-alist-get :function (aref calls 0)))
                        "bash"))))))
 
 (ert-deftest harness-provider-test-wire-skips-empty-assistant ()

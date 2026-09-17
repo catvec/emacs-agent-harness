@@ -71,5 +71,15 @@ prefix.
   way to have a `special-mode`-derived buffer with an editable input area.
 - `tabulated-list-mode` reverts by re-running `tabulated-list-print`; keep
   `tabulated-list-entries` generation cheap and free of I/O.
+- `json-encode' cannot distinguish a one element array of objects from an
+  object, and silently encodes the wrong one.  Any JSON array whose elements
+  are objects or arrays must be built with `harness-json-array' (a vector).
+- A `defun` argument list cannot use `&key' (the compiler treats `&key' as a
+  parameter).  Use `cl-defun' when you want keyword arguments.
+- A slot named `directory' or `capabilities' generates an accessor of that
+  name, which then collides with any function you define.  Name the function
+  differently (`harness-tool-session-directory').
+- `decode-coding-string` with the `utf-8` coding system rewrites CRLF to LF.
+  Use `utf-8-unix` for anything that came off the wire or out of a file.
 - SQLite handles owned by a buffer must be closed in `kill-buffer-hook` or the
   file stays locked.

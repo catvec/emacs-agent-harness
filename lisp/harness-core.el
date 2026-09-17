@@ -134,6 +134,15 @@ When PRETTY is non-nil, produce indented output."
         (json-array-type 'list))
     (json-encode object)))
 
+(defun harness-json-array (list)
+  "Return LIST as a JSON array (a vector).
+
+`json-encode' cannot tell an array of objects from an object when the array
+has exactly one element, so any array whose elements are themselves objects
+or arrays must be passed through here.  Arrays of scalars are unambiguous and
+may stay lists."
+  (vconcat list))
+
 (defun harness-json-write-line (object)
   "Serialise OBJECT to one line of JSON, terminated by a newline."
   (concat (harness-json-write object) "\n"))
