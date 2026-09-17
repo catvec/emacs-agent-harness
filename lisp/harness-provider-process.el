@@ -72,7 +72,8 @@ inherit the current one).  ENV is an alist of (VAR . VALUE) merged over the
 current environment.  ON-MESSAGE is called with each parsed stdout message
 that carries no matching request id; ON-STDERR is called with each chunk of
 stderr; ON-EXIT is called with (STATUS DESCRIPTION) when the subprocess exits
-on its own, where STATUS is the exit code (or nil when killed by a signal)."
+on its own, where STATUS is `process-exit-status' (the exit code, or the
+signal number that killed it) and DESCRIPTION the process event text."
   (name nil)
   (command nil)
   (args nil)
@@ -97,7 +98,8 @@ on its own, where STATUS is the exit code (or nil when killed by a signal)."
 Recognised keys: `:name' (a symbol), `:command' (string), `:args' (list of
 strings), `:cwd' (string or nil), `:env' (alist of (VAR . VALUE) or nil),
 `:on-message' (function of one parsed message), `:on-stderr' (function of one
-string) and `:on-exit' (function of (status description))."
+string) and `:on-exit' (function of (status description), where STATUS is the
+exit status and DESCRIPTION the process event text)."
   (harness-provider-process-transport--make
    :name (harness-plist-or-alist-get :name plist)
    :command (harness-plist-or-alist-get :command plist)
@@ -160,7 +162,7 @@ Return the id, or nil when OBJECT has no `:id'."
 CALLBACK is called with (ERROR RESULT): ERROR is nil on success, otherwise the
 reply's `:error' object (or an error string when the transport failed); RESULT
 is the reply's `:result'.  Return the request id."
-  (let ((id (harness-provider-process-transport--next-id transport)))
+  (let ((id (harness-provider-process--next-id transport)))
     (harness-provider-process-transport-send
      transport
      (list (cons 'jsonrpc "2.0")
@@ -169,8 +171,8 @@ is the reply's `:result'.  Return the request id."
            (cons 'params params))
      (lambda (reply)
        (funcall callback
-                (harness-alist-get :error reply)
-                (harness-alist-get :result reply))))
+                (harness-plist-or-alist-get :error reply)
+                (harness-plist-or-alist-get :result reply))))
     id))
 
 (defun harness-provider-process-transport-notify (transport method params)
@@ -246,31 +248,38 @@ Returns the main process, or nil on failure (which is reported through
         (cwd (harness-provider-process-transport-cwd transport))
         (env (harness-provider-process-transport-env transport)))
     (condition-case err
-        (let* ((stderr-process
-                (make-pipe-process
-                 :name (format "harness-provider-%s-stderr" name)
-                 :coding 'utf-8-unix
-                 :noquery t
-                 :filter #'harness-provider-process--stderr-filter
-                 :sentinel #'harness-provider-process--stderr-sentinel))
-               (process
-                (make-process
-                 :name (format "harness-provider-%s" name)
-                 :connection-type 'pipe
-                 :coding 'utf-8-unix
-                 :noquery t
-                 :command (cons command args)
-                 :cwd cwd
-                 :env (harness-provider-process--env env)
-                 :stderr stderr-process
-                 :filter #'harness-provider-process--stdout-filter
-                 :sentinel #'harness-provider-process--sentinel)))
-          (process-put process 'harness-provider-process-transport transport)
-          (process-put stderr-process 'harness-provider-process-transport transport)
-          (setf (harness-provider-process-transport-process transport) process)
-          (setf (harness-provider-process-transport-stderr-process transport)
-                stderr-process)
-          process)
+        ;; `make-process' has no :cwd or :env keywords; the working directory
+        ;; and environment are set by binding the corresponding dynamic
+        ;; variables around the call.
+        (let ((default-directory (if cwd
+                                     (file-name-as-directory
+                                      (expand-file-name cwd))
+                                   default-directory))
+              (process-environment (or (harness-provider-process--env env)
+                                       process-environment)))
+          (let* ((stderr-process
+                  (make-pipe-process
+                   :name (format "harness-provider-%s-stderr" name)
+                   :coding 'utf-8-unix
+                   :noquery t
+                   :filter #'harness-provider-process--stderr-filter
+                   :sentinel #'harness-provider-process--stderr-sentinel))
+                 (process
+                  (make-process
+                   :name (format "harness-provider-%s" name)
+                   :connection-type 'pipe
+                   :coding 'utf-8-unix
+                   :noquery t
+                   :command (cons command args)
+                   :stderr stderr-process
+                   :filter #'harness-provider-process--stdout-filter
+                   :sentinel #'harness-provider-process--sentinel)))
+            (process-put process 'harness-provider-process-transport transport)
+            (process-put stderr-process 'harness-provider-process-transport transport)
+            (setf (harness-provider-process-transport-process transport) process)
+            (setf (harness-provider-process-transport-stderr-process transport)
+                  stderr-process)
+            process))
       (error
        (harness--log "could not start provider process %s: %s"
                      name (error-message-string err))
@@ -328,7 +337,7 @@ The pipe reaching EOF is expected when the child exits; nothing else to do."
 Reports `:on-exit' and fails every pending callback so the agent loop never
 hangs."
   (setf (harness-provider-process-transport-exited transport) t)
-  (let ((status (process-exit-code process))
+  (let ((status (process-exit-status process))
         (description (string-trim (or event ""))))
     (harness-provider-process--fail-pending
      transport (format "process exited: %s" description))
