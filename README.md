@@ -10,12 +10,91 @@ dependencies.
 describes exactly what the code does. `AGENTS.md` is the working guide for
 agents (and humans) changing this repository.
 
-## Quick start
+## Installation
+
+Emacs 29.1 or later and nothing else: the harness is built on built-in
+APIs, so there is no archive to add and no third-party package to install.
+Pick one of the routes below; each one ends at the same configuration in
+[Quick start](#quick-start).
+
+### straight.el
+
+straight adds only the top level of a package's build directory to
+`load-path`, and it does not descend into subdirectories unless the recipe
+says so.  Name the modules under `lisp/` explicitly.  A bare glob is linked
+into the top level of the build directory, which is exactly where
+`(require 'harness)` looks for `harness-core` and the rest:
+
+```elisp
+(straight-use-package
+ '(emacs-agent-harness
+   :type git
+   :host sourcehut
+   :repo "~catvec/emacs-agent-harness"
+   :files ("harness.el" "lisp/*.el")))
+```
+
+With `use-package`, the recipe goes in `:straight` and the feature in the
+declaration name:
+
+```elisp
+(use-package harness
+  :straight (emacs-agent-harness
+             :type git :host sourcehut
+             :repo "~catvec/emacs-agent-harness"
+             :files ("harness.el" "lisp/*.el"))
+  :config
+  ;; the Quick start configuration
+  )
+```
+
+### Doom Emacs
+
+Doom's package manager is straight, so declare the package the same way.
+In `$DOOMDIR/packages.el`:
+
+```elisp
+(package! emacs-agent-harness
+  :recipe (:host sourcehut
+           :repo "~catvec/emacs-agent-harness"
+           :files ("harness.el" "lisp/*.el")))
+```
+
+then run `doom sync`.  `:files` is required for the reason above: with
+Doom's default recipe the modules stay in `lisp/`, and `(require 'harness)`
+does not find them.
+
+In `$DOOMDIR/config.el`:
+
+```elisp
+(use-package! harness
+  :init
+  ;; providers and models; see Quick start
+  :config
+  (harness-setup)
+  (global-harness-mode 1))
+```
+
+The package ships no autoload cookies, so the declaration loads it eagerly
+rather than deferring, and `harness-setup` runs once at startup.  Everything
+else is Doom-native: `harness-reload` refreshes Doom's autoloads through
+`doom/reload-autoloads` when it exists (DESIGN.md §13), and `doom/reload`,
+`doom sync` and `C-M-x` work unchanged.
+
+### Manual
+
+Clone the repository (or use the checkout you already have) and put both
+the root and `lisp/` on `load-path`:
 
 ```elisp
 (add-to-list 'load-path "~/documents/ai/emacs-agent-harness")
+(add-to-list 'load-path "~/documents/ai/emacs-agent-harness/lisp")
 (require 'harness)
+```
 
+## Quick start
+
+```elisp
 ;; Any OpenAI-compatible endpoint: LiteLLM, DeepSeek, OpenAI, Ollama, vLLM,
 ;; llama.cpp server, OpenRouter, ...  Providers are pluggable (DESIGN.md §5).
 (setq harness-providers
