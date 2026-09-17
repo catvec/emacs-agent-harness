@@ -53,6 +53,11 @@ Then `M-x harness-new-session` (`C-c h n`).
 | Model selection | `lisp/harness-ui-model.el` |
 | Themeable faces | `lisp/harness-faces.el` |
 | Plugins / self-extension / dogfooding | `harness-define-tool`, `harness-add-renderer`, `harness-load-plugins`, `harness_eval` tool |
+| Hot reload of the harness and plugins | `harness-reload`, `harness-plugin-mode`, `harness-unload-file` |
+| `@` file/directory attachments (content, fuzzy completion) | `lisp/harness-attachments.el` |
+| Per-session working directory | `harness-session-cwd`, `M-x harness-set-working-directory` |
+| Git worktrees per session | `lisp/harness-worktree.el` |
+| Long context: budgeting, compaction, chunked transcript search | `lisp/harness-context.el` |
 
 ## Directory index
 

@@ -66,6 +66,9 @@ emacs-agent-harness/
 │   ├── harness-perms.el           permission policy, pending approvals, auto-mode
 │   ├── harness-agent.el           the run loop (streaming state machine)
 │   ├── harness-subagents.el       child sessions, personalities, model override
+│   ├── harness-attachments.el     @-notation completion and content attachment
+│   ├── harness-context.el         token budgeting, compaction, chunked search
+│   ├── harness-worktree.el        git worktree per session
 │   ├── harness-queue.el           queued messages + editable queue buffer
 │   ├── harness-ui-conversation.el conversation buffer + input area
 │   ├── harness-ui-sessions.el     tabulated-list session browser
@@ -194,6 +197,11 @@ unambiguous.
 | `harness-stream-hook` | `session message kind text` | `kind` is `text`/`thinking` |
 | `harness-run-finished-hook` | `session` | run loop reached idle |
 | `harness-approval-added-hook` / `-resolved-hook` | `session approval [decision]` | approval lifecycle |
+| `harness-user-message-functions` | `session text` → text | transform an outgoing message (attachments use this) |
+| `harness-content-render-functions` | `content` → handled-p | render a message body (the attachment renderer uses this) |
+| `harness-run-aborted-hook` | `session` | a run was aborted (subagents stop their children) |
+| `harness-after-reload-hook` | – | the harness or a plugin was reloaded |
+| `harness-context-updated-hook` | `session` | the summary or context view changed |
 
 `events` symbols: `messages`, `stream`, `status`, `usage`, `queue`,
 `approvals`, `meta`. UI handlers switch on them; `messages` means "structure
@@ -408,6 +416,11 @@ intentionally.
 - **Resume**: `harness-session-resume` re-reads the file, rebuilds the struct,
   registers it, and opens the conversation buffer. Resumed sessions are idle;
   the previous run state is never restored.
+- **Working directory**: every session has one (`harness-session-cwd`),
+  starting at the project root.  Tools, `@` attachment lookup and git resolve
+  against it, so moving a session -- to a git worktree, for example -- moves
+  all of them at once.  `M-x harness-set-working-directory` changes it and the
+  header line shows it.
 - **Project association**: `project.el` only (`project-current`,
   `project-root`, `project-name`, `project-files`). `projectile` is used only
   as an optional fallback when `project.el` finds nothing.
@@ -594,11 +607,17 @@ users can override with standard `display-buffer-alist` entries.
 | `C-c h q` | `harness-queue-edit` |
 | `C-c h b` | `harness-switch-buffer` (next blocked session) |
 | `C-c h TAB` | `harness-switch-session` (cycle sessions) |
+| `C-c h c` | `harness-compact-session` |
+| `C-c h w` | `harness-worktree-create` |
+| `C-c h W` | `harness-worktree-remove` |
+| `C-c h C-w` | `harness-worktree-switch` |
+| `C-c h F` | `harness-conversation-search` (whole transcript, chunked) |
 
 In conversation buffer: `RET` send, `C-j` newline, `C-c C-k` clear input,
 `C-c C-a` approve, `C-c C-d` deny, `C-c C-e` edit queued, `C-c C-t` tree,
-`C-c C-b` abort, `C-c C-n/p` next/previous session, `TAB` fold tool output,
-`g` refresh, `q` bury.
+`C-c C-b` abort, `C-c C-f` search the transcript, `C-c C-z` compact,
+`C-c C-w` change the working directory, `TAB` completes in the input area and
+folds tool output everywhere else, `g` refresh, `q` bury.
 
 ## 10. Subagents (`harness-subagents.el`)
 
@@ -718,7 +737,96 @@ What that means concretely:
 - `scripts/test.sh` runs byte-compilation with `-Werror`-style warnings and ERT
   in batch.
 
-## 15. Open questions / future work
+## 15. Attachments and long context
+
+### 15.1 `@` attachments (`harness-attachments.el`)
+
+While composing, `@` completes file and directory names of the session's
+working directory, fuzzy matched (`harness-attachments--fuzzy-score`), and
+what is picked is attached **by content**: the text of a file, or the listing
+of a directory, is appended to the message as an `<attached path=...>`
+block.  The agent therefore does not spend a turn finding the file and cannot
+be defeated by a path that moved in between.
+
+Two halves, deliberately separable:
+
+- **Completion** is a `completion-at-point-function` registered in the
+  conversation buffer.  Candidates come from the session's working directory,
+  so `@` follows a session into a git worktree, and the candidate cache is
+  keyed by the directory's mtime so completion does not re-walk a tree on
+  every keystroke.
+- **Expansion** is `harness-attachments-expand`, called through
+  `harness-user-message-functions` in `harness-agent-send`.  It lives in the
+  send path, not the UI, so a plugin, a queued message and a test attach the
+  same way.
+
+Budgets are enforced here rather than trusted to the model: a file larger than
+`harness-attachment-max-bytes` is truncated with a note, the total per message
+is capped, and a directory listing is bounded.  A reference that does not
+resolve to an existing path is left as ordinary text, which is what makes an
+at sign in prose harmless.
+
+Rendering is the `harness-content-render-functions` hook's first customer: the
+conversation view's text renderer offers content to those functions before
+falling back to plain text, so the attachment renderer adds folded, labelled
+sections without the core knowing about attachments.
+
+### 15.2 Long context (`harness-context.el`)
+
+A session can outlive its model's context window.  Three rules keep that
+graceful:
+
+1. **The transcript is not the request.**  `harness-context-build-messages`
+   returns what is actually sent: the summary plus a recent tail.  Nothing is
+   deleted by compaction, so the UI and search still see everything, and
+   `harness-context-summary-addition` delivers the summary through the system
+   prompt (a supported extension point) rather than as a fake message.
+2. **The buffer stays small.**  The conversation view renders a window of
+   messages; `harness-conversation-load-earlier` prepends only what is
+   missing instead of rebuilding, which keeps point, folds and the input area
+   where they were.
+3. **The big walks stay off the main thread.**  Searching a whole transcript
+   is chunked across timers (`harness-context-search`), and cross-session
+   search remains a SQLite query.  Sizing is O(1) per message because each
+   message caches its character count once.
+
+Compaction is a cheap-model request and therefore asynchronous: the run it
+interrupts waits for it, not the other way round.  A failure is recorded with
+a timestamp (`:summary-error-at`) so a broken summariser is not asked again on
+every turn, and the run degrades to the provider's error rather than looping.
+Token counts shown in the mode line come from the provider's usage; the
+*estimator* here is only used to decide when to compact and is deliberately
+crude.
+
+The context module is optional: the agent loop calls it through
+`fboundp`-guarded functions and falls back to sending the whole transcript, so
+`harness-core` + `harness-provider` + `harness-agent` remain usable headless.
+
+## 16. Git worktrees (`harness-worktree.el`)
+
+An agent that edits files should not do it in the working tree you are using.
+A session can create its own worktree on its own branch and work there.
+
+Because every filesystem path in the harness resolves through
+`harness-session-cwd` -- tools, `@` completion, the summariser's view of the
+project -- pointing the session at the worktree moves all of it at once, and
+the header line shows where it is working.  There is no separate "worktree
+mode" for any of the other modules to know about.
+
+- **Creating** runs git asynchronously (`git worktree add -b BRANCH PATH`); a
+  checkout of a large repository is exactly the kind of thing that must not
+  freeze Emacs.  The session's directory only changes once the checkout has
+  succeeded.  By default the worktree is created in a sibling directory
+  (`<project>-worktrees/<slug>`) rather than inside the project.
+- **Cleaning up** is opt-in on session close
+  (`harness-worktree-cleanup-on-exit`) and on Emacs exit
+  (`harness-worktree-cleanup-on-emacs-exit`), and it never discards work: git
+  refuses to remove a dirty worktree and the refusal is reported rather than
+  forced away.  `harness-worktree-remove` takes an explicit `force`.
+- **The agent can ask for one**: the `worktree` tool exposes create, list and
+  remove, because a worktree is as reasonable a request as a directory.
+
+## 17. Open questions / future work
 
 - Anthropic-native provider (currently reachable via LiteLLM or a compatible
   gateway).

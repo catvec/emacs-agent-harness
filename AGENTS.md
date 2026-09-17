@@ -84,5 +84,22 @@ prefix.
 - The Emacs 31 byte compiler sometimes reports a `let*' binding as unused when
   its init form is complex.  Assign with `setq' on the next line instead of in
   the binding list.
+- `run-hook-with-args` **discards** return values.  A hook that threads a value
+  (such as `harness-user-message-functions`) must be run with an explicit
+  `dolist` over the hook variable, not with `run-hook-with-args`.
+- Never `nreverse` a plist: it reverses the pairs and every later `plist-get`
+  returns garbage.  Only reverse a plain list of entries.
+- `(read-from-string "x")` returns `(OBJECT . POSITION)`, so a caller that
+  wants the forms must take the `car`.
+- Emacs variables that only exist during byte compilation (such as
+  `byte-compile-current-file`) must be read with `(bound-and-true-p ...)`, or a
+  freshly started Emacs signals a void-variable error.
+- A module that is *optional* (like `harness-context`) is referenced through
+  `fboundp`-guarded calls from the modules below it, so `harness-core` +
+  `harness-provider` + `harness-agent` stay usable headless.
+- Tests that run git must disable signing (`commit.gpgsign=false` in the temp
+  repository, and via `GIT_CONFIG_*` in the environment).  A temporary
+  repository inherits the user's global `commit.gpgsign`, and a test that pops
+  up a pinentry dialog hangs forever and interrupts the user.
 - SQLite handles owned by a buffer must be closed in `kill-buffer-hook` or the
   file stays locked.
