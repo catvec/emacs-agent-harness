@@ -30,7 +30,9 @@ BODY can refer to `session'."
             (session (harness-session-create '(:name "test" :model "mock-model"
                                                      :provider mock))))
        (harness-provider-setup)
-       ,@body)))
+       (unwind-protect
+           (progn ,@body)
+         (harness-session-remove session)))))
 
 (defun harness-agent-test--wait (session)
   "Wait until SESSION is idle again."
