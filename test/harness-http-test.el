@@ -15,15 +15,6 @@
 (require 'harness-http)
 (require 'harness-test-util)
 
-(defmacro harness-http-test-with-server (responder &rest body)
-  "Run BODY with an HTTP server responding via RESPONDER.
-BODY can refer to the variable `port'."
-  (declare (indent 1))
-  `(let ((port (harness-test-start-server ,responder)))
-     (unwind-protect
-         (progn ,@body)
-       (harness-test-stop-servers))))
-
 (defun harness-http-test--collect (responder &optional request-args)
   "Perform a request against a server using RESPONDER and return the result.
 The result is a plist with `:complete', `:error', `:events' and `:chunks'."

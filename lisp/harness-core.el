@@ -621,18 +621,24 @@ and MAX-LINES to `harness-truncate-lines'; a nil value means no limit."
            (lines (1+ (cl-count ?\n string)))
            (truncated nil))
       (when (and max-lines (> lines max-lines))
+        ;; Keep the first (or last) MAX-LINES lines.  `string-match' returns the
+        ;; start of the match, so the head case needs `match-end'.
         (setq string
               (if tail
-                  (let ((start (save-match-data
-                                 (string-match
-                                  (format "\\(?:[^\n]*\n\\)\\{%d\\}\\'" (- lines max-lines))
-                                  string))))
-                    (substring string (or start 0)))
-                (let ((end (save-match-data
-                             (string-match
-                              (format "\\(?:[^\n]*\n\\)\\{%d\\}" max-lines)
-                              string))))
-                  (substring string 0 end))))
+                  (substring string
+                             (or (save-match-data
+                                   (when (string-match
+                                          (format "\\(?:[^\n]*\n\\)\\{%d\\}\\'"
+                                                  (- lines max-lines))
+                                          string)
+                                     (match-beginning 0)))
+                                 0))
+                (substring string 0 (save-match-data
+                                      (string-match
+                                       (format "\\(?:[^\n]*\n\\)\\{%d\\}"
+                                               max-lines)
+                                       string)
+                                      (match-end 0)))))
         (setq truncated t))
       (when (> (length string) max-chars)
         (setq string

@@ -80,6 +80,15 @@ The port is returned; call `harness-test-stop-servers' to clean up."
     (push server harness-test--servers)
     (process-contact server :service)))
 
+(defmacro harness-http-test-with-server (responder &rest body)
+  "Run BODY with an HTTP server responding via RESPONDER.
+BODY can refer to the variable `port'."
+  (declare (indent 1))
+  `(let ((port (harness-test-start-server ,responder)))
+     (unwind-protect
+         (progn ,@body)
+       (harness-test-stop-servers))))
+
 (defun harness-test--make-filter (pending responder)
   "Return a process filter accumulating into PENDING and calling RESPONDER.
 A nil return value from RESPONDER means: do not answer.  Tests use that to

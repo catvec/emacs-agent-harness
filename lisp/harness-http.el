@@ -394,18 +394,26 @@ caller's filter and sentinel (see `network-stream-open-plain' and
          (body (harness-http-request-body request))
          (encoded-body (and body (encode-coding-string body 'utf-8-unix)))
          (headers (harness-http-request-headers request))
+         (custom-names (delq nil (mapcar (lambda (h)
+                                           (and (car h) (downcase (format "%s" (car h)))))
+                                         headers)))
          (lines nil))
     (unless (or (and tls (= port 443)) (and (not tls) (= port 80)))
       (setq host (format "%s:%d" host port)))
     ;; The whole header block is built by `push'ing and reversed once at the
-    ;; end, so the pieces cannot get out of order.
+    ;; end, so the pieces cannot get out of order.  Defaults are pushed first,
+    ;; so they appear before caller-supplied headers; a caller header with the
+    ;; same name replaces the default instead of duplicating it.
     (push (format "%s %s HTTP/1.1\r\n"
                   (harness-http-request-method request) path)
           lines)
     (push (format "Host: %s\r\n" host) lines)
-    (push (format "User-Agent: %s\r\n" harness-http-user-agent) lines)
-    (push "Accept: */*\r\n" lines)
-    (push "Accept-Encoding: identity\r\n" lines)
+    (unless (member "user-agent" custom-names)
+      (push (format "User-Agent: %s\r\n" harness-http-user-agent) lines))
+    (unless (member "accept" custom-names)
+      (push "Accept: */*\r\n" lines))
+    (unless (member "accept-encoding" custom-names)
+      (push "Accept-Encoding: identity\r\n" lines))
     (push "Connection: close\r\n" lines)
     (when encoded-body
       (push (format "Content-Length: %d\r\n" (string-bytes encoded-body)) lines))
