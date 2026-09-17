@@ -23,6 +23,28 @@ Like `let' but tolerant of variables that are not yet defined."
      (unwind-protect
          (progn ,@body))))
 
+(defun harness-test-reset-index ()
+  "Close the session index and forget cached session headers."
+  (when (and (boundp 'harness--index-db) harness--index-db)
+    (ignore-errors (sqlite-close harness--index-db))
+    (setq harness--index-db nil))
+  (when (boundp 'harness-session-header-cache)
+    (clrhash harness-session-header-cache)))
+
+(defmacro harness-test-with-temp-session-dir (&rest body)
+  "Run BODY with session storage in a throwaway directory."
+  (declare (indent 0))
+  `(let* ((harness-test--directory (make-temp-file "harness-test" t))
+          (default-directory (file-name-as-directory harness-test--directory))
+          (harness-session-directory (expand-file-name "sessions" harness-test--directory))
+          (harness-session-index-file (expand-file-name "index.sqlite" harness-test--directory))
+          (harness-session-header-cache (make-hash-table :test #'equal))
+          (harness--index-db nil))
+     (unwind-protect
+         (progn ,@body)
+       (harness-test-reset-index)
+       (ignore-errors (delete-directory harness-test--directory t)))))
+
 (defun harness-test-wait-for (predicate &optional timeout interval)
   "Run the event loop until PREDICATE returns non-nil, or TIMEOUT seconds pass.
 Return the last value of PREDICATE.  Blocks on purpose: this is the one place
