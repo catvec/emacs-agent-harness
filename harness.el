@@ -64,6 +64,7 @@
 (require 'harness-queue)
 (require 'harness-attachments)
 (require 'harness-subagents)
+(require 'harness-worktree)
 (require 'harness-mode-line)
 (require 'harness-ui-conversation)
 (require 'harness-ui-sessions)
@@ -104,7 +105,7 @@ Editors write a file more than once; this coalesces the writes."
   '(harness-core harness-faces harness-http harness-provider
     harness-provider-openai harness-provider-process harness-session
     harness-tools harness-perms harness-agent harness-context harness-queue
-    harness-attachments harness-subagents harness-mode-line harness-ui-conversation
+    harness-attachments harness-subagents harness-worktree harness-mode-line harness-ui-conversation
     harness-ui-sessions harness-ui-tree harness-ui-ask harness-ui-model
     harness)
   "Harness modules in dependency order, for `harness-reload'.")
@@ -610,6 +611,9 @@ keyboard."
     (define-key map (kbd "i") #'harness-index-rebuild)
     (define-key map (kbd "d") #'harness-describe-session)
     (define-key map (kbd "c") #'harness-compact-session)
+    (define-key map (kbd "w") #'harness-worktree-create)
+    (define-key map (kbd "W") #'harness-worktree-remove)
+    (define-key map (kbd "C-w") #'harness-worktree-switch)
     (define-key map (kbd "F") #'harness-conversation-search)
     (define-key map (kbd "h") #'harness-setup)
     map)
