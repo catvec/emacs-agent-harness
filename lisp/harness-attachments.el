@@ -58,12 +58,8 @@
 (require 'harness-core)
 (require 'harness-session)
 (require 'harness-agent)
+(require 'harness-ui-conversation)
 (require 'harness-faces)
-
-(declare-function harness-conversation-insert "harness-ui-conversation"
-                  (string &rest properties))
-(declare-function harness-conversation-insert-folded "harness-ui-conversation"
-                  (string &rest properties))
 
 (defcustom harness-attachment-max-bytes 65536
   "Maximum characters attached from one file.
@@ -152,10 +148,8 @@ Higher is better: consecutive matches and matches near a separator win."
           (score 0)
           (last-match -2)
           (index 0)
-          (length (length candidate))
-          (target (downcase (if (file-name-directory candidate)
-                                (file-name-nondirectory candidate)
-                              candidate)))
+          (target (downcase candidate))
+          (length (length (downcase candidate)))
           (wanted (downcase pattern)))
       (while (and (< index length) (< pattern-index (length wanted)))
         (if (eq (aref target index) (aref wanted pattern-index))

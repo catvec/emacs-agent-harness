@@ -60,6 +60,11 @@
   :type 'integer
   :group 'harness)
 
+(defcustom harness-context-minimum-budget 256
+  "Lower bound on the request budget, whatever the arithmetic says."
+  :type 'integer
+  :group 'harness)
+
 (defcustom harness-context-reserve-tokens 8000
   "Tokens kept free for the model's reply."
   :type 'integer
@@ -158,10 +163,15 @@ long session has a lot of messages."
       harness-context-default-window))
 
 (defun harness-context-budget (session)
-  "Return how many tokens SESSION's requests may use."
-  (max 1000 (- (harness-context-window session)
-               harness-context-reserve-tokens
-               (or harness-max-tokens 0))))
+  "Return how many tokens SESSION's requests may use.
+
+Never returns less than `harness-context-minimum-budget': a configuration that
+would leave no room at all is a misconfiguration, and silently pretending the
+budget is negative would make the mode line nonsense."
+  (max harness-context-minimum-budget
+       (- (harness-context-window session)
+          harness-context-reserve-tokens
+          (or harness-max-tokens 0))))
 
 (defun harness-context-ratio (session)
   "Return how full SESSION's context budget is, as a fraction."

@@ -243,7 +243,8 @@ a user-invoked command, unlike the tool paths."
         (dolist (line (split-string output "\n" t))
           (cond
            ((string-prefix-p "worktree " line)
-            (when current (push (nreverse current) worktrees))
+            ;; `current' is a plist: never reverse it, that corrupts the pairs.
+            (when current (push current worktrees))
             (setq current (list :path (substring line 9))))
            ((string-prefix-p "branch " line)
             (setq current (plist-put current :branch
@@ -255,7 +256,7 @@ a user-invoked command, unlike the tool paths."
             (setq current (plist-put current :detached t)))
            ((string-prefix-p "bare" line)
             (setq current (plist-put current :bare t)))))
-        (when current (push (nreverse current) worktrees))
+        (when current (push current worktrees))
         (nreverse worktrees)))))
 
 (defun harness-worktree-remove (session &optional force delete-branch callback)

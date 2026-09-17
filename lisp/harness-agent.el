@@ -225,7 +225,9 @@ Used to continue after a tool result is added by something else."
     (list :tools (when capable (harness-tools-specs session))
           ;; Not the transcript: the summary plus the recent tail, so a long
           ;; session degrades instead of failing.
-          :messages (harness-context-build-messages session)
+          :messages (if (fboundp 'harness-context-build-messages)
+                        (harness-context-build-messages session)
+                      (harness-session-messages session))
           :system (harness-provider-system-prompt session))))
 
 (defun harness-agent--request (session)
@@ -234,7 +236,8 @@ Used to continue after a tool result is added by something else."
 When the transcript has outgrown the model's window the run waits for a
 compaction first; the compaction is itself a request, so waiting is a
 callback rather than a block."
-  (if (harness-context-needs-compaction-p session)
+  (if (and (fboundp 'harness-context-needs-compaction-p)
+           (harness-context-needs-compaction-p session))
       (progn
         (harness-session-set-status session 'working
                                     (list :label "compacting context"))
