@@ -183,6 +183,41 @@
       (harness-index-sync-session session)
       (should (= (length (harness-search-sessions "duplicate me")) 1)))))
 
+(ert-deftest harness-session-test-project-detection ()
+  "A session is tied to the project the editor believes in.
+
+`project.el' is asked first; projectile is only a fallback, so the tests here
+drive `project-find-functions' directly rather than depending on which project
+backends happen to be installed."
+  (harness-test-with-temp-session-dir
+    (let* ((root (expand-file-name "myproject" harness-test--directory))
+           (nested (expand-file-name "src/deep" root)))
+      (make-directory nested t)
+      ;; Nothing recognises this directory as a project.
+      (let ((project-find-functions nil))
+        (let ((project (harness-session-project nested)))
+          (should (equal (car project) (file-name-as-directory nested)))
+          (should (stringp (cdr project)))))
+      ;; When project.el finds a root, a subdirectory belongs to it.
+      (let ((project-find-functions
+             (list (lambda (directory)
+                     (when (string-prefix-p root directory)
+                       (cons 'transient (file-name-as-directory root)))))))
+        (let ((project (harness-session-project nested)))
+          (should (equal (car project) (file-name-as-directory root)))
+          (should (equal (cdr project) "myproject"))))
+      ;; A session created in the subdirectory is tied to the root.
+      (let ((project-find-functions
+             (list (lambda (directory)
+                     (when (string-prefix-p root directory)
+                       (cons 'transient (file-name-as-directory root)))))))
+        (let ((session (harness-session-create (list :name "nested"
+                                                     :directory nested))))
+          (should (equal (harness-session-project-root session)
+                         (file-name-as-directory root)))
+          (should (equal (harness-session-working-directory session)
+                         (file-name-as-directory root))))))))
+
 (ert-deftest harness-session-test-project-slug ()
   "Project slugs are filesystem safe."
   (should (equal (harness-session-project-slug "/home/u/my project!") "home-u-my-project"))

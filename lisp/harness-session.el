@@ -47,6 +47,8 @@
 (require 'harness-core)
 (require 'harness-provider)
 
+(declare-function projectile-project-root "projectile" (&optional dir))
+
 (defcustom harness-session-directory
   (expand-file-name "agent-harness/sessions" user-emacs-directory)
   "Directory holding session files."
@@ -90,15 +92,26 @@ Each value is (MTIME . HEADER-PLIST).")
 ;;; Projects
 
 (defun harness-session-project (&optional directory)
-  "Return (ROOT . NAME) for DIRECTORY, or the current directory's basename."
+  "Return (ROOT . NAME) for DIRECTORY, or the current directory's basename.
+
+`project.el' is asked first, because it is the built-in and every other Emacs
+feature agrees with it.  Projectile is consulted only as a fallback, and only
+when it is already installed -- a session should be tied to the project the
+user's editor believes in, and that is usually the same answer from either."
   (let* ((dir (file-name-as-directory
                (expand-file-name (or directory default-directory))))
          (project (ignore-errors (project-current nil dir))))
-    (if project
-        (let ((root (file-name-as-directory (expand-file-name (project-root project)))))
-          (cons root (or (ignore-errors (project-name project))
-                         (file-name-nondirectory (directory-file-name root)))))
-      (cons dir (file-name-nondirectory (directory-file-name dir))))))
+    (cond
+     (project
+      (let ((root (file-name-as-directory (expand-file-name (project-root project)))))
+        (cons root (or (ignore-errors (project-name project))
+                       (file-name-nondirectory (directory-file-name root))))))
+     ((and (require 'projectile nil t)
+           (ignore-errors (projectile-project-root dir)))
+      (let ((root (file-name-as-directory
+                   (expand-file-name (projectile-project-root dir)))))
+        (cons root (file-name-nondirectory (directory-file-name root)))))
+     (t (cons dir (file-name-nondirectory (directory-file-name dir)))))))
 
 (defun harness-session-project-slug (root)
   "Return a filesystem-safe directory name for project ROOT."
