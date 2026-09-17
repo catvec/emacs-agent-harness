@@ -578,7 +578,7 @@ tail and leaves a "load earlier" button; `harness-ui-truncate-lines` reuses
 - `harness-mode-line.el` — `harness-mode-line-mode` (buffer-local) sets
   `mode-line-format` to a `(:eval ...)` that renders status, model, session
   name, tokens, cost and pending-approval count. Global indicator via
-  `harness-global-mode` adds `harness-mode-line-global-string` to
+  `global-harness-mode` adds `harness-mode-line-global-string` to
   `global-mode-string`, showing the number of blocked sessions.
 
 ### 9.3 Window/buffer placement

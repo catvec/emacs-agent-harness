@@ -617,21 +617,24 @@ keyboard."
     (define-key map (kbd "F") #'harness-conversation-search)
     (define-key map (kbd "h") #'harness-setup)
     map)
-  "Keymap for harness commands, bound to `C-c h' by `harness-global-mode'.")
+  "Keymap for harness commands, bound to `C-c h' by `global-harness-mode'.")
 
-(defvar harness-global-mode-map
+(defvar global-harness-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c h") harness-command-map)
     map)
   "Global keymap for the harness.")
 
-(define-minor-mode harness-global-mode
-  "Global harness mode: key bindings and the blocked-session indicator."
+(define-minor-mode global-harness-mode
+  "Global harness mode: key bindings and the blocked-session indicator.
+
+Named the way Emacs names global minor modes, so `global-harness-mode' reads
+like `global-display-line-numbers-mode' next to it in `M-x'."
   :global t
   :lighter nil
   :group 'harness
-  :keymap harness-global-mode-map
-  (harness-mode-line-global-mode (if harness-global-mode 1 -1)))
+  :keymap global-harness-mode-map
+  (harness-mode-line-global-mode (if global-harness-mode 1 -1)))
 
 (provide 'harness)
 ;;; harness.el ends here
