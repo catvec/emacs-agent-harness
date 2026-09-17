@@ -662,6 +662,50 @@ both without touching code.
   extend its own session. This is the "dogfood its own core functionality"
   requirement — every feature in this document could be added as a plugin.
 
+## 13.1 Hot reload
+
+Reloading a plugin must not mean restarting Emacs, and it must not leave the
+harness in a half-defined state.  The rule is: **use the built-in machinery,
+make everything re-loadable, and keep the registries honest.**
+
+What that means concretely:
+
+- **Nothing in the core is stateful in a way a reload destroys.**  Registries
+  are `defvar`'d hash tables (re-loading a file does not re-run `defvar` when
+  the variable is already bound), sessions and buffers are untouched by
+  redefining functions, and live runs keep working because their callbacks are
+  closures, not global function references.
+- **Registries remember their owner.**  `harness-define-tool` and
+  `harness-add-renderer` record the file that defined them
+  (`load-file-name` / `buffer-file-name`).  `harness-unload-file` removes that
+  file's tools and renderers before the file is re-loaded, so iteration does
+  not accumulate dead registrations.
+- **Reload is `load`, not a private loader.**  `harness-reload-plugin` calls
+  `harness-unload-file` then `load`; `harness-reload-plugins` does that for
+  every plugin; `harness-reload` reloads the harness modules in dependency
+  order (core first, `harness.el` last) so a change to a lower module is
+  picked up exactly like a restarted Emacs would.  `load-prefer-newer` is
+  respected, and byte-compiled files are used when current.
+- **`harness-plugin-mode`** is a global minor mode that watches the plugin
+  directory (and, when `harness-plugin-watch-harness-dir` is set, the harness
+  source directory) with `file-notify-add-watch`, debounces per file, and
+  reloads a file after it is saved.  This is what makes plugin development
+  feel live: edit, save, the tool list in the next request already has it.
+- **Coexistence with Doom.**  `harness-reload` calls
+  `doom/reload-autoloads` when it exists (guarded by `fboundp`, never
+  required), so a harness reload after adding an autoloaded command picks it
+  up the way `doom/reload` would.  `C-M-x`/`eval-defun`, `M-x load-file` and
+  `doom/reload` all work unchanged; the harness adds no reload engine of its
+  own.
+- **Reload is visible.**  `harness-reload` reports what it reloaded, and every
+  reload runs `harness-after-reload-hook`, which the UI uses to re-render
+  conversation buffers so a changed renderer takes effect immediately.
+- **The harness can reload itself.**  `harness_eval` evaluates Elisp in the
+  running instance and `harness_reload` is registered as a tool, so an agent
+  editing the harness (or a plugin) can call it directly and see the result in
+  its own next request.  This is the dogfooding requirement: the harness
+  extends itself with the same mechanism a person uses.
+
 ## 14. Testing
 
 - `test/` holds ERT tests. Nothing in the test suite touches the network: a

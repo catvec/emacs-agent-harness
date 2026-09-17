@@ -30,3 +30,8 @@ Replicate features of harnesses:
 - Select the model 
 - Theme-able
 - Add providers as a pluggable thing you can implement (this way a standard openapi completion provider can be used or a custom provider which uses claude code cli json-rpc [don't do this], the provider should submit and receive inference from a provider and also get stats about the provider like the model and the price)
+- Built in hot reload using the built in emacs / doom hot reload mechanism (play nice and let the system do it) so that plugin development and iteration is easy
+- During composing message the @ notation can be used to attach the contents of a file or directory and fuzzy search helps find that filesystem object (very important the contents are attached to the message so the agent doesn't need to find the file)
+- Working directory awareness per session (commands for tools, @ notation finding, everything) based on directory awareness
+- Git worktree native integration, sets working directory, automatically creates working tree, can clean up on exit
+- Handle very long amounts of context gracefully (only have relevant context loaded in the buffer, smartly use quick on another thread async operations when require full access to context ex when searching)

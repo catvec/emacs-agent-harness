@@ -60,7 +60,9 @@
 (require 'harness-tools)
 (require 'harness-perms)
 (require 'harness-agent)
+(require 'harness-context)
 (require 'harness-queue)
+(require 'harness-attachments)
 (require 'harness-subagents)
 (require 'harness-mode-line)
 (require 'harness-ui-conversation)
@@ -101,8 +103,8 @@ Editors write a file more than once; this coalesces the writes."
 (defconst harness--modules
   '(harness-core harness-faces harness-http harness-provider
     harness-provider-openai harness-provider-process harness-session
-    harness-tools harness-perms harness-agent harness-queue
-    harness-subagents harness-mode-line harness-ui-conversation
+    harness-tools harness-perms harness-agent harness-context harness-queue
+    harness-attachments harness-subagents harness-mode-line harness-ui-conversation
     harness-ui-sessions harness-ui-tree harness-ui-ask harness-ui-model
     harness)
   "Harness modules in dependency order, for `harness-reload'.")
@@ -607,6 +609,8 @@ keyboard."
     (define-key map (kbd "x") #'harness-abort-all)
     (define-key map (kbd "i") #'harness-index-rebuild)
     (define-key map (kbd "d") #'harness-describe-session)
+    (define-key map (kbd "c") #'harness-compact-session)
+    (define-key map (kbd "F") #'harness-conversation-search)
     (define-key map (kbd "h") #'harness-setup)
     map)
   "Keymap for harness commands, bound to `C-c h' by `harness-global-mode'.")

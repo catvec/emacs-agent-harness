@@ -194,6 +194,8 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
     (define-key map (kbd "C-c C-A") #'harness-conversation-approve-always)
     (define-key map (kbd "C-c C-t") #'harness-tree)
     (define-key map (kbd "C-c C-e") #'harness-queue-edit)
+    (define-key map (kbd "C-c C-f") #'harness-conversation-search)
+    (define-key map (kbd "C-c C-z") #'harness-compact-session)
     (define-key map (kbd "C-c C-m") #'harness-select-model)
     (define-key map (kbd "C-c C-l") #'harness-conversation-load-earlier)
     (define-key map (kbd "C-c C-w") #'harness-set-working-directory)
@@ -297,6 +299,19 @@ insertion at the start."
   (save-excursion
     (goto-char (marker-position marker))
     (apply #'harness-conversation--output string properties)))
+
+(defun harness-conversation-insert (string &rest properties)
+  "Insert read-only STRING with PROPERTIES into the current buffer.
+This and `harness-conversation-insert-folded' are the public insertion API for
+content renderers, so a plugin never has to reach for a private function."
+  (apply #'harness-conversation--output string properties))
+
+(defun harness-conversation-insert-folded (string &rest properties)
+  "Insert STRING folded, with PROPERTIES applied.
+Returns the fold, so a caller can unfold it later."
+  (let ((start (point)))
+    (apply #'harness-conversation--output string properties)
+    (harness-conversation--fold start (point) t)))
 
 (defun harness-conversation--fold (start end hidden)
   "Record a foldable region between START and END, hidden when HIDDEN."
@@ -650,6 +665,27 @@ worktree, say)."
       name)
      (t (format "%s/%s" name (harness-relative-path directory root))))))
 
+(defun harness-conversation-context-string (session)
+  "Return the context usage string for SESSION, or nil.
+Uses the context module when it is loaded; the header line must not require
+it, so that a minimal install still renders."
+  (when (fboundp 'harness-context-stats-string)
+    (let* ((ratio (harness-context-ratio session))
+           (string (harness-context-stats-string session)))
+      (propertize (format "  ctx %s" string)
+                  'face (cond ((>= ratio 0.9) 'harness-error)
+                              ((>= ratio (if (boundp 'harness-context-warn-at)
+                                             (symbol-value 'harness-context-warn-at)
+                                           0.6))
+                               'harness-approval)
+                              (t 'harness-muted))))))
+
+(declare-function harness-context-stats-string "harness-context" (session))
+(declare-function harness-context-ratio "harness-context" (session))
+(declare-function harness-context-search "harness-context"
+                  (session regexp callback &optional limit))
+(declare-function harness-compact-session "harness-context" (&optional session))
+
 (defun harness-conversation--header-line ()
   "Return the header line text for the current conversation buffer."
   (let ((session harness-conversation--session))
@@ -677,7 +713,8 @@ worktree, say)."
                        'face 'harness-approval))
          (when (harness-session-queue session)
            (propertize (format "  ✎ %d queued" (harness-queue-length session))
-                       'face 'harness-queue)))))))
+                       'face 'harness-queue))
+         (harness-conversation-context-string session))))))
 
 
 ;;; Core renderers
@@ -857,14 +894,87 @@ refusal; the plain body is the fallback."
     (harness-conversation--build)))
 
 (defun harness-conversation-load-earlier ()
-  "Show more of the transcript in this buffer."
+  "Show more of the transcript, by rendering only what is missing.
+
+Rebuilding the buffer would throw away the user's place (and, for a long
+session, re-render hundreds of messages); prepending the earlier messages
+keeps point, folds and the input area exactly where they were, because every
+marker after them shifts automatically."
   (interactive)
   (let* ((session harness-conversation--session)
-         (total (length (harness-session-messages session)))
-         (current (or harness-conversation--limit harness-ui-max-rendered-messages)))
-    (setq harness-conversation--limit (min total (* current 2)))
-    (harness-conversation--build)
-    (message "Showing the last %d of %d messages" harness-conversation--limit total)))
+         (messages (harness-session-messages session))
+         (total (length messages))
+         (current (or harness-conversation--limit harness-ui-max-rendered-messages))
+         (next (min total (* current 2))))
+    (if (= next current)
+        (message "The whole transcript is already shown (%d messages)" total)
+      (setq harness-conversation--limit next)
+      (let* ((visible (seq-drop messages (- total next)))
+             (missing (seq-take visible (- next current)))
+             (inhibit-read-only t))
+        (save-excursion
+          (goto-char (marker-position harness-conversation--messages-end))
+          ;; Render the missing messages above the current ones, then move the
+          ;; insertion point back to the top so they appear in order.
+          (let ((insertion (point)))
+            (dolist (message (reverse missing))
+              (goto-char insertion)
+              (let ((markers (harness-conversation--render-message session message)))
+                (puthash (harness-message-id message) markers
+                         harness-conversation--message-markers)
+                (setq insertion (point))))))
+      (message "Showing the last %d of %d messages" next total)))))
+
+(defun harness-conversation-search (regexp)
+  "Search this session's whole transcript for REGEXP.
+
+The search runs in chunks (see `harness-context-search'), so a long session
+does not block Emacs while it looks."
+  (interactive "sSearch transcript: ")
+  (let ((session harness-conversation--session))
+    (unless session (user-error "This buffer is not a harness conversation"))
+    (message "Searching…")
+    (harness-context-search
+     session regexp
+     (lambda (results)
+       (if (null results)
+           (message "No matches for %s" regexp)
+         (harness-conversation-show-search-results session regexp results))))))
+
+(defun harness-conversation-show-search-results (session regexp results)
+  "Show SEARCH RESULTS for REGEXP in a buffer, RET jumping to the message."
+  (let ((buffer (get-buffer-create (format "*Harness Search: %s*"
+                                           (harness-session-name session)))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (special-mode)
+        (insert (propertize (format "%d match%s for %s\n\n"
+                                    (length results)
+                                    (if (= (length results) 1) "" "es")
+                                    regexp)
+                            'face 'bold))
+        (dolist (result results)
+          (let ((start (point)))
+            (insert (propertize (format "#%d %s [%s]\n"
+                                        (plist-get result :index)
+                                        (harness-format-time
+                                         (harness-message-timestamp
+                                          (plist-get result :message)))
+                                        (plist-get result :field))
+                                'face 'harness-role-tool))
+            (insert (format "    %s\n\n" (plist-get result :text)))
+            (insert-text-button "jump"
+                                'action (lambda (button)
+                                          (harness-conversation-display-message
+                                           session (button-get button 'harness-message)))
+                                'harness-message (plist-get result :message)
+                                'follow-link t
+                                'face 'harness-muted)
+            (insert "\n\n")
+            (put-text-property start (point) 'harness-search-result result)))))
+    (display-buffer buffer '(display-buffer-at-bottom (window-height . 0.4)))
+    buffer))
 
 (defun harness-conversation-next-message ()
   "Move to the next message header."

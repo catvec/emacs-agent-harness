@@ -52,6 +52,11 @@
 (require 'harness-perms)
 (require 'harness-queue)
 
+(declare-function harness-context-build-messages "harness-context" (session))
+(declare-function harness-context-needs-compaction-p "harness-context" (session))
+(declare-function harness-context-compact "harness-context" (session &optional callback))
+(declare-function harness-context-summary-addition "harness-context" (session))
+
 (defcustom harness-agent-max-iterations 100
   "Maximum number of request/tool cycles in one run.
 Reaching it stops the run with a note rather than looping forever."
@@ -63,6 +68,17 @@ Reaching it stops the run with a note rather than looping forever."
 This costs one extra request per session."
   :type 'boolean
   :group 'harness-sessions)
+
+(defvar harness-user-message-functions nil
+  "Functions transforming a user message before it is stored.
+
+Each is called with (SESSION TEXT) and returns the text to use, or nil to
+leave the text alone; they run in order, each seeing the previous result.
+`run-hook-with-args' cannot be used here because it discards return values,
+and threading the text is the whole point.
+
+Attachments are expanded this way, so every caller of `harness-agent-send'
+gets them -- the UI, a plugin, a queued message, a test.")
 
 (defvar harness-run-started-hook nil
   "Hook run with the session when a run begins.")
@@ -133,15 +149,24 @@ Returns the message or the queued message."
    (list (or (harness-session--read-session "Send to")
              (user-error "No live sessions"))
          (read-string "Message: ")))
-  (if (harness-session-active-p session)
-      (progn
-        (harness-queue-add session text)
-        (message "Queued for %s" (harness-session-name session)))
-    (let ((message (harness-message-create session 'user text)))
-      (harness-message-finalize message)
-      (harness-session-add-message session message)
-      (harness-agent--start-run session)
-      message)))
+  (let ((text (harness-agent--transform-user-text session text)))
+    (if (harness-session-active-p session)
+        (progn
+          (harness-queue-add session text)
+          (message "Queued for %s" (harness-session-name session))
+          nil)
+      (let ((message (harness-message-create session 'user text)))
+        (harness-message-finalize message)
+        (harness-session-add-message session message)
+        (harness-agent--start-run session)
+        message))))
+
+(defun harness-agent--transform-user-text (session text)
+  "Run SESSION's user message functions over TEXT, in order."
+  (dolist (function harness-user-message-functions text)
+    (let ((transformed (funcall function session text)))
+      (when (stringp transformed)
+        (setq text transformed)))))
 
 (defun harness-agent-start (session)
   "Start a run on SESSION without adding a message.
@@ -198,11 +223,27 @@ Used to continue after a tool result is added by something else."
   "Return the request overrides for SESSION's next request."
   (let ((capable (harness-agent--provider-tool-capable-p session)))
     (list :tools (when capable (harness-tools-specs session))
-          :messages (harness-session-messages session)
+          ;; Not the transcript: the summary plus the recent tail, so a long
+          ;; session degrades instead of failing.
+          :messages (harness-context-build-messages session)
           :system (harness-provider-system-prompt session))))
 
 (defun harness-agent--request (session)
-  "Send the transcript to the model for SESSION and stream the reply."
+  "Send the transcript to the model for SESSION and stream the reply.
+
+When the transcript has outgrown the model's window the run waits for a
+compaction first; the compaction is itself a request, so waiting is a
+callback rather than a block."
+  (if (harness-context-needs-compaction-p session)
+      (progn
+        (harness-session-set-status session 'working
+                                    (list :label "compacting context"))
+        (harness-context-compact
+         session (lambda (_summary) (harness-agent--request-now session))))
+    (harness-agent--request-now session)))
+
+(defun harness-agent--request-now (session)
+  "Send SESSION's context view to the model and stream the reply."
   (let ((run (harness-agent-run-state session)))
     (when run
       (run-hook-with-args 'harness-before-request-hook session)

@@ -81,5 +81,8 @@ prefix.
   differently (`harness-tool-session-directory').
 - `decode-coding-string` with the `utf-8` coding system rewrites CRLF to LF.
   Use `utf-8-unix` for anything that came off the wire or out of a file.
+- The Emacs 31 byte compiler sometimes reports a `let*' binding as unused when
+  its init form is complex.  Assign with `setq' on the next line instead of in
+  the binding list.
 - SQLite handles owned by a buffer must be closed in `kill-buffer-hook` or the
   file stays locked.
