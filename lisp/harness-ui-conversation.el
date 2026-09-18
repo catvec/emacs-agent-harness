@@ -96,6 +96,17 @@ Nil means use the selected window."
   :type '(choice (const :tag "Selected window" nil) (repeat sexp))
   :group 'harness-ui)
 
+(defcustom harness-ui-input-display-action
+  '((display-buffer-in-side-window)
+    (side . bottom)
+    (window-height . 2)
+    (slot . 1))
+  "`display-buffer' action for the input side window.
+The input lives in its own buffer so it stays pinned to the bottom of the
+frame instead of floating up under a short transcript."
+  :type '(repeat sexp)
+  :group 'harness-ui)
+
 (defconst harness-ui-prompt "❯ "
   "Prompt in front of the input area.")
 
@@ -181,32 +192,27 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
 (defvar-local harness-conversation--limit nil
   "How many messages this buffer renders; nil means the default.")
 
-(defun harness-conversation--input-p ()
-  "Return non-nil when point is in the input area."
-  (and harness-conversation--input-start
-       (>= (point) (marker-position harness-conversation--input-start))))
+(defvar-local harness-conversation--input-buffer nil
+  "SESSION's input buffer, set in the transcript buffer.")
 
 (defvar harness-conversation-mode-map
   (let ((map (make-sparse-keymap)))
     ;; `special-mode-map' is deliberately *not* the parent: it binds every
-    ;; self-inserting key to `undefined' (`suppress-keymap'), which would make
-    ;; the input area impossible to type into.  The transcript is already kept
-    ;; read-only by the `read-only' text property (see
-    ;; `harness-conversation--protect'), so the map only has to keep the
-    ;; single-key commands below from swallowing what the user types (see
-    ;; `harness-conversation--input-p').
+    ;; self-inserting key to `undefined' (`suppress-keymap').  The transcript
+    ;; is read-only, so the keys below are free to mean navigation; typing
+    ;; happens in `harness-conversation-input-mode' instead.
     ;;
     ;; A non-nil parent is still required: `define-derived-mode' splices in the
     ;; parent mode's keymap when a mode's own map has no parent.
     (set-keymap-parent map (make-sparse-keymap))
-    (define-key map (kbd "RET") #'harness-conversation-send)
     (define-key map (kbd "C-c C-c") #'harness-conversation-send)
-    (define-key map (kbd "C-j") #'newline)
     (define-key map (kbd "C-c C-k") #'harness-conversation-clear-input)
     (define-key map (kbd "C-c C-b") #'harness-conversation-abort)
     (define-key map (kbd "C-c C-a") #'harness-conversation-approve)
     (define-key map (kbd "C-c C-d") #'harness-conversation-deny)
-    (define-key map (kbd "C-c C-A") #'harness-conversation-approve-always)
+    ;; `C-c C-A' is the same event as `C-c C-a' (control does not case-fold),
+    ;; so "always" needs a key of its own.
+    (define-key map (kbd "C-c C-y") #'harness-conversation-approve-always)
     (define-key map (kbd "C-c C-t") #'harness-tree)
     (define-key map (kbd "C-c C-e") #'harness-queue-edit)
     (define-key map (kbd "C-c C-f") #'harness-conversation-search)
@@ -214,22 +220,23 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
     (define-key map (kbd "C-c C-m") #'harness-select-model)
     (define-key map (kbd "C-c C-l") #'harness-conversation-load-earlier)
     (define-key map (kbd "C-c C-w") #'harness-set-working-directory)
-    (define-key map (kbd "TAB") #'harness-conversation-tab)
+    (define-key map (kbd "TAB") #'harness-conversation-toggle-fold)
     (define-key map (kbd "<backtab>") #'harness-conversation-toggle-fold)
-    (define-key map (kbd "n") #'harness-conversation--next-message-or-insert)
-    (define-key map (kbd "p") #'harness-conversation--previous-message-or-insert)
-    (define-key map (kbd "g") #'harness-conversation--refresh-or-insert)
-    (define-key map (kbd "q") #'harness-conversation--bury-or-insert)
-    (define-key map (kbd "SPC") #'harness-conversation--scroll-or-insert)
+    (define-key map (kbd "n") #'harness-conversation-next-message)
+    (define-key map (kbd "p") #'harness-conversation-previous-message)
+    (define-key map (kbd "g") #'harness-conversation-refresh)
+    (define-key map (kbd "q") #'bury-buffer)
+    (define-key map (kbd "SPC") #'scroll-up-command)
     map)
   "Keymap for `harness-conversation-mode'.")
 
 (define-derived-mode harness-conversation-mode special-mode "Harness"
-  "Major mode for a conversation with an agent.
+  "Major mode for the transcript of a conversation with an agent.
 
-Output is read-only; the input area at the bottom is not.
-\\[harness-conversation-send] sends, \\[harness-conversation-abort] aborts the
-run, \\[harness-conversation-toggle-fold] folds tool output and
+Output is read-only; typing happens in the input side window (see
+`harness-conversation-input-mode').
+\\[harness-conversation-abort] aborts the run,
+\\[harness-conversation-toggle-fold] folds tool output and
 \\[harness-conversation-refresh] re-renders."
   (setq-local buffer-read-only nil)
   (setq-local truncate-lines nil)
@@ -238,15 +245,94 @@ run, \\[harness-conversation-toggle-fold] folds tool output and
   (setq-local cursor-in-non-selected-windows t)
   (add-to-invisibility-spec '(harness-fold . t))
   (setq-local header-line-format '(:eval (harness-conversation--header-line)))
+  (add-hook 'kill-buffer-hook #'harness-conversation--kill-input nil t))
+
+(defvar harness-conversation-input-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map text-mode-map)
+    (define-key map (kbd "RET") #'harness-conversation-send)
+    (define-key map (kbd "C-c C-c") #'harness-conversation-send)
+    (define-key map (kbd "C-j") #'newline)
+    (define-key map (kbd "C-c C-k") #'harness-conversation-clear-input)
+    (define-key map (kbd "C-c C-b") #'harness-conversation-abort)
+    (define-key map (kbd "C-c C-a") #'harness-conversation-approve)
+    (define-key map (kbd "C-c C-y") #'harness-conversation-approve-always)
+    (define-key map (kbd "C-c C-d") #'harness-conversation-deny)
+    (define-key map (kbd "C-c C-t") #'harness-tree)
+    (define-key map (kbd "C-c C-e") #'harness-queue-edit)
+    (define-key map (kbd "TAB") #'completion-at-point)
+    map)
+  "Keymap for `harness-conversation-input-mode'.")
+
+(define-derived-mode harness-conversation-input-mode text-mode "Harness-Input"
+  "Major mode for the harness conversation input area.
+
+\[harness-conversation-send] sends, \[harness-conversation-clear-input]
+clears and \[harness-conversation-abort] aborts the run."
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t)
+  (setq-local mode-line-format
+              '(:eval (harness-conversation-input--mode-line)))
   (add-hook 'completion-at-point-functions
             #'harness-attachments-completion-at-point nil t))
+
+(defun harness-conversation-input--mode-line ()
+  "Return the input window's mode line, which separates it from the transcript."
+  (let ((session harness-conversation--session))
+    (concat
+     " "
+     (propertize "Harness" 'face 'mode-line-buffer-id)
+     (when session
+       (concat
+        " "
+        (propertize (or (harness-session-model session) "no model")
+                    'face 'mode-line-emphasis)
+        (when (harness-session-status-detail session)
+          (propertize (format " · %s" (harness-session-status-string session))
+                      'face 'mode-line-inactive))
+        (when (harness-session-approvals session)
+          (propertize (format "  ⚠%d" (length (harness-session-approvals session)))
+                      'face 'harness-approval))
+        (when (harness-session-queue session)
+          (propertize (format "  ✎%d" (harness-queue-length session))
+                      'face 'harness-queue))))
+     (when-let* ((hint (harness-key-hint #'harness-conversation-send
+                                         harness-conversation-input-mode-map)))
+       (concat "  " (propertize (format "%s send" hint) 'face 'mode-line-inactive)))
+     " ")))
 
 (defun harness-conversation-session (&optional buffer)
   "Return the session shown in BUFFER, or the current buffer."
   (buffer-local-value 'harness-conversation--session (or buffer (current-buffer))))
 
+(defun harness-conversation--kill-input ()
+  "Kill the input buffer that belongs to the current transcript buffer."
+  (let ((input harness-conversation--input-buffer))
+    (when (buffer-live-p input)
+      (with-current-buffer input
+        (setq buffer-read-only nil)
+        (kill-buffer input)))))
+
+(defun harness-conversation-input-buffer (session)
+  "Return SESSION's input buffer, creating and initialising it if needed."
+  (let* ((transcript (harness-session-buffer session))
+         (buffer (and (buffer-live-p transcript)
+                      (buffer-local-value 'harness-conversation--input-buffer
+                                          transcript))))
+    (unless (buffer-live-p buffer)
+      (setq buffer (get-buffer-create
+                    (format "*Harness Input: %s*" (harness-session-name session))))
+      (with-current-buffer buffer
+        (harness-conversation-input-mode)
+        (setq harness-conversation--session session)
+        (harness-conversation-input--reset)))
+    (when (buffer-live-p transcript)
+      (with-current-buffer transcript
+        (setq harness-conversation--input-buffer buffer)))
+    buffer))
+
 (defun harness-conversation-buffer (session)
-  "Return SESSION's conversation buffer, creating and initialising it if needed."
+  "Return SESSION's conversation (transcript) buffer, creating it if needed."
   (let ((buffer (harness-session-buffer session)))
     (unless (buffer-live-p buffer)
       (setq buffer (get-buffer-create
@@ -260,23 +346,37 @@ run, \\[harness-conversation-toggle-fold] folds tool output and
         (setq harness-conversation--tool-markers (make-hash-table :test #'equal))
         (harness-conversation--build)))
     (setf (harness-session-buffer session) buffer)
+    (harness-conversation-input-buffer session)
     buffer))
 
 (defun harness-conversation-open (session &optional noshow)
-  "Show SESSION's conversation buffer.  With NOSHOW, only create it."
-  (let ((buffer (harness-conversation-buffer session)))
+  "Show SESSION's conversation, with the input pinned in a bottom side window.
+With NOSHOW, only create the buffers."
+  (let ((buffer (harness-conversation-buffer session))
+        (input (harness-conversation-input-buffer session)))
     (unless noshow
       (if harness-ui-conversation-display-action
           (display-buffer buffer harness-ui-conversation-display-action)
-        (pop-to-buffer-same-window buffer)))
+        (pop-to-buffer-same-window buffer))
+      (display-buffer input harness-ui-input-display-action)
+      ;; The input is where the user types, so give it the cursor without
+      ;; stealing the transcript's follow (which only moves transcript windows).
+      (when-let* ((window (get-buffer-window input)))
+        (select-window window)))
     buffer))
 
 (defun harness-conversation-rename-buffer (session)
-  "Refresh SESSION's conversation buffer name after a rename."
+  "Refresh SESSION's conversation and input buffer names after a rename."
   (when-let* ((buffer (harness-session-buffer session)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (rename-buffer (format "*Harness: %s*" (harness-session-name session)) t)))))
+        (rename-buffer (format "*Harness: %s*" (harness-session-name session)) t))
+      (let ((input (buffer-local-value 'harness-conversation--input-buffer buffer)))
+        (when (buffer-live-p input)
+          (with-current-buffer input
+            (rename-buffer (format "*Harness Input: %s*"
+                                   (harness-session-name session))
+                           t)))))))
 
 
 ;;; Insertion helpers
@@ -366,13 +466,11 @@ Returns the fold, so a caller can unfold it later."
 ;;; Building and rendering
 
 (defun harness-conversation--build ()
-  "Create the buffer skeleton and render it.
+  "Create the transcript buffer skeleton and render it.
 
-The markers are created *after* the input area is inserted, so that inserting
-the prompt cannot push the message and extras markers past it.  Their
-insertion types are also deliberate: the message and extras markers must move
-past text inserted at them (output grows downwards), while the input marker
-must not, because text typed at `point-max' belongs to the input region."
+The message and extras markers use insertion type t so output grows
+downwards.  The editable input lives in a separate buffer (see
+`harness-conversation-input-mode'), so nothing here is editable."
   (let ((inhibit-read-only t)
         (windows (harness-conversation--windows-at-end)))
     (erase-buffer)
@@ -381,17 +479,22 @@ must not, because text typed at `point-max' belongs to the input region."
     (clrhash harness-conversation--tool-markers)
     (insert "\n")
     (let ((messages-position (point)))
-      (insert "\n")
-      (let ((start (point)))
-        (insert harness-ui-prompt)
-        (put-text-property start (point) 'face 'harness-prompt)
-        (put-text-property start (point) 'field 'harness-input)
-        (harness-conversation--protect start (point))
-        (setq harness-conversation--input-start (copy-marker (point))))
       (setq harness-conversation--messages-end (copy-marker messages-position t))
       (setq harness-conversation--extras-end (copy-marker messages-position t)))
     (harness-conversation--sync)
     (harness-conversation--follow windows)
+    (goto-char (point-max))))
+
+(defun harness-conversation-input--reset ()
+  "Reset the input buffer to just its read-only prompt."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (let ((start (point)))
+      (insert harness-ui-prompt)
+      (put-text-property start (point) 'face 'harness-prompt)
+      (put-text-property start (point) 'field 'harness-input)
+      (harness-conversation--protect start (point))
+      (setq harness-conversation--input-start (copy-marker (point))))
     (goto-char (point-max))))
 
 (defun harness-conversation--message-header (message)
@@ -427,7 +530,7 @@ Returns the markers plist, whose marks are positioned for later updates."
   (save-excursion
     (goto-char (marker-position harness-conversation--messages-end))
     (let ((start (point))
-          thinking-end)
+          thinking-end thinking-fold)
       (harness-conversation--output (harness-conversation--message-header message))
       (insert "\n")
       (when (harness-message-thinking message)
@@ -435,10 +538,14 @@ Returns the markers plist, whose marks are positioned for later updates."
           (harness-conversation--output "thinking…\n" 'face 'harness-thinking)
           (harness-conversation--output (harness-message-thinking message)
                                         'face 'harness-thinking)
-          (insert "\n")
+          ;; `thinking-end' is where later deltas are appended, so it stays
+          ;; before the separator and streamed reasoning never runs into the
+          ;; answer below it.
           (setq thinking-end (point))
-          (harness-conversation--fold body-start thinking-end
-                                      (not harness-ui-show-thinking))))
+          (insert "\n")
+          (setq thinking-fold (harness-conversation--fold
+                               body-start (point)
+                               (not harness-ui-show-thinking)))))
       (let ((content-start (point)))
         (harness-conversation--render-content session message content-start)
         (let ((content-end (point)))
@@ -447,7 +554,9 @@ Returns the markers plist, whose marks are positioned for later updates."
             ;; Everything in the block is output, including the newlines.
             (harness-conversation--protect start end)
             (list :start (copy-marker start)
+                  :content-start (copy-marker content-start t)
                   :thinking-end (and thinking-end (copy-marker thinking-end t))
+                  :thinking-fold thinking-fold
                   :content-end (copy-marker content-end t)
                   :end (copy-marker end t))))))))
 
@@ -547,21 +656,31 @@ WINDOWS, when given, are followed to the end of the buffer."
         (delete-region start end)))))
 
 (defun harness-conversation--render-extras ()
-  "Render the approval prompts and queued messages at the end of the messages."
+  "Render the approval prompts and queued messages after the messages.
+
+The extras are written at `extras-end' and `messages-end' is left at their
+start, so the next message lands above them.  If both markers advanced
+together the region between them would stay empty and
+`harness-conversation--clear-extras' could never remove the previous render,
+duplicating every prompt on the next sync."
   (let ((session harness-conversation--session))
     (save-excursion
-      (goto-char (marker-position harness-conversation--messages-end))
-      (let ((start (point))
+      (let ((start (marker-position harness-conversation--extras-end))
             (any nil))
+        (goto-char start)
         (dolist (approval (harness-approval-pending session))
-          (harness-conversation--render-approval session approval)
-          (setq any t))
+          ;; Questions have their own widget buffer; rendering Allow/Always/Deny
+          ;; for one here would be nonsense.
+          (when (eq (harness-approval-kind approval) 'tool)
+            (harness-conversation--render-approval session approval)
+            (setq any t)))
         (when (harness-session-queue session)
           (harness-conversation--render-queue session)
           (setq any t))
         (when any
           (insert "\n")
-          (harness-conversation--protect start (point)))))))
+          (harness-conversation--protect start (point)))
+        (set-marker harness-conversation--messages-end start)))))
 
 (defun harness-conversation--render-approval (session approval)
   "Render APPROVAL of SESSION with buttons."
@@ -574,15 +693,29 @@ WINDOWS, when given, are followed to the end of the buffer."
         (unless (string-empty-p summary)
           (harness-conversation--output (format "  %s\n" summary)
                                         'face 'harness-muted))))
+    ;; The key is in the label: the buttons are clickable, but a user reading
+    ;; the transcript should not have to guess how to answer from the keyboard.
+    ;; The hint is looked up live (see `harness-key-hint'), never spelled out.
     (harness-conversation--output "  ")
-    (harness-conversation--button "Allow" `(lambda (_) (harness-perms-resolve ,approval 'allow)))
-    (harness-conversation--output " ")
-    (harness-conversation--button "Always" `(lambda (_) (harness-perms-resolve ,approval 'allow-always)))
-    (harness-conversation--output " ")
-    (harness-conversation--button "Deny" `(lambda (_) (harness-perms-resolve ,approval 'deny)))
+    (harness-conversation--approval-button
+     "Allow" #'harness-conversation-approve
+     `(lambda (_) (harness-perms-resolve ,approval 'allow)))
+    (harness-conversation--approval-button
+     "Always" #'harness-conversation-approve-always
+     `(lambda (_) (harness-perms-resolve ,approval 'allow-always)))
+    (harness-conversation--approval-button
+     "Deny" #'harness-conversation-deny
+     `(lambda (_) (harness-perms-resolve ,approval 'deny)))
     (insert "\n")
     (let ((inhibit-read-only t))
       (put-text-property start (point) 'harness-approval approval))))
+
+(defun harness-conversation--approval-button (label command action)
+  "Insert clickable LABEL for ACTION, followed by COMMAND's live key hint."
+  (harness-conversation--button label action)
+  (when-let* ((hint (harness-key-hint command harness-conversation-mode-map)))
+    (harness-conversation--output (concat " " hint)))
+  (harness-conversation--output "  "))
 
 (defun harness-conversation--summarize (detail)
   "Return a one-line summary of approval DETAIL, which may not be JSON safe."
@@ -628,15 +761,52 @@ WINDOWS, when given, are followed to the end of the buffer."
       (setq markers (gethash (harness-message-id message)
                              harness-conversation--message-markers)))
     (when markers
-      (let ((marker (if (eq kind 'thinking)
-                        (or (plist-get markers :thinking-end)
-                            (plist-get markers :content-end))
-                      (plist-get markers :content-end))))
-        (when marker
-          (harness-conversation--output-at
-           marker text
-           'face (if (eq kind 'thinking) 'harness-thinking 'harness-message-body)))))))
+      (if (eq kind 'thinking)
+          (harness-conversation--append-thinking markers text)
+        (harness-conversation--output-at
+         (plist-get markers :content-end) text
+         'face 'harness-message-body)))))
   (ignore session))
+
+(defun harness-conversation--append-thinking (markers text)
+  "Append streamed TEXT to MARKERS's reasoning region.
+
+The message is rendered before the first delta arrives, so a streamed trace
+usually has no region yet.  Open one with the \"thinking…\" label and the
+newline that separates it from the answer, then append above that newline."
+  (if-let* ((thinking-end (plist-get markers :thinking-end)))
+      (let ((start (marker-position thinking-end)))
+        (harness-conversation--output-at thinking-end text 'face 'harness-thinking)
+        (harness-conversation--hide-thinking markers start))
+    (harness-conversation--open-thinking markers text)))
+
+(defun harness-conversation--open-thinking (markers text)
+  "Open MARKERS's reasoning region with the first TEXT and return its marker."
+  (let* ((content-start (plist-get markers :content-start))
+         (body-start (marker-position content-start)))
+    (harness-conversation--output-at content-start "thinking…\n"
+                                     'face 'harness-thinking)
+    ;; Remember the spot before the separator: the reasoning streams there,
+    ;; so its deltas stay on one line and the answer keeps its own.
+    (let ((insertion (marker-position content-start)))
+      (harness-conversation--output-at content-start "\n" 'face 'harness-thinking)
+      (let ((thinking-end (copy-marker insertion t)))
+        (harness-conversation--output-at thinking-end text 'face 'harness-thinking)
+        (plist-put markers :thinking-end thinking-end)
+        (plist-put markers :thinking-fold
+                   (harness-conversation--fold
+                    body-start (marker-position content-start)
+                    (not harness-ui-show-thinking)))
+        thinking-end))))
+
+(defun harness-conversation--hide-thinking (markers start)
+  "Keep the reasoning appended at START hidden when MARKERS's fold is folded."
+  (when-let* ((fold (plist-get markers :thinking-fold)))
+    (when (plist-get fold :hidden)
+      (harness-conversation--with-output
+       (put-text-property start
+                          (marker-position (plist-get markers :thinking-end))
+                          'invisible 'harness-fold)))))
 
 (defun harness-conversation--refresh-tool (call)
   "Re-render CALL's block in place, if it has one."
@@ -665,36 +835,20 @@ WINDOWS, when given, are followed to the end of the buffer."
               (harness-conversation--render-tool-call
                harness-conversation--session call)))))))))
 
-(defun harness-conversation--directory-label (session)
-  "Return a short label for SESSION's working directory.
-
-The project name when the session works in the project root, and the project
-plus the relative path when it has been pointed somewhere else (a git
-worktree, say)."
-  (let ((directory (harness-session-cwd session))
-        (root (harness-session-project-root session))
-        (name (harness-session-project-name session)))
-    (cond
-     ((null root) (abbreviate-file-name directory))
-     ((equal (file-name-as-directory (expand-file-name directory))
-             (file-name-as-directory (expand-file-name root)))
-      name)
-     (t (format "%s/%s" name (harness-relative-path directory root))))))
-
 (defun harness-conversation-context-string (session)
   "Return the context usage string for SESSION, or nil.
+Shown only once the context is filling, so the header line stays short.
 Uses the context module when it is loaded; the header line must not require
 it, so that a minimal install still renders."
-  (when (fboundp 'harness-context-stats-string)
+  (when (and (fboundp 'harness-context-stats-string)
+             (>= (harness-context-ratio session)
+                 (if (boundp 'harness-context-warn-at)
+                     (symbol-value 'harness-context-warn-at)
+                   0.6)))
     (let* ((ratio (harness-context-ratio session))
            (string (harness-context-stats-string session)))
       (propertize (format "  ctx %s" string)
-                  'face (cond ((>= ratio 0.9) 'harness-error)
-                              ((>= ratio (if (boundp 'harness-context-warn-at)
-                                             (symbol-value 'harness-context-warn-at)
-                                           0.6))
-                               'harness-approval)
-                              (t 'harness-muted))))))
+                  'face (if (>= ratio 0.9) 'harness-error 'harness-approval)))))
 
 (declare-function harness-context-stats-string "harness-context" (session))
 (declare-function harness-context-ratio "harness-context" (session))
@@ -703,7 +857,13 @@ it, so that a minimal install still renders."
 (declare-function harness-compact-session "harness-context" (&optional session))
 
 (defun harness-conversation--header-line ()
-  "Return the header line text for the current conversation buffer."
+  "Return the header line text for the current conversation buffer.
+
+Kept deliberately short: the input window's mode line and
+`harness-describe-session' carry the directory, cost and token detail, and a
+header line that overflows hides the status it exists to show.  The waiting
+count, queue length and context ratio appear only when there is something to
+say."
   (let ((session harness-conversation--session))
     (if (null session)
         " Harness"
@@ -718,17 +878,16 @@ it, so that a minimal install still renders."
          (propertize (harness-session-name session) 'face 'bold)
          (propertize (format "  %s" (or (harness-session-model session) "no model"))
                      'face 'harness-muted)
-         (when-let* ((directory (harness-conversation--directory-label session)))
-           (propertize (format "  %s" directory) 'face 'harness-muted))
-         (propertize (format "  %s" (harness-usage-format
-                                     (harness-session-usage-total session)))
-                     'face 'harness-cost)
          (when (harness-session-approvals session)
-           (propertize (format "  ⚠ %d waiting"
-                               (length (harness-session-approvals session)))
-                       'face 'harness-approval))
+           (concat
+            (propertize (format "  ⚠%d " (length (harness-session-approvals session)))
+                        'face 'harness-approval)
+            (harness-key-hints
+             (cons "allow" #'harness-conversation-approve)
+             (cons "always" #'harness-conversation-approve-always)
+             (cons "deny" #'harness-conversation-deny))))
          (when (harness-session-queue session)
-           (propertize (format "  ✎ %d queued" (harness-queue-length session))
+           (propertize (format "  ✎%d" (harness-queue-length session))
                        'face 'harness-queue))
          (harness-conversation-context-string session))))))
 
@@ -834,27 +993,46 @@ refusal; the plain body is the fallback."
 
 ;;; Commands
 
-(defun harness-conversation--input ()
-  "Return the text in the input area."
-  (buffer-substring-no-properties (marker-position harness-conversation--input-start)
-                                  (point-max)))
+(defun harness-conversation--current-input-buffer ()
+  "Return the input buffer for the current buffer, or nil."
+  (cond
+   ((and (bound-and-true-p harness-conversation--input-start)
+         harness-conversation--input-start)
+    (current-buffer))
+   (harness-conversation--session
+    (harness-conversation-input-buffer harness-conversation--session))))
+
+(defun harness-conversation--input (&optional buffer)
+  "Return the text in BUFFER's input area, defaulting to the session's."
+  (with-current-buffer (or buffer (harness-conversation--current-input-buffer)
+                           (user-error "This buffer is not a harness conversation"))
+    (buffer-substring-no-properties (marker-position harness-conversation--input-start)
+                                    (point-max))))
 
 (defun harness-conversation--clear-input ()
-  "Delete the input area's contents."
+  "Delete the current input buffer's contents."
   (let ((inhibit-read-only t))
     (delete-region (marker-position harness-conversation--input-start) (point-max))))
 
 (defun harness-conversation-send ()
   "Send the text in the input area to the session."
   (interactive)
-  (let* ((session harness-conversation--session)
-         (text (string-trim (harness-conversation--input))))
+  (let* ((input (harness-conversation--current-input-buffer))
+         (session (and input
+                       (buffer-local-value 'harness-conversation--session input)))
+         (text (and input (string-trim (harness-conversation--input input)))))
     (unless session (user-error "This buffer is not a harness conversation"))
     (when (string-empty-p text)
       (user-error "Nothing to send"))
-    (harness-conversation--clear-input)
-    (harness-agent-send session text))
-  (goto-char (point-max)))
+    (with-current-buffer input
+      (harness-conversation--clear-input)
+      (goto-char (point-max)))
+    (harness-agent-send session text)
+    ;; Point stays in the input; the transcript window follows the stream.
+    (when-let* ((transcript (harness-session-buffer session)))
+      (when (buffer-live-p transcript)
+        (with-current-buffer transcript
+          (harness-conversation--follow (harness-conversation--windows-at-end)))))))
 
 (defun harness-conversation-send-text (session text)
   "Send TEXT to SESSION from anywhere."
@@ -866,8 +1044,11 @@ refusal; the plain body is the fallback."
 (defun harness-conversation-clear-input ()
   "Clear the input area."
   (interactive)
-  (harness-conversation--clear-input)
-  (goto-char (point-max)))
+  (let ((input (harness-conversation--current-input-buffer)))
+    (unless input (user-error "This buffer is not a harness conversation"))
+    (with-current-buffer input
+      (harness-conversation--clear-input)
+      (goto-char (point-max)))))
 
 (defun harness-conversation-abort ()
   "Abort the current run."
@@ -1019,34 +1200,8 @@ does not block Emacs while it looks."
              harness-conversation--message-markers)
     (sort positions #'<)))
 
-(defmacro harness-conversation--define-or-insert (name command)
-  "Define NAME: type the invoked key in the input area, else call COMMAND.
-
-The input area shares its keymap with the transcript, so only the command can
-know where point is (the same trick as `harness-conversation-tab')."
-  (declare (indent 1))
-  `(defun ,name ()
-     ,(concat "Insert the typed key when point is in the input area.\n\n"
-              "Elsewhere in the buffer the same key calls\n`"
-              (symbol-name command) "'.")
-     (interactive)
-     (if (harness-conversation--input-p)
-         (self-insert-command 1)
-       (call-interactively #',command))))
-
-(harness-conversation--define-or-insert
-  harness-conversation--next-message-or-insert harness-conversation-next-message)
-(harness-conversation--define-or-insert
-  harness-conversation--previous-message-or-insert harness-conversation-previous-message)
-(harness-conversation--define-or-insert
-  harness-conversation--refresh-or-insert harness-conversation-refresh)
-(harness-conversation--define-or-insert
-  harness-conversation--bury-or-insert bury-buffer)
-(harness-conversation--define-or-insert
-  harness-conversation--scroll-or-insert scroll-up-command)
-
 (defun harness-conversation-display-message (session message)
-  "Show SESSION's buffer with point at MESSAGE.
+  "Show SESSION's transcript with point at MESSAGE.
 This is the entry point other views (the tree, the session list) use."
   (let ((buffer (harness-conversation-open session)))
     (with-current-buffer buffer
@@ -1056,19 +1211,13 @@ This is the entry point other views (the tree, the session list) use."
         (harness-conversation--build))
       (when-let* ((markers (gethash (harness-message-id message)
                                     harness-conversation--message-markers)))
-        (goto-char (marker-position (plist-get markers :start)))
-        (recenter 2)))
+        (goto-char (marker-position (plist-get markers :start)))))
+    ;; `harness-conversation-open' leaves point in the input; jumping to a
+    ;; message means the transcript.  A batch test has no window to recenter.
+    (when-let* ((window (get-buffer-window buffer)))
+      (select-window window)
+      (with-current-buffer buffer (recenter 2)))
     buffer))
-
-(defun harness-conversation-tab ()
-  "Complete in the input area, fold output elsewhere.
-
-One key, because TAB on a line of the transcript clearly means \"fold this\"
-and TAB while typing clearly means \"complete this\"."
-  (interactive)
-  (if (harness-conversation--input-p)
-      (completion-at-point)
-    (harness-conversation-toggle-fold)))
 
 (defun harness-conversation-toggle-fold ()
   "Fold or unfold the block at point."

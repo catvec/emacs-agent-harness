@@ -74,10 +74,15 @@ saves, \\[harness-queue-cancel] discards, and \\[harness-queue-delete-section-at
 removes the message under point."
   (setq-local buffer-read-only nil)
   (setq-local header-line-format
-              '(:eval (format " Queued messages for %s — C-c C-c save, C-c C-k discard"
+              '(:eval (format " Queued messages for %s — %s"
                               (if harness-queue--session
                                   (harness-session-name harness-queue--session)
-                                "?")))))
+                                "?")
+                              (harness-key-hints
+                               (list "save" #'harness-queue-commit harness-queue-mode-map)
+                               (list "discard" #'harness-queue-cancel harness-queue-mode-map)
+                               (list "delete" #'harness-queue-delete-section-at-point
+                                     harness-queue-mode-map))))))
 
 
 ;;; The queue

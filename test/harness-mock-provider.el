@@ -11,6 +11,7 @@
 ;; element is one response:
 ;;
 ;;   (:text "hello")                 stream text, then finish
+;;   (:deltas ((thinking "a") (text "b")))  stream each pair in order, then finish
 ;;   (:tool-call ("bash" ARGS))      emit one tool call, then finish
 ;;   (:error "boom")                 fail the request
 ;;   (:nothing)                      finish with no content
@@ -89,6 +90,13 @@ provider, so the mock must not assume they are all present."
      (harness-test-provider--emit callbacks :on-delta 'thinking (nth 1 step))
      (harness-test-provider--emit callbacks :on-delta 'text (or (nth 2 step) ""))
      (harness-test-provider--emit callbacks :on-done "stop" nil))
+    (:deltas
+     ;; Each element is (KIND TEXT); this is how a test streams several
+     ;; reasoning chunks before the answer.
+     (dolist (delta (cdr step))
+       (harness-test-provider--emit callbacks :on-delta (car delta) (cadr delta)))
+     (harness-test-provider--emit callbacks :on-usage '(:in 10 :out 5))
+     (harness-test-provider--emit callbacks :on-done "stop" '(:in 10 :out 5)))
     (:tool-call
      (let ((index 0))
        (dolist (call (cdr step))

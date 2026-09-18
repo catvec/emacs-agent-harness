@@ -63,7 +63,7 @@
 
 (ert-deftest harness-core-test-session-append-is-o1 ()
   "Appending keeps the tail pointer in sync and messages in order."
-  (let ((session (harness--make-session :id "s" :name "s")))
+  (let ((session (harness--make-session :id "append-o1" :name "s")))
     (dotimes (i 5)
       (harness-session-append-message
        session (harness-message-create session 'user (format "%d" i))))
@@ -76,7 +76,7 @@
 
 (ert-deftest harness-core-test-message-ids-are-unique ()
   "Message ids are unique within a session and reset by `set-messages'."
-  (let ((session (harness--make-session :id "s" :name "s")))
+  (let ((session (harness--make-session :id "message-ids" :name "s")))
     (dotimes (_ 3)
       (harness-session-append-message session (harness-message-create session 'user "x")))
     (should (equal (mapcar #'harness-message-id (harness-session-messages session))
@@ -126,6 +126,18 @@
   (should (equal (harness-format-cost 0.0123) "$0.0123"))
   (should (equal (harness-format-cost 2.5) "$2.50"))
   (should (equal (harness-format-time (- (float-time) 10)) "now")))
+
+(ert-deftest harness-core-test-command-key ()
+  "Key hints are looked up from a keymap, never hard-coded."
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-z") #'ignore)
+    (should (equal "C-c C-z" (harness-command-key #'ignore map)))
+    (should (equal " (C-c C-z)" (harness-command-key-label #'ignore map)))
+    (should-not (harness-command-key (intern "harness-no-such-command") map))
+    ;; A menu-bar binding is not a key the user presses.
+    (let ((menu-map (make-sparse-keymap)))
+      (define-key menu-map [menu-bar thing] '("Thing" . ignore))
+      (should-not (harness-command-key #'ignore menu-map)))))
 
 (provide 'harness-core-test)
 ;;; harness-core-test.el ends here

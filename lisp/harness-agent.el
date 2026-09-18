@@ -150,7 +150,12 @@ Returns the message or the queued message."
              (user-error "No live sessions"))
          (read-string "Message: ")))
   (let ((text (harness-agent--transform-user-text session text)))
-    (if (harness-session-active-p session)
+    ;; A blocked session still has a run in flight (waiting on an approval or an
+    ;; answer), so a new message is queued rather than starting a second run:
+    ;; starting one would clear the blocked status and abandon the pending
+    ;; question.
+    (if (or (harness-session-active-p session)
+            (harness-session-blocked-p session))
         (progn
           (harness-queue-add session text)
           (message "Queued for %s" (harness-session-name session))

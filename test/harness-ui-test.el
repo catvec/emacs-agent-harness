@@ -83,16 +83,18 @@ BODY can refer to `session' and `buffer'; the buffer is killed afterwards."
     (with-current-buffer buffer
       (should (string-match-p "mock-model" (harness-conversation--header-line)))
       (should (string-match-p "Idle" (harness-conversation--header-line))))
+    ;; The transcript is entirely read-only; the editable input lives in its
+    ;; own buffer, shown in a side window.
     (with-current-buffer buffer
-      ;; Output is read-only, the input area is not.
-      (should (text-property-not-all (point-min) (point-max) 'read-only nil))
-      (should-not (get-text-property (point-max) 'read-only))
-      (should (marker-position harness-conversation--input-start)))))
+      (should (text-property-not-all (point-min) (point-max) 'read-only nil)))
+    (with-current-buffer (harness-conversation-input-buffer session)
+      (should (marker-position harness-conversation--input-start))
+      (should (equal (harness-conversation--input) "")))))
 
 (ert-deftest harness-ui-test-input-area-round-trip ()
   "Typing in the input area and sending works from the buffer."
   (harness-ui-test-with-session '((:text "reply"))
-    (with-current-buffer buffer
+    (with-current-buffer (harness-conversation-input-buffer session)
       (goto-char (point-max))
       (insert "typed by hand")
       (harness-conversation-send)
@@ -102,18 +104,12 @@ BODY can refer to `session' and `buffer'; the buffer is killed afterwards."
     (should (string-match-p "reply" (harness-ui-test--text buffer)))))
 
 (ert-deftest harness-ui-test-input-area-accepts-typing ()
-  "Every key types in the input area, keys bound to commands included.
+  "Every key self-inserts in the input buffer, including command keys.
 
-`harness-conversation-mode' must not inherit `special-mode-map': its
-`suppress-keymap' binding maps every self-inserting key to `undefined', so the
-input area could not be typed into and single keys such as n, p, g and q ran
-the transcript commands instead."
+The input is a `text-mode' derivative, so a single-key transcript binding
+such as n, p, g or q cannot swallow what the user types."
   (harness-ui-test-with-session '((:text "reply"))
-    ;; `execute-kbd-macro' drives the selected window's buffer, which is how a
-    ;; user reaches the conversation (`harness-conversation-open' pop-to-buffers
-    ;; it).  The round-trip test above inserts programmatically, which hid this
-    ;; bug: `insert' never consults the keymap.
-    (switch-to-buffer buffer)
+    (switch-to-buffer (harness-conversation-input-buffer session))
     (goto-char (point-max))
     (execute-kbd-macro "n p g q 1 < > ? h a, b.")
     (should (equal (harness-conversation--input) "n p g q 1 < > ? h a, b."))
@@ -126,10 +122,11 @@ the transcript commands instead."
 (ert-deftest harness-ui-test-input-area-keeps-typing-after-a-send ()
   "The input area is typeable again after a message is sent."
   (harness-ui-test-with-session '((:text "first") (:text "second"))
-    (switch-to-buffer buffer)
+    (switch-to-buffer (harness-conversation-input-buffer session))
     (goto-char (point-max))
     (execute-kbd-macro "one\r")
     (harness-ui-test--wait-idle session)
+    (switch-to-buffer (harness-conversation-input-buffer session))
     (goto-char (point-max))
     (execute-kbd-macro "two\r")
     (harness-ui-test--wait-idle session)
@@ -138,13 +135,12 @@ the transcript commands instead."
       (should (string-match-p "two" text)))))
 
 (ert-deftest harness-ui-test-transcript-single-keys-still-work ()
-  "Outside the input area the single-key commands keep their meaning."
+  "In the transcript the single-key commands keep their meaning."
   (harness-ui-test-with-session '((:text "reply"))
     (harness-ui-test--send session "hello")
     (switch-to-buffer buffer)
     (goto-char (point-min))
     (execute-kbd-macro "n")
-    (should (equal (harness-conversation--input) ""))
     (should (> (point) (point-min)))
     (execute-kbd-macro "p")
     (should (= (point) (point-min)))))
@@ -178,8 +174,94 @@ the transcript commands instead."
       (with-current-buffer buffer
         (goto-char (point-min))
         (harness-conversation-approve))
+      ;; The widget buffer that opened for the approval must be disarmed, or a
+      ;; stale keypress there could resolve the same approval twice.
+      (when-let* ((approve (get-buffer "*Harness Approve: ui*")))
+        (with-current-buffer approve
+          (should-not harness-ask--approval)))
       (harness-ui-test--wait-idle session)
       (should (string-match-p "thank you" (harness-ui-test--text buffer))))))
+
+(ert-deftest harness-ui-test-streamed-thinking-gets-its-own-line ()
+  "A streamed reasoning trace is labelled and separated from the answer.
+
+The assistant message is rendered before the first delta, so the reasoning
+region has to be opened by the first thinking delta; the answer must still
+start on its own line."
+  (harness-ui-test-with-session
+      '((:deltas (thinking "first ") (thinking "second")
+                 (text "the answer")))
+    (let ((harness-ui-show-thinking t))
+      (harness-ui-test--send session "go"))
+    (let ((text (harness-ui-test--text buffer)))
+      (should (string-match-p "thinking…\nfirst second\nthe answer" text)))))
+
+(ert-deftest harness-ui-test-streamed-thinking-is-folded-by-default ()
+  "Reasoning is hidden until `harness-ui-show-thinking' is on."
+  (harness-ui-test-with-session
+      '((:deltas (thinking "a secret thought") (text "the answer")))
+    (harness-ui-test--send session "go")
+    (with-current-buffer buffer
+      (goto-char (point-min))
+      (search-forward "a secret thought")
+      (should (get-text-property (1- (point)) 'invisible)))
+    (should (string-match-p "the answer" (harness-ui-test--text buffer)))))
+
+(ert-deftest harness-ui-test-approval-is-rendered-once ()
+  "Re-syncing the conversation does not duplicate the approval block."
+  (harness-ui-test-with-session '((:tool-call ("bash" (:command "echo hi"))))
+    (let ((harness-permission-policy '((:default ask))))
+      ;; Not `--send': that waits for idle, and this run is meant to block.
+      (harness-agent-send session "run it")
+      (should (harness-test-wait-for
+               (lambda () (eq (harness-session-status session) 'awaiting-approval)) 10))
+      (with-current-buffer buffer
+        (harness-conversation--sync)
+        (harness-conversation--sync)
+        (goto-char (point-min))
+        (should (= 1 (how-many (regexp-quote "Allow bash(echo hi)?"))))))))
+
+(ert-deftest harness-ui-test-tool-approval-uses-widget-buffer ()
+  "A tool permission opens the shared widget buffer and is answered there."
+  (harness-ui-test-with-session
+      '((:tool-call ("bash" (:command "echo hi")))
+        (:text "done"))
+    (let ((harness-permission-policy '((:default ask))))
+      (harness-agent-send session "run it")
+      (should (harness-test-wait-for
+               (lambda () (eq (harness-session-status session) 'awaiting-approval)) 10))
+      (let ((approve (get-buffer "*Harness Approve: ui*")))
+        (should approve)
+        (with-current-buffer approve
+          (should (string-match-p "Allow bash" (buffer-string)))
+          (should (string-match-p "echo hi" (buffer-string)))
+          ;; The hint is the live binding, not a hard-coded string.
+          (should (string-match-p
+                   (regexp-quote (harness-command-key #'harness-ask-submit
+                                                     harness-ask-mode-map))
+                   (buffer-string)))
+          (harness-ask-submit)))
+      (harness-ui-test--wait-idle session)
+      (should (string-match-p "done" (harness-ui-test--text buffer))))))
+
+(ert-deftest harness-ui-test-send-while-blocked-queues ()
+  "Sending while a question is pending queues instead of starting a run."
+  (harness-ui-test-with-session
+      '((:tool-call ("ask_user_question"
+                     (:questions [(:question "Which?" :header "Q")])))
+        (:text "after the answer")
+        (:text "reply to the queued message"))
+    (harness-agent-send session "ask me")
+    (should (harness-test-wait-for
+             (lambda () (eq (harness-session-status session) 'awaiting-answer)) 10))
+    (should-not (harness-agent-send session "queued while blocked"))
+    (should (eq (harness-session-status session) 'awaiting-answer))
+    (should (= 1 (harness-queue-length session)))
+    (harness-ask-answer (harness-ask-pending session) nil)
+    (when-let* ((ask (get-buffer "*Harness Ask: ui*"))) (kill-buffer ask))
+    (harness-ui-test--wait-idle session)
+    (should (string-match-p "reply to the queued message"
+                            (harness-ui-test--text buffer)))))
 
 (ert-deftest harness-ui-test-queue-renders-and-edits ()
   "A queued message is visible and editable through the queue buffer."

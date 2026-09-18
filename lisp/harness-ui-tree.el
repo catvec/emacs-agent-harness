@@ -108,10 +108,15 @@ buffer and \\[harness-tree-refresh] re-renders."
   (setq-local truncate-lines nil)
   (setq-local buffer-read-only t)
   (setq-local header-line-format
-              '(:eval (format " Tree: %s — RET jumps, TAB folds, t toggles tool output"
+              '(:eval (format " Tree: %s — %s"
                               (if harness-tree--session
                                   (harness-session-name harness-tree--session)
-                                "?")))))
+                                "?")
+                              (harness-key-hints
+                               (list "jump" #'harness-tree-goto-message harness-tree-mode-map)
+                               (list "fold" #'outline-toggle-children harness-tree-mode-map)
+                               (list "tool output" #'harness-tree-toggle-output
+                                     harness-tree-mode-map))))))
 
 (defun harness-tree--insert (text &rest properties)
   "Insert read-only TEXT with PROPERTIES."

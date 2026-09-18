@@ -70,25 +70,47 @@
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "C-c C-c") #'harness-ask-submit)
     (define-key map (kbd "C-c C-k") #'harness-ask-cancel)
+    ;; `C-c C-A' is the same event as `C-c C-a' (control does not case-fold),
+    ;; so "always" needs a key of its own.
+    (define-key map (kbd "C-c C-y") #'harness-ask-approve-always)
     (define-key map (kbd "TAB") #'widget-forward)
     (define-key map (kbd "<backtab>") #'widget-backward)
     (define-key map (kbd "q") #'bury-buffer)
     map)
   "Keymap for `harness-ask-mode'.")
 
-(define-derived-mode harness-ask-mode special-mode "Harness-Ask"
-  "Major mode for answering questions from the model.
+(defun harness-ask--header-line ()
+  "Return the header line for the request being answered.
+The keys are looked up live (see `harness-key-hints') so the prompt cannot
+drift from the keymap."
+  (let ((approval harness-ask--approval))
+    (if (null approval)
+        " Harness"
+      (let ((name (harness-session-name (harness-approval-session approval))))
+        (if (eq (harness-approval-kind approval) 'question)
+            (concat
+             (format " %s asks — " name)
+             (harness-key-hints
+              (list "move" #'widget-forward harness-ask-mode-map)
+              (list "pick" #'widget-button-press widget-keymap)
+              (list "send" #'harness-ask-submit harness-ask-mode-map)
+              (list "skip" #'harness-ask-cancel harness-ask-mode-map)))
+          (concat
+           (format " %s — " (harness-approval-prompt approval))
+           (harness-key-hints
+            (list "allow" #'harness-ask-submit harness-ask-mode-map)
+            (list "always" #'harness-ask-approve-always harness-ask-mode-map)
+            (list "deny" #'harness-ask-cancel harness-ask-mode-map))))))))
 
-\\[harness-ask-submit] sends the answers back and resumes the run;
-\\[harness-ask-cancel] tells the model the user declined to answer."
+(define-derived-mode harness-ask-mode special-mode "Harness-Ask"
+  "Major mode for answering a question or a tool-permission request.
+
+\[harness-ask-submit] confirms (send answers or allow the tool);
+\[harness-ask-cancel] declines (skip the question or deny the tool);
+\[harness-ask-approve-always] allows a tool and remembers the decision."
   (setq-local buffer-read-only nil)
   (setq-local truncate-lines nil)
-  (setq-local header-line-format
-              '(:eval (format " Question from %s — C-c C-c to send, C-c C-k to skip"
-                              (if-let* ((approval harness-ask--approval))
-                                  (harness-session-name
-                                   (harness-approval-session approval))
-                                "?")))))
+  (setq-local header-line-format '(:eval (harness-ask--header-line))))
 
 
 ;;; The tool
@@ -173,8 +195,13 @@
                      :header (or (harness-tools-arg question :header) "Question")
                      :options (harness-ask--normalize-options
                                (harness-tools-arg question :options))
-                     :multi-select (harness-tools-arg question :multi_select)
-                     :allow-custom (harness-tools-arg question :allow_custom)))))
+                     ;; JSON `false' parses to the symbol `:false', which is
+                     ;; truthy; normalise through `harness-json-true-p' so the
+                     ;; widget choice (radio vs checkbox) is right.
+                     :multi-select (harness-json-true-p
+                                    (harness-tools-arg question :multi_select))
+                     :allow-custom (harness-json-true-p
+                                    (harness-tools-arg question :allow_custom))))))
          (if (listp raw) raw nil))))
 
 (defun harness-ask--normalize-options (raw)
@@ -254,25 +281,48 @@ checklist widget) and `:field' (the free text widget, when there is one)."
     (condition-case nil (widget-value widget) (error nil))))
 
 (defun harness-ask-submit ()
-  "Send the answers in this buffer and resume the run."
-  (interactive)
-  (unless harness-ask--approval (user-error "This buffer is not answering a question"))
-  (let ((answers (harness-ask-answers-from-buffer))
-        (approval harness-ask--approval))
-    (setq harness-ask--approval nil)
-    (harness-ask-answer approval answers)
-    (bury-buffer)
-    (message "Answer sent")))
+  "Confirm the request: send the answers, or allow the tool call.
 
-(defun harness-ask-cancel ()
-  "Tells the model the user declined to answer."
+Both kinds of request share this buffer (see `harness-ask--display'), so the
+primary key sends a question and allows a permission."
   (interactive)
-  (unless harness-ask--approval (user-error "This buffer is not answering a question"))
+  (unless harness-ask--approval (user-error "This buffer is not answering a request"))
   (let ((approval harness-ask--approval))
     (setq harness-ask--approval nil)
-    (harness-ask-answer approval nil)
+    (if (eq (harness-approval-kind approval) 'question)
+        (let ((answers (harness-ask-answers-from-buffer)))
+          (harness-ask-answer approval answers)
+          (message "Answer sent"))
+      (harness-perms-resolve approval 'allow)
+      (message "Allowed"))
+    (bury-buffer)))
+
+(defun harness-ask-cancel ()
+  "Decline the request: skip the question, or deny the tool call."
+  (interactive)
+  (unless harness-ask--approval (user-error "This buffer is not answering a request"))
+  (let ((approval harness-ask--approval))
+    (setq harness-ask--approval nil)
+    (if (eq (harness-approval-kind approval) 'question)
+        (progn
+          (harness-ask-answer approval nil)
+          (message "Question skipped"))
+      (harness-perms-resolve approval 'deny)
+      (message "Denied"))
+    (bury-buffer)))
+
+(defun harness-ask-approve-always ()
+  "Allow the pending tool call and remember the decision.
+This only applies to a tool permission; a question has no always-answer."
+  (interactive)
+  (let ((approval harness-ask--approval))
+    (unless approval (user-error "This buffer is not answering a request"))
+    (unless (eq (harness-approval-kind approval) 'tool)
+      (user-error "A question has no always-answer"))
+    (setq harness-ask--approval nil)
+    (harness-perms-resolve approval 'allow-always)
     (bury-buffer)
-    (message "Question skipped")))
+    (message "Always allowed")))
 
 (defun harness-ask-answer-pending ()
   "Answer the oldest pending question from the minibuffer."
@@ -307,20 +357,32 @@ checklist widget) and `:field' (the free text widget, when there is one)."
 
 ;;; The buffer
 
+(defun harness-ask--buffer-name (session approval)
+  "Return the widget buffer name for APPROVAL of SESSION."
+  (format "*Harness %s: %s*"
+          (if (eq (harness-approval-kind approval) 'question) "Ask" "Approve")
+          (harness-session-name session)))
+
 (defun harness-ask--display (session approval)
-  "Show the question buffer for APPROVAL of SESSION."
-  (let ((buffer (get-buffer-create
-                 (format "*Harness Ask: %s*" (harness-session-name session)))))
+  "Show the widget buffer for APPROVAL of SESSION.
+
+Questions get the answer widgets; a tool permission gets the request and
+Allow/Always/Deny buttons.  Both share `harness-ask-mode', so the UI, the
+faces and the live key hints are one implementation instead of two."
+  (let ((buffer (get-buffer-create (harness-ask--buffer-name session approval))))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (harness-ask-mode)
         (erase-buffer)
         (setq harness-ask--approval approval)
         (setq harness-ask--widgets nil)
-        (harness-ask--insert-intro session)
-        (dolist (question (harness-approval-detail approval))
-          (harness-ask--insert-question question))
-        (harness-ask--insert-buttons)
+        (if (eq (harness-approval-kind approval) 'question)
+            (progn
+              (harness-ask--insert-intro session)
+              (dolist (question (harness-approval-detail approval))
+                (harness-ask--insert-question question))
+              (harness-ask--insert-buttons))
+          (harness-ask--insert-permission session approval))
         (goto-char (point-min))
         (unless (widget-at (point))
           (widget-forward 1)))
@@ -330,9 +392,51 @@ checklist widget) and `:field' (the free text widget, when there is one)."
 
 (defun harness-ask--insert-intro (session)
   "Insert the buffer's introduction for SESSION."
-  (insert (propertize (format "%s asks:\n\n" (harness-session-name session))
+  (insert (propertize (format "%s asks:\n" (harness-session-name session))
                       'face 'bold
-                      'read-only t)))
+                      'read-only t))
+  (insert (propertize
+           (harness-key-hints
+            (list "move" #'widget-forward harness-ask-mode-map)
+            (list "pick" #'widget-button-press widget-keymap)
+            (list "send" #'harness-ask-submit harness-ask-mode-map)
+            (list "skip" #'harness-ask-cancel harness-ask-mode-map))
+           'face 'harness-muted
+           'read-only t))
+  (insert "\n\n"))
+
+(defun harness-ask--insert-permission (session approval)
+  "Insert the request and decision buttons for tool APPROVAL."
+  (insert (propertize (format "%s wants to run:\n\n" (harness-session-name session))
+                      'face 'bold 'read-only t))
+  (insert (propertize (format "  %s\n" (harness-approval-prompt approval))
+                      'face 'harness-approval 'read-only t))
+  (when-let* ((detail (harness-approval-detail approval)))
+    (insert (propertize "\nArguments:\n" 'face 'harness-role-tool 'read-only t))
+    (insert (propertize (harness-ask--format-detail detail)
+                        'face 'harness-message-body 'read-only t)))
+  (insert "\n")
+  (harness-ask--button "Allow" #'harness-ask-submit)
+  (harness-ask--button "Always" #'harness-ask-approve-always)
+  (harness-ask--button "Deny" #'harness-ask-cancel)
+  (insert "\n")
+  (use-local-map harness-ask-mode-map)
+  (widget-setup))
+
+(defun harness-ask--button (label command)
+  "Insert a push-button LABEL running COMMAND, followed by its key hint."
+  (widget-create 'push-button
+                 :notify (lambda (&rest _) (call-interactively command))
+                 :tag label)
+  (when-let* ((hint (harness-key-hint command harness-ask-mode-map)))
+    (insert (propertize (format " %s" hint) 'face 'harness-muted)))
+  (insert "  "))
+
+(defun harness-ask--format-detail (detail)
+  "Return DETAIL pretty-printed for the approval buffer."
+  (condition-case nil
+      (concat (harness-json-write detail t) "\n")
+    (error (format "%S\n" detail))))
 
 (defun harness-ask--insert-question (question)
   "Insert one QUESTION with its widgets."
@@ -372,43 +476,55 @@ checklist widget) and `:field' (the free text widget, when there is one)."
     (insert "\n")))
 
 (defun harness-ask--insert-buttons ()
-  "Insert the Submit and Cancel buttons."
+  "Insert the Submit and Cancel buttons, each with its live key hint."
   (insert "\n")
-  (widget-create 'push-button
-                 :notify (lambda (&rest _) (harness-ask-submit))
-                 :tag "Submit")
-  (insert " ")
-  (widget-create 'push-button
-                 :notify (lambda (&rest _) (harness-ask-cancel))
-                 :tag "Cancel")
+  (harness-ask--button "Submit" #'harness-ask-submit)
+  (harness-ask--button "Cancel" #'harness-ask-cancel)
   (insert "\n")
   (use-local-map harness-ask-mode-map)
   (widget-setup))
 
 (defun harness-ask-open (&optional session)
-  "Show the pending question for SESSION."
+  "Show the pending question or permission for SESSION."
   (interactive)
   (let* ((session (or session
                       (when (fboundp 'harness-conversation-session)
                         (harness-conversation-session))
-                      (harness-session--read-session "Question for")))
-         (approval (and session (harness-ask-pending session))))
-    (unless approval (user-error "No pending question"))
+                      (harness-session--read-session "Answer for")))
+         (approval (and session
+                        (or (harness-ask-pending session)
+                            (seq-find (lambda (candidate)
+                                        (eq (harness-approval-kind candidate) 'tool))
+                                      (harness-approval-pending session))))))
+    (unless approval (user-error "Nothing is waiting for an answer"))
     (harness-ask--display session approval)))
 
 (defun harness-ask--on-approval-added (session approval)
-  "Show APPROVAL when it is a question.
-Errors are reported rather than swallowed: a question buffer that fails to
+  "Open the widget buffer for APPROVAL.
+Questions and tool permissions both go through `harness-ask--display'.
+Errors are reported rather than swallowed: a request buffer that fails to
 render would otherwise look like the session simply hanging."
-  (when (eq (harness-approval-kind approval) 'question)
-    (condition-case err
-        (harness-ask--display session approval)
-      (error (harness--log "could not display the question: %s"
-                           (error-message-string err))
-             (message "Harness could not display the question: %s"
-                      (error-message-string err))))))
+  (condition-case err
+      (harness-ask--display session approval)
+    (error (harness--log "could not display the request: %s"
+                         (error-message-string err))
+           (message "Harness could not display the request: %s"
+                    (error-message-string err)))))
+
+(defun harness-ask--on-approval-resolved (_session approval _decision)
+  "Forget APPROVAL in any widget buffer that was answering it.
+It may have been resolved from the minibuffer or from the inline prompt in
+the conversation; leaving the buffer armed would let a stale keypress resolve
+the approval a second time."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'harness-ask-mode)
+                 (eq harness-ask--approval approval))
+        (setq harness-ask--approval nil)
+        (bury-buffer buffer)))))
 
 (add-hook 'harness-approval-added-hook #'harness-ask--on-approval-added)
+(add-hook 'harness-approval-resolved-hook #'harness-ask--on-approval-resolved)
 
 (provide 'harness-ui-ask)
 ;;; harness-ui-ask.el ends here

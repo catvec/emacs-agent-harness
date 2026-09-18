@@ -156,6 +156,76 @@ may stay lists."
   "Return non-nil when JSON VALUE is true (neither nil nor :false)."
   (not (memq value '(nil :false))))
 
+(defun harness--key-modifier-count (key)
+  "Return the number of non-printing events in the KEY vector."
+  (let ((count 0))
+    (dotimes (index (length key))
+      (let ((event (aref key index)))
+        (unless (and (integerp event) (>= event 32) (/= event 127))
+          (setq count (1+ count)))))
+    count))
+
+(defun harness--key-better-p (a b)
+  "Return non-nil when key sequence A is a better hint than B."
+  (or (< (length a) (length b))
+      (and (= (length a) (length b))
+           (< (harness--key-modifier-count a)
+              (harness--key-modifier-count b)))))
+
+(defun harness--key-displayable-p (key)
+  "Return non-nil when KEY is a keyboard sequence worth showing.
+A menu-bar, mouse or toolbar binding is not something the user presses."
+  (and (> (length key) 0)
+       (integerp (aref key 0))))
+
+(defun harness-command-key (command &optional keymap)
+  "Return a display string of the keys bound to COMMAND, or nil.
+
+KEYMAP is a keymap or a list of keymaps and defaults to the current buffer's
+active keymaps, so a hint rendered in the UI always shows the binding the
+user would actually press instead of a hard-coded string that can drift when
+the keymap changes.  Menu, mouse and toolbar bindings are ignored and the
+shortest keyboard binding wins."
+  (let* ((keymaps (cond ((null keymap) (current-active-maps))
+                        ((keymapp keymap) (list keymap))
+                        (t keymap)))
+         (keys (where-is-internal command keymaps nil t))
+         (usable (cl-remove-if-not #'harness--key-displayable-p keys)))
+    (when usable
+      (key-description (car (sort usable #'harness--key-better-p))))))
+
+(defun harness-command-key-label (command &optional keymap)
+  "Return a\" (KEY)\" label for COMMAND, or \"\" when it has no keyboard
+binding."
+  (if-let* ((keys (harness-command-key command keymap)))
+      (format " (%s)" keys)
+    ""))
+
+(defun harness-key-hint (command &optional keymap)
+  "Return a propertized key hint for COMMAND, or nil when it is unbound.
+
+The binding is looked up live through `harness-command-key', so every key
+prompt in the UI shows the keys the user would actually press; passing
+KEYMAP targets a specific mode's map."
+  (when-let* ((keys (harness-command-key command keymap)))
+    (propertize keys 'face 'harness-muted)))
+
+(defun harness-key-hints (&rest commands)
+  "Return a propertized string of labels and live key hints from COMMANDS.
+Each argument is (LABEL . COMMAND) or (LABEL COMMAND KEYMAP); KEYMAP targets
+a mode's map so commands bound outside `current-active-maps' (widgets, for
+instance) still resolve.  A command with no keyboard binding is skipped."
+  (string-join
+   (delq nil
+         (mapcar (lambda (entry)
+                   (let* ((tail (cdr entry))
+                          (command (if (consp tail) (car tail) tail))
+                          (keymap (and (consp tail) (cadr tail)))
+                          (hint (harness-key-hint command keymap)))
+                     (when hint (format "%s %s" (car entry) hint))))
+                 commands))
+   ", "))
+
 (defun harness-alist-get (key alist)
   "Return the value of KEY in ALIST.
 
