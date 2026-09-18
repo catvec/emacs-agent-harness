@@ -1,6 +1,6 @@
 ;;; harness-provider-test.el --- Tests for the provider layer -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
 ;; This file is not part of GNU Emacs.
 
@@ -172,6 +172,31 @@
       (should (equal (harness-provider-openai--message-json message) first))
       (should (equal (plist-get (harness-message-meta message) :wire-json) first))
       (should (equal (harness-provider-openai--message-json message) first)))))
+
+(ert-deftest harness-provider-test-message-json-skips-empty-assistant ()
+  "A skipped message is nil, not the JSON string \"null\".
+`harness-json-write' turns nil into \"null\", so dropping the wire form has to
+happen before it is encoded, or the request body carries a null element and
+the provider rejects it."
+  (let* ((session (harness--make-session :id "s5b" :name "s5b"))
+         (message (harness-message-create session 'assistant "")))
+    (harness-message-finalize message)
+    (should-not (harness-provider-openai--message-json message))))
+
+(ert-deftest harness-provider-test-request-body-drops-empty-assistant ()
+  "An empty assistant message never reaches the wire as a JSON null."
+  (let* ((session (harness--make-session :id "s5c" :name "s5c" :model "m"))
+         (empty (harness-message-create session 'assistant ""))
+         (user (harness-message-create session 'user "hello")))
+    (harness-message-finalize empty)
+    (harness-message-finalize user)
+    (let* ((request (harness-provider--make-request
+                     :model "m" :messages (list empty user)))
+           (body (harness-provider-openai--request-body request))
+           (messages (harness-alist-get :messages (harness-json-read body))))
+      (should-not (string-match-p "null" body))
+      (should (= 1 (length messages)))
+      (should (equal (harness-alist-get :role (car messages)) "user")))))
 
 (ert-deftest harness-provider-test-parse-usage ()
   "Usage maps to the harness plist, including cached input tokens."

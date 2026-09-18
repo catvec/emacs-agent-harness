@@ -1,6 +1,6 @@
 ;;; harness-session-test.el --- Tests for session storage and search -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
 ;; This file is not part of GNU Emacs.
 

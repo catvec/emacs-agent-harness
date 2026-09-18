@@ -1,6 +1,6 @@
 ;;; harness-subagents-test.el --- Tests for subagents -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
 ;; This file is not part of GNU Emacs.
 

@@ -1,6 +1,6 @@
 ;;; harness-perms-test.el --- Tests for permissions and auto mode -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
 ;; This file is not part of GNU Emacs.
 

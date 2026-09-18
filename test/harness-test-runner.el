@@ -1,6 +1,6 @@
 ;;; harness-test-runner.el --- Load every test suite -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
 ;; This file is not part of GNU Emacs.
 

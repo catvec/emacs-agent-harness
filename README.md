@@ -21,8 +21,9 @@ Pick one of the routes below; each one ends at the same configuration in
 
 straight adds only the top level of a package's build directory to
 `load-path`, and it does not descend into subdirectories unless the recipe
-says so.  Name the modules under `lisp/` explicitly.  A bare glob is linked
-into the top level of the build directory, which is exactly where
+says so.  Name the modules under `lisp/` explicitly, and name `plugins` as a
+directory so the bundled plugins keep their subdirectory.  A bare glob is
+linked into the top level of the build directory, which is exactly where
 `(require 'harness)` looks for `harness-core` and the rest:
 
 ```elisp
@@ -31,7 +32,7 @@ into the top level of the build directory, which is exactly where
    :type git
    :host sourcehut
    :repo "~catvec/emacs-agent-harness"
-   :files ("harness.el" "lisp/*.el")))
+   :files ("harness.el" "lisp/*.el" "plugins")))
 ```
 
 With `use-package`, the recipe goes in `:straight` and the feature in the
@@ -42,7 +43,7 @@ declaration name:
   :straight (emacs-agent-harness
              :type git :host sourcehut
              :repo "~catvec/emacs-agent-harness"
-             :files ("harness.el" "lisp/*.el"))
+             :files ("harness.el" "lisp/*.el" "plugins"))
   :config
   ;; the Quick start configuration
   )
@@ -57,7 +58,7 @@ In `$DOOMDIR/packages.el`:
 (package! emacs-agent-harness
   :recipe (:host sourcehut
            :repo "~catvec/emacs-agent-harness"
-           :files ("harness.el" "lisp/*.el")))
+           :files ("harness.el" "lisp/*.el" "plugins")))
 ```
 
 then run `doom sync`.  `:files` is required for the reason above: with

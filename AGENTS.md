@@ -34,6 +34,11 @@ Conventions for any agent (or human) changing this repository.
 - A feature is added to the core only if it cannot be expressed as a tool, a
   renderer, a hook function, a provider, or a transport. If you add a special
   case, add a registry instead.
+- The same rule applies to a feature that is part of the distribution: if it
+  can be expressed through the plugin API, it ships as a plugin in `plugins/`
+  and is loaded by default, rather than becoming another `harness-*` module.
+  The core provides the loader and the registries, not the feature. See
+  DESIGN.md §13.2.
 - Every buffer gets a major mode derived from an existing one
   (`special-mode`, `tabulated-list-mode`, `outline-mode`, `text-mode`).
 
@@ -67,8 +72,16 @@ prefix.
   `binary` process coding and decode UTF-8 yourself.
 - `open-network-stream` with `:nowait t` reports connection failure through the
   sentinel, not through a raised error.
-- `read-only` text properties together with `buffer-read-only nil` is the only
-  way to have a `special-mode`-derived buffer with an editable input area.
+- `read-only` text properties together with `buffer-read-only nil` is how a
+  `special-mode`-derived buffer keeps an editable input area, but it is not
+  enough on its own: `special-mode-map` goes through `suppress-keymap`, which
+  maps every self-inserting key to `undefined`, and `define-derived-mode`
+  splices that keymap in as the parent. A mode with an editable area needs a
+  keymap whose parent is not `special-mode-map`, and its single-key commands
+  must fall through to `self-insert-command` inside the editable area
+  (`harness-conversation--input-p`). `insert` in a test does not catch this;
+  type through `execute-kbd-macro` (the macro runs in the selected window's
+  buffer, so `switch-to-buffer' first).
 - `tabulated-list-mode` reverts by re-running `tabulated-list-print`; keep
   `tabulated-list-entries` generation cheap and free of I/O.
 - `json-encode' cannot distinguish a one element array of objects from an
@@ -103,3 +116,18 @@ prefix.
   up a pinentry dialog hangs forever and interrupts the user.
 - SQLite handles owned by a buffer must be closed in `kill-buffer-hook` or the
   file stays locked.
+- Emacs reports errors from process filters and sentinels from C, with
+  `Fmessage`, so advice on the `message` function never sees them and
+  `debug-on-error` produces no backtrace. The only sink they reach is
+  `*Messages*`; `plugins/harness-log.el` mirrors it to a file.
+- `unload-feature` unbinds the variables the file defined, so a plugin's
+  `defcustom` values reset on every reload unless its `FEATURE-unload-function`
+  removes them from `unload-function-defs-list`.
+- A plugin with effects outside the registries (a timer, an advice, a hook)
+  must define `FEATURE-unload-function` to undo them; `unload-feature` only
+  knows the definitions the file itself made.
+- `harness-json-write` (through `json-encode`) encodes nil as the string
+  `"null"`, so `(delq nil ...)` over already-encoded JSON strings removes
+  nothing and the null reaches the provider. Drop the wire form before
+  encoding it: `harness-provider-openai--message-json` returns nil for a
+  message that must not be sent.

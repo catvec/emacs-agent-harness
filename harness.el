@@ -1,12 +1,12 @@
 ;;; harness.el --- A coding agent harness for Emacs -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
-;; Author: Noah Huppert <contact@noahh.io>
+;; Author: the emacs-agent-harness authors
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, ai, convenience
-;; URL: https://github.com/noahhuppert/emacs-agent-harness
+;; URL: https://git.sr.ht/~catvec/emacs-agent-harness
 
 ;; This file is not part of GNU Emacs.
 
@@ -72,9 +72,29 @@
 (require 'harness-ui-ask)
 (require 'harness-ui-model)
 
+(defconst harness--directory
+  (file-name-directory (or load-file-name buffer-file-name
+                           (locate-library "harness")
+                           default-directory))
+  "Directory the harness was loaded from.
+`load-file-name' is bound while this file is loaded; the other clauses keep
+the value usable when the form is evaluated by hand (`eval-defun').")
+
+(defcustom harness-bundled-plugins-directory
+  (expand-file-name "plugins" harness--directory)
+  "Directory of plugins that ship with the harness.
+They are loaded by `harness-setup' before `harness-plugins-directory', so a
+feature that can be expressed through the plugin API ships as a plugin and
+is distributed and loaded by default instead of growing the core.  A user
+plugin of the same name loads later and wins.  See DESIGN.md section 13.2."
+  :type 'directory
+  :group 'harness)
+
 (defcustom harness-plugins-directory
   (expand-file-name "agent-harness/plugins" user-emacs-directory)
-  "Directory whose `*.el' files are loaded as harness plugins."
+  "Directory whose `*.el' files are loaded as harness plugins.
+Loaded after `harness-bundled-plugins-directory', so the user's plugins can
+replace what the distribution ships."
   :type 'directory
   :group 'harness)
 
@@ -150,10 +170,35 @@ Editors write a file more than once; this coalesces the writes."
 
 ;;; Plugins and hot reload
 
-(defun harness-plugin-files ()
-  "Return the plugin files, in load order."
-  (when (file-directory-p harness-plugins-directory)
-    (sort (directory-files harness-plugins-directory t "\\`[^.#].*\\.el\\'") #'string<)))
+(defun harness-plugin-files (&optional directory)
+  "Return the plugin files in DIRECTORY, in load order.
+DIRECTORY defaults to `harness-plugins-directory'."
+  (let ((directory (or directory harness-plugins-directory)))
+    (when (file-directory-p directory)
+      (sort (directory-files directory t "\\`[^.#].*\\.el\\'") #'string<))))
+
+(defun harness-plugin-directories ()
+  "Return the plugin directories, bundled ones before the user's.
+See `harness-bundled-plugins-directory' and `harness-plugins-directory'.
+Duplicate directories are collapsed so a file is never loaded twice."
+  (delete-dups
+   (delq nil (mapcar (lambda (directory)
+                       (when directory
+                         (file-name-as-directory (expand-file-name directory))))
+                     (list harness-bundled-plugins-directory
+                           harness-plugins-directory)))))
+
+(defun harness-plugin-files-all ()
+  "Return every plugin file, bundled plugins before user plugins."
+  (seq-mapcat #'harness-plugin-files (harness-plugin-directories)))
+
+(defun harness-plugin-file-p (file)
+  "Return non-nil when FILE is inside one of the plugin directories."
+  (let ((file (expand-file-name file)))
+    (seq-some (lambda (directory)
+                (string-prefix-p (file-name-as-directory (expand-file-name directory))
+                                 file))
+              (harness-plugin-directories))))
 
 (defun harness-file-features (file)
   "Return the features provided by FILE."
@@ -195,9 +240,9 @@ functions and variables the file defined."
     file))
 
 (defun harness-load-plugins ()
-  "Load every plugin in `harness-plugins-directory'."
+  "Load every plugin, bundled plugins before user plugins."
   (interactive)
-  (let ((files (harness-plugin-files))
+  (let ((files (harness-plugin-files-all))
         (loaded 0))
     (dolist (file files)
       (condition-case err
@@ -215,7 +260,7 @@ functions and variables the file defined."
 (defun harness-reload-plugins ()
   "Reload every plugin, so edits take effect without a restart."
   (interactive)
-  (dolist (file (harness-plugin-files))
+  (dolist (file (harness-plugin-files-all))
     (condition-case err
         (harness-reload-plugin file)
       (error (harness--log "plugin %s failed: %s" file (error-message-string err))
@@ -256,8 +301,7 @@ when the variable is already bound, so registries and session state survive;
   "Reload whatever FILE is: a plugin, or a harness module."
   (interactive (list (or (buffer-file-name)
                          (read-file-name "Reload: " nil nil t nil #'file-regular-p))))
-  (if (string-prefix-p (expand-file-name harness-plugins-directory)
-                       (expand-file-name file))
+  (if (harness-plugin-file-p file)
       (harness-reload-plugin file)
     (harness-unload-file file)
     (let ((load-prefer-newer t))
@@ -343,6 +387,9 @@ and this predicate lets callers tell which world they are in."
         (unless (file-directory-p harness-plugins-directory)
           (make-directory harness-plugins-directory t))
         (harness--watch-directory harness-plugins-directory)
+        ;; Bundled plugins are part of the package, but watching them too keeps
+        ;; `plugins/' hot while the harness itself is being developed.
+        (harness--watch-directory harness-bundled-plugins-directory)
         (when harness-plugin-watch-harness-directory
           (harness--watch-directory
            (file-name-directory (or (locate-library "harness") default-directory)))))
@@ -384,6 +431,7 @@ is the point: the loop from empty file to working tool is one save."
 This is how a project-local plugin folder is picked up."
   (interactive "DPlugin directory: ")
   (let ((harness-plugins-directory (expand-file-name directory))
+        (harness-bundled-plugins-directory nil)
         (harness-plugin-auto-load t))
     (harness-load-plugins)))
 

@@ -1,6 +1,6 @@
 ;;; harness-reload-test.el --- Tests for plugins and hot reload -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
 ;; This file is not part of GNU Emacs.
 
@@ -24,6 +24,10 @@
   `(harness-test-with-temp-session-dir
      (let ((harness-plugins-directory
             (expand-file-name "plugins" harness-test--directory))
+           ;; Keep the distribution's own plugins out of every test that uses
+           ;; this macro; the bundled loader gets its own test below.
+           (harness-bundled-plugins-directory
+            (expand-file-name "no-bundled-plugins" harness-test--directory))
            (harness-plugin-auto-load nil)
            (harness-plugin-watch-harness-directory nil))
        (make-directory harness-plugins-directory t)
@@ -110,6 +114,38 @@
       (dolist (file (harness-plugin-files))
         (push (file-name-base file) order))
       (should (equal (nreverse order) '("a-first" "b-second"))))))
+
+(ert-deftest harness-reload-test-loads-bundled-plugins-first ()
+  "Plugins shipped with the harness load by default, before the user's."
+  (harness-reload-test-with-plugins
+    (let ((harness-bundled-plugins-directory
+           (expand-file-name "bundled" harness-test--directory)))
+      (make-directory harness-bundled-plugins-directory t)
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region "(provide 'bundled-plugin)\n" nil
+                      (expand-file-name "bundled-plugin.el"
+                                        harness-bundled-plugins-directory)
+                      nil 'silent))
+      (harness-reload-test--write-plugin "user-plugin" "(provide 'user-plugin)\n")
+      (should (equal (mapcar #'file-name-base (harness-plugin-files-all))
+                     '("bundled-plugin" "user-plugin")))
+      (should (= 2 (harness-load-plugins))))))
+
+(ert-deftest harness-reload-test-plugin-file-p ()
+  "Only files inside a plugin directory count as plugins."
+  (harness-reload-test-with-plugins
+    (let ((harness-bundled-plugins-directory
+           (expand-file-name "bundled" harness-test--directory)))
+      (make-directory harness-bundled-plugins-directory t)
+      (should (harness-plugin-file-p
+               (expand-file-name "x.el" harness-plugins-directory)))
+      (should (harness-plugin-file-p
+               (expand-file-name "x.el" harness-bundled-plugins-directory)))
+      ;; A sibling whose name merely starts with a plugin directory's name is
+      ;; not inside it.
+      (should-not (harness-plugin-file-p
+                   (expand-file-name "plugins-elsewhere/x.el"
+                                     harness-test--directory))))))
 
 (ert-deftest harness-reload-test-reload-keeps-sessions ()
   "Reloading the harness keeps live sessions and the tool registry."

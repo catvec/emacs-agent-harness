@@ -1,12 +1,12 @@
 ;;; harness-provider.el --- Pluggable inference provider API -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
-;; Author: Noah Huppert <contact@noahh.io>
+;; Author: the emacs-agent-harness authors
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, ai
-;; URL: https://github.com/noahhuppert/emacs-agent-harness
+;; URL: https://git.sr.ht/~catvec/emacs-agent-harness
 
 ;; This file is not part of GNU Emacs.
 

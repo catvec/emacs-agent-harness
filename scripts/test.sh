@@ -17,7 +17,7 @@ SELECTOR="${ERT_SELECTOR:-t}"
 echo "== byte-compiling =="
 "$EMACS" -Q --batch -L . -L lisp -L test \
   --eval '(setq byte-compile-error-on-warn t)' \
-  -f batch-byte-compile lisp/*.el harness.el test/*.el
+  -f batch-byte-compile lisp/*.el harness.el plugins/*.el test/*.el
 
 echo "== running tests =="
 ERT_SELECTOR="$SELECTOR" "$EMACS" -Q --batch -L . -L lisp -L test \

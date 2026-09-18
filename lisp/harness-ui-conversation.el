@@ -1,12 +1,12 @@
 ;;; harness-ui-conversation.el --- Conversation buffer and input area -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
-;; Author: Noah Huppert <contact@noahh.io>
+;; Author: the emacs-agent-harness authors
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, ai
-;; URL: https://github.com/noahhuppert/emacs-agent-harness
+;; URL: https://git.sr.ht/~catvec/emacs-agent-harness
 
 ;; This file is not part of GNU Emacs.
 
@@ -181,9 +181,24 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
 (defvar-local harness-conversation--limit nil
   "How many messages this buffer renders; nil means the default.")
 
+(defun harness-conversation--input-p ()
+  "Return non-nil when point is in the input area."
+  (and harness-conversation--input-start
+       (>= (point) (marker-position harness-conversation--input-start))))
+
 (defvar harness-conversation-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    ;; `special-mode-map' is deliberately *not* the parent: it binds every
+    ;; self-inserting key to `undefined' (`suppress-keymap'), which would make
+    ;; the input area impossible to type into.  The transcript is already kept
+    ;; read-only by the `read-only' text property (see
+    ;; `harness-conversation--protect'), so the map only has to keep the
+    ;; single-key commands below from swallowing what the user types (see
+    ;; `harness-conversation--input-p').
+    ;;
+    ;; A non-nil parent is still required: `define-derived-mode' splices in the
+    ;; parent mode's keymap when a mode's own map has no parent.
+    (set-keymap-parent map (make-sparse-keymap))
     (define-key map (kbd "RET") #'harness-conversation-send)
     (define-key map (kbd "C-c C-c") #'harness-conversation-send)
     (define-key map (kbd "C-j") #'newline)
@@ -201,10 +216,11 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
     (define-key map (kbd "C-c C-w") #'harness-set-working-directory)
     (define-key map (kbd "TAB") #'harness-conversation-tab)
     (define-key map (kbd "<backtab>") #'harness-conversation-toggle-fold)
-    (define-key map (kbd "n") #'harness-conversation-next-message)
-    (define-key map (kbd "p") #'harness-conversation-previous-message)
-    (define-key map (kbd "g") #'harness-conversation-refresh)
-    (define-key map (kbd "q") #'bury-buffer)
+    (define-key map (kbd "n") #'harness-conversation--next-message-or-insert)
+    (define-key map (kbd "p") #'harness-conversation--previous-message-or-insert)
+    (define-key map (kbd "g") #'harness-conversation--refresh-or-insert)
+    (define-key map (kbd "q") #'harness-conversation--bury-or-insert)
+    (define-key map (kbd "SPC") #'harness-conversation--scroll-or-insert)
     map)
   "Keymap for `harness-conversation-mode'.")
 
@@ -1003,6 +1019,32 @@ does not block Emacs while it looks."
              harness-conversation--message-markers)
     (sort positions #'<)))
 
+(defmacro harness-conversation--define-or-insert (name command)
+  "Define NAME: type the invoked key in the input area, else call COMMAND.
+
+The input area shares its keymap with the transcript, so only the command can
+know where point is (the same trick as `harness-conversation-tab')."
+  (declare (indent 1))
+  `(defun ,name ()
+     ,(concat "Insert the typed key when point is in the input area.\n\n"
+              "Elsewhere in the buffer the same key calls\n`"
+              (symbol-name command) "'.")
+     (interactive)
+     (if (harness-conversation--input-p)
+         (self-insert-command 1)
+       (call-interactively #',command))))
+
+(harness-conversation--define-or-insert
+  harness-conversation--next-message-or-insert harness-conversation-next-message)
+(harness-conversation--define-or-insert
+  harness-conversation--previous-message-or-insert harness-conversation-previous-message)
+(harness-conversation--define-or-insert
+  harness-conversation--refresh-or-insert harness-conversation-refresh)
+(harness-conversation--define-or-insert
+  harness-conversation--bury-or-insert bury-buffer)
+(harness-conversation--define-or-insert
+  harness-conversation--scroll-or-insert scroll-up-command)
+
 (defun harness-conversation-display-message (session message)
   "Show SESSION's buffer with point at MESSAGE.
 This is the entry point other views (the tree, the session list) use."
@@ -1024,8 +1066,7 @@ This is the entry point other views (the tree, the session list) use."
 One key, because TAB on a line of the transcript clearly means \"fold this\"
 and TAB while typing clearly means \"complete this\"."
   (interactive)
-  (if (and harness-conversation--input-start
-           (>= (point) (marker-position harness-conversation--input-start)))
+  (if (harness-conversation--input-p)
       (completion-at-point)
     (harness-conversation-toggle-fold)))
 

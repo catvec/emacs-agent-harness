@@ -1,12 +1,12 @@
 ;;; harness-provider-openai.el --- OpenAI-compatible provider -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 the emacs-agent-harness authors
 
-;; Author: Noah Huppert <contact@noahh.io>
+;; Author: the emacs-agent-harness authors
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, ai
-;; URL: https://github.com/noahhuppert/emacs-agent-harness
+;; URL: https://git.sr.ht/~catvec/emacs-agent-harness
 
 ;; This file is not part of GNU Emacs.
 
@@ -140,13 +140,17 @@ Return nil for messages that must not be sent."
                                          "{}"))))))
 
 (defun harness-provider-openai--message-json (message)
-  "Return MESSAGE as a JSON string, cached on finished messages."
-  (or (plist-get (harness-message-meta message) :wire-json)
-      (let ((json (harness-json-write (harness-provider-openai--wire-message message))))
-        (when (eq (harness-message-status message) 'complete)
-          (setf (harness-message-meta message)
-                (plist-put (harness-message-meta message) :wire-json json)))
-        json)))
+  "Return MESSAGE as a JSON string, cached on finished messages.
+Return nil for a message that must not be sent.  This matters because
+`harness-json-write' encodes nil as the string \"null\", which a `delq nil'
+over the encoded strings would not remove."
+  (when-let* ((wire (harness-provider-openai--wire-message message)))
+    (or (plist-get (harness-message-meta message) :wire-json)
+        (let ((json (harness-json-write wire)))
+          (when (eq (harness-message-status message) 'complete)
+            (setf (harness-message-meta message)
+                  (plist-put (harness-message-meta message) :wire-json json)))
+          json))))
 
 (defun harness-provider-openai--system-json (system)
   "Return the JSON for a system prompt string SYSTEM."
