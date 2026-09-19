@@ -53,6 +53,7 @@
 (require 'subr-x)
 (require 'seq)
 (require 'button)
+(require 'display-line-numbers)
 (require 'harness-core)
 (require 'harness-session)
 (require 'harness-agent)
@@ -103,8 +104,22 @@ Nil means use the selected window."
     (slot . 1))
   "`display-buffer' action for the input side window.
 The input lives in its own buffer so it stays pinned to the bottom of the
-frame instead of floating up under a short transcript."
+frame instead of floating up under a short transcript.  Keep the
+`window-height' here in step with `harness-ui-input-min-height'."
   :type '(repeat sexp)
+  :group 'harness-ui)
+
+(defcustom harness-ui-input-min-height 2
+  "Smallest height, in lines, of the input side window.
+The input shrinks back to this height when its contents are cleared."
+  :type 'integer
+  :group 'harness-ui)
+
+(defcustom harness-ui-input-max-height 10
+  "Largest height, in lines, the input side window grows to.
+The window grows with the message being composed and stops here; a longer
+message scrolls inside the window instead of covering the transcript."
+  :type 'integer
   :group 'harness-ui)
 
 (defconst harness-ui-prompt "❯ "
@@ -195,6 +210,30 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
 (defvar-local harness-conversation--input-buffer nil
   "SESSION's input buffer, set in the transcript buffer.")
 
+(defun harness-conversation--no-line-numbers ()
+  "Opt the current buffer out of `display-line-numbers-mode'.
+
+Neither the transcript nor the editable input is source code, and the
+line-number gutter pushes the `❯' prompt to the right.  Toggle the mode off
+rather than `setq-local'ing `display-line-numbers' directly: only an explicit
+toggle marks the buffer as deliberately configured, which is what lets
+`global-display-line-numbers-mode' leave it alone."
+  (display-line-numbers-mode -1))
+
+(defun harness-conversation--disable-line-numbers ()
+  "Turn line numbers off in a harness buffer.
+
+Run from `after-change-major-mode-hook' rather than from the mode bodies:
+Doom enables `display-line-numbers-mode' from `text-mode-hook' (and other
+major-mode hooks), which runs after a mode's body, so a body call would be
+undone for the `text-mode'-derived input buffer.  This hook runs last, after
+both those hooks and the globalized minor mode's turn-on."
+  (when (derived-mode-p 'harness-conversation-mode
+                        'harness-conversation-input-mode)
+    (harness-conversation--no-line-numbers)))
+
+(add-hook 'after-change-major-mode-hook #'harness-conversation--disable-line-numbers)
+
 (defvar harness-conversation-mode-map
   (let ((map (make-sparse-keymap)))
     ;; `special-mode-map' is deliberately *not* the parent: it binds every
@@ -250,7 +289,14 @@ Output is read-only; typing happens in the input side window (see
 (defvar harness-conversation-input-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map text-mode-map)
+    ;; `RET' sends, so the common case is one keystroke.  A newline is
+    ;; `S-<return>'; `C-j' stays on `newline' as a fallback for terminals
+    ;; that cannot report Shift+Return distinctly from Return.  `C-c C-c'
+    ;; remains an alternative send for muscle memory.
     (define-key map (kbd "RET") #'harness-conversation-send)
+    (define-key map (kbd "<return>") #'harness-conversation-send)
+    (define-key map (kbd "S-<return>") #'newline)
+    (define-key map (kbd "S-RET") #'newline)
     (define-key map (kbd "C-c C-c") #'harness-conversation-send)
     (define-key map (kbd "C-j") #'newline)
     (define-key map (kbd "C-c C-k") #'harness-conversation-clear-input)
@@ -267,12 +313,15 @@ Output is read-only; typing happens in the input side window (see
 (define-derived-mode harness-conversation-input-mode text-mode "Harness-Input"
   "Major mode for the harness conversation input area.
 
-\[harness-conversation-send] sends, \[harness-conversation-clear-input]
-clears and \[harness-conversation-abort] aborts the run."
+\[harness-conversation-send] sends the message (also on `RET'), `S-<return>'
+or \[newline] inserts a newline, \[harness-conversation-clear-input] clears
+the area and \[harness-conversation-abort] aborts the run.  The window grows
+with the message up to `harness-ui-input-max-height' lines and then scrolls."
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
   (setq-local mode-line-format
               '(:eval (harness-conversation-input--mode-line)))
+  (add-hook 'after-change-functions #'harness-conversation-input--fit nil t)
   (add-hook 'completion-at-point-functions
             #'harness-attachments-completion-at-point nil t))
 
@@ -362,7 +411,11 @@ With NOSHOW, only create the buffers."
       ;; The input is where the user types, so give it the cursor without
       ;; stealing the transcript's follow (which only moves transcript windows).
       (when-let* ((window (get-buffer-window input)))
-        (select-window window)))
+        (select-window window)
+        ;; `display-buffer' resets the side window to its configured height;
+        ;; restore a taller window if the input was not empty.
+        (with-current-buffer input
+          (harness-conversation-input--fit))))
     buffer))
 
 (defun harness-conversation-rename-buffer (session)
@@ -496,6 +549,24 @@ downwards.  The editable input lives in a separate buffer (see
       (harness-conversation--protect start (point))
       (setq harness-conversation--input-start (copy-marker (point))))
     (goto-char (point-max))))
+
+(defun harness-conversation-input--fit (&rest _)
+  "Grow or shrink the input window to fit its contents.
+The window grows with the message being composed and stops at
+`harness-ui-input-max-height' lines, scrolling to keep point visible beyond
+that.  Called from `after-change-functions', so every edit -- including the
+deletion that follows a send -- resizes the window."
+  (dolist (window (get-buffer-window-list (current-buffer) nil t))
+    (when (window-live-p window)
+      (fit-window-to-buffer window
+                            harness-ui-input-max-height
+                            harness-ui-input-min-height)
+      ;; `fit-window-to-buffer' measures from `window-start', so it will not
+      ;; scroll a window that is already at the limit.  Keep the cursor (where
+      ;; the next character goes) on screen when the contents do not fit.
+      (with-selected-window window
+        (unless (pos-visible-in-window-p (window-point window) window)
+          (recenter -1))))))
 
 (defun harness-conversation--message-header (message)
   "Return the header text for MESSAGE."

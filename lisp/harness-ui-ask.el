@@ -284,32 +284,32 @@ checklist widget) and `:field' (the free text widget, when there is one)."
   "Confirm the request: send the answers, or allow the tool call.
 
 Both kinds of request share this buffer (see `harness-ask--display'), so the
-primary key sends a question and allows a permission."
+primary key sends a question and allows a permission.  The buffer itself is
+dismissed by `harness-ask--on-approval-resolved', which runs when the
+approval is resolved, however it was resolved."
   (interactive)
-  (unless harness-ask--approval (user-error "This buffer is not answering a request"))
   (let ((approval harness-ask--approval))
-    (setq harness-ask--approval nil)
+    (unless approval (user-error "This buffer is not answering a request"))
     (if (eq (harness-approval-kind approval) 'question)
+        ;; Collect the answers before resolving: resolving dismisses this
+        ;; buffer, so the widgets must be read while they still exist.
         (let ((answers (harness-ask-answers-from-buffer)))
           (harness-ask-answer approval answers)
           (message "Answer sent"))
       (harness-perms-resolve approval 'allow)
-      (message "Allowed"))
-    (bury-buffer)))
+      (message "Allowed"))))
 
 (defun harness-ask-cancel ()
   "Decline the request: skip the question, or deny the tool call."
   (interactive)
-  (unless harness-ask--approval (user-error "This buffer is not answering a request"))
   (let ((approval harness-ask--approval))
-    (setq harness-ask--approval nil)
+    (unless approval (user-error "This buffer is not answering a request"))
     (if (eq (harness-approval-kind approval) 'question)
         (progn
           (harness-ask-answer approval nil)
           (message "Question skipped"))
       (harness-perms-resolve approval 'deny)
-      (message "Denied"))
-    (bury-buffer)))
+      (message "Denied"))))
 
 (defun harness-ask-approve-always ()
   "Allow the pending tool call and remember the decision.
@@ -319,9 +319,7 @@ This only applies to a tool permission; a question has no always-answer."
     (unless approval (user-error "This buffer is not answering a request"))
     (unless (eq (harness-approval-kind approval) 'tool)
       (user-error "A question has no always-answer"))
-    (setq harness-ask--approval nil)
     (harness-perms-resolve approval 'allow-always)
-    (bury-buffer)
     (message "Always allowed")))
 
 (defun harness-ask-answer-pending ()
@@ -511,17 +509,38 @@ render would otherwise look like the session simply hanging."
            (message "Harness could not display the request: %s"
                     (error-message-string err)))))
 
+(defun harness-ask--dismiss-buffer (buffer)
+  "Remove BUFFER from every window and kill it.
+`bury-buffer' is not enough: called with a buffer argument it only moves the
+buffer down the list and leaves it displayed, so the window would linger and
+the next request would open another one beside it.  `quit-window' honours the
+`quit-restore' parameter that `display-buffer' recorded, putting the previous
+layout back before the buffer is thrown away.
+
+`quit-window' can change the current buffer when it restores a window, and
+this runs from `harness-approval-resolved-hook', where the caller expects its
+own buffer to stay current, so the caller's buffer is restored afterwards."
+  (let ((caller (current-buffer)))
+    (dolist (window (get-buffer-window-list buffer nil t))
+      (quit-window nil window))
+    (when (buffer-live-p buffer)
+      (kill-buffer buffer))
+    (when (buffer-live-p caller)
+      (set-buffer caller))))
+
 (defun harness-ask--on-approval-resolved (_session approval _decision)
-  "Forget APPROVAL in any widget buffer that was answering it.
-It may have been resolved from the minibuffer or from the inline prompt in
-the conversation; leaving the buffer armed would let a stale keypress resolve
-the approval a second time."
-  (dolist (buffer (buffer-list))
-    (with-current-buffer buffer
-      (when (and (derived-mode-p 'harness-ask-mode)
-                 (eq harness-ask--approval approval))
-        (setq harness-ask--approval nil)
-        (bury-buffer buffer)))))
+  "Dismiss the widget buffer that was answering APPROVAL.
+The approval may have been resolved from here, from the minibuffer or from
+the inline prompt in the conversation; all of them leave a stale window
+otherwise, and a stale buffer could still resolve the approval a second
+time."
+  (save-current-buffer
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (and (derived-mode-p 'harness-ask-mode)
+                   (eq harness-ask--approval approval))
+          (setq harness-ask--approval nil)
+          (harness-ask--dismiss-buffer buffer))))))
 
 (add-hook 'harness-approval-added-hook #'harness-ask--on-approval-added)
 (add-hook 'harness-approval-resolved-hook #'harness-ask--on-approval-resolved)

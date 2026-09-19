@@ -569,12 +569,19 @@ Rendering is incremental and marker-based:
 
 Input: the input side window is `harness-conversation-input-mode`.  The
 read-only `❯` prompt is the start of the buffer and everything after it is
-editable.  `RET` submits, `C-j` inserts a newline, `C-c C-k` clears.
+editable.  `RET` submits (`C-c C-c` is an alternative), `S-<return>`/`C-j`
+insert a newline, `C-c C-k` clears.  The window grows with the message up to
+`harness-ui-input-max-height` lines (`harness-ui-input-min-height` when
+empty) and then scrolls, so a long message never covers the transcript.
 Submitting while a run is in flight -- `working`, `streaming`, or blocked on
 an approval or a question -- enqueues instead.  The transcript window follows
 the stream only when it was already at the end (`harness-ui-follow`);
 `n`, `p`, `g`, `q` and `SPC` keep their transcript meaning there because
-typing happens in the other buffer.
+typing happens in the other buffer.  Neither buffer shows line numbers:
+line numbers are turned off from `after-change-major-mode-hook', because Doom
+(and similar configs) enables them from `text-mode-hook', which runs after a
+mode's body and would otherwise undo an opt-out there and push the `❯' prompt
+to the right.
 
 Perf guards: `harness-ui-max-rendered-messages` (default 200) renders only the
 tail and leaves a "load earlier" button; `harness-ui-truncate-lines` reuses
@@ -598,7 +605,10 @@ tail and leaves a "load earlier" button; `harness-ui-truncate-lines` reuses
   move and `RET` picks.  The header line and the intro say so, via the live
   binding lookup.  The conversation buffer keeps an inline approval block with
   the same live hints as a quick path.  Answers go back to the waiting tool
-  call through an async callback.  Modeled on the customize UI.
+  call through an async callback.  Resolving a request -- from the widget, the
+  minibuffer or the inline prompt -- dismisses the widget buffer: it is removed
+  from its window and killed, so a sequence of permissions cannot leave stale
+  windows behind.  Modeled on the customize UI.
 - `harness-ui-model.el` — `harness-select-model` (`completing-read` with
   annotations), `harness-model-mode` for a browseable list with costs.
 - `harness-mode-line.el` — `harness-mode-line-mode` (buffer-local) sets
@@ -645,10 +655,10 @@ In the conversation transcript: `C-c C-a` approve, `C-c C-y` approve always,
 `C-c C-e` edit queued, `C-c C-t` tree, `C-c C-b` abort, `C-c C-f` search the
 transcript, `C-c C-z` compact, `C-c C-w` change the working directory, `TAB`
 folds tool output, `n`/`p` next/previous message, `g` refresh, `q` bury,
-`SPC` scroll.  In the input buffer: `RET`/`C-c C-c` send, `C-j` newline,
-`C-c C-k` clear, plus the approval keys.  (`C-c C-A` is the same event as
-`C-c C-a`, so "always" is `C-c C-y`.)  Every key prompt in the UI is rendered
-from the actual binding, never from a literal.
+`SPC` scroll.  In the input buffer: `RET`/`C-c C-c` send,
+`S-<return>`/`C-j` newline, `C-c C-k` clear, plus the approval keys.
+(`C-c C-A` is the same event as `C-c C-a`, so "always" is `C-c C-y`.)  Every
+key prompt in the UI is rendered from the actual binding, never from a literal.
 
 ## 10. Subagents (`harness-subagents.el`)
 

@@ -113,22 +113,85 @@ such as n, p, g or q cannot swallow what the user types."
     (goto-char (point-max))
     (execute-kbd-macro "n p g q 1 < > ? h a, b.")
     (should (equal (harness-conversation--input) "n p g q 1 < > ? h a, b."))
-    (execute-kbd-macro "\r")
+    (execute-kbd-macro (kbd "RET"))
     (harness-ui-test--wait-idle session)
     (should (string-match-p (regexp-quote "n p g q 1 < > ? h a, b.")
                             (harness-ui-test--text buffer)))
     (should (string-match-p "reply" (harness-ui-test--text buffer)))))
+
+(ert-deftest harness-ui-test-input-area-ret-sends-and-shift-ret-newlines ()
+  "RET sends the input; `S-<return>' inserts a newline."
+  (harness-ui-test-with-session '((:text "reply"))
+    (switch-to-buffer (harness-conversation-input-buffer session))
+    (goto-char (point-max))
+    (execute-kbd-macro "first line")
+    (execute-kbd-macro (kbd "S-<return>"))
+    (execute-kbd-macro "second line")
+    ;; Shift+Return must not have submitted anything.
+    (should (equal (harness-conversation--input) "first line\nsecond line"))
+    (should (eq (harness-session-status session) 'idle))
+    (execute-kbd-macro (kbd "RET"))
+    (harness-ui-test--wait-idle session)
+    (should (equal (harness-conversation--input) ""))
+    (should (string-match-p "first line" (harness-ui-test--text buffer)))
+    (should (string-match-p "second line" (harness-ui-test--text buffer)))))
+
+(ert-deftest harness-ui-test-input-window-grows-with-the-message ()
+  "The input side window grows with a multi-line message and shrinks again."
+  (harness-ui-test-with-session '((:text "reply"))
+    (harness-conversation-open session)
+    (let ((input (harness-conversation-input-buffer session))
+          (window nil))
+      (unwind-protect
+          (progn
+            (setq window (get-buffer-window input))
+            (should window)
+            (should (= (window-height window) harness-ui-input-min-height))
+            (with-current-buffer input
+              (goto-char (point-max))
+              (insert "one\ntwo")
+              (harness-conversation-input--fit))
+            (should (> (window-height window) harness-ui-input-min-height))
+            ;; A message longer than the limit is capped, not unbounded.
+            (with-current-buffer input
+              (goto-char (point-max))
+              (dotimes (i 40) (insert (format "line %d\n" i)))
+              (harness-conversation-input--fit))
+            (should (= (window-height window) harness-ui-input-max-height))
+            (should (> (window-start window) (point-min)))
+            (with-current-buffer input
+              (harness-conversation--clear-input)
+              (harness-conversation-input--fit))
+            (should (= (window-height window) harness-ui-input-min-height)))
+        (when (window-live-p window) (delete-window window))))))
+
+(ert-deftest harness-ui-test-buffers-opt-out-of-line-numbers ()
+  "Harness buffers do not show a line-number gutter.
+
+Doom enables line numbers from `text-mode-hook', which runs after a mode's
+body, so the opt-out has to survive that as well as the globalized mode."
+  (require 'display-line-numbers)
+  (global-display-line-numbers-mode 1)
+  (add-hook 'text-mode-hook #'display-line-numbers-mode)
+  (unwind-protect
+      (harness-ui-test-with-session '((:text "reply"))
+        (with-current-buffer buffer
+          (should-not display-line-numbers))
+        (with-current-buffer (harness-conversation-input-buffer session)
+          (should-not display-line-numbers)))
+    (remove-hook 'text-mode-hook #'display-line-numbers-mode)
+    (global-display-line-numbers-mode -1)))
 
 (ert-deftest harness-ui-test-input-area-keeps-typing-after-a-send ()
   "The input area is typeable again after a message is sent."
   (harness-ui-test-with-session '((:text "first") (:text "second"))
     (switch-to-buffer (harness-conversation-input-buffer session))
     (goto-char (point-max))
-    (execute-kbd-macro "one\r")
+    (execute-kbd-macro (concat "one" (kbd "C-c C-c")))
     (harness-ui-test--wait-idle session)
     (switch-to-buffer (harness-conversation-input-buffer session))
     (goto-char (point-max))
-    (execute-kbd-macro "two\r")
+    (execute-kbd-macro (concat "two" (kbd "C-c C-c")))
     (harness-ui-test--wait-idle session)
     (let ((text (harness-ui-test--text buffer)))
       (should (string-match-p "one" text))
@@ -174,13 +237,41 @@ such as n, p, g or q cannot swallow what the user types."
       (with-current-buffer buffer
         (goto-char (point-min))
         (harness-conversation-approve))
-      ;; The widget buffer that opened for the approval must be disarmed, or a
-      ;; stale keypress there could resolve the same approval twice.
-      (when-let* ((approve (get-buffer "*Harness Approve: ui*")))
-        (with-current-buffer approve
-          (should-not harness-ask--approval)))
+      ;; The widget buffer that opened for the approval must be gone; leaving
+      ;; it up would let a stale keypress resolve the approval a second time.
+      (should-not (get-buffer "*Harness Approve: ui*"))
       (harness-ui-test--wait-idle session)
       (should (string-match-p "thank you" (harness-ui-test--text buffer))))))
+
+(ert-deftest harness-ui-test-resolving-dismisses-the-ask-buffer ()
+  "Approving tool calls leaves no ask buffer or window behind.
+
+Every permission opens the widget buffer in a window.  Resolving it must
+remove that buffer from its window -- `bury-buffer' with a buffer argument
+only reorders the buffer list -- or each approval leaves a window up and the
+next request opens another one beside it."
+  (harness-ui-test-with-session
+      '((:tool-call ("bash" (:command "echo 1")))
+        (:tool-call ("bash" (:command "echo 2")))
+        (:tool-call ("bash" (:command "echo 3")))
+        (:tool-call ("bash" (:command "echo 4")))
+        (:text "all done"))
+    (let ((harness-permission-policy '((:default ask))))
+      (harness-agent-send session "run it")
+      (dotimes (_ 4)
+        (should (harness-test-wait-for
+                 (lambda () (eq (harness-session-status session) 'awaiting-approval)) 10))
+        (let ((approve (get-buffer "*Harness Approve: ui*")))
+          (should approve)
+          (with-current-buffer approve (harness-ask-submit)))
+        ;; Gone before the next request arrives, so nothing accumulates.
+        (should-not (get-buffer "*Harness Approve: ui*")))
+      (harness-ui-test--wait-idle session)
+      (should-not (get-buffer "*Harness Approve: ui*"))
+      (should-not (seq-find (lambda (window)
+                              (string-match-p "Harness Approve"
+                                              (buffer-name (window-buffer window))))
+                            (window-list))))))
 
 (ert-deftest harness-ui-test-streamed-thinking-gets-its-own-line ()
   "A streamed reasoning trace is labelled and separated from the answer.
