@@ -36,7 +36,17 @@
 ;;   header line          (header-line-format, rebuilt on demand)
 ;;   messages             [harness-conversation--messages-end]
 ;;   approvals + queue    [harness-conversation--extras-end]
-;;   input area           [harness-conversation--input-start]
+;;   filler               [harness-conversation--filler-start]
+;;   input area           [harness-conversation--prompt-start,
+;;                         harness-conversation--input-start]
+;;
+;; The filler is blank, read-only lines inserted between the transcript and
+;; the prompt so the input sits on the window's bottom line -- a blank session
+;; looks like a chat box, not a prompt stranded at the top.  It is recomputed
+;; whenever the window or the content changes, and shrinks to nothing once the
+;; transcript is taller than the window.  Nothing is measured while the
+;; transcript already fills the window (`harness-conversation--filler-full'),
+;; so streaming stays O(delta).
 ;;
 ;; Rendering is incremental.  A streamed token is inserted at a marker, so the
 ;; cost is the token, not the transcript; a finished tool call re-renders only
@@ -66,6 +76,8 @@
 (declare-function harness-attachments-completion-at-point "harness-attachments" ())
 (declare-function harness-tree "harness-ui-tree" (&optional session))
 (declare-function harness-select-model "harness-ui-model" (&optional session))
+(declare-function harness-search-results-menu "harness-ui-menu" ())
+(declare-function harness-conversation-menu "harness-ui-menu" ())
 
 (defcustom harness-ui-max-rendered-messages 200
   "How many recent messages a conversation buffer renders.
@@ -172,6 +184,26 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
 (defvar-local harness-conversation--extras-end nil
   "Marker after the approval and queue section.  Insertion type t.")
 
+(defvar-local harness-conversation--prompt-start nil
+  "Marker at the first character of the input prompt.
+Insertion type t, so the prompt follows the filler when it is inserted before
+it; the filler region is [filler-start, prompt-start).")
+
+(defvar-local harness-conversation--filler-start nil
+  "Marker at the start of the filler above the input prompt.
+Insertion type nil, so it stays put while the filler itself is inserted.")
+
+(defvar-local harness-conversation--filler-lines 0
+  "Number of blank filler lines currently inserted above the prompt.")
+
+(defvar-local harness-conversation--filler-full nil
+  "Non-nil when the transcript already fills the window.
+Set once no filler is needed, so that streaming does not re-measure the whole
+buffer for every token; any event that can make the content shorter resets it.")
+
+(defvar-local harness-conversation--updating-filler nil
+  "Non-nil while the filler is being adjusted, to stop recursion.")
+
 (defvar-local harness-conversation--input-start nil
   "Marker at the first editable character of the input area.")
 
@@ -181,9 +213,37 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
 (defvar-local harness-conversation--limit nil
   "How many messages this buffer renders; nil means the default.")
 
+(defun harness-conversation--in-input-p ()
+  "Return non-nil when point is in the editable compose area."
+  (and harness-conversation--input-start
+       (>= (point) (marker-position harness-conversation--input-start))))
+
+(defun harness-conversation--input-aware (compose transcript)
+  "Return a command that runs COMPOSE in the input, TRANSCRIPT elsewhere.
+
+The transcript and the compose area share one buffer, so a key that is a
+command on the read-only transcript must still insert its character while the
+user is typing.  COMPOSE is usually `self-insert-command'."
+  (lambda ()
+    (interactive)
+    (if (harness-conversation--in-input-p)
+        (call-interactively compose)
+      (call-interactively transcript))))
+
+(defun harness-conversation-help ()
+  "Show the conversation menu, or type `?' while composing."
+  (interactive)
+  (if (harness-conversation--in-input-p)
+      (self-insert-command (prefix-numeric-value current-prefix-arg))
+    (call-interactively #'harness-conversation-menu)))
+
 (defvar harness-conversation-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    ;; `text-mode-map', not `special-mode-map': `special-mode' remaps
+    ;; `self-insert-command' to `undefined' and binds letters and `SPC', which
+    ;; would make the compose area untypeable.  The read-only transcript is
+    ;; enforced by text properties, not by the keymap.
+    (set-keymap-parent map text-mode-map)
     (define-key map (kbd "RET") #'harness-conversation-send)
     (define-key map (kbd "C-c C-c") #'harness-conversation-send)
     (define-key map (kbd "C-j") #'newline)
@@ -201,10 +261,43 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
     (define-key map (kbd "C-c C-w") #'harness-set-working-directory)
     (define-key map (kbd "TAB") #'harness-conversation-tab)
     (define-key map (kbd "<backtab>") #'harness-conversation-toggle-fold)
-    (define-key map (kbd "n") #'harness-conversation-next-message)
-    (define-key map (kbd "p") #'harness-conversation-previous-message)
-    (define-key map (kbd "g") #'harness-conversation-refresh)
-    (define-key map (kbd "q") #'bury-buffer)
+    (define-key map (kbd "n")
+      (harness-conversation--input-aware #'self-insert-command
+                                          #'harness-conversation-next-message))
+    (define-key map (kbd "p")
+      (harness-conversation--input-aware #'self-insert-command
+                                          #'harness-conversation-previous-message))
+    (define-key map (kbd "g")
+      (harness-conversation--input-aware #'self-insert-command
+                                          #'harness-conversation-refresh))
+    (define-key map (kbd "?")
+      #'harness-conversation-help)
+    (define-key map (kbd "q")
+      (harness-conversation--input-aware #'self-insert-command #'bury-buffer))
+    (define-key map (kbd "SPC")
+      (harness-conversation--input-aware #'self-insert-command
+                                          #'scroll-up-command))
+    (define-key map (kbd "S-SPC")
+      (harness-conversation--input-aware #'self-insert-command
+                                          #'scroll-down-command))
+    (define-key map (kbd "DEL")
+      (harness-conversation--input-aware #'delete-backward-char
+                                          #'scroll-down-command))
+    ;; Prefix arguments and buffer navigation, as `special-mode' had them,
+    ;; but typable in the compose area.
+    (dolist (digit (number-sequence 0 9))
+      (define-key map (kbd (number-to-string digit))
+        (harness-conversation--input-aware #'self-insert-command
+                                            #'digit-argument)))
+    (define-key map (kbd "-")
+      (harness-conversation--input-aware #'self-insert-command
+                                          #'negative-argument))
+    (define-key map (kbd "<")
+      (harness-conversation--input-aware #'self-insert-command
+                                          #'beginning-of-buffer))
+    (define-key map (kbd ">")
+      (harness-conversation--input-aware #'self-insert-command
+                                          #'end-of-buffer))
     map)
   "Keymap for `harness-conversation-mode'.")
 
@@ -213,8 +306,9 @@ Each element is a plist with `:start', `:end' and `:hidden'.")
 
 Output is read-only; the input area at the bottom is not.
 \\[harness-conversation-send] sends, \\[harness-conversation-abort] aborts the
-run, \\[harness-conversation-toggle-fold] folds tool output and
-\\[harness-conversation-refresh] re-renders."
+run, \\[harness-conversation-toggle-fold] folds tool output, and
+\\[harness-conversation-refresh] re-renders.  \\[harness-conversation-help]
+opens the command menu (it types `?' while composing)."
   (setq-local buffer-read-only nil)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
@@ -223,7 +317,13 @@ run, \\[harness-conversation-toggle-fold] folds tool output and
   (add-to-invisibility-spec '(harness-fold . t))
   (setq-local header-line-format '(:eval (harness-conversation--header-line)))
   (add-hook 'completion-at-point-functions
-            #'harness-attachments-completion-at-point nil t))
+            #'harness-attachments-completion-at-point nil t)
+  ;; The input is pinned to the window's bottom line.  These hooks are
+  ;; buffer-local, so they only run for windows showing this buffer.
+  (add-hook 'window-size-change-functions
+            #'harness-conversation--window-changed nil t)
+  (add-hook 'after-change-functions
+            #'harness-conversation--after-change nil t))
 
 (defun harness-conversation-session (&optional buffer)
   "Return the session shown in BUFFER, or the current buffer."
@@ -252,7 +352,11 @@ run, \\[harness-conversation-toggle-fold] folds tool output and
     (unless noshow
       (if harness-ui-conversation-display-action
           (display-buffer buffer harness-ui-conversation-display-action)
-        (pop-to-buffer-same-window buffer)))
+        (pop-to-buffer-same-window buffer))
+      ;; Do it now rather than waiting for the window-change hook, so the
+      ;; prompt never flashes at the top of a fresh buffer.
+      (with-current-buffer buffer
+        (harness-conversation--refresh-filler t)))
     buffer))
 
 (defun harness-conversation-rename-buffer (session)
@@ -355,10 +459,17 @@ Returns the fold, so a caller can unfold it later."
 The markers are created *after* the input area is inserted, so that inserting
 the prompt cannot push the message and extras markers past it.  Their
 insertion types are also deliberate: the message and extras markers must move
-past text inserted at them (output grows downwards), while the input marker
-must not, because text typed at `point-max' belongs to the input region."
+past text inserted at them (output grows downwards), while the prompt and
+input markers must not, because the prompt is re-anchored by the filler and
+text typed at `point-max' belongs to the input region."
   (let ((inhibit-read-only t)
         (windows (harness-conversation--windows-at-end)))
+    ;; `erase-buffer' runs `after-change-functions' with the old markers still
+    ;; in place; clear them and block the filler update until the new skeleton
+    ;; exists, or a short, displayed buffer would be filled mid-rebuild.
+    (setq harness-conversation--prompt-start nil)
+    (setq harness-conversation--filler-start nil)
+    (setq harness-conversation--updating-filler t)
     (erase-buffer)
     (harness-conversation--forget-folds)
     (clrhash harness-conversation--message-markers)
@@ -371,12 +482,85 @@ must not, because text typed at `point-max' belongs to the input region."
         (put-text-property start (point) 'face 'harness-prompt)
         (put-text-property start (point) 'field 'harness-input)
         (harness-conversation--protect start (point))
+        ;; `prompt-start' moves with the filler inserted before it;
+        ;; `filler-start' marks where that filler begins.
+        (setq harness-conversation--prompt-start (copy-marker start t))
+        (setq harness-conversation--filler-start (copy-marker start nil))
+        (setq harness-conversation--filler-lines 0)
+        (setq harness-conversation--filler-full nil)
         (setq harness-conversation--input-start (copy-marker (point))))
       (setq harness-conversation--messages-end (copy-marker messages-position t))
       (setq harness-conversation--extras-end (copy-marker messages-position t)))
+    (setq harness-conversation--updating-filler nil)
     (harness-conversation--sync)
     (harness-conversation--follow windows)
+    (harness-conversation--update-filler)
     (goto-char (point-max))))
+
+(defun harness-conversation--filler-window ()
+  "Return a window showing this buffer, preferring the selected one."
+  (or (and (eq (window-buffer (selected-window)) (current-buffer))
+           (selected-window))
+      (car (get-buffer-window-list (current-buffer) nil t))))
+
+(defun harness-conversation--set-filler (lines)
+  "Insert LINES blank, read-only lines above the input prompt."
+  (unless (= lines harness-conversation--filler-lines)
+    (let ((start (marker-position harness-conversation--filler-start))
+          (end (marker-position harness-conversation--prompt-start))
+          (inhibit-read-only t))
+      (when (and start end (<= start end))
+        (save-excursion
+          (delete-region start end)
+          (goto-char start)
+          (when (> lines 0)
+            (let ((filler-start (point)))
+              (insert (make-string lines ?\n))
+              (harness-conversation--protect filler-start (point))))))
+      (setq harness-conversation--filler-lines lines))))
+
+(defun harness-conversation--update-filler (&optional window)
+  "Put blank filler above the input so it sits at the bottom of WINDOW.
+Does nothing when the buffer is not displayed in a live window.  While
+`harness-conversation--filler-full' is set the transcript already fills the
+window, so the measurement is skipped; callers that may have made the content
+shorter reset that flag first (see `harness-conversation--refresh-filler')."
+  (when (and harness-conversation--prompt-start
+             (not harness-conversation--updating-filler))
+    (let ((window (or window (harness-conversation--filler-window))))
+      (when (and (window-live-p window)
+                 (eq (window-buffer window) (current-buffer)))
+        (let ((harness-conversation--updating-filler t))
+          (unless harness-conversation--filler-full
+            (let* ((body (window-body-height window))
+                   ;; `count-screen-lines' includes the current filler, which
+                   ;; is always one screen line per inserted newline.
+                   (total (count-screen-lines (point-min) (point-max) t window))
+                   (content (- total harness-conversation--filler-lines))
+                   (needed (max 0 (- body content))))
+              (harness-conversation--set-filler needed)
+              (when (zerop needed)
+                (setq harness-conversation--filler-full t)))))))))
+
+(defun harness-conversation--refresh-filler (&optional force)
+  "Recompute the filler, re-measuring when FORCE is non-nil."
+  (when force (setq harness-conversation--filler-full nil))
+  (harness-conversation--update-filler))
+
+(defun harness-conversation--window-changed (&optional window)
+  "Re-anchor the input after WINDOW was resized or shown."
+  (setq harness-conversation--filler-full nil)
+  (harness-conversation--update-filler (and (windowp window) window)))
+
+(defun harness-conversation--after-change (start _end _old-length)
+  "Grow or shrink the filler when the user edits the input area.
+Only runs while the buffer is short enough that the filler matters; a long
+transcript skips the measurement so typing stays O(1)."
+  (when (and harness-conversation--input-start
+             (not harness-conversation--updating-filler)
+             (not harness-conversation--filler-full)
+             (>= start (marker-position harness-conversation--input-start)))
+    (harness-conversation--update-filler)))
 
 (defun harness-conversation--message-header (message)
   "Return the header text for MESSAGE."
@@ -520,7 +704,8 @@ WINDOWS, when given, are followed to the end of the buffer."
                      (harness-conversation--render-message session message)
                      harness-conversation--message-markers)))
         (harness-conversation--render-extras))
-       (harness-conversation--follow windows)))))
+       (harness-conversation--follow windows)))
+    (harness-conversation--refresh-filler)))
 
 (defun harness-conversation--clear-extras ()
   "Delete the approval and queue region."
@@ -531,21 +716,30 @@ WINDOWS, when given, are followed to the end of the buffer."
         (delete-region start end)))))
 
 (defun harness-conversation--render-extras ()
-  "Render the approval prompts and queued messages at the end of the messages."
+  "Render the approval prompts and queued messages at the end of the messages.
+
+The extras sit between the message region and the filler.  `messages-end' is
+temporarily given a nil insertion type so that inserting an approval or a
+queued message leaves it *before* the extras: the next message must still land
+above them, and `clear-extras' must be able to delete them again."
   (let ((session harness-conversation--session))
     (save-excursion
       (goto-char (marker-position harness-conversation--messages-end))
       (let ((start (point))
             (any nil))
-        (dolist (approval (harness-approval-pending session))
-          (harness-conversation--render-approval session approval)
-          (setq any t))
-        (when (harness-session-queue session)
-          (harness-conversation--render-queue session)
-          (setq any t))
-        (when any
-          (insert "\n")
-          (harness-conversation--protect start (point)))))))
+        (set-marker-insertion-type harness-conversation--messages-end nil)
+        (unwind-protect
+            (progn
+              (dolist (approval (harness-approval-pending session))
+                (harness-conversation--render-approval session approval)
+                (setq any t))
+              (when (harness-session-queue session)
+                (harness-conversation--render-queue session)
+                (setq any t))
+              (when any
+                (insert "\n")
+                (harness-conversation--protect start (point))))
+          (set-marker-insertion-type harness-conversation--messages-end t))))))
 
 (defun harness-conversation--render-approval (session approval)
   "Render APPROVAL of SESSION with buttons."
@@ -620,6 +814,7 @@ WINDOWS, when given, are followed to the end of the buffer."
           (harness-conversation--output-at
            marker text
            'face (if (eq kind 'thinking) 'harness-thinking 'harness-message-body)))))))
+  (harness-conversation--refresh-filler)
   (ignore session))
 
 (defun harness-conversation--refresh-tool (call)
@@ -647,7 +842,8 @@ WINDOWS, when given, are followed to the end of the buffer."
               (goto-char start)
               (delete-region start end)
               (harness-conversation--render-tool-call
-               harness-conversation--session call)))))))))
+               harness-conversation--session call))))))))
+  (harness-conversation--refresh-filler))
 
 (defun harness-conversation--directory-label (session)
   "Return a short label for SESSION's working directory.
@@ -787,7 +983,9 @@ refusal; the plain body is the fallback."
                (let ((harness-conversation--suppress-refresh t))
                  (harness-conversation--clear-extras)
                  (harness-conversation--render-extras)))
-              (harness-conversation--follow windows)))
+              (harness-conversation--follow windows))
+            ;; The queue or an approval may have gone away, so re-measure.
+            (harness-conversation--refresh-filler t))
            ((memq 'status events)
             (force-mode-line-update))
            (t nil)))))))
@@ -923,7 +1121,33 @@ marker after them shifts automatically."
                 (puthash (harness-message-id message) markers
                          harness-conversation--message-markers)
                 (setq insertion (point))))))
+      (harness-conversation--refresh-filler)
       (message "Showing the last %d of %d messages" next total)))))
+
+(defvar harness-search-results-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "RET") #'harness-search-results-jump)
+    (define-key map (kbd "n") #'forward-button)
+    (define-key map (kbd "p") #'backward-button)
+    (define-key map (kbd "?") #'harness-search-results-menu)
+    map)
+  "Keymap for `harness-search-results-mode'.")
+
+(define-derived-mode harness-search-results-mode special-mode "Harness-Search"
+  "Major mode for the transcript search results buffer.
+
+\[harness-search-results-jump] opens the message whose result is at point,
+\[forward-button] and \[backward-button] move between results, and
+\[harness-search-results-menu] lists every command."
+  (setq-local truncate-lines nil))
+
+(defun harness-search-results-jump ()
+  "Open the message whose search result is at point."
+  (interactive)
+  (if (button-at (point))
+      (push-button)
+    (user-error "No result at point")))
 
 (defun harness-conversation-search (regexp)
   "Search this session's whole transcript for REGEXP.
@@ -948,7 +1172,7 @@ does not block Emacs while it looks."
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (special-mode)
+        (harness-search-results-mode)
         (insert (propertize (format "%d match%s for %s\n\n"
                                     (length results)
                                     (if (= (length results) 1) "" "es")
@@ -1058,7 +1282,9 @@ and TAB while typing clearly means \"complete this\"."
               (put-text-property start end 'invisible 'harness-fold)
             (remove-text-properties start end '(invisible nil))))
         (plist-put fold :hidden hide)
-        (when hide (goto-char start))))))
+        (when hide (goto-char start))
+        ;; Folding changes how tall the transcript is, so re-measure.
+        (harness-conversation--refresh-filler t)))))
 
 (defun harness-conversation--tool-block-at-point ()
   "Return the (START . END) of the tool block containing point, or nil."

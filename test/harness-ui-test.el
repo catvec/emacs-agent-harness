@@ -101,6 +101,103 @@ BODY can refer to `session' and `buffer'; the buffer is killed afterwards."
     (should (string-match-p "typed by hand" (harness-ui-test--text buffer)))
     (should (string-match-p "reply" (harness-ui-test--text buffer)))))
 
+(ert-deftest harness-ui-test-compose-area-is-typable ()
+  "The compose area types printable characters, including `?'.
+`special-mode' would otherwise shadow them and remap `self-insert-command'."
+  (harness-ui-test-with-session '((:text "reply"))
+    (let ((original (window-buffer (selected-window))))
+      (unwind-protect
+          (progn
+            (set-window-buffer (selected-window) buffer)
+            (with-current-buffer buffer
+              (goto-char (point-max))
+              (execute-kbd-macro (kbd "h i SPC t h e r e ? SPC 1 - q"))
+              (should (equal (harness-conversation--input) "hi there? 1-q"))
+              ;; The transcript still routes `?' to the help command.
+              (goto-char (point-min))
+              (should-not (harness-conversation--in-input-p))
+              (should (eq (key-binding (kbd "?")) 'harness-conversation-help))))
+        (set-window-buffer (selected-window) original)))))
+
+(ert-deftest harness-ui-test-editable-modes-do-not-shadow-typing ()
+  "A plain letter is self-inserting in the editable harness modes."
+  (dolist (mode '(harness-conversation-mode harness-ask-mode harness-queue-mode))
+    (with-temp-buffer
+      (funcall mode)
+      (should (eq (key-binding (kbd "a")) #'self-insert-command)))))
+
+(ert-deftest harness-ui-test-input-pinned-to-window-bottom ()
+  "A short transcript fills with read-only filler above the input.
+The input must end on the window's last line, so a blank session reads as a
+chat box rather than a prompt stranded at the top."
+  (harness-ui-test-with-session '((:text "reply"))
+    (let ((original (window-buffer (selected-window))))
+      (unwind-protect
+          (progn
+            (set-window-buffer (selected-window) buffer)
+            (with-current-buffer buffer
+              (harness-conversation--refresh-filler t)
+              (should (> harness-conversation--filler-lines 0))
+              (should (get-text-property
+                       (marker-position harness-conversation--filler-start)
+                       'read-only))
+              ;; The input area ends on the last line of the buffer, and the
+              ;; window follows the end, so it is the bottom line on screen.
+              (should (= (line-number-at-pos (point-max))
+                         (line-number-at-pos
+                          (marker-position harness-conversation--input-start))))
+              ;; Typing a newline in the input consumes one filler line so the
+              ;; transcript above is not pushed out of the window.
+              (let ((filler harness-conversation--filler-lines))
+                (goto-char (point-max))
+                (insert "\n")
+                (should (= harness-conversation--filler-lines (1- filler))))
+              ;; A full rebuild on a displayed buffer must not corrupt the
+              ;; filler (rebuilding erases the buffer).
+              (harness-conversation-refresh)
+              (should (> harness-conversation--filler-lines 0))
+              (should (= (line-number-at-pos (point-max))
+                         (line-number-at-pos
+                          (marker-position harness-conversation--input-start))))))
+        (set-window-buffer (selected-window) original)))))
+
+(ert-deftest harness-ui-test-no-filler-once-transcript-is-tall ()
+  "Once the transcript fills the window the filler is removed again."
+  (harness-ui-test-with-session
+      (mapcar (lambda (i) (list :text (format "reply-%d" i)))
+              (number-sequence 1 12))
+    (let ((original (window-buffer (selected-window))))
+      (unwind-protect
+          (progn
+            (set-window-buffer (selected-window) buffer)
+            (dotimes (i 12)
+              (harness-ui-test--send session (format "message-%d" (1+ i))))
+            (with-current-buffer buffer
+              (harness-conversation--refresh-filler t)
+              (should (> (line-number-at-pos (point-max))
+                         (window-body-height (selected-window))))
+              (should (zerop harness-conversation--filler-lines))
+              (should harness-conversation--filler-full)))
+        (set-window-buffer (selected-window) original)))))
+
+(ert-deftest harness-ui-test-extras-stay-below-earlier-messages ()
+  "Approvals and queued messages never displace the messages before them."
+  (harness-ui-test-with-session '((:text "alpha-reply") (:text "beta-reply"))
+    (harness-agent-send session "alpha-message")
+    (harness-agent-send session "beta-message")
+    (harness-ui-test--wait-idle session)
+    (harness-test-wait-for
+     (lambda () (string-match-p "beta-reply" (harness-ui-test--text buffer))) 10)
+    (let* ((text (harness-ui-test--text buffer))
+           (alpha (string-match "alpha-message" text))
+           (alpha-reply (string-match "alpha-reply" text))
+           (beta (string-match "beta-message" text))
+           (beta-reply (string-match "beta-reply" text)))
+      (should (and alpha alpha-reply beta beta-reply
+                   (< alpha alpha-reply) (< alpha-reply beta) (< beta beta-reply)))
+      ;; The queued message was drained, so the queue section is gone too.
+      (should-not (string-match-p "Queued" text)))))
+
 (ert-deftest harness-ui-test-tool-call-renders-output ()
   "A tool call's name, status and output appear in the conversation."
   (harness-ui-test-with-session
@@ -179,6 +276,62 @@ BODY can refer to `session' and `buffer'; the buffer is killed afterwards."
     (should (string-match-p "1 blocked" (harness-mode-line-global-string)))
     (harness-session-set-status session 'working)
     (should (string-match-p "1" (harness-mode-line-global-string)))))
+
+(defconst harness-ui-test--menus
+  '((harness-conversation-mode "?" harness-conversation-help harness-conversation-menu)
+    (harness-queue-mode "C-c ?" harness-queue-menu harness-queue-menu)
+    (harness-ask-mode "?" harness-ask-help harness-ask-menu)
+    (harness-model-mode "?" harness-model-menu harness-model-menu)
+    (harness-sessions-mode "?" harness-sessions-menu harness-sessions-menu)
+    (harness-tree-mode "?" harness-tree-menu harness-tree-menu)
+    (harness-search-results-mode "?" harness-search-results-menu harness-search-results-menu))
+  "Mode, the key that opens help, the bound command and the menu.
+Most modes bind `?' directly.  The queue editor is a text buffer, so `?' must
+type and the menu moves to `C-c ?'; the conversation and ask buffers use an
+input-aware command so `?' types in the editable part.")
+
+(defun harness-ui-test--collect-commands (form)
+  "Collect every value of a `:command' key anywhere in FORM."
+  (cond
+   ((vectorp form)
+    (seq-mapcat #'harness-ui-test--collect-commands (append form nil)))
+   ((consp form)
+    (let (commands)
+      (let ((rest form))
+        (while (consp rest)
+          (when (eq (car rest) :command)
+            (push (cadr rest) commands))
+          (setq rest (cdr rest))))
+      (append (nreverse commands)
+              (seq-mapcat #'harness-ui-test--collect-commands form))))
+   (t nil)))
+
+(ert-deftest harness-ui-test-every-mode-has-a-help-menu ()
+  "Every harness major mode reaches its transient help menu."
+  (dolist (entry harness-ui-test--menus)
+    (pcase-let ((`(,mode ,key ,binding ,menu) entry))
+      (with-temp-buffer
+        (funcall mode)
+        (should (eq (key-binding (kbd key)) binding)))
+      (should (commandp menu))
+      ;; The command exists and is a transient prefix, not a plain command.
+      (should (get menu 'transient--prefix))
+      ;; Every command named in the menu is a real command, so a typo cannot
+      ;; hide behind the quoted layout data.
+      (let ((commands (delete-dups
+                       (harness-ui-test--collect-commands
+                        (get menu 'transient--layout)))))
+        (should commands)
+        (should (seq-every-p #'commandp commands))))))
+
+(ert-deftest harness-ui-test-global-help-menu ()
+  "`C-c h ?' opens the global harness menu."
+  (global-harness-mode 1)
+  (unwind-protect
+      (progn
+        (should (eq (key-binding (kbd "C-c h ?")) 'harness-menu))
+        (should (get 'harness-menu 'transient--prefix)))
+    (global-harness-mode -1)))
 
 
 ;;; Session browser

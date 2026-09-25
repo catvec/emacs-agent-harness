@@ -40,6 +40,8 @@
 (require 'harness-core)
 (require 'harness-session)
 
+(declare-function harness-queue-menu "harness-ui-menu" ())
+
 (defcustom harness-queue-display-action
   '(display-buffer-at-bottom (window-height . 0.3))
   "`display-buffer' action used for the queue editor."
@@ -57,6 +59,8 @@
     (define-key map (kbd "C-c C-d") #'harness-queue-delete-section-at-point)
     (define-key map (kbd "C-c C-n") #'harness-queue-next)
     (define-key map (kbd "C-c C-p") #'harness-queue-previous)
+    ;; The queue is a text editor, so `?' has to type; the menu gets a prefix.
+    (define-key map (kbd "C-c ?") #'harness-queue-menu)
     map)
   "Keymap for `harness-queue-mode'.")
 
@@ -71,10 +75,10 @@
 
 Each message is one section, separated by a form feed.  \\[harness-queue-commit]
 saves, \\[harness-queue-cancel] discards, and \\[harness-queue-delete-section-at-point]
-removes the message under point."
+removes the message under point.  \\[harness-queue-menu] lists every command."
   (setq-local buffer-read-only nil)
   (setq-local header-line-format
-              '(:eval (format " Queued messages for %s — C-c C-c save, C-c C-k discard"
+              '(:eval (format " Queued messages for %s — C-c C-c save, C-c C-k discard, C-c ? help"
                               (if harness-queue--session
                                   (harness-session-name harness-queue--session)
                                 "?")))))

@@ -53,6 +53,8 @@
 (require 'harness-perms)
 (require 'harness-faces)
 
+(declare-function harness-ask-menu "harness-ui-menu" ())
+
 (defcustom harness-ask-display-action
   '(display-buffer-at-bottom (window-height . 0.4))
   "`display-buffer' action for the question buffer."
@@ -67,20 +69,44 @@
 
 (defvar harness-ask-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    ;; `widget-keymap', not `special-mode-map': `special-mode' remaps
+    ;; `self-insert-command' to `undefined', which would make the editable
+    ;; fields untypeable.
+    (set-keymap-parent map widget-keymap)
     (define-key map (kbd "C-c C-c") #'harness-ask-submit)
     (define-key map (kbd "C-c C-k") #'harness-ask-cancel)
     (define-key map (kbd "TAB") #'widget-forward)
     (define-key map (kbd "<backtab>") #'widget-backward)
-    (define-key map (kbd "q") #'bury-buffer)
+    (define-key map (kbd "q") #'harness-ask-bury)
+    (define-key map (kbd "?") #'harness-ask-help)
     map)
   "Keymap for `harness-ask-mode'.")
+
+(defun harness-ask--insert-or-call (command)
+  "Type the key that invoked this command when in a widget field.
+Otherwise call COMMAND interactively.  The buffer mixes read-only question
+text with editable fields, so a key such as `?' or `q' must insert while the
+user is answering and act as a command everywhere else."
+  (if (widget-at (point))
+      (self-insert-command (prefix-numeric-value current-prefix-arg))
+    (call-interactively command)))
+
+(defun harness-ask-help ()
+  "Show the question menu, or type `?' in a field."
+  (interactive)
+  (harness-ask--insert-or-call #'harness-ask-menu))
+
+(defun harness-ask-bury ()
+  "Bury the buffer, or type `q' in a field."
+  (interactive)
+  (harness-ask--insert-or-call #'bury-buffer))
 
 (define-derived-mode harness-ask-mode special-mode "Harness-Ask"
   "Major mode for answering questions from the model.
 
 \\[harness-ask-submit] sends the answers back and resumes the run;
-\\[harness-ask-cancel] tells the model the user declined to answer."
+\\[harness-ask-cancel] tells the model the user declined to answer.
+\\[harness-ask-help] opens the command menu (or types `?' in a field)."
   (setq-local buffer-read-only nil)
   (setq-local truncate-lines nil)
   (setq-local header-line-format

@@ -71,6 +71,7 @@
 (require 'harness-ui-tree)
 (require 'harness-ui-ask)
 (require 'harness-ui-model)
+(require 'harness-ui-menu)
 
 (defcustom harness-plugins-directory
   (expand-file-name "agent-harness/plugins" user-emacs-directory)
@@ -107,7 +108,7 @@ Editors write a file more than once; this coalesces the writes."
     harness-tools harness-perms harness-agent harness-context harness-queue
     harness-attachments harness-subagents harness-worktree harness-mode-line harness-ui-conversation
     harness-ui-sessions harness-ui-tree harness-ui-ask harness-ui-model
-    harness)
+    harness-ui-menu harness)
   "Harness modules in dependency order, for `harness-reload'.")
 
 (defvar harness--watch-descriptors nil
@@ -615,6 +616,7 @@ keyboard."
     (define-key map (kbd "W") #'harness-worktree-remove)
     (define-key map (kbd "C-w") #'harness-worktree-switch)
     (define-key map (kbd "F") #'harness-conversation-search)
+    (define-key map (kbd "?") #'harness-menu)
     (define-key map (kbd "h") #'harness-setup)
     map)
   "Keymap for harness commands, bound to `C-c h' by `global-harness-mode'.")

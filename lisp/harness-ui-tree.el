@@ -50,6 +50,7 @@
 (declare-function harness-conversation-display-message "harness-ui-conversation"
                   (session message))
 (declare-function harness-conversation-session "harness-ui-conversation" (&optional buffer))
+(declare-function harness-tree-menu "harness-ui-menu" ())
 
 (defcustom harness-tree-display-action
   '(display-buffer-in-side-window (side . right) (window-width . 0.35))
@@ -94,6 +95,7 @@
     (define-key map (kbd "n") #'harness-tree-next)
     (define-key map (kbd "p") #'harness-tree-previous)
     (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "?") #'harness-tree-menu)
     map)
   "Keymap for `harness-tree-mode'.")
 
@@ -102,7 +104,8 @@
 
 Each message is a heading, so \\[outline-toggle-children] folds it.
 \\[harness-tree-goto-message] jumps to the same message in the conversation
-buffer and \\[harness-tree-refresh] re-renders."
+buffer and \\[harness-tree-refresh] re-renders.  \\[harness-tree-menu] lists
+every command."
   (setq-local outline-regexp "^\\(?:◆\\|▸\\|●\\)")
   (setq-local outline-level #'harness-tree-level)
   (setq-local truncate-lines nil)

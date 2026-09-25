@@ -55,6 +55,7 @@
 
 (declare-function harness-new-session "harness" (&optional name))
 (declare-function harness-select-model "harness-ui-model" (&optional session))
+(declare-function harness-sessions-menu "harness-ui-menu" ())
 
 (defcustom harness-sessions-display-action
   '(display-buffer-same-window)
@@ -108,6 +109,7 @@
     (define-key map (kbd "R") #'harness-sessions-rename)
     (define-key map (kbd "g") #'harness-sessions-refresh)
     (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "?") #'harness-sessions-menu)
     map)
   "Keymap for `harness-sessions-mode'.")
 
@@ -117,7 +119,8 @@
 \\[harness-sessions-view] opens a conversation,
 \\[harness-sessions-search] searches transcripts by content,
 \\[harness-sessions-filter] filters by status and
-\\[harness-sessions-approve] answers an approval without leaving this buffer."
+\\[harness-sessions-approve] answers an approval without leaving this buffer.
+\\[harness-sessions-menu] lists every command."
   (setq tabulated-list-format
         [("" 2 t)
          ("Project" 18 t)

@@ -44,6 +44,7 @@
 (require 'harness-faces)
 
 (declare-function harness-conversation-session "harness-ui-conversation" (&optional buffer))
+(declare-function harness-model-menu "harness-ui-menu" ())
 
 (defcustom harness-model-buffer-display-action
   '(display-buffer-same-window)
@@ -59,6 +60,7 @@
     (define-key map (kbd "R") #'harness-model-refresh)
     (define-key map (kbd "g") #'revert-buffer)
     (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "?") #'harness-model-menu)
     map)
   "Keymap for `harness-model-mode'.")
 
@@ -66,7 +68,8 @@
   "Major mode listing every known model with its price and context window.
 
 \\[harness-model-use] selects the model for the session this list was opened
-from, and \\[harness-model-refresh] asks the providers for their catalogue."
+from, \\[harness-model-refresh] asks the providers for their catalogue, and
+\\[harness-model-menu] lists every command."
   (setq tabulated-list-format
         [("Model" 34 t)
          ("Provider" 14 t)
