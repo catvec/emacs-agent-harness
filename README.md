@@ -31,18 +31,93 @@ no thumbnails; audio playback needs an external player and microphone
 input is not implemented; the TCP agent endpoint has no authentication,
 so keep it on loopback or behind an ssh tunnel.
 
-## Quick start
+## Install
+
+Emacs 28.1 or newer is required.  The bundle is self-locating:
+`harness.el` puts the `lisp/` directories next to itself on `load-path`,
+so a checkout works with only the repository root on `load-path`.  The
+package is `harness`; `emacs-agent-harness` is only the repository.
+
+### From a checkout
 
 ```elisp
 (add-to-list 'load-path "/path/to/emacs-agent-harness")
-(add-to-list 'load-path "/path/to/emacs-agent-harness/lisp")
-(add-to-list 'load-path "/path/to/emacs-agent-harness/lisp/modules")
-(add-to-list 'load-path "/path/to/emacs-agent-harness/lisp/transports")
-(add-to-list 'load-path "/path/to/emacs-agent-harness/lisp/ui")
-
 (require 'harness)
 (harness-start)
 ```
+
+### straight.el
+
+```elisp
+(straight-use-package
+ '(harness :type git :host sourcehut :repo "catvec/emacs-agent-harness"
+           :files ("*.el" "README.md" "LICENSE"
+                   "lisp/*.el" "lisp/modules/*.el"
+                   "lisp/transports/*.el" "lisp/ui/*.el")))
+```
+
+(Keep the `:files` list as it is: straight generates autoloads only for
+files in the package root, so the modules are flattened into the build
+directory.  `harness.el` finds them either way.)
+
+### Doom Emacs
+
+In `~/.config/doom/packages.el`:
+
+```elisp
+(package! harness
+  :recipe (:host sourcehut
+           :repo "catvec/emacs-agent-harness"
+           :files ("*.el" "README.md" "LICENSE"
+                   "lisp/*.el" "lisp/modules/*.el"
+                   "lisp/transports/*.el" "lisp/ui/*.el")))
+```
+
+In `~/.config/doom/config.el`:
+
+```elisp
+(use-package! harness
+  :init
+  ;; (setenv "OPENAI_API_KEY" "...")   ; or another provider's key
+  :config
+  ;; Start with Emacs.  Drop this line and run `M-x harness-start' by
+  ;; hand if you prefer to start the harness per session.
+  (harness-start))
+```
+
+Then `doom sync` and restart Emacs.  `harness-start` and the other
+lifecycle commands are autoloaded.
+
+### Using the checkout on disk instead of the published repository
+
+Replace the remote URL with `:local-repo`; straight symlinks the checkout
+into its build directory, so editing the files is enough (no
+`git push` + `doom sync -u` round trip):
+
+```elisp
+(package! harness
+  :recipe (:local-repo "~/documents/ai/emacs-agent-harness"
+           :files ("*.el" "README.md" "LICENSE"
+                   "lisp/*.el" "lisp/modules/*.el"
+                   "lisp/transports/*.el" "lisp/ui/*.el")))
+```
+
+With `load-prefer-newer` non-nil and `M-x harness-auto-reload-mode` on,
+saving a source file reloads the harness in place.  The mode follows the
+symlinks straight creates and watches the true source directories, and
+the reload compiles the edited source before swapping it in.
+
+The same recipe works with plain straight:
+
+```elisp
+(straight-use-package
+ '(harness :local-repo "~/documents/ai/emacs-agent-harness"
+           :files ("*.el" "README.md" "LICENSE"
+                   "lisp/*.el" "lisp/modules/*.el"
+                   "lisp/transports/*.el" "lisp/ui/*.el")))
+```
+
+## Quick start
 
 `harness-start` loads the default module set and connects the local UI.
 Nothing starts before it: a bare harness never shows a UI or calls a

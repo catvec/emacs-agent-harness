@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'bytecomp)
 (require 'cl-lib)
 (require 'harness-core)
 (require 'harness-session)
@@ -28,6 +29,12 @@
 (defconst harness-reload-test--fixture
   (expand-file-name "fixtures/harness-fixture-reload.el"
                     (file-name-directory (or load-file-name buffer-file-name))))
+
+(defconst harness-reload-test--root
+  (file-name-directory
+   (directory-file-name
+    (file-name-directory (or load-file-name buffer-file-name))))
+  "Repository root of the checkout under test.")
 
 (defun harness-reload-test--reset ()
   "Copy the fixture into a fresh temp directory and put it first on `load-path'."
@@ -69,6 +76,56 @@
         (harness-reload-test--write "(require 'harness-core)\n(defun broken (")
         (should-not (harness-module-validate 'harness-fixture-reload)))
     (harness-reload-test--cleanup)))
+
+(ert-deftest harness-reload-validates-the-source-a-reload-would-read ()
+  ;; A package manager build: a stale .elc sits beside the .el it was
+  ;; compiled from, and `load-prefer-newer' makes reloads read the edited
+  ;; source.  Validation must compile that source, not the stale bytecode.
+  (unwind-protect
+      (progn
+        (harness-reload-test--reset)
+        (let ((byte-compile-warnings nil))
+          (byte-compile-file harness-reload-test--file))
+        ;; The freshly built bytecode is normally newer than the source.
+        ;; Backdate it explicitly: file timestamps can be too coarse to
+        ;; order two operations that happen in the same instant.
+        (set-file-times (concat harness-reload-test--file "c")
+                        (time-subtract nil 60))
+        (let ((load-prefer-newer nil))
+          (harness-module-load 'harness-fixture-reload))
+        (should (string-suffix-p ".elc"
+                                 (harness-module-loaded-file 'harness-fixture-reload)))
+        (harness-reload-test--write "(require 'harness-core)\n(defun broken (")
+        (let ((load-prefer-newer t))
+          (should (equal harness-reload-test--file
+                         (harness-module-source-file 'harness-fixture-reload)))
+          (should-not (harness-module-validate 'harness-fixture-reload))))
+    (harness-reload-test--cleanup)))
+
+(ert-deftest harness-reload-watches-through-a-symlinked-build-directory ()
+  ;; Straight.el symlinks files into its build directory; the watcher must
+  ;; resolve them so edits to the checkout trigger a reload.
+  (let* ((source (make-temp-file "harness-reload-source-" t))
+         (build (make-temp-file "harness-reload-build-" t))
+         (source-file (expand-file-name "harness-fixture-reload.el" source))
+         (link (expand-file-name "harness-fixture-reload.el" build)))
+    (unwind-protect
+        (progn
+          (when (harness-module-manifest 'harness-fixture-reload)
+            (ignore-errors (harness-module-unload 'harness-fixture-reload)))
+          (copy-file harness-reload-test--fixture source-file t)
+          (make-symbolic-link source-file link)
+          (add-to-list 'load-path build)
+          (harness-module-load 'harness-fixture-reload)
+          (should (equal (file-name-directory (file-truename source-file))
+                         (harness--module-source-directory 'harness-fixture-reload)))
+          (should (member (file-name-directory (file-truename source-file))
+                          (harness--watch-directories))))
+      (when (harness-module-manifest 'harness-fixture-reload)
+        (ignore-errors (harness-module-unload 'harness-fixture-reload)))
+      (setq load-path (remove build load-path))
+      (delete-directory source t)
+      (delete-directory build t))))
 
 (ert-deftest harness-reload-refuses-broken-file-keeps-running-code ()
   (unwind-protect
@@ -131,6 +188,28 @@
     (harness-reload-test--cleanup)
     (when (boundp 'harness-fixture-reload-value)
       (setq harness-fixture-reload-value "one"))))
+
+(ert-deftest harness-entry-point-finds-its-own-sources ()
+  ;; With only the checkout root added to `load-path', `harness.el' must
+  ;; find the modules under lisp/ itself: that is what lets a checkout
+  ;; work with a single `load-path' entry.
+  (let* ((program (concat invocation-directory invocation-name))
+         (output (with-temp-buffer
+                   (should (equal 0
+                                  (call-process
+                                   program nil '(t t) nil
+                                   "-Q" "--batch" "--eval"
+                                   (format (concat "(progn"
+                                                   " (add-to-list 'load-path %S)"
+                                                   " (require 'harness)"
+                                                   " (let ((file (harness-module-file"
+                                                   "              (harness-module-manifest 'harness-core))))"
+                                                   "   (princ (if (string-prefix-p %S file)"
+                                                   "              \"ok\" \"wrong\"))))")
+                                           harness-reload-test--root
+                                           harness-reload-test--root))))
+                   (buffer-string))))
+    (should (string-match-p "ok" output))))
 
 (ert-deftest harness-reload-load-order-is-dependency-first ()
   (let ((order (harness-module-load-order

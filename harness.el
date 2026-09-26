@@ -1,5 +1,10 @@
 ;;; harness.el --- Emacs Agent Harness entry point -*- lexical-binding: t; -*-
 
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1"))
+;; Keywords: tools, convenience
+;; URL: https://git.sr.ht/~catvec/emacs-agent-harness
+
 ;; This file is part of Emacs Agent Harness.
 
 ;;; Commentary:
@@ -18,6 +23,12 @@
 ;; first, and if a new load fails the previous definitions and setup are
 ;; restored, so a bad edit never bricks a running session.  UI modules
 ;; listen for `harness-reloaded' and redraw their buffers.
+;;
+;; The bundle is self-locating: loading (or byte-compiling) this file puts
+;; the source directories next to it on `load-path', so the entry point
+;; works both from a checkout and from a package manager's build
+;; directory.  See "Install" in README.md for the straight.el and Doom
+;; Emacs recipes.
 
 ;;; Code:
 
@@ -25,6 +36,23 @@
 (require 'filenotify)
 (require 'seq)
 (require 'subr-x)
+
+;;; Source layout
+
+(eval-and-compile
+  ;; `byte-compile-current-file' makes the same directories visible at
+  ;; compile time, so the `require's below resolve in a build directory
+  ;; that has never been loaded.
+  (let ((directory (file-name-directory
+                    (or load-file-name
+                        (bound-and-true-p byte-compile-current-file)
+                        buffer-file-name
+                        default-directory))))
+    (dolist (relative '("" "lisp" "lisp/modules" "lisp/transports" "lisp/ui"))
+      (let ((path (directory-file-name (expand-file-name relative directory))))
+        (when (file-directory-p path)
+          (add-to-list 'load-path path))))))
+
 (require 'harness-core)
 
 (defcustom harness-modules
@@ -91,6 +119,7 @@ find the address without guessing the ephemeral port."
 
 ;;; Lifecycle
 
+;;;###autoload
 (defun harness-load (&optional modules)
   "Load MODULES (default `harness-modules') and their dependencies."
   (interactive)
@@ -98,6 +127,7 @@ find the address without guessing the ephemeral port."
     (harness-module-load module))
   (harness-module-list))
 
+;;;###autoload
 (defun harness-start (&optional modules)
   "Load the harness and, when configured, start the remote ACP server."
   (interactive)
@@ -118,6 +148,7 @@ find the address without guessing the ephemeral port."
   (message "Harness ready (%d modules)" (length (harness-module-list)))
   t)
 
+;;;###autoload
 (defun harness-stop ()
   "Stop the ACP server and unload every module."
   (interactive)
@@ -130,6 +161,7 @@ find the address without guessing the ephemeral port."
   (message "Harness stopped")
   t)
 
+;;;###autoload
 (defun harness-reload ()
   "Safely reload every loaded module.
 The kernel itself is never reloaded (it is the ground the reload stands
@@ -170,15 +202,35 @@ setup are restored for every module, so existing sessions keep working."
 (defvar harness--auto-reload-watches nil
   "File notification watches for `harness-auto-reload-mode'.")
 
+(defun harness--module-source-directory (name)
+  "Return the directory holding module NAME's true source, or nil.
+A package manager may load modules from a build directory that only
+holds symlinks; resolve through them so the checkout is watched."
+  (when-let* ((file (harness-module-source-file name)))
+    (when (string-suffix-p ".elc" file)
+      (let ((source (concat (file-name-sans-extension file) ".el")))
+        (when (file-exists-p source)
+          (setq file source))))
+    (when (string-suffix-p ".el" file)
+      (file-name-directory (file-truename file)))))
+
 (defun harness--watch-directories ()
   "Return the source directories that hold harness modules."
-  (delete-dups
-   (seq-keep (lambda (directory)
-               (when (seq-some (lambda (file)
-                                 (string-prefix-p "harness" file))
-                               (ignore-errors (directory-files directory nil "^harness.*\\.elc?\\'")))
-                 directory))
-             load-path)))
+  (or (delete-dups
+       ;; Where the loaded modules came from.  Straight.el installs symlink
+       ;; the checkout into a build directory, so resolve the symlinks:
+       ;; edits happen in the checkout, not on `load-path'.
+       (seq-keep #'harness--module-source-directory (harness-module-list)))
+      ;; Nothing is loaded yet: an edit before `harness-start' still
+      ;; deserves a watch, so fall back to the load-path.
+      (delete-dups
+       (seq-keep (lambda (directory)
+                   (when (seq-some (lambda (file)
+                                     (string-prefix-p "harness" file))
+                                   (ignore-errors
+                                     (directory-files directory nil "^harness.*\\.elc?\\'")))
+                     directory))
+                 load-path))))
 
 (defun harness--auto-reload-event (_event)
   "Reload the harness after a source file changed, without breaking it."
@@ -190,6 +242,7 @@ setup are restored for every module, so existing sessions keep working."
                       (message "Harness auto-reload skipped: %s"
                                (error-message-string err)))))))
 
+;;;###autoload
 (define-minor-mode harness-auto-reload-mode
   "Watch the harness source tree and reload the harness after changes."
   :global t

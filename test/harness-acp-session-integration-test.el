@@ -58,9 +58,11 @@
 (defmacro harness-acp-session-integration-test--with-pair (client-symbol &rest body)
   "Run BODY with CLIENT-SYMBOL bound to a client connection."
   (declare (indent 1))
-  `(let* ((harness-session-storage-directory
-           harness-acp-session-integration-test--storage)
+  `(let* (;; Setup creates the isolated storage directory, so it must run
+          ;; before `harness-session-storage-directory' is bound to it.
           (pair (harness-acp-session-integration-test--setup))
+          (harness-session-storage-directory
+           harness-acp-session-integration-test--storage)
           (,client-symbol (cdr pair)))
      ,@body))
 

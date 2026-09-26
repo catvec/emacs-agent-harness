@@ -412,12 +412,45 @@ Reloading a live session must never steal a window with compiler noise."
         (let ((inhibit-read-only t)) (erase-buffer)))
       (bury-buffer buffer))))
 
+(defun harness-module-loaded-file (name)
+  "Return the file module NAME was loaded from, or nil.
+`load-history' records the file `load' actually read, which matters when
+`load-prefer-newer' picks a newer `.el' over an existing `.elc'.  Modules
+that are not loaded yet fall back to `locate-library'."
+  (or (seq-some (lambda (entry)
+                  (let ((file (car entry)))
+                    (when (and (stringp file)
+                               ;; An unloaded or deleted module leaves its
+                               ;; old path in `load-history'.
+                               (file-exists-p file)
+                               (equal (file-name-base file) (symbol-name name))
+                               (string-match-p "\\.elc?\\'" file))
+                      file)))
+                load-history)
+      (locate-library (symbol-name name))))
+
+(defun harness-module-source-file (name)
+  "Return the file a fresh load of module NAME would read, or nil.
+This is what validation must compile: with `load-prefer-newer' a newer
+`.el' beside a stale `.elc' — the state of a package manager build
+directory after an edit — is what `load' will choose next."
+  (let ((file (harness-module-loaded-file name)))
+    (if (and load-prefer-newer
+             file
+             (string-suffix-p ".elc" file))
+        (let ((source (concat (file-name-sans-extension file) ".el")))
+          (if (and (file-exists-p source)
+                   (file-newer-than-file-p source file))
+              source
+            file))
+      file)))
+
 (defun harness-module-validate (name)
   "Byte-compile module NAME's file to check that it loads cleanly.
 Returns non-nil when the file compiles.  Nothing in the running Emacs is
 changed, so a module with a syntax or macro-expansion error can be
 rejected before it is ever unloaded."
-  (let ((file (locate-library (symbol-name name))))
+  (let ((file (harness-module-source-file name)))
     (cond
      ((not (and file (string-suffix-p ".el" file)))
       ;; A module with no source (already compiled, or not yet loaded).
@@ -457,7 +490,7 @@ rejected before it is ever unloaded."
 
 (defun harness-module--snapshot (name)
   "Capture NAME's function and variable definitions for restore-on-failure."
-  (let* ((file (locate-library (symbol-name name)))
+  (let* ((file (harness-module-loaded-file name))
          (entry (and file (assoc file load-history)))
          (symbols (delete-dups (seq-filter #'symbolp (cdr entry))))
          (functions nil)

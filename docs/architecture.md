@@ -42,6 +42,10 @@ Dependency rules:
 
 `harness.el` is only a distribution bundle: it loads the default module set.
 Loading `harness-core.el` alone must start no UI, no network, no timers.
+As the package entry point it is self-locating: loading (or
+byte-compiling) it puts the `lisp/` directories next to itself on
+`load-path', so a checkout works with only the repository root on
+`load-path` (see "Install" in README.md).
 
 ## The kernel (`harness-core.el`)
 
@@ -70,6 +74,11 @@ A module is a feature file that declares a manifest:
   cannot silently leak registrations.
 - `harness-module-list` reports each module's state: `defined`, `loaded`,
   `set-up`, `error`.
+- `harness-module-loaded-file` and `harness-module-source-file` report the
+  file a module was loaded from and the file a reload would read next.
+  They differ when `load-prefer-newer` picks an edited `.el` over a stale
+  `.elc`, which is what a package manager's build directory looks like
+  after an edit; validation and restore-on-failure use them.
 
 ### Services
 
