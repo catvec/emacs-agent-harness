@@ -198,8 +198,7 @@
    :module 'harness-perms-test
    :methods
    (list (cons 'complete
-               (lambda (request)
-                 (ignore request)
+               (lambda (_request)
                  (let ((deferred (harness-deferred-new)))
                    (if (functionp reply)
                        (funcall reply deferred)

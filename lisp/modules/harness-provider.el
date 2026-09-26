@@ -309,16 +309,23 @@ updates are not sent to the model."
   (harness-provider-models))
 
 (defun harness-provider-service-complete (&rest args)
-  "Service: run a completion."
-  (harness-provider-complete args))
+  "Service: run a completion.
+The method takes a single request plist; keyword-style arguments are also
+accepted for convenience."
+  (harness-provider-complete
+   (if (and (= (length args) 1) (listp (car args)))
+       (car args)
+     args)))
 
 (defun harness-provider-service-price (&rest args)
   "Service: estimate a cost."
-  (harness-provider-price (plist-get args :model) (plist-get args :usage)))
+  (let ((args (if (and (= (length args) 1) (listp (car args))) (car args) args)))
+    (harness-provider-price (plist-get args :model) (plist-get args :usage))))
 
 (defun harness-provider-service-count-tokens (&rest args)
   "Service: count tokens."
-  (harness-provider-count-tokens (plist-get args :model) (plist-get args :text)))
+  (let ((args (if (and (= (length args) 1) (listp (car args))) (car args) args)))
+    (harness-provider-count-tokens (plist-get args :model) (plist-get args :text))))
 
 (defun harness-provider-setup ()
   "Set up the provider module."
