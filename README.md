@@ -61,6 +61,10 @@ what they acted on and their status, and consecutive safe tool calls
 (`read`, `glob`, `search`, ...) coalesce into a summary line so long
 transcripts stay readable.
 
+**Plan mode** (`C-c C-p`-style session mode) keeps the agent read-only and
+asks it to record a complete plan with the `plan` tool, which appears as a
+styled plan block in the transcript before anything is changed.
+
 The agent can run work in a **sub-agent** session (`subagent` tool): a
 full session parented to the current one, shown in the session list, whose
 final report comes back as the tool result.

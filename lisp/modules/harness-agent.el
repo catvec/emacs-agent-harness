@@ -312,6 +312,13 @@ Signals when the transcript is still being read from disk."
 (defun harness-agent--system-prompt (info)
   "Return the system prompt for session INFO."
   (concat harness-agent-system-prompt
+          (if (equal (plist-get info :mode) "plan")
+              (concat "\n\nYou are in plan mode: investigate with read-only tools only, "
+                      "never modify files, then record a complete plan with the `plan' "
+                      "tool and stop for approval.  The plan should state the goal, the "
+                      "approach, the files and tools involved, how to verify the result, "
+                      "and where forking or a sub-agent would help.")
+            "")
           "\n\nSession directory: " (or (plist-get info :cwd) "(unknown)")
           (let ((additional (plist-get info :additionalDirectories)))
             (if (and additional (> (length additional) 0))

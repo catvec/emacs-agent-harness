@@ -43,6 +43,7 @@
     harness-agent
     harness-subagents
     harness-search
+    harness-plan
     harness-ui
     harness-ui-chat
     harness-ui-ask

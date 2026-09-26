@@ -575,11 +575,14 @@ Returns non-nil when the line was rendered, leaving point on it."
     (harness-ui-chat--mark-read-only start (point))))
 
 (defun harness-ui-chat--render-plan (record)
-  "Render a plan RECORD."
-  (let ((start (point)))
-    (insert (propertize "Plan\n" 'face 'harness-ui-header-face))
-    (insert (propertize (or (harness-ui-chat-record-text record) "")
-                        'face 'harness-ui-tool-body-face))
+  "Render a plan RECORD with its markdown body."
+  (let ((start (point))
+        (title (or (harness-ui-chat-record-title record) "Plan")))
+    (insert (propertize title 'face 'harness-ui-header-face))
+    (insert "\n")
+    (let ((body (point)))
+      (insert (or (harness-ui-chat-record-text record) ""))
+      (harness-ui-chat--fontify body (point)))
     (insert "\n")
     (harness-ui-chat--mark-read-only start (point))))
 
@@ -704,6 +707,7 @@ region."
           (let ((new (harness-ui-chat-record-create
                       :key key :kind kind :text (or text "")
                       :tool-name (plist-get update :name)
+                      :title (plist-get update :title)
                       :status (plist-get update :status)
                       :collapsed (not (member kind '("agent_message_chunk")))
                       :children (plist-get update :content))))

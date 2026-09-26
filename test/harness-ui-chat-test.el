@@ -206,6 +206,29 @@
       (should (string-match-p "model changed" (harness-ui-chat-test--text buffer)))
       (kill-buffer buffer))))
 
+(ert-deftest harness-ui-chat-renders-plans-with-markdown ()
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (harness-ui-chat-test--apply buffer
+                                   (list :sessionUpdate "plan"
+                                         :id "plan-1" :title "Fix the bug"
+                                         :final t
+                                         :content (list :type "text"
+                                                        :text "# Approach\n\n- read the code\n- patch it")))
+      (let ((text (harness-ui-chat-test--text buffer)))
+        (should (string-match-p "Fix the bug" text))
+        (should (string-match-p "Approach" text))
+        (should (string-match-p "read the code" text))
+        ;; The heading marker is concealed with a display property while
+        ;; the text stays in the buffer (searchable, exportable).
+        (with-current-buffer buffer
+          (goto-char (point-min))
+          (search-forward "# Approach")
+          (should (equal (get-text-property (match-beginning 0) 'display) ""))))
+      (with-current-buffer buffer
+        (should (harness-ui-chat-test--find-face 'harness-ui-header-face buffer)))
+      (kill-buffer buffer))))
+
 (ert-deftest harness-ui-chat-fontifies-markdown ()
   (harness-ui-chat-test--with-stubs
     (let ((buffer (harness-ui-chat-test--buffer)))
