@@ -336,25 +336,70 @@ session in the same position replaces the buffer there.
 | `harness-acp-tcp` | TCP transport | acp |
 | `harness-http` | `http` service | core |
 | `harness-config` | `config` service | core |
+| `harness-sandbox` | `sandbox` service | core |
 | `harness-session` | `session` service | core, config |
 | `harness-provider` | `provider` service | core |
 | `harness-provider-openai` | provider registration | provider, http |
 | `harness-tools` | `tool` service | core |
-| `harness-tools-emacs` | core tool set | tools, session |
-| `harness-perms` | `permission` service | core |
-| `harness-perms-jail` | directory jail rules | perms |
+| `harness-tools-emacs` | core tool set | tools, sandbox |
+| `harness-skills` | `skill` service, skill tools | config, tools |
+| `harness-perms` | `permission` service | tools |
+| `harness-perms-jail` | directory jail rules | perms, tools |
 | `harness-agent` | `agent` service | session, provider, tools, perms |
-| `harness-ui` | ACP client + events | core, acp, inprocess |
+| `harness-ui` | ACP client + events | acp, inprocess, perms |
 | `harness-ui-chat` | chat buffer | ui |
-| `harness-ui-sessions` | session list | ui |
-| `harness-ui-tree` | conversation graph | ui, chat |
-| `harness-ui-notifier` | blocked notifier | ui |
+| `harness-ui-ask` | approval/question panels | ui |
+| `harness-ui-sessions` | session list | ui, chat |
+| `harness-ui-tree` | conversation tree | ui, chat, sessions |
 | `harness-ui-config` | model/thinking/mode controls | ui |
+| `harness-ui-notifier` | blocked notifier | ui |
 
 `harness.el` loads: acp, inprocess, config, session, provider,
 provider-openai, tools, tools-emacs, perms, perms-jail, agent, ui, and the
 UI feature modules selected by `harness-ui-modules` (all by default).  A
 user can replace any of them by customizing the list.
+
+## Sandbox
+
+Every process the harness spawns goes through `harness-sandbox-spawn`.
+The backend is chosen at startup in preference order: bwrap,
+`systemd-run --user`, none.  Policies either prefer confinement (warn
+loudly once when no backend exists) or require it (fail closed).  bwrap
+gets read-only system trees, only the needed `/etc` entries, a tmpfs for
+`/tmp` used as HOME and TMPDIR (the real home is never mounted), a
+read-write session cwd, pid/ipc/uts namespaces and `--die-with-parent`;
+network is allowed unless a policy opts into `--unshare-net`.
+`:permission-mode` is a prompt-level hint and never a security boundary.
+
+## ACP extension surface
+
+Beyond the standard ACP v1 methods, the harness and its UI agree on
+extensions under the reserved `_harness/` prefix (advertised in
+`initialize` under `agentCapabilities._meta.harness`):
+
+- `_harness/session/info`, `_harness/session/fork`,
+  `_harness/session/rename`, `_harness/session/entries`
+- `_harness/agent/configuration`
+- `_harness/skills/list`, `_harness/skills/load`
+- notifications `_harness/session_status` (status, model, unread),
+  `_harness/sessions_changed`
+- the `_harness/question` request (client side), used by the agent's
+  `ask` tool.
+
+The session status extension exists because ACP has no session status
+notification, and the blocked notifier must work without a chat buffer.
+
+## Reload
+
+`harness-reload` reloads every loaded module safely: all sources are
+byte-compiled to a temporary location first; if any fails, nothing is
+touched.  Unloading removes services, handlers, features and the
+module's setup, but keeps function definitions and variable values in
+place, so outstanding dynamic bindings and caches survive.  If a module
+fails while loading, snapshots of every module's definitions restore the
+previous version and re-run its setup.  The kernel never reloads itself.
+Open sessions are re-adopted from kernel state after the session module
+reloads, and `harness-reloaded` makes UI modules redraw their buffers.
 
 ## Testing
 
