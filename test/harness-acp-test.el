@@ -339,5 +339,26 @@
      (lambda (value) (setq result value)))
     (should (eq result :hello))))
 
+(ert-deftest harness-acp-refresh-installs-new-methods ()
+  ;; A hot reload can add extension methods after the connection exists.
+  (require 'harness-acp-inprocess)
+  (harness-module-load 'harness-acp)
+  (harness-module-load 'harness-acp-inprocess)
+  (let* ((pair (harness-acp-inprocess-pair))
+         (client (cdr pair)))
+    (unwind-protect
+        (progn
+          (harness-acp-agent-started (car pair))
+          (harness-acp-connection-register-method
+           (car pair) "test/echo" (lambda (_connection params) (plist-get params :value)))
+          (harness-acp-refresh-agent-methods)
+          (let ((deferred (harness-acp-connection-request
+                           client "test/echo" (list :value "hi"))))
+            (harness-test-settle deferred 5)
+            (should (harness-deferred-resolved-p deferred))
+            (should (equal (harness-deferred-value deferred) "hi"))))
+      (harness-acp-connection-close client "test over")
+      (harness-acp-connection-close (car pair) "test over"))))
+
 (provide 'harness-acp-test)
 ;;; harness-acp-test.el ends here

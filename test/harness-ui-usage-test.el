@@ -108,9 +108,11 @@
              (let ((face (get-text-property (point) 'face)))
                (when face (push face faces)))
              (forward-char 1)))
+         ;; The fill takes its colour from the theme's error face.
          (should (cl-some (lambda (face)
-                            (equal (if (listp face) (car face) face)
-                                   'harness-ui-usage-bar-full-face))
+                            (and (listp face)
+                                 (equal (plist-get face :background)
+                                        (face-attribute 'error :foreground nil t))))
                           faces)))))))
 
 (ert-deftest harness-ui-usage-formatting ()

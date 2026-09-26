@@ -79,16 +79,20 @@
           (t (number-to-string count)))))
 
 (defun harness-ui-usage--bar (fraction &optional width)
-  "Insert a graphical bar for FRACTION (0-1+)."
+  "Insert a graphical bar for FRACTION (0-1+).
+The fill takes its colour from the theme's success/warning/error faces,
+so the bar follows any theme without hardcoded colours."
   (let* ((width (or width harness-ui-usage-bar-width))
          (filled (max 0 (min width (round (* fraction width)))))
-         (face (cond ((> fraction 1.0) 'harness-ui-usage-bar-full-face)
-                     ((> fraction 0.8) 'harness-ui-usage-bar-warning-face)
-                     (t 'harness-ui-usage-bar-face))))
-    (insert (propertize (make-string filled ?\s) 'face (list face :extend nil)))
+         (severity (cond ((> fraction 1.0) 'error)
+                         ((> fraction 0.8) 'warning)
+                         (t 'success)))
+         (fill-color (face-attribute severity :foreground nil t))
+         (track-color (face-attribute 'secondary-selection :background nil t)))
+    (insert (propertize (make-string filled ?\s)
+                        'face (list :background fill-color :extend nil)))
     (insert (propertize (make-string (- width filled) ?\s)
-                        'face (list 'harness-ui-usage-bar-track-face
-                                    :background (face-attribute 'shadow :foreground nil t))))))
+                        'face (list :background track-color :extend nil)))))
 
 (defun harness-ui-usage--row (label value &optional bar-fraction)
   "Insert a label/value row, optionally with BAR-FRACTION."

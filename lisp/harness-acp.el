@@ -343,7 +343,21 @@ Returns CONNECTION."
      (setq harness-acp--agent-connections (delq connection harness-acp--agent-connections))))
   connection)
 
-(defvar harness-acp-agent-methods
+(defun harness-acp-refresh-agent-methods ()
+  "Install the current agent method table on every live connection.
+Modules can add extension methods after the UI connection exists (for
+example on a hot reload); this makes them visible without reconnecting."
+  (interactive)
+  (setq harness-acp--agent-connections
+        (seq-filter (lambda (connection)
+                      (not (harness-acp-connection-closed-p connection)))
+                    harness-acp--agent-connections))
+  (dolist (connection harness-acp--agent-connections)
+    (dolist (entry harness-acp-agent-methods)
+      (harness-acp-connection-register-method connection (car entry) (cdr entry))))
+  harness-acp--agent-connections)
+
+(defconst harness-acp-agent-methods
   '(("initialize" . harness-acp--method-initialize)
     ("session/new" . harness-acp--method-session-new)
     ("session/load" . harness-acp--method-session-load)
@@ -756,6 +770,7 @@ and the same values travel in _meta.harness."
 
 (defun harness-acp-setup ()
   "Set up the ACP module."
+  (harness-acp-refresh-agent-methods)
   (harness-on 'session-entry-added #'harness-acp--bridge-session-entry
               :module 'harness-acp)
   (harness-on 'session-info-updated #'harness-acp--bridge-session-info
