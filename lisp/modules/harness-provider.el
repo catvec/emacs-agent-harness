@@ -78,6 +78,9 @@ Returns the provider."
                    :price-fn (plist-get properties :price)
                    :token-fn (plist-get properties :tokens)
                    :config (plist-get properties :config))))
+    (when harness-core--current-module
+      (harness-core-add-module-cleanup
+       harness-core--current-module (lambda () (harness-provider-unregister name))))
     (puthash name provider harness-provider--registry)
     provider))
 

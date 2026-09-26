@@ -235,7 +235,7 @@ root-level fields (which the protocol reserves) without losing them."
         :cost (harness-session-cost session)
         :worktree (harness-session-worktree session)
         :state (let ((state (harness-session--state-plist session)))
-                 (unless (null state) state))))
+                 (unless (null state) state)))))
 
 (defun harness-session--session-from-metadata (metadata)
   "Create an inactive (no transcript) session from METADATA."

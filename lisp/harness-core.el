@@ -262,6 +262,19 @@ Returns a deferred that settles like DEFERRED after FUNCTION ran."
   "Module whose setup or teardown is running.
 Registries use it to attribute registrations to a module.")
 
+(defvar harness-core--module-cleanups (make-hash-table :test #'eq)
+  "Module -> list of functions run when the module is unloaded.")
+
+(defun harness-core-add-module-cleanup (module function)
+  "Call FUNCTION when MODULE is unloaded.
+Modules that own their own registries use this so that unloading them
+removes everything they registered, the way the kernel does for services
+and event handlers.  Adding the same FUNCTION twice is harmless."
+  (unless (memq function (gethash module harness-core--module-cleanups))
+    (puthash module (cons function (gethash module harness-core--module-cleanups))
+             harness-core--module-cleanups))
+  function)
+
 (defun harness-module--version-ok-p (required available)
   "Return non-nil when AVAILABLE satisfies REQUIRED version string."
   (or (null required) (null available) (version<= required available)))
@@ -409,7 +422,12 @@ Services and event handlers registered by the module are removed."
                                    (gethash event harness-core--event-handlers))))
         (if remaining
             (puthash event remaining harness-core--event-handlers)
-          (remhash event harness-core--event-handlers))))))
+          (remhash event harness-core--event-handlers)))))
+  (dolist (cleanup (gethash name harness-core--module-cleanups))
+    (condition-case err
+        (funcall cleanup)
+      (error (harness-log "module cleanup for %s failed: %S" name err))))
+  (remhash name harness-core--module-cleanups))
 
 ;;; Services
 
