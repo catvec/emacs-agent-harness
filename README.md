@@ -102,6 +102,15 @@ explains what to configure.  Other backends plug in through
 `harness-search-register-provider`, and the tool always uses the first
 registered provider.
 
+## Worktrees
+
+`M-x harness-ui-worktrees` (or `C-c C-w` in a chat) manages git
+worktrees of the session's repository: create one with a fresh branch and
+open a session inside it, open or create a session in an existing
+worktree, and remove worktrees you no longer need.  Sessions record their
+worktree, so the session list and the conversation tree show where each
+one runs.
+
 ## Usage and budgets
 
 `M-x harness-ui-usage` (or `C-c C-u` in a chat) opens a full report:

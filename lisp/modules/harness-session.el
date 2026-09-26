@@ -340,7 +340,7 @@ otherwise create."
 (defun harness-session-create (&rest args)
   "Create a session.
 ARGS: :cwd (required), :title, :additional-directories, :parent-id,
-:fork-entry-id, :model, :thinking, :permission-mode, :mode."
+:fork-entry-id, :model, :thinking, :permission-mode, :mode, :worktree."
   (let* ((cwd (plist-get args :cwd))
          (directory (and cwd (file-name-absolute-p cwd)
                          (file-name-as-directory (expand-file-name cwd))))
@@ -365,6 +365,7 @@ ARGS: :cwd (required), :title, :additional-directories, :parent-id,
                    :thinking (plist-get args :thinking)
                    :permission-mode (or (plist-get args :permission-mode) 'ask)
                    :mode (or (plist-get args :mode) "code")
+                   :worktree (plist-get args :worktree)
                    :usage (list :input 0 :output 0 :cache-read 0 :cache-write 0)
                    :cost (list :amount 0.0 :currency (or (plist-get args :currency) "USD"))
                    :entries-loaded t))

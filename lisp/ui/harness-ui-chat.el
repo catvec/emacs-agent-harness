@@ -1314,6 +1314,7 @@ TEXT defaults to the composer's current contents."
     (define-key map (kbd "C-c C-p") #'harness-ui-set-permission-mode)
     (define-key map (kbd "C-c C-t") #'harness-ui-set-thinking)
     (define-key map (kbd "C-c C-u") #'harness-ui-usage)
+    (define-key map (kbd "C-c C-w") #'harness-ui-worktrees)
     (define-key map (kbd "C-c C-e") #'harness-ui-chat-back-to-end)
     (define-key map (kbd "C-c C-a") #'harness-ui-chat-attach-file)
     (define-key map (kbd "q") #'bury-buffer)

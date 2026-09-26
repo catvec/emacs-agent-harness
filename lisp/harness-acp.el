@@ -375,6 +375,11 @@ example on a hot reload); this makes them visible without reconnecting."
     ("_harness/session/entries" . harness-acp--method-session-entries)
     ("_harness/agent/configuration" . harness-acp--method-agent-configuration)
     ("_harness/usage/summary" . harness-acp--method-usage-summary)
+    ("_harness/session/infos" . harness-acp--method-session-infos)
+    ("_harness/worktree/list" . harness-acp--method-worktree-list)
+    ("_harness/worktree/create" . harness-acp--method-worktree-create)
+    ("_harness/worktree/remove" . harness-acp--method-worktree-remove)
+    ("_harness/worktree/session" . harness-acp--method-worktree-session)
     ("_harness/skills/list" . harness-acp--method-skills-list)
     ("_harness/skills/load" . harness-acp--method-skills-load)
     ("_harness/ping" . harness-acp--method-ping)
@@ -584,6 +589,48 @@ Returns the raw transcript entries (with ids and times)."
      ((harness-service-available-p "session" 'configuration)
       (harness-service-call "session" 'configuration :session-id session-id))
      (t (list :configOptions [])))))
+
+(defun harness-acp--worktree-service (method &rest args)
+  "Call worktree service METHOD with ARGS."
+  (if (harness-service-available-p "worktree" method)
+      (apply #'harness-service-call "worktree" method args)
+    (signal 'harness-acp-error
+            (list (alist-get 'method-not-found harness-acp-error-codes)
+                  (format "No worktree service method: %s" method)
+                  nil))))
+
+(defun harness-acp--method-session-infos (_connection _params)
+  "Handle the _harness/session/infos extension."
+  (harness-acp--session-service 'infos))
+
+(defun harness-acp--method-worktree-list (_connection params)
+  "Handle the _harness/worktree/list extension with PARAMS."
+  (list :worktrees (harness-acp--worktree-service
+                    'list :directory (plist-get params :directory))))
+
+(defun harness-acp--method-worktree-create (_connection params)
+  "Handle the _harness/worktree/create extension with PARAMS."
+  (harness-acp--worktree-service
+   'create
+   :repo (plist-get params :repo)
+   :name (plist-get params :name)
+   :base (plist-get params :base)))
+
+(defun harness-acp--method-worktree-remove (_connection params)
+  "Handle the _harness/worktree/remove extension with PARAMS."
+  (harness-acp--worktree-service
+   'remove :path (plist-get params :path) :force (plist-get params :force))
+  (make-hash-table))
+
+(defun harness-acp--method-worktree-session (_connection params)
+  "Handle the _harness/worktree/session extension with PARAMS."
+  (harness-acp--worktree-service
+   'session
+   :repo (plist-get params :repo)
+   :name (plist-get params :name)
+   :base (plist-get params :base)
+   :title (plist-get params :title)
+   :parent-id (plist-get params :parentId)))
 
 (defun harness-acp--method-usage-summary (_connection _params)
   "Handle the _harness/usage/summary extension."

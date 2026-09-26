@@ -52,7 +52,8 @@
     harness-ui-config
     harness-ui-notifier
     harness-ui-tree
-    harness-ui-usage)
+    harness-ui-usage
+    harness-ui-worktree)
   "Modules a normal `harness-start' loads, in addition to dependencies."
   :type '(repeat symbol))
 

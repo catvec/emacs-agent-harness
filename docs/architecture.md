@@ -347,6 +347,7 @@ session in the same position replaces the buffer there.
 | `harness-perms-jail` | directory jail rules | perms, tools |
 | `harness-agent` | `agent` service | session, provider, tools, perms |
 | `harness-usage` | `usage` service | session |
+| `harness-worktree` | `worktree` service | config, session |
 | `harness-subagents` | `subagent` tool | agent, session, tools |
 | `harness-search` | `websearch` tool | http, tools |
 | `harness-plan` | `plan` tool | session, tools |
@@ -358,10 +359,11 @@ session in the same position replaces the buffer there.
 | `harness-ui-config` | model/thinking/mode controls | ui |
 | `harness-ui-notifier` | blocked notifier | ui |
 | `harness-ui-usage` | usage and cost report | ui, usage |
+| `harness-ui-worktree` | worktree manager | ui |
 
 `harness.el` loads: acp, inprocess, config, session, provider,
 provider-openai, tools, tools-emacs, perms, perms-jail, agent, usage,
-subagents, search, plan, ui, and the UI feature modules selected by
+worktree, subagents, search, plan, ui, and the UI feature modules selected by
 `harness-ui-modules` (all by default).  A user can replace any of them by
 customizing the list.
 
