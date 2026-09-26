@@ -47,8 +47,10 @@
   :group 'harness-ui-ask)
 
 (defface harness-ui-ask-args-face
-  '((t :inherit fixed-pitch :background "grey95" :extend t))
-  "Face for tool arguments."
+  '((t :inherit (fixed-pitch secondary-selection) :extend t))
+  "Face for tool arguments.
+Inherits the theme's selection surface so the arguments stay readable on
+both light and dark themes."
   :group 'harness-ui-ask)
 
 (defvar harness-ui-ask--queue nil
@@ -128,7 +130,7 @@
        (format "%s\n\n" (truncate-string-to-width
                           (or (ignore-errors (harness-json-serialize args)) (format "%S" args))
                           200 nil nil "…"))
-       'face 'harness-ui-ask-args-face))
+       'face (harness-ui-ask--args-face))
     (when reason
       (harness-ui-ask--insert (format "%s\n\n" reason) 'face 'harness-ui-ask-reason-face))
     (harness-ui-ask--button "Allow once" "y" (lambda () (harness-ui-ask-answer "allow-once")))
@@ -177,11 +179,12 @@
                   buffer
                   `((display-buffer-in-side-window)
                     (side . ,harness-ui-ask-position)
-                    (window-height . fit-window-to-buffer)
-                    (preserve-size . (nil . t))))))
+                    (window-height . fit-window-to-buffer)))))
     (when (window-live-p window)
       (with-selected-window window
-        (fit-window-to-buffer nil nil 4 3)
+        ;; Cap the panel so the transcript stays visible; short panels fit
+        ;; their content.
+        (fit-window-to-buffer nil nil 16 3)
         (goto-char (point-min))))))
 
 ;;; Answering

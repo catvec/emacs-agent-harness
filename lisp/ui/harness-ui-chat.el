@@ -435,7 +435,7 @@ the original text stays searchable."
 (defun harness-ui-chat--tool-status-label (record)
   "Return a human label for RECORD's tool status."
   (pcase (harness-ui-chat-record-status record)
-    ("pending" "queued")
+    ("pending" "waiting")
     ("in_progress" "running")
     ("completed" "done")
     ("failed" "failed")
