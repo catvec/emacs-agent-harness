@@ -24,6 +24,8 @@ The architecture of this project is such that all modules should be developable 
 
 Make sure both local emacs and remote client ACP are tested whenever new feature are added or when verifying functionality. 
 
+Since there will be many rounds of human feedback and interation even after your testing it should be safe and easy to reload the harness. This means if new harness code has an error and doesn't compile (if that's needed) or doesn't pass muster in some way it doesn't brick any existing sessions. Since we will be dogfooding the harness to develop the harness. After new code is verified it should be hot-reloaded into the current Emacs instance and all sessions via built in Emacs methods. Also redraw session buffers so if render bugs occured and were fixed they will work now.
+
 # Technical Architecture
 The architecture of this harness is inspired by the Pi coding agent, and other modular systems like very mod-able games, D-Bus + XDG + the whole linux desktop system, ect. The core of the harness should be entirely focused on loading modules and facilitating communication between modules. All functionality should be provided via addon modules (even if they are shipped in tree), a plain harness running with no modules shouldn't even show a UI or call a completion API. Different modules need to be able to communicate with the APIs of other modules. This includes making direct calls to enact an action, but also hooking into events which are caused by a module (ex., on question ask). 
 

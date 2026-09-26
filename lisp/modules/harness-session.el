@@ -101,6 +101,7 @@ root-level fields (which the protocol reserves) without losing them."
   "Return the JSON-able info plist for SESSION."
   (list :sessionId (harness-session-id session)
         :cwd (harness-session-cwd session)
+        :additionalDirectories (or (harness-session-additional-directories session) [])
         :title (harness-session-title session)
         :createdAt (harness-session-created-at session)
         :updatedAt (harness-session-updated-at session)
@@ -693,6 +694,17 @@ LEVEL is \"info\", \"warning\" or \"error\"."
   (harness-session--schedule-save session)
   session)
 
+(defun harness-session-add-directory (session directory)
+  "Add DIRECTORY to SESSION's allowed directories."
+  (let ((directory (file-name-as-directory (expand-file-name directory))))
+    (unless (member directory (harness-session-additional-directories session))
+      (setf (harness-session-additional-directories session)
+            (append (harness-session-additional-directories session)
+                    (list directory))
+            (harness-session-updated-at session) (harness-iso-time))
+      (harness-session--schedule-save session))
+    (harness-session-additional-directories session)))
+
 (defun harness-session--emit-config-changed (session)
   "Emit the complete configuration state of SESSION."
   (harness-emit 'session-config-changed
@@ -1056,6 +1068,11 @@ transcript is still being read from disk."
   "Service: return all state of a session."
   (harness-session--state-plist (harness-session--get-service (plist-get args :session-id))))
 
+(defun harness-session-service-add-directory (&rest args)
+  "Service: grant a directory to a session."
+  (harness-session-add-directory (harness-session--get-service (plist-get args :session-id))
+                                 (plist-get args :directory)))
+
 (defun harness-session-setup ()
   "Set up the session module."
   (harness-event-define 'session-created
@@ -1120,7 +1137,8 @@ transcript is still being read from disk."
      (active . harness-session-service-active)
      (state-get . harness-session-service-state-get)
      (state-set . harness-session-service-state-set)
-     (state-all . harness-session-service-state-all))))
+     (state-all . harness-session-service-state-all)
+     (add-directory . harness-session-service-add-directory))))
 
 (defun harness-session-teardown ()
   "Tear down the session module, flushing pending writes."
