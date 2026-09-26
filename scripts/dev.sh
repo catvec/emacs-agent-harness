@@ -37,7 +37,10 @@ start() {
   echo "starting harness-dev..."
   "$EMACS" -Q --daemon="$SOCK" \
            --load "$REPO/scripts/harness-dev.el" \
-           --eval '(progn (harness-dev-toggle-debug 1) (harness-dev-load-safely))' \
+           --eval '(progn (harness-dev-toggle-debug 1)
+                          (harness-dev-load-safely)
+                          (when (fboundp (quote harness-auto-reload-mode))
+                            (harness-auto-reload-mode 1)))' \
            >"$DEV_DIR/daemon.out" 2>&1 &
   for _ in $(seq 1 100); do
     if ec --eval 't' >/dev/null 2>&1; then

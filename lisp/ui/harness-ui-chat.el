@@ -51,40 +51,54 @@ Only non-blocking tools belong here; anything that can hold the session
   :type 'boolean)
 
 (defface harness-ui-user-face
-  '((t :inherit default :background "grey94" :extend t))
-  "Face for user messages.")
+  '((t :inherit secondary-selection :extend t))
+  "Face for user messages.  Uses the theme's selection colour."
+  :group 'harness-ui-chat)
 
 (defface harness-ui-agent-face
   '((t :inherit default))
-  "Face for agent messages.")
+  "Face for agent messages."
+  :group 'harness-ui-chat)
 
 (defface harness-ui-thinking-face
   '((t :inherit shadow :slant italic))
-  "Face for thinking text.")
+  "Face for thinking text."
+  :group 'harness-ui-chat)
 
 (defface harness-ui-hint-face
   '((t :inherit shadow :height 0.9))
-  "Face for harness system hints.")
+  "Face for harness system hints."
+  :group 'harness-ui-chat)
 
 (defface harness-ui-tool-face
-  '((t :inherit font-lock-keyword-face :background "grey97" :extend t))
-  "Face for tool call labels.")
+  '((t :inherit font-lock-keyword-face))
+  "Face for tool call labels."
+  :group 'harness-ui-chat)
 
 (defface harness-ui-tool-body-face
-  '((t :inherit font-lock-string-face :background "grey97" :extend t))
-  "Face for tool output.")
+  '((t :inherit font-lock-string-face))
+  "Face for tool output."
+  :group 'harness-ui-chat)
 
 (defface harness-ui-code-face
-  '((t :inherit fixed-pitch :background "grey96" :extend t))
-  "Face for code blocks.")
+  '((t :inherit fixed-pitch :extend t))
+  "Face for code blocks."
+  :group 'harness-ui-chat)
 
 (defface harness-ui-header-face
   '((t :inherit bold :height 1.05))
-  "Face for markdown headings.")
+  "Face for markdown headings."
+  :group 'harness-ui-chat)
 
 (defface harness-ui-compose-face
-  '((t :inherit default :background "grey90" :extend t))
-  "Face of the composer area.")
+  '((t :inherit default))
+  "Face of the composer area."
+  :group 'harness-ui-chat)
+
+(defface harness-ui-prompt-face
+  '((t :inherit shadow))
+  "Face of the composer's prompt glyph."
+  :group 'harness-ui-chat)
 
 ;;; Buffer state
 
@@ -154,30 +168,53 @@ Only non-blocking tools belong here; anything that can hold the session
   "Small markdown subset rendered with faces.")
 
 (defun harness-ui-chat--fontify (start end)
-  "Apply markdown styling between START and END."
-  (save-excursion
-    ;; Fenced code blocks first so inline rules do not touch them.
-    (goto-char start)
-    (while (re-search-forward "^```" end t)
-      (let ((block-start (line-beginning-position)))
-        (if (re-search-forward "^```[ \t]*$" end t)
-            (let ((block-end (line-end-position)))
-              (add-face-text-property block-start block-end 'harness-ui-code-face)
-              (save-excursion
-                (goto-char block-start)
-                (when (re-search-forward "^```\\(.*\\)$" block-end t)
-                  (unless (string-empty-p (string-trim (match-string 1)))
-                    (add-face-text-property (line-beginning-position) (line-end-position)
-                                            'font-lock-keyword-face)))))
-          (goto-char end))))
-    (dolist (rule harness-ui-chat--md-rules)
+  "Render the markdown subset between START and END.
+Faces style the text; structural markers are collapsed with display
+properties so headings, emphasis, code and bullets read naturally while
+the original text stays searchable."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      ;; Headings.
       (goto-char start)
-      (while (re-search-forward (nth 0 rule) end t)
-        (let ((group (nth 1 rule))
-              (face (nth 2 rule)))
-          (when-let* ((from (match-beginning group))
-                      (_ (match-end group)))
-            (add-face-text-property from (match-end group) face)))))))
+      (while (re-search-forward "^\\(#\\{1,6\\}\\) \\(.*\\)$" end t)
+        (let ((hash-start (match-beginning 1))
+              (hash-end (match-end 1)))
+          (add-face-text-property (line-beginning-position) (line-end-position)
+                                  'harness-ui-header-face)
+          (add-text-properties hash-start (1+ hash-end) '(display ""))))
+      ;; Bullets.
+      (goto-char start)
+      (while (re-search-forward "^\\([-*]\\) " end t)
+        (let ((marker-start (match-beginning 1))
+              (marker-end (match-end 1)))
+          (add-text-properties marker-start marker-end '(display ""))
+          (add-text-properties marker-end (1+ marker-end)
+                               (list 'display (propertize "• " 'face 'shadow)))))
+      ;; Inline emphasis and code: hide the markers, style the contents.
+      (dolist (rule '(("\\*\\*\\([^*\n]+\\)\\*\\*" bold)
+                      ("`\\([^`\n]+\\)`" harness-ui-code-face)))
+        (goto-char start)
+        (while (re-search-forward (nth 0 rule) end t)
+          (let ((inner-start (match-beginning 1))
+                (inner-end (match-end 1))
+                (full-start (match-beginning 0))
+                (full-end (match-end 0)))
+            (add-face-text-property inner-start inner-end (nth 1 rule))
+            (add-text-properties full-start inner-start '(display ""))
+            (add-text-properties inner-end full-end '(display "")))))
+      ;; Fenced code blocks: style them and hide only the fence lines.
+      (goto-char start)
+      (while (re-search-forward "^```" end t)
+        (let* ((block-start (line-beginning-position))
+               (opening-end (1+ (line-end-position))))
+          (if (re-search-forward "^```[ \t]*$" end t)
+              (let ((block-end (line-end-position)))
+                (add-face-text-property block-start block-end 'harness-ui-code-face)
+                (add-text-properties block-start opening-end '(display ""))
+                (add-text-properties (line-beginning-position)
+                                     (1+ (line-end-position))
+                                     '(display "")))
+            (goto-char end)))))))
 
 
 ;;; Entry model
@@ -404,8 +441,13 @@ region."
     (setq harness-ui-chat--transcript-end nil
           harness-ui-chat--compose-start nil
           harness-ui-chat--needs-rebuild nil)
-    (dolist (record (reverse harness-ui-chat--records))
-      (harness-ui-chat--render-record record))
+    (if (null harness-ui-chat--records)
+        (insert (propertize
+                 (concat "Start the conversation.\n\n"
+                         "  @ references a file    C-c C-s sessions    C-c C-m model\n")
+                 'face 'shadow))
+      (dolist (record (reverse harness-ui-chat--records))
+        (harness-ui-chat--render-record record)))
     (harness-ui-chat--render-composer compose-text)
     (when compose-offset
       (goto-char (min (point-max)
@@ -555,31 +597,52 @@ region."
 
 ;;; Header and composer
 
+(defun harness-ui-chat--format-tokens (used size)
+  "Format USED/SIZE tokens compactly."
+  (cond
+   ((and (> size 0) (>= size 1000))
+    (format "%s/%.0fk"
+            (if (>= used 1000) (format "%.1fk" (/ used 1000.0)) (number-to-string used))
+            (/ size 1000.0)))
+   ((> size 0) (format "%d/%d" used size))
+   (t (format "%d tok" used))))
+
 (defun harness-ui-chat--refresh-header ()
-  "Redraw the header line."
-  (let ((info harness-ui-chat--info)
-        (status harness-ui-chat--status))
+  "Redraw the header line: title, status, model, tokens, cost, permissions.
+Segments use only theme faces so light and dark themes stay legible on
+the theme's own header-line background."
+  (let* ((info harness-ui-chat--info)
+         (status (or harness-ui-chat--status 'idle))
+         (title (or (plist-get info :title)
+                    (and (plist-get info :sessionId)
+                         (substring (plist-get info :sessionId) 0 8))
+                    "session"))
+         (cost (plist-get info :cost)))
     (setq header-line-format
           (list
-           (propertize (format " %s " (or (plist-get info :title) "session"))
-                       'face 'harness-ui-header-face)
-           (propertize (format "%s " (or status "idle"))
+           " "
+           (propertize title 'face 'bold)
+           "  "
+           (propertize (symbol-name status)
                        'face (pcase status
-                               ("running" '(success bold))
-                               ("blocked" '(error bold))
+                               ('running 'success)
+                               ('blocked 'error)
                                (_ 'shadow)))
-           (propertize (format "%s " (or (plist-get info :model) "no model"))
-                       'face 'shadow)
-           (let ((used (or (plist-get info :contextUsed) 0))
-                 (size (or (plist-get info :contextSize) 0)))
-             (propertize (if (> size 0) (format "%d/%dk " (/ used 1000) (/ size 1000))
-                           (format "%d tok " used))
-                         'face (if (and (> size 0) (> used (* 0.8 size))) 'warning 'shadow)))
-           (let ((cost (plist-get info :cost)))
-             (when cost
-               (propertize (format "$%.3f " (or (plist-get cost :amount) 0))
-                           'face 'shadow)))
-           (propertize (format "[%s] " (or (plist-get info :permissionMode) "ask"))
+           "  "
+           (propertize (or (plist-get info :model) "no model") 'face 'shadow)
+           "  "
+           (propertize (harness-ui-chat--format-tokens
+                        (or (plist-get info :contextUsed) 0)
+                        (or (plist-get info :contextSize) 0))
+                       'face (if (and (> (or (plist-get info :contextSize) 0) 0)
+                                      (> (or (plist-get info :contextUsed) 0)
+                                         (* 0.8 (plist-get info :contextSize))))
+                                 'warning
+                               'shadow))
+           (when cost
+             (propertize (format "  $%.3f" (or (plist-get cost :amount) 0))
+                         'face 'shadow))
+           (propertize (format "  [%s]" (or (plist-get info :permissionMode) "ask"))
                        'face 'shadow)))))
 
 (defun harness-ui-chat--render-composer (&optional text)
@@ -616,6 +679,7 @@ TEXT defaults to the composer's current contents."
     (insert " ")
     (harness-ui-chat--button "Mode" #'harness-ui-set-session-mode :help-echo "Plan or code")
     (insert "\n")
+    (insert (propertize "❯ " 'face 'harness-ui-prompt-face))
     (let ((start (point)))
       (insert (propertize text 'face 'harness-ui-compose-face))
       (setq harness-ui-chat--compose-start (copy-marker start)))
@@ -889,6 +953,7 @@ TEXT defaults to the composer's current contents."
     (define-key map (kbd "C-c C-m") #'harness-ui-switch-model)
     (define-key map (kbd "C-c C-e") #'harness-ui-chat-back-to-end)
     (define-key map (kbd "C-c C-a") #'harness-ui-chat-attach-file)
+    (define-key map (kbd "q") #'bury-buffer)
     map)
   "Keymap for `harness-ui-chat-mode'.")
 

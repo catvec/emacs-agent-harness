@@ -33,19 +33,23 @@
 
 (defface harness-ui-ask-title-face
   '((t :inherit bold :height 1.1))
-  "Face for the panel's title.")
+  "Face for the panel's title."
+  :group 'harness-ui-ask)
 
 (defface harness-ui-ask-key-face
   '((t :inherit shadow))
-  "Face for keyboard hints.")
+  "Face for keyboard hints."
+  :group 'harness-ui-ask)
 
 (defface harness-ui-ask-reason-face
   '((t :inherit shadow :slant italic))
-  "Face for the harness' reason.")
+  "Face for the harness' reason."
+  :group 'harness-ui-ask)
 
 (defface harness-ui-ask-args-face
   '((t :inherit fixed-pitch :background "grey95" :extend t))
-  "Face for tool arguments.")
+  "Face for tool arguments."
+  :group 'harness-ui-ask)
 
 (defvar harness-ui-ask--queue nil
   "Pending requests, oldest first.")

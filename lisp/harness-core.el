@@ -390,6 +390,17 @@ with unbound variables or missing functions."
 
 ;;; Safe reloading
 
+(defun harness-core--quiet-compile-log ()
+  "Erase the validation compile log and any windows showing it.
+Reloading a live session must never steal a window with compiler noise."
+  (let ((buffer (get-buffer " *harness-byte-compile-log*")))
+    (when (buffer-live-p buffer)
+      (dolist (window (get-buffer-window-list buffer nil t))
+        (ignore-errors (quit-window nil window)))
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t)) (erase-buffer)))
+      (bury-buffer buffer))))
+
 (defun harness-module-validate (name)
   "Byte-compile module NAME's file to check that it loads cleanly.
 Returns non-nil when the file compiles.  Nothing in the running Emacs is
@@ -426,6 +437,7 @@ rejected before it is ever unloaded."
           (set 'byte-compile-warnings previous-warnings)
           (set 'native-comp-jit-compilation previous-jit)
           (set 'byte-compile-log-buffer previous-log)
+          (harness-core--quiet-compile-log)
           (ignore-errors (delete-file temporary)))
         success)))))
 
