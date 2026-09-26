@@ -60,6 +60,10 @@
 (defvar harness-ui-refresh-functions nil
   "Functions run to redraw UI buffers after a reload.")
 
+(defun harness-ui-agent-info ()
+  "Information the connected agent reported during initialize."
+  harness-ui--agent-info)
+
 (defun harness-ui-connected-p ()
   "Return non-nil when the local ACP connection is up."
   (and harness-ui--client-connection
@@ -91,6 +95,46 @@
          (harness-emit 'harness-ui-ready :agent-info harness-ui--agent-info)
          (harness-log "UI connected to %S" harness-ui--agent-info)))))
   harness-ui--client-connection)
+
+(defun harness-ui-connect (host port)
+  "Connect to a harness ACP server at HOST:PORT instead of the local one.
+This is the client half of a remote session: the UI drives a harness
+running on another machine (or in another Emacs) exactly like the local
+one.  Pass HOST as nil for a local port."
+  (interactive "sHost (empty for localhost): 
+nPort: ")
+  (let ((host (if (string-empty-p (string-trim (or host "")))
+                  "127.0.0.1"
+                (string-trim host)))
+        (port (if (stringp port) (string-to-number port) port)))
+    (unless (and (numberp port) (> port 0))
+      (user-error "A port is needed"))
+    (harness-ui-stop)
+    (let ((connection (harness-acp-tcp-connect host port 'client)))
+      (setq harness-ui--client-connection connection
+            harness-ui--agent-connection nil)
+      (harness-ui--register-client-methods connection)
+      (harness-ui--install-permission-asker)
+      (harness-ui--install-question-function)
+      (harness-deferred-then
+       (harness-acp-connection-request
+        connection "initialize"
+        (list :protocolVersion harness-acp-protocol-version
+              :clientCapabilities harness-ui-client-capabilities
+              :clientInfo (list :name "emacs-agent-harness-ui"
+                                :title "Emacs Agent Harness"
+                                :version harness-version)))
+       (lambda (result)
+         (setq harness-ui--agent-info (plist-get result :agentInfo)
+               harness-ui--capabilities (plist-get result :agentCapabilities))
+         (harness-emit 'harness-ui-ready :agent-info harness-ui--agent-info)
+         (message "Connected to %s (%s)"
+                  (or (plist-get harness-ui--agent-info :name) "harness")
+                  (or (plist-get harness-ui--agent-info :version) "?"))
+         (run-hooks 'harness-ui-refresh-functions))
+       (lambda (error)
+         (message "Could not connect to %s:%s: %S" host port error)))
+      connection)))
 
 (defun harness-ui-stop ()
   "Close the local ACP connection."

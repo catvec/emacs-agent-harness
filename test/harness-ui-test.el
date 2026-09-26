@@ -153,5 +153,27 @@
     (harness-ui-stop)
     (should-not (harness-ui-connected-p))))
 
+(ert-deftest harness-ui-connects-to-a-remote-acp-server ()
+  (require 'harness-acp-tcp)
+  (harness-module-load 'harness-acp)
+  (harness-module-load 'harness-acp-tcp)
+  (harness-module-load 'harness-ui)
+  (let* ((server (harness-acp-tcp-server 0 nil "127.0.0.1"))
+         (port (process-contact server :service)))
+    (unwind-protect
+        (progn
+          (should port)
+          (harness-ui-connect "127.0.0.1" port)
+          (should (harness-ui-connected-p))
+          ;; The handshake and a real request both travel over TCP.
+          (let ((deferred (harness-ui-request "_harness/version" (list))))
+            (harness-test-settle deferred 10)
+            (should (harness-deferred-resolved-p deferred))
+            (should (plist-get (harness-deferred-value deferred) :version)))
+          (let ((info (harness-ui-agent-info)))
+            (should info)))
+      (harness-ui-stop)
+      (delete-process server))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

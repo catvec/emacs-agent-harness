@@ -66,8 +66,26 @@ A local UI uses the in-process transport and does not need a port."
   "Address the ACP server listens on when `harness-acp-server-port' is set."
   :type 'string)
 
+(defcustom harness-acp-server-file
+  (expand-file-name "acp-server" "~/.local/share/harness")
+  "File recording the running ACP server's host and port.
+Written only when `harness-acp-server-port' is set, so a remote UI can
+find the address without guessing the ephemeral port."
+  :type 'file)
+
 (defvar harness--acp-server nil
   "The remote ACP server process, when running.")
+
+(defun harness--write-acp-server-file (host port)
+  "Record HOST and PORT for remote clients."
+  (ignore-errors
+    (make-directory (file-name-directory harness-acp-server-file) t)
+    (with-temp-file harness-acp-server-file
+      (insert (format "%s:%s\n" host port)))))
+
+(defun harness--remove-acp-server-file ()
+  "Forget the recorded server address."
+  (ignore-errors (delete-file harness-acp-server-file)))
 
 ;;; Lifecycle
 
@@ -91,9 +109,10 @@ A local UI uses the in-process transport and does not need a port."
             (harness-acp-tcp-server harness-acp-server-port
                                     #'harness-acp-agent-started
                                     harness-acp-server-host))
-      (message "Harness ACP server listening on %s:%s"
-               harness-acp-server-host
-               (process-contact harness--acp-server :service))))
+      (let ((port (process-contact harness--acp-server :service)))
+        (harness--write-acp-server-file harness-acp-server-host port)
+        (message "Harness ACP server listening on %s:%s"
+                 harness-acp-server-host port))))
   (message "Harness ready (%d modules)" (length (harness-module-list)))
   t)
 
@@ -102,7 +121,8 @@ A local UI uses the in-process transport and does not need a port."
   (interactive)
   (when (and harness--acp-server (process-live-p harness--acp-server))
     (delete-process harness--acp-server)
-    (setq harness--acp-server nil))
+    (setq harness--acp-server nil)
+    (harness--remove-acp-server-file))
   (dolist (module (reverse (harness-module-load-order)))
     (harness-module-unload module))
   (message "Harness stopped")

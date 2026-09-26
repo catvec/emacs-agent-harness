@@ -103,6 +103,21 @@ explains what to configure.  Other backends plug in through
 `harness-search-register-provider`, and the tool always uses the first
 registered provider.
 
+## Remote sessions
+
+The harness runs an ACP agent, and the UI is an ACP client, so a UI can
+drive a harness on another machine.  On the host, enable the server:
+
+```elisp
+(setq harness-acp-server-port 0           ; free port, recorded on disk
+      harness-acp-server-host "127.0.0.1") ; keep it on loopback
+```
+
+On the client, `M-x harness-ui-connect`, give the host and the port from
+`harness-acp-server-file` (use an ssh tunnel rather than binding the
+server to a public address: ACP carries no authentication, and an agent
+endpoint can run tools).
+
 ## Side conversations
 
 `C-c C-b` opens a **btw** conversation: a fork of the current session in
