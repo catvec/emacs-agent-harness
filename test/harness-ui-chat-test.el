@@ -94,8 +94,11 @@
     buffer)))
 
 (defun harness-ui-chat-test--apply (buffer update)
-  "Apply UPDATE to BUFFER and flush."
-  (harness-ui-chat--apply-update buffer "s1" update))
+  "Apply UPDATE to BUFFER and lay the transcript out."
+  (harness-ui-chat--apply-update buffer "s1" update)
+  (with-current-buffer buffer
+    (when harness-ui-chat--needs-rebuild
+      (harness-ui-chat-rebuild))))
 
 (defun harness-ui-chat-test--text (&optional buffer)
   "Return the buffer text without properties."

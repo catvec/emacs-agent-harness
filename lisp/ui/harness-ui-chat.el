@@ -98,7 +98,9 @@ Only non-blocking tools belong here; anything that can hold the session
   "Last known status symbol.")
 
 (defvar-local harness-ui-chat--records nil
-  "Rendered entry records, oldest first.")
+  "Rendered entry records, newest first.")
+(defvar-local harness-ui-chat--needs-rebuild nil
+  "Non-nil when the transcript must be re-laid-out before display.")
 
 (defvar-local harness-ui-chat--queue nil
   "Client-side queue of (blocks . text) waiting for the next turn.")
@@ -367,7 +369,7 @@ Only non-blocking tools belong here; anything that can hold the session
     (harness-ui-chat--mark-read-only start (point))))
 
 (defun harness-ui-chat--rerender (record)
-  "Redraw RECORD's region in place."
+  "Redraw RECORD's region in place (contents only, no re-layout)."
   (let ((inhibit-read-only t)
         (start (harness-ui-chat-record-start record))
         (end (harness-ui-chat-record-end record)))
@@ -375,8 +377,7 @@ Only non-blocking tools belong here; anything that can hold the session
       (delete-region start end)
       (save-excursion
         (goto-char start)
-        (harness-ui-chat--render-record record))
-      (harness-ui-chat--sync-boundary))))
+        (harness-ui-chat--render-record record)))))
 
 (defun harness-ui-chat-toggle (record)
   "Toggle collapse state of RECORD."
@@ -384,38 +385,32 @@ Only non-blocking tools belong here; anything that can hold the session
         (not (harness-ui-chat-record-collapsed record)))
   (harness-ui-chat--rerender record))
 
-(defun harness-ui-chat--sync-boundary ()
-  "Put the transcript boundary after the last rendered record.
-Records are inserted at the boundary; re-rendering a record would
-otherwise pull it back to that record's start, so recompute it from the
-records' own end markers."
-  (let ((end (point-min)))
-    (dolist (record harness-ui-chat--records)
-      (when-let* ((marker (harness-ui-chat-record-end record))
-                  ((marker-position marker)))
-        (setq end (max end (marker-position marker)))))
-    (when harness-ui-chat--transcript-end
-      (set-marker harness-ui-chat--transcript-end end (current-buffer)))))
+(defun harness-ui-chat--insert-record (record)
+  "Queue RECORD for the next transcript layout."
+  (push record harness-ui-chat--records)
+  (setq harness-ui-chat--needs-rebuild t))
 
-(defun harness-ui-chat--insert-record (record &optional before-marker)
-  "Insert RECORD at the end of the transcript, above the composer.
-The transcript boundary is advanced past the new record so the next one
-follows it in chronological order."
-  (let ((inhibit-read-only t))
-    ;; Register the record before syncing so the boundary can see its end.
-    (push record harness-ui-chat--records)
-    (save-excursion
-      (goto-char (or before-marker (harness-ui-chat--transcript-point)))
-      (harness-ui-chat--render-record record)
-      (unless before-marker
-        (harness-ui-chat--sync-boundary)))))
-
-(defun harness-ui-chat--transcript-point ()
-  "Return the point where the transcript ends."
-  (if (and harness-ui-chat--transcript-end
-           (marker-position harness-ui-chat--transcript-end))
-      (marker-position harness-ui-chat--transcript-end)
-    (point-max)))
+(defun harness-ui-chat-rebuild ()
+  "Lay the transcript out from scratch above the composer.
+Rendering every record in order is cheap enough for structural changes
+and keeps ordering exact; streaming deltas only re-render their own
+region."
+  (let ((inhibit-read-only t)
+        (compose-offset (when (and harness-ui-chat--transcript-end
+                                   (>= (point) (marker-position harness-ui-chat--transcript-end)))
+                          (- (point) (marker-position harness-ui-chat--transcript-end))))
+        (compose-text (harness-ui-chat--compose-text)))
+    (erase-buffer)
+    (setq harness-ui-chat--transcript-end nil
+          harness-ui-chat--compose-start nil
+          harness-ui-chat--needs-rebuild nil)
+    (dolist (record (reverse harness-ui-chat--records))
+      (harness-ui-chat--render-record record))
+    (harness-ui-chat--render-composer compose-text)
+    (when compose-offset
+      (goto-char (min (point-max)
+                      (+ (marker-position harness-ui-chat--transcript-end)
+                         compose-offset))))))
 
 ;;; Updates from the harness
 
@@ -494,22 +489,15 @@ follows it in chronological order."
          (previous (car records)))
     (when (and previous
                (harness-ui-chat--coalescable-p previous))
-      ;; Fold both into a group record rendered collapsed.
+      ;; Fold both into a group record; the next layout draws it collapsed.
       (let ((group (harness-ui-chat-record-create
                     :key (list 'group (harness-ui-chat-record-key previous))
                     :kind "tool_run"
                     :children (list previous record)
                     :collapsed t
                     :tool-name (harness-ui-chat-record-tool-name previous))))
-        (let ((inhibit-read-only t))
-          (delete-region (harness-ui-chat-record-start previous)
-                         (harness-ui-chat-record-end record))
-          (setq harness-ui-chat--records
-                (cons group (cdr (cdr records))))
-          (save-excursion
-            (goto-char (marker-position (harness-ui-chat-record-start previous)))
-            (harness-ui-chat--render-record group))
-          (harness-ui-chat--sync-boundary))))))
+        (setq harness-ui-chat--records (cons group (cdr (cdr records)))
+              harness-ui-chat--needs-rebuild t)))))
 
 (defun harness-ui-chat--update-text (update)
   "Flatten UPDATE's content blocks into display text."
@@ -594,13 +582,15 @@ follows it in chronological order."
            (propertize (format "[%s] " (or (plist-get info :permissionMode) "ask"))
                        'face 'shadow)))))
 
-(defun harness-ui-chat--render-composer ()
-  "(Re)draw the composer area and its action buttons."
+(defun harness-ui-chat--render-composer (&optional text)
+  "(Re)draw the composer area and its action buttons.
+TEXT defaults to the composer's current contents."
   (let ((inhibit-read-only t)
-        (text (harness-ui-chat--compose-text)))
-    (when harness-ui-chat--transcript-end
+        (text (or text (harness-ui-chat--compose-text))))
+    (when (and harness-ui-chat--transcript-end
+               (marker-position harness-ui-chat--transcript-end))
       (delete-region (marker-position harness-ui-chat--transcript-end) (point-max)))
-    (goto-char (harness-ui-chat--transcript-point))
+    (goto-char (point-max))
     (setq harness-ui-chat--transcript-end (copy-marker (point)))
     (insert "\n")
     (harness-ui-chat--render-queued)
@@ -964,8 +954,11 @@ follows it in chronological order."
         (buffer (gethash session-id harness-ui-chat--buffers)))
     (remhash session-id harness-ui-chat--pending-updates)
     (when (and updates (buffer-live-p buffer))
-      (dolist (update updates)
-        (harness-ui-chat--apply-update buffer session-id update))
+      (with-current-buffer buffer
+        (dolist (update updates)
+          (harness-ui-chat--apply-update buffer session-id update))
+        (when harness-ui-chat--needs-rebuild
+          (harness-ui-chat-rebuild)))
       (when-let* ((window (get-buffer-window buffer t)))
         (with-selected-window window
           (when harness-ui-chat-auto-scroll
@@ -992,14 +985,7 @@ follows it in chronological order."
              (when (buffer-live-p buffer)
                (with-current-buffer buffer
                  (harness-ui-chat--refresh-header)
-                 (let ((inhibit-read-only t))
-                   (when harness-ui-chat--transcript-end
-                     (delete-region (marker-position harness-ui-chat--transcript-end)
-                                    (point-max)))
-                   (goto-char (harness-ui-chat--transcript-point))
-                   (dolist (record (reverse harness-ui-chat--records))
-                     (harness-ui-chat--render-record record))
-                   (harness-ui-chat--render-composer)))))
+                 (harness-ui-chat-rebuild))))
            harness-ui-chat--buffers))
 
 (defun harness-ui-chat-setup ()

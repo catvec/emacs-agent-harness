@@ -87,7 +87,7 @@ defaults to `harness-acp-tcp-default-host'.  Returns the server process."
            :family 'ipv4
            :coding 'utf-8-unix
            :noquery t
-           :reuse-addr t
+           :reuseaddr t
            ;; For a server these are inherited by each connection; the
            ;; server itself never uses them.
            :filter (lambda (process chunk)
