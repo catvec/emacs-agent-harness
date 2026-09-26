@@ -18,9 +18,11 @@ The combination of opportunities to take agentic tooling to the next level with 
 # Development Guidance
 The first priority is to develop a workflow (set of tools, skills, docs, ect) which facilitate a closed loop hands on development cycle. An Emacs instance should be launched which can be manipulated and inspected / screenshot so that the agent can verify live that the code is working as intended. The code simply appearing implemented is not enough.
 
+It is very important to verify features as they are created. You should not create multiple features without testing each one before going on to the next.
+
 The architecture of this project is such that all modules should be developable in parallel once the core loader logic and API contracts are defined.
 
-Make sure both local emacs and remote client ACP are tested whenever new feature are added or when verifying functionality.
+Make sure both local emacs and remote client ACP are tested whenever new feature are added or when verifying functionality. 
 
 # Technical Architecture
 The architecture of this harness is inspired by the Pi coding agent, and other modular systems like very mod-able games, D-Bus + XDG + the whole linux desktop system, ect. The core of the harness should be entirely focused on loading modules and facilitating communication between modules. All functionality should be provided via addon modules (even if they are shipped in tree), a plain harness running with no modules shouldn't even show a UI or call a completion API. Different modules need to be able to communicate with the APIs of other modules. This includes making direct calls to enact an action, but also hooking into events which are caused by a module (ex., on question ask). 
