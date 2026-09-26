@@ -18,6 +18,8 @@ The combination of opportunities to take agentic tooling to the next level with 
 # Development Guidance
 The first priority is to develop a workflow (set of tools, skills, docs, ect) which facilitate a closed loop hands on development cycle. An Emacs instance should be launched which can be manipulated and inspected / screenshot so that the agent can verify live that the code is working as intended. The code simply appearing implemented is not enough.
 
+The architecture of this project is such that all modules should be developable in parallel once the core loader logic and API contracts are defined.
+
 # Technical Architecture
 The architecture of this harness is inspired by the Pi coding agent, and other modular systems like very mod-able games, D-Bus + XDG + the whole linux desktop system, ect. The core of the harness should be entirely focused on loading modules and facilitating communication between modules. All functionality should be provided via addon modules (even if they are shipped in tree), a plain harness running with no modules shouldn't even show a UI or call a completion API. Different modules need to be able to communicate with the APIs of other modules. This includes making direct calls to enact an action, but also hooking into events which are caused by a module (ex., on question ask). 
 
@@ -85,11 +87,20 @@ Functional requirements:
 - System hint messages can be shown from the harness to tell the user when harness configuration (like session info: name, model, permission mode, ect) change, the text should be muted like thinking but distinct
 - Messages from the agent, the user, and thinking / tool messages should all have their contents be searchable
 
+### Image Video Audio Support 
+Modern models are multimodal and can declare capabilities such as understanding data in the form of text (common), image, video, and audio. This could include the support of each of those modes on input and / or output. A common configuration for coding agents is text and image input and text output. Especially key is the ability to handle uncommon MIME types in the user's clipboard. If you don't know what it is pass the data and the MIME type all of which are considered somewhat hostile user inputs, to the agent and see what it thinks.
+
+The conversation UI must be able to display images if the Emacs instance is capable. Ideally video is playable in emacs or at least a command to open the video and also do thumbnails w builtin emacs functionality. Audio should also be supported if the model supports it. Allow for audio input and audio output. Have good user interfaces which show what is clearly happening with all these modes (playback bars, volume, audio mic monitoring).
+
 ### Queued Messages 
 If the agent is mid-turn and the user wants to send a message that message can be queued for sending. The message should be shown at the bottom of the chat interface right above the compose message box. Queued messages can be edited before they are sent by selecting the queued message from the queued message list and re-composing it. Queued messages should all be sent at the next possible turn in the session all at once.
 
 ### File References
-Allow user messages to have references to files, who's contents will be attached in the user's message. These files are referenced by putting an at symbol followed by the file name. The harness should perform fuzzy searching for files matching the contents after the at symbol.
+Allow user messages to have references to files, who's absolute path and size in bytes will be attached in the user's message. These files are referenced by putting an at symbol followed by the file name. The harness should perform fuzzy searching for files matching the contents after the at symbol.
+
+If the user is in GUI mode of Emacs make use of the operating system drag file on to application behavior to attach that file to the message.
+
+Show attached files near the compose message box, use their relative path to the project root and shorten in the middle if needed, allow via this ui to open that file as a buffer or remove it from the message.
 
 ### Skill References
 Allow user messages to have explicit reference to a skill, who's contents will be attached to the user's message.
@@ -117,8 +128,14 @@ If a name is not provided when a session is made (not mandatory) then an agent w
 ## Permissions 
 Tool calls should have a permission hook which is responsible for performing some process (be it asking the user, automatically approving due to the tool, or a more advanced decision) to determine if the tool is allowed to run or not. Using this many advanced permission systems can be created. 
 
+### Directory Jail
+By default session should not be given permission to files outside of the current directory. Enforce this with read, write, search, ect commands. If a session wants to add another directory to its allow list the user must give permission. If an automatic tool call deny is required provide constructive information to the agent so it succeeds and doesn't require user intervention to use the correct directories, work with what you have.
+
 ### Auto Mode
 User a cheap LLM to determine if a tool call is allowed. Give the details of the tool call (description as seen by agent) as well as the parameters and any other supporting context. The cheap LLM outputs a decision along with a reason.
+
+### Non-Interactive Mode 
+Using this hook system a mode can be enabled which forces the model to attempt to not get blocked waiting for user input. If enabled and a tool call would be disabled an automatic steering message is sent to the agent telling it that it should do everything in its power to find a different approach which respects the permission denial but also achieves the goal. The user of this mode is for when users start a task and know they will be stepping away for a while and want the session to get work done.
 
 ## Completion API
 Model providers are generic. There is a set of API methods which model providers must implement in order to provide functionality needed for all the harness's usage. Provide a built in implementation of the OpenAI compatible completion API. Providers can provide extra optional capabilities enable features in the harness (like knowing your plan's quota, if a session is still in the KV cache, dynamic pricing).
@@ -148,7 +165,7 @@ The harness should use provider APIs to determine when tokens from a conversatio
 A new session can be created using the context and settings of another existing session. This lets new tasks or lines of thought be persued by parallel agents all sharing some initial state. This also leverages the auto-regressive LLM caching price model. Where tokens you already have are better than a fresh context in many cases. Forks should record their parent session and show up on the session list.
 
 ## Sub-agents 
-Sub-agents should be able to be created by an agent as a tool call. Sub-agents just create a new fully fledged session with the context they are provided. Sub-agents should be able to be viewed using the normal session viewing UI. Sub-agents should have their session parent be recorded.
+Sub-agents should be able to be created by an agent as a tool call. Sub-agents just create a new fully fledged session with the context they are provided. Sub-agents should be able to be viewed using the normal session viewing UI. Sub-agents should have their session parent be recorded. A sub-agent can also be made out of a fork of a conversation if choosen.
 
 ## Emacs MCP/Tool
 A tool should be provided to the agent to interact with the current Emacs session. This allows the agent to view buffers, emacs variables, eval functions, control emacs, help the user drive.
@@ -176,3 +193,15 @@ For models which provide a setting to set the thinking level provide an interfac
 
 ## Remote Session Connect 
 Using the Agent Client Protocol (ACP) the harness can connect to a harness server running on another host and control it fully using the UI running on the user's current machine. By default when the harness starts it should start an ACP server which the local harness UI then talks to. This should be configured for optimal local use, but can be relaxed to allow remote connections.
+
+## Plan Mode
+A tool which allows the agent to propose a detailed plan for a complex task. Gives the agent a way to gather its thoughts and lay out the full plan. The plan should include superpowers guidance and details on how it will be implemented. The unique presence of forking tools, sub-agents, and merge queues should be taken into account when planning the implementation.
+
+## Todo Tool
+Track todo items and allow the agent to update todo statuses.
+
+## Websearch Tool
+Allow the agent to search the web for content. This is a generic tool which should be implemented by a drop in provider. To start provide a built in implementation of the brave websearch API.
+
+## Context Bomb Protection
+If a tool output, file read, ect any type would cause an output of too large of a size which would screw up your context do not output it and instead require the use of range parameters to get the output. 
