@@ -454,8 +454,8 @@ Only non-blocking tools belong here; anything that can hold the session
       ;; header also shows info (model name, tokens) that only the session
       ;; knows; refresh it.
       (when (member kind '("session_info_update" "config_option_update"
-                           "current_mode_update"))
-        (harness-ui-chat--refresh-info buffer session-id)))))
+                           "current_mode_update" "usage_update"))
+        (harness-ui-chat--refresh-info buffer _session-id)))))
 
 (defun harness-ui-chat--refresh-info (buffer session-id)
   "Re-fetch SESSION-ID's info and redraw BUFFER's header."
@@ -581,7 +581,9 @@ Only non-blocking tools belong here; anything that can hold the session
     (when harness-ui-chat--transcript-end
       (delete-region (marker-position harness-ui-chat--transcript-end) (point-max)))
     (goto-char (harness-ui-chat--transcript-point))
-    (setq harness-ui-chat--transcript-end (copy-marker (point)))
+    ;; Insertion type t keeps the marker after newly inserted transcript
+    ;; records, so they stay in chronological order above the composer.
+    (setq harness-ui-chat--transcript-end (copy-marker (point) t))
     (insert "\n")
     (harness-ui-chat--render-queued)
     (harness-ui-chat--render-attachments-line)
@@ -685,7 +687,7 @@ Only non-blocking tools belong here; anything that can hold the session
           (setq harness-ui-chat--records nil
                 harness-ui-chat--queue nil
                 harness-ui-chat--attachments nil
-                harness-ui-chat--transcript-end (copy-marker (point-max)))
+                harness-ui-chat--transcript-end (copy-marker (point-max) t))
           (harness-ui-chat--render-composer))
         (puthash session-id buffer harness-ui-chat--buffers)
         buffer)))
@@ -977,7 +979,7 @@ Only non-blocking tools belong here; anything that can hold the session
                      (delete-region (marker-position harness-ui-chat--transcript-end)
                                     (point-max)))
                    (goto-char (harness-ui-chat--transcript-point))
-                   (dolist (record harness-ui-chat--records)
+                   (dolist (record (reverse harness-ui-chat--records))
                      (harness-ui-chat--render-record record))
                    (harness-ui-chat--render-composer)))))
            harness-ui-chat--buffers))

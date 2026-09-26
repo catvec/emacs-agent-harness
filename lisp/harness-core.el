@@ -407,10 +407,16 @@ rejected before it is ever unloaded."
       ;; byte-compiled without bytecomp loaded.
       (let ((previous-dest (symbol-value 'byte-compile-dest-file-function))
             (previous-warnings (symbol-value 'byte-compile-warnings))
+            (previous-jit (symbol-value 'native-comp-jit-compilation))
+            (previous-log (symbol-value 'byte-compile-log-buffer))
             (temporary (make-temp-file "harness-byte-compile-" nil ".elc"))
             (success nil))
         (set 'byte-compile-dest-file-function (lambda (_file) temporary))
         (set 'byte-compile-warnings nil)
+        ;; Validation must not spawn compiler warnings popups or native
+        ;; compilation in a running session.
+        (set 'native-comp-jit-compilation nil)
+        (set 'byte-compile-log-buffer " *harness-byte-compile-log*")
         (unwind-protect
             (setq success
                   (condition-case err
@@ -418,6 +424,8 @@ rejected before it is ever unloaded."
                     (error (harness-log "%s does not compile: %S" name err) nil)))
           (set 'byte-compile-dest-file-function previous-dest)
           (set 'byte-compile-warnings previous-warnings)
+          (set 'native-comp-jit-compilation previous-jit)
+          (set 'byte-compile-log-buffer previous-log)
           (ignore-errors (delete-file temporary)))
         success)))))
 

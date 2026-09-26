@@ -537,5 +537,27 @@ Methods without an entry use `harness-ui-chat-test--stub-method'."
       (harness-ui-stop)
       (delete-directory directory t))))
 
+
+(ert-deftest harness-ui-chat-keeps-chronological-order ()
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (dolist (entry (list (cons "user_message_chunk" "first message")
+                           (cons "agent_message_chunk" "second message")
+                           (cons "agent_message_chunk" "third message")))
+        (harness-ui-chat-test--apply
+         buffer
+         (list :sessionUpdate (car entry) :messageId (car entry) :final t
+               :content (list :type "text" :text (cdr entry)))))
+      (let* ((text (harness-ui-chat-test--text buffer))
+             (first (string-match "first message" text))
+             (second (string-match "second message" text))
+             (third (string-match "third message" text)))
+        (should first)
+        (should second)
+        (should third)
+        (should (< first second))
+        (should (< second third)))
+      (kill-buffer buffer))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
