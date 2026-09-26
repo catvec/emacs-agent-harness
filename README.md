@@ -90,6 +90,14 @@ all with `s`), as a tree with forks and subagents under their parent.
 `f` forks, `r` renames, `d` deletes, `RET` opens.  Sessions are scoped to
 their project, resume from disk, and record token usage and cost.
 
+## Web search
+
+`websearch` uses the Brave Search API.  Set `BRAVE_API_KEY` (or customize
+`harness-search-brave-api-key`) to enable it; without a key the tool
+explains what to configure.  Other backends plug in through
+`harness-search-register-provider`, and the tool always uses the first
+registered provider.
+
 ## Completion providers
 
 `harness-provider-openai-instances` configures any number of

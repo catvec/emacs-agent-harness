@@ -347,6 +347,7 @@ session in the same position replaces the buffer there.
 | `harness-perms-jail` | directory jail rules | perms, tools |
 | `harness-agent` | `agent` service | session, provider, tools, perms |
 | `harness-subagents` | `subagent` tool | agent, session, tools |
+| `harness-search` | `websearch` tool | http, tools |
 | `harness-ui` | ACP client + events | acp, inprocess, perms |
 | `harness-ui-chat` | chat buffer | ui |
 | `harness-ui-ask` | approval/question panels | ui |
@@ -357,7 +358,7 @@ session in the same position replaces the buffer there.
 
 `harness.el` loads: acp, inprocess, config, session, provider,
 provider-openai, tools, tools-emacs, perms, perms-jail, agent,
-subagents, ui, and the UI feature modules selected by
+subagents, search, ui, and the UI feature modules selected by
 `harness-ui-modules` (all by default).  A user can replace any of them by
 customizing the list.
 
