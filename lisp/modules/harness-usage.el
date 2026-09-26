@@ -128,18 +128,24 @@ Each entry is a plist:
         (plist-get cost :amount)
       0.0)))
 
+(defun harness-usage--scan-start (&optional now)
+  "Earliest epoch period reports read transcripts from."
+  (- (or now (float-time)) (* 86400 harness-usage-transcript-scan-days)))
+
 (defun harness-usage--scanned-entries (&optional since)
   "Usage entries since SINCE (default: scan window)."
-  (let ((since (or since
-                   (- (float-time) (* 86400 harness-usage-transcript-scan-days)))))
+  (let ((since (or since (harness-usage--scan-start))))
     (if (harness-service-available-p "session" 'usage-entries)
         (append (harness-service-call "session" 'usage-entries :since since) nil)
       nil)))
 
 (defun harness-usage--period-spend (period &optional entries project session-id)
   "Sum cost of ENTRIES inside PERIOD.
-Limit to PROJECT and/or SESSION-ID when given."
-  (let ((start (harness-usage-period-start period))
+Limit to PROJECT and/or SESSION-ID when given.  Like the rest of the
+report, this never looks further back than
+`harness-usage-transcript-scan-days'."
+  (let ((start (max (harness-usage-period-start period)
+                    (harness-usage--scan-start)))
         (amount 0.0))
     (dolist (entry (or entries (harness-usage--scanned-entries start)))
       (let ((time (harness-usage--entry-time entry)))

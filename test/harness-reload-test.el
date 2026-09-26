@@ -211,6 +211,11 @@
                    (buffer-string))))
     (should (string-match-p "ok" output))))
 
+(ert-deftest harness-entry-point-loads-the-worktree-service ()
+  ;; `harness-ui-worktrees' talks to the worktree service; the default
+  ;; bundle must load it or the manager opens empty.
+  (should (memq 'harness-worktree harness-modules)))
+
 (ert-deftest harness-reload-load-order-is-dependency-first ()
   (let ((order (harness-module-load-order
                 '(harness-agent harness-tools harness-core))))

@@ -165,6 +165,20 @@
         (should (equal (plist-get captured :entry) entry))
         (should (plist-get captured :final))))))
 
+(ert-deftest harness-session-ensure-entry-keeps-plists-well-formed ()
+  ;; Stripping :id/:time must remove their values too: a plist with a
+  ;; stranded value cannot be serialized and would break session saves.
+  (let* ((entry (harness-session-ensure-entry
+                 (list :sessionUpdate "_harness/system_hint"
+                       :id "auto-name"
+                       :content (list :type "text" :text "Naming this conversation…")))))
+    (should (equal "auto-name" (plist-get entry :id)))
+    (should (zerop (% (length entry) 2)))
+    (should (equal "auto-name"
+                   (plist-get (plist-get (plist-get entry :_meta) :harness) :entryId)))
+    (should (equal "Naming this conversation…"
+                   (plist-get (plist-get entry :content) :text)))))
+
 (ert-deftest harness-session-streaming-coalesces-into-one-entry ()
   (harness-session-test--setup)
   (harness-session-test--with-storage

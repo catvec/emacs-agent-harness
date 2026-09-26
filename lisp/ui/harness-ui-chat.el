@@ -58,8 +58,13 @@ both light and dark themes without hardcoding a colour."
   :group 'harness-ui-chat)
 
 (defface harness-ui-agent-face
-  '((t :inherit default))
-  "Face for agent messages."
+  '((t :extend t))
+  "Face for agent messages.
+This deliberately does not inherit `default': inheriting it would put
+the frame's weight, height and family ahead of the markdown faces the
+transcript layers under the message (bold, heading sizes, fixed-pitch
+code).  Users can still set attributes here to restyle the whole
+message."
   :group 'harness-ui-chat)
 
 (defface harness-ui-thinking-face
@@ -320,6 +325,9 @@ the original text stays searchable."
   (or (plist-get update :messageId)
       (plist-get update :toolCallId)
       (plist-get update :id)
+      ;; Transcript entries carry their stable id in _meta after the ACP
+      ;; projection strips the reserved root-level fields.
+      (plist-get (plist-get (plist-get update :_meta) :harness) :entryId)
       (harness-uuid)))
 
 (defun harness-ui-chat--kind (update)
@@ -762,6 +770,13 @@ region."
                     :status (plist-get update :status)
                     :collapsed (not (member kind '("agent_message_chunk"))))))
           (harness-ui-chat--insert-record new)))
+       ;; A hint with an id and no text retires that hint: it is how
+       ;; transient work (auto-naming) stops advertising itself.
+       ((and (equal kind "_harness/system_hint")
+             (string-empty-p (or text "")))
+        (when record
+          (setq harness-ui-chat--records (delq record harness-ui-chat--records))
+          (setq harness-ui-chat--needs-rebuild t)))
        (t
         (if record
             (progn
@@ -867,8 +882,8 @@ region."
     (if windows
         (dolist (window windows)
           (with-selected-window window
-            (goto-char (harness-ui-chat--compose-point))))
-      (goto-char (harness-ui-chat--compose-point)))))
+            (goto-char (harness-ui-chat--compose-end-point))))
+      (goto-char (harness-ui-chat--compose-end-point)))))
 
 (defun harness-ui-chat--compose-point ()
   "Return the start of the composer body."
@@ -1499,22 +1514,20 @@ returns to the main session untouched."
 (defun harness-ui-chat-back-to-end ()
   "Jump back to the composer."
   (interactive)
-  (goto-char (point-max)))
+  (goto-char (harness-ui-chat--compose-end-point)))
 
 (defun harness-ui-chat-ret ()
   "RET in the composer sends the message."
   (interactive)
-  (if (>= (point) (harness-ui-chat--compose-point))
-      (harness-ui-chat-send)
-    (save-excursion (goto-char (point-max)) (harness-ui-chat-send))))
+  ;; `harness-ui-chat-send' reads the composer itself, wherever point is.
+  (harness-ui-chat-send))
 
 (defun harness-ui-chat-newline ()
   "Insert a newline in the composer."
   (interactive)
-  (if (>= (point) (harness-ui-chat--compose-point))
-      (insert "\n")
-    (goto-char (point-max))
-    (insert "\n")))
+  (unless (>= (point) (harness-ui-chat--compose-point))
+    (goto-char (harness-ui-chat--compose-end-point)))
+  (insert "\n"))
 
 ;;; @file references
 
@@ -1540,9 +1553,30 @@ returns to the main session untouched."
             (or files
                 (ignore-errors (directory-files-recursively cwd "" ))))))
 
+(defun harness-ui-chat--self-insert (arg)
+  "Insert typed text in the composer, wherever point is.
+The transcript is read-only, so a plain `self-insert-command' would
+ring the bell there."
+  (interactive "p")
+  (unless (>= (point) (harness-ui-chat--compose-point))
+    (goto-char (harness-ui-chat--compose-end-point)))
+  (self-insert-command arg))
+
+(defun harness-ui-chat-quit ()
+  "Bury the chat, or insert a q while composing."
+  (interactive)
+  (if (>= (point) (harness-ui-chat--compose-point))
+      (harness-ui-chat--self-insert 1)
+    (bury-buffer)))
+
 (defvar harness-ui-chat-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    ;; Give the map an (empty) parent so `define-derived-mode' does not
+    ;; attach `special-mode-map': its bindings (`q', `h', `SPC', the
+    ;; digits, ...) would shadow typing in the composer, and its
+    ;; `self-insert-command' remap disables it entirely.
+    (set-keymap-parent map (make-sparse-keymap))
+    (define-key map [remap self-insert-command] #'harness-ui-chat--self-insert)
     (define-key map (kbd "RET") #'harness-ui-chat-ret)
     (define-key map (kbd "S-<return>") #'harness-ui-chat-newline)
     (define-key map (kbd "C-j") #'harness-ui-chat-newline)
@@ -1559,7 +1593,7 @@ returns to the main session untouched."
     (define-key map (kbd "C-c C-v") #'harness-ui-chat-paste-image)
     (define-key map (kbd "C-c C-e") #'harness-ui-chat-back-to-end)
     (define-key map (kbd "C-c C-a") #'harness-ui-chat-attach-file)
-    (define-key map (kbd "q") #'bury-buffer)
+    (define-key map (kbd "q") #'harness-ui-chat-quit)
     map)
   "Keymap for `harness-ui-chat-mode'.")
 
@@ -1581,6 +1615,11 @@ returns to the main session untouched."
 
 ;;; Display presets
 
+(defun harness-ui-chat--compose-end-point ()
+  "Return the end of the composer body, ready for typing."
+  (or (harness-ui-chat--safe-marker-position harness-ui-chat--compose-end)
+      (harness-ui-chat--compose-point)))
+
 (defun harness-ui-chat--display-right (buffer)
   "Show BUFFER in a right side window."
   (let ((window (display-buffer
@@ -1589,7 +1628,7 @@ returns to the main session untouched."
                    (side . right)
                    (window-width . 0.5)))))
     (select-window window)
-    (with-current-buffer buffer (goto-char (point-max)))))
+    (with-current-buffer buffer (goto-char (harness-ui-chat--compose-end-point)))))
 
 (defun harness-ui-chat--display-bottom (buffer)
   "Show BUFFER in a bottom side window."
@@ -1599,12 +1638,12 @@ returns to the main session untouched."
                    (side . bottom)
                    (window-height . 0.4)))))
     (select-window window)
-    (with-current-buffer buffer (goto-char (point-max)))))
+    (with-current-buffer buffer (goto-char (harness-ui-chat--compose-end-point)))))
 
 (defun harness-ui-chat--display-full (buffer)
   "Show BUFFER in the selected window."
   (switch-to-buffer buffer)
-  (goto-char (point-max)))
+  (goto-char (harness-ui-chat--compose-end-point)))
 
 ;;; Event wiring
 
@@ -1643,7 +1682,7 @@ returns to the main session untouched."
       (when-let* ((window (get-buffer-window buffer t)))
         (with-selected-window window
           (when harness-ui-chat-auto-scroll
-            (goto-char (point-max))))))))
+            (harness-ui-chat--scroll-to-end)))))))
 
 (defun harness-ui-chat--on-status (payload)
   "Handle `harness-ui-session-status' PAYLOAD."

@@ -83,12 +83,14 @@
 The id and time are mirrored in _meta so the ACP projection can strip the
 root-level fields (which the protocol reserves) without losing them."
   (let ((id (or (plist-get entry :id) (harness-uuid)))
-        (time (or (plist-get entry :time) (harness-iso-time))))
+        (time (or (plist-get entry :time) (harness-iso-time)))
+        (fields nil))
+    (cl-loop for (key value) on entry by #'cddr
+             unless (memq key '(:id :time :_meta))
+             do (setq fields (append fields (list key value))))
     (append (list :id id :time time
                   :_meta (list :harness (list :entryId id :time time)))
-            (seq-remove (lambda (key) (memq key '(:id :time :_meta)))
-                        (cl-loop for (key value) on entry by #'cddr
-                                 append (list key value))))))
+            fields)))
 
 (defun harness-session-thinking-string (session)
   "Return SESSION's thinking level as a JSON-safe value."
@@ -616,14 +618,18 @@ be read from disk."
   "Append INCOMING content blocks to EXISTING, both as block lists."
   (vconcat (harness-session--blocks existing) (harness-session--blocks incoming)))
 
-(defun harness-session-system-hint (session text &optional level)
+(defun harness-session-system-hint (session text &optional level id)
   "Append a harness system hint TEXT to SESSION.
-LEVEL is \"info\", \"warning\" or \"error\"."
+LEVEL is \"info\", \"warning\" or \"error\".  With ID, a later hint
+with the same ID replaces this one; an empty TEXT retires it (the UI
+uses this for hints that track transient work, like auto-naming)."
   (harness-session-append
    session
-   (list :sessionUpdate "_harness/system_hint"
-         :content (list :type "text" :text text)
-         :level (or level "info"))))
+   (harness-plist-omit-nil
+    (list :sessionUpdate "_harness/system_hint"
+          :content (list :type "text" :text text)
+          :level (or level "info")
+          :id id))))
 
 ;;; Status and configuration
 
@@ -1055,7 +1061,8 @@ transcript is still being read from disk."
   (harness-session-with-loaded-entries
    (harness-session--get-service (plist-get args :session-id))
    (lambda (session)
-     (harness-session-system-hint session (plist-get args :text) (plist-get args :level)))))
+     (harness-session-system-hint session (plist-get args :text) (plist-get args :level)
+                                  (plist-get args :id)))))
 
 (defun harness-session-service-set-status (&rest args)
   "Service: set a session's status."

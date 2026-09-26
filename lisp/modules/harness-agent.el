@@ -137,10 +137,12 @@ answer string or nil.")
      ((null data) (format "%S" (car error)))
      (t (format "%S" error)))))
 
-(defun harness-agent--system-hint (session-id text &optional level)
-  "Append a harness hint to SESSION-ID."
+(defun harness-agent--system-hint (session-id text &optional level id)
+  "Append a harness hint to SESSION-ID.
+With ID, the hint replaces an earlier one with the same ID; empty TEXT
+retires it."
   (harness-service-call "session" 'system-hint
-                        :session-id session-id :text text :level level))
+                        :session-id session-id :text text :level level :id id))
 
 (defun harness-agent--allowed-p (decision)
   "Return non-nil when DECISION allows a call."
@@ -827,9 +829,8 @@ prompt cache usually covers it."
       (when (null (plist-get info :title))
         (let ((model (or (plist-get info :model) harness-agent-default-model)))
           (when model
-            (harness-service-call "session" 'system-hint
-                                  :session-id session-id
-                                  :text "Naming this conversation…")
+            (harness-agent--system-hint session-id "Naming this conversation…"
+                                        nil "auto-name")
             (harness-deferred-then
              (harness-service-call
               "provider" 'complete
@@ -841,12 +842,14 @@ prompt cache usually covers it."
              (lambda (result)
                (let ((title (harness-agent--clean-title (plist-get result :text))))
                  ;; The rename triggers a session info update, which the UI
-                 ;; shows in its header; no extra transcript line.
+                 ;; shows in its header; retire the transient hint.
                  (when title
                    (harness-service-call "session" 'rename
-                                         :session-id session-id :title title))))
+                                         :session-id session-id :title title))
+                 (harness-agent--system-hint session-id "" nil "auto-name")))
              (lambda (error)
-               (harness-log "auto-naming failed: %S" error)))))))))
+               (harness-log "auto-naming failed: %S" error)
+               (harness-agent--system-hint session-id "" nil "auto-name")))))))))
 
 (defun harness-agent--clean-title (text)
   "Turn a model reply TEXT into a usable session title."

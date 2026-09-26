@@ -26,7 +26,7 @@ ec() { emacsclient -s "$SOCK" "$@"; }
 ec_eval() {
   emacsclient -s "$SOCK" \
     --eval "(progn (load \"$REPO/scripts/harness-dev.el\" nil nil 'nomessage) nil)" \
-    --eval "$1"
+    --eval "(progn (harness-dev-frame) $1)"
 }
 
 start() {
@@ -44,11 +44,11 @@ start() {
            >"$DEV_DIR/daemon.out" 2>&1 &
   for _ in $(seq 1 100); do
     if ec --eval 't' >/dev/null 2>&1; then
-      # Open a real GUI frame through emacsclient so the display is the
-      # client's, then make sure it is focused.
-      emacsclient -s "$SOCK" -c -n >/dev/null 2>&1 || true
-      sleep 0.3
-      ec --eval '(harness-dev-focus)' >/dev/null 2>&1 || true
+      # Create the frame inside the daemon: it is mapped without focus
+      # and lowered, so it never steals the user's focus or sits in
+      # front of their work.  Use `M-x
+      # harness-dev-focus' (interactive) to bring it up deliberately.
+      ec_eval '(harness-dev-frame)' >/dev/null 2>&1 || true
       echo "ready (sock: $SOCK)"
       return 0
     fi
@@ -82,22 +82,11 @@ keys() {
 }
 
 shot() {
+  # Export the frame from Emacs itself: no window capture, no focus
+  # change, no desktop portal.
   local out="${1:-$DEV_DIR/shot.png}"
   mkdir -p "$(dirname "$out")"
-  ec_eval '(harness-dev-focus)' >/dev/null 2>&1 || true
-  sleep 0.3
-  if command -v spectacle >/dev/null 2>&1; then
-    # Wayland/KDE: scrot sees only black under Xwayland, the portal does not.
-    spectacle -b -n -a -o "$out" >/dev/null 2>&1
-  else
-    local wid
-    wid="$(ec_eval '(harness-dev-window-id)' 2>/dev/null | tail -n1 | tr -d '"' || true)"
-    if [[ "$wid" =~ ^0x[0-9a-fA-F]+$ ]]; then
-      scrot -z -o -w "$wid" "$out"
-    else
-      scrot -z -o -u "$out"
-    fi
-  fi
+  ec_eval "(harness-dev-export-frame \"$out\")" >/dev/null
   echo "$out"
 }
 

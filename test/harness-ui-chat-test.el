@@ -195,6 +195,27 @@
         (should-not (string-match-p "file body" text)))
       (kill-buffer buffer))))
 
+(ert-deftest harness-ui-chat-composer-is-typeable ()
+  ;; `special-mode-map' remaps self-insert to undefined and binds `q',
+  ;; `SPC' and friends; the composer must not inherit those.
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (with-current-buffer buffer
+        (should (eq (key-binding (kbd "i")) #'harness-ui-chat--self-insert))
+        (should (eq (key-binding (kbd "SPC")) #'harness-ui-chat--self-insert))
+        (should (eq (key-binding (kbd "q")) #'harness-ui-chat-quit))
+        (should (eq (command-remapping #'self-insert-command)
+                    #'harness-ui-chat--self-insert)))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-open-puts-point-in-the-composer ()
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (with-current-buffer buffer
+        (harness-ui-chat--display-full buffer)
+        (should (= (point) (harness-ui-chat--compose-end-point))))
+      (kill-buffer buffer))))
+
 (ert-deftest harness-ui-chat-renders-hints-and-errors ()
   (harness-ui-chat-test--with-stubs
     (let ((buffer (harness-ui-chat-test--buffer)))
@@ -204,6 +225,25 @@
                                          :content (list :type "text" :text "model changed")
                                          :level "info"))
       (should (string-match-p "model changed" (harness-ui-chat-test--text buffer)))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-retires-a-transient-hint ()
+  ;; A hint with an id is replaced when the same id arrives with no text;
+  ;; the ACP projection carries the id in _meta.
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer))
+          (hint (lambda (text)
+                  (list :sessionUpdate "_harness/system_hint"
+                        :final t
+                        :_meta (list :harness (list :entryId "auto-name"))
+                        :content (list :type "text" :text text)
+                        :level "info"))))
+      (harness-ui-chat-test--apply buffer (funcall hint "Naming this conversation…"))
+      (should (string-match-p "Naming this conversation"
+                              (harness-ui-chat-test--text buffer)))
+      (harness-ui-chat-test--apply buffer (funcall hint ""))
+      (should-not (string-match-p "Naming this conversation"
+                                  (harness-ui-chat-test--text buffer)))
       (kill-buffer buffer))))
 
 (ert-deftest harness-ui-chat-renders-plans-with-markdown ()

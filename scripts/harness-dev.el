@@ -61,17 +61,45 @@
       (message "harness-dev: no harness.el in %s yet" harness-dev--repo))))
 
 ;;; Frames and screenshots
+;;
+;; Automation must never steal the user's focus.  The harness frame is
+;; created with `no-focus-on-map' and `skip-taskbar' and lowered; the
+;; helpers below select it only inside Emacs, so captures and synthetic
+;; keys work while the user keeps typing in their own window.
+;; `harness-dev-focus' is the explicit, human-facing way to raise it.
 
 (defun harness-dev-frame ()
-  "Return a GUI frame for the harness, creating one if needed."
-  (or (seq-find (lambda (f) (memq (framep f) '(x pgtk)))
-                (frame-list))
-      (make-frame '((name . "harness")
-                    (width . 180)
-                    (height . 50)))))
+  "Return a harness GUI frame, creating one if needed.
+A new frame does not take focus when it appears and is lowered, so
+automation never interrupts the user or sits in front of their work.
+The frame is selected inside Emacs (not focused), so server evals and
+asynchronous callbacks display buffers in it."
+  (let ((frame (or (seq-find (lambda (frame) (memq (framep frame) '(x pgtk)))
+                             (frame-list))
+                   ;; A daemon has no graphical selected frame, so
+                   ;; `make-frame' would try the terminal it was started
+                   ;; from; name the display instead.
+                   (let* ((display (if (featurep 'pgtk)
+                                       (getenv "WAYLAND_DISPLAY")
+                                     (getenv "DISPLAY")))
+                          (parameters '((name . "harness")
+                                        (width . 180)
+                                        (height . 50)
+                                        (no-focus-on-map . t)
+                                        (skip-taskbar . t)))
+                          (frame (if display
+                                     (make-frame-on-display display parameters)
+                                   (make-frame parameters))))
+                     (lower-frame frame)
+                     frame))))
+    (unless (eq frame (selected-frame))
+      (select-frame frame))
+    frame))
 
 (defun harness-dev-focus ()
-  "Focus the harness GUI frame."
+  "Raise and focus the harness GUI frame.
+This is for humans; automation uses `harness-dev-frame', which never
+steals focus."
   (interactive)
   (let ((frame (harness-dev-frame)))
     (x-focus-frame frame)
@@ -81,29 +109,41 @@
 (defun harness-dev-window-id ()
   "Return the X window id of the harness GUI frame."
   (interactive)
-  (let* ((frame (harness-dev-focus))
+  (let* ((frame (harness-dev-frame))
          (id (frame-parameter frame 'window-id)))
     (format "0x%x" (if (integerp id) id (string-to-number id)))))
 
+(defun harness-dev--kbd (keys)
+  "Turn KEYS into a key sequence.
+A single character is taken literally (so " " is the space key, which
+`kbd' would drop); anything longer is read like `kbd'."
+  (if (= (length keys) 1)
+      (string-to-vector keys)
+    (kbd keys)))
+
 (defun harness-dev-keys (keys &optional buffer)
   "Send KEYS (a `kbd' string) to the harness frame.
-With BUFFER, select that buffer in the frame first."
+With BUFFER, select that buffer in the frame first.  Keyboard macros
+run inside Emacs, so the frame is not focused and the user's typing is
+not interrupted."
   (interactive "sKeys: ")
-  (let* ((frame (harness-dev-focus))
+  (let* ((frame (harness-dev-frame))
          (window (frame-selected-window frame)))
-    (with-selected-window window
-      (when buffer
-        (set-window-buffer window (get-buffer buffer)))
-      (execute-kbd-macro (kbd keys) 1))))
+    (with-selected-frame frame
+      (with-selected-window window
+        (when buffer
+          (set-window-buffer window (get-buffer buffer)))
+        (execute-kbd-macro (harness-dev--kbd keys) 1)))))
 
 (defun harness-dev-click (pos)
   "Click `mouse-1' at POS.
 POS is a position list as returned by `event-start', e.g. from
-`(posn-at-point)'."
+`(posn-at-point)'.  No pointer motion and no focus change."
   (interactive (list (posn-at-point)))
-  (let ((frame (harness-dev-focus)))
-    (with-selected-window (frame-selected-window frame)
-      (mouse-set-point (event-start (list 'mouse-1 pos))))))
+  (let ((frame (harness-dev-frame)))
+    (with-selected-frame frame
+      (with-selected-window (frame-selected-window frame)
+        (mouse-set-point (event-start (list 'mouse-1 pos)))))))
 
 ;;; Error capture
 
@@ -140,6 +180,79 @@ blocking debugger, so the daemon keeps serving requests."
     (buffer-substring-no-properties
      (max (point-min) (- (point-max) 4000))
      (point-max))))
+
+;;; Recording
+
+(defun harness-dev-export-frame (file)
+  "Write the harness frame as a PNG to FILE and return it.
+The echo area is cleared first, so captures do not carry stale
+messages.  The frame is not focused or raised."
+  (interactive "FWrite frame to: ")
+  (let ((frame (harness-dev-frame)))
+    (with-selected-frame frame
+      (message " ")
+      (let ((data (x-export-frames frame 'png)))
+        (unless (stringp data)
+          (error "harness-dev: this frame cannot be exported (no GUI?)"))
+        (with-temp-file file
+          (set-buffer-multibyte nil)
+          (insert data))
+        file))))
+
+(defvar harness-dev--recording nil
+  "Active recording state, or nil.
+A plist with :frame, :directory, :interval, :index and :timer.")
+
+(defun harness-dev--record-frame (recording)
+  "Write one frame for RECORDING and schedule the next."
+  (let ((file (format "%s/frame-%05d.png"
+                      (plist-get recording :directory)
+                      (plist-get recording :index)))
+        (frame (plist-get recording :frame))
+        (data nil))
+    (cl-incf (plist-get recording :index))
+    ;; `x-export-frames' returns what was last drawn; without a forced
+    ;; redisplay every frame would be the first one.
+    (with-selected-frame frame
+      (redisplay t)
+      (setq data (ignore-errors (x-export-frames frame 'png))))
+    (when (and data (stringp data))
+      (with-temp-file file
+        (set-buffer-multibyte nil)
+        (insert data)))
+    (when (eq recording harness-dev--recording)
+      (setf (plist-get recording :timer)
+            (run-at-time (plist-get recording :interval) nil
+                         #'harness-dev--record-frame recording)))))
+
+(defun harness-dev-record-start (directory &optional interval)
+  "Record the harness frame into PNG files in DIRECTORY.
+INTERVAL is the delay between frames in seconds (default 0.05, 20 fps).
+Stop with `harness-dev-record-stop' and assemble the frames with e.g.
+ffmpeg -framerate 20 -i frame-%05d.png -c:v libx264 demo.mp4."
+  (interactive "DRecord into directory: ")
+  (harness-dev-record-stop)
+  (make-directory directory t)
+  (let ((frame (harness-dev-frame)))
+    (with-selected-frame frame (message " "))
+    (setq harness-dev--recording
+          (list :frame frame
+                :directory (expand-file-name directory)
+                :interval (or interval 0.05)
+                :index 0
+                :timer nil)))
+  (harness-dev--record-frame harness-dev--recording)
+  (plist-get harness-dev--recording :index))
+
+(defun harness-dev-record-stop ()
+  "Stop the recording started by `harness-dev-record-start'.
+Returns the number of frames written."
+  (interactive)
+  (let ((recording harness-dev--recording))
+    (setq harness-dev--recording nil)
+    (when (and recording (plist-get recording :timer))
+      (cancel-timer (plist-get recording :timer)))
+    (or (and recording (plist-get recording :index)) 0)))
 
 (provide 'harness-dev)
 ;;; harness-dev.el ends here

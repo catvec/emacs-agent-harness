@@ -75,6 +75,7 @@
     harness-search
     harness-plan
     harness-merge
+    harness-worktree
     harness-ui
     harness-ui-chat
     harness-ui-ask

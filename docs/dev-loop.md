@@ -10,6 +10,7 @@ inspect and screenshot a live Emacs.
 |---|---|
 | `scripts/dev.sh` | run/drive a GUI Emacs daemon named `harness-dev` |
 | `scripts/demo.sh` | run a complete scripted conversation and screenshot it |
+| `scripts/media.sh` | regenerate the README screenshots and demo video |
 | `scripts/harness-gui-demo.el` | the scripted provider used by `demo.sh` |
 | `scripts/lint.sh` | byte-compile every `.el` out of tree |
 | `scripts/test.sh` | run every ERT suite, one clean Emacs per file |
@@ -30,10 +31,16 @@ Details that matter:
 - The daemon runs `emacs -Q` (no user init) and loads only
   `harness-dev.el`, so results are reproducible.  `harness-dev-load`
   (re)loads the checkout.
+- The dev frame is mapped without focus (`no-focus-on-map`) and lowered,
+  so automation never steals the user's focus or sits in front of their
+  work.  `M-x harness-dev-focus` raises it deliberately.
 - `harness-dev-keys` runs a real `kbd` macro in the frame's selected
-  window, so keybindings are exercised for real, not simulated.
-- Screenshots use `spectacle -a` on Wayland; under Xwayland `scrot` sees
-  only black.  (`scripts/dev.sh shot` picks the right one.)
+  window, so keybindings are exercised for real, not simulated; it does
+  not need (or take) window focus.
+- Screenshots and recordings export frames from Emacs itself with
+  `x-export-frames` (`scripts/dev.sh shot`, `harness-dev-export-frame`,
+  `harness-dev-record-start`).  No desktop portal or window grab is
+  involved, and captures work with the frame behind other windows.
 - The daemon loads `harness-auto-reload-mode`, so saving a source file
   reloads the harness in place.  Reloading is safe: sources are compiled
   first and a failed load restores the previous version.

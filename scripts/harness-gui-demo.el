@@ -138,7 +138,9 @@
                                  (list :amount 0.0123 :currency "USD"))))))
 
 (defun harness-gui-demo--new-session (mode prompt)
-  "Create a session in MODE, open it and send PROMPT."
+  "Create a session in MODE, open it and send PROMPT.
+With PROMPT nil, open the chat but leave the composer empty for the
+caller (used by demos that type the prompt for real)."
   (harness-agent-refresh-models)
   (harness-deferred-then
    (harness-ui-request "session/new" (list :cwd default-directory :mcpServers []))
@@ -152,10 +154,20 @@
           (when mode
             (harness-service-call "agent" 'set-mode :session-id session-id :mode-id mode))
           (harness-ui-chat-open session-id 'full)
-          (with-current-buffer (gethash session-id harness-ui-chat--buffers)
-            (goto-char (harness-ui-chat--compose-point))
-            (insert prompt)
-            (harness-ui-chat-send))))))))
+          (when prompt
+            (with-current-buffer (gethash session-id harness-ui-chat--buffers)
+              (goto-char (harness-ui-chat--compose-point))
+              (insert prompt)
+              (harness-ui-chat-send)))))))))
+
+(defun harness-gui-demo-prepare ()
+  "Install the scripted provider and open an empty demo chat.
+The caller types the prompt; used by demos and screen recordings."
+  (interactive)
+  (setq harness-gui-demo--turn 0
+        harness-gui-demo--script 'summary)
+  (harness-gui-demo--install-provider)
+  (harness-gui-demo--new-session nil nil))
 
 (defun harness-gui-demo-install ()
   "Install the scripted provider and create a demo session."
