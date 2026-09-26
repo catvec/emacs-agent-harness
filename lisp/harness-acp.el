@@ -360,6 +360,7 @@ Returns CONNECTION."
     ("_harness/session/rename" . harness-acp--method-session-rename)
     ("_harness/session/entries" . harness-acp--method-session-entries)
     ("_harness/agent/configuration" . harness-acp--method-agent-configuration)
+    ("_harness/usage/summary" . harness-acp--method-usage-summary)
     ("_harness/skills/list" . harness-acp--method-skills-list)
     ("_harness/skills/load" . harness-acp--method-skills-load)
     ("_harness/ping" . harness-acp--method-ping)
@@ -569,6 +570,18 @@ Returns the raw transcript entries (with ids and times)."
      ((harness-service-available-p "session" 'configuration)
       (harness-service-call "session" 'configuration :session-id session-id))
      (t (list :configOptions [])))))
+
+(defun harness-acp--method-usage-summary (_connection _params)
+  "Handle the _harness/usage/summary extension."
+  (if (harness-service-available-p "usage" 'summary)
+      (harness-service-call "usage" 'summary)
+    (list :totals (list :sessions 0 :input 0 :output 0
+                        :cost (list :amount 0 :currency "USD"))
+          :projects []
+          :models []
+          :sessions []
+          :periods []
+          :budgets [])))
 
 (defun harness-acp--method-skills-list (_connection params)
   "Handle the _harness/skills/list extension with PARAMS."

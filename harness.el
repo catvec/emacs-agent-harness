@@ -41,6 +41,7 @@
     harness-perms
     harness-perms-jail
     harness-agent
+    harness-usage
     harness-subagents
     harness-search
     harness-plan
@@ -50,7 +51,8 @@
     harness-ui-sessions
     harness-ui-config
     harness-ui-notifier
-    harness-ui-tree)
+    harness-ui-tree
+    harness-ui-usage)
   "Modules a normal `harness-start' loads, in addition to dependencies."
   :type '(repeat symbol))
 

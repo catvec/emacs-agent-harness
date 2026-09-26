@@ -88,8 +88,18 @@ both light and dark themes without hardcoding a colour."
   :group 'harness-ui-chat)
 
 (defface harness-ui-header-face
-  '((t :inherit bold :height 1.05))
+  '((t :inherit bold))
   "Face for markdown headings."
+  :group 'harness-ui-chat)
+
+(defface harness-ui-h1-face
+  '((t :inherit (harness-ui-header-face) :height 1.15))
+  "Face for level-one markdown headings."
+  :group 'harness-ui-chat)
+
+(defface harness-ui-h2-face
+  '((t :inherit (harness-ui-header-face) :height 1.08))
+  "Face for level-two markdown headings."
   :group 'harness-ui-chat)
 
 (defface harness-ui-compose-face
@@ -215,13 +225,17 @@ properties so headings, emphasis, code and bullets read naturally while
 the original text stays searchable."
   (let ((inhibit-read-only t))
     (save-excursion
-      ;; Headings: hide the hashes, style the whole line.
+      ;; Headings: hide the hashes and size the line by level.
       (goto-char start)
       (while (re-search-forward "^\\(#\\{1,6\\}\\) \\(.*\\)$" end t)
-        (let ((hash-start (match-beginning 1))
-              (hash-end (match-end 1)))
-          (add-face-text-property (line-beginning-position) (line-end-position)
-                                  'harness-ui-header-face)
+        (let* ((hash-start (match-beginning 1))
+               (hash-end (match-end 1))
+               (level (length (match-string 1)))
+               (face (pcase level
+                       (1 'harness-ui-h1-face)
+                       (2 'harness-ui-h2-face)
+                       (_ 'harness-ui-header-face))))
+          (add-face-text-property (line-beginning-position) (line-end-position) face)
           (add-text-properties hash-start (1+ hash-end) '(display ""))))
       ;; Bullets.
       (goto-char start)
@@ -640,6 +654,7 @@ region."
                 (propertize (concat "  Type a message and press RET\n\n"
                                     "  @ file reference      C-c C-s  sessions\n"
                                     "  # skill               C-c C-m  model\n"
+                                    "  C-c C-u usage         C-c C-t  thinking\n"
                                     "  C-c C-q queue         C-c C-p  permissions\n"
                                     "  C-c C-k cancel        C-c C-t  thinking\n")
                             'face 'shadow))
@@ -1290,6 +1305,7 @@ TEXT defaults to the composer's current contents."
     (define-key map (kbd "C-c C-m") #'harness-ui-switch-model)
     (define-key map (kbd "C-c C-p") #'harness-ui-set-permission-mode)
     (define-key map (kbd "C-c C-t") #'harness-ui-set-thinking)
+    (define-key map (kbd "C-c C-u") #'harness-ui-usage)
     (define-key map (kbd "C-c C-e") #'harness-ui-chat-back-to-end)
     (define-key map (kbd "C-c C-a") #'harness-ui-chat-attach-file)
     (define-key map (kbd "q") #'bury-buffer)

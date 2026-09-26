@@ -860,6 +860,51 @@ ARGS: :entry-id (fork point, defaults to the whole transcript), :title,
           (seq-filter (lambda (info) (equal (plist-get info :parentId) id))
                       (harness-session--all-infos))))
 
+(defun harness-session-usage-entries (&optional since)
+  "Return usage entries of sessions updated after SINCE (an epoch float).
+Returns a vector of plists with :sessionId, :projectRoot, :model, :time,
+:usage and :cost.  Transcripts of sessions updated before SINCE are not
+read, which keeps period reports cheap."
+  (let ((entries nil))
+    (dolist (info (harness-session--all-infos))
+      (let ((updated (or (plist-get info :updatedEpoch) 0)))
+        (when (or (null since) (>= updated since))
+          (let* ((session-id (plist-get info :sessionId))
+                 (directory (expand-file-name
+                             session-id
+                             (expand-file-name
+                              (harness-session--project-id
+                               (or (plist-get info :projectRoot) default-directory))
+                              harness-session-storage-directory)))
+                 (file (expand-file-name "transcript.jsonl" directory)))
+            (when (file-readable-p file)
+              (with-temp-buffer
+                (insert-file-contents file)
+                (goto-char (point-min))
+                (while (not (eobp))
+                  (let ((line (buffer-substring-no-properties
+                               (line-beginning-position) (line-end-position))))
+                    (forward-line 1)
+                    (when (and (not (string-empty-p line))
+                               (string-match-p "usage_update" line))
+                      (let ((entry (ignore-errors
+                                     (json-parse-string line :object-type 'plist))))
+                        (when entry
+                          (push (append (list :sessionId session-id
+                                              :projectRoot (plist-get info :projectRoot))
+                                        (harness-plist-omit-nil
+                                         (list :title (plist-get info :title)
+                                               :model (plist-get entry :model)
+                                               :time (plist-get entry :time)
+                                               :usage (plist-get entry :usage)
+                                               :cost (plist-get entry :cost))))
+                                entries))))))))))))
+    (vconcat (nreverse entries))))
+
+(defun harness-session-all-infos ()
+  "Return info plists for every session known on disk or in memory."
+  (vconcat (harness-session--all-infos)))
+
 ;;; Listing
 
 (defun harness-session--all-infos ()
@@ -1028,6 +1073,14 @@ transcript is still being read from disk."
    (harness-session--get-service (plist-get args :session-id))
    (plist-get args :mode-id)))
 
+(defun harness-session-service-infos (&rest _args)
+  "Service: info plists for every session known on disk or in memory."
+  (harness-session-all-infos))
+
+(defun harness-session-service-usage-entries (&rest args)
+  "Service: usage entries of sessions updated after :since (epoch)."
+  (harness-session-usage-entries (plist-get args :since)))
+
 (defun harness-session-service-add-usage (&rest args)
   "Service: add usage to a session."
   (apply #'harness-session-add-usage
@@ -1131,6 +1184,8 @@ transcript is still being read from disk."
      (stream-chunk . harness-session-service-stream-chunk)
      (stream-end . harness-session-service-stream-end)
      (system-hint . harness-session-service-system-hint)
+     (infos . harness-session-service-infos)
+     (usage-entries . harness-session-service-usage-entries)
      (set-status . harness-session-service-set-status)
      (set-unread . harness-session-service-set-unread)
      (rename . harness-session-service-rename)

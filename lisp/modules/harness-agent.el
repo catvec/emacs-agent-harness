@@ -156,20 +156,30 @@ Signals when the transcript is still being read from disk."
 ;;; Prompting
 
 (defun harness-agent-prompt (&rest args)
-  "Handle a session/prompt.  Returns a deferred of the stop reason."
+  "Handle a session/prompt.  Returns a deferred of the stop reason.
+Hard budgets are checked first: when one is exceeded the turn is refused
+with an explanation instead of spending more."
   (let* ((session-id (plist-get args :session-id))
          (blocks (harness-agent--block-vector (plist-get args :prompt)))
-         (state (harness-agent--state session-id)))
-    (if (harness-agent-state-turn state)
-        ;; Mid-turn: queue the message for the next turn boundary.
+         (state (harness-agent--state session-id))
+         (budget (and (harness-service-available-p "usage" 'budget-check)
+                      (harness-service-call "usage" 'budget-check
+                                            :session-id session-id))))
+    (if (and budget (plist-get budget :blocked))
         (let ((deferred (harness-deferred-new)))
-          (setf (harness-agent-state-queue state)
-                (append (harness-agent-state-queue state)
-                        (list (cons blocks deferred))))
+          (harness-agent--system-hint session-id (plist-get budget :reason) "error")
+          (harness-deferred-resolve deferred "refusal")
           deferred)
-      (harness-deferred-then
-       (harness-service-call "session" 'entries :session-id session-id)
-       (lambda (_entries) (harness-agent--start-turn session-id blocks))))))
+      (if (harness-agent-state-turn state)
+          ;; Mid-turn: queue the message for the next turn boundary.
+          (let ((deferred (harness-deferred-new)))
+            (setf (harness-agent-state-queue state)
+                  (append (harness-agent-state-queue state)
+                          (list (cons blocks deferred))))
+            deferred)
+        (harness-deferred-then
+         (harness-service-call "session" 'entries :session-id session-id)
+         (lambda (_entries) (harness-agent--start-turn session-id blocks)))))))
 
 (defun harness-agent--block-vector (blocks)
   "Normalize BLOCKS into a vector of content blocks."
@@ -635,10 +645,14 @@ Signals when the transcript is still being read from disk."
 ;;; Usage and cost
 
 (defun harness-agent--record-usage (session-id model result)
-  "Record usage and cost of RESULT on MODEL for SESSION-ID."
+  "Record usage and cost of RESULT on MODEL for SESSION-ID.
+The per-call delta is also appended to the transcript as a usage_update
+entry (with a timestamp), which is what per-period budgets and the usage
+overview aggregate; it is never sent to the model."
   (let* ((usage (plist-get result :usage))
          (input (or (plist-get usage :input-tokens) 0))
-         (output (or (plist-get usage :output-tokens) 0)))
+         (output (or (plist-get usage :output-tokens) 0))
+         (cost nil))
     (when (or (> input 0) (> output 0))
       (harness-service-call "session" 'add-usage
                             :session-id session-id
@@ -649,12 +663,24 @@ Signals when the transcript is still being read from disk."
                             :context-used (+ input output)
                             :context-size (harness-agent--context-size model))
       (when (harness-service-available-p "provider" 'price)
-        (let ((cost (harness-service-call "provider" 'price :model model :usage usage)))
-          (when (and (listp cost) (numberp (plist-get cost :amount)))
+        (let ((priced (harness-service-call "provider" 'price :model model :usage usage)))
+          (when (and (listp priced) (numberp (plist-get priced :amount)))
+            (setq cost priced)
             (harness-service-call "session" 'add-cost
                                   :session-id session-id
-                                  :amount (plist-get cost :amount)
-                                  :currency (or (plist-get cost :currency) "USD"))))))))
+                                  :amount (plist-get priced :amount)
+                                  :currency (or (plist-get priced :currency) "USD")))))
+      (harness-service-call
+       "session" 'append
+       :session-id session-id
+       :entry (harness-plist-omit-nil
+               (list :sessionUpdate "usage_update"
+                     :model model
+                     :usage (list :input input
+                                  :output output
+                                  :cache-read (or (plist-get usage :cache-read) 0)
+                                  :cache-write (or (plist-get usage :cache-write) 0))
+                     :cost cost))))))
 
 (defun harness-agent--context-size (model)
   "Return the context window of MODEL from the provider model list."

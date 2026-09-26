@@ -102,6 +102,27 @@ explains what to configure.  Other backends plug in through
 `harness-search-register-provider`, and the tool always uses the first
 registered provider.
 
+## Usage and budgets
+
+`M-x harness-ui-usage` (or `C-c C-u` in a chat) opens a full report:
+total tokens and cost, spend for today/this week/this month, a graphical
+breakdown by project and model, budgets, and a cost-sorted table of every
+session.
+
+Every model call appends a timestamped usage entry to the transcript, so
+period reports are exact.  Configure budgets with
+`harness-usage-budgets`:
+
+```elisp
+(setq harness-usage-budgets
+      '((:scope project :project "/home/me/work/api"
+         :period monthly :amount 25.0 :hard t)))
+```
+
+`:hard t` refuses new turns while the budget is exceeded (the agent
+explains why in a hint); without it the budget is informational and shows
+up in the report with a warning bar.
+
 ## Completion providers
 
 `harness-provider-openai-instances` configures any number of

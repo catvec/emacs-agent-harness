@@ -226,7 +226,7 @@
           (search-forward "# Approach")
           (should (equal (get-text-property (match-beginning 0) 'display) ""))))
       (with-current-buffer buffer
-        (should (harness-ui-chat-test--find-face 'harness-ui-header-face buffer)))
+        (should (harness-ui-chat-test--find-face 'harness-ui-h1-face buffer)))
       (kill-buffer buffer))))
 
 (ert-deftest harness-ui-chat-fontifies-markdown ()
@@ -237,7 +237,7 @@
                                          :messageId "a1" :final t
                                          :content (list :type "text"
                                                         :text "# Title\n\nsome `code` here")))
-      (should (harness-ui-chat-test--find-face 'harness-ui-header-face buffer))
+      (should (harness-ui-chat-test--find-face 'harness-ui-h1-face buffer))
       (should (harness-ui-chat-test--find-face 'harness-ui-code-face buffer))
       (kill-buffer buffer))))
 

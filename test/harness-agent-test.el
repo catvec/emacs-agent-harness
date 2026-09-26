@@ -181,7 +181,10 @@
       (should (equal (harness-agent-test--kinds test-session-id)
                      '("user_message_chunk"
                        "agent_thought_chunk"
-                       "agent_message_chunk")))
+                       "agent_message_chunk"
+                       ;; The per-call usage delta is kept as a timestamped
+                       ;; transcript entry for budgets and the overview.
+                       "usage_update")))
       (should (member "Hello there" (harness-agent-test--texts test-session-id)))
       (should (equal (plist-get (harness-service-call "session" 'info :session-id test-session-id)
                                 :status)
