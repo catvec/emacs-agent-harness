@@ -211,5 +211,29 @@
     (should-not (plist-get result :is-error))
     (should (equal harness-tools-test--called '(:text "svc")))))
 
+(ert-deftest harness-tools-service-keeps-the-callers-context ()
+  ;; The agent executes tools through the service; rebuilding the context
+  ;; there silently dropped the session id that session-aware tools need.
+  (harness-tool-register "context-probe"
+                         :description "Records the context it received."
+                         :schema '(:type "object" :properties (:x (:type "string")))
+                         :kind 'read :read-only t :module 'harness-tools-test
+                         :handler (lambda (_arguments context)
+                                    (let ((deferred (harness-deferred-new)))
+                                      (harness-deferred-resolve
+                                       deferred (harness-tool-context-session-id context))
+                                      deferred)))
+  (unwind-protect
+      (let* ((context (harness-tool-context-create :session-id "session-7" :cwd "/tmp"))
+             (deferred (harness-service-call "tool" 'execute
+                                             :name "context-probe"
+                                             :arguments '(:x "1")
+                                             :context context)))
+        (harness-test-settle deferred 5)
+        (should (equal (harness-tools--text-of
+                        (plist-get (harness-deferred-value deferred) :content))
+                       "session-7")))
+    (harness-tool-unregister "context-probe")))
+
 (provide 'harness-tools-test)
 ;;; harness-tools-test.el ends here

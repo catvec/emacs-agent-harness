@@ -21,6 +21,13 @@
 ;; edits appear to have no effect.
 (setq load-prefer-newer t)
 
+;; Background native compilation of the checkout's files keeps inline
+;; expansions from older definitions alive, which surfaces as confusing
+;; wrong-number-of-arguments errors while reloading.  The dev daemon runs
+;; interpreted source on purpose.
+(setq native-comp-jit-compilation nil
+      native-comp-deferred-compilation nil)
+
 ;;; Code:
 
 (require 'subr-x)
@@ -97,10 +104,23 @@ POS is a position list as returned by `event-start', e.g. from
 
 ;;; Error capture
 
+(defun harness-dev-log-backtrace (&rest _args)
+  "Record the current backtrace without opening the debugger.
+A blocking debugger would freeze the daemon; autonomous work needs the
+error captured and the session alive."
+  (ignore-errors
+    (with-temp-file (expand-file-name "scripts/.dev/last-error.txt" harness-dev--repo)
+      (let ((standard-output (current-buffer)))
+        (backtrace)))))
+
 (defun harness-dev-toggle-debug (&optional on)
-  "Turn `debug-on-error' ON (or off when nil)."
+  "Turn `debug-on-error' ON (or off when nil).
+Errors are logged to scripts/.dev/last-error.txt instead of opening the
+blocking debugger, so the daemon keeps serving requests."
   (interactive "p")
   (setq debug-on-error (if on (> on 0) (not debug-on-error)))
+  (when debug-on-error
+    (setq debugger #'harness-dev-log-backtrace))
   debug-on-error)
 
 (defun harness-dev-load-safely ()

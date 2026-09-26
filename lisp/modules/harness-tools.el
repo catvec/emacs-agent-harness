@@ -357,14 +357,19 @@ to a normalized result; handler failures become `:is-error' results."
   (harness-tools-specs (plist-get args :names)))
 
 (defun harness-tools-service-execute (&rest args)
-  "Service: execute a tool."
+  "Service: execute a tool.
+A caller's :context is used as-is; otherwise one is built from
+:session-id, :cwd and :abort.  Rebuilding the context would drop the
+session id and cwd the agent attached to it, which session-aware tools
+(the plan, sub-agent and ask tools) depend on."
   (harness-tools-execute
    (plist-get args :name)
    (plist-get args :arguments)
-   (harness-tool-context-create
-    :session-id (plist-get args :session-id)
-    :cwd (or (plist-get args :cwd) default-directory)
-    :abort (plist-get args :abort))))
+   (or (plist-get args :context)
+       (harness-tool-context-create
+        :session-id (plist-get args :session-id)
+        :cwd (or (plist-get args :cwd) default-directory)
+        :abort (plist-get args :abort)))))
 
 (defun harness-tools-service-get (&rest args)
   "Service: return a tool's declaration."
