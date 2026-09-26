@@ -215,7 +215,7 @@ Only non-blocking tools belong here; anything that can hold the session
 
 (defun harness-ui-chat--render-record (record)
   "Insert RECORD's rendering at point and return it."
-  (setf (harness-ui-chat-record-start record) (copy-marker (point) t))
+  (setf (harness-ui-chat-record-start record) (copy-marker (point)))
   (pcase (harness-ui-chat-record-kind record)
     ((or "user_message_chunk" "agent_message_chunk" "agent_thought_chunk"
          "_harness/system_hint")
@@ -231,7 +231,7 @@ Only non-blocking tools belong here; anything that can hold the session
     ((or "usage_update" "available_commands_update" "current_mode_update"
          "config_option_update" "session_info_update")
      nil))
-  (setf (harness-ui-chat-record-end record) (copy-marker (point) t))
+  (setf (harness-ui-chat-record-end record) (copy-marker (point)))
   record)
 
 (defun harness-ui-chat--render-message (record)
@@ -470,12 +470,12 @@ Only non-blocking tools belong here; anything that can hold the session
                     :tool-name (harness-ui-chat-record-tool-name previous))))
         (let ((inhibit-read-only t))
           (delete-region (harness-ui-chat-record-start previous)
-                         (harness-ui-chat-record-end record)))
-        (setq harness-ui-chat--records
-              (cons group (cdr (cdr records))))
-        (save-excursion
-          (goto-char (marker-position (harness-ui-chat-record-start previous)))
-          (harness-ui-chat--render-record group))))))
+                         (harness-ui-chat-record-end record))
+          (setq harness-ui-chat--records
+                (cons group (cdr (cdr records))))
+          (save-excursion
+            (goto-char (marker-position (harness-ui-chat-record-start previous)))
+            (harness-ui-chat--render-record group)))))))
 
 (defun harness-ui-chat--update-text (update)
   "Flatten UPDATE's content blocks into display text."

@@ -117,7 +117,8 @@
                                          :content (list :type "text" :text "hello human")))
       (let ((text (harness-ui-chat-test--text buffer)))
         (should (string-match-p "hello agent" text))
-        (should (string-match-p "hello human" text)))
+        (should (string-match-p "hello human" text))
+        (should (= (length (split-string text "hello agent")) 2)))
       ;; The user message carries the user face.
       (with-current-buffer buffer
         (should (harness-ui-chat-test--find-face 'harness-ui-user-face buffer)))
@@ -139,7 +140,7 @@
                                          :content (list :type "text" :text "Hello")))
       (let ((text (harness-ui-chat-test--text buffer)))
         (should (string-match-p "Hello" text))
-        (should-not (string-match-p "Hellohello" (downcase text)))))
+        (should (= (length (split-string text "Hello")) 2))))
     (kill-buffer "*harness: s1*")))
 
 (ert-deftest harness-ui-chat-collapses-thinking-and-tools ()
@@ -166,6 +167,9 @@
         (search-forward "Thinking")
         (push-button (match-beginning 0)))
       (should (string-match-p "secret reasoning" (harness-ui-chat-test--text buffer)))
+      (should (= (length (split-string (harness-ui-chat-test--text buffer)
+                                       "secret reasoning"))
+                 2))
       (kill-buffer buffer))))
 
 (ert-deftest harness-ui-chat-coalesces-allow-listed-tools ()
