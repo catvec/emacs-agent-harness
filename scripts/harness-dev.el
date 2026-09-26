@@ -15,6 +15,12 @@
 ;; ring the bell at the human.  Never make noise in the dev daemon.
 (setq ring-bell-function #'ignore)
 
+;; Development loads the checkout's source, never a stale `.elc' or
+;; native-compiled `.eln' cache entry next to it.  Without this, `load'
+;; prefers the compiled file even when the editable source is newer, and
+;; edits appear to have no effect.
+(setq load-prefer-newer t)
+
 ;;; Code:
 
 (require 'subr-x)

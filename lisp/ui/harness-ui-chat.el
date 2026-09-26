@@ -188,15 +188,19 @@ while quiet toggles can stay in the shadow face."
   "Insert LABEL as a clickable collapse toggle for RECORD.
 The :face property replaces the theme's link-looking `button' face so
 quiet toggles stay quiet."
-  (insert-text-button label
-                      'action (lambda (_button) (harness-ui-chat-toggle record))
-                      'follow-link t
-                      'mouse-face 'highlight
-                      'face (or (plist-get properties :face) 'shadow)
-                      'help-echo (or (plist-get properties :help-echo)
-                                     "Show or hide this block")
-                      'keymap harness-ui-chat--tool-line-keymap
-                      'harness-ui-chat-record record))
+  (let ((start (point)))
+    (insert-text-button label
+                        'action (lambda (_button) (harness-ui-chat-toggle record))
+                        'follow-link t
+                        'mouse-face 'highlight
+                        'help-echo (or (plist-get properties :help-echo)
+                                       "Show or hide this block")
+                        'keymap harness-ui-chat--tool-line-keymap
+                        'harness-ui-chat-record record)
+    ;; Set the face last: button.el installs the link-looking `button'
+    ;; face through the category, which otherwise wins over :face.
+    (add-text-properties start (point)
+                         (list 'face (or (plist-get properties :face) 'shadow)))))
 
 (defun harness-ui-chat--mark-read-only (start end)
   "Mark START to END as read-only transcript text."
@@ -613,6 +617,10 @@ happen after a reload re-adopts a buffer)."
 Rendering every record in order is cheap enough for structural changes
 and keeps ordering exact; streaming deltas only re-render their own
 region."
+  ;; Buffers created before this mode turned font-lock off still have its
+  ;; idle fontifier running; it would strip the manually applied faces.
+  (when font-lock-mode
+    (font-lock-mode -1))
   (let ((inhibit-read-only t)
         (compose-offset (let ((end (harness-ui-chat--safe-marker-position
                                     harness-ui-chat--transcript-end)))
@@ -1291,7 +1299,11 @@ TEXT defaults to the composer's current contents."
   (setq-local word-wrap t)
   (setq-local buffer-read-only nil)
   (setq-local window-point-insertion-type t)
-  (setq-local font-lock-defaults '(nil t))
+  ;; Rendering is manual (`harness-ui-chat--fontify'), and the global
+  ;; font-lock mode's jit-lock timer would strip those faces a second
+  ;; after the fact (leaving button faces showing through).
+  (setq-local font-lock-defaults nil)
+  (font-lock-mode -1)
   (add-hook 'completion-at-point-functions
             #'harness-ui-chat-completion-at-point nil t)
   (visual-line-mode 1))
