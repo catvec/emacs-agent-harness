@@ -51,6 +51,7 @@ The user experience of the harness must be amazing and designed with great care.
 - Always user built in Emacs UI tools, do not settle for using ASCII or UTF-8 tricks to create the UI which is needed
 - Responsiveness is a priority: Use UI pattnerns which make the harness feel snappy and quick, if an operation is going to take more than an instant show a loading state while it occurs and then show if it was a success or failure
 - Every action with a keyboard shortcut should have a place in the UI where you can click with your mouse to perform the same action
+- Polished to an extreme degree: seemless feeling to use like if apple designed a harness, subtle flourishes and good design choices, nothing which overwhelms and ruins the other elegance aspects
 
 # Features
 Most features specified here are standard to any agentic harness. 

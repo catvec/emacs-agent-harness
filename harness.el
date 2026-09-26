@@ -39,7 +39,13 @@
     harness-tools-emacs
     harness-perms
     harness-perms-jail
-    harness-agent)
+    harness-agent
+    harness-ui
+    harness-ui-chat
+    harness-ui-sessions
+    harness-ui-config
+    harness-ui-notifier
+    harness-ui-tree)
   "Modules a normal `harness-start' loads, in addition to dependencies."
   :type '(repeat symbol))
 
@@ -68,6 +74,8 @@ A local UI uses the in-process transport and does not need a port."
   "Load the harness and, when configured, start the remote ACP server."
   (interactive)
   (harness-load modules)
+  (when (harness-module-set-up-p 'harness-ui)
+    (harness-ui-start))
   (when (and harness-acp-server-port
              (harness-module-set-up-p 'harness-acp-tcp))
     (unless (and harness--acp-server (process-live-p harness--acp-server))

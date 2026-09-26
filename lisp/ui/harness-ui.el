@@ -1,0 +1,317 @@
+;;; harness-ui.el --- Local UI's ACP client host -*- lexical-binding: t; -*-
+
+;; This file is part of Emacs Agent Harness.
+
+;;; Commentary:
+
+;; The presentation layer speaks ACP and nothing else.  This module owns
+;; the local in-process connection to the harness agent: it initializes
+;; the client, implements the client-side methods (file access and
+;; permission prompts) and re-broadcasts ACP notifications as Emacs
+;; events, so feature modules do not each talk to a connection.
+;;
+;; Events emitted:
+;;
+;;   harness-ui-update              session/update arrived
+;;   harness-ui-session-status      _harness/session_status arrived
+;;   harness-ui-sessions-changed    the harness session list changed
+;;   harness-ui-permission-request  the agent needs a decision
+;;   harness-ui-ready               initialize completed
+;;
+;; `harness-ui-request' is the way features call the harness; it returns a
+;; deferred of the ACP result.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'json)
+(require 'subr-x)
+(require 'harness-core)
+(require 'harness-acp)
+(require 'harness-acp-inprocess)
+(require 'harness-perms)
+
+(defgroup harness-ui nil
+  "Harness user interface."
+  :group 'harness)
+
+(defcustom harness-ui-client-capabilities
+  '(:fs (:readTextFile t :writeTextFile t)
+        :terminal :false
+        :_meta (:harness (:local t)))
+  "Capabilities advertised in initialize."
+  :type 'plist)
+
+(defvar harness-ui--agent-connection nil
+  "Agent side of the local ACP pair.")
+
+(defvar harness-ui--client-connection nil
+  "Client side of the local ACP pair; the UI's connection to the harness.")
+
+(defvar harness-ui--agent-info nil
+  "agentInfo from the initialize result.")
+
+(defvar harness-ui-current-session nil
+  "Session most recently displayed; configuration commands act on it.")
+
+(defvar harness-ui--capabilities nil
+  "agentCapabilities from the initialize result.")
+
+(defvar harness-ui-refresh-functions nil
+  "Functions run to redraw UI buffers after a reload.")
+
+(defun harness-ui-connected-p ()
+  "Return non-nil when the local ACP connection is up."
+  (and harness-ui--client-connection
+       (not (harness-acp-connection-closed-p harness-ui--client-connection))))
+
+;;; Starting
+
+(defun harness-ui-start ()
+  "Connect to the local harness over the in-process ACP transport."
+  (interactive)
+  (unless (harness-ui-connected-p)
+    (let ((pair (harness-acp-inprocess-pair)))
+      (setq harness-ui--agent-connection (car pair)
+            harness-ui--client-connection (cdr pair))
+      (harness-ui--register-client-methods harness-ui--client-connection)
+      (harness-ui--install-permission-asker)
+      (harness-deferred-then
+       (harness-acp-connection-request
+        harness-ui--client-connection "initialize"
+        (list :protocolVersion harness-acp-protocol-version
+              :clientCapabilities harness-ui-client-capabilities
+              :clientInfo (list :name "emacs-agent-harness-ui"
+                                :title "Emacs Agent Harness"
+                                :version harness-version)))
+       (lambda (result)
+         (setq harness-ui--agent-info (plist-get result :agentInfo)
+               harness-ui--capabilities (plist-get result :agentCapabilities))
+         (harness-emit 'harness-ui-ready :agent-info harness-ui--agent-info)
+         (harness-log "UI connected to %S" harness-ui--agent-info)))))
+  harness-ui--client-connection)
+
+(defun harness-ui-stop ()
+  "Close the local ACP connection."
+  (interactive)
+  (when harness-ui--client-connection
+    (harness-acp-connection-close harness-ui--client-connection "UI stopped"))
+  (setq harness-ui--client-connection nil
+        harness-ui--agent-connection nil)
+  (when (eq harness-permission-ask-function #'harness-ui--ask-permission)
+    (setq harness-permission-ask-function nil)))
+
+;;; Requests
+
+(defun harness-ui-request (method &optional params)
+  "Send METHOD to the harness.  Returns a deferred of the result."
+  (harness-ui-start)
+  (harness-acp-connection-request harness-ui--client-connection method params))
+
+(defun harness-ui-send (session-id blocks)
+  "Send BLOCKS (a vector of content blocks) as a prompt to SESSION-ID."
+  (harness-ui-request "session/prompt"
+                      (list :sessionId session-id :prompt blocks)))
+
+(defun harness-ui-cancel (session-id)
+  "Cancel SESSION-ID's running turn."
+  (harness-acp-connection-notify harness-ui--client-connection
+                                 "session/cancel" (list :sessionId session-id)))
+
+;;; Client-side methods
+
+(defun harness-ui--register-client-methods (client)
+  "Install the client method handlers on CLIENT."
+  (harness-acp-connection-register-method
+   client "session/update"
+   (lambda (_connection params)
+     (harness-emit 'harness-ui-update
+                   :session-id (plist-get params :sessionId)
+                   :update (plist-get params :update))))
+  (harness-acp-connection-register-method
+   client "_harness/session_status"
+   (lambda (_connection params)
+     (harness-emit 'harness-ui-session-status :status params)))
+  (harness-acp-connection-register-method
+   client "_harness/sessions_changed"
+   (lambda (_connection _params)
+     (harness-emit 'harness-ui-sessions-changed)))
+  (harness-acp-connection-register-method
+   client "session/request_permission"
+   (lambda (_connection params)
+     (harness-ui--permission-request params)))
+  (harness-acp-connection-register-method
+   client "fs/read_text_file"
+   (lambda (_connection params) (harness-ui--read-text-file params)))
+  (harness-acp-connection-register-method
+   client "fs/write_text_file"
+   (lambda (_connection params) (harness-ui--write-text-file params)))
+  client)
+
+(defun harness-ui--read-text-file (params)
+  "Serve fs/read_text_file with Emacs' own file access."
+  (let* ((path (plist-get params :path))
+         (line (or (plist-get params :line) 1))
+         (limit (plist-get params :limit)))
+    (condition-case err
+        (with-temp-buffer
+          (insert-file-contents path)
+          (goto-char (point-min))
+          (forward-line (1- line))
+          (let ((start (point)))
+            (when limit
+              (forward-line limit))
+            (list :content (buffer-substring-no-properties start (point)))))
+      (error (signal 'harness-acp-error
+                     (list -32603 (error-message-string err) nil))))))
+
+(defun harness-ui--write-text-file (params)
+  "Serve fs/write_text_file with Emacs' own file access."
+  (let ((path (plist-get params :path))
+        (content (or (plist-get params :content) "")))
+    (condition-case err
+        (progn
+          (make-directory (file-name-directory path) t)
+          (with-temp-file path (insert content))
+          (make-hash-table))
+      (error (signal 'harness-acp-error
+                     (list -32603 (error-message-string err) nil))))))
+
+;;; Permission prompts
+
+(defun harness-ui--permission-request (params)
+  "Ask the user to decide PARAMS and return the ACP outcome.
+The request is broadcast as `harness-ui-permission-request'; a feature
+module answers it by calling the response function."
+  (let ((deferred (harness-deferred-new))
+        (tool-call (plist-get params :toolCall))
+        (options (plist-get params :options)))
+    (harness-emit 'harness-ui-permission-request
+                  :session-id (plist-get params :sessionId)
+                  :tool-call tool-call
+                  :options options
+                  :respond (lambda (option-id)
+                             (harness-deferred-resolve
+                              deferred
+                              (list :outcome (list :outcome "selected"
+                                                   :optionId option-id)))))
+    ;; Safety net: if nothing answers, deny rather than hang forever.
+    (run-at-time harness-ui-permission-timeout nil
+                 (lambda ()
+                   (when (harness-deferred-pending-p deferred)
+                     (harness-deferred-resolve
+                      deferred (list :outcome (list :outcome "selected"
+                                                    :optionId "reject-once"))))))
+    deferred))
+
+(defcustom harness-ui-permission-timeout 120
+  "Seconds to wait for the user to answer a permission request."
+  :type 'number)
+
+(defun harness-ui--install-permission-asker ()
+  "Route the agent-side permission asker through this ACP connection."
+  (setq harness-permission-ask-function #'harness-ui--ask-permission))
+
+(defun harness-ui--ask-permission (request)
+  "Called by the permission chain; asks this UI over ACP.
+REQUEST is the plist from `harness-permission-check'."
+  (let* ((tool-name (or (plist-get request :tool-name) "tool"))
+         (arguments (plist-get request :arguments))
+         (paths (plist-get request :paths))
+         (params (list :sessionId (plist-get request :session-id)
+                       :toolCall
+                       (harness-plist-omit-nil
+                        (list :toolCallId (or (plist-get request :tool-call-id)
+                                              (harness-uuid))
+                              :title (format "Run %s" tool-name)
+                              :kind "other"
+                              :status "pending"
+                              :rawInput (or arguments (make-hash-table))
+                              :content (vector (list :type "content"
+                                                     :content
+                                                     (list :type "text"
+                                                           :text (or (plist-get request :reason)
+                                                                     (format "Allow %s?" tool-name)))))))
+                       :options (or (plist-get request :options)
+                                    (harness-permission-options)))))
+    (ignore paths)
+    (harness-deferred-then
+     (harness-acp-connection-request harness-ui--agent-connection
+                                     "session/request_permission" params)
+     (lambda (result)
+       (let* ((outcome (plist-get result :outcome))
+              (option (plist-get outcome :optionId))
+              (cancelled (equal (plist-get outcome :outcome) "cancelled")))
+         (cond
+          (cancelled (list :outcome "deny" :always nil :reason "Cancelled"))
+          ((and option (string-prefix-p "allow" option))
+           (list :outcome "allow"
+                 :always (string-suffix-p "always" option)))
+          (t (list :outcome "deny"
+                   :always (and option (string-suffix-p "always" option))
+                   :reason "The user rejected this tool call.")))))
+     (lambda (error)
+       (list :outcome "deny" :always nil
+             :reason (format "Permission prompt failed: %S" error))))))
+
+;;; Redraws
+
+(defun harness-ui-refresh-all ()
+  "Redraw every UI buffer (used after reloads)."
+  (run-hooks 'harness-ui-refresh-functions))
+
+;;; Service and module
+
+(defun harness-ui-setup ()
+  "Set up the UI host."
+  (harness-event-define 'harness-ui-update
+    :module 'harness-ui
+    :doc "A session/update notification arrived from the harness."
+    :payload '((session-id . string) (update . plist)))
+  (harness-event-define 'harness-ui-session-status
+    :module 'harness-ui
+    :doc "A session status notification arrived."
+    :payload '((status . plist)))
+  (harness-event-define 'harness-ui-sessions-changed
+    :module 'harness-ui
+    :doc "The harness session list changed."
+    :payload '())
+  (harness-event-define 'harness-ui-permission-request
+    :module 'harness-ui
+    :doc "The harness needs a permission decision."
+    :payload '((session-id . string) (tool-call . plist)
+               (options . vector) (respond . function)))
+  (harness-event-define 'harness-ui-ready
+    :module 'harness-ui
+    :doc "The local ACP connection completed initialize."
+    :payload '((agent-info . plist)))
+  (harness-on 'harness-reloaded (lambda (_payload) (harness-ui-refresh-all))
+              :module 'harness-ui)
+  (harness-service-register
+   "ui"
+   :module 'harness-ui
+   :doc "The local UI's ACP connection to the harness."
+   :methods '((start . harness-ui-start)
+              (stop . harness-ui-stop)
+              (request . harness-ui-request)
+              (send . harness-ui-send)
+              (cancel . harness-ui-cancel)
+              (refresh-all . harness-ui-refresh-all))))
+
+(defun harness-ui-teardown ()
+  "Tear down the UI host."
+  (harness-ui-stop)
+  (setq harness-ui-refresh-functions nil))
+
+(harness-module-define 'harness-ui
+  :version harness-version
+  :description "Local UI's ACP client host."
+  :requires '((harness-core "0.1.0")
+              (harness-acp "0.1.0")
+              (harness-acp-inprocess "0.1.0"))
+  :provides '(harness-ui)
+  :setup #'harness-ui-setup
+  :teardown #'harness-ui-teardown)
+
+(provide 'harness-ui)
+;;; harness-ui.el ends here

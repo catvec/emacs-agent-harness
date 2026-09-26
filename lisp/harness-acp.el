@@ -355,6 +355,11 @@ Returns CONNECTION."
     ("session/cancel" . harness-acp--method-session-cancel)
     ("session/set_mode" . harness-acp--method-session-set-mode)
     ("session/set_config_option" . harness-acp--method-session-set-config-option)
+    ("_harness/session/info" . harness-acp--method-session-info)
+    ("_harness/session/fork" . harness-acp--method-session-fork)
+    ("_harness/session/rename" . harness-acp--method-session-rename)
+    ("_harness/session/entries" . harness-acp--method-session-entries)
+    ("_harness/agent/configuration" . harness-acp--method-agent-configuration)
     ("_harness/ping" . harness-acp--method-ping)
     ("_harness/version" . harness-acp--method-version))
   "ACP method table for the agent role.")
@@ -523,6 +528,45 @@ Harness extras are namespaced under _meta.harness."
                                               :projectRoot (plist-get info :projectRoot)
                                               :messageCount (plist-get info :messageCount))))))))
     projected))
+
+(defun harness-acp--method-session-info (_connection params)
+  "Handle the _harness/session/info extension with PARAMS.
+Unlike session/list this is a harness extension between our own client
+and server, so it returns the complete info plist including _meta."
+  (harness-acp--session-service 'info :session-id (plist-get params :sessionId)))
+
+(defun harness-acp--method-session-fork (_connection params)
+  "Handle the _harness/session/fork extension with PARAMS."
+  (harness-acp--session-service 'fork
+                                :session-id (plist-get params :sessionId)
+                                :entry-id (plist-get params :entryId)
+                                :title (plist-get params :title)))
+
+(defun harness-acp--method-session-rename (_connection params)
+  "Handle the _harness/session/rename extension with PARAMS."
+  (harness-acp--session-service 'rename
+                                :session-id (plist-get params :sessionId)
+                                :title (plist-get params :title))
+  (make-hash-table))
+
+(defun harness-acp--method-session-entries (_connection params)
+  "Handle the _harness/session/entries extension with PARAMS.
+Returns the raw transcript entries (with ids and times)."
+  (let ((entries (harness-acp--session-service 'entries
+                                               :session-id (plist-get params :sessionId))))
+    (if (harness-deferred-p entries)
+        (harness-deferred-then entries (lambda (value) (list :entries (or value []))))
+      (list :entries (or entries [])))))
+
+(defun harness-acp--method-agent-configuration (_connection params)
+  "Handle the _harness/agent/configuration extension with PARAMS."
+  (let ((session-id (plist-get params :sessionId)))
+    (cond
+     ((harness-service-available-p "agent" 'configuration)
+      (harness-service-call "agent" 'configuration :session-id session-id))
+     ((harness-service-available-p "session" 'configuration)
+      (harness-service-call "session" 'configuration :session-id session-id))
+     (t (list :configOptions [])))))
 
 (defun harness-acp--method-session-delete (_connection params)
   "Handle session/delete with PARAMS."
