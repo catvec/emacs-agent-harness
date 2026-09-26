@@ -31,17 +31,24 @@ Broadly the systems from top (closest to user) to bottom are:
 Most features specified here are standard to any agentic harness. 
 
 ## Sessions
+At the core of any agentic session is a series of messages, and tool calls (from the agent), between the user and an agent. These messages are organized
 
 ## Chat Interface
-At the core of any agentic session is a series of messages, and tool calls (from the agent), between the user and an agent. These messages should show up like a chat app, where older messages are at the top of the screen and newer messages are at the bottom. The sender of the message is identified by the styling of the message (human messages have a slightly lighter background, agent messages use the default background color). The chat interface is also where the user can send new chat messages to the agent.
+Session messages should show up like a chat app, where older messages are at the top of the screen and newer messages are at the bottom. The sender and type of the message is identified by the styling of the message (human messages have a slightly lighter background, agent messages use the default background color, agent tool messages have a slightly styled colored background). The chat interface is also where the user can send new chat messages to the agent.
 
 Functional requirements:
 
 - All messages in session are visible in chat UI
 - Older messages can be viewed by scrolling up, you can return to newer messages by scrolling down
 - Text from all messages is aligned in the user's language direction (english is left to right)
+- The sender (agent or user) and type () of a message 
 - The sender of a message is identifiable by the background color of the message text (agents have a darker background color, users have a lighter background color)
 - If messages are too long they wrap to the next line matching the original line's indentation
 - Messages are formatted in Markdown and rendered as such
 - A message composition box should be displayed at the bottom of the chat history view
 - The message composition box supports multi-lined input, but by default is 1 line, and only expands to a maximum height if the user types a message which spans multiple lines
+- History of all messages can contain up to more or more than 1 million tokens, UI must remain responsive and performant with this high amount
+- Tool calls from the agent are shown in the correct chronological place in the chat history 
+- Tool calls are differentiable from agent and user text messages 
+- Tool call messages should show which tool was used, parameters of the tool, and the output of the tool 
+- The chat interface should automatically scroll down to show new messages when they arrive, unless the user has explicitly scrolled up and is viewing history in which case do not scroll
