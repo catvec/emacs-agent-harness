@@ -20,11 +20,15 @@
 ;; `:permission-mode' elsewhere in the harness is a prompt-level hint; it
 ;; never decides whether the sandbox is used.
 ;;
-;; Filesystem inside bwrap: /usr, /etc, /lib, /lib64 (and the /bin, /sbin,
-;; /lib64 symlinks) read-only; the session working directory read-write;
-;; $HOME a fresh tmpfs; /proc and /dev mounted; extra paths can be granted
-;; per policy.  Network is allowed by default because hosted providers need
-;; it; disabling it is opt-in and only correct for local models.
+;; Filesystem inside bwrap: /usr (and non-merged /lib, /lib64, /bin,
+;; /sbin) read-only; a minimal /etc (certificates, DNS and identity files
+;; only -- never the whole of /etc); a fresh tmpfs for /tmp, which is also
+;; HOME and TMPDIR; the session working directory read-write; /proc and a
+;; minimal /dev.  The real HOME and every other user file are not mounted
+;; at all, so credentials like ~/.npmrc or ~/.ssh cannot leak into a tool
+;; process.  Extra paths can be granted per policy.  Network is allowed by
+;; default because hosted providers need it; disabling it is opt-in and
+;; only correct for local models.
 
 ;;; Code:
 
@@ -49,6 +53,12 @@ backend (and falls back to unconfined only when the policy allows it)."
 `preferred' uses the chosen backend when available and warns when it is
 not; `required' fails closed; `none' never confines."
   :type '(choice (const preferred) (const required) (const none)))
+
+(defcustom harness-sandbox-home "/tmp"
+  "HOME inside the sandbox.
+The real home directory is never mounted; tools get a fresh tmpfs and an
+empty HOME so credentials and dotfiles cannot leak into them."
+  :type 'string)
 
 (cl-defstruct (harness-sandbox-policy (:constructor harness-sandbox-policy-create))
   (mode 'preferred)             ; preferred, required, none
@@ -143,20 +153,38 @@ Accepted: :mode, :network, :writable, :read-only."
 ;;; Command construction
 
 (defun harness-sandbox--home-directory ()
-  "Return HOME, defaulting to a placeholder when unset."
-  (or (getenv "HOME") "/root"))
+  "Return HOME inside the sandbox, never the real home directory."
+  harness-sandbox-home)
+
+(defconst harness-sandbox--etc-entries
+  '("ssl" "ca-certificates" "resolv.conf" "hosts" "nsswitch.conf"
+    "passwd" "group" "localtime")
+  "Minimal /etc entries mounted read-only inside the sandbox.
+Deliberately not the whole of /etc: secrets such as shadow, ssh host keys
+or package-manager credentials must stay outside.")
 
 (defun harness-sandbox--bwrap-args (command args cwd policy)
   "Build the bwrap argument list for COMMAND ARGS CWD and POLICY."
   (let ((argv (list)))
-    ;; Read-only system trees; /bin and /sbin are usually symlinks into
-    ;; /usr and bind mounts resolve them.
-    (dolist (path '("/usr" "/etc" "/lib" "/lib64" "/bin" "/sbin"))
-      (when (file-exists-p path)
-        (setq argv (append argv (list "--ro-bind" path path)))))
+    ;; System trees, read-only.  On merged-/usr systems /lib, /lib64, /bin
+    ;; and /sbin are symlinks into /usr, so recreate the symlink instead.
+    (dolist (path '("/usr" "/lib" "/lib64" "/bin" "/sbin"))
+      (cond
+       ((file-symlink-p path)
+        (setq argv (append argv (list "--symlink" (file-symlink-p path) path))))
+       ((file-exists-p path)
+        (setq argv (append argv (list "--ro-bind" path path))))))
+    ;; Only the parts of /etc tools actually need.
+    (dolist (name harness-sandbox--etc-entries)
+      (let ((path (expand-file-name name "/etc")))
+        (when (file-exists-p path)
+          (setq argv (append argv (list "--ro-bind" path path))))))
     (setq argv (append argv (list "--proc" "/proc"
-                                  "--dev" "/dev"
-                                  "--tmpfs" (harness-sandbox--home-directory))))
+                                  "--dev" "/dev")))
+    ;; A fresh tmpfs for /tmp; the real home is not mounted at all.
+    (setq argv (append argv (list "--tmpfs" "/tmp"
+                                  "--setenv" "HOME" "/tmp"
+                                  "--setenv" "TMPDIR" "/tmp")))
     (when (and cwd (file-directory-p cwd))
       (setq argv (append argv (list "--bind" cwd cwd))))
     (dolist (directory (harness-sandbox-policy-read-only policy))
@@ -180,14 +208,21 @@ Accepted: :mode, :network, :writable, :read-only."
   "Build the systemd-run argument list for COMMAND ARGS CWD and POLICY."
   (let ((argv (list "--user" "--scope" "--quiet" "--pipe"
                     "--property=ProtectSystem=strict"
-                    "--property=ProtectHome=tmpfs"
+                    ;; The real home and the whole of /etc stay inaccessible.
+                    "--property=ProtectHome=yes"
                     "--property=PrivateTmp=yes"
+                    "--property=PrivateDevices=yes"
                     "--property=NoNewPrivileges=yes"
                     "--property=ProtectKernelTunables=yes"
                     "--property=ProtectKernelModules=yes"
+                    "--property=ProtectKernelLogs=yes"
                     "--property=ProtectControlGroups=yes"
+                    "--property=ProtectClock=yes"
+                    "--property=ProtectHostname=yes"
                     "--property=RestrictRealtime=yes"
-                    "--property=RestrictSUIDSGID=yes")))
+                    "--property=RestrictSUIDSGID=yes"
+                    "--setenv=HOME=/tmp"
+                    "--setenv=TMPDIR=/tmp")))
     (when (and cwd (file-directory-p cwd))
       (setq argv (append argv (list (format "--property=WorkingDirectory=%s" cwd)
                                     (format "--property=ReadWritePaths=%s" cwd)))))

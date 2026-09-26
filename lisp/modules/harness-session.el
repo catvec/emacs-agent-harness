@@ -75,6 +75,7 @@
   (persisted 0)
   entries-loaded
   (live (make-hash-table :test #'equal))
+  (state (make-hash-table :test #'equal))
   file)
 
 (defun harness-session-ensure-entry (entry)
@@ -186,6 +187,29 @@ root-level fields (which the protocol reserves) without losing them."
 
 ;;; Persistence
 
+(defun harness-session--state-plist (session)
+  "Return SESSION's arbitrary state as a plist."
+  (let ((plist nil))
+    (maphash (lambda (key value)
+               (setq plist (plist-put plist (intern (concat ":" (symbol-name key))) value)))
+             (harness-session-state session))
+    plist))
+
+(defun harness-session-state-get (session key &optional default)
+  "Return SESSION's state value for KEY, or DEFAULT."
+  (gethash key (harness-session-state session) default))
+
+(defun harness-session-state-set (session key value)
+  "Set SESSION's state KEY to VALUE."
+  (puthash key value (harness-session-state session))
+  (harness-session--schedule-save session)
+  value)
+
+(defun harness-session-state-delete (session key)
+  "Remove KEY from SESSION's state."
+  (remhash key (harness-session-state session))
+  (harness-session--schedule-save session))
+
 (defun harness-session--metadata-plist (session)
   "Return the on-disk metadata plist for SESSION."
   (harness-plist-omit-nil
@@ -209,7 +233,9 @@ root-level fields (which the protocol reserves) without losing them."
         :contextUsed (harness-session-context-used session)
         :contextSize (harness-session-context-size session)
         :cost (harness-session-cost session)
-        :worktree (harness-session-worktree session))))
+        :worktree (harness-session-worktree session)
+        :state (let ((state (harness-session--state-plist session)))
+                 (unless (null state) state))))
 
 (defun harness-session--session-from-metadata (metadata)
   "Create an inactive (no transcript) session from METADATA."
@@ -237,7 +263,12 @@ root-level fields (which the protocol reserves) without losing them."
    :context-used (plist-get metadata :contextUsed)
    :context-size (plist-get metadata :contextSize)
    :cost (plist-get metadata :cost)
-   :worktree (plist-get metadata :worktree)))
+   :worktree (plist-get metadata :worktree)
+   :state (let ((table (make-hash-table :test #'equal))
+                (state (plist-get metadata :state)))
+            (cl-loop for (key value) on state by #'cddr
+                     do (puthash (intern (substring (symbol-name key) 1)) value table))
+            table)))
 
 (defun harness-session--read-metadata (file)
   "Read a metadata FILE, returning a plist or nil."
@@ -1009,6 +1040,22 @@ transcript is still being read from disk."
 
 ;;; Module
 
+(defun harness-session-service-state-get (&rest args)
+  "Service: read a session state value."
+  (harness-session-state-get (harness-session--get-service (plist-get args :session-id))
+                             (plist-get args :key)
+                             (plist-get args :default)))
+
+(defun harness-session-service-state-set (&rest args)
+  "Service: set a session state value."
+  (harness-session-state-set (harness-session--get-service (plist-get args :session-id))
+                             (plist-get args :key)
+                             (plist-get args :value)))
+
+(defun harness-session-service-state-all (&rest args)
+  "Service: return all state of a session."
+  (harness-session--state-plist (harness-session--get-service (plist-get args :session-id))))
+
 (defun harness-session-setup ()
   "Set up the session module."
   (harness-event-define 'session-created
@@ -1070,7 +1117,10 @@ transcript is still being read from disk."
      (add-cost . harness-session-service-add-cost)
      (fork . harness-session-service-fork)
      (children . harness-session-service-children)
-     (active . harness-session-service-active))))
+     (active . harness-session-service-active)
+     (state-get . harness-session-service-state-get)
+     (state-set . harness-session-service-state-set)
+     (state-all . harness-session-service-state-all))))
 
 (defun harness-session-teardown ()
   "Tear down the session module, flushing pending writes."

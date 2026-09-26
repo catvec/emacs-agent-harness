@@ -338,5 +338,22 @@
         (should (equal (plist-get metadata :title) "batched")))
       (should (harness-session-active id)))))
 
+(ert-deftest harness-session-state-round-trip ()
+  (harness-session-test--setup)
+  (harness-session-test--with-storage
+    (let* ((session (harness-session-test--make))
+           (id (harness-session-id session)))
+      (harness-session-state-set session 'todos (vector (list :id "t1" :text "first")))
+      (harness-session-state-set session 'plan "step one")
+      (should (equal (harness-session-state-get session 'plan) "step one"))
+      (harness-session-save session)
+      (clrhash harness-session--active)
+      (let ((reloaded (harness-session-load id)))
+        (should (equal (harness-session-state-get reloaded 'plan) "step one"))
+        (should (equal (aref (harness-session-state-get reloaded 'todos) 0)
+                       '(:id "t1" :text "first")))
+        (harness-session-state-delete reloaded 'plan)
+        (should-not (harness-session-state-get reloaded 'plan))))))
+
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here

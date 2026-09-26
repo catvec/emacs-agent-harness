@@ -42,6 +42,19 @@
       (should (member "--proc" args))
       (should (member "--dev" args))
       (should (member "--tmpfs" args))
+      ;; A fresh tmpfs is HOME and TMPDIR; the real home is never mounted.
+      (should (equal (cadr (member "--tmpfs" args)) "/tmp"))
+      (let ((pos (cl-position "--setenv" args :test #'equal)))
+        (should pos)
+        (should (equal (nth (1+ pos) args) "HOME"))
+        (should (equal (nth (+ 2 pos) args) "/tmp")))
+      (should-not (member (or (getenv "HOME") "") args))
+      ;; /etc is not mounted wholesale.
+      (should-not (member "/etc" args))
+      ;; The cwd is bound read-write and made the working directory.
+      (let ((arguments (append args nil)))
+        (should (cl-search '("--bind" "/tmp" "/tmp") arguments :test #'equal))
+        (should (cl-search '("--chdir" "/tmp") arguments :test #'equal)))
       (should (member "--unshare-pid" args))
       (should (member "--unshare-ipc" args))
       (should (member "--unshare-uts" args))
@@ -49,9 +62,6 @@
       (should (member "--new-session" args))
       ;; Network is allowed by default.
       (should-not (member "--unshare-net" args))
-      ;; The cwd is bound read-write and made the working directory.
-      (should (equal (cadr (member "/tmp" args)) "/tmp"))
-      (should (equal (cadr (member "--chdir" args)) "/tmp"))
       ;; The command follows the -- separator.
       (let ((separator (cl-position "--" args :test #'equal)))
         (should separator)
@@ -87,7 +97,9 @@
       (should (member "--user" args))
       (should (member "--scope" args))
       (should (member "--property=ProtectSystem=strict" args))
-      (should (member "--property=ProtectHome=tmpfs" args))
+      (should (member "--property=ProtectHome=yes" args))
+      (should (member "--property=PrivateDevices=yes" args))
+      (should (member "--setenv=HOME=/tmp" args))
       (should (member "--property=ReadWritePaths=/tmp" args))
       (should (member "--property=WorkingDirectory=/tmp" args))
       ;; The command comes last.
@@ -176,7 +188,7 @@
     (let* ((cwd (make-temp-file "harness-sandbox-real-" t))
            (result (harness-sandbox-spawn-sync
                     "/bin/sh"
-                    '("-c" "echo cwd-ok > inside.txt; cat /etc/hostname > /dev/null 2>&1 && echo etc-readable; touch /usr/should-not-exist 2>/dev/null && echo usr-writable || echo usr-read-only; echo home=$HOME; touch $HOME/x && echo home-writable || echo home-not-writable")
+                    '("-c" "echo cwd-ok > inside.txt; cat /etc/passwd > /dev/null 2>&1 && echo etc-readable; test -e /etc/hostname && echo etc-broad || echo etc-minimal; touch /usr/should-not-exist 2>/dev/null && echo usr-writable || echo usr-read-only; echo home=$HOME; touch $HOME/x && echo home-writable || echo home-not-writable; ls /home >/dev/null 2>&1 && echo home-visible || echo home-hidden; test -e /etc/shadow && echo shadow-leak || echo no-shadow")
                     :cwd cwd
                     :policy (harness-sandbox-policy)
                     :timeout 20)))
@@ -185,10 +197,12 @@
             (should (equal (car result) 0))
             (should (file-exists-p (expand-file-name "inside.txt" cwd)))
             (should (string-match-p "etc-readable" (cdr result)))
+            (should (string-match-p "etc-minimal" (cdr result)))
             (should (string-match-p "usr-read-only" (cdr result)))
+            (should (string-match-p "home=/tmp" (cdr result)))
             (should (string-match-p "home-writable" (cdr result)))
-            (should (string-match-p (format "home=%s" (regexp-quote (or (getenv "HOME") "/root")))
-                                    (cdr result))))
+            (should (string-match-p "home-hidden" (cdr result)))
+            (should (string-match-p "no-shadow" (cdr result))))
         (delete-directory cwd t)))))
 
 (provide 'harness-sandbox-test)
