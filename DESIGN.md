@@ -3,6 +3,7 @@ This is the design document for the Emacs native agent harness. This document de
 
 # Table Of Contents
 - [Overview](#overview)
+- [Development Guidance](#development-guidance)
 - [Technical Architecture](#technical-architecture)
 - [User Experience](#user-experience)
 - [Features](#features)
@@ -13,6 +14,9 @@ The agentic experience in Emacs as of yet has been well served by generic tools 
 The status quo is running a terminal emulator inside Emacs further inside which you run a harness which paints UI elements via curses style drawing commands. Although this gives you access to agentic tooling (Claude code, Pi, ect) it's obviously not an ideal experience (Many layers of indirection between UI, Emacs vterm is okay at best--doesn't compare to ghostty or kitty, curses GUIs aren't great to begin with).
 
 The combination of opportunities to take agentic tooling to the next level with the power of Emacs, and the underserved user experience which sub-par tools like TUI harnesses offer, is what provide an excellent opportunity to make a tool to serve these needs.
+
+# Development Guidance
+The first priority is to develop a workflow (set of tools, skills, docs, ect) which facilitate a closed loop hands on development cycle. An Emacs instance should be launched which can be manipulated and inspected / screenshot so that the agent can verify live that the code is working as intended. The code simply appearing implemented is not enough.
 
 # Technical Architecture
 The architecture of this harness is inspired by the Pi coding agent, and other modular systems like very mod-able games, D-Bus + XDG + the whole linux desktop system, ect. The core of the harness should be entirely focused on loading modules and facilitating communication between modules. All functionality should be provided via addon modules (even if they are shipped in tree), a plain harness running with no modules shouldn't even show a UI or call a completion API. Different modules need to be able to communicate with the APIs of other modules. This includes making direct calls to enact an action, but also hooking into events which are caused by a module (ex., on question ask). 
