@@ -229,6 +229,54 @@
         (should (harness-ui-chat-test--find-face 'harness-ui-h1-face buffer)))
       (kill-buffer buffer))))
 
+(ert-deftest harness-ui-chat-btw-forks-and-asks ()
+  (harness-ui-chat-test--with-stubs
+    (let* ((buffer (harness-ui-chat-test--buffer))
+           (captured (list (cons :fork-requests nil)
+                           (cons :opened nil)
+                           (cons :sent nil))))
+      (with-current-buffer buffer
+        (setq harness-ui-chat--info '(:title "Main session" :sessionId "s1")))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (method &optional params)
+                   (setcdr (assq :fork-requests captured)
+                           (cons (cons method params)
+                                 (cdr (assq :fork-requests captured))))
+                   (let ((deferred (harness-deferred-new)))
+                     (harness-deferred-resolve
+                      deferred
+                      (pcase method
+                        ("_harness/session/fork" (list :sessionId "btw-1"))
+                        (_ (make-hash-table))))
+                     deferred)))
+                ((symbol-function 'harness-ui-send)
+                 (lambda (_session-id blocks)
+                   (setcdr (assq :sent captured)
+                           (cons blocks (cdr (assq :sent captured))))
+                   (let ((deferred (harness-deferred-new)))
+                     (harness-deferred-resolve deferred (list :stopReason "end_turn"))
+                     deferred)))
+                ((symbol-function 'harness-ui-chat-open)
+                 (lambda (session-id &optional position)
+                   (setcdr (assq :opened captured)
+                           (cons (list session-id position)
+                                 (cdr (assq :opened captured))))
+                   (harness-ui-chat--buffer session-id))))
+        (with-current-buffer buffer
+          (harness-ui-chat-btw "what is the cache key?")))
+      ;; The fork carries the parent's title with a btw marker.
+      (let ((fork (assoc "_harness/session/fork" (cdr (assq :fork-requests captured)))))
+        (should fork)
+        (should (equal (plist-get (cdr fork) :sessionId) "s1"))
+        (should (string-match-p "(btw)" (plist-get (cdr fork) :title))))
+      ;; The side conversation was opened and asked.
+      (should (equal (car (cdr (assq :opened captured))) '("btw-1" right)))
+      (let ((sent (cdr (assq :sent captured))))
+        (should (= (length sent) 1))
+        (should (equal (plist-get (aref (car sent) 0) :text)
+                       "what is the cache key?")))
+      (kill-buffer buffer))))
+
 (ert-deftest harness-ui-chat-fontifies-markdown ()
   (harness-ui-chat-test--with-stubs
     (let ((buffer (harness-ui-chat-test--buffer)))

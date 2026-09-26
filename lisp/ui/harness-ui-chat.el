@@ -1256,6 +1256,33 @@ TEXT defaults to the composer's current contents."
       (harness-ui-chat-attach-file path)
       action)))
 
+(defun harness-ui-chat-btw (question)
+  "Start a side conversation forked from this session and ask QUESTION.
+The fork opens in a side window and stays in the session tree; closing it
+returns to the main session untouched."
+  (interactive "sAsk in a side conversation: ")
+  (let ((session-id (harness-ui-chat--current-session))
+        (info harness-ui-chat--info))
+    (when (null session-id)
+      (user-error "Not in a harness chat buffer"))
+    (harness-deferred-then
+     (harness-ui-request
+      "_harness/session/fork"
+      (list :sessionId session-id
+            :title (format "%s (btw)"
+                           (or (plist-get info :title)
+                               (substring session-id 0 8)))))
+     (lambda (result)
+       (let ((btw (plist-get result :sessionId)))
+         (unless btw
+           (user-error "Forking failed"))
+         (let ((buffer (harness-ui-chat-open btw 'right)))
+           (when (and question (not (string-empty-p (string-trim question))))
+             (with-current-buffer buffer
+               (harness-ui-chat--send-blocks
+                (vector (list :type "text" :text (string-trim question)))))))
+         (message "Side conversation %s — q closes it" (substring btw 0 8)))))))
+
 (defun harness-ui-chat-back-to-end ()
   "Jump back to the composer."
   (interactive)
@@ -1315,6 +1342,7 @@ TEXT defaults to the composer's current contents."
     (define-key map (kbd "C-c C-t") #'harness-ui-set-thinking)
     (define-key map (kbd "C-c C-u") #'harness-ui-usage)
     (define-key map (kbd "C-c C-w") #'harness-ui-worktrees)
+    (define-key map (kbd "C-c C-b") #'harness-ui-chat-btw)
     (define-key map (kbd "C-c C-e") #'harness-ui-chat-back-to-end)
     (define-key map (kbd "C-c C-a") #'harness-ui-chat-attach-file)
     (define-key map (kbd "q") #'bury-buffer)

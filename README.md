@@ -51,6 +51,7 @@ Then:
 | `C-c C-m` | switch model |
 | `C-c C-p` / `C-c C-t` | permission mode / thinking level |
 | `C-c C-a` | attach a file |
+| `C-c C-b` | ask in a side conversation (btw fork) |
 | `C-c C-e` | jump back to the message box |
 | `q` | bury the chat |
 
@@ -101,6 +102,13 @@ their project, resume from disk, and record token usage and cost.
 explains what to configure.  Other backends plug in through
 `harness-search-register-provider`, and the tool always uses the first
 registered provider.
+
+## Side conversations
+
+`C-c C-b` opens a **btw** conversation: a fork of the current session in
+a side window, asked immediately with your question.  The main session
+keeps running untouched; the fork stays visible in the conversation tree,
+and `q` closes the side window when you are done.
 
 ## Worktrees
 
