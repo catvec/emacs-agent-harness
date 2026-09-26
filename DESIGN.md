@@ -20,6 +20,8 @@ The first priority is to develop a workflow (set of tools, skills, docs, ect) wh
 
 The architecture of this project is such that all modules should be developable in parallel once the core loader logic and API contracts are defined.
 
+Make sure both local emacs and remote client ACP are tested whenever new feature are added or when verifying functionality.
+
 # Technical Architecture
 The architecture of this harness is inspired by the Pi coding agent, and other modular systems like very mod-able games, D-Bus + XDG + the whole linux desktop system, ect. The core of the harness should be entirely focused on loading modules and facilitating communication between modules. All functionality should be provided via addon modules (even if they are shipped in tree), a plain harness running with no modules shouldn't even show a UI or call a completion API. Different modules need to be able to communicate with the APIs of other modules. This includes making direct calls to enact an action, but also hooking into events which are caused by a module (ex., on question ask). 
 
