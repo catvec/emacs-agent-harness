@@ -384,11 +384,15 @@ Only non-blocking tools belong here; anything that can hold the session
   (harness-ui-chat--rerender record))
 
 (defun harness-ui-chat--insert-record (record &optional before-marker)
-  "Insert RECORD, optionally before BEFORE-MARKER."
+  "Insert RECORD at the end of the transcript, above the composer.
+The transcript boundary is advanced past the new record so the next one
+follows it in chronological order."
   (let ((inhibit-read-only t))
     (save-excursion
       (goto-char (or before-marker (harness-ui-chat--transcript-point)))
-      (harness-ui-chat--render-record record))
+      (harness-ui-chat--render-record record)
+      (unless before-marker
+        (set-marker harness-ui-chat--transcript-end (point) (current-buffer))))
     (push record harness-ui-chat--records)))
 
 (defun harness-ui-chat--transcript-point ()
@@ -581,9 +585,7 @@ Only non-blocking tools belong here; anything that can hold the session
     (when harness-ui-chat--transcript-end
       (delete-region (marker-position harness-ui-chat--transcript-end) (point-max)))
     (goto-char (harness-ui-chat--transcript-point))
-    ;; Insertion type t keeps the marker after newly inserted transcript
-    ;; records, so they stay in chronological order above the composer.
-    (setq harness-ui-chat--transcript-end (copy-marker (point) t))
+    (setq harness-ui-chat--transcript-end (copy-marker (point)))
     (insert "\n")
     (harness-ui-chat--render-queued)
     (harness-ui-chat--render-attachments-line)
@@ -687,7 +689,7 @@ Only non-blocking tools belong here; anything that can hold the session
           (setq harness-ui-chat--records nil
                 harness-ui-chat--queue nil
                 harness-ui-chat--attachments nil
-                harness-ui-chat--transcript-end (copy-marker (point-max) t))
+                harness-ui-chat--transcript-end (copy-marker (point-max)))
           (harness-ui-chat--render-composer))
         (puthash session-id buffer harness-ui-chat--buffers)
         buffer)))
