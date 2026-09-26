@@ -49,14 +49,21 @@ Then:
 | `C-c C-k` | cancel the running turn |
 | `C-c C-s` | session list |
 | `C-c C-m` | switch model |
+| `C-c C-p` / `C-c C-t` | permission mode / thinking level |
 | `C-c C-a` | attach a file |
 | `C-c C-e` | jump back to the message box |
 | `q` | bury the chat |
 
 Every action also exists as a clickable button in the composer line.
 Thinking and tool calls start collapsed (`▸`); click or press the toggle
-to expand.  Consecutive safe tool calls (`read`, `glob`, `search`, ...)
-coalesce into a summary line so long transcripts stay readable.
+to expand.  Collapsed thinking previews its first line, tool lines show
+what they acted on and their status, and consecutive safe tool calls
+(`read`, `glob`, `search`, ...) coalesce into a summary line so long
+transcripts stay readable.
+
+The agent can run work in a **sub-agent** session (`subagent` tool): a
+full session parented to the current one, shown in the session list, whose
+final report comes back as the tool result.
 
 The header line shows the session name, status, model, context usage,
 cost and permission mode.

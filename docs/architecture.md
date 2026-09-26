@@ -346,6 +346,7 @@ session in the same position replaces the buffer there.
 | `harness-perms` | `permission` service | tools |
 | `harness-perms-jail` | directory jail rules | perms, tools |
 | `harness-agent` | `agent` service | session, provider, tools, perms |
+| `harness-subagents` | `subagent` tool | agent, session, tools |
 | `harness-ui` | ACP client + events | acp, inprocess, perms |
 | `harness-ui-chat` | chat buffer | ui |
 | `harness-ui-ask` | approval/question panels | ui |
@@ -355,9 +356,20 @@ session in the same position replaces the buffer there.
 | `harness-ui-notifier` | blocked notifier | ui |
 
 `harness.el` loads: acp, inprocess, config, session, provider,
-provider-openai, tools, tools-emacs, perms, perms-jail, agent, ui, and the
-UI feature modules selected by `harness-ui-modules` (all by default).  A
-user can replace any of them by customizing the list.
+provider-openai, tools, tools-emacs, perms, perms-jail, agent,
+subagents, ui, and the UI feature modules selected by
+`harness-ui-modules` (all by default).  A user can replace any of them by
+customizing the list.
+
+### Sub-agents
+
+`harness-subagents` registers the `subagent` tool.  A call creates a new
+session whose parent is the calling session (so the conversation tree and
+the session list show it), inherits the caller's model and thinking level,
+runs the given prompt to completion and returns the child's final message
+as the tool result.  With `:fork` the child starts from a fork of the
+caller's transcript instead of an empty one.  Nesting is capped by
+`harness-subagents-max-depth`.
 
 ## Sandbox
 

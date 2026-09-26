@@ -114,6 +114,15 @@ both light and dark themes."
                       'help-echo (format "Click or press %s" hint))
   (insert (propertize (format "  %s\n" hint) 'face 'harness-ui-ask-key-face)))
 
+(defun harness-ui-ask--args-face ()
+  "Face for tool arguments, resolved against the current theme.
+Resolving at render time keeps the panel readable even when a hot reload
+replaces the face definition (previously set attributes can linger)."
+  (let ((background (face-attribute 'secondary-selection :background nil t)))
+    (if (or (null background) (eq background 'unspecified))
+        'fixed-pitch
+      (list :inherit 'fixed-pitch :background background :extend t))))
+
 (defun harness-ui-ask--render-permission (request)
   "Render a permission REQUEST."
   (let* ((tool-call (plist-get request :tool-call))
@@ -130,7 +139,7 @@ both light and dark themes."
        (format "%s\n\n" (truncate-string-to-width
                           (or (ignore-errors (harness-json-serialize args)) (format "%S" args))
                           200 nil nil "…"))
-       'face (harness-ui-ask--args-face))
+       'face (harness-ui-ask--args-face)))
     (when reason
       (harness-ui-ask--insert (format "%s\n\n" reason) 'face 'harness-ui-ask-reason-face))
     (harness-ui-ask--button "Allow once" "y" (lambda () (harness-ui-ask-answer "allow-once")))

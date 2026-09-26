@@ -398,34 +398,34 @@ Signals when the transcript is still being read from disk."
 
 (defun harness-agent--call-provider (session-id turn model request)
   "Call the provider with REQUEST and handle the result for TURN."
-  (unless (harness-service-available-p "provider" 'complete)
-    (harness-agent--system-hint
-     session-id "No completion provider is loaded; cannot run the model." "error")
-    (harness-agent--finish-turn session-id turn "refusal")
-    (cl-return-from harness-agent--call-provider nil))
-  (let* ((turn-abort (harness-agent-turn-abort turn))
-         (deferred (harness-service-call "provider" 'complete request)))
-    (harness-deferred-on-cancel turn-abort
-                                (lambda ()
-                                  (when (harness-deferred-pending-p deferred)
-                                    (harness-deferred-cancel deferred))))
-    (harness-deferred-then
-     deferred
-     (lambda (result)
-       (harness-agent--close-streams session-id turn)
-       (when (harness-agent-turn-running turn)
-         (harness-agent--record-usage session-id model result)
-         (harness-agent--handle-result session-id turn result)))
-     (lambda (error)
-       (harness-agent--close-streams session-id turn)
-       (when (harness-agent-turn-running turn)
-         (if (harness-agent-turn-cancelled turn)
-             (harness-agent--finish-turn session-id turn "cancelled")
-           (let ((message (format "The model call failed: %s"
-                                  (harness-agent--error-message error))))
-             (harness-agent--system-hint session-id message "error")
-             (harness-emit 'agent-error :session-id session-id :message message)
-             (harness-agent--finish-turn session-id turn "end_turn"))))))))
+  (if (not (harness-service-available-p "provider" 'complete))
+      (progn
+        (harness-agent--system-hint
+         session-id "No completion provider is loaded; cannot run the model." "error")
+        (harness-agent--finish-turn session-id turn "refusal"))
+    (let* ((turn-abort (harness-agent-turn-abort turn))
+           (deferred (harness-service-call "provider" 'complete request)))
+      (harness-deferred-on-cancel turn-abort
+                                  (lambda ()
+                                    (when (harness-deferred-pending-p deferred)
+                                      (harness-deferred-cancel deferred))))
+      (harness-deferred-then
+       deferred
+       (lambda (result)
+         (harness-agent--close-streams session-id turn)
+         (when (harness-agent-turn-running turn)
+           (harness-agent--record-usage session-id model result)
+           (harness-agent--handle-result session-id turn result)))
+       (lambda (error)
+         (harness-agent--close-streams session-id turn)
+         (when (harness-agent-turn-running turn)
+           (if (harness-agent-turn-cancelled turn)
+               (harness-agent--finish-turn session-id turn "cancelled")
+             (let ((message (format "The model call failed: %s"
+                                    (harness-agent--error-message error))))
+               (harness-agent--system-hint session-id message "error")
+               (harness-emit 'agent-error :session-id session-id :message message)
+               (harness-agent--finish-turn session-id turn "end_turn")))))))))
 
 ;;; Results, tools, continuation
 

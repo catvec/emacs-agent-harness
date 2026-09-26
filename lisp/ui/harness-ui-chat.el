@@ -850,9 +850,8 @@ state in the wrong buffer."
 Segments use only theme faces so light and dark themes stay legible on
 the theme's own header-line background, and the important ones are
 clickable."
-  (when (harness-ui-chat--call-in-chat-buffer #'harness-ui-chat--refresh-header)
-    (cl-return-from harness-ui-chat--refresh-header nil))
-  (let* ((info harness-ui-chat--info)
+  (unless (harness-ui-chat--call-in-chat-buffer #'harness-ui-chat--refresh-header)
+    (let* ((info harness-ui-chat--info)
          (status (or harness-ui-chat--status 'idle))
          (title (or (plist-get info :title)
                     (and (plist-get info :sessionId)
@@ -907,15 +906,14 @@ clickable."
              (list separator
                    (harness-ui-chat--header-segment
                     (format "%d queued" (length harness-ui-chat--queue))
-                    'warning "Messages waiting for the next turn")))))))
+                    'warning "Messages waiting for the next turn"))))))))
 
 (defun harness-ui-chat--render-composer (&optional text)
   "(Re)draw the composer area and its action buttons.
 TEXT defaults to the composer's current contents."
-  (when (harness-ui-chat--call-in-chat-buffer
-         (lambda () (harness-ui-chat--render-composer text)))
-    (cl-return-from harness-ui-chat--render-composer nil))
-  (let* ((inhibit-read-only t)
+  (unless (harness-ui-chat--call-in-chat-buffer
+           (lambda () (harness-ui-chat--render-composer text)))
+    (let* ((inhibit-read-only t)
          (text (or text (harness-ui-chat--compose-text)))
          (running (eq harness-ui-chat--status 'running))
          (input-end nil)
@@ -962,7 +960,7 @@ TEXT defaults to the composer's current contents."
     (setq harness-ui-chat--compose-end (copy-marker input-end t))
     (when compose-point
       (goto-char (min (point-max)
-                      (+ (marker-position harness-ui-chat--compose-start) compose-point))))))
+                      (+ (marker-position harness-ui-chat--compose-start) compose-point)))))))
 
 (defun harness-ui-chat--safe-marker-position (marker)
   "Marker's position, clamped to the accessible buffer text."

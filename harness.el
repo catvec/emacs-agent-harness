@@ -41,6 +41,7 @@
     harness-perms
     harness-perms-jail
     harness-agent
+    harness-subagents
     harness-ui
     harness-ui-chat
     harness-ui-ask
