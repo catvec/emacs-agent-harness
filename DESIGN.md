@@ -215,7 +215,7 @@ For users who want to get very serious with it use a real Linux jail. Isolation 
 
 - Backends, in preference order: `bwrap`, `systemd-run --user`, `none`.
 - Fail closed if a policy requires confinement and no backend is available; warn loudly rather than silently running unconfined.
-- Filesystem: read-only `/usr`, `/lib`, `/lib64`, `/etc`; read-write session cwd; tmpfs `$HOME`; `--dev /dev --proc /proc`.
+- Filesystem: read-write session cwd; tmpfs, purposely not HOME or any other files to avoid very valuable files like npm credentials being accessible and minimal system or kernel mounts to prevent breakout or other attempts
 - Process: `--unshare-pid --unshare-ipc --unshare-uts --die-with-parent --new-session`.
 - Network: allowed by default (hosted providers need their API); `--unshare-net` is opt-in and only correct for local models.
 - `:permission-mode` is a prompt-level hint, never a security boundary.
