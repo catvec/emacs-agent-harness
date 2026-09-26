@@ -189,5 +189,44 @@
         (should-not harness--auto-reload-watches))
     (when harness-auto-reload-mode (harness-auto-reload-mode -1))))
 
-(provide 'harness-reload-test)
+
 ;;; harness-reload-test.el ends here
+
+(require 'harness-ui)
+(require 'harness-ui-chat)
+(harness-module-load 'harness-ui)
+(harness-module-load 'harness-ui-chat)
+
+(ert-deftest harness-reload-keeps-ui-handlers-valid ()
+  "Reloading must leave UI event handlers as working functions."
+  (harness-module-load 'harness-ui-chat)
+  (harness-reload)
+  (let* ((handlers (gethash 'harness-ui-update harness-core--event-handlers))
+         (handler (car handlers)))
+    (should (= (length handlers) 1))
+    ;; The handler is the symbol, so the newest definition is called.
+    (should (eq (harness-event-handler-function handler)
+                'harness-ui-chat--on-update)))
+  ;; And a session update actually renders after the reload.
+  (let ((buffer nil))
+    (unwind-protect
+        (progn
+          (setq buffer (harness-ui-chat--buffer "reload-ui"))
+          (harness-emit 'harness-ui-update
+                        :session-id "reload-ui"
+                        :update (list :sessionUpdate "agent_message_chunk"
+                                      :messageId "r1" :final t
+                                      :content (list :type "text" :text "AFTER-RELOAD")))
+          (harness-test-wait-for
+           (lambda ()
+             (with-current-buffer buffer
+               (string-match-p "AFTER-RELOAD"
+                               (buffer-substring-no-properties (point-min) (point-max)))))
+           5)
+          (with-current-buffer buffer
+            (should (string-match-p "AFTER-RELOAD"
+                                    (buffer-substring-no-properties (point-min) (point-max))))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (remhash "reload-ui" harness-ui-chat--buffers))))
+
+(provide 'harness-reload-test)
