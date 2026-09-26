@@ -76,6 +76,7 @@
             harness-ui--client-connection (cdr pair))
       (harness-ui--register-client-methods harness-ui--client-connection)
       (harness-ui--install-permission-asker)
+      (harness-ui--install-question-function)
       (harness-deferred-then
        (harness-acp-connection-request
         harness-ui--client-connection "initialize"
@@ -99,7 +100,10 @@
   (setq harness-ui--client-connection nil
         harness-ui--agent-connection nil)
   (when (eq harness-permission-ask-function #'harness-ui--ask-permission)
-    (setq harness-permission-ask-function nil)))
+    (setq harness-permission-ask-function nil))
+  (when (and (boundp 'harness-agent-question-function)
+             (eq harness-agent-question-function #'harness-ui--ask-question))
+    (setq harness-agent-question-function nil)))
 
 ;;; Requests
 
@@ -140,6 +144,19 @@
    client "session/request_permission"
    (lambda (_connection params)
      (harness-ui--permission-request params)))
+  (harness-acp-connection-register-method
+   client "_harness/question"
+   (lambda (_connection params)
+     (let ((deferred (harness-deferred-new)))
+       (harness-emit 'harness-ui-question
+                     :session-id (plist-get params :sessionId)
+                     :question (plist-get params :question)
+                     :options (plist-get params :options)
+                     :freeform (plist-get params :freeform)
+                     :respond (lambda (answer)
+                                (harness-deferred-resolve
+                                 deferred (list :answer (or answer "")))))
+       deferred)))
   (harness-acp-connection-register-method
    client "fs/read_text_file"
    (lambda (_connection params) (harness-ui--read-text-file params)))
@@ -211,6 +228,24 @@ module answers it by calling the response function."
 (defun harness-ui--install-permission-asker ()
   "Route the agent-side permission asker through this ACP connection."
   (setq harness-permission-ask-function #'harness-ui--ask-permission))
+
+(defun harness-ui--install-question-function ()
+  "Route the agent-side question tool through this ACP connection."
+  (when (boundp 'harness-agent-question-function)
+    (setq harness-agent-question-function #'harness-ui--ask-question)))
+
+(defun harness-ui--ask-question (request)
+  "Ask the user REQUEST's question over ACP.  Returns a deferred of the answer."
+  (harness-deferred-then
+   (harness-acp-connection-request
+    harness-ui--agent-connection "_harness/question"
+    (harness-plist-omit-nil
+     (list :sessionId (plist-get request :session-id)
+           :question (plist-get request :question)
+           :options (plist-get request :options)
+           :freeform (plist-get request :freeform))))
+   (lambda (result) (plist-get result :answer))
+   (lambda (_error) nil)))
 
 (defun harness-ui--ask-permission (request)
   "Called by the permission chain; asks this UI over ACP.

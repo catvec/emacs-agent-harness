@@ -28,6 +28,12 @@ Processes timers and process output while waiting."
   (harness-test-settle deferred seconds)
   (harness-deferred-value deferred))
 
+(defun harness-test-resolved (value)
+  "Return a deferred already resolved with VALUE."
+  (let ((deferred (harness-deferred-new)))
+    (harness-deferred-resolve deferred value)
+    deferred))
+
 ;;; A canned HTTP server, for tests that need a real socket
 
 (defvar harness-test-http-processes nil

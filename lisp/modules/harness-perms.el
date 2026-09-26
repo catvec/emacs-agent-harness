@@ -160,10 +160,18 @@ Rules may return a decision directly or a deferred resolving to one."
       (step harness-permission-functions))
     result))
 
+(defun harness-perms--set-session-status (session-id status)
+  "Tell the session service about a status change, when it is loaded."
+  (when (and session-id (harness-service-available-p "session" 'set-status))
+    (ignore-errors
+      (harness-service-call "session" 'set-status
+                            :session-id session-id :status status))))
+
 (defun harness-permission--ask (request decision)
   "Resolve an `ask' DECISION for REQUEST."
-  (let* ((ask-request (harness-plist-omit-nil
-                       (list :session-id (harness-permission-request-session-id request)
+  (let* ((session-id (harness-permission-request-session-id request))
+         (ask-request (harness-plist-omit-nil
+                       (list :session-id session-id
                              :tool-name (harness-permission-request-tool-name request)
                              :arguments (harness-permission-request-arguments request)
                              :cwd (harness-permission-request-cwd request)
@@ -173,9 +181,12 @@ Rules may return a decision directly or a deferred resolving to one."
                                           (harness-permission-options))))))
     (if harness-permission-ask-function
         (let ((deferred (harness-deferred-new)))
+          ;; The session is blocked while the user decides.
+          (harness-perms--set-session-status session-id "blocked")
           (harness-deferred-then
            (funcall harness-permission-ask-function ask-request)
            (lambda (outcome)
+             (harness-perms--set-session-status session-id "running")
              (harness-deferred-resolve
               deferred
               (if (equal (plist-get outcome :outcome) "allow")
@@ -187,6 +198,7 @@ Rules may return a decision directly or a deferred resolving to one."
                       :reason (or (plist-get outcome :reason)
                                   "The user rejected this tool call.")))))
            (lambda (error)
+             (harness-perms--set-session-status session-id "running")
              (harness-deferred-resolve
               deferred
               (list :decision 'deny

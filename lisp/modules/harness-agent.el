@@ -72,6 +72,12 @@
 (defvar harness-agent--model-cache nil
   "Cached vector of model plists, or nil when never fetched.")
 
+(defvar harness-agent-question-function nil
+  "Function that asks the user a question and returns a deferred.
+The UI layer installs this; the request plist carries :session-id,
+:question, :options and :freeform, and the deferred resolves to the
+answer string or nil.")
+
 ;;; State
 
 (cl-defstruct (harness-agent-state (:constructor harness-agent-state-create))
@@ -810,6 +816,39 @@ Signals when the transcript is still being read from disk."
 
 ;;; Events and service
 
+(defun harness-agent-ask-tool (arguments context)
+  "Tool handler: ask the user a question through the UI."
+  (let ((session-id (harness-tool-context-session-id context))
+        (question (plist-get arguments :question)))
+    (if (null harness-agent-question-function)
+        (harness-tool-error-result
+         "No user is available to answer questions; decide for yourself or continue.")
+      (progn
+        (harness-agent--set-status session-id "blocked")
+        (harness-deferred-then
+         (funcall harness-agent-question-function
+                  (harness-plist-omit-nil
+                   (list :session-id session-id
+                         :question question
+                         :options (let ((options (plist-get arguments :options)))
+                                    (when (and options (> (length options) 0)) options))
+                         :freeform (plist-get arguments :freeform))))
+         (lambda (answer)
+           (harness-agent--set-status session-id "running")
+           (if (and answer (not (string-empty-p answer)))
+               (format "The user answered: %s" answer)
+             "The user dismissed the question without answering."))
+         (lambda (error)
+           (harness-agent--set-status session-id "running")
+           (harness-tool-error-result
+            (format "Asking the user failed: %s" (harness-agent--error-message error)))))))))
+
+(defun harness-agent--set-status (session-id status)
+  "Set SESSION-ID's status through the session service."
+  (when (and session-id (harness-service-available-p "session" 'set-status))
+    (ignore-errors
+      (harness-service-call "session" 'set-status :session-id session-id :status status))))
+
 (defun harness-agent-setup ()
   "Set up the agent module."
   (harness-event-define 'agent-error
@@ -830,7 +869,17 @@ Signals when the transcript is still being read from disk."
               (configuration . harness-agent-configuration)
               (set-config . harness-agent-set-config)
               (set-mode . harness-agent-set-mode)
-              (refresh-models . harness-agent-refresh-models))))
+              (refresh-models . harness-agent-refresh-models)))
+  (harness-tool-register
+   "ask"
+   :description "Ask the user a question and wait for their answer. Use sparingly, when the task truly needs human input."
+   :schema '(:type "object"
+             :properties (:question (:type "string")
+                          :options (:type "array" :description "Suggested answers.")
+                          :freeform (:type "boolean" :description "Allow a free-form answer."))
+             :required ["question"])
+   :kind 'think
+   :handler #'harness-agent-ask-tool))
 
 (defun harness-agent-teardown ()
   "Tear down the agent module."
