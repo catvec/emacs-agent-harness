@@ -125,8 +125,14 @@
            (setf (harness-provider-claude--state-seen-result state) t)
            (let ((result (plist-get event :result))
                  (usage (plist-get event :usage)))
-             (when (and result (not (harness-provider-claude--state-text state)))
-               (setf (harness-provider-claude--state-text state) result))
+             (if (or (plist-get event :is_error)
+                     (and (plist-get event :subtype)
+                          (not (equal (plist-get event :subtype) "success"))))
+                 ;; Authentication and other CLI failures arrive here.
+                 (setf (harness-provider-claude--state-error state)
+                       (or result "the Claude CLI reported an error"))
+               (when (and result (not (harness-provider-claude--state-text state)))
+                 (setf (harness-provider-claude--state-text state) result)))
              (when usage
                (setf (harness-provider-claude--state-usage state)
                      (list :input-tokens (or (plist-get usage :input_tokens) 0)

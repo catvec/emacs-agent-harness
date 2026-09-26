@@ -175,22 +175,33 @@ with an explanation instead of spending more."
          (state (harness-agent--state session-id))
          (budget (and (harness-service-available-p "usage" 'budget-check)
                       (harness-service-call "usage" 'budget-check
-                                            :session-id session-id))))
-    (if (and budget (plist-get budget :blocked))
+                                            :session-id session-id)))
+         (merge-lock (and (harness-service-available-p "merge" 'lock)
+                          (harness-service-call "merge" 'lock :parent-id session-id))))
+    (if merge-lock
+        ;; A child is merging into this session's files; let it finish.
         (let ((deferred (harness-deferred-new)))
-          (harness-agent--system-hint session-id (plist-get budget :reason) "error")
+          (harness-agent--system-hint
+           session-id
+           (format "Session %s is merging into this working directory; try again when it finishes."
+                   (substring merge-lock 0 8)))
           (harness-deferred-resolve deferred "refusal")
           deferred)
-      (if (harness-agent-state-turn state)
-          ;; Mid-turn: queue the message for the next turn boundary.
+      (if (and budget (plist-get budget :blocked))
           (let ((deferred (harness-deferred-new)))
-            (setf (harness-agent-state-queue state)
-                  (append (harness-agent-state-queue state)
-                          (list (cons blocks deferred))))
+            (harness-agent--system-hint session-id (plist-get budget :reason) "error")
+            (harness-deferred-resolve deferred "refusal")
             deferred)
-        (harness-deferred-then
-         (harness-service-call "session" 'entries :session-id session-id)
-         (lambda (_entries) (harness-agent--start-turn session-id blocks)))))))
+        (if (harness-agent-state-turn state)
+            ;; Mid-turn: queue the message for the next turn boundary.
+            (let ((deferred (harness-deferred-new)))
+              (setf (harness-agent-state-queue state)
+                    (append (harness-agent-state-queue state)
+                            (list (cons blocks deferred))))
+              deferred)
+          (harness-deferred-then
+           (harness-service-call "session" 'entries :session-id session-id)
+           (lambda (_entries) (harness-agent--start-turn session-id blocks))))))))
 
 (defun harness-agent--block-vector (blocks)
   "Normalize BLOCKS into a vector of content blocks."

@@ -349,6 +349,7 @@ session in the same position replaces the buffer there.
 | `harness-agent` | `agent` service | session, provider, tools, perms |
 | `harness-usage` | `usage` service | session |
 | `harness-worktree` | `worktree` service | config, session |
+| `harness-merge` | `merge` service, `merge` tool | session, agent, tools |
 | `harness-subagents` | `subagent` tool | agent, session, tools |
 | `harness-search` | `websearch` tool | http, tools |
 | `harness-plan` | `plan` tool | session, tools |
@@ -364,7 +365,7 @@ session in the same position replaces the buffer there.
 
 `harness.el` loads: acp, inprocess, config, session, provider,
 provider-openai, provider-claude, tools, tools-emacs, perms, perms-jail, agent, usage,
-worktree, subagents, search, plan, ui, and the UI feature modules selected by
+worktree, merge, subagents, search, plan, ui, and the UI feature modules selected by
 `harness-ui-modules` (all by default).  A user can replace any of them by
 customizing the list.
 

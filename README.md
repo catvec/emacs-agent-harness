@@ -142,6 +142,16 @@ worktree, and remove worktrees you no longer need.  Sessions record their
 worktree, so the session list and the conversation tree show where each
 one runs.
 
+## Merging work back
+
+A forked or worktree session can ask to merge its changes into its
+parent's working directory (the `merge` tool, also available to the
+agent).  Requests queue on the parent and only one child holds the merge
+window at a time; the parent pauses new turns while it does, the child
+gets the parent's directory as an allowed path plus a normal turn that
+asks it to apply its changes and resolve conflicts, and the window closes
+when that turn ends (or after `harness-merge-lock-timeout`).
+
 ## Usage and budgets
 
 `M-x harness-ui-usage` (or `C-c C-u` in a chat) opens a full report:

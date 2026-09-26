@@ -711,6 +711,16 @@ LEVEL is \"info\", \"warning\" or \"error\"."
   (harness-session--schedule-save session)
   session)
 
+(defun harness-session-remove-directory (session directory)
+  "Remove DIRECTORY from SESSION's allowed directories."
+  (let ((directory (file-name-as-directory (expand-file-name directory))))
+    (when (member directory (harness-session-additional-directories session))
+      (setf (harness-session-additional-directories session)
+            (remove directory (harness-session-additional-directories session))
+            (harness-session-updated-at session) (harness-iso-time))
+      (harness-session--schedule-save session)))
+  session)
+
 (defun harness-session-add-directory (session directory)
   "Add DIRECTORY to SESSION's allowed directories."
   (let ((directory (file-name-as-directory (expand-file-name directory))))

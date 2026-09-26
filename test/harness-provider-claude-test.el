@@ -113,5 +113,16 @@ ON-TEXT receives streamed deltas."
     (should (string-match-p "User: Say hello" prompt))
     (should (string-match-p "Assistant:$" prompt))))
 
+(ert-deftest harness-provider-claude-surfaces-authentication-errors ()
+  "A result event with is_error becomes a provider error, not an answer."
+  (let* ((harness-provider-claude-program
+          (harness-provider-claude-test--script
+           '("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"result\":\"Failed to authenticate. API Error: 401\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}")))
+         (deferred (harness-provider-claude-test--run
+                    (harness-provider-claude-test--request))))
+    (should (harness-deferred-rejected-p deferred))
+    (should (string-match-p "Failed to authenticate"
+                            (format "%S" (harness-deferred-value deferred))))))
+
 (provide 'harness-provider-claude-test)
 ;;; harness-provider-claude-test.el ends here

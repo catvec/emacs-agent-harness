@@ -46,6 +46,7 @@
     harness-subagents
     harness-search
     harness-plan
+    harness-merge
     harness-ui
     harness-ui-chat
     harness-ui-ask
