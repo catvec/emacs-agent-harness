@@ -85,7 +85,9 @@ answer string or nil.")
   turn
   (queue nil)                   ; list of (blocks . deferred), oldest first
   (steers nil)                  ; list of content blocks, oldest first
-  (compacting nil))
+  (compacting nil)
+  (named nil)                   ; non-nil once naming was attempted
+  (turns 0))                    ; completed turns
 
 (cl-defstruct (harness-agent-turn (:constructor harness-agent-turn-create))
   deferred
@@ -691,10 +693,10 @@ Signals when the transcript is still being read from disk."
       (harness-deferred-then
        (harness-service-call
         "provider" 'complete
-        :model model
-        :system "Summarize this conversation for continuation. Keep decisions, file paths, command results and open questions. Be concise."
-        :messages (harness-provider-messages-from-entries older)
-        :max-output-tokens 2000)
+        (list :model model
+              :system "Summarize this conversation for continuation. Keep decisions, file paths, command results and open questions. Be concise."
+              :messages (harness-provider-messages-from-entries older)
+              :max-output-tokens 2000))
        (lambda (result)
          (let ((text (plist-get result :text)))
            (when (and text (not (string-empty-p text)))
@@ -718,6 +720,8 @@ Signals when the transcript is still being read from disk."
     (setf (harness-agent-turn-running turn) nil)
     (let ((state (harness-agent--state session-id)))
       (setf (harness-agent-state-turn state) nil)
+      (cl-incf (harness-agent-state-turns state))
+      (harness-agent--maybe-auto-name session-id state)
       (harness-service-call "session" 'set-status :session-id session-id :status "idle")
       (harness-emit 'agent-turn-finished :session-id session-id :stop-reason stop-reason)
       (harness-deferred-resolve (harness-agent-turn-deferred turn) stop-reason)
@@ -732,6 +736,50 @@ Signals when the transcript is still being read from disk."
              (lambda (reason)
                (dolist (deferred deferreds)
                  (harness-deferred-resolve deferred reason))))))))))
+
+(defun harness-agent--maybe-auto-name (session-id state)
+  "Name SESSION-ID automatically after its first completed turn.
+The naming call reuses the conversation as a prefix, so the provider's
+prompt cache usually covers it."
+  (when (and (not (harness-agent-state-named state))
+             (= (harness-agent-state-turns state) 1)
+             (harness-service-available-p "provider" 'complete))
+    (setf (harness-agent-state-named state) t)
+    (let ((info (harness-agent--info session-id)))
+      (when (null (plist-get info :title))
+        (let ((model (or (plist-get info :model) harness-agent-default-model)))
+          (when model
+            (harness-service-call "session" 'system-hint
+                                  :session-id session-id
+                                  :text "Naming this conversation…")
+            (harness-deferred-then
+             (harness-service-call
+              "provider" 'complete
+              (list :model model
+                    :system (concat "Suggest a short title for this conversation. "
+                                    "Reply with the title only: three to six words, no quotes, no punctuation at the end.")
+                    :messages (harness-agent--messages session-id)
+                    :max-output-tokens 40))
+             (lambda (result)
+               (let ((title (harness-agent--clean-title (plist-get result :text))))
+                 (when title
+                   (harness-service-call "session" 'rename
+                                         :session-id session-id :title title)
+                   (harness-service-call "session" 'system-hint
+                                         :session-id session-id
+                                         :text (format "Conversation named “%s”." title)))))
+             (lambda (error)
+               (harness-log "auto-naming failed: %S" error)))))))))
+
+(defun harness-agent--clean-title (text)
+  "Turn a model reply TEXT into a usable session title."
+  (when (and text (not (string-empty-p (string-trim text))))
+    (let ((title (string-trim
+                  (car (split-string (string-trim text) "\n")))))
+      (setq title (string-trim title " \t\n\"'“”‘’”"))
+      (when (> (length title) 72)
+        (setq title (concat (substring title 0 69) "…")))
+      (unless (string-empty-p title) title))))
 
 (defun harness-agent-cancel (&rest args)
   "Cancel the running turn of :session-id, if any."
@@ -771,7 +819,24 @@ Signals when the transcript is still being read from disk."
       (setq options (cons (harness-agent--model-option models (plist-get info :model))
                           (seq-remove (lambda (option) (equal (plist-get option :id) "model"))
                                       options))))
+    (when-let* ((thinking (harness-agent--thinking-option info models)))
+      (setq options (append options (list thinking))))
     (list :configOptions (vconcat options))))
+
+(defun harness-agent--thinking-option (info models)
+  "Build the thinking level option when INFO's model supports one."
+  (let ((model (seq-find (lambda (entry)
+                           (equal (plist-get entry :id) (plist-get info :model)))
+                         (append models nil))))
+    (when (and model (plist-get model :thinking))
+      (list :id "thinking" :name "Thinking" :category "thought_level"
+            :type "select"
+            :currentValue (or (plist-get info :thinking) "medium")
+            :options (vector (list :value "low" :name "Low"
+                                   :description "Faster answers, less deliberation")
+                             (list :value "medium" :name "Medium")
+                             (list :value "high" :name "High"
+                                   :description "Deeper reasoning, slower answers"))))))
 
 (defun harness-agent--model-option (models current)
   "Build the model config option from MODELS with CURRENT selected."

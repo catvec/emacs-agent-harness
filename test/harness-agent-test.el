@@ -393,5 +393,53 @@
                               :model)
                    "mock/other"))))
 
+
+(ert-deftest harness-agent-thinking-option ()
+  "Models that support a thinking level expose a config option."
+  (harness-agent-test--with-session
+    (setq harness-agent--model-cache
+          (vector (list :id "mock/mock-model" :name "Mock" :provider "mock"
+                        :context-window 100000 :thinking t)))
+    (let* ((configuration (harness-service-call "agent" 'configuration
+                                                :session-id test-session-id))
+           (options (append (plist-get configuration :configOptions) nil))
+           (thinking (seq-find (lambda (option)
+                                 (equal (plist-get option :id) "thinking"))
+                               options)))
+      (should thinking)
+      (should (equal (plist-get thinking :category) "thought_level"))
+      (should (= (length (plist-get thinking :options)) 3)))
+    (harness-service-call "agent" 'set-config
+                          :session-id test-session-id
+                          :config-id "thinking" :value "high")
+    (should (equal (plist-get (harness-service-call "session" 'info
+                                                    :session-id test-session-id)
+                              :thinking)
+                   "high"))))
+
+(ert-deftest harness-agent-auto-names-the-session ()
+  "After the first turn a titleless session gets a model-generated name."
+  (harness-agent-test--with-session
+    (harness-service-call "session" 'rename :session-id test-session-id :title nil)
+    (setq harness-agent-test--responses
+          (list (list :text "The answer is 42." :stop-reason "end_turn")
+                (list :text "Answering Life\n" :stop-reason "end_turn")))
+    (let ((deferred (harness-agent-test--prompt test-session-id "what is the answer?")))
+      (harness-test-settle deferred 10)
+      (should (harness-test-wait-for
+               (lambda ()
+                 (equal (plist-get (harness-service-call "session" 'info
+                                                         :session-id test-session-id)
+                                   :title)
+                        "Answering Life"))
+               10))
+      ;; The naming request reused the conversation as its prefix.
+      (should (= (length harness-agent-test--requests) 2))
+      (let ((naming (car harness-agent-test--requests)))
+        (should (string-match-p "short title" (plist-get naming :system))))
+      ;; And the harness hinted that naming happened.
+      (should (cl-some (lambda (text) (and text (string-match-p "Conversation named" text)))
+                       (harness-agent-test--texts test-session-id))))))
+
 (provide 'harness-agent-test)
 ;;; harness-agent-test.el ends here

@@ -246,12 +246,12 @@ Rules may return a decision directly or a deferred resolving to one."
     (harness-deferred-then
      (harness-service-call
       "provider" 'complete
-      :model harness-perms-auto-model
-      :system "You are a permission gate for a coding agent. Reply ALLOW or DENY, then a dash and a short reason."
-      :messages (vector (list :role "user"
-                              :content (vector (list :type "text"
-                                                     :text (harness-perms--auto-prompt request)))))
-      :max-output-tokens 120)
+      (list :model harness-perms-auto-model
+            :system "You are a permission gate for a coding agent. Reply ALLOW or DENY, then a dash and a short reason."
+            :messages (vector (list :role "user"
+                                    :content (vector (list :type "text"
+                                                           :text (harness-perms--auto-prompt request)))))
+            :max-output-tokens 120))
      (lambda (result)
        (let* ((text (or (plist-get result :text) ""))
               (allow (string-match-p "\\`[^A-Za-z]*ALLOW" text))
