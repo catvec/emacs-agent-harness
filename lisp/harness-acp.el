@@ -60,8 +60,7 @@ Parsed JSON false is the keyword :false, which is non-nil in Lisp."
   "Return PLIST without entries whose value is nil.
 JSON cannot round-trip a nil plist value: the serializer writes {}.  Use
 this for optional fields instead of sending `:null'."
-  (cl-loop for (key value) on plist by #'cddr
-           when (not (null value)) append (list key value)))
+  (harness-plist-omit-nil plist))
 
 ;;; Messages
 
@@ -288,15 +287,21 @@ REASON is a human-readable string."
 (defun harness-acp--respond-error (connection id error)
   "Respond to ID on CONNECTION with the reduced ERROR."
   (let ((data (cdr error)))
-    (if (eq (car error) 'harness-acp-error)
-        (let ((code (nth 0 data))
-              (message (nth 1 data))
-              (extra (nth 2 data)))
-          (harness-acp-connection-fail connection id (or code -32603) message extra))
+    (cond
+     ((eq (car error) 'harness-acp-error)
+      (let ((code (nth 0 data))
+            (message (nth 1 data))
+            (extra (nth 2 data)))
+        (harness-acp-connection-fail connection id (or code -32603) message extra)))
+     ((eq (car error) 'harness-user-error)
+      (harness-acp-connection-fail
+       connection id (alist-get 'invalid-params harness-acp-error-codes)
+       (or (car data) "Invalid request")))
+     (t
       (harness-acp-connection-fail
        connection id
        (alist-get 'internal-error harness-acp-error-codes)
-       (format "%s: %s" (car error) (or (car (cdr error)) "error"))))))
+       (format "%s: %s" (car error) (or (car data) "error")))))))
 
 (defun harness-acp--handle-notification (connection message)
   "Handle an incoming notification MESSAGE on CONNECTION."
@@ -433,9 +438,13 @@ Returns CONNECTION."
                   :cwd (plist-get params :cwd)
                   :additional-directories (plist-get params :additionalDirectories)
                   :title (plist-get params :title)))
-         (session-id (plist-get result :session-id)))
-    (when session-id
-      (harness-acp-connection-track-session connection session-id))
+         (session-id (plist-get result :sessionId)))
+    (unless session-id
+      (signal 'harness-acp-error
+              (list (alist-get 'internal-error harness-acp-error-codes)
+                    "Session service did not return a sessionId"
+                    nil)))
+    (harness-acp-connection-track-session connection session-id)
     (append
      (list :sessionId session-id)
      (harness-acp--session-configuration session-id))))
@@ -443,21 +452,26 @@ Returns CONNECTION."
 (defun harness-acp--method-session-load (connection params)
   "Handle session/load with PARAMS on CONNECTION."
   (let* ((session-id (plist-get params :sessionId))
-         (result (harness-acp--session-service
-                  'load
-                  :session-id session-id
-                  :cwd (plist-get params :cwd)))
-         (entries (harness-acp--session-service 'entries :session-id session-id)))
+         (entries nil))
+    (harness-acp--session-service
+     'load
+     :session-id session-id
+     :cwd (plist-get params :cwd))
+    (setq entries (harness-acp--session-service 'entries :session-id session-id))
     (harness-acp-connection-track-session connection session-id)
-    (dolist (entry (append entries nil))
-      (harness-acp-agent-send-update connection session-id entry))
-    (let ((configuration (harness-acp--session-configuration session-id)))
-      (when configuration
-        (harness-acp-agent-send-update
-         connection session-id
-         (list :sessionUpdate "config_option_update"
-               :configOptions (plist-get configuration :configOptions)))))
-    (or result (make-hash-table))))
+    (let ((replay (lambda (loaded)
+                    (dolist (entry (append loaded nil))
+                      (harness-acp-agent-send-update connection session-id entry))
+                    (let ((configuration (harness-acp--session-configuration session-id)))
+                      (when configuration
+                        (harness-acp-agent-send-update
+                         connection session-id
+                         (list :sessionUpdate "config_option_update"
+                               :configOptions (plist-get configuration :configOptions)))))
+                    (make-hash-table))))
+      (if (harness-deferred-p entries)
+          (harness-deferred-then entries replay)
+        (funcall replay entries)))))
 
 (defun harness-acp--method-session-resume (connection params)
   "Handle session/resume with PARAMS on CONNECTION."
@@ -479,11 +493,36 @@ Returns CONNECTION."
 
 (defun harness-acp--method-session-list (_connection params)
   "Handle session/list with PARAMS."
-  (let ((result (harness-acp--session-service
-                 'list :cwd (plist-get params :cwd)
-                 :cursor (plist-get params :cursor))))
-    (list :sessions (or (plist-get result :sessions) [])
+  (let* ((result (harness-acp--session-service
+                  'list :cwd (plist-get params :cwd)
+                  :cursor (plist-get params :cursor)))
+         (sessions (plist-get result :sessions)))
+    (list :sessions (vconcat (mapcar #'harness-acp--session-info sessions))
           :nextCursor (or (plist-get result :nextCursor) :null))))
+
+(defun harness-acp--session-info (info)
+  "Project a harness session INFO onto an ACP SessionInfo object.
+Harness extras are namespaced under _meta.harness."
+  (let ((projected (harness-acp-plist-omit-nil
+                    (list :sessionId (plist-get info :sessionId)
+                          :cwd (plist-get info :cwd)
+                          :title (plist-get info :title)
+                          :updatedAt (plist-get info :updatedAt)
+                          :additionalDirectories (plist-get info :additionalDirectories)
+                          :_meta (list :harness
+                                       (harness-acp-plist-omit-nil
+                                        (list :status (plist-get info :status)
+                                              :model (plist-get info :model)
+                                              :permissionMode (plist-get info :permissionMode)
+                                              :mode (plist-get info :mode)
+                                              :unread (plist-get info :unread)
+                                              :usage (plist-get info :usage)
+                                              :cost (plist-get info :cost)
+                                              :parentId (plist-get info :parentId)
+                                              :forkEntryId (plist-get info :forkEntryId)
+                                              :projectRoot (plist-get info :projectRoot)
+                                              :messageCount (plist-get info :messageCount))))))))
+    projected))
 
 (defun harness-acp--method-session-delete (_connection params)
   "Handle session/delete with PARAMS."
@@ -492,15 +531,29 @@ Returns CONNECTION."
 
 (defun harness-acp--method-session-set-mode (_connection params)
   "Handle session/set_mode with PARAMS."
-  (harness-acp--session-service 'set-mode
-                                :session-id (plist-get params :sessionId)
-                                :mode-id (plist-get params :modeId))
+  (let ((service (harness-acp--config-service 'set-mode)))
+    (when service
+      (harness-service-call service 'set-mode
+                            :session-id (plist-get params :sessionId)
+                            :mode-id (plist-get params :modeId))))
   (make-hash-table))
+
+(defun harness-acp--config-service (method)
+  "Return the service that owns configuration METHOD, or signal.
+The agent service owns model and thinking configuration because only it
+knows the provider; the session service is the fallback."
+  (cond ((harness-service-available-p "agent" method) "agent")
+        ((harness-service-available-p "session" method) "session")
+        (t (signal 'harness-acp-error
+                   (list (alist-get 'method-not-found harness-acp-error-codes)
+                         (format "No service provides %s" method)
+                         nil)))))
 
 (defun harness-acp--method-session-set-config-option (_connection params)
   "Handle session/set_config_option with PARAMS."
   (let* ((session-id (plist-get params :sessionId))
-         (result (harness-acp--session-service
+         (result (harness-service-call
+                  (harness-acp--config-service 'set-config)
                   'set-config
                   :session-id session-id
                   :config-id (plist-get params :configId)
@@ -509,8 +562,10 @@ Returns CONNECTION."
 
 (defun harness-acp--session-configuration (session-id)
   "Return :modes and :configOptions for SESSION-ID, if services provide them."
-  (when (harness-service-available-p "session" 'configuration)
-    (let ((configuration (harness-service-call "session" 'configuration :session-id session-id)))
+  (when (or (harness-service-available-p "agent" 'configuration)
+            (harness-service-available-p "session" 'configuration))
+    (let ((configuration (harness-service-call (harness-acp--config-service 'configuration)
+                                               'configuration :session-id session-id)))
       (harness-acp-plist-omit-nil
        (list :modes (plist-get configuration :modes)
              :configOptions (plist-get configuration :configOptions))))))
@@ -539,10 +594,20 @@ Returns CONNECTION."
     (gethash session-id sessions)))
 
 (defun harness-acp-agent-send-update (connection session-id update)
-  "Send UPDATE as a session/update notification to CONNECTION for SESSION-ID."
+  "Send UPDATE as a session/update notification to CONNECTION for SESSION-ID.
+Root-level harness bookkeeping fields are removed; ACP reserves root keys
+and the same values travel in _meta.harness."
   (harness-acp-connection-notify
    connection "session/update"
-   (list :sessionId session-id :update update)))
+   (list :sessionId session-id
+         :update (harness-acp--strip-entry-extras update))))
+
+(defun harness-acp--strip-entry-extras (entry)
+  "Return ENTRY without root-level :id and :time fields."
+  (if (or (plist-member entry :id) (plist-member entry :time))
+      (cl-loop for (key value) on entry by #'cddr
+               unless (memq key '(:id :time)) append (list key value))
+    entry))
 
 (defun harness-acp--broadcast-update (session-id update)
   "Send UPDATE for SESSION-ID to every agent connection following it."

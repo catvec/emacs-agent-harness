@@ -26,6 +26,7 @@
 (require 'time-date)
 
 (define-error 'harness-error "Harness error")
+(define-error 'harness-user-error "Harness user error" 'harness-error)
 (define-error 'harness-service-missing "Harness service missing" 'harness-error)
 (define-error 'harness-module-error "Harness module error" 'harness-error)
 (define-error 'harness-cancelled "Cancelled" 'harness-error)
@@ -60,6 +61,13 @@
 (defun harness-iso-time (&optional time)
   "Format TIME (default now) as an ISO 8601 UTC timestamp."
   (format-time-string "%Y-%m-%dT%H:%M:%SZ" (or time (current-time)) t))
+
+(defun harness-plist-omit-nil (plist)
+  "Return PLIST without entries whose value is nil.
+`json-serialize' writes a nil plist value as {}, so omit optional keys
+rather than relying on nil meaning null."
+  (cl-loop for (key value) on plist by #'cddr
+           when (not (null value)) append (list key value)))
 
 (defun harness-log (format-string &rest args)
   "Log a message when `harness-debug' is non-nil.

@@ -173,7 +173,7 @@
    (list
     (cons 'create
           (lambda (&rest args)
-            (let ((session (list :session-id "sess-1"
+            (let ((session (list :sessionId "sess-1"
                                  :cwd (plist-get args :cwd)
                                  :title (plist-get args :title))))
               (push session harness-acp-test--sessions)
