@@ -12,6 +12,22 @@ trap 'rm -rf "$TMPDIR_LINT"' EXIT
 
 status=0
 while IFS= read -r file; do
+  # A reader pass catches unbalanced parentheses that byte-compile can
+  # silently truncate without failing.
+  syntax=$("$EMACS" -Q --batch --eval "(with-temp-buffer
+    (insert-file-contents \"$file\")
+    (goto-char (point-min))
+    (condition-case err
+        (progn (while (progn (skip-chars-forward \" \\t\\n\") (not (eobp)))
+                 (forward-list 1))
+               (princ \"ok\"))
+      (error (princ (format \"ERR %S at line %d\" err (line-number-at-pos (point)))))))" 2>&1 || true)
+  if [[ "$syntax" != *ok* ]]; then
+    printf '%-55s %s\n' "$(basename "$file")" "FAILED (syntax)"
+    echo "$syntax" | grep -v debug-early | head -3
+    status=1
+    continue
+  fi
   out=$("$EMACS" -Q --batch -L "$REPO" -L "$REPO/lisp" -L "$REPO/lisp/modules" \
         -L "$REPO/lisp/transports" -L "$REPO/lisp/ui" \
         --eval "(progn (require 'bytecomp)

@@ -762,12 +762,11 @@ prompt cache usually covers it."
                     :max-output-tokens 40))
              (lambda (result)
                (let ((title (harness-agent--clean-title (plist-get result :text))))
+                 ;; The rename triggers a session info update, which the UI
+                 ;; shows in its header; no extra transcript line.
                  (when title
                    (harness-service-call "session" 'rename
-                                         :session-id session-id :title title)
-                   (harness-service-call "session" 'system-hint
-                                         :session-id session-id
-                                         :text (format "Conversation named “%s”." title)))))
+                                         :session-id session-id :title title))))
              (lambda (error)
                (harness-log "auto-naming failed: %S" error)))))))))
 

@@ -437,8 +437,9 @@
       (should (= (length harness-agent-test--requests) 2))
       (let ((naming (car harness-agent-test--requests)))
         (should (string-match-p "short title" (plist-get naming :system))))
-      ;; And the harness hinted that naming happened.
-      (should (cl-some (lambda (text) (and text (string-match-p "Conversation named" text)))
+      ;; The harness marked the session as being named; the UI shows the
+      ;; resulting title in its header rather than another transcript line.
+      (should (cl-some (lambda (text) (and text (string-match-p "Naming this conversation" text)))
                        (harness-agent-test--texts test-session-id))))))
 
 (provide 'harness-agent-test)

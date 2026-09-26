@@ -154,7 +154,8 @@
       (harness-ui-chat-test--apply buffer
                                    (list :sessionUpdate "agent_thought_chunk"
                                          :messageId "t1" :final t
-                                         :content (list :type "text" :text "secret reasoning")))
+                                         :content (list :type "text"
+                                                        :text "Checking the plan\nsecret reasoning")))
       (harness-ui-chat-test--apply buffer
                                    (list :sessionUpdate "tool_call" :toolCallId "c1"
                                          :name "bash" :status "completed" :final t
@@ -163,6 +164,8 @@
                                                                                :text "tool output")))))
       (let ((text (harness-ui-chat-test--text buffer)))
         (should (string-match-p "Thinking" text))
+        ;; Collapsed, the first line previews as a hint; the rest is hidden.
+        (should (string-match-p "Checking the plan" text))
         (should-not (string-match-p "secret reasoning" text))
         (should (string-match-p "bash" text))
         (should-not (string-match-p "tool output" text)))
@@ -188,7 +191,7 @@
                :content (vector (list :type "content"
                                       :content (list :type "text" :text "file body"))))))
       (let ((text (harness-ui-chat-test--text buffer)))
-        (should (string-match-p "tools: read ×2" text))
+        (should (string-match-p "tools read ×2" text))
         (should-not (string-match-p "file body" text)))
       (kill-buffer buffer))))
 

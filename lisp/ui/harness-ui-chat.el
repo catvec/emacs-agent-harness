@@ -51,8 +51,10 @@ Only non-blocking tools belong here; anything that can hold the session
   :type 'boolean)
 
 (defface harness-ui-user-face
-  '((t :inherit secondary-selection :extend t))
-  "Face for user messages.  Uses the theme's selection colour."
+  '((t :inherit (default secondary-selection) :weight bold :extend t))
+  "Face for user messages.
+Inheriting the theme's selection surface gives the message a bubble on
+both light and dark themes without hardcoding a colour."
   :group 'harness-ui-chat)
 
 (defface harness-ui-agent-face
@@ -81,8 +83,8 @@ Only non-blocking tools belong here; anything that can hold the session
   :group 'harness-ui-chat)
 
 (defface harness-ui-code-face
-  '((t :inherit fixed-pitch :extend t))
-  "Face for code blocks."
+  '((t :inherit (fixed-pitch secondary-selection) :extend t))
+  "Face for code blocks and inline code."
   :group 'harness-ui-chat)
 
 (defface harness-ui-header-face
@@ -98,6 +100,26 @@ Only non-blocking tools belong here; anything that can hold the session
 (defface harness-ui-prompt-face
   '((t :inherit shadow))
   "Face of the composer's prompt glyph."
+  :group 'harness-ui-chat)
+
+(defface harness-ui-tool-name-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for the tool name in a tool call line."
+  :group 'harness-ui-chat)
+
+(defface harness-ui-tool-done-face
+  '((t :inherit success))
+  "Face for a finished tool call on the transcript line."
+  :group 'harness-ui-chat)
+
+(defface harness-ui-tool-failed-face
+  '((t :inherit error))
+  "Face for a failed tool call on the transcript line."
+  :group 'harness-ui-chat)
+
+(defface harness-ui-separator-face
+  '((t :inherit shadow :extend t))
+  "Face for structural separators."
   :group 'harness-ui-chat)
 
 ;;; Buffer state
@@ -124,6 +146,10 @@ Only non-blocking tools belong here; anything that can hold the session
 
 (defvar-local harness-ui-chat--compose-start nil
   "Marker where the composer body starts.")
+
+(defvar-local harness-ui-chat--compose-end nil
+  "Marker just after the composer body (before its trailing newline).
+Insertion type is t so typed text stays inside the body.")
 
 (defvar-local harness-ui-chat--transcript-end nil
   "Marker where the transcript ends and the composer begins.")
@@ -158,15 +184,6 @@ Only non-blocking tools belong here; anything that can hold the session
 
 ;;; Markdown-lite fontification
 
-(defconst harness-ui-chat--md-rules
-  '(("^#\\{1,6\\} .*$" 0 harness-ui-header-face)
-    ("\\*\\*\\([^*\n]+\\)\\*\\*" 1 bold)
-    ("\\b_\\([^_\n]+\\)_\\b" 1 italic)
-    ("`\\([^`\n]+\\)`" 1 harness-ui-code-face)
-    ("^>[^\n]*$" 0 shadow)
-    ("\\(https?://[^ \n)]+\\)" 1 link))
-  "Small markdown subset rendered with faces.")
-
 (defun harness-ui-chat--fontify (start end)
   "Render the markdown subset between START and END.
 Faces style the text; structural markers are collapsed with display
@@ -174,7 +191,7 @@ properties so headings, emphasis, code and bullets read naturally while
 the original text stays searchable."
   (let ((inhibit-read-only t))
     (save-excursion
-      ;; Headings.
+      ;; Headings: hide the hashes, style the whole line.
       (goto-char start)
       (while (re-search-forward "^\\(#\\{1,6\\}\\) \\(.*\\)$" end t)
         (let ((hash-start (match-beginning 1))
@@ -190,6 +207,12 @@ the original text stays searchable."
           (add-text-properties marker-start marker-end '(display ""))
           (add-text-properties marker-end (1+ marker-end)
                                (list 'display (propertize "• " 'face 'shadow)))))
+      ;; Block quotes: a quiet vertical rule instead of the markdown `>'.
+      (goto-char start)
+      (while (re-search-forward "^\\(>\\) \\(.*\\)$" end t)
+        (add-text-properties (match-beginning 1) (1+ (match-beginning 1))
+                             (list 'display (propertize "│ " 'face 'shadow)))
+        (add-face-text-property (match-beginning 2) (match-end 2) 'shadow))
       ;; Inline emphasis and code: hide the markers, style the contents.
       (dolist (rule '(("\\*\\*\\([^*\n]+\\)\\*\\*" bold)
                       ("`\\([^`\n]+\\)`" harness-ui-code-face)))
@@ -202,6 +225,16 @@ the original text stays searchable."
             (add-face-text-property inner-start inner-end (nth 1 rule))
             (add-text-properties full-start inner-start '(display ""))
             (add-text-properties inner-end full-end '(display "")))))
+      ;; _italic_ (word boundaries are unreliable around underscores).
+      (goto-char start)
+      (while (re-search-forward "\\(^\\|\\s-\\|[(\\[]\\)\\(_\\([^_\n]+\\)_\\)" end t)
+        (let ((inner-start (match-beginning 3))
+              (inner-end (match-end 3))
+              (open-start (match-beginning 2))
+              (close-end (match-end 2)))
+          (add-face-text-property inner-start inner-end 'italic)
+          (add-text-properties open-start inner-start '(display ""))
+          (add-text-properties inner-end close-end '(display ""))))
       ;; Fenced code blocks: style them and hide only the fence lines.
       (goto-char start)
       (while (re-search-forward "^```" end t)
@@ -220,7 +253,26 @@ the original text stays searchable."
 ;;; Entry model
 
 (cl-defstruct (harness-ui-chat-record (:constructor harness-ui-chat-record-create))
-  key kind text status tool-name children collapsed start end)
+  key kind text status tool-name title raw-input children collapsed start end)
+
+(defun harness-ui-chat--previous-record (record)
+  "Return the record laid out before RECORD, if any.
+`harness-ui-chat--records' keeps newest first."
+  (cadr (memq record harness-ui-chat--records)))
+
+(defun harness-ui-chat--inline-record-p (record)
+  "Return non-nil when RECORD renders as a single collapsed line."
+  (and (harness-ui-chat--collapsible-p record)
+       (harness-ui-chat-record-collapsed record)))
+
+(defun harness-ui-chat--ensure-gap-before (record)
+  "Insert a blank separator line before RECORD when it follows a block."
+  (let ((previous (harness-ui-chat--previous-record record)))
+    (when (and previous
+               (not (harness-ui-chat--inline-record-p previous))
+               (> (point) (point-min))
+               (not (looking-back "\n\n" 2 t)))
+      (insert "\n"))))
 
 (defun harness-ui-chat--key (update)
   "Return a stable key for UPDATE."
@@ -255,6 +307,7 @@ the original text stays searchable."
 (defun harness-ui-chat--render-record (record)
   "Insert RECORD's rendering at point and return it."
   (setf (harness-ui-chat-record-start record) (copy-marker (point)))
+  (harness-ui-chat--ensure-gap-before record)
   (pcase (harness-ui-chat-record-kind record)
     ((or "user_message_chunk" "agent_message_chunk" "agent_thought_chunk"
          "_harness/system_hint")
@@ -273,40 +326,63 @@ the original text stays searchable."
   (setf (harness-ui-chat-record-end record) (copy-marker (point)))
   record)
 
+(defun harness-ui-chat--first-line (text &optional width)
+  "First non-empty line of TEXT, truncated to WIDTH."
+  (let ((line (car (seq-filter (lambda (line) (not (string-empty-p (string-trim line))))
+                               (split-string (or text "") "\n")))))
+    (when line
+      (truncate-string-to-width (string-trim line) (or width 68) nil nil "…"))))
+
 (defun harness-ui-chat--render-message (record)
   "Render a text RECORD."
   (let* ((kind (harness-ui-chat-record-kind record))
-         (text (or (harness-ui-chat-record-text record) ""))
+         (text (string-trim-right (or (harness-ui-chat-record-text record) "") "[ \t\n\r]+"))
          (face (pcase kind
                  ("user_message_chunk" 'harness-ui-user-face)
                  ("agent_thought_chunk" 'harness-ui-thinking-face)
                  ("_harness/system_hint" 'harness-ui-hint-face)
                  (_ 'harness-ui-agent-face)))
-         (label (pcase kind
-                  ("user_message_chunk" "You")
-                  ("agent_thought_chunk" "Thinking")
-                  ("_harness/system_hint" "Harness")
-                  (_ "Agent")))
+         (collapsible (harness-ui-chat--collapsible-p record))
+         (collapsed (and collapsible (harness-ui-chat-record-collapsed record)))
          (start (point)))
-    (when (harness-ui-chat--collapsible-p record)
-      (harness-ui-chat--insert
-       (if (harness-ui-chat-record-collapsed record) "▸ " "▾ ")
-       'face 'shadow)
-      (harness-ui-chat--button
-       (format "%s (%d lines)" label (length (split-string text "\n")))
-       (lambda () (harness-ui-chat-toggle record))
-       :help-echo "Show or hide this block"))
-    (unless (and (harness-ui-chat-record-collapsed record)
-                 (harness-ui-chat--collapsible-p record))
-      (insert "\n")
-      (insert (propertize text 'face face 'font-lock-face face))
-      (harness-ui-chat--render-attachments record))
+    (pcase kind
+      ("agent_thought_chunk"
+       (insert (propertize (if collapsed "▸ " "▾ ") 'face 'shadow))
+       (harness-ui-chat--button
+        (let ((lines (length (split-string text "\n" t))))
+          (concat "Thinking"
+                  (if collapsed
+                      (let ((preview (harness-ui-chat--first-line text)))
+                        (if (and preview (not (string-empty-p preview)))
+                            (concat "  " preview)
+                          ""))
+                    (format " (%d %s)" lines (if (= lines 1) "line" "lines")))))
+        (lambda () (harness-ui-chat-toggle record))
+        :help-echo "Show or hide the thinking")
+       (unless collapsed
+         (insert "\n")
+         (let ((body (point)))
+           (insert (propertize text 'face face))
+           (harness-ui-chat--fontify body (point)))))
+      ("_harness/system_hint"
+       (insert (propertize "· " 'face face))
+       (insert (propertize text 'face face)))
+      (_
+       (when (equal kind "user_message_chunk")
+         (insert (propertize "› " 'face 'shadow)))
+       (let ((body (point)))
+         (insert (propertize text 'face face))
+         (harness-ui-chat--render-attachments record)
+         ;; Fontify first, then layer the message face on top: markdown
+         ;; sets faces itself and `add-face-text-property' appends.
+         (harness-ui-chat--fontify body (point))
+         (add-face-text-property body (point) face))))
     (insert "\n")
+    (when (member kind '("user_message_chunk" "agent_message_chunk"))
+      ;; The newline carries the face too so `:extend' fills the line.
+      (add-face-text-property (1- (point)) (point) face))
     (harness-ui-chat--mark-read-only start (point))
-    ;; Fontify first, then layer the message face on top: font-lock sets
-    ;; the `face' property, and `add-face-text-property' appends to it.
-    (harness-ui-chat--fontify start (point))
-    (add-face-text-property start (point) face)))
+    record))
 
 (defun harness-ui-chat--render-attachments (record)
   "Render image/audio blocks attached to RECORD."
@@ -331,11 +407,100 @@ the original text stays searchable."
 (defun harness-ui-chat--tool-status-label (record)
   "Return a human label for RECORD's tool status."
   (pcase (harness-ui-chat-record-status record)
-    ("pending" "pending")
+    ("pending" "queued")
     ("in_progress" "running")
     ("completed" "done")
     ("failed" "failed")
     (_ "")))
+
+(defun harness-ui-chat--tool-status-face (record)
+  "Face for RECORD's status word."
+  (pcase (harness-ui-chat-record-status record)
+    ("completed" 'harness-ui-tool-done-face)
+    ("failed" 'harness-ui-tool-failed-face)
+    (_ 'shadow)))
+
+(defconst harness-ui-chat--tool-argument-keys
+  '(:path :file :file_path :filePath :command :query :pattern :glob :url :skill :text :name)
+  "Argument keys used, in order, to summarise a tool call.")
+
+(defun harness-ui-chat--tool-argument (raw-input key)
+  "Return KEY's value from RAW-INPUT (plist or JSON hash table)."
+  (let ((name (substring (symbol-name key) 1)))
+    (cond
+     ((hash-table-p raw-input) (gethash name raw-input))
+     ((and (listp raw-input) (plist-member raw-input key)) (plist-get raw-input key))
+     (t nil))))
+
+(defun harness-ui-chat--tool-summary (record)
+  "A short, human description of what RECORD's tool call acts on."
+  (let ((raw (harness-ui-chat-record-raw-input record)))
+    (when (and raw (not (equal raw [])))
+      (let ((value (seq-some (lambda (key)
+                               (let ((value (harness-ui-chat--tool-argument raw key)))
+                                 (when (and value (not (equal value "")))
+                                   value)))
+                             harness-ui-chat--tool-argument-keys)))
+        (cond
+         ((null value) nil)
+         ((stringp value)
+          (let ((value (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " value))))
+            (when (not (string-empty-p value))
+              (truncate-string-to-width value 72 nil nil "…"))))
+         ((numberp value) (number-to-string value))
+         (t nil))))))
+
+(defun harness-ui-chat--render-tool-line (record)
+  "Render RECORD's one-line tool summary.
+Returns non-nil when the line was rendered, leaving point on it."
+  (let* ((name (or (harness-ui-chat-record-tool-name record) "tool"))
+         (status (harness-ui-chat--tool-status-label record))
+         (summary (harness-ui-chat--tool-summary record))
+         (collapsible (harness-ui-chat--collapsible-p record))
+         (collapsed (and collapsible (harness-ui-chat-record-collapsed record))))
+    (when collapsible
+      (insert (propertize (if collapsed "▸ " "▾ ") 'face 'shadow)))
+    (let ((line-start (point)))
+      (insert (propertize name 'face 'harness-ui-tool-name-face))
+      (when summary
+        (insert " " (propertize summary 'face 'default)))
+      (when (not (string-empty-p status))
+        (insert (propertize (concat " · " status) 'face (harness-ui-chat--tool-status-face record))))
+      ;; Keep the whole label clickable for the collapse toggle.
+      (when collapsible
+        (with-silent-modifications
+          (add-text-properties line-start (point)
+                               (list 'keymap harness-ui-chat--tool-line-keymap
+                                     'mouse-face 'highlight
+                                     'help-echo "Show or hide the call details"
+                                     'harness-ui-chat-record record))))
+      (unless collapsed
+        (let ((text (string-trim-right (or (harness-ui-chat-record-text record) "") "[ \t\n\r]+")))
+          (when (not (string-empty-p text))
+            (insert "\n")
+            (let ((body (point)))
+              (insert (propertize text 'face 'harness-ui-tool-body-face))
+              (add-face-text-property body (point) 'harness-ui-tool-body-face)))))
+      (insert "\n")
+      t)))
+
+(defvar harness-ui-chat--tool-line-keymap
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'harness-ui-chat--tool-line-click)
+    (define-key map [mouse-2] #'harness-ui-chat--tool-line-click)
+    (define-key map "\r" #'harness-ui-chat--tool-line-click)
+    map)
+  "Keymap on tool call lines.")
+
+(defun harness-ui-chat--tool-line-click (event)
+  "Toggle the tool record under EVENT."
+  (interactive "e")
+  (let* ((position (event-start event))
+         (record (get-pos-property (posn-point position)
+                                   'harness-ui-chat-record
+                                   (window-buffer (posn-window position)))))
+    (when record
+      (harness-ui-chat-toggle record))))
 
 (defun harness-ui-chat--render-tool-run (record)
   "Render a coalesced run of allow-listed tool calls."
@@ -349,7 +514,7 @@ the original text stays searchable."
     (harness-ui-chat--insert
      (if (harness-ui-chat-record-collapsed record) "▸ " "▾ ") 'face 'shadow)
     (harness-ui-chat--button
-     (format "tools: %s"
+     (format "tools %s"
              (string-join (mapcar (lambda (entry)
                                     (format "%s ×%d" (car entry) (cdr entry)))
                                   (nreverse counts))
@@ -367,24 +532,8 @@ the original text stays searchable."
 
 (defun harness-ui-chat--render-tool (record)
   "Render a tool call RECORD."
-  (let ((start (point))
-        (name (or (harness-ui-chat-record-tool-name record) "tool")))
-    (when (harness-ui-chat--collapsible-p record)
-      (harness-ui-chat--insert
-       (if (harness-ui-chat-record-collapsed record) "▸ " "▾ ")
-       'face 'shadow))
-    (harness-ui-chat--button
-     (format "%s %s" name (harness-ui-chat--tool-status-label record))
-     (lambda () (harness-ui-chat-toggle record))
-     :help-echo "Show or hide the tool details")
-    (unless (harness-ui-chat-record-collapsed record)
-      (let ((text (or (harness-ui-chat-record-text record) "")))
-        (insert "\n")
-        (let ((body-start (point)))
-          (insert (propertize text 'face 'harness-ui-tool-body-face))
-          (harness-ui-chat--mark-read-only body-start (point)))))
-    (insert "\n")
-    (add-face-text-property start (point) 'harness-ui-tool-face)
+  (let ((start (point)))
+    (harness-ui-chat--render-tool-line record)
     (harness-ui-chat--mark-read-only start (point))))
 
 (defun harness-ui-chat--render-todo (record)
@@ -440,12 +589,16 @@ region."
     (erase-buffer)
     (setq harness-ui-chat--transcript-end nil
           harness-ui-chat--compose-start nil
+          harness-ui-chat--compose-end nil
           harness-ui-chat--needs-rebuild nil)
     (if (null harness-ui-chat--records)
-        (insert (propertize
-                 (concat "Start the conversation.\n\n"
-                         "  @ references a file    C-c C-s sessions    C-c C-m model\n")
-                 'face 'shadow))
+        (insert (propertize "Ready when you are.\n\n" 'face 'bold)
+                (propertize (concat "  Type a message and press RET\n\n"
+                                    "  @ file reference      C-c C-s  sessions\n"
+                                    "  # skill               C-c C-m  model\n"
+                                    "  C-c C-q queue         C-c C-p  permissions\n"
+                                    "  C-c C-k cancel        C-c C-t  thinking\n")
+                            'face 'shadow))
       (dolist (record (reverse harness-ui-chat--records))
         (harness-ui-chat--render-record record)))
     (harness-ui-chat--render-composer compose-text)
@@ -475,6 +628,8 @@ region."
               (harness-ui-chat--rerender record))
           (let ((new (harness-ui-chat-record-create
                       :key key :kind kind :text (or text (plist-get update :delta))
+                      :title (plist-get update :title)
+                      :raw-input (plist-get update :rawInput)
                       :collapsed (not (member kind '("agent_message_chunk"))))))
             (harness-ui-chat--insert-record new))))
        ;; Live begin (no delta yet).
@@ -482,6 +637,8 @@ region."
         (let ((new (harness-ui-chat-record-create
                     :key key :kind kind :text (or text "")
                     :tool-name (plist-get update :name)
+                    :title (plist-get update :title)
+                    :raw-input (plist-get update :rawInput)
                     :status (plist-get update :status)
                     :collapsed (not (member kind '("agent_message_chunk"))))))
           (harness-ui-chat--insert-record new)))
@@ -492,7 +649,11 @@ region."
                     (harness-ui-chat-record-status record) (or (plist-get update :status)
                                                                (harness-ui-chat-record-status record))
                     (harness-ui-chat-record-tool-name record)
-                    (or (plist-get update :name) (harness-ui-chat-record-tool-name record)))
+                    (or (plist-get update :name) (harness-ui-chat-record-tool-name record))
+                    (harness-ui-chat-record-title record)
+                    (or (plist-get update :title) (harness-ui-chat-record-title record))
+                    (harness-ui-chat-record-raw-input record)
+                    (or (plist-get update :rawInput) (harness-ui-chat-record-raw-input record)))
               (harness-ui-chat--rerender record))
           (let ((new (harness-ui-chat-record-create
                       :key key :kind kind :text (or text "")
@@ -607,49 +768,95 @@ region."
    ((> size 0) (format "%d/%d" used size))
    (t (format "%d tok" used))))
 
+(defun harness-ui-chat--header-segment (label face help &optional action)
+  "A propertized header-line segment.
+With ACTION, the segment becomes a clickable button."
+  (let ((string (propertize label 'face face 'help-echo help)))
+    (if (and action (display-graphic-p))
+        (propertize string
+                    'mouse-face 'highlight
+                    'keymap (let ((map (make-sparse-keymap)))
+                              (define-key map [header-line mouse-1]
+                                          (lambda () (interactive) (funcall action)))
+                              (define-key map [mouse-1]
+                                          (lambda () (interactive) (funcall action)))
+                              map))
+      string)))
+
 (defun harness-ui-chat--refresh-header ()
   "Redraw the header line: title, status, model, tokens, cost, permissions.
 Segments use only theme faces so light and dark themes stay legible on
-the theme's own header-line background."
+the theme's own header-line background, and the important ones are
+clickable."
   (let* ((info harness-ui-chat--info)
          (status (or harness-ui-chat--status 'idle))
          (title (or (plist-get info :title)
                     (and (plist-get info :sessionId)
                          (substring (plist-get info :sessionId) 0 8))
                     "session"))
-         (cost (plist-get info :cost)))
+         (cost (plist-get info :cost))
+         (used (or (plist-get info :contextUsed) 0))
+         (size (or (plist-get info :contextSize) 0))
+         (thinking (plist-get info :thinking))
+         (separator (propertize "  ·  " 'face 'shadow)))
     (setq header-line-format
           (list
            " "
-           (propertize title 'face 'bold)
-           "  "
-           (propertize (symbol-name status)
-                       'face (pcase status
-                               ('running 'success)
-                               ('blocked 'error)
-                               (_ 'shadow)))
-           "  "
-           (propertize (or (plist-get info :model) "no model") 'face 'shadow)
-           "  "
-           (propertize (harness-ui-chat--format-tokens
-                        (or (plist-get info :contextUsed) 0)
-                        (or (plist-get info :contextSize) 0))
-                       'face (if (and (> (or (plist-get info :contextSize) 0) 0)
-                                      (> (or (plist-get info :contextUsed) 0)
-                                         (* 0.8 (plist-get info :contextSize))))
-                                 'warning
-                               'shadow))
+           (harness-ui-chat--header-segment
+            title 'bold "Session list (C-c C-s)" #'harness-ui-sessions)
+           separator
+           (harness-ui-chat--header-segment
+            (symbol-name status)
+            (pcase status
+              ('running 'success)
+              ('blocked 'error)
+              (_ 'shadow))
+            (if (eq status 'running) "The agent is working" "Idle"))
+           separator
+           (harness-ui-chat--header-segment
+            (or (plist-get info :model) "no model") 'shadow
+            "Switch model (C-c C-m)" #'harness-ui-switch-model)
+           separator
+           (harness-ui-chat--header-segment
+            (harness-ui-chat--format-tokens used size)
+            (if (and (> size 0) (> used (* 0.8 size))) 'warning 'shadow)
+            "Context window usage")
            (when cost
-             (propertize (format "  $%.3f" (or (plist-get cost :amount) 0))
-                         'face 'shadow))
-           (propertize (format "  [%s]" (or (plist-get info :permissionMode) "ask"))
-                       'face 'shadow)))))
+             (list separator
+                   (harness-ui-chat--header-segment
+                    (format "$%.3f" (or (plist-get cost :amount) 0))
+                    'shadow "Estimated cost so far")))
+           (when thinking
+             (list separator
+                   (harness-ui-chat--header-segment
+                    (format "%s thinking" (if (symbolp thinking) (symbol-name thinking) thinking))
+                    'shadow "Thinking level (C-c C-t)" #'harness-ui-set-thinking)))
+           separator
+           (harness-ui-chat--header-segment
+            (format "%s" (or (plist-get info :permissionMode) "ask"))
+            (pcase (plist-get info :permissionMode)
+              ("auto" 'warning)
+              ('auto 'warning)
+              (_ 'shadow))
+            "Permission mode (C-c C-p)" #'harness-ui-set-permission-mode)
+           (when (>= (length harness-ui-chat--queue) 1)
+             (list separator
+                   (harness-ui-chat--header-segment
+                    (format "%d queued" (length harness-ui-chat--queue))
+                    'warning "Messages waiting for the next turn")))))))
 
 (defun harness-ui-chat--render-composer (&optional text)
   "(Re)draw the composer area and its action buttons.
 TEXT defaults to the composer's current contents."
-  (let ((inhibit-read-only t)
-        (text (or text (harness-ui-chat--compose-text))))
+  (let* ((inhibit-read-only t)
+         (text (or text (harness-ui-chat--compose-text)))
+         (running (eq harness-ui-chat--status 'running))
+         (input-end nil)
+         ;; Keep the cursor where the user left it inside the composer.
+         (compose-point (and harness-ui-chat--compose-start
+                             (marker-position harness-ui-chat--compose-start)
+                             (>= (point) (marker-position harness-ui-chat--compose-start))
+                             (- (point) (marker-position harness-ui-chat--compose-start)))))
     (when (and harness-ui-chat--transcript-end
                (marker-position harness-ui-chat--transcript-end))
       (delete-region (marker-position harness-ui-chat--transcript-end) (point-max)))
@@ -658,48 +865,59 @@ TEXT defaults to the composer's current contents."
     (insert "\n")
     (harness-ui-chat--render-queued)
     (harness-ui-chat--render-attachments-line)
-    (insert (propertize "───" 'face 'shadow))
-    (insert " ")
-    (harness-ui-chat--button "Send" #'harness-ui-chat-send :help-echo "Send (RET)")
-    (insert " ")
-    (harness-ui-chat--button "Cancel" #'harness-ui-chat-cancel :help-echo "Cancel the turn (C-c C-k)")
-    (insert " ")
-    (harness-ui-chat--button "Queue" #'harness-ui-chat-queue :help-echo "Queue this message (C-c C-q)")
-    (insert " ")
-    (harness-ui-chat--button "Attach" #'harness-ui-chat-attach-file :help-echo "Attach a file (@)")
-    (insert " ")
-    (harness-ui-chat--button "Sessions" #'harness-ui-sessions :help-echo "Session list (C-c C-s)")
-    (insert " ")
-    (harness-ui-chat--button "Model" #'harness-ui-switch-model :help-echo "Switch model (C-c C-m)")
-    (insert " ")
-    (harness-ui-chat--button "Thinking" #'harness-ui-set-thinking :help-echo "Thinking level")
-    (insert " ")
-    (harness-ui-chat--button "Permissions" #'harness-ui-set-permission-mode
-                             :help-echo "Permission mode")
-    (insert " ")
-    (harness-ui-chat--button "Mode" #'harness-ui-set-session-mode :help-echo "Plan or code")
-    (insert "\n")
     (insert (propertize "❯ " 'face 'harness-ui-prompt-face))
     (let ((start (point)))
       (insert (propertize text 'face 'harness-ui-compose-face))
-      (setq harness-ui-chat--compose-start (copy-marker start)))
-    (insert "\n")))
+      (setq harness-ui-chat--compose-start (copy-marker start)
+            input-end (point)))
+    (insert "\n")
+    (insert (propertize "  " 'face 'shadow))
+    (harness-ui-chat--button (if running "Queue" "Send")
+                             (if running #'harness-ui-chat-queue #'harness-ui-chat-send)
+                             :help-echo (if running
+                                            "Queue for the next turn (C-c C-q)"
+                                          "Send (RET)"))
+    (insert (propertize "  ·  " 'face 'shadow))
+    (harness-ui-chat--button "Queue" #'harness-ui-chat-queue
+                             :help-echo "Queue for the next turn (C-c C-q)")
+    (insert (propertize "  ·  " 'face 'shadow))
+    (harness-ui-chat--button "Attach" #'harness-ui-chat-attach-file
+                             :help-echo "Attach a file (@)")
+    (when running
+      (insert (propertize "  ·  " 'face 'shadow))
+      (harness-ui-chat--button "Stop" #'harness-ui-chat-cancel
+                               :help-echo "Cancel the running turn (C-c C-k)"))
+    (insert "\n")
+    ;; The marker is created last: inserting at its position would drag it
+    ;; along, and it must sit right after the typed text.
+    (setq harness-ui-chat--compose-end (copy-marker input-end t))
+    (when compose-point
+      (goto-char (min (point-max)
+                      (+ (marker-position harness-ui-chat--compose-start) compose-point))))))
 
 (defun harness-ui-chat--compose-text ()
   "Return the composer's current text."
   (if (and harness-ui-chat--compose-start
-           (marker-position harness-ui-chat--compose-start))
+           harness-ui-chat--compose-end
+           (marker-position harness-ui-chat--compose-start)
+           (marker-position harness-ui-chat--compose-end))
       (buffer-substring-no-properties (marker-position harness-ui-chat--compose-start)
-                                      (point-max))
+                                      (marker-position harness-ui-chat--compose-end))
     ""))
 
 (defun harness-ui-chat--replace-compose (text)
   "Replace the composer's text with TEXT."
   (let ((inhibit-read-only t))
-    (delete-region (harness-ui-chat--compose-point) (point-max))
+    (delete-region (harness-ui-chat--compose-point)
+                   (if (and harness-ui-chat--compose-end
+                            (marker-position harness-ui-chat--compose-end))
+                       (marker-position harness-ui-chat--compose-end)
+                     (point-max)))
     (goto-char (harness-ui-chat--compose-point))
-    (insert (propertize text 'face 'harness-ui-compose-face))
-    (setq harness-ui-chat--compose-start (copy-marker (harness-ui-chat--compose-point)))))
+    (let ((start (point)))
+      (insert (propertize text 'face 'harness-ui-compose-face))
+      (setq harness-ui-chat--compose-start (copy-marker start)
+            harness-ui-chat--compose-end (copy-marker (point) t)))))
 
 (defun harness-ui-chat--render-queued ()
   "Render the queued message list above the composer."
@@ -872,11 +1090,13 @@ TEXT defaults to the composer's current contents."
   (setq harness-ui-chat--attachments nil)
   (setq harness-ui-chat--status 'running)
   (harness-ui-chat--refresh-header)
+  (harness-ui-chat--render-composer)
   (harness-deferred-then
    (harness-ui-send harness-ui-chat--session-id blocks)
    (lambda (_result)
      (setq harness-ui-chat--status 'idle)
      (harness-ui-chat--refresh-header)
+     (harness-ui-chat--render-composer)
      (when harness-ui-chat--queue
        (let ((queued (copy-sequence harness-ui-chat--queue)))
          (setq harness-ui-chat--queue nil)
@@ -885,6 +1105,7 @@ TEXT defaults to the composer's current contents."
    (lambda (error)
      (setq harness-ui-chat--status 'idle)
      (harness-ui-chat--refresh-header)
+     (harness-ui-chat--render-composer)
      (message "Prompt failed: %S" error))))
 
 (defun harness-ui-chat-queue ()
@@ -988,6 +1209,8 @@ TEXT defaults to the composer's current contents."
     (define-key map (kbd "C-c C-q") #'harness-ui-chat-queue)
     (define-key map (kbd "C-c C-s") #'harness-ui-sessions)
     (define-key map (kbd "C-c C-m") #'harness-ui-switch-model)
+    (define-key map (kbd "C-c C-p") #'harness-ui-set-permission-mode)
+    (define-key map (kbd "C-c C-t") #'harness-ui-set-thinking)
     (define-key map (kbd "C-c C-e") #'harness-ui-chat-back-to-end)
     (define-key map (kbd "C-c C-a") #'harness-ui-chat-attach-file)
     (define-key map (kbd "q") #'bury-buffer)
@@ -1079,7 +1302,8 @@ TEXT defaults to the composer's current contents."
           (let ((queued (copy-sequence harness-ui-chat--queue)))
             (setq harness-ui-chat--queue nil)
             (harness-ui-chat--send-blocks (vconcat (seq-mapcat #'car queued)))))
-        (harness-ui-chat--refresh-header)))))
+        (harness-ui-chat--refresh-header)
+        (harness-ui-chat--render-composer)))))
 
 (defun harness-ui-chat-refresh-all ()
   "Redraw every chat buffer (after a reload)."
