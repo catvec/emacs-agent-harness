@@ -445,5 +445,28 @@
       (should (cl-some (lambda (text) (and text (string-match-p "Naming this conversation" text)))
                        (harness-agent-test--texts test-session-id))))))
 
+(ert-deftest harness-agent-notices-cache-expiry ()
+  "A long gap before a big-context turn produces a cache hint."
+  (harness-agent-test--with-session
+    (harness-service-call "session" 'add-usage :session-id test-session-id
+                          :input 5000 :output 500)
+    (harness-service-call "session" 'state-set :session-id test-session-id
+                          :key 'last-turn-at
+                          :value (- (float-time) (* 3 harness-agent-cache-ttl)))
+    (harness-agent--note-cache-expiry test-session-id)
+    (should (cl-some (lambda (text) (and text (string-match-p "Prompt cache likely expired" text)))
+                     (harness-agent-test--texts test-session-id)))))
+
+(ert-deftest harness-agent-keeps-quiet-when-the-cache-is-warm ()
+  (harness-agent-test--with-session
+    (harness-service-call "session" 'add-usage :session-id test-session-id
+                          :input 5000 :output 500)
+    (harness-service-call "session" 'state-set :session-id test-session-id
+                          :key 'last-turn-at
+                          :value (float-time))
+    (harness-agent--note-cache-expiry test-session-id)
+    (should-not (cl-some (lambda (text) (and text (string-match-p "Prompt cache" text)))
+                         (harness-agent-test--texts test-session-id)))))
+
 (provide 'harness-agent-test)
 ;;; harness-agent-test.el ends here

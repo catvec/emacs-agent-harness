@@ -54,7 +54,7 @@
       ;; The latest plan lives in session state for later turns.
       (let ((state (harness-service-call "session" 'state-get
                                         :session-id (harness-session-id session)
-                                        :key :plan)))
+                                        :key 'plan)))
         (should state)
         (should (equal (plist-get state :title) "Fix the bug")))
       ;; A hint tells the user a plan is waiting.

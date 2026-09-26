@@ -910,6 +910,14 @@ clickable."
                    (harness-ui-chat--header-segment
                     (format "$%.3f" (or (plist-get cost :amount) 0))
                     'shadow "Estimated cost so far")))
+           (let* ((usage (plist-get info :usage))
+                  (cached (or (plist-get usage :cache-read) 0))
+                  (prompt (or (plist-get usage :input) 0)))
+             (when (and (> cached 0) (> prompt 0))
+               (list separator
+                     (harness-ui-chat--header-segment
+                      (format "cache %d%%" (round (* 100.0 (/ (float cached) prompt))))
+                      'shadow "Share of prompt tokens served from the provider cache"))))
            (when thinking
              (list separator
                    (harness-ui-chat--header-segment

@@ -393,5 +393,20 @@
         (harness-session-state-delete reloaded 'plan)
         (should-not (harness-session-state-get reloaded 'plan))))))
 
+(ert-deftest harness-session-state-keys-normalize ()
+  ;; Keyword and symbol keys address the same slot, and the projected
+  ;; plist uses a single-colon keyword.
+  (harness-session-test--setup)
+  (harness-session-test--with-storage
+    (let ((session (harness-session-test--make)))
+      (harness-session-state-set session :last-turn-at 12.5)
+      (should (equal (harness-session-state-get session 'last-turn-at) 12.5))
+      (should (equal (harness-session-state-get session :last-turn-at) 12.5))
+      (let ((projected (harness-session--state-plist session)))
+        (should (equal (plist-get projected :last-turn-at) 12.5))
+        (should-not (plist-get projected ::last-turn-at)))
+      (harness-session-state-delete session :last-turn-at)
+      (should-not (harness-session-state-get session 'last-turn-at)))))
+
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here

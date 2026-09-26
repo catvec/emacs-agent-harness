@@ -44,7 +44,7 @@
                                            :content (list :type "text" :text text)))
         (harness-service-call "session" 'state-set
                               :session-id session-id
-                              :key :plan
+                              :key 'plan
                               :value (list :title headline :text text))
         (harness-service-call "session" 'system-hint
                               :session-id session-id

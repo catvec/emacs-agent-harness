@@ -198,19 +198,28 @@ root-level fields (which the protocol reserves) without losing them."
              (harness-session-state session))
     plist))
 
+(defun harness-session--state-key (key)
+  "Normalize state KEY to a plain symbol.
+State keys are stored as symbols and projected as keywords; accepting
+`:foo' and `foo' alike avoids the `::foo' entries a keyword would
+otherwise create."
+  (if (keywordp key)
+      (intern (substring (symbol-name key) 1))
+    key))
+
 (defun harness-session-state-get (session key &optional default)
   "Return SESSION's state value for KEY, or DEFAULT."
-  (gethash key (harness-session-state session) default))
+  (gethash (harness-session--state-key key) (harness-session-state session) default))
 
 (defun harness-session-state-set (session key value)
   "Set SESSION's state KEY to VALUE."
-  (puthash key value (harness-session-state session))
+  (puthash (harness-session--state-key key) value (harness-session-state session))
   (harness-session--schedule-save session)
   value)
 
 (defun harness-session-state-delete (session key)
   "Remove KEY from SESSION's state."
-  (remhash key (harness-session-state session))
+  (remhash (harness-session--state-key key) (harness-session-state session))
   (harness-session--schedule-save session))
 
 (defun harness-session--metadata-plist (session)

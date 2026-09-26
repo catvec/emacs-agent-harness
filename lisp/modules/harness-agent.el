@@ -34,6 +34,17 @@
   "Agent turn loop."
   :group 'harness)
 
+(defcustom harness-agent-cache-ttl 300
+  "Seconds after which a provider prompt cache is probably gone.
+Before starting a turn the agent notes when this much time passed since
+the last one and the context is large, because the whole conversation
+will be re-read at full price."
+  :type 'natnum)
+
+(defcustom harness-agent-cache-min-tokens 2000
+  "Context size above which cache expiry is worth mentioning."
+  :type 'natnum)
+
 (defcustom harness-agent-system-prompt
   (concat "You are a coding agent running inside Emacs. You work in the session "
           "directory shown below; file tools are confined to it and shell commands "
@@ -185,6 +196,24 @@ with an explanation instead of spending more."
   "Normalize BLOCKS into a vector of content blocks."
   (vconcat (append blocks nil)))
 
+(defun harness-agent--note-cache-expiry (session-id)
+  "Hint when the provider prompt cache has probably expired."
+  (let* ((state (ignore-errors
+                  (harness-service-call "session" 'state-all :session-id session-id)))
+         (last (plist-get state :last-turn-at))
+         (info (harness-agent--info session-id))
+         (usage (plist-get info :usage))
+         (context (+ (or (plist-get usage :input) 0)
+                     (or (plist-get usage :output) 0))))
+    (when (and (numberp last)
+               (> context harness-agent-cache-min-tokens)
+               (> (- (float-time) last) harness-agent-cache-ttl))
+      (harness-agent--system-hint
+       session-id
+       (format "Prompt cache likely expired (%d minutes since the last turn); this turn will re-read the whole context."
+               (round (/ (- (float-time) last) 60)))
+       "info"))))
+
 (defun harness-agent--start-turn (session-id blocks)
   "Start a turn for SESSION-ID with BLOCKS.  Returns a deferred."
   (let* ((state (harness-agent--state session-id))
@@ -192,6 +221,7 @@ with an explanation instead of spending more."
                                           :abort (harness-deferred-new))))
     (setf (harness-agent-state-turn state) turn)
     (harness-service-call "session" 'set-status :session-id session-id :status "running")
+    (harness-agent--note-cache-expiry session-id)
     (harness-agent--append-user-message session-id blocks)
     (harness-deferred-on-cancel (harness-agent-turn-deferred turn)
                                 (lambda () (harness-agent-cancel :session-id session-id)))
@@ -755,6 +785,10 @@ overview aggregate; it is never sent to the model."
       (setf (harness-agent-state-turn state) nil)
       (cl-incf (harness-agent-state-turns state))
       (harness-agent--maybe-auto-name session-id state)
+      (harness-service-call "session" 'state-set
+                            :session-id session-id
+                            :key 'last-turn-at
+                            :value (float-time))
       (harness-service-call "session" 'set-status :session-id session-id :status "idle")
       (harness-emit 'agent-turn-finished :session-id session-id :stop-reason stop-reason)
       (harness-deferred-resolve (harness-agent-turn-deferred turn) stop-reason)
