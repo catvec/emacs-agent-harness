@@ -123,6 +123,13 @@
     (harness-emit 'harness-fixture-ping :value 1)
     (should (equal seen '(new)))))
 
+(ert-deftest harness-core-deferred-predicate ()
+  ;; Regression: a hand-written wrapper once shadowed the struct predicate
+  ;; and called a function that did not exist.
+  (should (harness-deferred-p (harness-deferred-new)))
+  (should-not (harness-deferred-p 42))
+  (should-not (harness-deferred-p nil)))
+
 (ert-deftest harness-core-deferred-resolve ()
   (let ((d (harness-deferred-new))
         (got nil))

@@ -102,10 +102,6 @@ FORMAT-STRING and ARGS are passed to `format'."
   "Return a new, pending deferred."
   (harness-deferred--make))
 
-(defun harness-deferred-p (object)
-  "Return non-nil when OBJECT is a `harness-deferred'."
-  (harness-deferred--p object))
-
 (defun harness-deferred-pending-p (deferred)
   "Return non-nil when DEFERRED has not settled."
   (eq (harness-deferred-state deferred) 'pending))

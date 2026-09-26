@@ -322,19 +322,19 @@ Returns a `harness-sandbox-process'."
          (cwd (or (plist-get properties :cwd) default-directory))
          (policy (or (plist-get properties :policy) (harness-sandbox-policy)))
          (wrapped (harness-sandbox-wrap command args cwd policy))
-         (process (make-process
-                   :name (or (plist-get properties :name) "harness-sandbox")
-                   :command (cons (plist-get wrapped :program)
-                                  (plist-get wrapped :args))
-                   :default-directory (file-name-as-directory
-                                       (expand-file-name cwd))
-                   :coding (or (plist-get properties :coding) 'utf-8-unix)
-                   :connection-type 'pipe
-                   :noquery t
-                   :filter (plist-get properties :filter)
-                   :sentinel (plist-get properties :sentinel)
-                   :stderr (plist-get properties :stderr)
-                   :environment (plist-get properties :env))))
+         (process (let ((default-directory (file-name-as-directory
+                                            (expand-file-name cwd))))
+                    (make-process
+                     :name (or (plist-get properties :name) "harness-sandbox")
+                     :command (cons (plist-get wrapped :program)
+                                    (plist-get wrapped :args))
+                     :coding (or (plist-get properties :coding) 'utf-8-unix)
+                     :connection-type 'pipe
+                     :noquery t
+                     :filter (plist-get properties :filter)
+                     :sentinel (plist-get properties :sentinel)
+                     :stderr (plist-get properties :stderr)
+                     :environment (plist-get properties :env)))))
     (harness-sandbox-process-create
      :process process
      :backend (plist-get wrapped :backend)
@@ -349,27 +349,27 @@ PROPERTIES accepts the same keys as `harness-sandbox-spawn' plus
 string) and `:timeout' (seconds, enforced by a watchdog that kills the
 process).  Returns (EXIT-CODE . OUTPUT)."
   (let* ((buffer (generate-new-buffer " *harness-sandbox-sync*"))
-         (result (make-symbol "result"))
          (finished nil)
          (cwd (or (plist-get properties :cwd) default-directory))
          (policy (or (plist-get properties :policy) (harness-sandbox-policy)))
          (wrapped (harness-sandbox-wrap command args cwd policy))
-         (process (make-process
-                   :name (or (plist-get properties :name) "harness-sandbox-sync")
-                   :command (cons (plist-get wrapped :program)
-                                  (plist-get wrapped :args))
-                   :default-directory (file-name-as-directory
-                                       (expand-file-name cwd))
-                   :coding (or (plist-get properties :coding) 'utf-8-unix)
-                   :connection-type 'pipe
-                   :noquery t
-                   :buffer buffer
-                   :sentinel (lambda (process event)
-                               (when (memq (process-status process)
-                                           '(exit signal failed))
-                                 (setq finished (cons (process-exit-status process) event))))))
          (timeout (plist-get properties :timeout))
          (timed-out nil)
+         (process (let ((default-directory (file-name-as-directory
+                                            (expand-file-name cwd))))
+                    (make-process
+                     :name (or (plist-get properties :name) "harness-sandbox-sync")
+                     :command (cons (plist-get wrapped :program)
+                                    (plist-get wrapped :args))
+                     :coding (or (plist-get properties :coding) 'utf-8-unix)
+                     :connection-type 'pipe
+                     :noquery t
+                     :buffer buffer
+                     :sentinel (lambda (process event)
+                                 (when (memq (process-status process)
+                                             '(exit signal failed))
+                                   (setq finished (cons (process-exit-status process)
+                                                        event)))))))
          (watchdog (and timeout
                         (run-at-time timeout nil
                                      (lambda ()

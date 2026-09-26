@@ -42,6 +42,7 @@
     harness-agent
     harness-ui
     harness-ui-chat
+    harness-ui-ask
     harness-ui-sessions
     harness-ui-config
     harness-ui-notifier
