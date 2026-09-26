@@ -450,10 +450,24 @@ Only non-blocking tools belong here; anything that can hold the session
               (harness-ui-chat--absorb-into-tool-run new))))))
       (when (and harness-ui-chat-auto-scroll (harness-ui-chat--at-end-p))
         (harness-ui-chat--scroll-to-end))
-      ;; Auto-name / hint updates that change the header.
+      ;; Configuration changes carry the complete new state, but the
+      ;; header also shows info (model name, tokens) that only the session
+      ;; knows; refresh it.
       (when (member kind '("session_info_update" "config_option_update"
-                           "current_mode_update" "usage_update"))
-        (harness-ui-chat--refresh-header)))))
+                           "current_mode_update"))
+        (harness-ui-chat--refresh-info buffer session-id)))))
+
+(defun harness-ui-chat--refresh-info (buffer session-id)
+  "Re-fetch SESSION-ID's info and redraw BUFFER's header."
+  (harness-deferred-then
+   (harness-ui-request "_harness/session/info" (list :sessionId session-id))
+   (lambda (info)
+     (when (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (setq harness-ui-chat--info info
+               harness-ui-chat--status (intern (or (plist-get info :status) "idle")))
+         (harness-ui-chat--refresh-header))))
+   (lambda (_error) nil)))
 
 (defun harness-ui-chat--absorb-into-tool-run (record)
   "Merge RECORD into the previous allow-listed tool run, if adjacent."
