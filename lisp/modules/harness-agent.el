@@ -776,7 +776,10 @@ prompt cache usually covers it."
   (when (and text (not (string-empty-p (string-trim text))))
     (let ((title (string-trim
                   (car (split-string (string-trim text) "\n")))))
-      (setq title (string-trim title " \t\n\"'“”‘’”"))
+      ;; Models like to answer with headings, bullets or quotes.
+      (setq title (replace-regexp-in-string "\\`[#>*+-]+[ \t]*" "" title))
+      (setq title (string-trim title " \t\n\"'“”‘’*_`#"))
+      (setq title (replace-regexp-in-string "[ \t]+" " " title))
       (when (> (length title) 72)
         (setq title (concat (substring title 0 69) "…")))
       (unless (string-empty-p title) title))))

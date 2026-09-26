@@ -236,7 +236,7 @@ Rules may return a decision directly or a deferred resolving to one."
             (plist-get request :tool-name)
             (or (harness-tool-description tool) "(none)")
             (plist-get request :cwd)
-            (let ((json (json-serialize (or (plist-get request :arguments)
+            (let ((json (harness-json-serialize (or (plist-get request :arguments)
                                             (make-hash-table)))))
               (if (> (length json) 4000) (substring json 0 4000) json)))))
 

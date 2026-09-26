@@ -6,6 +6,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'json)
 (require 'harness-core)
 (require 'harness-session)
 (require 'harness-test-helpers)
@@ -113,6 +114,43 @@
                        "hi there"))
         (should (plist-get (aref (harness-session-entries reloaded) 0) :id))
         (should (harness-deferred-resolved-p entries))))))
+
+(ert-deftest harness-session-unicode-round-trip ()
+  ;; json-serialize returns unibyte UTF-8; writing it into a buffer must not
+  ;; leave raw-byte characters behind (which used to trigger a blocking
+  ;; coding-system prompt from the save timer).
+  (harness-session-test--setup)
+  (harness-session-test--with-storage
+    (let* ((session (harness-session-test--make))
+           (id (harness-session-id session))
+           (text "em\u2014dash \u2026 \u65e5\u672c\u8a9e \U0001F389"))
+      (harness-session-append session
+                              (list :sessionUpdate "agent_message_chunk"
+                                    :content (list :type "text" :text text)
+                                    :messageId "m1"))
+      (harness-session-save session)
+      (should (file-exists-p (harness-session--transcript-file session)))
+      (with-temp-buffer
+        (insert-file-contents (harness-session--transcript-file session))
+        (let ((contents (buffer-string)))
+          (should (not (cl-loop for character across contents
+                                thereis (and (>= character #x3FFF80)
+                                             (<= character #x3FFFFF)))))
+          (should (equal (plist-get (plist-get (json-parse-string
+                                                contents :object-type 'plist)
+                                               :content)
+                                    :text)
+                         text))))
+      ;; Reload from disk with a clean active registry.
+      (clrhash harness-session--active)
+      (let ((reloaded (harness-session-load id)))
+        (harness-test-settle (harness-session-ensure-entries reloaded))
+        (should (equal (plist-get (plist-get (aref (harness-session-entries reloaded) 0)
+                                             :content)
+                                  :text)
+                       text))
+        (should (equal (plist-get (harness-session-info reloaded) :title)
+                       (plist-get (harness-session-info session) :title)))))))
 
 (ert-deftest harness-session-entry-events-carry-id-and-meta ()
   (harness-session-test--setup)

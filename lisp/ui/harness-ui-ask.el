@@ -126,7 +126,7 @@
     (when (and args (not (equal args (make-hash-table))))
       (harness-ui-ask--insert
        (format "%s\n\n" (truncate-string-to-width
-                          (or (ignore-errors (json-serialize args)) (format "%S" args))
+                          (or (ignore-errors (harness-json-serialize args)) (format "%S" args))
                           200 nil nil "…"))
        'face 'harness-ui-ask-args-face))
     (when reason

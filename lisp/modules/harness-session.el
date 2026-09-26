@@ -156,7 +156,9 @@ root-level fields (which the protocol reserves) without losing them."
 (defun harness-session--write-atomic (file content)
   "Write CONTENT to FILE atomically."
   (make-directory (file-name-directory file) t)
-  (let ((temporary (concat file ".tmp")))
+  (let ((temporary (concat file ".tmp"))
+        (create-lockfiles nil)
+        (coding-system-for-write 'utf-8-unix))
     (with-temp-file temporary
       (insert content))
     (rename-file temporary file t)))
@@ -285,13 +287,14 @@ root-level fields (which the protocol reserves) without losing them."
     (condition-case err
         (progn
           (harness-session--write-atomic
-           file (json-serialize (harness-session--metadata-plist session)))
+           file (harness-json-serialize (harness-session--metadata-plist session)))
           (harness-session--append-new-entries session))
       (error
        (harness-log "cannot save session %s: %S" (harness-session-id session) err)
-       (display-warning 'harness
-                        (format "cannot save session %s: %S" (harness-session-id session) err)
-                        :warning))))
+       ;; Saves happen from timers; never steal the echo area or pop a
+       ;; warning buffer for something the user cannot act on right now.
+       (unless (or noninteractive (active-minibuffer-window))
+         (message "harness: session not saved (%s)" (error-message-string err))))))
   session)
 
 (defun harness-session--append-new-entries (session)
@@ -299,13 +302,17 @@ root-level fields (which the protocol reserves) without losing them."
   (let ((entries (harness-session-entries session))
         (persisted (harness-session-persisted session)))
     (when (< persisted (length entries))
-      (let ((file (harness-session--transcript-file session)))
+      (let ((file (harness-session--transcript-file session))
+            ;; Writing never visits the file and never asks anything: a save
+            ;; runs from a timer and must not touch the minibuffer.
+            (create-lockfiles nil)
+            (coding-system-for-write 'utf-8-unix))
         (make-directory (file-name-directory file) t)
         (with-temp-buffer
           (cl-loop for index from persisted below (length entries)
                    for entry = (aref entries index)
-                   do (insert (json-serialize entry) "\n"))
-          (write-region (point-min) (point-max) file t 'silent))
+                   do (insert (harness-json-serialize entry) "\n"))
+          (write-region (point-min) (point-max) file nil 'silent))
         (setf (harness-session-persisted session) (length entries))))))
 
 (defun harness-session--schedule-save (session)

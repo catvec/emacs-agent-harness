@@ -5,6 +5,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'json)
 (require 'harness-core)
 
 (add-to-list 'load-path
@@ -225,6 +226,22 @@
        t))
     (should (>= iterations 1))
     (should (< iterations 1000))))
+
+(ert-deftest harness-json-serialize-is-multibyte ()
+  ;; `json-serialize' returns unibyte UTF-8 bytes; inserting that into a
+  ;; buffer yields raw-byte characters.  The helper returns text.
+  (let* ((text "em\u2014dash \u2026 \u65e5\u672c\u8a9e \U0001F389")
+         (json (harness-json-serialize (list :text text))))
+    (should (multibyte-string-p json))
+    (should (equal (plist-get (json-parse-string json :object-type 'plist) :text)
+                   text))
+    (should (not (multibyte-string-p (json-serialize (list :text text)))))
+    ;; A plist argument and explicit options both work (json-serialize
+    ;; rejects an explicit nil OPTIONS).
+    (should (equal (harness-json-serialize '(:path "x.txt"))
+                   "{\"path\":\"x.txt\"}"))
+    (should (equal (harness-json-serialize '(:a :false) :false-object :false)
+                   "{\"a\":false}"))))
 
 (provide 'harness-core-test)
 ;;; harness-core-test.el ends here

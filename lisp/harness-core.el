@@ -69,6 +69,17 @@ rather than relying on nil meaning null."
   (cl-loop for (key value) on plist by #'cddr
            when (not (null value)) append (list key value)))
 
+(defun harness-json-serialize (object &rest options)
+  "Serialize OBJECT to JSON and return it as multibyte UTF-8 text.
+OPTIONS are passed to `json-serialize' (`:pretty', `:null-object', ...).
+`json-serialize' returns a unibyte string of UTF-8 bytes, which becomes
+raw-byte characters when inserted into a buffer (and then fails to save
+cleanly).  Use this for anything that is written to a buffer or file."
+  (let ((json (apply #'json-serialize object options)))
+    (if (multibyte-string-p json)
+        json
+      (decode-coding-string json 'utf-8))))
+
 (defun harness-log (format-string &rest args)
   "Log a message when `harness-debug' is non-nil.
 FORMAT-STRING and ARGS are passed to `format'."
