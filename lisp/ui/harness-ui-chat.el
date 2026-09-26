@@ -170,13 +170,33 @@ Insertion type is t so typed text stays inside the body.")
   (insert (apply #'propertize string properties)))
 
 (defun harness-ui-chat--button (label callback &rest properties)
-  "Insert a button LABEL that calls CALLBACK."
+  "Insert a button LABEL that calls CALLBACK.
+PROPERTIES may carry :help-echo and :face; FACE is layered over the
+theme's `button' face, which keeps action buttons looking like links
+while quiet toggles can stay in the shadow face."
+  (let ((start (point)))
+    (insert-text-button label
+                        'action (lambda (_button) (funcall callback))
+                        'follow-link t
+                        'mouse-face 'highlight
+                        'help-echo (or (plist-get properties :help-echo)
+                                       (format-message "Click: %s" label)))
+    (when-let* ((face (plist-get properties :face)))
+      (add-face-text-property start (point) face))))
+
+(defun harness-ui-chat--toggle (label record &rest properties)
+  "Insert LABEL as a clickable collapse toggle for RECORD.
+The :face property replaces the theme's link-looking `button' face so
+quiet toggles stay quiet."
   (insert-text-button label
-                      'action (lambda (_button) (funcall callback))
+                      'action (lambda (_button) (harness-ui-chat-toggle record))
                       'follow-link t
                       'mouse-face 'highlight
+                      'face (or (plist-get properties :face) 'shadow)
                       'help-echo (or (plist-get properties :help-echo)
-                                     (format-message "Click: %s" label))))
+                                     "Show or hide this block")
+                      'keymap harness-ui-chat--tool-line-keymap
+                      'harness-ui-chat-record record))
 
 (defun harness-ui-chat--mark-read-only (start end)
   "Mark START to END as read-only transcript text."
@@ -235,18 +255,20 @@ the original text stays searchable."
           (add-face-text-property inner-start inner-end 'italic)
           (add-text-properties open-start inner-start '(display ""))
           (add-text-properties inner-end close-end '(display ""))))
-      ;; Fenced code blocks: style them and hide only the fence lines.
+      ;; Fenced code blocks: hide the fences completely (newline included,
+      ;; otherwise their :extend face paints full-width bars) and style the
+      ;; body lines.
       (goto-char start)
       (while (re-search-forward "^```" end t)
-        (let* ((block-start (line-beginning-position))
-               (opening-end (1+ (line-end-position))))
+        (let* ((opening-start (line-beginning-position))
+               (body-start (1+ (line-end-position))))
           (if (re-search-forward "^```[ \t]*$" end t)
-              (let ((block-end (line-end-position)))
-                (add-face-text-property block-start block-end 'harness-ui-code-face)
-                (add-text-properties block-start opening-end '(display ""))
-                (add-text-properties (line-beginning-position)
-                                     (1+ (line-end-position))
-                                     '(display "")))
+              (let ((body-end (line-beginning-position))
+                    (closing-end (min (1+ (line-end-position)) (point-max))))
+                (when (< body-start body-end)
+                  (add-face-text-property body-start body-end 'harness-ui-code-face))
+                (add-text-properties opening-start body-start '(display ""))
+                (add-text-properties body-end closing-end '(display "")))
             (goto-char end)))))))
 
 
@@ -270,8 +292,9 @@ the original text stays searchable."
   (let ((previous (harness-ui-chat--previous-record record)))
     (when (and previous
                (not (harness-ui-chat--inline-record-p previous))
-               (> (point) (point-min))
-               (not (looking-back "\n\n" 2 t)))
+               (>= (point) 2)
+               (not (and (eq (char-before (1- (point))) ?\n)
+                         (eq (char-before) ?\n))))
       (insert "\n"))))
 
 (defun harness-ui-chat--key (update)
@@ -348,7 +371,7 @@ the original text stays searchable."
     (pcase kind
       ("agent_thought_chunk"
        (insert (propertize (if collapsed "▸ " "▾ ") 'face 'shadow))
-       (harness-ui-chat--button
+       (harness-ui-chat--toggle
         (let ((lines (length (split-string text "\n" t))))
           (concat "Thinking"
                   (if collapsed
@@ -357,7 +380,8 @@ the original text stays searchable."
                             (concat "  " preview)
                           ""))
                     (format " (%d %s)" lines (if (= lines 1) "line" "lines")))))
-        (lambda () (harness-ui-chat-toggle record))
+        record
+        :face 'harness-ui-thinking-face
         :help-echo "Show or hide the thinking")
        (unless collapsed
          (insert "\n")
@@ -513,13 +537,14 @@ Returns non-nil when the line was rendered, leaving point on it."
               (1+ (or (alist-get name counts nil nil #'equal) 0)))))
     (harness-ui-chat--insert
      (if (harness-ui-chat-record-collapsed record) "▸ " "▾ ") 'face 'shadow)
-    (harness-ui-chat--button
+    (harness-ui-chat--toggle
      (format "tools %s"
              (string-join (mapcar (lambda (entry)
                                     (format "%s ×%d" (car entry) (cdr entry)))
                                   (nreverse counts))
                           ", "))
-     (lambda () (harness-ui-chat-toggle record))
+     record
+     :face 'harness-ui-tool-face
      :help-echo "Show or hide these tool calls")
     (unless (harness-ui-chat-record-collapsed record)
       (insert "\n")
@@ -555,15 +580,22 @@ Returns non-nil when the line was rendered, leaving point on it."
     (harness-ui-chat--mark-read-only start (point))))
 
 (defun harness-ui-chat--rerender (record)
-  "Redraw RECORD's region in place (contents only, no re-layout)."
-  (let ((inhibit-read-only t)
-        (start (harness-ui-chat-record-start record))
-        (end (harness-ui-chat-record-end record)))
-    (when (and start end (marker-position start) (marker-position end))
-      (delete-region start end)
-      (save-excursion
-        (goto-char start)
-        (harness-ui-chat--render-record record)))))
+  "Redraw RECORD's region in place (contents only, no re-layout).
+Falls back to a full layout when the record markers are stale (which can
+happen after a reload re-adopts a buffer)."
+  (let* ((inhibit-read-only t)
+         (start (harness-ui-chat--safe-marker-position
+                 (harness-ui-chat-record-start record)))
+         (end (harness-ui-chat--safe-marker-position
+               (harness-ui-chat-record-end record))))
+    (if (and start end (<= start end))
+        (progn
+          (delete-region start end)
+          (save-excursion
+            (goto-char start)
+            (harness-ui-chat--render-record record)))
+      ;; Stale markers: lay the whole transcript out again.
+      (setq harness-ui-chat--needs-rebuild t))))
 
 (defun harness-ui-chat-toggle (record)
   "Toggle collapse state of RECORD."
@@ -582,9 +614,10 @@ Rendering every record in order is cheap enough for structural changes
 and keeps ordering exact; streaming deltas only re-render their own
 region."
   (let ((inhibit-read-only t)
-        (compose-offset (when (and harness-ui-chat--transcript-end
-                                   (>= (point) (marker-position harness-ui-chat--transcript-end)))
-                          (- (point) (marker-position harness-ui-chat--transcript-end))))
+        (compose-offset (let ((end (harness-ui-chat--safe-marker-position
+                                    harness-ui-chat--transcript-end)))
+                          (when (and end (>= (point) end))
+                            (- (point) end))))
         (compose-text (harness-ui-chat--compose-text)))
     (erase-buffer)
     (setq harness-ui-chat--transcript-end nil
@@ -600,7 +633,12 @@ region."
                                     "  C-c C-k cancel        C-c C-t  thinking\n")
                             'face 'shadow))
       (dolist (record (reverse harness-ui-chat--records))
-        (harness-ui-chat--render-record record)))
+        ;; One malformed record must not cost the user their transcript.
+        (condition-case err
+            (harness-ui-chat--render-record record)
+          (error
+           (harness-log "cannot render %s record: %S"
+                        (harness-ui-chat-record-kind record) err)))))
     (harness-ui-chat--render-composer compose-text)
     (when compose-offset
       (goto-char (min (point-max)
@@ -751,10 +789,8 @@ region."
 
 (defun harness-ui-chat--compose-point ()
   "Return the start of the composer body."
-  (if (and harness-ui-chat--compose-start
-           (marker-position harness-ui-chat--compose-start))
-      (marker-position harness-ui-chat--compose-start)
-    (point-max)))
+  (or (harness-ui-chat--safe-marker-position harness-ui-chat--compose-start)
+      (point-max)))
 
 ;;; Header and composer
 
@@ -783,11 +819,31 @@ With ACTION, the segment becomes a clickable button."
                               map))
       string)))
 
+(defun harness-ui-chat--in-buffer (session-id)
+  "Return SESSION-ID's chat buffer when it exists."
+  (and session-id (gethash session-id harness-ui-chat--buffers)))
+
+(defun harness-ui-chat--call-in-chat-buffer (function)
+  "Call FUNCTION in a chat buffer.
+Return the symbol `redirected' when the call was delegated to another
+buffer, and nil when the current buffer already is a chat buffer.
+Timers and deferred callbacks call the rendering functions with an
+arbitrary current buffer; running them there would set buffer-local
+state in the wrong buffer."
+  (cond
+   ((derived-mode-p 'harness-ui-chat-mode) nil)
+   ((when-let* ((buffer (harness-ui-chat--in-buffer harness-ui-current-session)))
+      (with-current-buffer buffer (funcall function))
+      'redirected))
+   (t 'nowhere)))
+
 (defun harness-ui-chat--refresh-header ()
   "Redraw the header line: title, status, model, tokens, cost, permissions.
 Segments use only theme faces so light and dark themes stay legible on
 the theme's own header-line background, and the important ones are
 clickable."
+  (when (harness-ui-chat--call-in-chat-buffer #'harness-ui-chat--refresh-header)
+    (cl-return-from harness-ui-chat--refresh-header nil))
   (let* ((info harness-ui-chat--info)
          (status (or harness-ui-chat--status 'idle))
          (title (or (plist-get info :title)
@@ -848,21 +904,26 @@ clickable."
 (defun harness-ui-chat--render-composer (&optional text)
   "(Re)draw the composer area and its action buttons.
 TEXT defaults to the composer's current contents."
+  (when (harness-ui-chat--call-in-chat-buffer
+         (lambda () (harness-ui-chat--render-composer text)))
+    (cl-return-from harness-ui-chat--render-composer nil))
   (let* ((inhibit-read-only t)
          (text (or text (harness-ui-chat--compose-text)))
          (running (eq harness-ui-chat--status 'running))
          (input-end nil)
          ;; Keep the cursor where the user left it inside the composer.
-         (compose-point (and harness-ui-chat--compose-start
-                             (marker-position harness-ui-chat--compose-start)
-                             (>= (point) (marker-position harness-ui-chat--compose-start))
-                             (- (point) (marker-position harness-ui-chat--compose-start)))))
-    (when (and harness-ui-chat--transcript-end
-               (marker-position harness-ui-chat--transcript-end))
-      (delete-region (marker-position harness-ui-chat--transcript-end) (point-max)))
+         (compose-point (let ((start (harness-ui-chat--safe-marker-position
+                                      harness-ui-chat--compose-start)))
+                          (when (and start (>= (point) start))
+                            (- (point) start)))))
+    (when-let* ((end (harness-ui-chat--safe-marker-position harness-ui-chat--transcript-end)))
+      (delete-region end (point-max)))
     (goto-char (point-max))
     (setq harness-ui-chat--transcript-end (copy-marker (point)))
-    (insert "\n")
+    (unless (and (>= (point) 2)
+                 (eq (char-before (1- (point))) ?\n)
+                 (eq (char-before) ?\n))
+      (insert "\n"))
     (harness-ui-chat--render-queued)
     (harness-ui-chat--render-attachments-line)
     (insert (propertize "❯ " 'face 'harness-ui-prompt-face))
@@ -895,24 +956,25 @@ TEXT defaults to the composer's current contents."
       (goto-char (min (point-max)
                       (+ (marker-position harness-ui-chat--compose-start) compose-point))))))
 
+(defun harness-ui-chat--safe-marker-position (marker)
+  "Marker's position, clamped to the accessible buffer text."
+  (when (and marker (marker-position marker))
+    (min (marker-position marker) (point-max))))
+
 (defun harness-ui-chat--compose-text ()
   "Return the composer's current text."
-  (if (and harness-ui-chat--compose-start
-           harness-ui-chat--compose-end
-           (marker-position harness-ui-chat--compose-start)
-           (marker-position harness-ui-chat--compose-end))
-      (buffer-substring-no-properties (marker-position harness-ui-chat--compose-start)
-                                      (marker-position harness-ui-chat--compose-end))
-    ""))
+  (let ((start (harness-ui-chat--safe-marker-position harness-ui-chat--compose-start))
+        (end (harness-ui-chat--safe-marker-position harness-ui-chat--compose-end)))
+    (if (and start end (<= start end))
+        (buffer-substring-no-properties start end)
+      "")))
 
 (defun harness-ui-chat--replace-compose (text)
   "Replace the composer's text with TEXT."
   (let ((inhibit-read-only t))
     (delete-region (harness-ui-chat--compose-point)
-                   (if (and harness-ui-chat--compose-end
-                            (marker-position harness-ui-chat--compose-end))
-                       (marker-position harness-ui-chat--compose-end)
-                     (point-max)))
+                   (or (harness-ui-chat--safe-marker-position harness-ui-chat--compose-end)
+                       (point-max)))
     (goto-char (harness-ui-chat--compose-point))
     (let ((start (point)))
       (insert (propertize text 'face 'harness-ui-compose-face))
@@ -1087,26 +1149,31 @@ TEXT defaults to the composer's current contents."
 
 (defun harness-ui-chat--send-blocks (blocks)
   "Send BLOCKS to the session and mark the turn as running."
-  (setq harness-ui-chat--attachments nil)
-  (setq harness-ui-chat--status 'running)
-  (harness-ui-chat--refresh-header)
-  (harness-ui-chat--render-composer)
-  (harness-deferred-then
-   (harness-ui-send harness-ui-chat--session-id blocks)
-   (lambda (_result)
-     (setq harness-ui-chat--status 'idle)
-     (harness-ui-chat--refresh-header)
-     (harness-ui-chat--render-composer)
-     (when harness-ui-chat--queue
-       (let ((queued (copy-sequence harness-ui-chat--queue)))
-         (setq harness-ui-chat--queue nil)
-         (harness-ui-chat--send-blocks
-          (vconcat (seq-mapcat #'car queued))))))
-   (lambda (error)
-     (setq harness-ui-chat--status 'idle)
-     (harness-ui-chat--refresh-header)
-     (harness-ui-chat--render-composer)
-     (message "Prompt failed: %S" error))))
+  (let ((buffer (current-buffer)))
+    (setq harness-ui-chat--attachments nil)
+    (setq harness-ui-chat--status 'running)
+    (harness-ui-chat--refresh-header)
+    (harness-ui-chat--render-composer)
+    (harness-deferred-then
+     (harness-ui-send harness-ui-chat--session-id blocks)
+     (lambda (_result)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq harness-ui-chat--status 'idle)
+           (harness-ui-chat--refresh-header)
+           (harness-ui-chat--render-composer)
+           (when harness-ui-chat--queue
+             (let ((queued (copy-sequence harness-ui-chat--queue)))
+               (setq harness-ui-chat--queue nil)
+               (harness-ui-chat--send-blocks
+                (vconcat (seq-mapcat #'car queued))))))))
+     (lambda (error)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq harness-ui-chat--status 'idle)
+           (harness-ui-chat--refresh-header)
+           (harness-ui-chat--render-composer)
+           (message "Prompt failed: %S" error)))))))
 
 (defun harness-ui-chat-queue ()
   "Queue the composer's message for the next turn."
@@ -1281,9 +1348,15 @@ TEXT defaults to the composer's current contents."
     (when (and updates (buffer-live-p buffer))
       (with-current-buffer buffer
         (dolist (update updates)
-          (harness-ui-chat--apply-update buffer session-id update))
+          (condition-case err
+              (harness-ui-chat--apply-update buffer session-id update)
+            (error
+             (harness-log "chat update failed: %S" err)
+             (setq harness-ui-chat--needs-rebuild t))))
         (when harness-ui-chat--needs-rebuild
-          (harness-ui-chat-rebuild)))
+          (condition-case err
+              (harness-ui-chat-rebuild)
+            (error (harness-log "chat rebuild failed: %S" err)))))
       (when-let* ((window (get-buffer-window buffer t)))
         (with-selected-window window
           (when harness-ui-chat-auto-scroll
