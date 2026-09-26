@@ -559,5 +559,30 @@ Methods without an entry use `harness-ui-chat-test--stub-method'."
         (should (< second third)))
       (kill-buffer buffer))))
 
+
+(ert-deftest harness-ui-chat-live-and-final-keep-order ()
+  "Streaming (live) entries followed by final entries stay in order."
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (harness-ui-chat-test--apply buffer (list :sessionUpdate "user_message_chunk"
+                                                :messageId "u1" :live t
+                                                :content (list :type "text" :text "QUESTION")))
+      (harness-ui-chat-test--apply buffer (list :sessionUpdate "user_message_chunk"
+                                                :messageId "u1" :final t
+                                                :content (list :type "text" :text "QUESTION")))
+      (harness-ui-chat-test--apply buffer (list :sessionUpdate "agent_message_chunk"
+                                                :messageId "a1" :live t :delta "ANS"
+                                                :content (list :type "text" :text "ANS")))
+      (harness-ui-chat-test--apply buffer (list :sessionUpdate "agent_message_chunk"
+                                                :messageId "a1" :final t
+                                                :content (list :type "text" :text "ANSWER")))
+      (let* ((text (harness-ui-chat-test--text buffer))
+             (question (string-match "QUESTION" text))
+             (answer (string-match "ANSWER" text)))
+        (should question)
+        (should answer)
+        (should (< question answer)))
+      (kill-buffer buffer))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

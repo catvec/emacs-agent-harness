@@ -375,7 +375,8 @@ Only non-blocking tools belong here; anything that can hold the session
       (delete-region start end)
       (save-excursion
         (goto-char start)
-        (harness-ui-chat--render-record record)))))
+        (harness-ui-chat--render-record record))
+      (harness-ui-chat--sync-boundary))))
 
 (defun harness-ui-chat-toggle (record)
   "Toggle collapse state of RECORD."
@@ -383,17 +384,31 @@ Only non-blocking tools belong here; anything that can hold the session
         (not (harness-ui-chat-record-collapsed record)))
   (harness-ui-chat--rerender record))
 
+(defun harness-ui-chat--sync-boundary ()
+  "Put the transcript boundary after the last rendered record.
+Records are inserted at the boundary; re-rendering a record would
+otherwise pull it back to that record's start, so recompute it from the
+records' own end markers."
+  (let ((end (point-min)))
+    (dolist (record harness-ui-chat--records)
+      (when-let* ((marker (harness-ui-chat-record-end record))
+                  ((marker-position marker)))
+        (setq end (max end (marker-position marker)))))
+    (when harness-ui-chat--transcript-end
+      (set-marker harness-ui-chat--transcript-end end (current-buffer)))))
+
 (defun harness-ui-chat--insert-record (record &optional before-marker)
   "Insert RECORD at the end of the transcript, above the composer.
 The transcript boundary is advanced past the new record so the next one
 follows it in chronological order."
   (let ((inhibit-read-only t))
+    ;; Register the record before syncing so the boundary can see its end.
+    (push record harness-ui-chat--records)
     (save-excursion
       (goto-char (or before-marker (harness-ui-chat--transcript-point)))
       (harness-ui-chat--render-record record)
       (unless before-marker
-        (set-marker harness-ui-chat--transcript-end (point) (current-buffer))))
-    (push record harness-ui-chat--records)))
+        (harness-ui-chat--sync-boundary)))))
 
 (defun harness-ui-chat--transcript-point ()
   "Return the point where the transcript ends."
@@ -493,7 +508,8 @@ follows it in chronological order."
                 (cons group (cdr (cdr records))))
           (save-excursion
             (goto-char (marker-position (harness-ui-chat-record-start previous)))
-            (harness-ui-chat--render-record group)))))))
+            (harness-ui-chat--render-record group))
+          (harness-ui-chat--sync-boundary))))))
 
 (defun harness-ui-chat--update-text (update)
   "Flatten UPDATE's content blocks into display text."

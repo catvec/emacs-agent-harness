@@ -323,7 +323,9 @@ Returns a `harness-sandbox-process'."
          (policy (or (plist-get properties :policy) (harness-sandbox-policy)))
          (wrapped (harness-sandbox-wrap command args cwd policy))
          (process (let ((default-directory (file-name-as-directory
-                                            (expand-file-name cwd))))
+                                            (expand-file-name cwd)))
+                        (process-environment (or (plist-get properties :env)
+                                                 process-environment)))
                     (make-process
                      :name (or (plist-get properties :name) "harness-sandbox")
                      :command (cons (plist-get wrapped :program)
@@ -333,8 +335,7 @@ Returns a `harness-sandbox-process'."
                      :noquery t
                      :filter (plist-get properties :filter)
                      :sentinel (plist-get properties :sentinel)
-                     :stderr (plist-get properties :stderr)
-                     :environment (plist-get properties :env)))))
+                     :stderr (plist-get properties :stderr)))))
     (harness-sandbox-process-create
      :process process
      :backend (plist-get wrapped :backend)
@@ -356,7 +357,9 @@ process).  Returns (EXIT-CODE . OUTPUT)."
          (timeout (plist-get properties :timeout))
          (timed-out nil)
          (process (let ((default-directory (file-name-as-directory
-                                            (expand-file-name cwd))))
+                                            (expand-file-name cwd)))
+                        (process-environment (or (plist-get properties :env)
+                                                 process-environment)))
                     (make-process
                      :name (or (plist-get properties :name) "harness-sandbox-sync")
                      :command (cons (plist-get wrapped :program)
