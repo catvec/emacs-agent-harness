@@ -814,21 +814,58 @@ TEXT defaults to the composer's current contents."
      (lambda (result)
        (harness-ui-chat-open (plist-get result :sessionId))))))
 
+(defun harness-ui-chat--skill-names (text)
+  "Return #name skill references in TEXT."
+  (let (names)
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (while (re-search-forward "\\(?:\\`\\|[[:space:](]\\)#\\([[:alnum:]_-]+\\)\\b" nil t)
+        (push (match-string 1) names)))
+    (delete-dups (nreverse names))))
+
+(defun harness-ui-chat--skill-blocks (names)
+  "Load NAMES as skills.  Returns a deferred of their text blocks."
+  (if (null names)
+      (let ((deferred (harness-deferred-new))) (harness-deferred-resolve deferred nil) deferred)
+    (harness-deferred-then
+     (harness-deferred-all
+      (mapcar (lambda (name)
+                (harness-deferred-then
+                 (harness-ui-request "_harness/skills/load" (list :name name))
+                 (lambda (skill)
+                   (list :type "text"
+                         :text (format "Skill `%s` follows:\n\n%s"
+                                       (plist-get skill :name)
+                                       (or (plist-get skill :content) ""))))
+                 (lambda (_error) nil)))
+              names))
+     (lambda (blocks) (delq nil blocks)))))
+
 (defun harness-ui-chat-send ()
-  "Send the composer's message, or queue it while a turn is running."
+  "Send the composer's message, or queue it while a turn is running.
+#name references load skills and attach their contents."
   (interactive)
   (let ((text (string-trim (harness-ui-chat--compose-text))))
     (when (or (not (string-empty-p text))
               harness-ui-chat--attachments)
-      (let ((blocks (harness-ui-chat--message-blocks text)))
+      (let ((skill-names (harness-ui-chat--skill-names text))
+            (attachments harness-ui-chat--attachments))
         (harness-ui-chat--replace-compose "")
-        (if (eq harness-ui-chat--status 'running)
-            (progn
-              (setq harness-ui-chat--queue
-                    (append harness-ui-chat--queue (list (cons blocks text))))
-              (harness-ui-chat--render-composer)
-              (message "Queued; it will be sent at the next turn"))
-          (harness-ui-chat--send-blocks blocks))))))
+        (harness-deferred-then
+         (harness-ui-chat--skill-blocks skill-names)
+         (lambda (skill-blocks)
+           (let ((blocks (vconcat (append skill-blocks nil)
+                                  (harness-ui-chat--message-blocks text))))
+             (ignore attachments)
+             (if (eq harness-ui-chat--status 'running)
+                 (progn
+                   (setq harness-ui-chat--queue
+                         (append harness-ui-chat--queue (list (cons blocks text))))
+                   (with-current-buffer (current-buffer)
+                     (harness-ui-chat--render-composer))
+                   (message "Queued; it will be sent at the next turn"))
+               (harness-ui-chat--send-blocks blocks)))))))))
 
 (defun harness-ui-chat--send-blocks (blocks)
   "Send BLOCKS to the session and mark the turn as running."

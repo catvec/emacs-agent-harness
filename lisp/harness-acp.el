@@ -360,6 +360,8 @@ Returns CONNECTION."
     ("_harness/session/rename" . harness-acp--method-session-rename)
     ("_harness/session/entries" . harness-acp--method-session-entries)
     ("_harness/agent/configuration" . harness-acp--method-agent-configuration)
+    ("_harness/skills/list" . harness-acp--method-skills-list)
+    ("_harness/skills/load" . harness-acp--method-skills-load)
     ("_harness/ping" . harness-acp--method-ping)
     ("_harness/version" . harness-acp--method-version))
   "ACP method table for the agent role.")
@@ -567,6 +569,22 @@ Returns the raw transcript entries (with ids and times)."
      ((harness-service-available-p "session" 'configuration)
       (harness-service-call "session" 'configuration :session-id session-id))
      (t (list :configOptions [])))))
+
+(defun harness-acp--method-skills-list (_connection params)
+  "Handle the _harness/skills/list extension with PARAMS."
+  (if (harness-service-available-p "skill" 'list)
+      (list :skills (harness-service-call "skill" 'list :cwd (plist-get params :cwd)))
+    (list :skills [])))
+
+(defun harness-acp--method-skills-load (_connection params)
+  "Handle the _harness/skills/load extension with PARAMS."
+  (unless (harness-service-available-p "skill" 'load)
+    (signal 'harness-acp-error
+            (list (alist-get 'method-not-found harness-acp-error-codes)
+                  "No skills service is loaded" nil)))
+  (harness-service-call "skill" 'load
+                        :name (plist-get params :name)
+                        :cwd (plist-get params :cwd)))
 
 (defun harness-acp--method-session-delete (_connection params)
   "Handle session/delete with PARAMS."

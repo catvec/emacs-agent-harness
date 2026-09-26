@@ -37,6 +37,7 @@
     harness-provider-openai
     harness-tools
     harness-tools-emacs
+    harness-skills
     harness-perms
     harness-perms-jail
     harness-agent

@@ -57,6 +57,8 @@
                      ("_harness/session/info" (list :sessionId "s1" :title "Test"
                                                     :model "mock/m1" :status "idle"))
                      ("session/list" (list :sessions []))
+                     ("_harness/skills/load"
+                      (list :name (plist-get params :name) :content "SKILL BODY"))
                      (_ (make-hash-table))))
                   deferred))))
      (let ((harness-ui-chat-test--sent nil)
@@ -585,6 +587,23 @@ Methods without an entry use `harness-ui-chat-test--stub-method'."
         (should question)
         (should answer)
         (should (< question answer)))
+      (kill-buffer buffer))))
+
+
+(ert-deftest harness-ui-chat-skill-references ()
+  "#name references attach skill contents to the message."
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (with-current-buffer buffer
+        (goto-char (harness-ui-chat--compose-point))
+        (insert "#alpha please")
+        (harness-ui-chat-send))
+      (let* ((blocks (car harness-ui-chat-test--sent))
+             (texts (mapcar (lambda (block) (plist-get block :text)) (append blocks nil))))
+        (should (= (length texts) 2))
+        (should (string-match-p "Skill `alpha`" (car texts)))
+        (should (string-match-p "SKILL BODY" (car texts)))
+        (should (equal (cadr texts) "#alpha please")))
       (kill-buffer buffer))))
 
 (provide 'harness-ui-chat-test)
