@@ -250,5 +250,22 @@ Inside BODY, `test-base-url' is bound to the instance URL."
         (should (equal (plist-get call :id) "c1"))
         (should (equal (plist-get (plist-get call :function) :name) "bash"))))))
 
+(ert-deftest harness-provider-openai-sends-images-inline ()
+  "Image blocks become image_url data parts, not empty text."
+  (let* ((messages (harness-provider-openai--messages
+                    (vector (list :role "user"
+                                  :content (vector
+                                            (list :type "text" :text "what is this?")
+                                            (list :type "image"
+                                                  :mime-type "image/png"
+                                                  :data "aGVsbG8="))))))
+         (message (aref messages 0))
+         (parts (append (plist-get message :content) nil))
+         (image (seq-find (lambda (part) (equal (plist-get part :type) "image_url")) parts)))
+    (should image)
+    (should (equal (plist-get (plist-get image :image_url) :url)
+                   "data:image/png;base64,aGVsbG8="))
+    (should (seq-some (lambda (part) (equal (plist-get part :type) "text")) parts))))
+
 (provide 'harness-provider-openai-test)
 ;;; harness-provider-openai-test.el ends here

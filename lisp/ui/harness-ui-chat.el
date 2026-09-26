@@ -426,25 +426,80 @@ the original text stays searchable."
     (harness-ui-chat--mark-read-only start (point))
     record))
 
+(defun harness-ui-chat--data-file (attachment extension)
+  "Write ATTACHMENT's data to a temporary file with EXTENSION and return it."
+  (let ((file (make-temp-file "harness-attachment-" nil (concat "." extension))))
+    (with-temp-file file
+      (set-buffer-multibyte nil)
+      (insert (base64-decode-string (or (plist-get attachment :data) ""))))
+    file))
+
+(defun harness-ui-chat--audio-player ()
+  "A command that can play audio, or nil."
+  (seq-find #'executable-find '("mpv" "ffplay" "paplay" "aplay")))
+
+(defun harness-ui-chat-play-data (attachment)
+  "Play ATTACHMENT's audio outside Emacs.
+Emacs has no audio API, so this hands the file to a player when one is
+available."
+  (let* ((mime (or (plist-get attachment :mime) "audio/wav"))
+         (extension (or (cadr (split-string mime "/")) "wav"))
+         (file (if (plist-get attachment :data)
+                   (harness-ui-chat--data-file attachment extension)
+                 (plist-get attachment :file)))
+         (player (harness-ui-chat--audio-player)))
+    (cond
+     ((null file) (message "Nothing to play"))
+     ((null player) (message "No audio player found (mpv, ffplay, paplay or aplay)"))
+     (t (make-process :name "harness-audio"
+                      :command (list player file)
+                      :noquery t
+                      :connection-type 'pipe)
+        (message "Playing %s" (file-name-nondirectory file))))))
+
+(defun harness-ui-chat--open-data (attachment)
+  "Open ATTACHMENT's data with the desktop."
+  (let* ((mime (or (plist-get attachment :mime) "application/octet-stream"))
+         (extension (or (cadr (split-string mime "/")) "bin")))
+    (if (plist-get attachment :data)
+        (browse-url-of-file (harness-ui-chat--data-file attachment extension))
+      (when-let* ((file (plist-get attachment :file)))
+        (find-file-other-window file)))))
+
 (defun harness-ui-chat--render-attachments (record)
-  "Render image/audio blocks attached to RECORD."
+  "Render image, audio and video blocks attached to RECORD."
   (dolist (block (append (harness-ui-chat-record-children record) nil))
-    (when (equal (plist-get block :type) "image")
-      (let ((data (plist-get block :data))
-            (mime (plist-get block :mime-type)))
-        (insert "\n")
-        (if (and (display-graphic-p) data
-                 (fboundp 'create-image))
-            (condition-case nil
-                (insert-image (create-image (base64-decode-string data)
-                                            (intern (or (and mime
-                                                             (car (split-string
-                                                                   (cadr (split-string mime "/")))))
-                                                        "png"))
-                                            t)
-                              "[image]")
-              (error (insert "[image]")))
-          (insert "[image]"))))))
+    (let ((type (plist-get block :type))
+          (data (plist-get block :data))
+          (mime (plist-get block :mime-type))
+          (name (plist-get block :name)))
+      (pcase type
+        ("image"
+         (insert "\n")
+         (if (and (display-graphic-p) data (fboundp 'create-image))
+             (condition-case nil
+                 (insert-image (create-image (base64-decode-string data)
+                                             (intern (or (and mime
+                                                              (car (split-string
+                                                                    (cadr (split-string mime "/")))))
+                                                         "png"))
+                                             t)
+                               "[image]")
+               (error (insert "[image]")))
+           (insert "[image]")))
+        ("audio"
+         (insert "\n")
+         (let ((attachment (list :data data :mime mime :name (or name "audio"))))
+           (harness-ui-chat--button "[play audio]"
+                                    (lambda () (harness-ui-chat-play-data attachment))
+                                    :help-echo "Play this audio")))
+        ("video"
+         (insert "\n")
+         (let ((attachment (list :data data :mime mime :name (or name "video"))))
+           (harness-ui-chat--button
+            (format "[video: %s]" (or name "open"))
+            (lambda () (harness-ui-chat--open-data attachment))
+            :help-echo "Open this video externally")))))))
 
 (defun harness-ui-chat--tool-status-label (record)
   "Return a human label for RECORD's tool status."
@@ -653,6 +708,7 @@ region."
         (insert (propertize "Ready when you are.\n\n" 'face 'bold)
                 (propertize (concat "  Type a message and press RET\n\n"
                                     "  @ file reference      C-c C-s  sessions\n"
+                                    "  C-c C-v paste image   C-c C-b  btw\n"
                                     "  # skill               C-c C-m  model\n"
                                     "  C-c C-u usage         C-c C-t  thinking\n"
                                     "  C-c C-q queue         C-c C-p  permissions\n"
@@ -1036,19 +1092,34 @@ TEXT defaults to the composer's current contents."
                     (insert " "))
                finally (insert "\n")))))
 
+(defun harness-ui-chat--attachment-label (attachment)
+  "Compact label for ATTACHMENT, prefixed with its kind."
+  (let* ((kind (harness-ui-chat--attachment-kind attachment))
+         (prefix (pcase kind
+                   ('image "[image] ") ('audio "[audio] ") ('video "[video] ") (_ "")))
+         (file (harness-ui-chat--attachment-file attachment)))
+    (concat prefix
+            (if file
+                (harness-ui-chat--short-path file)
+              (harness-ui-chat--attachment-name attachment))))) 
+
 (defun harness-ui-chat--render-attachments-line ()
   "Render the attached-files line."
   (when harness-ui-chat--attachments
     (insert (propertize "Attached: " 'face 'shadow))
-    (dolist (file harness-ui-chat--attachments)
+    (dolist (attachment harness-ui-chat--attachments)
       (harness-ui-chat--button
-       (harness-ui-chat--short-path file)
-       (lambda () (find-file-other-window file))
-       :help-echo (format "Open %s" file))
+       (harness-ui-chat--attachment-label attachment)
+       (lambda ()
+         (let ((file (harness-ui-chat--attachment-file attachment)))
+           (if file
+               (find-file-other-window file)
+             (harness-ui-chat--open-data attachment))))
+       :help-echo "Open this attachment")
       (insert " ")
       (harness-ui-chat--button "×" (lambda ()
                                      (setq harness-ui-chat--attachments
-                                           (remove file harness-ui-chat--attachments))
+                                           (remove attachment harness-ui-chat--attachments))
                                      (harness-ui-chat--render-composer))
                               :help-echo "Remove attachment")
       (insert "  "))
@@ -1228,25 +1299,167 @@ TEXT defaults to the composer's current contents."
     (harness-ui-cancel harness-ui-chat--session-id)
     (message "Cancelling…")))
 
+(defcustom harness-ui-chat-inline-attachment-bytes 4194304
+  "Images and audio up to this size are inlined into the prompt.
+Larger files are sent as resource links instead, so a big attachment
+cannot blow up the context or the request body."
+  :type 'natnum)
+
+(defconst harness-ui-chat--image-types
+  '(("png" . "image/png") ("jpg" . "image/jpeg") ("jpeg" . "image/jpeg")
+    ("gif" . "image/gif") ("webp" . "image/webp") ("bmp" . "image/bmp"))
+  "Image extensions and their media types.")
+
+(defconst harness-ui-chat--audio-types
+  '(("wav" . "audio/wav") ("mp3" . "audio/mpeg") ("ogg" . "audio/ogg")
+    ("m4a" . "audio/mp4") ("flac" . "audio/flac"))
+  "Audio extensions and their media types.")
+
+(defun harness-ui-chat--inline-type (file)
+  "Return (KIND . MIME) for FILE when it can be inlined, else nil."
+  (let* ((extension (downcase (or (file-name-extension file) "")))
+         (image (assoc extension harness-ui-chat--image-types))
+         (audio (assoc extension harness-ui-chat--audio-types)))
+    (cond
+     (image (cons "image" (cdr image)))
+     (audio (cons "audio" (cdr audio)))
+     (t nil))))
+
+(defun harness-ui-chat--file-data (file)
+  "Base64 data of FILE, or nil when it cannot be read."
+  (condition-case nil
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert-file-contents-literally file)
+        (base64-encode-region (point-min) (point-max) t)
+        (buffer-string))
+    (error nil)))
+
+(defun harness-ui-chat--file-attachment (file)
+  "An attachment plist for FILE."
+  (list :file (expand-file-name file)))
+
+(defun harness-ui-chat--data-attachment (data mime &optional name)
+  "An in-memory attachment of DATA (base64) with MIME and NAME."
+  (list :data data :mime mime :name (or name "clipboard")))
+
+(defun harness-ui-chat--attachment-file (attachment)
+  "The file of ATTACHMENT, or nil for in-memory attachments."
+  (plist-get attachment :file))
+
+(defun harness-ui-chat--attachment-name (attachment)
+  "Display name of ATTACHMENT."
+  (or (plist-get attachment :name)
+      (and (plist-get attachment :file)
+           (file-name-nondirectory (plist-get attachment :file)))
+      "attachment"))
+
+(defun harness-ui-chat--attachment-kind (attachment)
+  "Kind of ATTACHMENT: image, audio, video or file."
+  (let* ((mime (or (plist-get attachment :mime)
+                   (and (plist-get attachment :file)
+                        (cdr (harness-ui-chat--inline-type (plist-get attachment :file))))))
+         (extension (downcase (or (file-name-extension (harness-ui-chat--attachment-name attachment))
+                                  ""))))
+    (cond
+     ((and mime (string-prefix-p "image/" mime)) 'image)
+     ((and mime (string-prefix-p "audio/" mime)) 'audio)
+     ((and mime (string-prefix-p "video/" mime)) 'video)
+     ((member extension '("mp4" "webm" "mov" "mkv" "avi")) 'video)
+     ((member extension '("wav" "mp3" "ogg" "m4a" "flac")) 'audio)
+     ((member extension '("png" "jpg" "jpeg" "gif" "webp" "bmp")) 'image)
+     (t 'file))))
+
+(defun harness-ui-chat--attachment-block (attachment)
+  "One ACP content block for ATTACHMENT.
+Images and audio are inlined as data blocks so the model actually sees
+them; everything else stays a resource link."
+  (let* ((file (harness-ui-chat--attachment-file attachment))
+         (mime (plist-get attachment :mime))
+         (data (plist-get attachment :data))
+         (inline (or (and mime (string-prefix-p "image/" mime) "image")
+                     (and mime (string-prefix-p "audio/" mime) "audio")
+                     (and file (car (harness-ui-chat--inline-type file))))))
+    (cond
+     ((and inline data)
+      (list :type inline :mime-type mime :data data))
+     ((and inline file)
+      (let* ((size (or (ignore-errors (file-attribute-size (file-attributes file))) 0))
+             (inline-mime (cdr (harness-ui-chat--inline-type file))))
+        (if (<= size harness-ui-chat-inline-attachment-bytes)
+            (list :type inline :mime-type inline-mime
+                  :data (harness-ui-chat--file-data file))
+          (list :type "resource_link"
+                :uri (concat "file://" file)
+                :name (file-name-nondirectory file)
+                :size size))))
+     ((and file)
+      (list :type "resource_link"
+            :uri (concat "file://" file)
+            :name (file-name-nondirectory file)
+            :size (or (ignore-errors (file-attribute-size (file-attributes file))) 0)))
+     (t
+      (list :type "resource_link"
+            :uri (concat "data:" (or mime "application/octet-stream") ";base64," data)
+            :name (harness-ui-chat--attachment-name attachment)
+            :size (length (or data "")))))))
+
 (defun harness-ui-chat--message-blocks (text)
-  "Turn TEXT plus attachments into ACP content blocks."
+  "Turn TEXT plus attachments into ACP content blocks.
+Images and audio are inlined as data blocks so the model actually sees
+them; everything else stays a resource link."
   (let ((blocks (list (list :type "text" :text text))))
-    (dolist (file harness-ui-chat--attachments)
-      (push (list :type "resource_link"
-                  :uri (concat "file://" file)
-                  :name (file-name-nondirectory file)
-                  :size (or (ignore-errors (file-attribute-size (file-attributes file))) 0))
-            blocks))
+    (dolist (attachment harness-ui-chat--attachments)
+      (push (harness-ui-chat--attachment-block attachment) blocks))
     (vconcat (nreverse blocks))))
 
 (defun harness-ui-chat-attach-file (file)
   "Attach FILE to the next message."
   (interactive "fAttach file: ")
-  (let ((file (expand-file-name file)))
-    (unless (member file harness-ui-chat--attachments)
+  (let ((attachment (harness-ui-chat--file-attachment file)))
+    (unless (member attachment harness-ui-chat--attachments)
       (setq harness-ui-chat--attachments
-            (append harness-ui-chat--attachments (list file))))
+            (append harness-ui-chat--attachments (list attachment))))
     (harness-ui-chat--render-composer)))
+
+(defun harness-ui-chat-clipboard-image ()
+  "The clipboard's image data as (MIME . BASE64), or nil."
+  (let ((targets '(("image/png" . "image/png")
+                   ("image/jpeg" . "image/jpeg")
+                   ("image/gif" . "image/gif")
+                   ("image/webp" . "image/webp"))))
+    (seq-some
+     (lambda (target)
+       (when-let* ((data (ignore-errors (gui-get-selection 'CLIPBOARD (car target)))))
+         (when (and data (not (equal data "")))
+           (cons (cdr target)
+                 (if (multibyte-string-p data)
+                     (base64-encode-string (encode-coding-string data 'binary) t)
+                   (base64-encode-string data t))))))
+     targets)))
+
+(defun harness-ui-chat-paste-image ()
+  "Attach the clipboard image (or copied files) to the next message.
+Uncommon MIME types are passed to the model as data with their MIME type,
+which is exactly what a multimodal model expects."
+  (interactive)
+  (let ((image (harness-ui-chat-clipboard-image)))
+    (cond
+     (image
+      (let ((attachment (harness-ui-chat--data-attachment
+                         (cdr image) (car image)
+                         (format "clipboard.%s" (if (equal (car image) "image/jpeg")
+                                                    "jpg"
+                                                  (cadr (split-string (car image) "/")))))))
+        (push attachment harness-ui-chat--attachments)
+        (harness-ui-chat--render-composer)
+        (message "Attached clipboard image (%s)" (car image))))
+     (t
+      (let ((files (ignore-errors (gui-get-selection 'CLIPBOARD 'FILE_NAME))))
+        (if (and files (not (equal files "")))
+            (dolist (file (if (listp files) files (list files)))
+              (harness-ui-chat-attach-file file))
+          (user-error "No image or copied files on the clipboard")))))))
 
 (defun harness-ui-chat-dnd-handler (uri action)
   "Handle dropped URI in a chat buffer."
@@ -1343,6 +1556,7 @@ returns to the main session untouched."
     (define-key map (kbd "C-c C-u") #'harness-ui-usage)
     (define-key map (kbd "C-c C-w") #'harness-ui-worktrees)
     (define-key map (kbd "C-c C-b") #'harness-ui-chat-btw)
+    (define-key map (kbd "C-c C-v") #'harness-ui-chat-paste-image)
     (define-key map (kbd "C-c C-e") #'harness-ui-chat-back-to-end)
     (define-key map (kbd "C-c C-a") #'harness-ui-chat-attach-file)
     (define-key map (kbd "q") #'bury-buffer)

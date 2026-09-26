@@ -49,12 +49,15 @@
         (add-to-list 'load-path full)))))
 
 (defun harness-dev-load ()
-  "Load (or reload) the harness entry point from the checkout."
+  "Load the harness entry point and start it."
   (interactive)
   (harness-dev-add-load-path)
   (let ((entry (expand-file-name "harness.el" harness-dev--repo)))
     (if (file-exists-p entry)
-        (load entry nil nil 'nomessage)
+        (progn
+          (load entry nil nil 'nomessage)
+          (when (fboundp 'harness-start)
+            (harness-start)))
       (message "harness-dev: no harness.el in %s yet" harness-dev--repo))))
 
 ;;; Frames and screenshots

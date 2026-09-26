@@ -326,6 +326,86 @@
         (delete-file file)
         (kill-buffer buffer)))))
 
+(ert-deftest harness-ui-chat-inlines-image-attachments ()
+  (harness-ui-chat-test--with-stubs
+    (let* ((directory (make-temp-file "harness-chat-img-" t))
+           (image (expand-file-name "shot.png" directory))
+           (textual (expand-file-name "notes.txt" directory))
+           (buffer (harness-ui-chat-test--buffer)))
+      ;; A one-pixel PNG stands in for the real thing.
+      (with-temp-file image
+        (set-buffer-multibyte nil)
+        (insert (base64-decode-string
+                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")))
+      (with-temp-file textual (insert "notes"))
+      (with-current-buffer buffer
+        (setq harness-ui-chat--attachments (list (harness-ui-chat--file-attachment image)
+                                                 (harness-ui-chat--file-attachment textual)))
+        (let* ((blocks (append (harness-ui-chat--message-blocks "look") nil))
+               (image-block (seq-find (lambda (block) (equal (plist-get block :type) "image"))
+                                      blocks))
+               (link-block (seq-find (lambda (block) (equal (plist-get block :type) "resource_link"))
+                                     blocks)))
+          (should image-block)
+          (should (equal (plist-get image-block :mime-type) "image/png"))
+          (should (stringp (plist-get image-block :data)))
+          (should (> (length (plist-get image-block :data)) 10))
+          (should link-block)
+          (should (string-match-p "notes\.txt" (plist-get link-block :uri)))))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-oversized-images-stay-links ()
+  (harness-ui-chat-test--with-stubs
+    (let* ((directory (make-temp-file "harness-chat-big-" t))
+           (image (expand-file-name "big.png" directory))
+           (buffer (harness-ui-chat-test--buffer)))
+      (with-temp-file image (insert (make-string 2000 ?x)))
+      (with-current-buffer buffer
+        (let ((harness-ui-chat-inline-attachment-bytes 100))
+          (setq harness-ui-chat--attachments (list (harness-ui-chat--file-attachment image)))
+          (let* ((blocks (append (harness-ui-chat--message-blocks "look") nil))
+                 (block (cadr blocks)))
+            (should (equal (plist-get block :type) "resource_link")))))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-in-memory-attachments ()
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (with-current-buffer buffer
+        (setq harness-ui-chat--attachments
+              (list (harness-ui-chat--data-attachment "aGVsbG8=" "image/png" "paste.png")))
+        ;; The label announces the kind, and the block inlines the data.
+        (should (equal (harness-ui-chat--attachment-kind
+                        (car harness-ui-chat--attachments))
+                       'image))
+        (should (string-match-p "\[image\]"
+                                (harness-ui-chat--attachment-label
+                                 (car harness-ui-chat--attachments))))
+        (let ((block (cadr (append (harness-ui-chat--message-blocks "see") nil))))
+          (should (equal (plist-get block :type) "image"))
+          (should (equal (plist-get block :mime-type) "image/png"))
+          (should (equal (plist-get block :data) "aGVsbG8=")))
+        ;; The attachment line renders a button for it.
+        (harness-ui-chat--render-composer)
+        (goto-char (point-min))
+        (should (search-forward "[image] paste.png" nil t)))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-renders-audio-and-video-blocks ()
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (harness-ui-chat-test--apply
+       buffer
+       (list :sessionUpdate "agent_message_chunk" :messageId "m1" :final t
+             :content (vector (list :type "text" :text "here you go")
+                              (list :type "audio" :mime-type "audio/wav" :data "UklGRg==")
+                              (list :type "video" :mime-type "video/mp4"
+                                    :data "AAAA" :name "clip.mp4"))))
+      (let ((text (harness-ui-chat-test--text buffer)))
+        (should (string-match-p "\[play audio\]" text))
+        (should (string-match-p "\[video: clip\.mp4\]" text)))
+      (kill-buffer buffer))))
+
 (ert-deftest harness-ui-chat-queues-while-running ()
   (harness-ui-chat-test--with-stubs
     (let ((buffer (harness-ui-chat-test--buffer)))

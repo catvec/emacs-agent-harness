@@ -196,5 +196,8 @@
       (when server (delete-process server))
       (delete-directory directory t))))
 
+(ert-deftest harness-acp-does-not-advertise-mcp ()
+  (should-not (plist-member harness-acp-agent-capabilities :mcpCapabilities)))
+
 (provide 'harness-acp-agent-integration-test)
 ;;; harness-acp-agent-integration-test.el ends here

@@ -389,7 +389,6 @@ example on a hot reload); this makes them visible without reconnecting."
 (defconst harness-acp-agent-capabilities
   (list :loadSession t
         :promptCapabilities (list :image t :audio t :embeddedContext t)
-        :mcpCapabilities (list :http t)
         :sessionCapabilities (list :list (make-hash-table)
                                    :delete (make-hash-table)
                                    :close (make-hash-table)
@@ -472,6 +471,14 @@ example on a hot reload); this makes them visible without reconnecting."
                     "Session service did not return a sessionId"
                     nil)))
     (harness-acp-connection-track-session connection session-id)
+    ;; MCP servers are not implemented: say so instead of pretending.
+    (let ((servers (append (plist-get params :mcpServers) nil)))
+      (when servers
+        (harness-service-call "session" 'system-hint
+                              :session-id session-id
+                              :text (format "Ignoring %d MCP server(s): MCP is not supported yet."
+                                            (length servers))
+                              :level "warn")))
     (append
      (list :sessionId session-id)
      (harness-acp--session-configuration session-id))))

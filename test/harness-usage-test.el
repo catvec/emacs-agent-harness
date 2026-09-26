@@ -142,5 +142,27 @@
     (should (< (harness-usage--period-spend 'monthly) 5.0))
     (should (= (harness-usage--period-spend 'all) 0.0))))
 
+(ert-deftest harness-usage-per-session-budgets ()
+  (setq harness-session-storage-directory (harness-usage-test--setup))
+  (let* ((project (make-temp-file "harness-usage-session-" t))
+         (one (harness-usage-test--session project "One"))
+         (two (harness-usage-test--session project "Two"))
+         (one-id (harness-session-id one)))
+    (harness-usage-test--cost one 0.30)
+    (harness-usage-test--cost two 0.50)
+    (harness-session-save one)
+    (harness-session-save two)
+    (setq harness-usage-budgets
+          (list (list :scope 'session :session-id one-id :period 'all :amount 0.20 :hard t)))
+    (let* ((summary (harness-usage-summary))
+           (budget (car (plist-get summary :budgets))))
+      (should (plist-get budget :over))
+      (should (< (abs (- (plist-get budget :spent) 0.30)) 0.0001))
+      (should (string-match-p "session" (plist-get budget :label))))
+    ;; The budget only blocks its own session.
+    (should (plist-get (harness-usage-service-budget-check :session-id one-id) :blocked))
+    (should-not (harness-usage-service-budget-check
+                 :session-id (harness-session-id two)))))
+
 (provide 'harness-usage-test)
 ;;; harness-usage-test.el ends here

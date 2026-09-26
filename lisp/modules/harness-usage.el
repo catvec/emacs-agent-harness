@@ -21,12 +21,13 @@
   "Budgets to track and optionally enforce.
 
 Each entry is a plist:
-  :scope    `global' or `project'
-  :project  project root when :scope is `project'
-  :period   `daily', `weekly', `monthly' or `all'
-  :amount   budget in the currency below
-  :currency currency, default \"USD\"
-  :hard     when non-nil, refuse to start turns while over budget"
+  :scope      `global', `project' or `session'
+  :project    project root when :scope is `project'
+  :session-id session id when :scope is `session'
+  :period     `daily', `weekly', `monthly' or `all'
+  :amount     budget in the currency below
+  :currency   currency, default \"USD\"
+  :hard       when non-nil, refuse to start turns while over budget"
   :type '(repeat (plist :key-type symbol :value-type sexp)))
 
 (defcustom harness-usage-week-starts-on 1
@@ -135,8 +136,9 @@ Each entry is a plist:
         (append (harness-service-call "session" 'usage-entries :since since) nil)
       nil)))
 
-(defun harness-usage--period-spend (period &optional entries project)
-  "Sum cost of ENTRIES inside PERIOD, optionally for PROJECT only."
+(defun harness-usage--period-spend (period &optional entries project session-id)
+  "Sum cost of ENTRIES inside PERIOD.
+Limit to PROJECT and/or SESSION-ID when given."
   (let ((start (harness-usage-period-start period))
         (amount 0.0))
     (dolist (entry (or entries (harness-usage--scanned-entries start)))
@@ -144,7 +146,9 @@ Each entry is a plist:
         (when (and time (>= time start)
                    (or (null project)
                        (harness-usage--same-project-p
-                        (plist-get entry :projectRoot) project)))
+                        (plist-get entry :projectRoot) project))
+                   (or (null session-id)
+                       (equal (plist-get entry :sessionId) session-id)))
           (cl-incf amount (harness-usage--entry-cost entry)))))
     amount))
 
@@ -157,10 +161,17 @@ Each entry is a plist:
 (defun harness-usage--budget-label (budget)
   "Human label for BUDGET."
   (format "%s budget (%s)"
-          (if (eq (plist-get budget :scope) 'project)
-              (or (plist-get budget :project) "project")
-            "global")
+          (pcase (plist-get budget :scope)
+            ('project (or (plist-get budget :project) "project"))
+            ('session (format "session %s"
+                              (substring (or (plist-get budget :session-id) "?") 0 8)))
+            (_ "global"))
           (or (plist-get budget :period) "all")))
+
+(defun harness-usage--budget-session (budget)
+  "Session id a session-scoped BUDGET applies to."
+  (and (eq (plist-get budget :scope) 'session)
+       (plist-get budget :session-id)))
 
 ;;; Summary
 
@@ -179,16 +190,21 @@ Each entry is a plist:
              (let* ((period (or (plist-get budget :period) 'all))
                     (project (and (eq (plist-get budget :scope) 'project)
                                   (plist-get budget :project)))
+                    (budget-session (harness-usage--budget-session budget))
                     (spent (if (eq period 'all)
                                (cl-loop for info in infos
-                                        when (or (null project)
-                                                 (harness-usage--same-project-p
-                                                  (plist-get info :projectRoot) project))
+                                        when (and (or (null project)
+                                                      (harness-usage--same-project-p
+                                                       (plist-get info :projectRoot) project))
+                                                  (or (null budget-session)
+                                                      (equal (plist-get info :sessionId)
+                                                             budget-session)))
                                         sum (let ((cost (plist-get info :cost)))
                                               (if (and cost (numberp (plist-get cost :amount)))
                                                   (plist-get cost :amount)
                                                 0.0)))
-                             (harness-usage--period-spend period entries project)))
+                             (harness-usage--period-spend period entries project
+                                                          budget-session)))
                     (amount (or (plist-get budget :amount) 0)))
                (list :label (harness-usage--budget-label budget)
                      :scope (or (plist-get budget :scope) 'global)
@@ -240,11 +256,14 @@ Returns nil when allowed, or a plist (:blocked t :reason STRING)."
           (let* ((period (or (plist-get budget :period) 'all))
                  (scope-project (and (eq (plist-get budget :scope) 'project)
                                      (plist-get budget :project)))
-                 (applies (or (null scope-project)
-                              (harness-usage--same-project-p scope-project project)))
+                 (scope-session (harness-usage--budget-session budget))
+                 (applies (and (or (null scope-project)
+                                   (harness-usage--same-project-p scope-project project))
+                               (or (null scope-session)
+                                   (equal scope-session session-id))))
                  (amount (or (plist-get budget :amount) 0)))
             (when applies
-              (let ((spent (harness-usage--period-spend period nil scope-project)))
+              (let ((spent (harness-usage--period-spend period nil scope-project scope-session)))
                 (when (> spent amount)
                   (throw 'blocked
                          (list :blocked t

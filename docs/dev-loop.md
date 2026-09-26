@@ -67,3 +67,9 @@ For a change to UI or cross-module behaviour:
 
 For protocol-level changes, the ACP suites drive the real stack both
 in-process (local UI) and over TCP (remote client); keep both green.
+
+`scripts/dev.sh start` loads the checkout, starts the harness and opens a GUI
+frame; the daemon reloads on source changes (or `scripts/dev.sh eval
+'(harness-reload)'`).  The harness runs interpreted source there on purpose:
+`harness-dev.el` turns off native compilation and prefers newer files, so a
+stale `.eln` can never mask an edit.
