@@ -340,6 +340,7 @@ session in the same position replaces the buffer there.
 | `harness-session` | `session` service | core, config |
 | `harness-provider` | `provider` service | core |
 | `harness-provider-openai` | provider registration | provider, http |
+| `harness-provider-claude` | Claude CLI provider | provider |
 | `harness-tools` | `tool` service | core |
 | `harness-tools-emacs` | core tool set | tools, sandbox |
 | `harness-skills` | `skill` service, skill tools | config, tools |
@@ -362,7 +363,7 @@ session in the same position replaces the buffer there.
 | `harness-ui-worktree` | worktree manager | ui |
 
 `harness.el` loads: acp, inprocess, config, session, provider,
-provider-openai, tools, tools-emacs, perms, perms-jail, agent, usage,
+provider-openai, provider-claude, tools, tools-emacs, perms, perms-jail, agent, usage,
 worktree, subagents, search, plan, ui, and the UI feature modules selected by
 `harness-ui-modules` (all by default).  A user can replace any of them by
 customizing the list.

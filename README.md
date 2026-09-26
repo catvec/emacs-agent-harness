@@ -103,6 +103,14 @@ explains what to configure.  Other backends plug in through
 `harness-search-register-provider`, and the tool always uses the first
 registered provider.
 
+### Claude subscription plans
+
+If the `claude` CLI is installed, the harness registers a `claude-cli`
+provider that runs completions through it (print mode, stream-json).  It
+appears in the model switcher as `claude-sonnet`, `claude-opus` and
+`claude-haiku`.  Its own tools are disabled: the harness keeps its
+permission model and its own tools.
+
 ## Remote sessions
 
 The harness runs an ACP agent, and the UI is an ACP client, so a UI can

@@ -35,6 +35,7 @@
     harness-session
     harness-provider
     harness-provider-openai
+    harness-provider-claude
     harness-tools
     harness-tools-emacs
     harness-skills
