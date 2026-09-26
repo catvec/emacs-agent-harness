@@ -1138,14 +1138,27 @@ transcript is still being read from disk."
      (state-get . harness-session-service-state-get)
      (state-set . harness-session-service-state-set)
      (state-all . harness-session-service-state-all)
-     (add-directory . harness-session-service-add-directory))))
+     (add-directory . harness-session-service-add-directory)))
+  (harness-session-adopt-survivors))
+
+(defun harness-session-adopt-survivors ()
+  "Re-adopt sessions that were open before this module was reloaded."
+  (dolist (id (harness-core-state-get 'harness-session 'active-ids))
+    (condition-case err
+        (harness-session-load id)
+      (error (harness-log "could not re-adopt session %s: %S" id err))))
+  (harness-core-state-clear 'harness-session 'active-ids))
 
 (defun harness-session-teardown ()
-  "Tear down the session module, flushing pending writes."
+  "Tear down the session module, flushing pending writes.
+The ids of open sessions are recorded in kernel state so that a reload
+can re-adopt them; the transcripts themselves were saved to disk."
   (dolist (session (harness-session-active-list))
     (condition-case err
         (harness-session-save session)
       (error (harness-log "flush failed for %s: %S" (harness-session-id session) err))))
+  (harness-core-state-set 'harness-session 'active-ids
+                          (mapcar #'harness-session-id (harness-session-active-list)))
   (clrhash harness-session--active)
   (clrhash harness-session--project-ids))
 

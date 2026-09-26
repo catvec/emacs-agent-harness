@@ -9,7 +9,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EMACS="${EMACS:-emacs}"
 
-load_args=(-L "$REPO/lisp" -L "$REPO/lisp/modules" -L "$REPO/lisp/transports"
+load_args=(-L "$REPO" -L "$REPO/lisp" -L "$REPO/lisp/modules" -L "$REPO/lisp/transports"
            -L "$REPO/lisp/tools" -L "$REPO/lisp/ui" -L "$REPO/test")
 
 if [[ $# -gt 0 ]]; then

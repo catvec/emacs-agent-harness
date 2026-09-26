@@ -373,8 +373,12 @@ Returns the module manifest.  Loading an already set-up module is a no-op."
         manifest)))))
 
 (defun harness-module-unload (name)
-  "Tear down module NAME and unload its feature.
-Services and event handlers registered by the module are removed."
+  "Tear down module NAME, keeping its definitions in place.
+Services, event handlers and the provided feature are removed, and the
+module's teardown runs.  Function and variable definitions are left
+alone: reloading then redefines them in place, so values and outstanding
+dynamic bindings survive, and a failed reload cannot leave the harness
+with unbound variables or missing functions."
   (interactive (list (intern (completing-read "Module: " (mapcar #'symbol-name (harness-module-list))))))
   (let ((manifest (harness-module-manifest name)))
     (when manifest
@@ -383,21 +387,155 @@ Services and event handlers registered by the module are removed."
           (when (harness-module-teardown manifest)
             (funcall (harness-module-teardown manifest)))))
       (harness-core--unregister-module name)
-      (when (featurep name)
-        (unload-feature name t))
+      (setq features (delq name features))
       (remhash name harness-core--modules)
       (harness-log "unloaded module %s" name)))
   nil)
 
+;;; Safe reloading
+
+(defun harness-module-validate (name)
+  "Byte-compile module NAME's file to check that it loads cleanly.
+Returns non-nil when the file compiles.  Nothing in the running Emacs is
+changed, so a module with a syntax or macro-expansion error can be
+rejected before it is ever unloaded."
+  (let ((file (locate-library (symbol-name name))))
+    (cond
+     ((not (and file (string-suffix-p ".el" file)))
+      ;; A module with no source (already compiled, or not yet loaded).
+      (harness-log "cannot validate %s: no source file" name)
+      t)
+     (t
+      (require 'bytecomp)
+      ;; `set' (not setq) keeps these dynamic even when this file is
+      ;; byte-compiled without bytecomp loaded.
+      (let ((previous-dest (symbol-value 'byte-compile-dest-file-function))
+            (previous-warnings (symbol-value 'byte-compile-warnings))
+            (temporary (make-temp-file "harness-byte-compile-" nil ".elc"))
+            (success nil))
+        (set 'byte-compile-dest-file-function (lambda (_file) temporary))
+        (set 'byte-compile-warnings nil)
+        (unwind-protect
+            (setq success
+                  (condition-case err
+                      (byte-compile-file file)
+                    (error (harness-log "%s does not compile: %S" name err) nil)))
+          (set 'byte-compile-dest-file-function previous-dest)
+          (set 'byte-compile-warnings previous-warnings)
+          (ignore-errors (delete-file temporary)))
+        success)))))
+
+(cl-defstruct (harness-module-snapshot (:constructor harness-module-snapshot-create))
+  name manifest functions variables)
+
+(defun harness-module--snapshot (name)
+  "Capture NAME's function and variable definitions for restore-on-failure."
+  (let* ((file (locate-library (symbol-name name)))
+         (entry (and file (assoc file load-history)))
+         (symbols (delete-dups (seq-filter #'symbolp (cdr entry))))
+         (functions nil)
+         (variables nil))
+    (dolist (symbol symbols)
+      (when (fboundp symbol)
+        (push (cons symbol (symbol-function symbol)) functions))
+      (when (and (boundp symbol) (default-boundp symbol))
+        (push (cons symbol (default-value symbol)) variables)))
+    (harness-module-snapshot-create
+     :name name
+     :manifest (harness-module-manifest name)
+     :functions functions
+     :variables variables)))
+
+(defun harness-module--restore (snapshot)
+  "Put SNAPSHOT's definitions back and re-run its setup."
+  (dolist (pair (harness-module-snapshot-functions snapshot))
+    (fset (car pair) (cdr pair)))
+  (dolist (pair (harness-module-snapshot-variables snapshot))
+    (set-default (car pair) (cdr pair)))
+  (let ((manifest (harness-module-snapshot-manifest snapshot)))
+    (when manifest
+      (puthash (harness-module-snapshot-name snapshot) manifest harness-core--modules)
+      (when (harness-module-setup manifest)
+        (let ((harness-core--current-module (harness-module-snapshot-name snapshot)))
+          (funcall (harness-module-setup manifest))))
+      (setf (harness-module-state manifest) 'set-up))))
+
+(defalias 'harness-module-snapshot #'harness-module--snapshot
+  "Capture a module's definitions for `harness-module-restore'.")
+(defalias 'harness-module-restore #'harness-module--restore
+  "Restore a snapshot taken by `harness-module-snapshot'.")
+
 (defun harness-module-reload (name)
-  "Reload module NAME: teardown, unload, load and set up again."
+  "Reload module NAME safely: validate, unload, load.
+When the new code fails to load, the previous definitions are restored
+and its setup runs again, so a bad edit never leaves the harness broken.
+The kernel module itself cannot be reloaded while it is running."
   (interactive (list (intern (completing-read "Module: " (mapcar #'symbol-name (harness-module-list))))))
-  (harness-module-unload name)
-  (harness-module-load name))
+  (when (eq name 'harness-core)
+    (signal 'harness-module-error
+            (list "harness-core cannot reload itself while the harness runs")))
+  (unless (harness-module-validate name)
+    (signal 'harness-module-error
+            (list (format "%s does not compile; keeping the running version" name))))
+  (let ((snapshot (harness-module--snapshot name)))
+    (harness-module-unload name)
+    (condition-case err
+        (progn
+          (harness-module-load name)
+          (harness-emit 'harness-reloaded :module name)
+          (harness-log "reloaded %s" name)
+          t)
+      (error
+       (harness-log "reload of %s failed: %S; restoring" name err)
+       (harness-module--restore snapshot)
+       (signal 'harness-module-error
+               (list (format "Reload of %s failed (%s); the previous version was restored"
+                             name (error-message-string err))))))))
 
 (defun harness-module-list ()
   "Return a list of all known module names."
   (sort (hash-table-keys harness-core--modules) #'string<))
+
+(defun harness-module-load-order (&optional modules)
+  "Return MODULES (default: loaded modules) in dependency-first order."
+  (let ((pending (or modules (harness-module-list)))
+        (ordered nil)
+        (seen (make-hash-table :test #'eq)))
+    (cl-labels ((visit (name)
+                  (unless (gethash name seen)
+                    (puthash name t seen)
+                    (dolist (dependency (harness-module-requires
+                                         (harness-module-manifest name)))
+                      (let ((dependency (if (consp dependency) (car dependency) dependency)))
+                        (when (harness-module-manifest dependency)
+                          (visit dependency))))
+                    (push name ordered))))
+      (dolist (name pending)
+        (when (harness-module-manifest name) (visit name))))
+    (nreverse ordered)))
+
+;;; State that survives module reloads
+
+(defvar harness-core--state (make-hash-table :test #'eq)
+  "Module -> plist of state that must survive unloading the module.")
+
+(defun harness-core-state-set (module key value)
+  "Store VALUE under KEY for MODULE, surviving MODULE's reload."
+  (puthash module (plist-put (gethash module harness-core--state) key value)
+           harness-core--state)
+  value)
+
+(defun harness-core-state-get (module key &optional default)
+  "Return MODULE's surviving state under KEY, or DEFAULT."
+  (plist-get (gethash module harness-core--state) key default))
+
+(defun harness-core-state-clear (module key)
+  "Remove KEY from MODULE's surviving state."
+  (puthash module (harness-plist-omit-nil
+                   (let ((plist (gethash module harness-core--state)))
+                     (cl-loop for (k v) on plist by #'cddr
+                              unless (eq k key) append (list k v))))
+           harness-core--state))
 
 (defun harness-core--unregister-module (name)
   "Remove every service and event handler attributed to module NAME."
@@ -698,6 +836,11 @@ FUNCTION receives no arguments and returns non-nil while there is more work."
 ;; The kernel declares itself as a module like everything else, so that
 ;; dependency declarations such as (:requires ((harness-core "0.1.0"))) are
 ;; uniform.  It has no setup of its own.
+(harness-event-define 'harness-reloaded
+  :module 'harness-core
+  :doc "A module was reloaded; UI and dependents should refresh."
+  :payload '((module . symbol)))
+
 (harness-module-define 'harness-core
   :version harness-version
   :description "Kernel: modules, services, events and deferreds."
