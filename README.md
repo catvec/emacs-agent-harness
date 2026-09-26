@@ -9,6 +9,28 @@ in-process transport, or TCP for remote sessions).
 See [DESIGN.md](DESIGN.md) for the product design and
 [docs/architecture.md](docs/architecture.md) for the module contracts.
 
+## What is implemented
+
+Sessions (metadata plus JSONL transcripts, ACP-shaped), the chat buffer
+with markdown, collapsible thinking and tool calls, a queue, @file and
+#skill references, attachments (images and audio inlined, clipboard
+paste), the conversation tree, compaction, the session list and blocked
+notifier, automatic naming, permissions (ask, auto by a cheap model,
+non-interactive; directory jail), the sandboxed bash tool, native Emacs
+tools, skills, plans and plan mode, sub-agent sessions, the merge queue,
+BTW side conversations, git worktrees with a manager, usage and cost
+accounting with budgets and a report page, cache-aware turns, the model
+switcher, thinking levels, the OpenAI-compatible provider, the Claude CLI
+provider for subscription plans, the Brave web search tool, remote ACP
+connections (opt-in), safe hot reload, and a kernel that only loads
+modules and routes service calls and events.
+
+Known gaps, stated plainly: MCP servers passed to `session/new` are
+ignored (with a visible hint); video attachments open externally and have
+no thumbnails; audio playback needs an external player and microphone
+input is not implemented; the TCP agent endpoint has no authentication,
+so keep it on loopback or behind an ssh tunnel.
+
 ## Quick start
 
 ```elisp

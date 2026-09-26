@@ -19,9 +19,8 @@ DEV="$REPO/scripts/dev.sh"
 "$DEV" eval '(progn (setq debug-on-error nil) (harness-start) (condition-case nil (harness-reload) (error nil)) t)' >/dev/null
 "$DEV" eval '(progn (dolist (b (buffer-list)) (when (string-prefix-p "*harness" (buffer-name b)) (kill-buffer b))) (clrhash harness-ui-chat--buffers) t)' >/dev/null
 "$DEV" eval "(progn (load \"$REPO/scripts/harness-gui-demo.el\" nil t) (harness-gui-demo-install) t)" >/dev/null
-sleep 1
-"$DEV" eval '(harness-gui-demo-send) t' >/dev/null
-sleep 2.5
+# `harness-gui-demo-install` already sends the opening prompt.
+sleep 3
 "$DEV" eval '(harness-ui-ask-answer "allow-once") t' >/dev/null
 sleep 2.5
 if [[ -n "$THEME" ]]; then
