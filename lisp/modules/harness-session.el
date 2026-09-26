@@ -26,6 +26,7 @@
 (require 'subr-x)
 (require 'xdg)
 (require 'harness-core)
+(require 'harness-config)
 
 (defgroup harness-session nil
   "Sessions and their transcripts."
@@ -123,13 +124,6 @@ root-level fields (which the protocol reserves) without losing them."
 
 (defvar harness-session--project-ids (make-hash-table :test #'equal)
   "Project root -> storage directory name.")
-
-(defun harness-session-detect-project-root (directory)
-  "Return the project root for DIRECTORY, or DIRECTORY itself."
-  (let ((dir (file-name-as-directory (expand-file-name directory))))
-    (or (when-let* ((project (ignore-errors (project-current nil dir))))
-          (file-name-as-directory (expand-file-name (project-root project))))
-        dir)))
 
 (defun harness-session--project-id (project-root)
   "Return the storage directory name for PROJECT-ROOT."
@@ -312,7 +306,7 @@ ARGS: :cwd (required), :title, :additional-directories, :parent-id,
                    :id (harness-uuid)
                    :title (plist-get args :title)
                    :cwd directory
-                   :project-root (harness-session-detect-project-root directory)
+                   :project-root (harness-config-project-root directory)
                    :additional-directories (plist-get args :additional-directories)
                    :parent-id (plist-get args :parent-id)
                    :fork-entry-id (plist-get args :fork-entry-id)
@@ -355,7 +349,7 @@ Returns the session's own directory, not the project directory."
   (let* ((candidate (and directory
                          (expand-file-name
                           (harness-session--project-id
-                           (harness-session-detect-project-root directory))
+                           (harness-config-project-root directory))
                           harness-session-storage-directory)))
          (project-dir
           (or (and candidate
@@ -842,7 +836,7 @@ ARGS: :entry-id (fork point, defaults to the whole transcript), :title,
   "List sessions, most recently updated first.
 ARGS: :cwd (scope to that project), :cursor, :limit."
   (let* ((cwd (plist-get args :cwd))
-         (scope (and cwd (harness-session-detect-project-root cwd)))
+         (scope (and cwd (harness-config-project-root cwd)))
          (infos (seq-filter
                  (lambda (info)
                    (or (null scope)
@@ -1090,7 +1084,8 @@ transcript is still being read from disk."
 (harness-module-define 'harness-session
   :version harness-version
   :description "Sessions, transcripts and their storage."
-  :requires '((harness-core "0.1.0"))
+  :requires '((harness-core "0.1.0")
+              (harness-config "0.1.0"))
   :provides '(harness-session)
   :setup #'harness-session-setup
   :teardown #'harness-session-teardown)

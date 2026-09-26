@@ -79,11 +79,11 @@
          (sub (expand-file-name "packages/app" root)))
     (make-directory (expand-file-name ".git" root) t)
     (make-directory sub t)
-    (should (equal (harness-session-detect-project-root sub)
+    (should (equal (harness-config-project-root sub)
                    (file-name-as-directory root)))
     ;; A directory with no project of its own is its own root.
     (let ((lonely (make-temp-file "harness-lonely-" t)))
-      (should (equal (harness-session-detect-project-root lonely)
+      (should (equal (harness-config-project-root lonely)
                      (file-name-as-directory lonely))))))
 
 (ert-deftest harness-session-append-persists-and-reloads ()
