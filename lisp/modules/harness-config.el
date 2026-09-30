@@ -1,237 +1,171 @@
-;;; harness-config.el --- Layered configuration via .dir-locals.el -*- lexical-binding: t; -*-
-
-;; This file is part of Emacs Agent Harness.
+;;; harness-config.el --- Layered configuration  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Harness settings are ordinary Emacs customization variables.  Values are
-;; resolved with the standard directory-variables mechanism, most specific
-;; last:
+;; Three layers, most specific wins:
+;;   directory  .dir-locals.el in the session's working directory
+;;   project    .dir-locals.el at the project root
+;;   global     the customize value of the variable
 ;;
-;;   1. the global (custom-file) value,
-;;   2. the project's .dir-locals.el,
-;;   3. the nearest .dir-locals.el between the directory and the project
-;;      root.
-;;
-;; `harness-config-set' persists a value to the most specific file that
-;; already configures it, else the project's file, else the global custom
-;; file.  Settings live in the nil ("all modes") entry of .dir-locals.el,
-;; so they apply to any file in the directory, not just harness buffers.
-;;
-;; Emacs' own `add-dir-local-variable' is interactive and does not persist
-;; in batch; this module reads and writes the same file format directly.
+;; Every setting is an ordinary `defcustom' with a `:safe' predicate, so
+;; the built-in dir-locals machinery reads and writes them without
+;; prompting.  Persisting a setting writes the most specific file that
+;; makes sense: the project file when the session is in a project,
+;; otherwise the directory file, unless a directory file already exists.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'project)
-(require 'seq)
-(require 'subr-x)
+(require 'files-x)
 (require 'harness-core)
+(require 'harness-util)
 
-(defgroup harness-config nil
-  "Layered harness configuration."
+(defcustom harness-model "claude:claude-fable-5-1"
+  "Default model as PROVIDER:MODEL."
+  :type 'string :safe #'stringp :group 'harness)
+
+(defcustom harness-permission-mode 'ask
+  "Default permission mode for new sessions."
+  :type '(choice (const ask) (const accept-edits) (const auto) (const yolo))
+  :safe (lambda (v) (memq v '(ask accept-edits auto yolo)))
   :group 'harness)
 
-(defcustom harness-config-dir-locals-file ".dir-locals.el"
-  "Name of the directory configuration file."
-  :type 'string)
+(defcustom harness-thinking nil
+  "Default thinking level, or nil for the model default."
+  :type '(choice (const nil) (const "low") (const "medium") (const "high") (const "xhigh") (const "max"))
+  :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
+  :group 'harness)
 
-(defvar harness-config--cache (make-hash-table :test #'equal)
-  "File -> (MTIME . VARIABLES-ALIST).")
+(defcustom harness-allowed-directories nil
+  "Extra directories sessions may touch besides their working directory."
+  :type '(repeat directory)
+  :safe (lambda (v) (and (listp v) (cl-every #'stringp v)))
+  :group 'harness)
 
-;;; Project root
+(defcustom harness-budget nil
+  "Default per-session budget plist (:amount USD :hard BOOL), or nil."
+  :type '(choice (const nil) (plist :key-type symbol :value-type sexp))
+  :safe (lambda (v) (or (null v) (and (listp v) (numberp (plist-get v :amount)))))
+  :group 'harness)
 
-(defun harness-config-project-root (directory)
-  "Return the project root of DIRECTORY, or DIRECTORY itself."
-  (let ((dir (file-name-as-directory (expand-file-name directory))))
-    (or (when-let* ((project (ignore-errors (project-current nil dir))))
-          (file-name-as-directory (expand-file-name (project-root project))))
-        dir)))
+(defcustom harness-sandbox-policy 'preferred
+  "Whether tool processes must run in a kernel sandbox.
+`required' fails closed when no backend exists, `preferred' uses one
+when available, `off' never sandboxes."
+  :type '(choice (const required) (const preferred) (const off))
+  :safe (lambda (v) (memq v '(required preferred off)))
+  :group 'harness)
 
-(defun harness-config-project-p (directory)
-  "Return non-nil when DIRECTORY belongs to a project."
-  (and (ignore-errors (project-current nil (file-name-as-directory
-                                            (expand-file-name directory))))
-       t))
+(defcustom harness-non-interactive nil
+  "When non-nil sessions avoid blocking on the user."
+  :type 'boolean :safe #'booleanp :group 'harness)
 
-;;; Reading .dir-locals.el
+(defcustom harness-context-reserve 20000
+  "Tokens kept free below the context window before compaction."
+  :type 'integer :safe #'integerp :group 'harness)
 
-(defun harness-config--read-form (file)
-  "Read the Lisp form in FILE, or nil."
-  (when (file-exists-p file)
-    (condition-case err
-        (with-temp-buffer
-          (insert-file-contents file)
-          (goto-char (point-min))
-          (read (current-buffer)))
-      (error
-       (harness-log "cannot read %s: %S" file err)
-       nil))))
+(defconst harness-config-keys
+  '(harness-model harness-permission-mode harness-thinking harness-allowed-directories
+    harness-budget harness-sandbox-policy harness-non-interactive harness-context-reserve)
+  "Settings that take part in layering.")
 
-(defun harness-config--variables (file)
-  "Return the nil-mode variables alist of FILE, cached by mtime."
-  (let* ((attributes (file-attributes file))
-         (mtime (and attributes (file-attribute-modification-time attributes)))
-         (cached (gethash file harness-config--cache)))
-    (if (and cached (equal (car cached) mtime))
-        (cdr cached)
-      (let* ((form (harness-config--read-form file))
-             (entry (assq nil form))
-             (variables (and (listp entry) (cdr entry))))
-        (puthash file (cons mtime variables) harness-config--cache)
-        variables))))
+(defun harness-config--dir-locals-alist (dir)
+  "Return the alist of variables set for all modes by DIR's dir-locals file."
+  (let* ((dir (file-name-as-directory (expand-file-name dir)))
+         (file (expand-file-name dir-locals-file dir)))
+    (when (file-readable-p file)
+      (condition-case err
+          (let ((class (dir-locals-read-from-dir dir)))
+            (when class
+              (let (out)
+                (dolist (entry (dir-locals-get-class-variables class))
+                  (when (null (car entry))
+                    (dolist (var (cdr entry))
+                      (push var out))))
+                (nreverse out))))
+        (error (harness-log 'warn "config: cannot read %s: %S" file err) nil)))))
 
-(defun harness-config-dir-locals-chain (directory)
-  "Return the .dir-locals.el files affecting DIRECTORY, outermost first.
-The chain stops at the project root; outside a project only DIRECTORY's
-own file is considered."
-  (let* ((dir (file-name-as-directory (expand-file-name directory)))
-         (root (harness-config-project-root dir))
-         (files nil)
-         (current dir))
-    (catch 'done
-      (while t
-        (let ((file (expand-file-name harness-config-dir-locals-file current)))
-          (when (file-exists-p file)
-            (push file files)))
-        (when (equal current root)
-          (throw 'done nil))
-        (let ((parent (file-name-directory (directory-file-name current))))
-          (when (or (null parent) (equal parent current))
-            (throw 'done nil))
-          (setq current parent))))
-    files))
+(defun harness-config--layer-value (dir key)
+  "Return (FOUND . VALUE) for KEY in DIR's dir-locals, or nil."
+  (let ((cell (assq key (harness-config--dir-locals-alist dir))))
+    (and cell (cons t (cdr cell)))))
 
-;;; Resolution and persistence
+(defun harness-config--root (cwd)
+  (if (harness-method-exists-p 'project/root)
+      (harness-call 'project/root cwd)
+    (file-name-as-directory (expand-file-name cwd))))
 
-(defun harness-config-resolve (variable directory)
-  "Return the effective value of VARIABLE for DIRECTORY.
-The nearest .dir-locals.el that sets VARIABLE wins; otherwise the global
-custom value."
-  (let ((value :harness-unset))
-    (dolist (file (harness-config-dir-locals-chain directory))
-      (when-let* ((pair (assq variable (harness-config--variables file))))
-        (setq value (cdr pair))))
-    (if (eq value :harness-unset)
-        (default-value variable)
-      value)))
+(harness-defmethod config/layers (cwd)
+  "Return ((global . V) (project . V) (directory . V)) for every config key at CWD.
+Each V is a plist of KEY VALUE for keys set at that layer; global
+always lists every key."
+  (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
+         (root (harness-config--root cwd))
+         (global (cl-loop for k in harness-config-keys
+                          append (list k (symbol-value k))))
+         (project (cl-loop for k in harness-config-keys
+                           for v = (harness-config--layer-value root k)
+                           when v append (list k (cdr v))))
+         (directory (and (not (string= cwd root))
+                         (cl-loop for k in harness-config-keys
+                                  for v = (harness-config--layer-value cwd k)
+                                  when v append (list k (cdr v))))))
+    (list (cons 'global global) (cons 'project project) (cons 'directory directory))))
 
-(defun harness-config--write-form (file form)
-  "Write FORM to FILE in the standard .dir-locals.el style."
-  (make-directory (file-name-directory file) t)
-  (with-temp-file file
-    (insert ";;; Directory Local Variables            -*- no-byte-compile: t -*-\n")
-    (insert ";;; For more information see (info \"(emacs) Directory Variables\")\n\n")
-    (let ((print-length nil)
-          (print-level nil))
-      (pp form (current-buffer)))
-    (unless (bolp) (insert "\n"))))
+(harness-defmethod config/get (key cwd)
+  "Return the effective value of setting KEY for a session at CWD."
+  (unless (memq key harness-config-keys)
+    (error "Unknown config key %s" key))
+  (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
+         (root (harness-config--root cwd))
+         (dir (and (not (string= cwd root)) (harness-config--layer-value cwd key)))
+         (proj (or dir (harness-config--layer-value root key))))
+    (if proj (cdr proj) (symbol-value key))))
 
-(defun harness-config-write-variable (file variable value)
-  "Set VARIABLE to VALUE in the .dir-locals.el FILE."
-  (let* ((form (or (harness-config--read-form file) nil))
-         (entry (assq nil form))
-         (variables (copy-sequence (and (listp entry) (cdr entry))))
-         (existing (assq variable variables)))
-    (cond
-     (existing (setcdr existing value))
-     (t (setq variables (cons (cons variable value) variables))))
-    (if entry
-        (setcdr entry variables)
-      (setq form (cons (cons nil variables) form)))
-    ;; Keep the file tidy: sort entries by variable name.
-    (let ((sorted (sort variables (lambda (a b)
-                                    (string< (symbol-name (car a))
-                                             (symbol-name (car b)))))))
-      (setcdr (assq nil form) sorted))
-    (harness-config--write-form file form)
-    (remhash file harness-config--cache)
+(defun harness-config--write-dir-local (dir key value)
+  "Persist KEY VALUE for all modes in DIR's dir-locals file."
+  (let* ((dir (file-name-as-directory (expand-file-name dir)))
+         (file (expand-file-name dir-locals-file dir))
+         (default-directory dir)
+         (enable-local-variables :all))
+    (let ((buf (find-file-noselect file)))
+      (unwind-protect
+          (with-current-buffer buf
+            (add-dir-local-variable nil key value file)
+            (let ((inhibit-message t)) (save-buffer)))
+        (when (buffer-live-p buf) (kill-buffer buf))))
+    ;; Drop the cached class so the next read sees the new value.
+    (dir-locals-read-from-dir dir)
     file))
 
-(defun harness-config--dir-locals-file-for (directory)
-  "Return the file `harness-config-set' should write for DIRECTORY.
-The most specific file already holding harness settings, else the
-project file, else the directory's own file."
-  (let* ((dir (file-name-as-directory (expand-file-name directory)))
-         (chain (harness-config-dir-locals-chain dir)))
-    (or (harness-config--file-already-setting chain)
-        (when (harness-config-project-p dir)
-          (expand-file-name harness-config-dir-locals-file
-                            (harness-config-project-root dir)))
-        (expand-file-name harness-config-dir-locals-file dir))))
+(harness-defmethod config/set (key value &rest opts)
+  "Set KEY to VALUE.  OPTS: `:scope' directory|project|global, `:cwd' DIR.
+Without `:scope' the project file is used when CWD is in a project,
+unless a directory file already exists at CWD; without a project the
+directory file is used.  Return (SCOPE . FILE-OR-NIL)."
+  (unless (memq key harness-config-keys) (error "Unknown config key %s" key))
+  (let* ((cwd (file-name-as-directory (expand-file-name (or (plist-get opts :cwd) default-directory))))
+         (root (harness-config--root cwd))
+         (scope (or (plist-get opts :scope)
+                    (cond ((file-exists-p (expand-file-name dir-locals-file cwd)) 'directory)
+                          ((and (harness-method-exists-p 'project/root)
+                                (ignore-errors (project-current nil cwd)))
+                           'project)
+                          (t 'directory))))
+         (result
+          (pcase scope
+            ('global (customize-save-variable key value) (cons 'global custom-file))
+            ('project (cons 'project (harness-config--write-dir-local root key value)))
+            ('directory (cons 'directory (harness-config--write-dir-local cwd key value)))
+            (_ (error "Unknown scope %s" scope)))))
+    (harness-emit 'config/changed key value scope cwd)
+    result))
 
-(defun harness-config--file-already-setting (chain)
-  "Return the most specific file in CHAIN that sets a harness variable.
-Any harness variable counts: the file already being used for harness
-settings should keep receiving them."
-  (seq-find (lambda (file)
-              (seq-some (lambda (pair)
-                          (string-prefix-p "harness-" (symbol-name (car pair))))
-                        (harness-config--variables file)))
-            (reverse chain)))
+(harness-declare-event 'config/changed "(KEY VALUE SCOPE CWD) after `config/set'.")
 
-(defun harness-config-set (variable value directory)
-  "Persist VARIABLE=VALUE for DIRECTORY.
-Writes to the nearest file that already holds harness settings, else the
-project's .dir-locals.el, else the global custom file.  Returns the file
-written, or `global'."
-  (let ((file (harness-config--dir-locals-file-for directory)))
-    (if file
-        (harness-config-write-variable file variable value)
-      (customize-save-variable variable value)
-      'global)))
-
-(defun harness-config-describe (&optional directory)
-  "Return the configuration files and resolved harness values for DIRECTORY."
-  (let ((dir (file-name-as-directory (expand-file-name (or directory default-directory)))))
-    (list :directory dir
-          :project-root (harness-config-project-root dir)
-          :files (harness-config-dir-locals-chain dir))))
-
-;;; Service
-
-(defun harness-config-service-resolve (&rest args)
-  "Service: resolve a variable for a directory."
-  (harness-config-resolve (plist-get args :variable)
-                          (or (plist-get args :directory) default-directory)))
-
-(defun harness-config-service-set (&rest args)
-  "Service: persist a variable for a directory."
-  (harness-config-set (plist-get args :variable)
-                      (plist-get args :value)
-                      (or (plist-get args :directory) default-directory)))
-
-(defun harness-config-service-describe (&rest args)
-  "Service: configuration files for a directory."
-  (harness-config-describe (plist-get args :directory)))
-
-(defun harness-config-service-project-root (&rest args)
-  "Service: project root of a directory."
-  (harness-config-project-root (or (plist-get args :directory) default-directory)))
-
-(defun harness-config-setup ()
-  "Set up the config module."
-  (harness-service-register
-   "config"
-   :module 'harness-config
-   :doc "Layered configuration through .dir-locals.el."
-   :methods '((resolve . harness-config-service-resolve)
-              (set . harness-config-service-set)
-              (describe . harness-config-service-describe)
-              (project-root . harness-config-service-project-root))))
-
-(defun harness-config-teardown ()
-  "Tear down the config module."
-  (clrhash harness-config--cache))
-
-(harness-module-define 'harness-config
-  :version harness-version
-  :description "Layered configuration through .dir-locals.el."
-  :requires '((harness-core "0.1.0"))
-  :provides '(harness-config)
-  :setup #'harness-config-setup
-  :teardown #'harness-config-teardown)
+(harness-define-module 'config
+  :doc "Layered settings through customize and dir-locals."
+  :requires '(project))
 
 (provide 'harness-config)
 ;;; harness-config.el ends here

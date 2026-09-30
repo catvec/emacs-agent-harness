@@ -1,1052 +1,422 @@
-;;; harness-agent.el --- The agent turn loop -*- lexical-binding: t; -*-
-
-;; This file is part of Emacs Agent Harness.
+;;; harness-agent.el --- The turn loop  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; One prompt turn:
+;; One turn: the user's message goes in, the model streams text and
+;; thinking, asks for tools, the harness runs them (through the
+;; permission chain) and feeds the results back, until the model stops.
+;; Providers that run their own loop (hosted) hand each tool call to us
+;; through a `:respond' callback; native providers stop with `tool-use'
+;; and are called again with the results.  Steering messages sent while
+;; a turn runs are injected at the next step boundary; queued messages
+;; go out together when the turn ends.
 ;;
-;;   user message -> provider stream -> text/thinking/tool calls
-;;     -> permissions -> tool execution -> tool results -> provider again
-;;     -> ... until the model stops asking for tools
-;;
-;; The loop lives in the state layer and speaks only to kernel services:
-;; the session service stores the transcript, the provider service streams
-;; completions, the tool service executes, the permission service decides.
-;; The ACP layer projects everything that happens here onto
-;; `session/update' notifications; this module never talks to a UI.
-;;
-;; Prompts that arrive mid-turn are queued and sent together at the next
-;; turn boundary.  Steering messages (used by non-interactive denials, and
-;; available to the UI) are injected before the next provider call, which is
-;; how an agent gets corrected without aborting its work.
+;; The loop is entirely event driven: nothing here waits.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'json)
-(require 'seq)
 (require 'subr-x)
 (require 'harness-core)
-(require 'harness-tools)
+(require 'harness-util)
 
-(defgroup harness-agent nil
-  "Agent turn loop."
-  :group 'harness)
+(declare-function harness-tool-title "harness-tools")
 
-(defcustom harness-agent-cache-ttl 300
-  "Seconds after which a provider prompt cache is probably gone.
-Before starting a turn the agent notes when this much time passed since
-the last one and the context is large, because the whole conversation
-will be re-read at full price."
-  :type 'natnum)
+(defcustom harness-agent-max-steps 200
+  "Maximum model calls in one turn before the harness stops it."
+  :type 'integer :group 'harness)
 
-(defcustom harness-agent-cache-min-tokens 2000
-  "Context size above which cache expiry is worth mentioning."
-  :type 'natnum)
+(defcustom harness-agent-base-system-prompt
+  "You are an expert software engineering agent working inside the user's GNU Emacs through the Emacs agent harness.
 
-(defcustom harness-agent-system-prompt
-  (concat "You are a coding agent running inside Emacs. You work in the session "
-          "directory shown below; file tools are confined to it and shell commands "
-          "run in a sandbox where the real home directory does not exist.\n"
-          "\n"
-          "Use the tools to inspect and change code. Prefer `read' over guessing, "
-          "`edit' over rewriting files, and `search`/`glob` to find things. "
-          "Keep answers short; the user can read the tool output. "
-          "Use the todo tool for multi-step work.")
-  "System prompt prepended to every completion."
-  :type 'string)
+Work carefully and verify what you do. Prefer the provided tools over guessing; read files before editing them; keep edits minimal and correct. When a tool call is denied, read the reason: it tells you what is permitted, so adjust your approach instead of repeating the call. Stay inside the session's working directory unless told otherwise. When you need a decision only the user can make, use the ask_user tool. Keep answers concise and concrete."
+  "First section of every system prompt."
+  :type 'string :group 'harness)
 
-(defcustom harness-agent-max-turn-requests 50
-  "Maximum provider calls in one turn before it is cut short."
-  :type 'natnum)
+(defcustom harness-agent-cancel-grace 3
+  "Seconds to wait for a provider to acknowledge a cancel before forcing it."
+  :type 'number :group 'harness)
 
-(defcustom harness-agent-default-model nil
-  "Model used when a session has none, as \"provider/model\"."
-  :type '(choice (const nil) string))
+(cl-defstruct (harness-agent-turn (:copier nil))
+  session-id promise handle (steps 0) cancelled steering
+  text-node text-buf think-node think-buf
+  (pending 0) waiting-done stop-reason error hosted last-usage started)
 
-(defcustom harness-agent-max-output-tokens 8192
-  "Maximum tokens the model may generate in one call."
-  :type 'natnum)
+(defvar harness-agent--turns (make-hash-table :test 'equal)
+  "Session id -> running `harness-agent-turn'.")
 
-(defcustom harness-agent-compact-threshold 0.8
-  "Compact the conversation when this fraction of the context is used."
-  :type 'number)
+(defun harness-agent-turn-for (session-id)
+  "Return the running turn of SESSION-ID or nil."
+  (gethash session-id harness-agent--turns))
 
-(defcustom harness-agent-compact-keep-entries 12
-  "Entries kept verbatim when compacting; older ones become a summary."
-  :type 'natnum)
+(defun harness-agent-running-p (session-id)
+  "Non-nil while SESSION-ID has a running turn."
+  (and (gethash session-id harness-agent--turns) t))
 
-(defvar harness-agent--sessions (make-hash-table :test #'equal)
-  "Session id -> `harness-agent-state'.")
+;;;; Prompt assembly
 
-(defvar harness-agent--model-cache nil
-  "Cached vector of model plists, or nil when never fetched.")
+(defun harness-agent--system-prompt (session)
+  "Return the system prompt for SESSION after the `agent/system-prompt' filter."
+  (let ((base (format "%s\n\n## Environment\n- Working directory: %s\n- Project: %s\n- Date: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
+                      harness-agent-base-system-prompt
+                      (plist-get session :cwd)
+                      (or (and (harness-method-exists-p 'project/name)
+                               (harness-call 'project/name (plist-get session :project)))
+                          (plist-get session :project))
+                      (format-time-string "%Y-%m-%d")
+                      system-configuration
+                      emacs-version)))
+    (harness-run-filter 'agent/system-prompt base session)))
 
-(defvar harness-agent-question-function nil
-  "Function that asks the user a question and returns a deferred.
-The UI layer installs this; the request plist carries :session-id,
-:question, :options and :freeform, and the deferred resolves to the
-answer string or nil.")
+(defun harness-agent--vision-p (session)
+  (member "image" (plist-get (and (harness-method-exists-p 'provider/model)
+                                  (harness-call 'provider/model (plist-get session :model)))
+                             :input-modalities)))
 
-;;; State
+(defun harness-agent--file-base64 (path)
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally path)
+    (base64-encode-string (buffer-string) t)))
 
-(cl-defstruct (harness-agent-state (:constructor harness-agent-state-create))
-  session-id
-  turn
-  (queue nil)                   ; list of (blocks . deferred), oldest first
-  (steers nil)                  ; list of content blocks, oldest first
-  (compacting nil)
-  (named nil)                   ; non-nil once naming was attempted
-  (turns 0))                    ; completed turns
+(defun harness-agent--prepare-block (block session)
+  "Return BLOCK ready for a provider: images inlined, files described."
+  (pcase (plist-get block :type)
+    ("image"
+     (cond ((plist-get block :data) block)
+           ((and (plist-get block :path) (harness-agent--vision-p session)
+                 (file-readable-p (plist-get block :path)))
+            (list :type "image" :mime (or (plist-get block :mime) "image/png")
+                  :data (harness-agent--file-base64 (plist-get block :path))))
+           (t (list :type "text" :text (format "[image attached: %s]" (or (plist-get block :path) "clipboard"))))))
+    ("audio"
+     (if (plist-get block :data) block
+       (list :type "text" :text (format "[audio attached: %s]" (plist-get block :path)))))
+    ("file"
+     (list :type "text"
+           :text (format "Attached file: %s (%s bytes)" (plist-get block :path)
+                         (or (plist-get block :size) (harness-file-size (plist-get block :path)) "?"))))
+    (_ block)))
 
-(cl-defstruct (harness-agent-turn (:constructor harness-agent-turn-create))
-  deferred
-  abort
-  (message-id nil)
-  (thinking-id nil)
-  (streamed nil)
-  (iterations 0)
-  (waited-for-models nil)
-  (running t)
-  (cancelled nil))
+(defun harness-agent--prepare-messages (session messages)
+  (mapcar (lambda (m)
+            (if (eq (plist-get m :role) 'user)
+                (list :role 'user
+                      :content (mapcar (lambda (b) (harness-agent--prepare-block b session))
+                                       (plist-get m :content)))
+              m))
+          messages))
 
-(defun harness-agent--state (session-id)
-  "Return (creating it if needed) the agent state for SESSION-ID."
-  (or (gethash session-id harness-agent--sessions)
-      (puthash session-id (harness-agent-state-create :session-id session-id)
-               harness-agent--sessions)))
+(defun harness-agent--blocks-text (blocks)
+  "Return the plain text of BLOCKS for a transcript node."
+  (mapconcat (lambda (b)
+               (pcase (plist-get b :type)
+                 ("text" (plist-get b :text))
+                 ("file" (format "@%s" (file-name-nondirectory (or (plist-get b :path) ""))))
+                 ("image" "[image]")
+                 ("audio" "[audio]")
+                 (_ "")))
+             blocks " "))
 
-(defun harness-agent--turn (session-id)
-  "Return the running turn of SESSION-ID, or nil."
-  (let ((state (gethash session-id harness-agent--sessions)))
-    (and state (harness-agent-state-turn state))))
+(defun harness-agent--only-text-p (blocks)
+  (cl-every (lambda (b) (equal (plist-get b :type) "text")) blocks))
 
-;;; Session plumbing
+(defun harness-agent-attachments-to-blocks (attachments)
+  "Turn ATTACHMENT plists into content blocks."
+  (mapcar (lambda (a)
+            (let ((mime (or (plist-get a :mime) "")))
+              (cond ((string-prefix-p "image/" mime)
+                     (list :type "image" :mime mime :path (plist-get a :path)))
+                    ((string-prefix-p "audio/" mime)
+                     (list :type "audio" :mime mime :path (plist-get a :path)))
+                    (t (list :type "file" :path (plist-get a :path) :size (plist-get a :size)
+                             :mime mime :name (plist-get a :name))))))
+          attachments))
 
-(defun harness-agent--info (session-id)
-  "Return session info for SESSION-ID or signal."
-  (harness-service-call "session" 'info :session-id session-id))
+;;;; Turn start
 
-(defun harness-agent--error-message (error)
-  "Render an error value from a deferred rejection as a string."
-  (let ((data (cdr error)))
+(harness-defmethod agent/prompt (session-id blocks &optional opts)
+  "Send BLOCKS (content blocks, or a string) to SESSION-ID.
+Idle session: start a turn and return a promise of (:stop-reason …).
+Running session: steer — the message is recorded now and delivered at
+the next step boundary; the running turn's promise is returned.  OPTS
+`:queue' non-nil only queues the message for the next turn."
+  (let* ((blocks (if (stringp blocks) (list (list :type "text" :text blocks)) blocks))
+         (turn (gethash session-id harness-agent--turns)))
     (cond
-     ((stringp data) data)
-     ((and (consp data) (stringp (car data))) (car data))
-     ((null data) (format "%S" (car error)))
-     (t (format "%S" error)))))
+     ((plist-get opts :queue)
+      (harness-call 'session/queue session-id (harness-agent--blocks-text blocks)
+                    (plist-get opts :attachments))
+      (harness-resolved (list :queued t)))
+     (turn
+      (harness-call 'session/append session-id
+                    (list :kind 'user :content (harness-agent--blocks-text blocks)
+                          :blocks (unless (harness-agent--only-text-p blocks) blocks)
+                          :meta (list :steering t)))
+      (setf (harness-agent-turn-steering turn)
+            (append (harness-agent-turn-steering turn) (list (harness-agent--blocks-text blocks))))
+      (harness-emit 'agent/steered session-id)
+      (harness-agent-turn-promise turn))
+     (t (harness-agent--start session-id blocks)))))
 
-(defun harness-agent--system-hint (session-id text &optional level id)
-  "Append a harness hint to SESSION-ID.
-With ID, the hint replaces an earlier one with the same ID; empty TEXT
-retires it."
-  (harness-service-call "session" 'system-hint
-                        :session-id session-id :text text :level level :id id))
-
-(defun harness-agent--allowed-p (decision)
-  "Return non-nil when DECISION allows a call."
-  (eq (plist-get decision :decision) 'allow))
-
-(defun harness-agent--entries (session-id)
-  "Return the transcript entries of SESSION-ID as a list.
-Signals when the transcript is still being read from disk."
-  (let ((entries (harness-service-call "session" 'entries :session-id session-id)))
-    (cond
-     ((not (harness-deferred-p entries))
-      (append entries nil))
-     ((harness-deferred-resolved-p entries)
-      (append (harness-deferred-value entries) nil))
-     (t (signal 'harness-error (list "Session transcript is still loading"))))))
-
-(defun harness-agent--permission-mode (info)
-  "Return INFO's permission mode as a symbol."
-  (let ((mode (plist-get info :permissionMode)))
-    (cond ((symbolp mode) (or mode 'ask))
-          ((stringp mode) (intern mode))
-          (t 'ask))))
-
-;;; Prompting
-
-(defun harness-agent-prompt (&rest args)
-  "Handle a session/prompt.  Returns a deferred of the stop reason.
-Hard budgets are checked first: when one is exceeded the turn is refused
-with an explanation instead of spending more."
-  (let* ((session-id (plist-get args :session-id))
-         (blocks (harness-agent--block-vector (plist-get args :prompt)))
-         (state (harness-agent--state session-id))
-         (budget (and (harness-service-available-p "usage" 'budget-check)
-                      (harness-service-call "usage" 'budget-check
-                                            :session-id session-id)))
-         (merge-lock (and (harness-service-available-p "merge" 'lock)
-                          (harness-service-call "merge" 'lock :parent-id session-id))))
-    (if merge-lock
-        ;; A child is merging into this session's files; let it finish.
-        (let ((deferred (harness-deferred-new)))
-          (harness-agent--system-hint
-           session-id
-           (format "Session %s is merging into this working directory; try again when it finishes."
-                   (substring merge-lock 0 8)))
-          (harness-deferred-resolve deferred "refusal")
-          deferred)
-      (if (and budget (plist-get budget :blocked))
-          (let ((deferred (harness-deferred-new)))
-            (harness-agent--system-hint session-id (plist-get budget :reason) "error")
-            (harness-deferred-resolve deferred "refusal")
-            deferred)
-        (if (harness-agent-state-turn state)
-            ;; Mid-turn: queue the message for the next turn boundary.
-            (let ((deferred (harness-deferred-new)))
-              (setf (harness-agent-state-queue state)
-                    (append (harness-agent-state-queue state)
-                            (list (cons blocks deferred))))
-              deferred)
-          (harness-deferred-then
-           (harness-service-call "session" 'entries :session-id session-id)
-           (lambda (_entries) (harness-agent--start-turn session-id blocks))))))))
-
-(defun harness-agent--block-vector (blocks)
-  "Normalize BLOCKS into a vector of content blocks."
-  (vconcat (append blocks nil)))
-
-(defun harness-agent--note-cache-expiry (session-id)
-  "Hint when the provider prompt cache has probably expired."
-  (let* ((state (ignore-errors
-                  (harness-service-call "session" 'state-all :session-id session-id)))
-         (last (plist-get state :last-turn-at))
-         (info (harness-agent--info session-id))
-         (usage (plist-get info :usage))
-         (context (+ (or (plist-get usage :input) 0)
-                     (or (plist-get usage :output) 0))))
-    (when (and (numberp last)
-               (> context harness-agent-cache-min-tokens)
-               (> (- (float-time) last) harness-agent-cache-ttl))
-      (harness-agent--system-hint
-       session-id
-       (format "Prompt cache likely expired (%d minutes since the last turn); this turn will re-read the whole context."
-               (round (/ (- (float-time) last) 60)))
-       "info"))))
-
-(defun harness-agent--start-turn (session-id blocks)
-  "Start a turn for SESSION-ID with BLOCKS.  Returns a deferred."
-  (let* ((state (harness-agent--state session-id))
-         (turn (harness-agent-turn-create :deferred (harness-deferred-new)
-                                          :abort (harness-deferred-new))))
-    (setf (harness-agent-state-turn state) turn)
-    (harness-service-call "session" 'set-status :session-id session-id :status "running")
-    (harness-agent--note-cache-expiry session-id)
-    (harness-agent--append-user-message session-id blocks)
-    (harness-deferred-on-cancel (harness-agent-turn-deferred turn)
-                                (lambda () (harness-agent-cancel :session-id session-id)))
-    (run-at-time 0 nil (lambda () (harness-agent--loop session-id turn)))
-    (harness-agent-turn-deferred turn)))
-
-(defun harness-agent--append-user-message (session-id blocks)
-  "Append BLOCKS as one user message to SESSION-ID."
-  (let ((key (list "user" (harness-uuid)))
-        (message-id (harness-uuid)))
-    (harness-service-call
-     "session" 'stream-begin
-     :session-id session-id
-     :key key
-     :entry (list :sessionUpdate "user_message_chunk"
-                  :messageId message-id
-                  :content (harness-agent--block-vector blocks)))
-    (harness-service-call "session" 'stream-end :session-id session-id :key key)))
-
-;;; The loop
-
-(defun harness-agent--session-model (info)
-  "Return INFO's model, or nil when unset/empty."
-  (let ((model (plist-get info :model)))
-    (and (stringp model) (not (string-empty-p model)) model)))
-
-(defun harness-agent--loop (session-id turn)
-  "Run one provider call for SESSION-ID and continue as needed."
-  (when (harness-agent-turn-running turn)
-    (if (harness-deferred-rejected-p (harness-agent-turn-abort turn))
-        (harness-agent--finish-turn session-id turn "cancelled")
-      (progn
-        (harness-agent--flush-steers session-id)
-        (harness-agent--maybe-compact session-id)
-        (let* ((info (harness-agent--info session-id))
-               (model (or (harness-agent--session-model info)
-                          harness-agent-default-model
-                          (harness-agent--first-model))))
-          (cond
-           (model
-            (harness-agent--call-provider
-             session-id turn model (harness-agent--provider-request session-id turn info model)))
-           ((harness-agent-turn-waited-for-models turn)
-            (harness-agent--system-hint
-             session-id
-             "No model is configured. Choose one with the model switcher, or set harness-agent-default-model."
-             "error")
-            (harness-agent--finish-turn session-id turn "refusal"))
-           (t
-            (setf (harness-agent-turn-waited-for-models turn) t)
-            (harness-deferred-then
-             (harness-agent--ensure-models)
-             (lambda (_) (harness-agent--loop session-id turn))))))))))
-
-(defun harness-agent--flush-steers (session-id)
-  "Inject pending steering messages into the transcript."
-  (let* ((state (harness-agent--state session-id))
-         (steers (harness-agent-state-steers state)))
-    (when steers
-      (setf (harness-agent-state-steers state) nil)
-      (harness-agent--append-user-message
-       session-id
-       (vconcat (vector (list :type "text"
-                              :text "Additional instruction from the user:"))
-                (vconcat steers))))))
-
-(defun harness-agent--ensure-models ()
-  "Return a deferred resolving once the model cache is populated."
-  (if harness-agent--model-cache
-      (let ((deferred (harness-deferred-new)))
-        (harness-deferred-resolve deferred harness-agent--model-cache)
-        deferred)
-    (let ((models (if (harness-service-available-p "provider" 'models)
-                      (harness-service-call "provider" 'models)
-                    nil)))
-      (if (harness-deferred-p models)
-          (harness-deferred-then models
-                                 (lambda (value)
-                                   (setq harness-agent--model-cache value)
-                                   value))
-        (setq harness-agent--model-cache (or models []))
-        (let ((deferred (harness-deferred-new)))
-          (harness-deferred-resolve deferred harness-agent--model-cache)
-          deferred)))))
-
-(defun harness-agent--first-model ()
-  "Return the first available model id, or nil."
-  (when (and harness-agent--model-cache
-             (> (length harness-agent--model-cache) 0))
-    (plist-get (aref harness-agent--model-cache 0) :id)))
-
-(defun harness-agent--provider-request (session-id _turn info model)
-  "Build the completion request for SESSION-ID."
-  (list :model model
-        :system (harness-agent--system-prompt info)
-        :messages (harness-agent--messages session-id)
-        :tools (harness-agent--tools info)
-        :max-output-tokens harness-agent-max-output-tokens
-        :thinking (plist-get info :thinking)
-        :on-text (lambda (delta)
-                   (harness-agent--stream-delta session-id
-                                                (harness-agent--turn session-id)
-                                                'text delta))
-        :on-thought (lambda (delta)
-                      (harness-agent--stream-delta session-id
-                                                   (harness-agent--turn session-id)
-                                                   'thinking delta))
-        :on-tool-call #'ignore))
-
-(defun harness-agent--messages (session-id)
-  "Build the provider messages for SESSION-ID, honouring compaction."
-  (let* ((entries (harness-agent--entries session-id))
-         (compaction (harness-agent--compaction session-id)))
-    (if (and compaction (plist-get compaction :up-to))
-        (let* ((upto (plist-get compaction :up-to))
-               (summary (plist-get compaction :text))
-               (after (cl-loop for entry in entries
-                               for index from 0
-                               when (> index upto) collect entry)))
-          (vconcat
-           (vector (list :role "user"
-                         :content (vector (list :type "text"
-                                                :text (format "Summary of the earlier conversation:\n%s"
-                                                              summary)))))
-           (harness-provider-messages-from-entries (vconcat after))))
-      (harness-provider-messages-from-entries (vconcat entries)))))
-
-(defun harness-agent--system-prompt (info)
-  "Return the system prompt for session INFO."
-  (concat harness-agent-system-prompt
-          (if (equal (plist-get info :mode) "plan")
-              (concat "\n\nYou are in plan mode: investigate with read-only tools only, "
-                      "never modify files, then record a complete plan with the `plan' "
-                      "tool and stop for approval.  The plan should state the goal, the "
-                      "approach, the files and tools involved, how to verify the result, "
-                      "and where forking or a sub-agent would help.")
-            "")
-          "\n\nSession directory: " (or (plist-get info :cwd) "(unknown)")
-          (let ((additional (plist-get info :additionalDirectories)))
-            (if (and additional (> (length additional) 0))
-                (format "\nAdditional directories: %s"
-                        (string-join (append additional nil) ", "))
-              ""))
-          (let* ((state (harness-service-call "session" 'state-all
-                                              :session-id (plist-get info :sessionId)))
-                 (todos (plist-get state :todos)))
-            (if (and todos (> (length todos) 0))
-                (format "\n\nCurrent todo list:\n%s"
-                        (mapconcat (lambda (item)
-                                     (format "- [%s] %s"
-                                             (or (plist-get item :status) "pending")
-                                             (or (plist-get item :content) "")))
-                                   (append todos nil) "\n"))
-              ""))))
-
-(defun harness-agent--tools (info)
-  "Return tool specs for session INFO.  Plan mode keeps read-only tools."
-  (if (equal (plist-get info :mode) "plan")
-      (harness-tools-specs
-       (seq-keep (lambda (tool)
-                   (when (harness-tool-read-only tool)
-                     (harness-tool-name tool)))
-                 (harness-tool-list)))
-    (harness-tools-specs)))
-
-;;; Streaming
-
-(defun harness-agent--stream-delta (session-id turn kind delta)
-  "Record a streamed DELTA of KIND for TURN."
-  (when (and turn (harness-agent-turn-running turn))
-    (setf (harness-agent-turn-streamed turn) t)
-    (pcase kind
-      ('text
-       (unless (harness-agent-turn-message-id turn)
-         (setf (harness-agent-turn-message-id turn) (harness-uuid))
-         (harness-service-call
-          "session" 'stream-begin
-          :session-id session-id
-          :key (list "agent" (harness-agent-turn-message-id turn))
-          :entry (list :sessionUpdate "agent_message_chunk"
-                       :messageId (harness-agent-turn-message-id turn)
-                       :content (list :type "text" :text ""))))
-       (harness-service-call
-        "session" 'stream-chunk
-        :session-id session-id
-        :key (list "agent" (harness-agent-turn-message-id turn))
-        :update (list :sessionUpdate "agent_message_chunk"
-                      :messageId (harness-agent-turn-message-id turn)
-                      :content (list :type "text" :text delta))))
-      ('thinking
-       (unless (harness-agent-turn-thinking-id turn)
-         (setf (harness-agent-turn-thinking-id turn) (harness-uuid))
-         (harness-service-call
-          "session" 'stream-begin
-          :session-id session-id
-          :key (list "thinking" (harness-agent-turn-thinking-id turn))
-          :entry (list :sessionUpdate "agent_thought_chunk"
-                       :messageId (harness-agent-turn-thinking-id turn)
-                       :content (list :type "text" :text ""))))
-       (harness-service-call
-        "session" 'stream-chunk
-        :session-id session-id
-        :key (list "thinking" (harness-agent-turn-thinking-id turn))
-        :update (list :sessionUpdate "agent_thought_chunk"
-                      :messageId (harness-agent-turn-thinking-id turn)
-                      :content (list :type "text" :text delta)))))))
-
-(defun harness-agent--close-streams (session-id turn)
-  "Materialize any open streams of TURN."
-  ;; Thinking was produced before the message, so materialize it first.
-  (when (harness-agent-turn-thinking-id turn)
-    (harness-service-call "session" 'stream-end :session-id session-id
-                          :key (list "thinking" (harness-agent-turn-thinking-id turn)))
-    (setf (harness-agent-turn-thinking-id turn) nil))
-  (when (harness-agent-turn-message-id turn)
-    (harness-service-call "session" 'stream-end :session-id session-id
-                          :key (list "agent" (harness-agent-turn-message-id turn)))
-    (setf (harness-agent-turn-message-id turn) nil)))
-
-;;; Provider call
-
-(defun harness-agent--call-provider (session-id turn model request)
-  "Call the provider with REQUEST and handle the result for TURN."
-  (if (not (harness-service-available-p "provider" 'complete))
-      (progn
-        (harness-agent--system-hint
-         session-id "No completion provider is loaded; cannot run the model." "error")
-        (harness-agent--finish-turn session-id turn "refusal"))
-    (let* ((turn-abort (harness-agent-turn-abort turn))
-           (deferred (harness-service-call "provider" 'complete request)))
-      (harness-deferred-on-cancel turn-abort
-                                  (lambda ()
-                                    (when (harness-deferred-pending-p deferred)
-                                      (harness-deferred-cancel deferred))))
-      (harness-deferred-then
-       deferred
-       (lambda (result)
-         (harness-agent--close-streams session-id turn)
-         (when (harness-agent-turn-running turn)
-           (harness-agent--record-usage session-id model result)
-           (harness-agent--handle-result session-id turn result)))
-       (lambda (error)
-         (harness-agent--close-streams session-id turn)
-         (when (harness-agent-turn-running turn)
-           (if (harness-agent-turn-cancelled turn)
-               (harness-agent--finish-turn session-id turn "cancelled")
-             (let ((message (format "The model call failed: %s"
-                                    (harness-agent--error-message error))))
-               (harness-agent--system-hint session-id message "error")
-               (harness-emit 'agent-error :session-id session-id :message message)
-               (harness-agent--finish-turn session-id turn "end_turn")))))))))
-
-;;; Results, tools, continuation
-
-(defun harness-agent--handle-result (session-id turn result)
-  "Handle a completed provider RESULT for TURN."
-  (let* ((text (or (plist-get result :text) ""))
-         (tool-calls (append (plist-get result :tool-calls) nil)))
-    ;; Providers that do not stream: append the whole message now.
-    (when (and (not (harness-agent-turn-streamed turn))
-               (not (string-empty-p text)))
-      (let ((key (list "agent-final" (harness-uuid))))
-        (harness-service-call
-         "session" 'stream-begin
-         :session-id session-id :key key
-         :entry (list :sessionUpdate "agent_message_chunk"
-                      :messageId (harness-uuid)
-                      :content (list :type "text" :text text)))
-        (harness-service-call "session" 'stream-end :session-id session-id :key key)))
-    (cond
-     ((null tool-calls)
-      (harness-agent--finish-turn session-id turn
-                                  (or (plist-get result :stop-reason) "end_turn")))
-     ((>= (harness-agent-turn-iterations turn) harness-agent-max-turn-requests)
-      (harness-agent--finish-turn session-id turn "max_turn_requests"))
-     (t
-      (harness-deferred-then
-       (harness-agent--execute-tools session-id turn tool-calls)
-       (lambda (_)
-         (cl-incf (harness-agent-turn-iterations turn))
-         (run-at-time 0 nil (lambda () (harness-agent--loop session-id turn)))))))))
-
-(defun harness-agent--execute-tools (session-id turn tool-calls)
-  "Execute every tool call of TOOL-CALLS sequentially.  Returns a deferred."
-  (let ((deferred (harness-deferred-new))
-        (remaining (copy-sequence tool-calls)))
-    (cl-labels ((next ()
-                  (if (null remaining)
-                      (harness-deferred-resolve deferred nil)
-                    (let ((call (pop remaining)))
-                      (harness-deferred-then
-                       (harness-agent--execute-tool session-id turn call)
-                       (lambda (_) (next)))))))
-      (next))
-    deferred))
-
-(defun harness-agent--execute-tool (session-id turn call)
-  "Check permissions, run CALL, and append its transcript entries."
-  (let* ((tool-name (or (plist-get call :name) ""))
-         (arguments (plist-get call :arguments))
-         (tool (harness-tool-get tool-name))
-         (tool-call-id (or (plist-get call :id) (harness-uuid)))
-         (key (list "tool" tool-call-id))
-         (deferred (harness-deferred-new))
-         (info (harness-agent--info session-id))
-         (context (harness-tool-context-create
-                   :session-id session-id
-                   :cwd (plist-get info :cwd)
-                   :abort (harness-agent-turn-abort turn)
-                   :meta info)))
-    (harness-agent--append-tool-entry
-     session-id
-     (list :sessionUpdate "tool_call"
-           :toolCallId tool-call-id
-           :name tool-name
-           :title (or (and tool (harness-tool-description tool))
-                      (format "Calling %s" tool-name))
-           :kind (if tool (symbol-name (harness-tool-kind tool)) "other")
-           :status "pending"
-           :rawInput (if (stringp arguments)
-                         arguments
-                       (or arguments (make-hash-table)))))
-    (cond
-     ((null tool)
-      (harness-deferred-resolve
-       deferred
-       (harness-agent--finish-tool session-id key tool-call-id
-                                   (harness-tool-error-result
-                                    (format "No such tool: %s" tool-name)))))
-     ((and (stringp arguments) (not (string-empty-p arguments)))
-      (harness-deferred-resolve
-       deferred
-       (harness-agent--finish-tool session-id key tool-call-id
-                                   (harness-tool-error-result
-                                    (format "Arguments were not valid JSON: %s" arguments)))))
-     (t
-      (harness-deferred-then
-       (harness-agent--check-permission session-id tool-name arguments context info)
-       (lambda (decision)
-         (if (harness-agent--allowed-p decision)
-             (progn
-               (when (plist-get decision :always)
-                 (harness-agent--grant-paths session-id decision))
-               (harness-agent--append-tool-entry
-                session-id
-                (list :sessionUpdate "tool_call_update"
-                      :toolCallId tool-call-id
-                      :status "in_progress"))
-               (harness-deferred-then
-                (harness-service-call "tool" 'execute
-                                      :name tool-name
-                                      :arguments arguments
-                                      :context context)
-                (lambda (result)
-                  (harness-deferred-resolve
-                   deferred
-                   (harness-agent--finish-tool session-id key tool-call-id result)))))
+(defun harness-agent--start (session-id blocks)
+  (let* ((session (harness-call 'session/get session-id))
+         (promise (harness-make-promise))
+         (turn (make-harness-agent-turn :session-id session-id :promise promise :started (float-time)))
+         (node (list :kind 'user :content (harness-agent--blocks-text blocks)
+                     :blocks (unless (harness-agent--only-text-p blocks) blocks))))
+    (puthash session-id turn harness-agent--turns)
+    ;; The gate runs first so that an automatic compaction lands before
+    ;; the user's new message, never after it.
+    (harness-then
+     (harness-run-filter-async 'agent/before-turn (list :proceed t) session)
+     (lambda (gate)
+       (when (harness-call 'session/exists-p session-id)
+         (harness-call 'session/append session-id node))
+       (if (not (plist-get gate :proceed))
            (progn
-             (harness-agent--maybe-steer-about-denial session-id info decision)
-             (harness-deferred-resolve
-              deferred
-              (harness-agent--finish-tool
-               session-id key tool-call-id
-               (harness-tool-error-result
-                (format "Permission denied: %s"
-                        (or (plist-get decision :reason) "not allowed")))))))))))
-    deferred))
+             (when (plist-get gate :reason)
+               (harness-call 'session/hint session-id (format "Turn not started: %s" (plist-get gate :reason))))
+             (harness-agent--end turn 'blocked (plist-get gate :reason)))
+         (harness-call 'session/set-status session-id 'running)
+         (harness-emit 'agent/turn-started session-id)
+         (harness-agent--step turn))))
+    promise))
 
-(defun harness-agent--append-tool-entry (session-id entry)
-  "Append a tool transcript ENTRY to SESSION-ID."
-  (harness-service-call "session" 'append :session-id session-id :entry entry))
+;;;; Steps
 
-(defun harness-agent--finish-tool (session-id _key tool-call-id result)
-  "Append the completed tool entry for RESULT on TOOL-CALL-ID."
-  (harness-agent--append-tool-entry
-   session-id
-   (list :sessionUpdate "tool_call_update"
-         :toolCallId tool-call-id
-         :status (if (plist-get result :is-error) "failed" "completed")
-         :content (vector (list :type "content"
-                                :content (list :type "text"
-                                               :text (harness-agent--result-text result))))))
-  result)
+(defun harness-agent--step (turn)
+  "Call the provider once for TURN."
+  (let ((sid (harness-agent-turn-session-id turn)))
+    (cond
+     ((harness-agent-turn-cancelled turn) (harness-agent--end turn 'cancelled))
+     ((>= (harness-agent-turn-steps turn) harness-agent-max-steps)
+      (harness-call 'session/hint sid (format "Stopped after %d steps" harness-agent-max-steps))
+      (harness-agent--end turn 'max-steps))
+     ((not (harness-call 'session/exists-p sid)) (harness-agent--end turn 'error "session deleted"))
+     (t
+      (cl-incf (harness-agent-turn-steps turn))
+      (setf (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil
+            (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil
+            (harness-agent-turn-pending turn) 0 (harness-agent-turn-waiting-done turn) nil
+            (harness-agent-turn-stop-reason turn) nil (harness-agent-turn-error turn) nil)
+      (let* ((session (harness-call 'session/get sid))
+             (request (list :model (plist-get session :model)
+                            :session session
+                            :system (harness-agent--system-prompt session)
+                            :messages (harness-agent--prepare-messages session (harness-call 'session/messages sid))
+                            :tools (if (harness-method-exists-p 'tools/list) (harness-call 'tools/list sid) nil)
+                            :thinking (plist-get session :thinking)
+                            :provider-state (plist-get session :provider-state)
+                            :on-event (lambda (ev) (harness-agent--on-event turn ev)))))
+        (harness-emit 'agent/step-started sid (harness-agent-turn-steps turn))
+        (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
 
-(defun harness-agent--result-text (result)
-  "Flatten tool RESULT content into text."
-  (mapconcat (lambda (block)
-               (let ((content (plist-get block :content)))
-                 (cond
-                  ((and (listp content) (plist-get content :type))
-                   (or (plist-get content :text) (format "%S" content)))
-                  ((vectorp content)
-                   (mapconcat (lambda (inner) (or (plist-get inner :text) ""))
-                              (append content nil) "\n"))
-                  (t (format "%S" (plist-get block :text))))))
-             (append (plist-get result :content) nil) "\n"))
+(defun harness-agent--take-steering (turn)
+  "Return and clear pending steering text for TURN, or nil."
+  (let ((texts (harness-agent-turn-steering turn)))
+    (setf (harness-agent-turn-steering turn) nil)
+    (and texts (string-join texts "\n\n"))))
 
-(defun harness-agent--check-permission (session-id tool-name arguments context info)
-  "Return a deferred permission decision for a tool call."
-  (let ((mode (harness-agent--permission-mode info)))
-    (if (not (harness-service-available-p "permission" 'check))
-        (let ((deferred (harness-deferred-new)))
-          (harness-deferred-resolve deferred (list :decision 'allow))
-          deferred)
-      (let ((deferred (harness-deferred-new)))
-        (harness-deferred-then
-         (harness-service-call
-          "permission" 'check
-          :tool-name tool-name
-          :arguments arguments
-          :context context
-          :cwd (plist-get info :cwd)
-          :additional-directories (plist-get info :additionalDirectories)
-          :permission-mode mode)
-         (lambda (decision)
-           ;; Non-interactive mode never blocks: a denial becomes steering.
-           (if (and (eq mode 'non-interactive)
-                    (not (harness-agent--allowed-p decision)))
-               (harness-deferred-resolve
-                deferred
-                (list :decision 'deny
-                      :reason (concat (or (plist-get decision :reason) "not allowed")
-                                      " The user is away; find a different approach that "
-                                      "respects this restriction and continue the task.")))
-             (harness-deferred-resolve deferred decision)))
-         (lambda (error)
-           (harness-deferred-resolve
-            deferred (list :decision 'deny
-                           :reason (format "Permission check failed: %s"
-                                           (harness-agent--error-message error))))))
-        deferred))))
+(defun harness-agent--on-event (turn ev)
+  (let ((sid (harness-agent-turn-session-id turn)))
+    (pcase (plist-get ev :type)
+      ('start nil)
+      ('text (harness-agent--stream turn 'assistant (plist-get ev :delta)))
+      ('thinking (harness-agent--stream turn 'thinking (plist-get ev :delta)))
+      ('tool-call (harness-agent--tool-call turn ev))
+      ('tool-result nil)
+      ('usage
+       (setf (harness-agent-turn-last-usage turn) ev)
+       (harness-call 'session/usage-add sid
+                     (list :input (plist-get ev :input) :output (plist-get ev :output)
+                           :cache-read (plist-get ev :cache-read) :cache-write (plist-get ev :cache-write)
+                           :cost (plist-get ev :cost) :context (plist-get ev :context))))
+      ('provider-state (harness-call 'session/set-provider-state sid (plist-get ev :state)))
+      ('quota (harness-call 'session/runtime sid :quota (plist-get ev :windows))
+              (harness-emit 'agent/quota sid (plist-get ev :windows)))
+      ('hint (harness-call 'session/hint sid (plist-get ev :text)))
+      ('done
+       (harness-agent--finalize-live turn)
+       (setf (harness-agent-turn-stop-reason turn) (plist-get ev :stop-reason)
+             (harness-agent-turn-error turn) (plist-get ev :error)
+             (harness-agent-turn-waiting-done turn) t)
+       (when (eq (plist-get ev :stop-reason) 'error)
+         (harness-call 'session/hint sid (format "Error: %s" (or (plist-get ev :error) "unknown"))))
+       (harness-agent--maybe-continue turn))
+      (other (harness-log 'debug "agent: unknown provider event %S" other)))))
 
-(defun harness-agent--grant-paths (session-id decision)
-  "Grant the directories of an always-allow DECISION to SESSION-ID."
-  (dolist (path (append (plist-get decision :paths) nil))
-    (harness-service-call "session" 'add-directory
-                          :session-id session-id
-                          :directory (file-name-directory path))))
+(defun harness-agent--stream (turn kind delta)
+  "Append DELTA of KIND (assistant or thinking) to the live node of TURN."
+  (when (and delta (not (string-empty-p delta)))
+    (let* ((sid (harness-agent-turn-session-id turn))
+           (thinking (eq kind 'thinking)))
+      ;; Switching between thinking and text closes the other live node.
+      (if thinking
+          (when (harness-agent-turn-text-node turn) (harness-agent--finalize turn 'assistant))
+        (when (harness-agent-turn-think-node turn) (harness-agent--finalize turn 'thinking)))
+      (let ((node-id (if thinking (harness-agent-turn-think-node turn) (harness-agent-turn-text-node turn))))
+        (if node-id
+            (let ((buf (if thinking (harness-agent-turn-think-buf turn) (harness-agent-turn-text-buf turn))))
+              (setq buf (concat buf delta))
+              (if thinking (setf (harness-agent-turn-think-buf turn) buf) (setf (harness-agent-turn-text-buf turn) buf))
+              (harness-call 'session/update-node sid node-id :content buf :transient t))
+          (let ((node (harness-call 'session/append sid (list :kind kind :content delta))))
+            (setq node-id (plist-get node :id))
+            (if thinking
+                (setf (harness-agent-turn-think-node turn) node-id (harness-agent-turn-think-buf turn) delta)
+              (setf (harness-agent-turn-text-node turn) node-id (harness-agent-turn-text-buf turn) delta))))
+        (harness-emit 'agent/stream sid node-id kind delta)))))
 
-(defun harness-agent--maybe-steer-about-denial (session-id info decision)
-  "In non-interactive sessions, record DENIAL as a steering message."
-  (when (eq (harness-agent--permission-mode info) 'non-interactive)
-    (let ((state (harness-agent--state session-id)))
-      (setf (harness-agent-state-steers state)
-            (append (harness-agent-state-steers state)
-                    (list (list :type "text"
-                                :text (format "Permission was denied: %s"
-                                              (or (plist-get decision :reason)
-                                                  "not allowed")))))))))
+(defun harness-agent--finalize (turn kind)
+  (let* ((sid (harness-agent-turn-session-id turn))
+         (thinking (eq kind 'thinking))
+         (node-id (if thinking (harness-agent-turn-think-node turn) (harness-agent-turn-text-node turn)))
+         (buf (if thinking (harness-agent-turn-think-buf turn) (harness-agent-turn-text-buf turn))))
+    (when node-id
+      (harness-call 'session/update-node sid node-id :content (or buf "")
+                    :meta (list :model (plist-get (harness-call 'session/get sid) :model)
+                                :usage (and (not thinking) (harness-agent-turn-last-usage turn))))
+      (if thinking
+          (setf (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil)
+        (setf (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil)))))
 
-;;; Usage and cost
+(defun harness-agent--finalize-live (turn)
+  (harness-agent--finalize turn 'thinking)
+  (harness-agent--finalize turn 'assistant))
 
-(defun harness-agent--record-usage (session-id model result)
-  "Record usage and cost of RESULT on MODEL for SESSION-ID.
-The per-call delta is also appended to the transcript as a usage_update
-entry (with a timestamp), which is what per-period budgets and the usage
-overview aggregate; it is never sent to the model."
-  (let* ((usage (plist-get result :usage))
-         (input (or (plist-get usage :input-tokens) 0))
-         (output (or (plist-get usage :output-tokens) 0))
-         (cost nil))
-    (when (or (> input 0) (> output 0))
-      (harness-service-call "session" 'add-usage
-                            :session-id session-id
-                            :input input
-                            :output output
-                            :cache-read (or (plist-get usage :cache-read) 0)
-                            :cache-write (or (plist-get usage :cache-write) 0)
-                            :context-used (+ input output)
-                            :context-size (harness-agent--context-size model))
-      (when (harness-service-available-p "provider" 'price)
-        (let ((priced (harness-service-call "provider" 'price :model model :usage usage)))
-          (when (and (listp priced) (numberp (plist-get priced :amount)))
-            (setq cost priced)
-            (harness-service-call "session" 'add-cost
-                                  :session-id session-id
-                                  :amount (plist-get priced :amount)
-                                  :currency (or (plist-get priced :currency) "USD")))))
-      (harness-service-call
-       "session" 'append
-       :session-id session-id
-       :entry (harness-plist-omit-nil
-               (list :sessionUpdate "usage_update"
-                     :model model
-                     :usage (list :input input
-                                  :output output
-                                  :cache-read (or (plist-get usage :cache-read) 0)
-                                  :cache-write (or (plist-get usage :cache-write) 0))
-                     :cost cost))))))
-
-(defun harness-agent--context-size (model)
-  "Return the context window of MODEL from the provider model list."
-  (let ((cached (seq-find (lambda (entry) (equal (plist-get entry :id) model))
-                          (append harness-agent--model-cache nil))))
-    (or (plist-get cached :context-window) 0)))
-
-;;; Compaction
-
-(defun harness-agent--compaction (session-id)
-  "Return SESSION-ID's compaction state, or nil."
-  (let ((state (harness-service-call "session" 'state-all :session-id session-id)))
-    (plist-get state :compaction)))
-
-(defun harness-agent--maybe-compact (session-id)
-  "Start compacting SESSION-ID when it approaches the context window."
-  (let* ((state (harness-agent--state session-id))
-         (info (harness-agent--info session-id))
-         (model (or (plist-get info :model) harness-agent-default-model))
-         (size (harness-agent--context-size model))
-         (used (or (plist-get info :contextUsed) 0)))
-    (when (and (not (harness-agent-state-compacting state))
-               (> size 0)
-               (> used (* harness-agent-compact-threshold size))
-               (harness-service-available-p "provider" 'complete))
-      (setf (harness-agent-state-compacting state) t)
-      (harness-deferred-finally
-       (harness-agent--compact session-id model (harness-agent--entries session-id))
-       (lambda () (setf (harness-agent-state-compacting state) nil))))))
-
-(defun harness-agent--compact (session-id model entries)
-  "Summarize the older part of ENTRIES for SESSION-ID."
-  (let* ((keep harness-agent-compact-keep-entries)
-         (cutoff (max 0 (- (length entries) keep)))
-         (older (seq-subseq (vconcat entries) 0 cutoff)))
-    (if (zerop cutoff)
-        (let ((deferred (harness-deferred-new)))
-          (harness-deferred-resolve deferred nil)
-          deferred)
-      (harness-service-call "session" 'system-hint
-                            :session-id session-id
-                            :text "Compacting the conversation to free context…")
-      (harness-deferred-then
-       (harness-service-call
-        "provider" 'complete
-        (list :model model
-              :system "Summarize this conversation for continuation. Keep decisions, file paths, command results and open questions. Be concise."
-              :messages (harness-provider-messages-from-entries older)
-              :max-output-tokens 2000))
+(defun harness-agent--tool-call (turn ev)
+  (let* ((sid (harness-agent-turn-session-id turn))
+         (name (plist-get ev :name)) (input (plist-get ev :input))
+         (call-id (or (plist-get ev :id) (harness-short-id)))
+         (respond (plist-get ev :respond))
+         (started (float-time)))
+    (harness-agent--finalize-live turn)
+    (setf (harness-agent-turn-hosted turn) (and respond t))
+    (cl-incf (harness-agent-turn-pending turn))
+    (let ((node (harness-call 'session/append sid
+                              (list :kind 'tool-call :tool name :call-id call-id :input input
+                                    :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name)))))
+      (harness-emit 'agent/tool-call sid node)
+      (harness-then
+       (harness-call-async 'tools/execute sid (list :id call-id :name name :input input))
        (lambda (result)
-         (let ((text (plist-get result :text)))
-           (when (and text (not (string-empty-p text)))
-             (harness-service-call "session" 'state-set
-                                   :session-id session-id
-                                   :key 'compaction
-                                   :value (list :up-to (1- cutoff) :text text))
-             (harness-service-call "session" 'system-hint
-                                   :session-id session-id
-                                   :text "Conversation compacted.")))
-         nil)
-       (lambda (error)
-         (harness-log "compaction failed: %S" error)
-         nil)))))
+         (condition-case err
+             (let* ((steer (harness-agent--take-steering turn))
+                    (content (plist-get result :content))
+                    (content (if steer
+                                 (concat content "\n\n<user_message>\n" steer "\n</user_message>")
+                               content))
+                    (rnode (harness-call 'session/append sid
+                                         (list :kind 'tool-result :call-id call-id
+                                               :output (plist-get result :content)
+                                               :is-error (plist-get result :is-error)
+                                               :attachments (plist-get result :attachments)
+                                               :meta (list :duration (- (float-time) started)
+                                                           :denied (plist-get result :denied)
+                                                           :truncated (plist-get result :truncated))))))
+               (harness-emit 'agent/tool-result sid rnode)
+               (when respond
+                 (funcall respond (list :content content :is-error (plist-get result :is-error)))))
+           (error
+            (harness-log 'error "agent: recording result of %s failed: %S" name err)
+            (when respond
+              (funcall respond (list :content (plist-get result :content)
+                                     :is-error (plist-get result :is-error))))))
+         (cl-decf (harness-agent-turn-pending turn))
+         (harness-agent--maybe-continue turn))
+       (lambda (err)
+         (let ((msg (format "Tool %s failed: %s" name (harness-error-message err))))
+           (ignore-errors
+             (harness-call 'session/append sid (list :kind 'tool-result :call-id call-id :output msg :is-error t)))
+           (when respond (funcall respond (list :content msg :is-error t)))
+           (cl-decf (harness-agent-turn-pending turn))
+           (harness-agent--maybe-continue turn)))))))
 
-;;; Finishing and queueing
+(defun harness-agent--maybe-continue (turn)
+  "Decide what happens once the provider is done and no tools are running."
+  (when (and (harness-agent-turn-waiting-done turn)
+             (zerop (harness-agent-turn-pending turn)))
+    (setf (harness-agent-turn-waiting-done turn) nil)
+    (let ((sid (harness-agent-turn-session-id turn))
+          (reason (harness-agent-turn-stop-reason turn)))
+      (pcase reason
+        ((or 'tool-use (and 'end-turn (guard (harness-agent-turn-steering turn))))
+         (if (harness-agent-turn-cancelled turn)
+             (harness-agent--end turn 'cancelled)
+           (harness-then
+            (harness-run-filter-async 'agent/step (list :proceed t) (harness-call 'session/get sid))
+            (lambda (gate)
+              (if (plist-get gate :proceed)
+                  (harness-agent--step turn)
+                (when (plist-get gate :reason) (harness-call 'session/hint sid (plist-get gate :reason)))
+                (harness-agent--end turn 'blocked (plist-get gate :reason)))))))
+        ('end-turn (harness-agent--end turn 'end-turn))
+        ('max-tokens (harness-call 'session/hint sid "The model hit its output limit.")
+                     (harness-agent--end turn 'max-tokens))
+        ('cancelled (harness-agent--end turn 'cancelled))
+        ('error (harness-agent--end turn 'error (harness-agent-turn-error turn)))
+        (_ (harness-agent--end turn (or reason 'end-turn)))))))
 
-(defun harness-agent--finish-turn (session-id turn stop-reason)
-  "Finish TURN with STOP-REASON, then start any queued turn."
-  (when (harness-agent-turn-running turn)
-    (setf (harness-agent-turn-running turn) nil)
-    (let ((state (harness-agent--state session-id)))
-      (setf (harness-agent-state-turn state) nil)
-      (cl-incf (harness-agent-state-turns state))
-      (harness-agent--maybe-auto-name session-id state)
-      (harness-service-call "session" 'state-set
-                            :session-id session-id
-                            :key 'last-turn-at
-                            :value (float-time))
-      (harness-service-call "session" 'set-status :session-id session-id :status "idle")
-      (harness-emit 'agent-turn-finished :session-id session-id :stop-reason stop-reason)
-      (harness-deferred-resolve (harness-agent-turn-deferred turn) stop-reason)
-      (let ((queue (harness-agent-state-queue state)))
-        (when queue
-          (setf (harness-agent-state-queue state) nil)
-          (let ((blocks (vconcat (seq-mapcat (lambda (entry) (append (car entry) nil))
-                                             queue)))
-                (deferreds (mapcar #'cdr queue)))
-            (harness-deferred-then
-             (harness-agent--start-turn session-id blocks)
-             (lambda (reason)
-               (dolist (deferred deferreds)
-                 (harness-deferred-resolve deferred reason))))))))))
+(defun harness-agent--end (turn reason &optional error)
+  (let ((sid (harness-agent-turn-session-id turn)))
+    (when (eq (gethash sid harness-agent--turns) turn)
+      (remhash sid harness-agent--turns)
+      (when (harness-call 'session/exists-p sid)
+        (harness-call 'session/usage-add sid (list :turns 1))
+        (let ((session (harness-call 'session/get sid)))
+          (unless (eq (plist-get session :status) 'inactive)
+            (harness-call 'session/set-status sid (if (plist-get session :pending) 'blocked 'idle)))))
+      (harness-emit 'agent/turn-ended sid reason)
+      (harness-resolve (harness-agent-turn-promise turn)
+                       (list :stop-reason reason :error error
+                             :duration (- (float-time) (harness-agent-turn-started turn))))
+      (when (and (eq reason 'end-turn)
+                 (harness-call 'session/exists-p sid)
+                 (plist-get (harness-call 'session/get sid) :queue))
+        (harness-run-soon #'harness-call 'agent/send-queue sid)))))
 
-(defun harness-agent--maybe-auto-name (session-id state)
-  "Name SESSION-ID automatically after its first completed turn.
-The naming call reuses the conversation as a prefix, so the provider's
-prompt cache usually covers it."
-  (when (and (not (harness-agent-state-named state))
-             (= (harness-agent-state-turns state) 1)
-             (harness-service-available-p "provider" 'complete))
-    (setf (harness-agent-state-named state) t)
-    (let ((info (harness-agent--info session-id)))
-      (when (null (plist-get info :title))
-        (let ((model (or (plist-get info :model) harness-agent-default-model)))
-          (when model
-            (harness-agent--system-hint session-id "Naming this conversation…"
-                                        nil "auto-name")
-            (harness-deferred-then
-             (harness-service-call
-              "provider" 'complete
-              (list :model model
-                    :system (concat "Suggest a short title for this conversation. "
-                                    "Reply with the title only: three to six words, no quotes, no punctuation at the end.")
-                    :messages (harness-agent--messages session-id)
-                    :max-output-tokens 40))
-             (lambda (result)
-               (let ((title (harness-agent--clean-title (plist-get result :text))))
-                 ;; The rename triggers a session info update, which the UI
-                 ;; shows in its header; retire the transient hint.
-                 (when title
-                   (harness-service-call "session" 'rename
-                                         :session-id session-id :title title))
-                 (harness-agent--system-hint session-id "" nil "auto-name")))
-             (lambda (error)
-               (harness-log "auto-naming failed: %S" error)
-               (harness-agent--system-hint session-id "" nil "auto-name")))))))))
+;;;; Cancel and queue
 
-(defun harness-agent--clean-title (text)
-  "Turn a model reply TEXT into a usable session title."
-  (when (and text (not (string-empty-p (string-trim text))))
-    (let ((title (string-trim
-                  (car (split-string (string-trim text) "\n")))))
-      ;; Models like to answer with headings, bullets or quotes.
-      (setq title (replace-regexp-in-string "\\`[#>*+-]+[ \t]*" "" title))
-      (setq title (string-trim title " \t\n\"'“”‘’*_`#"))
-      (setq title (replace-regexp-in-string "[ \t]+" " " title))
-      (when (> (length title) 72)
-        (setq title (concat (substring title 0 69) "…")))
-      (unless (string-empty-p title) title))))
-
-(defun harness-agent-cancel (&rest args)
-  "Cancel the running turn of :session-id, if any."
-  (let* ((session-id (plist-get args :session-id))
-         (turn (harness-agent--turn session-id)))
+(harness-defmethod agent/cancel (session-id)
+  "Cancel the running turn of SESSION-ID, if any."
+  (let ((turn (gethash session-id harness-agent--turns)))
     (when turn
       (setf (harness-agent-turn-cancelled turn) t)
-      (harness-deferred-cancel (harness-agent-turn-abort turn) "cancelled")
-      (harness-agent--close-streams session-id turn)
-      (harness-agent--finish-turn session-id turn "cancelled"))
-    nil))
+      (let ((cancel (plist-get (harness-agent-turn-handle turn) :cancel)))
+        (when cancel (ignore-errors (funcall cancel))))
+      (run-at-time harness-agent-cancel-grace nil
+                   (lambda () (when (eq (gethash session-id harness-agent--turns) turn)
+                                (harness-agent--finalize-live turn)
+                                (harness-agent--end turn 'cancelled))))
+      t)))
 
-(defun harness-agent-steer (&rest args)
-  "Add steering text to the running turn, or start a turn with it."
-  (let* ((session-id (plist-get args :session-id))
-         (text (plist-get args :text)))
-    (if (harness-agent--turn session-id)
-        (let ((state (harness-agent--state session-id)))
-          (setf (harness-agent-state-steers state)
-                (append (harness-agent-state-steers state)
-                        (list (list :type "text" :text text))))
-          nil)
-      (harness-agent-prompt :session-id session-id
-                            :prompt (vector (list :type "text" :text text))))))
+(harness-defmethod agent/send-queue (session-id)
+  "Send every queued message of SESSION-ID as one turn; return its promise."
+  (let ((items (harness-call 'session/queue-take session-id)))
+    (if (null items)
+        (harness-resolved (list :stop-reason 'nothing-queued))
+      (let ((blocks (cl-loop for it in items
+                             append (cons (list :type "text" :text (plist-get it :text))
+                                          (harness-agent-attachments-to-blocks (plist-get it :attachments))))))
+        (harness-call 'agent/prompt session-id blocks)))))
 
-;;; Configuration
+(harness-defmethod agent/running (&optional session-id)
+  "Return running session ids, or non-nil when SESSION-ID is running."
+  (if session-id
+      (harness-agent-running-p session-id)
+    (let (out) (maphash (lambda (k _) (push k out)) harness-agent--turns) out)))
 
-(defun harness-agent-configuration (&rest args)
-  "Return the complete configuration state for :session-id."
-  (let* ((session-id (plist-get args :session-id))
-         (info (harness-service-call "session" 'info :session-id session-id))
-         (session-configuration (harness-service-call "session" 'configuration
-                                                      :session-id session-id))
-         (options (append (plist-get session-configuration :configOptions) nil))
-         (models (or harness-agent--model-cache [])))
-    (when (> (length models) 0)
-      (setq options (cons (harness-agent--model-option models (plist-get info :model))
-                          (seq-remove (lambda (option) (equal (plist-get option :id) "model"))
-                                      options))))
-    (when-let* ((thinking (harness-agent--thinking-option info models)))
-      (setq options (append options (list thinking))))
-    (list :configOptions (vconcat options))))
+(dolist (ev '((agent/turn-started . "(SESSION-ID)") (agent/turn-ended . "(SESSION-ID REASON)")
+              (agent/step-started . "(SESSION-ID STEP)")
+              (agent/stream . "(SESSION-ID NODE-ID KIND DELTA)")
+              (agent/tool-call . "(SESSION-ID NODE)") (agent/tool-result . "(SESSION-ID NODE)")
+              (agent/steered . "(SESSION-ID)") (agent/quota . "(SESSION-ID WINDOWS)")))
+  (harness-declare-event (car ev) (cdr ev)))
 
-(defun harness-agent--thinking-option (info models)
-  "Build the thinking level option when INFO's model supports one."
-  (let ((model (seq-find (lambda (entry)
-                           (equal (plist-get entry :id) (plist-get info :model)))
-                         (append models nil))))
-    (when (and model (plist-get model :thinking))
-      (list :id "thinking" :name "Thinking" :category "thought_level"
-            :type "select"
-            :currentValue (or (plist-get info :thinking) "medium")
-            :options (vector (list :value "low" :name "Low"
-                                   :description "Faster answers, less deliberation")
-                             (list :value "medium" :name "Medium")
-                             (list :value "high" :name "High"
-                                   :description "Deeper reasoning, slower answers"))))))
-
-(defun harness-agent--model-option (models current)
-  "Build the model config option from MODELS with CURRENT selected."
-  (list :id "model" :name "Model" :category "model" :type "select"
-        :currentValue (or current "")
-        :options
-        (vconcat
-         (mapcar (lambda (model)
-                   (list :value (plist-get model :id)
-                         :name (let ((name (or (plist-get model :name)
-                                               (plist-get model :id)))
-                                     (provider (plist-get model :provider)))
-                                 (if (and provider
-                                          (not (string-prefix-p (concat provider "/") name)))
-                                     (format "%s (%s)" name provider)
-                                   name))))
-                 (append models nil)))))
-
-(defun harness-agent-set-config (&rest args)
-  "Set :config-id to :value for :session-id and return the configuration."
-  (let ((session-id (plist-get args :session-id)))
-    (harness-service-call "session" 'set-config
-                          :session-id session-id
-                          :config-id (plist-get args :config-id)
-                          :value (plist-get args :value))
-    (harness-agent-configuration :session-id session-id)))
-
-(defun harness-agent-set-mode (&rest args)
-  "Set the session mode."
-  (let ((session-id (plist-get args :session-id)))
-    (harness-service-call "session" 'set-mode
-                          :session-id session-id
-                          :mode-id (plist-get args :mode-id))
-    (harness-agent-configuration :session-id session-id)))
-
-(defun harness-agent-refresh-models ()
-  "Refresh the cached model list."
-  (interactive)
-  (setq harness-agent--model-cache nil)
-  (harness-agent--ensure-models)
-  harness-agent--model-cache)
-
-;;; Events and service
-
-(defun harness-agent-ask-tool (arguments context)
-  "Tool handler: ask the user a question through the UI."
-  (let ((session-id (harness-tool-context-session-id context))
-        (question (plist-get arguments :question)))
-    (if (null harness-agent-question-function)
-        (harness-tool-error-result
-         "No user is available to answer questions; decide for yourself or continue.")
-      (progn
-        (harness-agent--set-status session-id "blocked")
-        (harness-deferred-then
-         (funcall harness-agent-question-function
-                  (harness-plist-omit-nil
-                   (list :session-id session-id
-                         :question question
-                         :options (let ((options (plist-get arguments :options)))
-                                    (when (and options (> (length options) 0)) options))
-                         :freeform (plist-get arguments :freeform))))
-         (lambda (answer)
-           (harness-agent--set-status session-id "running")
-           (if (and answer (not (string-empty-p answer)))
-               (format "The user answered: %s" answer)
-             "The user dismissed the question without answering."))
-         (lambda (error)
-           (harness-agent--set-status session-id "running")
-           (harness-tool-error-result
-            (format "Asking the user failed: %s" (harness-agent--error-message error)))))))))
-
-(defun harness-agent--set-status (session-id status)
-  "Set SESSION-ID's status through the session service."
-  (when (and session-id (harness-service-available-p "session" 'set-status))
-    (ignore-errors
-      (harness-service-call "session" 'set-status :session-id session-id :status status))))
-
-(defun harness-agent-setup ()
-  "Set up the agent module."
-  (harness-event-define 'agent-error
-    :module 'harness-agent
-    :doc "A model call failed."
-    :payload '((session-id . string) (message . string)))
-  (harness-event-define 'agent-turn-finished
-    :module 'harness-agent
-    :doc "A prompt turn ended."
-    :payload '((session-id . string) (stop-reason . string)))
-  (harness-service-register
-   "agent"
-   :module 'harness-agent
-   :doc "Prompt turns, tool execution and session configuration."
-   :methods '((prompt . harness-agent-prompt)
-              (cancel . harness-agent-cancel)
-              (steer . harness-agent-steer)
-              (configuration . harness-agent-configuration)
-              (set-config . harness-agent-set-config)
-              (set-mode . harness-agent-set-mode)
-              (refresh-models . harness-agent-refresh-models)))
-  (harness-tool-register
-   "ask"
-   :description "Ask the user a question and wait for their answer. Use sparingly, when the task truly needs human input."
-   :schema '(:type "object"
-             :properties (:question (:type "string")
-                          :options (:type "array" :description "Suggested answers.")
-                          :freeform (:type "boolean" :description "Allow a free-form answer."))
-             :required ["question"])
-   :kind 'think
-   :handler #'harness-agent-ask-tool))
-
-(defun harness-agent-teardown ()
-  "Tear down the agent module."
-  (maphash (lambda (_id state)
-             (when-let* ((turn (harness-agent-state-turn state)))
-               (harness-deferred-cancel (harness-agent-turn-abort turn) "teardown")))
-           harness-agent--sessions)
-  (clrhash harness-agent--sessions)
-  (setq harness-agent--model-cache nil))
-
-(harness-module-define 'harness-agent
-  :version harness-version
-  :description "Prompt turns, tool loop, queueing and compaction."
-  :requires '((harness-core "0.1.0")
-              (harness-tools "0.1.0")
-              (harness-provider "0.1.0"))
-  :provides '(harness-agent)
-  :setup #'harness-agent-setup
-  :teardown #'harness-agent-teardown)
+(harness-define-module 'agent
+  :doc "The turn loop: prompt, stream, run tools, steer, queue."
+  :requires '(session provider tools))
 
 (provide 'harness-agent)
 ;;; harness-agent.el ends here

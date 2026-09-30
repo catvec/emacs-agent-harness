@@ -1,364 +1,397 @@
-;;; harness-acp-test.el --- Tests for ACP protocol and transports -*- lexical-binding: t; -*-
+;;; harness-acp-test.el --- Tests for the ACP local transport  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
+;; Drives the in-process ACP connection end to end against the real
+;; state layer with the demo provider: standard methods, streaming
+;; updates, extension calls, error codes, wire normalisation and the
+;; permission / ask-user round trips.
+
 ;;; Code:
 
-(require 'ert)
-(require 'harness-core)
-(require 'harness-acp)
-(require 'harness-acp-inprocess)
 (require 'harness-test-helpers)
+(require 'harness-acp)
 
-(harness-module-load 'harness-acp)
+(defvar harness-acp-test-messages nil
+  "Every (METHOD PARAMS RESPOND) the primary connection's handler received, newest first.")
 
-;; Declare the events the ACP bridges watch for.  In the full harness the
-;; session module declares these; these unit tests do not load it.
-(harness-event-define 'session-entry-added :module 'harness-acp-test)
-(harness-event-define 'session-info-updated :module 'harness-acp-test)
-(harness-event-define 'session-config-changed :module 'harness-acp-test)
-(harness-event-define 'session-usage-changed :module 'harness-acp-test)
-(harness-event-define 'session-status-changed :module 'harness-acp-test)
-(harness-event-define 'session-created :module 'harness-acp-test)
-(harness-event-define 'session-deleted :module 'harness-acp-test)
+(defmacro harness-acp-test-with (&rest body)
+  "Load the state layer, the demo provider and the ACP module, then run BODY."
+  (declare (indent 0))
+  `(harness-test-with-temp-state
+     (harness-test-reset-bus)
+     (let ((harness-acp-server-enabled nil))
+       (dolist (m '(store project config provider provider-demo tools session agent acp))
+         (harness-test-load-module m)))
+     (clrhash harness-sessions)
+     (clrhash harness-tools)
+     (clrhash harness-agent--turns)
+     (setq harness-acp--clients nil
+           harness-acp-test-messages nil)
+     (let ((harness-provider-demo-delay 0.005)
+           (harness-acp-token nil)
+           (default-directory dir))
+       (harness-add-filter 'permission/decide
+                           (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
+       (harness-define-tool "list_dir" :description "list" :kind 'read
+                            :handler (lambda (input _ctx) (format "listing of %s" (plist-get input :path))))
+       (unwind-protect
+           (progn ,@body)
+         (dolist (c (copy-sequence harness-acp--clients))
+           (harness-acp--drop-client c))))))
 
-(defun harness-acp-test--pair ()
-  "Return a fresh (AGENT . CLIENT) in-process pair."
-  (let ((pair (harness-acp-inprocess-pair)))
-    (harness-acp-connection-register-method
-     (car pair) "test/echo"
-     (lambda (_connection params) (list :echo (plist-get params :value))))
-    (harness-acp-connection-register-method
-     (car pair) "test/notify"
-     (lambda (_connection params) (setq harness-acp-test--notified params)))
-    (harness-acp-connection-register-method
-     (car pair) "test/deferred"
-     (lambda (_connection _params)
-       (let ((deferred (harness-deferred-new)))
-         (run-at-time 0.01 nil (lambda () (harness-deferred-resolve deferred :later)))
-         deferred)))
-    (harness-acp-connection-register-method
-     (car pair) "test/signal"
-     (lambda (_connection _params) (error "handler exploded")))
-    (harness-acp-connection-register-method
-     (car pair) "test/protocol-error"
-     (lambda (_connection _params)
-       (signal 'harness-acp-error (list -32602 "bad params" '(:field "x")))))
-    pair))
+(defun harness-acp-test-connect ()
+  "Return a local connection whose handler records into `harness-acp-test-messages'."
+  (let ((conn (harness-acp-connect)))
+    (harness-acp-set-handler conn (lambda (method params respond)
+                                    (push (list method params respond) harness-acp-test-messages)))
+    conn))
 
-(defvar harness-acp-test--notified nil)
+(defun harness-acp-test-request (conn method params)
+  "Await the result of METHOD with PARAMS over CONN."
+  (harness-test-await (harness-acp-request conn method params)))
 
-(ert-deftest harness-acp-request-response ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (result nil))
-    (harness-deferred-then
-     (harness-acp-connection-request client "test/echo" (list :value 41))
-     (lambda (value) (setq result value)))
-    (should (equal result '(:echo 41)))))
+(defun harness-acp-test-error (conn method params)
+  "Return the (CODE MESSAGE DATA) rejection of METHOD with PARAMS over CONN."
+  (condition-case err
+      (progn (harness-acp-test-request conn method params) nil)
+    (acp-error (cdr err))))
 
-(ert-deftest harness-acp-notification ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair)))
-    (setq harness-acp-test--notified nil)
-    (harness-acp-connection-notify client "test/notify" (list :value "hey"))
-    (should (equal harness-acp-test--notified '(:value "hey")))))
+(defun harness-acp-test-updates (&optional messages)
+  "Return the session/update objects in MESSAGES (default the primary log), oldest first."
+  (let (out)
+    (dolist (m (or messages harness-acp-test-messages) out)
+      (when (equal (car m) "session/update")
+        (push (plist-get (cadr m) :update) out)))))
 
-(ert-deftest harness-acp-method-not-found ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (error-seen nil))
-    (harness-deferred-then
-     (harness-acp-connection-request client "test/absent" nil)
-     nil
-     (lambda (error) (setq error-seen error)))
-    (should (eq (car error-seen) 'harness-acp-error))
-    (should (eq (nth 0 (cdr error-seen)) -32601))))
+(defun harness-acp-test-kinds (&optional messages)
+  "Return the sessionUpdate kinds seen, oldest first."
+  (mapcar (lambda (u) (plist-get u :sessionUpdate)) (harness-acp-test-updates messages)))
 
-(ert-deftest harness-acp-handler-error-is-internal-error ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (error-seen nil))
-    (harness-deferred-then
-     (harness-acp-connection-request client "test/signal" nil)
-     nil
-     (lambda (error) (setq error-seen error)))
-    (should (eq (nth 0 (cdr error-seen)) -32603))))
+(defun harness-acp-test-new-session (conn)
+  "Create a demo session over CONN and return its id."
+  (plist-get (harness-acp-test-request conn "session/new"
+                                       (list :cwd (harness-test-temp-dir)
+                                             :_harness (list :model "demo:scripted")))
+             :sessionId))
 
-(ert-deftest harness-acp-protocol-error-passthrough ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (error-seen nil))
-    (harness-deferred-then
-     (harness-acp-connection-request client "test/protocol-error" nil)
-     nil
-     (lambda (error) (setq error-seen error)))
-    (should (eq (nth 0 (cdr error-seen)) -32602))
-    (should (equal (nth 1 (cdr error-seen)) "bad params"))
-    (should (equal (nth 2 (cdr error-seen)) '(:field "x")))))
+(defun harness-acp-test-prompt (conn sid text)
+  "Prompt session SID with TEXT over CONN and return the result."
+  (harness-acp-test-request conn "session/prompt"
+                            (list :sessionId sid :prompt (list (list :type "text" :text text)))))
 
-(ert-deftest harness-acp-deferred-handler ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (result nil))
-    (harness-deferred-then
-     (harness-acp-connection-request client "test/deferred" nil)
-     (lambda (value) (setq result value)))
-    (should (harness-test-wait-for (lambda () (equal result :later))))))
+;;;; Handshake and session lifecycle
 
-(ert-deftest harness-acp-timeout ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (agent (car pair))
-         (error-seen nil))
-    (harness-acp-connection-register-method
-     agent "test/never"
-     (lambda (_connection _params) (harness-deferred-new)))
-    (let ((deferred (harness-acp-connection-request client "test/never" nil :timeout 0.05)))
-      (harness-deferred-then deferred nil (lambda (error) (setq error-seen error)))
-      (should (harness-test-settle deferred))
-      (should (eq (car error-seen) 'harness-acp-error))
-      (should (eq (nth 0 (cdr error-seen)) -32603)))))
+(ert-deftest harness-acp-local-initialize ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (r (harness-test-await (harness-acp-initialize conn))))
+      (should (harness-acp-connection-p conn))
+      (should (harness-acp-connected-p conn))
+      (should-not (harness-acp-connection-address conn))
+      (should (= 1 (plist-get r :protocolVersion)))
+      (should (equal "emacs-agent-harness" (plist-get (plist-get r :agentInfo) :name)))
+      (should (eq t (plist-get (plist-get r :agentCapabilities) :loadSession)))
+      (let ((methods (plist-get (plist-get r :_harness) :methods)))
+        (should (member "session/list" methods))
+        (should (member "agent/prompt" methods))
+        (should (member "harness/api" methods))
+        (should-not (member "store/save" methods))
+        (should-not (member "acp/stop" methods)))
+      (should (member "session/node-added" (plist-get (plist-get r :_harness) :events)))
+      (should (equal '(:running :false) (seq-take (harness-call 'acp/status) 2))))))
 
-(ert-deftest harness-acp-close-rejects-pending ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (agent (car pair))
-         (error-seen nil))
-    (harness-acp-connection-register-method
-     agent "test/never" (lambda (_connection _params) (harness-deferred-new)))
-    (let ((deferred (harness-acp-connection-request client "test/never" nil)))
-      (harness-deferred-then deferred nil (lambda (error) (setq error-seen error)))
-      (harness-acp-connection-close agent "gone")
-      (should (eq (car error-seen) 'harness-acp-closed)))))
+(ert-deftest harness-acp-local-session-new-prompt-streams ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (r (harness-acp-test-request conn "session/new"
+                                        (list :cwd (harness-test-temp-dir)
+                                              :_harness (list :model "demo:scripted" :name "Tour"))))
+           (sid (plist-get r :sessionId)))
+      (should (stringp sid))
+      (should (equal "ask" (plist-get (plist-get r :modes) :currentModeId)))
+      (should (equal '("ask" "accept-edits" "auto" "yolo")
+                     (mapcar (lambda (m) (plist-get m :id)) (plist-get (plist-get r :modes) :availableModes))))
+      (should (equal "Tour" (plist-get (harness-call 'session/get sid) :name)))
+      (should (equal "demo:scripted" (plist-get (harness-call 'session/get sid) :model)))
+      (let ((result (harness-acp-test-prompt conn sid "give me the tour")))
+        (should (equal "end_turn" (plist-get result :stopReason)))
+        (should (equal "end-turn" (plist-get (plist-get result :_harness) :reason))))
+      ;; The debounced session push and the queued notifications land shortly after.
+      (harness-test-wait (lambda () (cl-some (lambda (u) (and (equal (plist-get u :sessionUpdate) "_harness/session")
+                                                              (equal "idle" (plist-get (plist-get u :session) :status))))
+                                             (harness-acp-test-updates)))
+                         5 "_harness/session idle")
+      (let* ((kinds (harness-acp-test-kinds))
+             (pos (lambda (k &optional from-end)
+                    (if from-end (cl-position k kinds :test #'equal :from-end t)
+                      (cl-position k kinds :test #'equal)))))
+        (dolist (k '("agent_thought_chunk" "agent_message_chunk" "tool_call" "tool_call_update"
+                     "_harness/node" "_harness/session" "user_message_chunk"))
+          (should (member k kinds)))
+        (should (< (funcall pos "user_message_chunk") (funcall pos "agent_thought_chunk")))
+        (should (< (funcall pos "agent_thought_chunk") (funcall pos "agent_message_chunk")))
+        (should (< (funcall pos "agent_message_chunk") (funcall pos "tool_call")))
+        (should (< (funcall pos "tool_call") (funcall pos "tool_call_update")))
+        (should (< (funcall pos "tool_call_update") (funcall pos "agent_message_chunk" t))))
+      (let* ((updates (harness-acp-test-updates))
+             (call (cl-find "tool_call" updates :key (lambda (u) (plist-get u :sessionUpdate)) :test #'equal))
+             (done (cl-find "tool_call_update" updates :key (lambda (u) (plist-get u :sessionUpdate)) :test #'equal))
+             (thought (cl-find "agent_thought_chunk" updates :key (lambda (u) (plist-get u :sessionUpdate)) :test #'equal)))
+        (should (equal "demo-1" (plist-get call :toolCallId)))
+        (should (equal "read" (plist-get call :kind)))
+        (should (equal "in_progress" (plist-get call :status)))
+        (should (stringp (plist-get call :title)))
+        (should (stringp (plist-get (plist-get call :_harness) :nodeId)))
+        (should (equal "demo-1" (plist-get done :toolCallId)))
+        (should (equal "completed" (plist-get done :status)))
+        (should (string-match-p "listing of" (plist-get done :rawOutput)))
+        (should (equal "text" (plist-get (plist-get (car (plist-get done :content)) :content) :type)))
+        (should (equal "text" (plist-get (plist-get thought :content) :type)))
+        (should (string-match-p "tour" (plist-get (plist-get thought :content) :text))))
+      ;; Every session/update names the session; the user node arrived as a wire-shaped node.
+      (dolist (m harness-acp-test-messages)
+        (when (equal (car m) "session/update")
+          (should (equal sid (plist-get (cadr m) :sessionId)))))
+      (let ((first-node (cl-find "_harness/node" (harness-acp-test-updates)
+                                 :key (lambda (u) (plist-get u :sessionUpdate)) :test #'equal)))
+        (should (equal "user" (plist-get (plist-get first-node :node) :kind))))
+      ;; Bus events are forwarded as _harness/event.
+      (let ((events (mapcar (lambda (m) (plist-get (cadr m) :event))
+                            (cl-remove-if-not (lambda (m) (equal (car m) "_harness/event")) harness-acp-test-messages))))
+        (should (member "session/created" events))
+        (should (member "agent/turn-started" events))
+        (should (member "agent/turn-ended" events))
+        (should-not (member "session/node-added" events)))
+      (let ((ended (cl-find-if (lambda (m) (and (equal (car m) "_harness/event")
+                                                (equal "agent/turn-ended" (plist-get (cadr m) :event))))
+                               harness-acp-test-messages)))
+        (should (equal (list sid "end-turn") (plist-get (cadr ended) :args)))))))
 
-(ert-deftest harness-acp-unknown-response-ignored ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair)))
-    (harness-acp-connection-receive
-     client (list :jsonrpc "2.0" :id 99999 :result (make-hash-table)))
-    (should t)))
+(ert-deftest harness-acp-local-cancel ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (harness-provider-demo-delay 0.2)
+           (p (harness-acp-request conn "session/prompt"
+                                   (list :sessionId sid :prompt (list (list :type "text" :text "tour"))))))
+      (harness-test-wait (lambda () (harness-agent-running-p sid)))
+      (harness-acp-notify conn "session/cancel" (list :sessionId sid))
+      (should (equal "cancelled" (plist-get (harness-test-await p) :stopReason)))
+      (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
 
-(ert-deftest harness-acp-json-round-trip ()
-  (let* ((message (harness-acp-request-message
-                   1 "session/prompt"
-                   (list :sessionId "s1"
-                         :prompt (vector (list :type "text" :text "hi\nthere"))
-                         :flag t
-                         :no :false)))
-         (parsed (harness-acp-parse (harness-acp-serialize message))))
-    (should (equal (plist-get parsed :method) "session/prompt"))
-    (should (equal (plist-get (plist-get parsed :params) :sessionId) "s1"))
-    (should (equal (aref (plist-get (plist-get parsed :params) :prompt) 0)
-                   '(:type "text" :text "hi\nthere")))
-    (should (harness-acp-json-true-p (plist-get (plist-get parsed :params) :flag)))
-    (should (eq (plist-get (plist-get parsed :params) :no) :false))))
+(ert-deftest harness-acp-local-set-mode-and-model ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (should (null (harness-acp-test-request conn "session/set_mode" (list :sessionId sid :modeId "accept-edits"))))
+      (should (eq 'accept-edits (plist-get (harness-call 'session/get sid) :permission-mode)))
+      (harness-test-wait (lambda () (member "current_mode_update" (harness-acp-test-kinds))))
+      (let ((u (cl-find "current_mode_update" (harness-acp-test-updates)
+                        :key (lambda (u) (plist-get u :sessionUpdate)) :test #'equal)))
+        (should (equal "accept-edits" (plist-get u :currentModeId))))
+      (should (= -32602 (car (harness-acp-test-error conn "session/set_mode" (list :sessionId sid :modeId "chaos")))))
+      (harness-acp-test-request conn "session/set_model" (list :sessionId sid :modelId "demo:other"))
+      (should (equal "demo:other" (plist-get (harness-call 'session/get sid) :model))))))
 
-(ert-deftest harness-acp-plist-omit-nil ()
-  (should (equal (harness-acp-plist-omit-nil '(:a 1 :b nil :c :false))
-                 '(:a 1 :c :false))))
+(ert-deftest harness-acp-local-load-replays-transcript ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (harness-acp-test-prompt conn sid "give me the tour")
+      (let* ((seen nil)
+             (other (harness-acp-connect)))
+        (harness-acp-set-handler other (lambda (method params _respond) (push (list method params) seen)))
+        (should (null (harness-acp-test-request other "session/load" (list :sessionId sid))))
+        (let* ((nodes (harness-call 'session/nodes sid))
+               (kinds (harness-acp-test-kinds seen)))
+          (should (equal '(user thinking assistant tool-call tool-result assistant)
+                         (mapcar (lambda (n) (plist-get n :kind)) nodes)))
+          (should (equal '("user_message_chunk" "_harness/node"
+                           "agent_thought_chunk" "_harness/node"
+                           "agent_message_chunk" "_harness/node"
+                           "tool_call" "_harness/node"
+                           "tool_call_update" "_harness/node"
+                           "agent_message_chunk" "_harness/node"
+                           "_harness/session")
+                         kinds))
+          (let ((chunk (nth 4 (harness-acp-test-updates seen))))
+            (should (string-match-p "look at the project" (plist-get (plist-get chunk :content) :text)))))
+        (harness-acp-close other)))))
 
-;;; Agent method table against fake services
+;;;; Extension methods
 
-(defvar harness-acp-test--sessions nil)
+(ert-deftest harness-acp-local-extension-calls ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (should (equal (list sid) (mapcar (lambda (s) (plist-get s :id))
+                                        (harness-acp-test-request conn "_harness/session/list" nil))))
+      ;; Enum values arrive as strings and are interned before the bus sees them.
+      (should (= 1 (length (harness-acp-test-request conn "_harness/session/list" '(:filter (:status "idle"))))))
+      (should (= 0 (length (harness-acp-test-request conn "_harness/session/list" '(:filter (:status "running"))))))
+      (should (equal sid (plist-get (harness-acp-test-request conn "_harness/session/get" (list :id sid)) :id)))
+      ;; Explicit positional form.
+      (should (equal sid (plist-get (harness-acp-test-request conn "_harness/session/get" (list :args (list sid))) :id)))
+      ;; &rest plist mapping: every remaining key goes to the method's plist.
+      (let ((s (harness-acp-test-request conn "_harness/session/update" (list :id sid :name "Renamed" :silent t))))
+        (should (equal "Renamed" (plist-get s :name)))
+        (should (equal "Renamed" (plist-get (harness-call 'session/get sid) :name))))
+      ;; camelCase keys map onto kebab-case argument names.
+      (let ((tools (harness-acp-test-request conn "_harness/tools/list" (list :sessionId sid))))
+        (should (equal '("list_dir") (mapcar (lambda (tl) (plist-get tl :name)) tools)))
+        (should (equal "read" (plist-get (car tools) :kind))))
+      (let ((api (harness-acp-test-request conn "_harness/harness/api" nil)))
+        (should (member "session/get" (mapcar (lambda (m) (plist-get m :name)) (plist-get api :methods))))
+        (should (cl-every #'stringp (plist-get api :filters))))
+      (should (equal harness-version (plist-get (harness-acp-test-request conn "_harness/harness/version" nil) :version)))
+      (should (eq t (plist-get (harness-acp-test-request conn "_harness/agent/prompt"
+                                                          (list :sessionId sid :blocks "hello" :opts '(:queue t)))
+                               :queued)))
+      (should (= 1 (length (plist-get (harness-call 'session/get sid) :queue)))))))
 
-(defun harness-acp-test--install-fakes ()
-  "Install minimal session and agent services for the protocol tests."
-  (setq harness-acp-test--sessions nil)
-  (harness-service-register
-   "session"
-   :module 'harness-acp-test
-   :doc "Fake session service."
-   :methods
-   (list
-    (cons 'create
-          (lambda (&rest args)
-            (let ((session (list :sessionId "sess-1"
-                                 :cwd (plist-get args :cwd)
-                                 :title (plist-get args :title))))
-              (push session harness-acp-test--sessions)
-              session)))
-    (cons 'load (lambda (&rest _) nil))
-    (cons 'close (lambda (&rest _) nil))
-    (cons 'entries (lambda (&rest _) []))
-    (cons 'configuration
-          (lambda (&rest _)
-            (list :configOptions
-                  (vector (list :id "model" :name "Model" :type "select"
-                                :currentValue "test-model"
-                                :options (vector (list :value "test-model" :name "Test")))))))
-    (cons 'list (lambda (&rest _) (list :sessions [])))
-    (cons 'delete (lambda (&rest _) nil))
-    (cons 'set-mode (lambda (&rest _) nil))
-    (cons 'set-config (lambda (&rest _) (list :configOptions [])))))
-  (harness-service-register
-   "agent"
-   :module 'harness-acp-test
-   :doc "Fake agent service."
-   :methods
-   (list (cons 'prompt (lambda (&rest _args) "end_turn"))
-         (cons 'cancel (lambda (&rest _) nil)))))
+(ert-deftest harness-acp-local-wire-normalisation ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (s (harness-acp-test-request conn "_harness/session/get" (list :id sid))))
+      (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+      (should (equal "idle" (plist-get s :status)))
+      (should (equal "main" (plist-get s :kind)))
+      (should (equal "ask" (plist-get s :permission-mode)))
+      (should (numberp (plist-get (plist-get s :usage) :input)))
+      (harness-call 'session/hint sid "a hint")
+      (harness-test-wait (lambda () (member "_harness/node" (harness-acp-test-kinds))))
+      (let ((node (plist-get (car (last (harness-acp-test-updates))) :node)))
+        (should (equal "hint" (plist-get node :kind)))
+        (should (equal "a hint" (plist-get node :content)))
+        (should (equal sid (plist-get node :session)))))))
 
-(ert-deftest harness-acp-initialize ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (result nil))
-    (harness-deferred-then
-     (harness-acp-connection-request
-      client "initialize"
-      (list :protocolVersion 1
-            :clientCapabilities (list :fs (list :readTextFile t :writeTextFile t))
-            :clientInfo (list :name "test-client" :version "1.0")))
-     (lambda (value) (setq result value)))
-    (should (= (plist-get result :protocolVersion) 1))
-    (should (harness-acp-json-true-p (plist-get (plist-get result :agentCapabilities) :loadSession)))
-    (should (equal (plist-get (plist-get result :agentInfo) :name) "emacs-agent-harness"))))
+(ert-deftest harness-acp-local-errors ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (should (= -32601 (car (harness-acp-test-error conn "nope/x" nil))))
+      (should (= -32601 (car (harness-acp-test-error conn "_harness/store/save" '(:name "x" :obj nil)))))
+      (should (= -32601 (car (harness-acp-test-error conn "_harness/session/not-a-method" nil))))
+      (let ((e (harness-acp-test-error conn "_harness/session/get" nil)))
+        (should (= -32602 (car e)))
+        (should (string-match-p "id" (cadr e))))
+      (should (= -32602 (car (harness-acp-test-error conn "_harness/session/get" (list :id sid :bogus 1)))))
+      (should (= -32602 (car (harness-acp-test-error conn "session/new" nil))))
+      (should (= -32602 (car (harness-acp-test-error conn "session/prompt" '(:prompt nil)))))
+      (let ((e (harness-acp-test-error conn "_harness/session/get" '(:id "missing"))))
+        (should (= -32000 (car e)))
+        (should (string-match-p "No session" (cadr e)))))))
 
-(ert-deftest harness-acp-session-new-and-configuration ()
-  (harness-acp-test--install-fakes)
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (result nil))
-    (harness-deferred-then
-     (harness-acp-connection-request client "session/new" (list :cwd "/tmp" :mcpServers []))
-     (lambda (value) (setq result value)))
-    (should (equal (plist-get result :sessionId) "sess-1"))
-    (should (vectorp (plist-get result :configOptions)))
-    (let ((model (aref (plist-get result :configOptions) 0)))
-      (should (equal (plist-get model :id) "model")))
-    (should (harness-acp-connection-tracks-session-p (car pair) "sess-1"))))
+;;;; Requests from the agent to the client
 
-(ert-deftest harness-acp-session-prompt-stop-reason ()
-  (harness-acp-test--install-fakes)
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (result nil))
-    (harness-deferred-then
-     (harness-acp-connection-request
-      client "session/prompt"
-      (list :sessionId "sess-1" :prompt (vector (list :type "text" :text "hello"))))
-     (lambda (value) (setq result value)))
-    (should (equal (plist-get result :stopReason) "end_turn"))))
+(ert-deftest harness-acp-local-permission-round-trip ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (recorded nil)
+           (second-respond nil)
+           (other (harness-acp-connect)))
+      (harness-register-method 'permission/answer
+                               (lambda (s pid answer) (push (list s pid answer) recorded) answer))
+      ;; A second client receives the same request; it answers later and must be ignored.
+      (harness-acp-set-handler other (lambda (method _params respond)
+                                       (when (equal method "session/request_permission")
+                                         (setq second-respond respond))))
+      (harness-emit 'permission/requested sid
+                    (list :id "p1" :kind 'permission
+                          :payload (list :tool "bash" :input '(:command "ls") :kind 'exec
+                                         :title "bash ls" :call-id "c1" :paths '("/tmp"))))
+      (harness-test-wait (lambda () (cl-find "session/request_permission" harness-acp-test-messages :key #'car :test #'equal)))
+      (let* ((m (cl-find "session/request_permission" harness-acp-test-messages :key #'car :test #'equal))
+             (params (nth 1 m)) (respond (nth 2 m)))
+        (should (functionp respond))
+        (should (equal sid (plist-get params :sessionId)))
+        (should (equal "c1" (plist-get (plist-get params :toolCall) :toolCallId)))
+        (should (equal "execute" (plist-get (plist-get params :toolCall) :kind)))
+        (should (equal "bash ls" (plist-get (plist-get params :toolCall) :title)))
+        (should (equal '(:command "ls") (plist-get (plist-get params :toolCall) :rawInput)))
+        (should (equal '("allow-once" "allow-session" "allow-always" "deny-once" "deny-always")
+                       (mapcar (lambda (o) (plist-get o :optionId)) (plist-get params :options))))
+        (should (equal "p1" (plist-get (plist-get params :_harness) :pendingId)))
+        (should (equal '("/tmp") (plist-get (plist-get params :_harness) :paths)))
+        (funcall respond (list :outcome (list :outcome "selected" :optionId "allow-session"))))
+      (harness-test-wait (lambda () recorded))
+      (should (equal (list (list sid "p1" '(:behavior allow :scope session))) recorded))
+      (harness-test-wait (lambda () second-respond))
+      (funcall second-respond (list :outcome (list :outcome "selected" :optionId "deny-always")))
+      (accept-process-output nil 0.05)
+      (should (= 1 (length recorded)))
+      (harness-acp-close other)
+      ;; A cancelled outcome denies once.
+      (harness-emit 'permission/requested sid (list :id "p2" :kind 'permission :payload (list :tool "bash" :kind 'exec)))
+      (harness-test-wait (lambda () (= 2 (cl-count "session/request_permission" harness-acp-test-messages :key #'car :test #'equal))))
+      (funcall (nth 2 (car harness-acp-test-messages)) (list :outcome (list :outcome "cancelled")))
+      (harness-test-wait (lambda () (= 2 (length recorded))))
+      (should (equal (list sid "p2" '(:behavior deny :scope once)) (car recorded))))))
 
-(ert-deftest harness-acp-session-new-without-service-is-error ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (error-seen nil))
-    ;; Remove any fake session service other tests installed.
-    (harness-service-unregister "session")
-    (harness-deferred-then
-     (harness-acp-connection-request client "session/new" (list :cwd "/tmp"))
-     nil
-     (lambda (error) (setq error-seen error)))
-    (should (eq (nth 0 (cdr error-seen)) -32601))))
+(ert-deftest harness-acp-local-ask-user-round-trip ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (recorded nil))
+      (harness-register-method 'question/answer
+                               (lambda (s pid answer) (push (list s pid answer) recorded) answer))
+      (harness-emit 'question/asked sid
+                    (list :id "q1" :kind 'question
+                          :payload (list :question "Which colour?" :options '("red" "green"))))
+      (harness-test-wait (lambda () (cl-find "_harness/ask_user" harness-acp-test-messages :key #'car :test #'equal)))
+      (let* ((m (cl-find "_harness/ask_user" harness-acp-test-messages :key #'car :test #'equal))
+             (params (nth 1 m)))
+        (should (equal sid (plist-get params :sessionId)))
+        (should (equal "q1" (plist-get params :requestId)))
+        (should (equal "Which colour?" (plist-get params :question)))
+        (should (equal '("red" "green") (plist-get params :options)))
+        (funcall (nth 2 m) (list :answer "green")))
+      (harness-test-wait (lambda () recorded))
+      (should (equal (list (list sid "q1" "green")) recorded)))))
 
-(ert-deftest harness-acp-extension-methods ()
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (version nil)
-         (pong nil))
-    (harness-deferred-then
-     (harness-acp-connection-request client "_harness/version" nil)
-     (lambda (value) (setq version value)))
-    (harness-deferred-then
-     (harness-acp-connection-request client "_harness/ping" nil)
-     (lambda (value) (setq pong value)))
-    (should (equal (plist-get version :version) "0.1.0"))
-    (should (harness-acp-json-true-p (plist-get pong :pong)))))
+(ert-deftest harness-acp-local-request-without-client-stays-pending ()
+  (harness-acp-test-with
+    (let* ((warned nil)
+           (hook (lambda (level msg) (when (eq level 'warn) (push msg warned)))))
+      (add-hook 'harness-log-hook hook)
+      (unwind-protect
+          (progn
+            (harness-emit 'permission/requested "s" (list :id "p" :kind 'permission :payload (list :tool "bash")))
+            (should (cl-some (lambda (m) (string-match-p "no client" m)) warned)))
+        (remove-hook 'harness-log-hook hook)))))
 
-;;; Event bridging
+;;;; Connection lifecycle
 
-(ert-deftest harness-acp-bridges-transcript-entries-to-session-update ()
-  (harness-acp-test--install-fakes)
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (updates nil))
-    (harness-acp-connection-register-method
-     client "session/update"
-     (lambda (_connection params) (push params updates)))
-    (harness-acp-connection-request client "session/new" (list :cwd "/tmp" :mcpServers []))
-    (harness-emit 'session-entry-added
-                  :session-id "sess-1"
-                  :entry (list :sessionUpdate "agent_message_chunk"
-                               :messageId "m1"
-                               :content (list :type "text" :text "hello")))
-    (should (= (length updates) 1))
-    (should (equal (plist-get (plist-get (car updates) :update) :sessionUpdate)
-                   "agent_message_chunk"))))
+(ert-deftest harness-acp-local-close ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (closed nil))
+      (harness-acp-on-close conn (lambda () (setq closed t)))
+      (should (= 1 (length harness-acp--clients)))
+      (harness-acp-close conn)
+      (should-not (harness-acp-connected-p conn))
+      (should (= 0 (length harness-acp--clients)))
+      (harness-test-wait (lambda () closed))
+      (should (= -32003 (car (harness-acp-test-error conn "_harness/harness/version" nil))))
+      ;; A closed client no longer receives anything.
+      (setq harness-acp-test-messages nil)
+      (harness-call 'session/create :cwd (harness-test-temp-dir))
+      (accept-process-output nil 0.05)
+      (should (null harness-acp-test-messages)))))
 
-(ert-deftest harness-acp-does-not-send-updates-for-untracked-sessions ()
-  (harness-acp-test--install-fakes)
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (updates nil))
-    (harness-acp-connection-register-method
-     client "session/update"
-     (lambda (_connection params) (push params updates)))
-    (harness-emit 'session-entry-added
-                  :session-id "stranger"
-                  :entry (list :sessionUpdate "agent_message_chunk"))
-    (should-not updates)))
-
-(ert-deftest harness-acp-bridges-usage-and-status ()
-  (harness-acp-test--install-fakes)
-  (let* ((pair (harness-acp-test--pair))
-         (client (cdr pair))
-         (usage nil)
-         (status nil))
-    (harness-acp-connection-register-method
-     client "session/update"
-     (lambda (_connection params)
-       (when (equal (plist-get (plist-get params :update) :sessionUpdate) "usage_update")
-         (setq usage params))))
-    (harness-acp-connection-register-method
-     client "_harness/session_status"
-     (lambda (_connection params) (setq status params)))
-    (harness-acp-connection-request client "session/new" (list :cwd "/tmp" :mcpServers []))
-    (harness-emit 'session-usage-changed
-                  :session-id "sess-1" :used 10 :size 100
-                  :cost (list :amount 0.01 :currency "USD"))
-    (harness-emit 'session-status-changed
-                  :session-id "sess-1" :status "running" :previous "idle")
-    (should (equal (plist-get (plist-get usage :update) :used) 10))
-    (should (equal (plist-get usage :update) '(:sessionUpdate "usage_update"
-                                                                :used 10 :size 100
-                                                                :cost (:amount 0.01 :currency "USD"))))
-    (should (equal (plist-get status :status) "running"))))
-
-;;; In-process transport
-
-(ert-deftest harness-acp-inprocess-connect ()
-  (let* ((pair (harness-acp-test--pair))
-         (agent (car pair))
-         (client (harness-acp-inprocess-connect agent))
-         (result nil))
-    (harness-acp-connection-register-method
-     agent "test/echo" (lambda (_connection params) (plist-get params :value)))
-    (harness-deferred-then
-     (harness-acp-connection-request client "test/echo" (list :value :hello))
-     (lambda (value) (setq result value)))
-    (should (eq result :hello))))
-
-(ert-deftest harness-acp-refresh-installs-new-methods ()
-  ;; A hot reload can add extension methods after the connection exists.
-  (require 'harness-acp-inprocess)
-  (harness-module-load 'harness-acp)
-  (harness-module-load 'harness-acp-inprocess)
-  (let* ((pair (harness-acp-inprocess-pair))
-         (client (cdr pair)))
-    (unwind-protect
-        (progn
-          (harness-acp-agent-started (car pair))
-          (harness-acp-connection-register-method
-           (car pair) "test/echo" (lambda (_connection params) (plist-get params :value)))
-          (harness-acp-refresh-agent-methods)
-          (let ((deferred (harness-acp-connection-request
-                           client "test/echo" (list :value "hi"))))
-            (harness-test-settle deferred 5)
-            (should (harness-deferred-resolved-p deferred))
-            (should (equal (harness-deferred-value deferred) "hi"))))
-      (harness-acp-connection-close client "test over")
-      (harness-acp-connection-close (car pair) "test over"))))
+(ert-deftest harness-acp-local-callbacks-are-deferred ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (settled-inside nil)
+           (p (harness-acp-request conn "_harness/harness/version" nil)))
+      (harness-then p (lambda (_) (setq settled-inside t)))
+      ;; The method ran synchronously but the promise settles from the command loop.
+      (should-not settled-inside)
+      (harness-test-await p)
+      (should settled-inside))))
 
 (provide 'harness-acp-test)
 ;;; harness-acp-test.el ends here

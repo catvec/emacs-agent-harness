@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+// Bridge stdio <-> the harness ACP TCP server, so ACP-native clients
+// (editors that spawn an agent process) can talk to a running harness.
+//   HARNESS_ACP_ADDRESS=127.0.0.1:PORT scripts/harness-acp-stdio
+// The address defaults to the one the harness writes into
+// <harness-state-directory>/acp-address (~/.emacs.d/harness/acp-address
+// by default; HARNESS_STATE_DIR overrides the directory).
+const net = require("net"), fs = require("fs"), os = require("os"), path = require("path");
+function address() {
+  if (process.env.HARNESS_ACP_ADDRESS) return process.env.HARNESS_ACP_ADDRESS;
+  const candidates = [
+    process.env.HARNESS_STATE_DIR && path.join(process.env.HARNESS_STATE_DIR, "acp-address"),
+    path.join(os.homedir(), ".emacs.d", "harness", "acp-address"),
+  ].filter(Boolean);
+  for (const f of candidates) { try { return fs.readFileSync(f, "utf8").trim(); } catch (_) {} }
+  console.error("harness-acp-stdio: no address (set HARNESS_ACP_ADDRESS)"); process.exit(2);
+}
+const [host, port] = address().split(":");
+const sock = net.connect({ host, port: Number(port) });
+sock.on("connect", () => { process.stdin.pipe(sock); sock.pipe(process.stdout); });
+sock.on("error", (e) => { console.error("harness-acp-stdio: " + e.message); process.exit(1); });
+sock.on("close", () => process.exit(0));
+process.stdin.on("end", () => sock.end());

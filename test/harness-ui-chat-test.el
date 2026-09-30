@@ -1,804 +1,540 @@
-;;; harness-ui-chat-test.el --- Tests for the chat interface -*- lexical-binding: t; -*-
+;;; harness-ui-chat-test.el --- Tests for the chat buffer  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Rendering, composing, queueing, attachments and the configuration
-;; controls are tested against stubbed ACP requests; the last test drives
-;; the real harness stack end to end through the local UI connection.
+;; Drives the chat buffer against the real state layer, the demo
+;; provider and the in-process ACP connection: rendering of every node
+;; kind, streaming, folding, coalescing, the pending panel, the queue,
+;; lazy history and redraws.  Runs in batch, so nothing here needs a
+;; window system; image, clipboard and drag-and-drop paths are skipped.
 
 ;;; Code:
 
-(require 'ert)
-(require 'cl-lib)
-(require 'harness)
-(require 'harness-core)
-(require 'harness-session)
-(require 'harness-tools)
-(require 'harness-agent)
-(require 'harness-ui)
-(require 'harness-ui-chat)
-(require 'harness-ui-sessions)
-(require 'harness-ui-config)
-(require 'harness-ui-notifier)
-(require 'harness-ui-tree)
 (require 'harness-test-helpers)
+(require 'harness-acp)
 
-(harness-module-load 'harness-ui)
-(harness-module-load 'harness-ui-chat)
-(harness-module-load 'harness-ui-sessions)
-(harness-module-load 'harness-ui-config)
+(defvar harness-ui-chat-test-events nil "Recorded (EVENT . ARGS), newest first.")
 
-(defvar harness-ui-chat-test--sent nil
-  "Blocks captured from `harness-ui-send'.")
+(defun harness-ui-chat-test-record-event (event args)
+  "Record EVENT with ARGS."
+  (push (cons event args) harness-ui-chat-test-events))
 
-(defvar harness-ui-chat-test--requests nil
-  "Requests captured from `harness-ui-request'.")
-
-(defmacro harness-ui-chat-test--with-stubs (&rest body)
-  "Run BODY with ACP calls stubbed out."
+(defmacro harness-ui-chat-test-with (&rest body)
+  "Load the state layer, the demo provider, ACP and the chat UI, then run BODY."
   (declare (indent 0))
-  `(cl-letf (((symbol-function 'harness-ui-send)
-              (lambda (_session-id blocks)
-                (setq harness-ui-chat-test--sent
-                      (append harness-ui-chat-test--sent (list blocks)))
-                (let ((deferred (harness-deferred-new)))
-                  (harness-deferred-resolve deferred (list :stopReason "end_turn"))
-                  deferred)))
-             ((symbol-function 'harness-ui-request)
-              (lambda (method &optional params)
-                (setq harness-ui-chat-test--requests
-                      (append harness-ui-chat-test--requests
-                              (list (cons method params))))
-                (let ((deferred (harness-deferred-new)))
-                  (harness-deferred-resolve
-                   deferred
-                   (pcase method
-                     ("session/load" (make-hash-table))
-                     ("_harness/session/info" (list :sessionId "s1" :title "Test"
-                                                    :model "mock/m1" :status "idle"))
-                     ("session/list" (list :sessions []))
-                     ("_harness/skills/load"
-                      (list :name (plist-get params :name) :content "SKILL BODY"))
-                     (_ (make-hash-table))))
-                  deferred))))
-     (let ((harness-ui-chat-test--sent nil)
-           (harness-ui-chat-test--requests nil))
-       ,@body)))
+  `(harness-test-with-temp-state
+     (harness-test-reset-bus)
+     (let ((harness-acp-server-enabled nil))
+       (dolist (m '(store project config provider provider-demo tools session agent acp))
+         (harness-test-load-module m)))
+     (clrhash harness-sessions)
+     (clrhash harness-tools)
+     (clrhash harness-agent--turns)
+     (setq harness-acp--clients nil
+           harness-ui-chat-test-events nil)
+     (let ((harness-provider-demo-delay 0.005)
+           (harness-acp-token nil)
+           (default-directory dir))
+       (harness-add-filter 'permission/decide
+                           (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
+       (dolist (name '("list_dir" "read_file" "glob" "grep"))
+         (harness-define-tool name :description name :kind 'read :coalescable t
+                              :title (let ((n name)) (lambda (input) (format "%s %s" n (or (plist-get input :path) (plist-get input :pattern) ""))))
+                              :handler (let ((n name)) (lambda (input _ctx) (format "%s of %s" n (plist-get input :path))))))
+       (harness-define-tool "bash" :description "bash" :kind 'exec
+                            :handler (lambda (input _ctx) (format "ran %s" (plist-get input :command))))
+       (harness-define-tool "ask_user" :description "ask" :kind 'meta
+                            :handler (lambda (input _ctx) (format "answer to %s: red" (plist-get input :question))))
+       (harness-test-load-module 'ui)
+       (harness-test-load-module 'ui-chat)
+       (clrhash harness-ui--sessions)
+       (add-hook 'harness-ui-event-functions #'harness-ui-chat-test-record-event)
+       (unwind-protect
+           (progn ,@body)
+         (remove-hook 'harness-ui-event-functions #'harness-ui-chat-test-record-event)
+         (maphash (lambda (_ b) (when (buffer-live-p b) (kill-buffer b))) harness-chat--buffers)
+         (clrhash harness-chat--buffers)
+         (dolist (c (copy-sequence harness-acp--clients))
+           (harness-acp--drop-client c))))))
 
-(defun harness-ui-chat-test--find-face (face &optional buffer)
-  "Return non-nil when FACE appears in BUFFER's text."
-  (with-current-buffer (or buffer (current-buffer))
+(defun harness-ui-chat-test-session (&optional name)
+  "Create a demo session called NAME and return its id."
+  (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
+                           :name (or name "Chat test"))
+             :id))
+
+(defun harness-ui-chat-test-open (sid)
+  "Open the chat buffer of SID and wait until it has rendered."
+  (let ((buf (harness-chat-buffer sid)))
+    (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-chat--compose-end)))
+                       5 "chat buffer loaded")
+    buf))
+
+(defun harness-ui-chat-test-turns-ended (sid)
+  "Return how many turns of SID ended."
+  (cl-count-if (lambda (e) (and (equal (car e) "agent/turn-ended") (equal (cadr e) sid)))
+               harness-ui-chat-test-events))
+
+(defun harness-ui-chat-test-type (buf text)
+  "Type TEXT into the compose box of BUF."
+  (with-current-buffer buf
+    (goto-char harness-chat--compose-end)
+    (insert text)))
+
+(defun harness-ui-chat-test-prompt (buf text)
+  "Send TEXT from BUF's compose box and wait for the turn to end."
+  (with-current-buffer buf
+    (let* ((sid harness-ui-session-id)
+           (before (harness-ui-chat-test-turns-ended sid))
+           (turns (or (plist-get (plist-get (harness-ui-session sid) :usage) :turns) 0)))
+      (harness-ui-chat-test-type buf text)
+      (harness-chat-send)
+      (harness-test-wait (lambda () (> (harness-ui-chat-test-turns-ended sid) before)) 10 "turn ended")
+      ;; The debounced session push (idle, usage counted) lands shortly after.
+      (harness-test-wait (lambda () (let ((s (harness-ui-session sid)))
+                                      (and (equal "idle" (plist-get s :status))
+                                           (> (or (plist-get (plist-get s :usage) :turns) 0) turns))))
+                         5 "session idle after the turn")
+      (accept-process-output nil 0.1))))
+
+(defun harness-ui-chat-test-blocks (buf kind)
+  "Return the blocks of KIND in BUF, oldest first."
+  (with-current-buffer buf
+    (cl-remove-if-not (lambda (b) (equal (harness-chat-block-kind b) kind))
+                      (mapcar (lambda (id) (gethash id harness-chat--blocks)) (reverse harness-chat--order)))))
+
+(defun harness-ui-chat-test-face-at (pos face)
+  "Non-nil when FACE is among the faces at POS."
+  (let ((f (get-text-property pos 'face)))
+    (or (eq f face) (and (listp f) (memq face f)))))
+
+(defun harness-ui-chat-test-find (buf text &optional from)
+  "Return the position of TEXT in BUF after FROM, or nil."
+  (with-current-buffer buf
     (save-excursion
-      (goto-char (point-min))
-      (let ((found nil))
-        (while (and (not found) (not (eobp)))
-          (let ((value (get-text-property (point) 'face)))
-            (when (or (eq value face)
-                      (and (listp value) (memq face value)))
-              (setq found t)))
-          (forward-char 1))
-        found))))
+      (goto-char (or from (point-min)))
+      (let ((case-fold-search nil))
+        (search-forward text nil t)))))
 
-(defun harness-ui-chat-test--buffer (&optional session-id)
-  "Create and return a fresh chat buffer for SESSION-ID."
-  (let* ((id (or session-id "s1"))
-         (old (gethash id harness-ui-chat--buffers)))
-    (when (buffer-live-p old)
-      (kill-buffer old))
-    (remhash id harness-ui-chat--buffers)
-    (remhash id harness-ui-chat--pending-updates)
-    (let ((buffer (harness-ui-chat--buffer id)))
-    (with-current-buffer buffer
-      (setq harness-ui-chat--info (list :sessionId (or session-id "s1")
-                                        :title "Test" :model "mock/m1" :cwd "/tmp")
-            harness-ui-chat--status 'idle)
-      (harness-ui-chat--refresh-header))
-    buffer)))
+;;;; Rendering a full turn
 
-(defun harness-ui-chat-test--apply (buffer update)
-  "Apply UPDATE to BUFFER and lay the transcript out."
-  (harness-ui-chat--apply-update buffer "s1" update)
-  (with-current-buffer buffer
-    (when harness-ui-chat--needs-rebuild
-      (harness-ui-chat-rebuild))))
+(ert-deftest harness-ui-chat-tour-renders-every-kind ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Tour"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-test-wait (lambda () (equal (buffer-name buf) "*harness: Tour*")) 5 "buffer renamed")
+      (with-current-buffer buf
+        (should (derived-mode-p 'harness-chat-mode))
+        (should (equal sid harness-ui-session-id))
+        (should (string-match-p "No messages yet" (buffer-string))))
+      (harness-ui-chat-test-prompt buf "give me the tour")
+      (with-current-buffer buf
+        ;; The user block carries the text on the user background.
+        (let ((pos (harness-ui-chat-test-find buf "give me the tour")))
+          (should pos)
+          (should (harness-ui-chat-test-face-at (1- pos) 'harness-user-face))
+          (should (harness-ui-chat-test-find buf "you")))
+        ;; Thinking is collapsed under an overlay and expands.
+        (let* ((think (car (harness-ui-chat-test-blocks buf "thinking")))
+               (text-pos (harness-ui-chat-test-find buf "wants a tour")))
+          (should think)
+          (should (harness-chat-block-collapsed think))
+          (should text-pos)
+          (should (invisible-p (1- text-pos)))
+          (should (string-match-p "thinking ([0-9]+ words)" (buffer-string)))
+          (harness-chat-toggle-block (harness-chat-block-id think))
+          (should-not (invisible-p (1- text-pos)))
+          (should-not (harness-chat-block-collapsed think))
+          (harness-chat-toggle-block (harness-chat-block-id think))
+          (should (invisible-p (1- text-pos))))
+        ;; The tool call and its result are one block, completed.
+        (let ((tools (harness-ui-chat-test-blocks buf "tool-call")))
+          (should (= 1 (length tools)))
+          (should (harness-chat-block-result (car tools)))
+          (should (string-match-p "list_dir" (plist-get (harness-chat-block-node (car tools)) :title)))
+          (should-not (harness-ui-chat-test-blocks buf "tool-result"))
+          (let ((title-pos (harness-ui-chat-test-find buf "list_dir")))
+            (should (harness-ui-chat-test-face-at (1- title-pos) 'harness-tool-face)))
+          (should (harness-ui-chat-test-find buf "✓"))
+          (let ((out (harness-ui-chat-test-find buf "list_dir of")))
+            (should out)
+            (should (invisible-p (1- out)))))
+        ;; Markdown rendered: heading face, code block, quote.
+        (let ((h (harness-ui-chat-test-find buf "Tour" (harness-ui-chat-test-find buf "give me the tour"))))
+          (should h)
+          (should (harness-ui-chat-test-face-at (1- h) 'harness-md-heading-1)))
+        (should (harness-ui-chat-test-find buf "(defun hello ()"))
+        (should (harness-ui-chat-test-find buf "Quotes render too"))
+        (should-not (string-match-p "```" (buffer-string)))
+        ;; Node order: user, thinking, assistant, tool, assistant.
+        (should (equal '("user" "thinking" "assistant" "tool-call" "assistant")
+                       (mapcar (lambda (id) (harness-chat-block-kind (gethash id harness-chat--blocks)))
+                               (reverse harness-chat--order))))
+        ;; Streaming left no pending re-render and the content is final.
+        (should (= 0 (hash-table-count harness-chat--render-timers)))
+        (let ((last (car (last (harness-ui-chat-test-blocks buf "assistant")))))
+          (should (string-prefix-p "# Tour" (harness-chat-block-content last))))
+        ;; Every block is read-only; the compose box is not.
+        (should (get-text-property (1+ (point-min)) 'read-only))
+        (harness-ui-chat-test-type buf "z")
+        (should (equal "z" (harness-chat--compose-text)))
+        (should (equal default-directory (plist-get (harness-ui-session sid) :cwd)))
+        (harness-chat--set-compose "")
+        ;; Copying the last response yields its Markdown.
+        (harness-chat-copy-last-response)
+        (should (string-prefix-p "# Tour" (current-kill 0)))
+        ;; The header shows the session and the compose box is empty again.
+        (let ((header (harness-chat--header)))
+          (should (string-match-p "Tour" header))
+          (should (string-match-p "demo" header))
+          (should (string-match-p "\\$0.0042" header))
+          (should (string-match-p "2.0k/" header)))
+        (should (string-match-p "idle" (harness-chat--mode-line)))
+        (should (equal "" (harness-chat--compose-text)))))))
 
-(defun harness-ui-chat-test--text (&optional buffer)
-  "Return the buffer text without properties."
-  (with-current-buffer (or buffer (current-buffer))
-    (buffer-substring-no-properties (point-min) (point-max))))
+(ert-deftest harness-ui-chat-streaming-appends-cheaply ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        ;; A node announcement followed by chunks: the first chunk is the
+        ;; announced content and is not duplicated; later chunks append.
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-live" :kind "assistant" :content "Hello")))
+        (harness-chat--apply-update (list :sessionUpdate "agent_message_chunk"
+                                          :content (list :type "text" :text "Hello")
+                                          :_harness (list :nodeId "n-live")))
+        (harness-chat--apply-update (list :sessionUpdate "agent_message_chunk"
+                                          :content (list :type "text" :text " world")
+                                          :_harness (list :nodeId "n-live")))
+        (let ((b (gethash "n-live" harness-chat--blocks)))
+          (should (equal "Hello world" (harness-chat-block-content b)))
+          (should (= 1 (hash-table-count harness-chat--render-timers)))
+          (should (equal "Hello world"
+                         (string-trim (buffer-substring-no-properties (harness-chat-block-start b)
+                                                                      (harness-chat-block-end b)))))
+          ;; The final node replaces the text with the Markdown rendering.
+          (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                            :node (list :id "n-live" :kind "assistant" :content "Hello **world**")))
+          (should (= 0 (hash-table-count harness-chat--render-timers)))
+          (let ((pos (harness-ui-chat-test-find buf "world")))
+            (should (harness-ui-chat-test-face-at (1- pos) 'bold))))
+        ;; A chunk for an unknown node creates its block.
+        (harness-chat--apply-update (list :sessionUpdate "agent_thought_chunk"
+                                          :content (list :type "text" :text "hmm")
+                                          :_harness (list :nodeId "n-think")))
+        (should (equal "thinking" (harness-chat-block-kind (gethash "n-think" harness-chat--blocks))))
+        (should (equal '("n-think" "n-live") harness-chat--order))))))
 
-;;; Rendering
+;;;; Scrolling
 
-(ert-deftest harness-ui-chat-renders-user-and-agent-messages ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "user_message_chunk"
-                                         :messageId "u1" :final t
-                                         :content (list :type "text" :text "hello agent")))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "agent_message_chunk"
-                                         :messageId "a1" :final t
-                                         :content (list :type "text" :text "hello human")))
-      (let ((text (harness-ui-chat-test--text buffer)))
-        (should (string-match-p "hello agent" text))
-        (should (string-match-p "hello human" text))
-        (should (= (length (split-string text "hello agent")) 2)))
-      ;; The user message carries the user face.
-      (with-current-buffer buffer
-        (should (harness-ui-chat-test--find-face 'harness-ui-user-face buffer)))
-      (kill-buffer buffer))))
+(ert-deftest harness-ui-chat-auto-scroll-predicate ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window)))
+      (dotimes (i 80) (harness-call 'session/hint sid (format "line %d" i)))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 80 (length harness-chat--order)))) 5 "hints rendered")
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (set-window-point w harness-chat--compose-end)
+        (should (harness-chat--at-bottom-p w))
+        (set-window-start w (point-min))
+        (set-window-point w (point-min))
+        (should-not (harness-chat--at-bottom-p w))
+        ;; New content while scrolled up: no scrolling, but a notice.
+        (should-not harness-chat--unseen)
+        (harness-chat--append-local-block "hint" "later")
+        (should harness-chat--unseen)
+        (should (= (window-start w) (point-min)))
+        (should (string-match-p "new messages" (harness-chat--header)))
+        (harness-chat-scroll-to-bottom)
+        (should-not harness-chat--unseen)
+        (should (harness-chat--at-bottom-p w))
+        ;; Redraws remember whether the window followed the bottom.
+        (set-window-start w (point-min))
+        (set-window-point w (point-min))
+        (harness-chat--append-local-block "hint" "again")
+        (should harness-chat--unseen)))))
 
-(ert-deftest harness-ui-chat-streams-deltas-into-one-message ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "agent_message_chunk"
-                                         :messageId "a1" :live t :delta "Hel"
-                                         :content (list :type "text" :text "Hel")))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "agent_message_chunk"
-                                         :messageId "a1" :live t :delta "lo"))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "agent_message_chunk"
-                                         :messageId "a1" :final t
-                                         :content (list :type "text" :text "Hello")))
-      (let ((text (harness-ui-chat-test--text buffer)))
-        (should (string-match-p "Hello" text))
-        (should (= (length (split-string text "Hello")) 2))))
-    (kill-buffer "*harness: s1*")))
+;;;; Queue
 
-(ert-deftest harness-ui-chat-collapses-thinking-and-tools ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "agent_thought_chunk"
-                                         :messageId "t1" :final t
-                                         :content (list :type "text"
-                                                        :text "Checking the plan\nsecret reasoning")))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "tool_call" :toolCallId "c1"
-                                         :name "bash" :status "completed" :final t
-                                         :content (vector (list :type "content"
-                                                                :content (list :type "text"
-                                                                               :text "tool output")))))
-      (let ((text (harness-ui-chat-test--text buffer)))
-        (should (string-match-p "Thinking" text))
-        ;; Collapsed, the first line previews as a hint; the rest is hidden.
-        (should (string-match-p "Checking the plan" text))
-        (should-not (string-match-p "secret reasoning" text))
-        (should (string-match-p "bash" text))
-        (should-not (string-match-p "tool output" text)))
-      ;; Un-collapse the thinking block by clicking its button.
-      (with-current-buffer buffer
-        (goto-char (point-min))
-        (search-forward "Thinking")
-        (push-button (match-beginning 0)))
-      (should (string-match-p "secret reasoning" (harness-ui-chat-test--text buffer)))
-      (should (= (length (split-string (harness-ui-chat-test--text buffer)
-                                       "secret reasoning"))
-                 2))
-      (kill-buffer buffer))))
+(ert-deftest harness-ui-chat-queue-add-edit-remove ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-type buf "later")
+      (with-current-buffer buf (harness-chat-queue))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 1 (length harness-chat--queue)))) 5 "queued")
+      (with-current-buffer buf
+        (should (equal "" (harness-chat--compose-text)))
+        (should (harness-ui-chat-test-find buf "queued for the next turn (1)"))
+        (let ((pos (harness-ui-chat-test-find buf "later")))
+          (should (harness-ui-chat-test-face-at (1- pos) 'harness-queue-face)))
+        ;; Edit: the text comes back into the compose box; sending removes the item.
+        (let ((qid (plist-get (car harness-chat--queue) :id)))
+          (harness-chat-edit-queued qid)
+          (should (equal "later" (harness-chat--compose-text)))
+          (should (equal qid harness-chat--editing))
+          (harness-ui-chat-test-type buf " please")))
+      (harness-ui-chat-test-prompt buf "")
+      (with-current-buffer buf
+        (should (null harness-chat--queue))
+        (should (null (plist-get (harness-call 'session/get sid) :queue)))
+        (should (harness-ui-chat-test-find buf "later please"))
+        (should (equal "user" (harness-chat-block-kind (gethash (car (last harness-chat--order)) harness-chat--blocks)))))
+      ;; Remove through the [×] button's command.
+      (harness-ui-chat-test-type buf "drop me")
+      (with-current-buffer buf (harness-chat-queue))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 1 (length harness-chat--queue)))) 5 "queued again")
+      (with-current-buffer buf
+        (harness-chat-remove-queued (plist-get (car harness-chat--queue) :id)))
+      (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--queue))) 5 "removed")
+      (should-not (harness-ui-chat-test-find buf "drop me")))))
 
-(ert-deftest harness-ui-chat-coalesces-allow-listed-tools ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (dolist (index (list 1 2))
-        (harness-ui-chat-test--apply
-         buffer
-         (list :sessionUpdate "tool_call" :toolCallId (format "c%d" index)
-               :name "read" :status "completed" :final t
-               :content (vector (list :type "content"
-                                      :content (list :type "text" :text "file body"))))))
-      (let ((text (harness-ui-chat-test--text buffer)))
-        (should (string-match-p "tools read ×2" text))
-        (should-not (string-match-p "file body" text)))
-      (kill-buffer buffer))))
+;;;; Pending panel
 
-(ert-deftest harness-ui-chat-composer-is-typeable ()
-  ;; `special-mode-map' remaps self-insert to undefined and binds `q',
-  ;; `SPC' and friends; the composer must not inherit those.
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (with-current-buffer buffer
-        (should (eq (key-binding (kbd "i")) #'harness-ui-chat--self-insert))
-        (should (eq (key-binding (kbd "SPC")) #'harness-ui-chat--self-insert))
-        (should (eq (key-binding (kbd "q")) #'harness-ui-chat-quit))
-        (should (eq (command-remapping #'self-insert-command)
-                    #'harness-ui-chat--self-insert)))
-      (kill-buffer buffer))))
+(ert-deftest harness-ui-chat-permission-panel ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (answers nil)
+           (respond (lambda (r) (push r answers)))
+           (params (list :sessionId sid
+                         :toolCall (list :toolCallId "c1" :title "bash ls -la" :kind "execute"
+                                         :rawInput '(:command "ls -la"))
+                         :options harness-acp--permission-options
+                         :_harness (list :pendingId "p1" :tool "bash" :paths '("/tmp") :reason "exec asks"))))
+      ;; A request for another session is not ours.
+      (should-not (harness-chat--on-permission (plist-put (copy-sequence params) :sessionId "other") respond))
+      (should (harness-chat--on-permission params respond))
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "Permission"))
+        (should (harness-ui-chat-test-find buf "bash ls -la"))
+        (should (harness-ui-chat-test-find buf "kind: execute"))
+        (should (harness-ui-chat-test-find buf "/tmp"))
+        (should (harness-ui-chat-test-find buf "exec asks"))
+        (let ((pos (harness-ui-chat-test-find buf "[Allow]")))
+          (should (harness-ui-chat-test-face-at (1- pos) 'harness-chat-panel-face))
+          (goto-char (1- pos))
+          (harness-chat-push))
+        (should (equal '((:outcome (:outcome "selected" :optionId "allow-once"))) answers))
+        (should (null harness-chat--pending))
+        (should-not (harness-ui-chat-test-find buf "Permission"))
+        ;; Keyboard answers: `s' on the panel, C-c C-n from anywhere.
+        (harness-chat--on-permission (plist-put (copy-sequence params) :_harness (list :pendingId "p2" :tool "bash")) respond)
+        (goto-char (harness-ui-chat-test-find buf "Permission"))
+        (call-interactively (lookup-key harness-chat-panel-map (kbd "s")))
+        (should (equal "allow-session" (plist-get (plist-get (car answers) :outcome) :optionId)))
+        (harness-chat--on-permission (plist-put (copy-sequence params) :_harness (list :pendingId "p3" :tool "bash")) respond)
+        (goto-char harness-chat--compose-end)
+        (harness-chat-deny-newest)
+        (should (equal "deny-once" (plist-get (plist-get (car answers) :outcome) :optionId)))
+        (should (null harness-chat--pending))))))
 
-(ert-deftest harness-ui-chat-open-puts-point-in-the-composer ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (with-current-buffer buffer
-        (harness-ui-chat--display-full buffer)
-        (should (= (point) (harness-ui-chat--compose-end-point))))
-      (kill-buffer buffer))))
+(ert-deftest harness-ui-chat-existing-pending-item-offers-buttons ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (recorded nil))
+      (harness-register-method 'permission/answer
+                               (lambda (session-id pending-id answer)
+                                 (push (list session-id pending-id answer) recorded) answer))
+      (harness-call 'session/pending-add sid (list :id "pre" :kind 'permission
+                                                   :payload (list :tool "bash" :title "bash echo" :kind 'exec
+                                                                  :input '(:command "echo"))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-find buf "bash echo"))
+          (goto-char (1- (harness-ui-chat-test-find buf "[Always allow]")))
+          (harness-chat-push))
+        (harness-test-wait (lambda () recorded) 5 "answered through the method")
+        (should (equal (list sid "pre" "allow-always") (car recorded)))))))
 
-(ert-deftest harness-ui-chat-renders-hints-and-errors ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "_harness/system_hint"
-                                         :final t
-                                         :content (list :type "text" :text "model changed")
-                                         :level "info"))
-      (should (string-match-p "model changed" (harness-ui-chat-test--text buffer)))
-      (kill-buffer buffer))))
+(ert-deftest harness-ui-chat-question-panel ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (answers nil)
+           (respond (lambda (r) (push r answers))))
+      (should (harness-chat--on-question (list :sessionId sid :requestId "q1" :question "Which colour?"
+                                               :options '("red" "green" "blue"))
+                                         respond))
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "Which colour?"))
+        (goto-char (1- (harness-ui-chat-test-find buf "[green]")))
+        (harness-chat-push)
+        (should (equal '((:answer "green")) answers))
+        (should (null harness-chat--pending))
+        ;; Free text goes through the compose box.
+        (harness-chat--on-question (list :sessionId sid :requestId "q2" :question "Name?" :options nil) respond)
+        (should (string-match-p "type an answer" (format "%s" (overlay-get harness-chat--placeholder-overlay 'before-string))))
+        (harness-ui-chat-test-type buf "purple")
+        (harness-chat-send)
+        (should (equal '(:answer "purple") (car answers)))
+        (should (null harness-chat--pending))
+        (should (equal "" (harness-chat--compose-text)))))))
 
-(ert-deftest harness-ui-chat-retires-a-transient-hint ()
-  ;; A hint with an id is replaced when the same id arrives with no text;
-  ;; the ACP projection carries the id in _meta.
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer))
-          (hint (lambda (text)
-                  (list :sessionUpdate "_harness/system_hint"
-                        :final t
-                        :_meta (list :harness (list :entryId "auto-name"))
-                        :content (list :type "text" :text text)
-                        :level "info"))))
-      (harness-ui-chat-test--apply buffer (funcall hint "Naming this conversation…"))
-      (should (string-match-p "Naming this conversation"
-                              (harness-ui-chat-test--text buffer)))
-      (harness-ui-chat-test--apply buffer (funcall hint ""))
-      (should-not (string-match-p "Naming this conversation"
-                                  (harness-ui-chat-test--text buffer)))
-      (kill-buffer buffer))))
+;;;; Coalescing
 
-(ert-deftest harness-ui-chat-renders-plans-with-markdown ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "plan"
-                                         :id "plan-1" :title "Fix the bug"
-                                         :final t
-                                         :content (list :type "text"
-                                                        :text "# Approach\n\n- read the code\n- patch it")))
-      (let ((text (harness-ui-chat-test--text buffer)))
-        (should (string-match-p "Fix the bug" text))
-        (should (string-match-p "Approach" text))
-        (should (string-match-p "read the code" text))
-        ;; The heading marker is concealed with a display property while
-        ;; the text stays in the buffer (searchable, exportable).
-        (with-current-buffer buffer
-          (goto-char (point-min))
-          (search-forward "# Approach")
-          (should (equal (get-text-property (match-beginning 0) 'display) ""))))
-      (with-current-buffer buffer
-        (should (harness-ui-chat-test--find-face 'harness-ui-h1-face buffer)))
-      (kill-buffer buffer))))
+(ert-deftest harness-ui-chat-coalesces-runs-of-tools ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (cwd (plist-get (harness-call 'session/get sid) :cwd)))
+      (let ((harness-provider-demo-script-override
+             `((:type text :delta "Reading around.\n")
+               (:type tool-call :id "r1" :name "read_file" :input (:path "a.el"))
+               (:type tool-call :id "r2" :name "read_file" :input (:path "b.el"))
+               (:type tool-call :id "r3" :name "read_file" :input (:path "c.el"))
+               (:type tool-call :id "r4" :name "grep" :input (:pattern "defun" :path ,cwd))
+               (:type tool-call :id "r5" :name "glob" :input (:pattern "*.el" :path ,cwd))
+               (:type text :delta "Done reading.")
+               (:type done :stop-reason end-turn))))
+        (harness-ui-chat-test-prompt buf "read things"))
+      (with-current-buffer buf
+        (should (member "read_file" harness-chat--coalescable))
+        (should-not (member "bash" harness-chat--coalescable))
+        (should (= 1 (hash-table-count harness-chat--groups)))
+        (let* ((group (car (hash-table-values harness-chat--groups)))
+               (summary (harness-ui-chat-test-find buf "5 tool calls: read_file ×3, grep, glob"))
+               (first (gethash (car (harness-chat-group-members group)) harness-chat--blocks)))
+          (should summary)
+          (should (= 5 (length (harness-chat-group-members group))))
+          (should (invisible-p (harness-chat-block-start first)))
+          (should (invisible-p (harness-ui-chat-test-find buf "read_file c.el")))
+          ;; Expanding shows the individual, still collapsed, blocks.
+          (harness-chat-toggle-group (harness-chat-group-id group))
+          (should-not (invisible-p (harness-chat-block-start first)))
+          (should (harness-chat-block-collapsed first))
+          (should (invisible-p (harness-ui-chat-test-find buf "read_file of a.el")))
+          (should (harness-ui-chat-test-find buf "[collapse]"))
+          (harness-chat-toggle-group (harness-chat-group-id group))
+          (should (invisible-p (harness-chat-block-start first))))
+        ;; The summary comes before the run, after the intro text.
+        (should (< (harness-ui-chat-test-find buf "Reading around")
+                   (harness-ui-chat-test-find buf "5 tool calls")
+                   (harness-ui-chat-test-find buf "Done reading"))))
+      ;; glob, grep then bash: a run of two broken by a non-coalescable tool stays as is.
+      (harness-ui-chat-test-prompt buf "run the tools")
+      (with-current-buffer buf
+        (should (= 1 (hash-table-count harness-chat--groups)))
+        (should (= 8 (length (harness-ui-chat-test-blocks buf "tool-call"))))
+        (should (harness-ui-chat-test-find buf "echo hello from bash"))
+        ;; A redraw computes the same grouping over the fetched history.
+        (harness-chat-redraw)
+        (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn")
+        (should (= 1 (hash-table-count harness-chat--groups)))
+        (should (harness-ui-chat-test-find buf "5 tool calls: read_file ×3, grep, glob"))))))
 
-(ert-deftest harness-ui-chat-btw-forks-and-asks ()
-  (harness-ui-chat-test--with-stubs
-    (let* ((buffer (harness-ui-chat-test--buffer))
-           (captured (list (cons :fork-requests nil)
-                           (cons :opened nil)
-                           (cons :sent nil))))
-      (with-current-buffer buffer
-        (setq harness-ui-chat--info '(:title "Main session" :sessionId "s1")))
-      (cl-letf (((symbol-function 'harness-ui-request)
-                 (lambda (method &optional params)
-                   (setcdr (assq :fork-requests captured)
-                           (cons (cons method params)
-                                 (cdr (assq :fork-requests captured))))
-                   (let ((deferred (harness-deferred-new)))
-                     (harness-deferred-resolve
-                      deferred
-                      (pcase method
-                        ("_harness/session/fork" (list :sessionId "btw-1"))
-                        (_ (make-hash-table))))
-                     deferred)))
-                ((symbol-function 'harness-ui-send)
-                 (lambda (_session-id blocks)
-                   (setcdr (assq :sent captured)
-                           (cons blocks (cdr (assq :sent captured))))
-                   (let ((deferred (harness-deferred-new)))
-                     (harness-deferred-resolve deferred (list :stopReason "end_turn"))
-                     deferred)))
-                ((symbol-function 'harness-ui-chat-open)
-                 (lambda (session-id &optional position)
-                   (setcdr (assq :opened captured)
-                           (cons (list session-id position)
-                                 (cdr (assq :opened captured))))
-                   (harness-ui-chat--buffer session-id))))
-        (with-current-buffer buffer
-          (harness-ui-chat-btw "what is the cache key?")))
-      ;; The fork carries the parent's title with a btw marker.
-      (let ((fork (assoc "_harness/session/fork" (cdr (assq :fork-requests captured)))))
-        (should fork)
-        (should (equal (plist-get (cdr fork) :sessionId) "s1"))
-        (should (string-match-p "(btw)" (plist-get (cdr fork) :title))))
-      ;; The side conversation was opened and asked.
-      (should (equal (car (cdr (assq :opened captured))) '("btw-1" right)))
-      (let ((sent (cdr (assq :sent captured))))
-        (should (= (length sent) 1))
-        (should (equal (plist-get (aref (car sent) 0) :text)
-                       "what is the cache key?")))
-      (kill-buffer buffer))))
+;;;; History
 
-(ert-deftest harness-ui-chat-fontifies-markdown ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "agent_message_chunk"
-                                         :messageId "a1" :final t
-                                         :content (list :type "text"
-                                                        :text "# Title\n\nsome `code` here")))
-      (should (harness-ui-chat-test--find-face 'harness-ui-h1-face buffer))
-      (should (harness-ui-chat-test--find-face 'harness-ui-code-face buffer))
-      (kill-buffer buffer))))
+(ert-deftest harness-ui-chat-lazy-history ()
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session "Long")))
+      (dotimes (i 150) (harness-call 'session/hint sid (format "hint number %d" i)))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (should (= 60 (length harness-chat--order)))
+          (should harness-chat--has-more)
+          (should (harness-ui-chat-test-find buf "Show earlier messages"))
+          (should (harness-ui-chat-test-find buf "hint number 90"))
+          (should-not (harness-ui-chat-test-find buf "hint number 89"))
+          (let ((pos (harness-ui-chat-test-find buf "hint number 149")))
+            (should (harness-ui-chat-test-face-at (1- pos) 'harness-hint-face)))
+          (goto-char (1- (harness-ui-chat-test-find buf "Show earlier messages")))
+          (harness-chat-push))
+        (harness-test-wait (lambda () (with-current-buffer buf (= 150 (length harness-chat--order)))) 5 "older page")
+        (with-current-buffer buf
+          (should-not harness-chat--has-more)
+          (should-not (harness-ui-chat-test-find buf "Show earlier messages"))
+          (should (< (harness-ui-chat-test-find buf "hint number 0")
+                     (harness-ui-chat-test-find buf "hint number 89")
+                     (harness-ui-chat-test-find buf "hint number 90")
+                     (harness-ui-chat-test-find buf "hint number 149")))
+          (should (equal "hint number 0"
+                         (plist-get (harness-chat-block-node (gethash (car (last harness-chat--order)) harness-chat--blocks))
+                                    :content)))
+          ;; Markers still delimit every block exactly.
+          (let ((prev (marker-position harness-chat--transcript-start)))
+            (dolist (id (reverse harness-chat--order))
+              (let ((b (gethash id harness-chat--blocks)))
+                (should (= prev (marker-position (harness-chat-block-start b))))
+                (setq prev (marker-position (harness-chat-block-end b)))))
+            (should (= prev (marker-position harness-chat--transcript-end)))))))))
 
-;;; Composing
+;;;; Redraw and deletion
 
-(ert-deftest harness-ui-chat-sends-and-clears ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (with-current-buffer buffer
-        (goto-char (harness-ui-chat--compose-point))
-        (insert "make it so")
-        (harness-ui-chat-send)
-        (should (equal (harness-ui-chat--compose-text) "")))
-      (should (= (length harness-ui-chat-test--sent) 1))
-      (let ((blocks (car harness-ui-chat-test--sent)))
-        (should (equal (plist-get (aref blocks 0) :text) "make it so")))
-      (kill-buffer buffer))))
+(ert-deftest harness-ui-chat-redraw-keeps-compose ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-prompt buf "hello there")
+      (harness-ui-chat-test-type buf "a draft in progress")
+      (with-current-buffer buf
+        (harness-chat-add-attachment (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
+        (should (harness-ui-chat-test-find buf "chat-test.el")))
+      (run-hooks 'harness-ui-redraw-hook)
+      (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-chat--order))) 5 "redrawn")
+      (with-current-buffer buf
+        (should (equal "a draft in progress" (harness-chat--compose-text)))
+        (should (= 1 (length harness-chat--attachments)))
+        (should (harness-ui-chat-test-find buf "hello there"))
+        (should (harness-ui-chat-test-find buf "You said"))
+        (should (harness-chat--in-compose-p (point)))
+        (let ((blocks (harness-chat--attachment-block (car harness-chat--attachments))))
+          (should (equal "resource_link" (plist-get blocks :type)))
+          (should (string-prefix-p "file://" (plist-get blocks :uri))))
+        (harness-chat-remove-attachment (plist-get (car harness-chat--attachments) :path))
+        (should (null harness-chat--attachments))))))
 
-(ert-deftest harness-ui-chat-attachments-become-resource-links ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer))
-          (file (make-temp-file "harness-chat-attach-" nil ".txt")))
-      (unwind-protect
-          (progn
-            (with-temp-file file (insert "payload"))
-            (with-current-buffer buffer
-              (harness-ui-chat-attach-file file)
-              (goto-char (harness-ui-chat--compose-point))
-              (insert "look at this")
-              (harness-ui-chat-send))
-            (let* ((blocks (car harness-ui-chat-test--sent))
-                   (link (seq-find (lambda (block)
-                                     (equal (plist-get block :type) "resource_link"))
-                                   (append blocks nil))))
-              (should link)
-              (should (equal (plist-get link :uri) (concat "file://" file)))
-              (should (= (plist-get link :size) 7))))
-        (delete-file file)
-        (kill-buffer buffer)))))
+(ert-deftest harness-ui-chat-session-deleted ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/delete sid)
+      (harness-test-wait (lambda () (with-current-buffer buf harness-chat--dead)) 5 "deleted")
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "session deleted"))
+        (harness-ui-chat-test-type buf "anyone there?")
+        (should-error (harness-chat-send) :type 'user-error)))))
 
-(ert-deftest harness-ui-chat-inlines-image-attachments ()
-  (harness-ui-chat-test--with-stubs
-    (let* ((directory (make-temp-file "harness-chat-img-" t))
-           (image (expand-file-name "shot.png" directory))
-           (textual (expand-file-name "notes.txt" directory))
-           (buffer (harness-ui-chat-test--buffer)))
-      ;; A one-pixel PNG stands in for the real thing.
-      (with-temp-file image
-        (set-buffer-multibyte nil)
-        (insert (base64-decode-string
-                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")))
-      (with-temp-file textual (insert "notes"))
-      (with-current-buffer buffer
-        (setq harness-ui-chat--attachments (list (harness-ui-chat--file-attachment image)
-                                                 (harness-ui-chat--file-attachment textual)))
-        (let* ((blocks (append (harness-ui-chat--message-blocks "look") nil))
-               (image-block (seq-find (lambda (block) (equal (plist-get block :type) "image"))
-                                      blocks))
-               (link-block (seq-find (lambda (block) (equal (plist-get block :type) "resource_link"))
-                                     blocks)))
-          (should image-block)
-          (should (equal (plist-get image-block :mime-type) "image/png"))
-          (should (stringp (plist-get image-block :data)))
-          (should (> (length (plist-get image-block :data)) 10))
-          (should link-block)
-          (should (string-match-p "notes\.txt" (plist-get link-block :uri)))))
-      (kill-buffer buffer))))
-
-(ert-deftest harness-ui-chat-oversized-images-stay-links ()
-  (harness-ui-chat-test--with-stubs
-    (let* ((directory (make-temp-file "harness-chat-big-" t))
-           (image (expand-file-name "big.png" directory))
-           (buffer (harness-ui-chat-test--buffer)))
-      (with-temp-file image (insert (make-string 2000 ?x)))
-      (with-current-buffer buffer
-        (let ((harness-ui-chat-inline-attachment-bytes 100))
-          (setq harness-ui-chat--attachments (list (harness-ui-chat--file-attachment image)))
-          (let* ((blocks (append (harness-ui-chat--message-blocks "look") nil))
-                 (block (cadr blocks)))
-            (should (equal (plist-get block :type) "resource_link")))))
-      (kill-buffer buffer))))
-
-(ert-deftest harness-ui-chat-in-memory-attachments ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (with-current-buffer buffer
-        (setq harness-ui-chat--attachments
-              (list (harness-ui-chat--data-attachment "aGVsbG8=" "image/png" "paste.png")))
-        ;; The label announces the kind, and the block inlines the data.
-        (should (equal (harness-ui-chat--attachment-kind
-                        (car harness-ui-chat--attachments))
-                       'image))
-        (should (string-match-p "\[image\]"
-                                (harness-ui-chat--attachment-label
-                                 (car harness-ui-chat--attachments))))
-        (let ((block (cadr (append (harness-ui-chat--message-blocks "see") nil))))
-          (should (equal (plist-get block :type) "image"))
-          (should (equal (plist-get block :mime-type) "image/png"))
-          (should (equal (plist-get block :data) "aGVsbG8=")))
-        ;; The attachment line renders a button for it.
-        (harness-ui-chat--render-composer)
-        (goto-char (point-min))
-        (should (search-forward "[image] paste.png" nil t)))
-      (kill-buffer buffer))))
-
-(ert-deftest harness-ui-chat-renders-audio-and-video-blocks ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (harness-ui-chat-test--apply
-       buffer
-       (list :sessionUpdate "agent_message_chunk" :messageId "m1" :final t
-             :content (vector (list :type "text" :text "here you go")
-                              (list :type "audio" :mime-type "audio/wav" :data "UklGRg==")
-                              (list :type "video" :mime-type "video/mp4"
-                                    :data "AAAA" :name "clip.mp4"))))
-      (let ((text (harness-ui-chat-test--text buffer)))
-        (should (string-match-p "\[play audio\]" text))
-        (should (string-match-p "\[video: clip\.mp4\]" text)))
-      (kill-buffer buffer))))
-
-(ert-deftest harness-ui-chat-queues-while-running ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (with-current-buffer buffer
-        (setq harness-ui-chat--status 'running)
-        (goto-char (harness-ui-chat--compose-point))
-        (insert "second thought")
-        (harness-ui-chat-send)
-        (should (= (length harness-ui-chat--queue) 1))
-        (should-not harness-ui-chat-test--sent)
-        (should (string-match-p "Queued (1)" (harness-ui-chat-test--text buffer)))
-        ;; Turning idle flushes the queue.
-        (harness-ui-chat--on-status (list :status (list :sessionId "s1" :status "idle")))
-        (should-not harness-ui-chat--queue))
-      (should (= (length harness-ui-chat-test--sent) 1))
-      (kill-buffer buffer))))
-
-(ert-deftest harness-ui-chat-at-file-completion ()
-  (harness-ui-chat-test--with-stubs
-    (let* ((dir (make-temp-file "harness-chat-comp-" t))
-           (buffer nil))
-      (unwind-protect
-          (progn
-            (with-temp-file (expand-file-name "alpha.txt" dir) (insert "x"))
-            (setq buffer (harness-ui-chat-test--buffer))
-            (with-current-buffer buffer
-              (setq harness-ui-chat--info (list :sessionId "s1" :cwd dir))
-              (goto-char (harness-ui-chat--compose-point))
-              (insert "@")
-              (let ((capf (harness-ui-chat-completion-at-point)))
-                (should capf)
-                (let ((candidates (nth 2 capf)))
-                  (should (member "alpha.txt" candidates))))))
-        (when (buffer-live-p buffer) (kill-buffer buffer))
-        (delete-directory dir t)))))
-
-(ert-deftest harness-ui-chat-header-shows-session-state ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (with-current-buffer buffer
-        (let ((rendered (prin1-to-string header-line-format)))
-          (should (string-match-p "Test" rendered))
-          (should (string-match-p "mock/m1" rendered))))
-      (kill-buffer buffer))))
-
-(ert-deftest harness-ui-chat-refresh-rerenders ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (harness-ui-chat-test--apply buffer
-                                   (list :sessionUpdate "agent_message_chunk"
-                                         :messageId "a1" :final t
-                                         :content (list :type "text" :text "kept")))
-      (with-current-buffer buffer
-        (harness-ui-chat-refresh-all)
-        (should (string-match-p "kept" (harness-ui-chat-test--text buffer))))
-      (kill-buffer buffer))))
-
-
-;;; Stubs shared by the remaining tests
-
-(defun harness-ui-chat-test--stub-method (method params)
-  "Default handler for stubbed ACP METHOD with PARAMS."
-  (pcase method
-    ("session/load" (make-hash-table))
-    ("_harness/session/info" (list :sessionId "s1" :title "Test"
-                                   :model "mock/m1" :status "idle"))
-    ("session/list" (list :sessions []))
-    ("session/delete" (make-hash-table))
-    ("_harness/session/rename" (make-hash-table))
-    ("_harness/session/fork" (list :sessionId "forked"))
-    ("_harness/agent/configuration"
-     (list :configOptions
-           (vector (list :id "model" :name "Model" :type "select"
-                         :currentValue "m1"
-                         :options (vector (list :value "m1" :name "M1")
-                                          (list :value "m2" :name "M2"))))))
-    ("session/set_config_option" (make-hash-table))
-    (_ (make-hash-table))))
-
-(defun harness-ui-chat-test--resolved (value)
-  "Return a resolved deferred of VALUE."
-  (let ((deferred (harness-deferred-new)))
-    (harness-deferred-resolve deferred value)
-    deferred))
-
-(defun harness-ui-chat-test--stub-requests (table)
-  "Install request stubs from TABLE, an alist of method -> function.
-Methods without an entry use `harness-ui-chat-test--stub-method'."
-  (cl-letf (((symbol-function 'harness-ui-request)
-             (lambda (method &optional params)
-               (let ((handler (cdr (assoc method table))))
-                 (harness-ui-chat-test--resolved
-                  (if handler
-                      (funcall handler params)
-                    (harness-ui-chat-test--stub-method method params)))))))
-    (funcall (or (cdr (assoc :body table)) #'ignore))))
-
-;;; Session list
-
-(defun harness-ui-chat-test--session-list ()
-  "A canned session/list result with a parent and child."
-  (list :sessions
-        (vector (list :sessionId "root" :cwd "/tmp" :title "Root"
-                      :updatedAt "now"
-                      :_meta (list :harness (list :status "idle" :model "m1")))
-                (list :sessionId "child" :cwd "/tmp" :title "Child"
-                      :updatedAt "now"
-                      :_meta (list :harness (list :status "running" :model "m1"
-                                                  :parentId "root"))))))
-
-(ert-deftest harness-ui-sessions-list-renders-tree ()
-  (harness-ui-chat-test--stub-requests
-   (list (cons "session/list"
-               (lambda (_params) (harness-ui-chat-test--session-list)))
-         (cons :body
-               (lambda ()
-                 (let ((buffer (harness-ui-sessions 'all)))
-                   (harness-test-wait-for
-                    (lambda () (with-current-buffer buffer tabulated-list-entries)) 5)
-                   (with-current-buffer buffer
-                     (should (= (length tabulated-list-entries) 2))
-                     (should (equal (car (car tabulated-list-entries)) "root"))
-                     (should (equal (car (cadr tabulated-list-entries)) "child")))
-                   (kill-buffer buffer)))))))
-
-(ert-deftest harness-ui-sessions-toggle-scope ()
-  (let ((asked nil))
-    (harness-ui-chat-test--stub-requests
-     (list (cons "session/list"
-                 (lambda (params) (setq asked params) (harness-ui-chat-test--session-list)))
-           (cons :body
-                 (lambda ()
-                   (setq harness-ui-sessions-scope 'project)
-                   (let ((buffer (harness-ui-sessions)))
-                     (harness-test-wait-for (lambda () asked) 5)
-                     (kill-buffer buffer))
-                   (should (equal (plist-get asked :mcpServers) []))))))))
-
-(ert-deftest harness-ui-sessions-fork-and-delete ()
-  (let ((forked nil) (deleted nil))
-    (harness-ui-chat-test--stub-requests
-     (list (cons "_harness/session/fork" (lambda (_params) (setq forked t) (list :sessionId "f")))
-           (cons "session/delete" (lambda (_params) (setq deleted t) (make-hash-table)))
-           (cons "session/list" (lambda (_params) (harness-ui-chat-test--session-list)))
-           (cons :body
-                 (lambda ()
-                   (let ((buffer (harness-ui-sessions 'all)))
-                     (harness-test-wait-for
-                      (lambda () (with-current-buffer buffer tabulated-list-entries)) 5)
-                     (with-current-buffer buffer
-                       (goto-char (point-min))
-                       (harness-ui-sessions-fork)
-                       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
-                         (harness-ui-sessions-delete)))
-                     (should forked)
-                     (should deleted)
-                     (kill-buffer buffer))))))))
-
-;;; Config controls
-
-(ert-deftest harness-ui-config-sets-model ()
-  (let ((harness-ui-current-session "s1")
-        (set-params nil))
-    (cl-letf (((symbol-function 'harness-ui-request)
-               (lambda (method &optional params)
-                 (when (equal method "session/set_config_option")
-                   (setq set-params params))
-                 (harness-ui-chat-test--resolved
-                  (harness-ui-chat-test--stub-method method params))))
-              ((symbol-function 'completing-read)
-               (lambda (&rest _args) "M2")))
-      (harness-ui-switch-model)
-      (harness-test-wait-for (lambda () set-params) 5)
-      (should (equal (plist-get set-params :configId) "model"))
-      (should (equal (plist-get set-params :value) "m2")))))
-
-(ert-deftest harness-ui-config-requires-a-session ()
-  (let ((harness-ui-current-session nil))
-    (should-error (harness-ui-switch-model) :type 'user-error)))
-
-;;; Notifier
-
-(ert-deftest harness-ui-notifier-counts-sessions ()
-  (clrhash harness-ui-notifier--sessions)
-  (harness-ui-notifier--on-status (list :status (list :sessionId "a" :status "blocked")))
-  (harness-ui-notifier--on-status (list :status (list :sessionId "b" :status "running")))
-  (harness-ui-notifier--on-status (list :status (list :sessionId "c" :status "idle" :unread 1)))
-  (harness-ui-notifier--on-status (list :status (list :sessionId "d" :status "idle" :unread 0)))
-  (should (equal (harness-ui-notifier-counts) '(1 1 1)))
-  (let ((string (harness-ui-notifier-string)))
-    (should (string-match-p "●1" string))
-    (should (string-match-p "◐1" string))
-    (should (string-match-p "○1" string)))
-  (clrhash harness-ui-notifier--sessions)
-  (should-not (harness-ui-notifier-string)))
-
-;;; Tree
-
-(ert-deftest harness-ui-tree-renders-and-expands ()
-  (harness-ui-chat-test--stub-requests
-   (list (cons "session/list" (lambda (_params) (harness-ui-chat-test--session-list)))
-         (cons "_harness/session/entries"
-               (lambda (_params)
-                 (list :entries (vector (list :sessionUpdate "user_message_chunk"
-                                              :content (list :type "text"
-                                                             :text "first message"))))))
-         (cons :body
-               (lambda ()
-                 (let ((buffer (harness-ui-tree)))
-                   (harness-test-wait-for
-                    (lambda () (with-current-buffer buffer (> (buffer-size) 0))) 5)
-                   (with-current-buffer buffer
-                     (should (string-match-p "Root" (buffer-string))))
-                   ;; Expanding fetches entries and shows their summaries.
-                   (harness-ui-tree-toggle-session "root")
-                   (harness-test-wait-for
-                    (lambda ()
-                      (with-current-buffer buffer
-                        (string-match-p "first message" (buffer-string))))
-                    5)
-                   (with-current-buffer buffer
-                     (should (string-match-p "first message" (buffer-string))))
-                   (kill-buffer buffer)))))))
-
-;;; End to end through the local ACP connection
-
-(defun harness-ui-chat-test--install-provider ()
-  "Install a scripted provider for the end-to-end test."
-  (harness-service-register
-   "provider"
-   :module 'harness-ui-chat-test
-   :methods
-   (list (cons 'complete
-               (lambda (request)
-                 (when-let* ((callback (plist-get request :on-text)))
-                   (funcall callback "streamed reply"))
-                 (let ((deferred (harness-deferred-new)))
-                   (run-at-time 0.001 nil
-                                (lambda ()
-                                  (harness-deferred-resolve
-                                   deferred (list :text "streamed reply"
-                                                  :stop-reason "end_turn"))))
-                   deferred)))
-         (cons 'models (lambda (&rest _args)
-                         (vector (list :id "mock/m1" :name "Mock" :provider "mock"))))
-         (cons 'price (lambda (&rest _args) nil)))))
-
-(ert-deftest harness-ui-chat-end-to-end-local ()
-  "The real agent stack, driven through the local UI connection."
-  (let* ((harness-session-storage-directory (make-temp-file "harness-ui-e2e-" t))
-         (directory (make-temp-file "harness-ui-e2e-project-" t))
-         (harness-modules '(harness-config harness-session harness-tools
-                            harness-agent harness-ui harness-ui-chat)))
-    (unwind-protect
-        (progn
-          (clrhash harness-session--active)
-          (clrhash harness-session--project-ids)
-          (harness-load harness-modules)
-          (harness-ui-chat-test--install-provider)
-          (harness-ui-start)
-          (let* ((request (harness-ui-request "session/new"
-                                              (list :cwd directory :mcpServers [])))
-                 (created (progn (harness-test-settle request 10)
-                                 (harness-deferred-value request)))
-                 (session-id (plist-get created :sessionId)))
-            (should session-id)
-            (harness-service-call "session" 'set-config
-                                  :session-id session-id
-                                  :config-id "model" :value "mock/m1")
-            (harness-ui-chat-open session-id 'full)
-            (let ((buffer (gethash session-id harness-ui-chat--buffers)))
-              (with-current-buffer buffer
-                (goto-char (harness-ui-chat--compose-point))
-                (insert "hello")
-                (harness-ui-chat-send))
-              (should (harness-test-wait-for
-                       (lambda ()
-                         (with-current-buffer buffer
-                           (string-match-p "streamed reply"
-                                           (buffer-substring-no-properties
-                                            (point-min) (point-max)))))
-                       15))
-              (with-current-buffer buffer
-                (should (string-match-p "hello"
-                                        (buffer-substring-no-properties
-                                         (point-min) (point-max)))))
-              (kill-buffer buffer))))
-      (harness-ui-stop)
-      (delete-directory directory t))))
-
-
-(ert-deftest harness-ui-chat-keeps-chronological-order ()
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (dolist (entry (list (list "user_message_chunk" "m1" "first message")
-                           (list "agent_message_chunk" "m2" "second message")
-                           (list "agent_message_chunk" "m3" "third message")))
-        (harness-ui-chat-test--apply
-         buffer
-         (list :sessionUpdate (nth 0 entry) :messageId (nth 1 entry) :final t
-               :content (list :type "text" :text (nth 2 entry)))))
-      (let* ((text (harness-ui-chat-test--text buffer))
-             (first (string-match "first message" text))
-             (second (string-match "second message" text))
-             (third (string-match "third message" text)))
-        (should first)
-        (should second)
-        (should third)
-        (should (< first second))
-        (should (< second third)))
-      (kill-buffer buffer))))
-
-
-(ert-deftest harness-ui-chat-live-and-final-keep-order ()
-  "Streaming (live) entries followed by final entries stay in order."
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (harness-ui-chat-test--apply buffer (list :sessionUpdate "user_message_chunk"
-                                                :messageId "u1" :live t
-                                                :content (list :type "text" :text "QUESTION")))
-      (harness-ui-chat-test--apply buffer (list :sessionUpdate "user_message_chunk"
-                                                :messageId "u1" :final t
-                                                :content (list :type "text" :text "QUESTION")))
-      (harness-ui-chat-test--apply buffer (list :sessionUpdate "agent_message_chunk"
-                                                :messageId "a1" :live t :delta "ANS"
-                                                :content (list :type "text" :text "ANS")))
-      (harness-ui-chat-test--apply buffer (list :sessionUpdate "agent_message_chunk"
-                                                :messageId "a1" :final t
-                                                :content (list :type "text" :text "ANSWER")))
-      (let* ((text (harness-ui-chat-test--text buffer))
-             (question (string-match "QUESTION" text))
-             (answer (string-match "ANSWER" text)))
-        (should question)
-        (should answer)
-        (should (< question answer)))
-      (kill-buffer buffer))))
-
-
-(ert-deftest harness-ui-chat-skill-references ()
-  "#name references attach skill contents to the message."
-  (harness-ui-chat-test--with-stubs
-    (let ((buffer (harness-ui-chat-test--buffer)))
-      (with-current-buffer buffer
-        (goto-char (harness-ui-chat--compose-point))
-        (insert "#alpha please")
-        (harness-ui-chat-send))
-      (let* ((blocks (car harness-ui-chat-test--sent))
-             (texts (mapcar (lambda (block) (plist-get block :text)) (append blocks nil))))
-        (should (= (length texts) 2))
-        (should (string-match-p "Skill `alpha`" (car texts)))
-        (should (string-match-p "SKILL BODY" (car texts)))
-        (should (equal (cadr texts) "#alpha please")))
-      (kill-buffer buffer))))
+(ert-deftest harness-ui-chat-completion-sources ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (cwd (plist-get (harness-call 'session/get sid) :cwd)))
+      (with-temp-file (expand-file-name "notes.txt" cwd) (insert "x"))
+      (harness-call 'project/invalidate cwd)
+      (with-current-buffer buf
+        (setq harness-chat--files nil)
+        (harness-chat--fetch-completions)
+        (harness-test-wait (lambda () harness-chat--files) 5 "files fetched")
+        (should (member "notes.txt" harness-chat--files))
+        (harness-ui-chat-test-type buf "see @not")
+        (let ((capf (harness-chat-completion-at-point)))
+          (should capf)
+          (should (= (nth 1 capf) (point)))
+          (should (equal "not" (buffer-substring (nth 0 capf) (nth 1 capf))))
+          (should (member "notes.txt" (all-completions "not" (nth 2 capf))))
+          ;; Choosing a file turns the token into an attachment chip.
+          (delete-region (nth 0 capf) (nth 1 capf))
+          (insert "notes.txt")
+          (funcall (plist-get (nthcdr 3 capf) :exit-function) "notes.txt" 'finished)
+          (should (equal "see " (harness-chat--compose-text)))
+          (should (equal (expand-file-name "notes.txt" cwd) (plist-get (car harness-chat--attachments) :path)))
+          (should (equal "text/plain" (plist-get (car harness-chat--attachments) :mime)))
+          (should (harness-ui-chat-test-find buf "notes.txt (1 B)")))
+        ;; A slash at the start completes skills; elsewhere it does not.
+        (setq harness-chat--skills '("review" "deploy"))
+        (harness-chat--clear-compose)
+        (harness-ui-chat-test-type buf "/rev")
+        (should (member "review" (all-completions "rev" (nth 2 (harness-chat-completion-at-point)))))
+        (harness-chat--clear-compose)
+        (harness-ui-chat-test-type buf "a /rev")
+        (should-not (harness-chat-completion-at-point))
+        (should (harness-chat--skill-reference-p "please /review this"))
+        (should-not (harness-chat--skill-reference-p "a/review"))))))
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

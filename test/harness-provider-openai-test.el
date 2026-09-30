@@ -1,271 +1,524 @@
-;;; harness-provider-openai-test.el --- Tests for the OpenAI provider -*- lexical-binding: t; -*-
+;;; harness-provider-openai-test.el --- Tests for the OpenAI-compatible provider  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; The provider is tested against a canned HTTP server: real socket, real
-;; SSE parsing, no network.
+;; Unit tests drive the provider through a fake `harness-http-request'
+;; that records the request and replays canned SSE chunks.  Integration
+;; tests (tag `integration', HARNESS_INTEGRATION=1) talk to OpenRouter.
 
 ;;; Code:
 
-(require 'ert)
-(require 'cl-lib)
-(require 'json)
-(require 'harness-core)
+(require 'harness-test-helpers)
 (require 'harness-http)
 (require 'harness-provider)
 (require 'harness-provider-openai)
-(require 'harness-test-helpers)
 
-(harness-module-load 'harness-provider)
-(harness-module-load 'harness-provider-openai)
+;;;; Fake HTTP layer
 
-(defvar harness-provider-openai-test--requests nil
-  "Requests captured by the canned server, oldest first.")
+(defvar harness-openai-test--requests nil
+  "Requests seen by the fake, newest first: (:url :method :headers :json :args).")
 
-(defmacro harness-provider-openai-test--with-server (responder &rest body)
-  "Run BODY with a canned server and a test provider instance.
-RESPONDER is called with (PROCESS REQUEST) and returns response parts.
-Inside BODY, `test-base-url' is bound to the instance URL."
+(defvar harness-openai-test--responses nil
+  "Alist of (URL-REGEXP . RESPONSE) consulted by the fake.
+RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
+\(:status N :body STRING) for plain ones; :hang t never answers.")
+
+(defun harness-openai-test--fake-request (url &rest args)
+  "Record a request to URL with ARGS and replay the matching canned response."
+  (let* ((response (cdr (cl-find-if (lambda (cell) (string-match-p (car cell) url))
+                                    harness-openai-test--responses)))
+         (handle (make-harness-http-handle :url url :callback (plist-get args :callback)
+                                           :on-chunk (plist-get args :on-chunk)
+                                           :started (float-time))))
+    (push (list :url url :method (or (plist-get args :method) "GET")
+                :headers (plist-get args :headers) :json (plist-get args :json) :args args)
+          harness-openai-test--requests)
+    (unless (plist-get response :hang)
+      (harness-run-soon
+       (lambda ()
+         (unless (harness-http-handle-cancelled handle)
+           (let ((status (or (plist-get response :status) 200)))
+             (when (plist-get args :on-headers)
+               (funcall (plist-get args :on-headers) status nil))
+             (if (plist-get args :on-chunk)
+                 (progn
+                   (dolist (chunk (or (plist-get response :chunks)
+                                      (and (plist-get response :body) (list (plist-get response :body)))))
+                     (funcall (plist-get args :on-chunk) chunk))
+                   (funcall (plist-get args :callback) status nil "" nil))
+               (funcall (plist-get args :callback) status nil (or (plist-get response :body) "") nil)))))))
+    handle))
+
+(defmacro harness-openai-test-with-fake (responses &rest body)
+  "Run BODY with `harness-http-request' replaced by a fake serving RESPONSES."
   (declare (indent 1))
-  `(unwind-protect
-       (let* ((harness-provider-openai-test--requests nil)
-              (server (harness-test-http-server
-                       (lambda (process request)
-                         (push request harness-provider-openai-test--requests)
-                         (funcall ,responder process request))))
-              (test-base-url (format "http://127.0.0.1:%s/v1"
-                                     (process-contact server :service))))
-         ,@body)
-     (harness-test-http-cleanup)))
+  `(let ((harness-openai-test--requests nil)
+         (harness-openai-test--responses ,responses)
+         (auth-sources nil))
+     (cl-letf (((symbol-function 'harness-http-request) #'harness-openai-test--fake-request))
+       ,@body)))
 
-(defun harness-provider-openai-test--sse (payloads)
-  "Build an SSE response body from PAYLOADS (strings or plists)."
-  (mapconcat (lambda (payload)
-               (concat "data: "
-                       (if (stringp payload) payload (json-serialize payload))
-                       "\n\n"))
+(defun harness-openai-test--sse (&rest payloads)
+  "Return one SSE chunk string holding PAYLOADS (strings or plists)."
+  (mapconcat (lambda (p) (format "data: %s\n\n" (if (stringp p) p (harness-json-encode p))))
              payloads ""))
 
-(defun harness-provider-openai-test--sse-response (payloads &optional headers)
-  "Build an SSE HTTP response with PAYLOADS."
-  (list (encode-coding-string
-         (concat "HTTP/1.1 200 OK\r\n"
-                 "Content-Type: text/event-stream\r\n"
-                 "Cache-Control: no-cache\r\n"
-                 (mapconcat (lambda (header) (format "%s: %s\r\n" (car header) (cdr header)))
-                            headers)
-                 "\r\n"
-                 (harness-provider-openai-test--sse payloads))
-         'utf-8)))
+(defvar harness-openai-test-endpoint
+  '(:id testrouter :label "Test router" :base-url "https://openrouter.example/api/v1/"
+    :api-key "sk-test-not-a-real-key")
+  "An OpenRouter-flavoured endpoint with a literal key.")
 
-(defun harness-provider-openai-test--register (base-url &rest properties)
-  "Register a test instance at BASE-URL with PROPERTIES."
-  (harness-provider-openai-register-instance
-   (append (list :name "test-openai"
-                 :base-url base-url
-                 :api-key "test-key"
-                 :thinking-param "reasoning_effort"
-                 :models '(("test-model" :context-window 1000
-                            :input-price 1.0 :output-price 2.0)))
-           properties)))
+(defvar harness-openai-test-openai-endpoint
+  '(:id testopenai :label "Test OpenAI" :base-url "https://api.openai.example/v1"
+    :api-key "sk-test-openai")
+  "A plain OpenAI-flavoured endpoint.")
 
-(defun harness-provider-openai-test--run (request)
-  "Complete REQUEST and return the settled result, signalling on error."
-  (let ((deferred (harness-provider-complete request)))
-    (harness-test-settle deferred 5)
-    (when (harness-deferred-rejected-p deferred)
-      (signal 'harness-provider-error (list (harness-deferred-value deferred))))
-    (harness-deferred-value deferred)))
+(defun harness-openai-test--complete (endpoint request)
+  "Run REQUEST directly against ENDPOINT's complete function, collecting events.
+Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
+  (let* ((events nil)
+         (request (plist-put (copy-sequence request) :on-event (lambda (e) (push e events))))
+         (handle (harness-openai--complete endpoint request)))
+    (harness-test-wait (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type)))) 5 "done event")
+    (cons (reverse events) handle)))
 
-(defun harness-provider-openai-test--split-request (request-string)
-  "Split REQUEST-STRING into (HEADERS . BODY)."
-  (if (string-match "\r\n\r\n" request-string)
-      (cons (substring request-string 0 (match-beginning 0))
-            (substring request-string (match-end 0)))
-    (cons request-string "")))
+(defun harness-openai-test--types (events)
+  "Return the `:type' of every event in EVENTS."
+  (mapcar (lambda (e) (plist-get e :type)) events))
 
-(defun harness-provider-openai-test--last-body ()
-  "Parse the body of the most recent captured request."
-  (pcase-let* ((`(,_headers . ,body)
-                (harness-provider-openai-test--split-request
-                 (car harness-provider-openai-test--requests))))
-    (json-parse-string body :object-type 'plist)))
+(defun harness-openai-test--last-request-json ()
+  "Return the JSON plist of the most recent fake request."
+  (plist-get (car harness-openai-test--requests) :json))
 
-(ert-deftest harness-provider-openai-streaming-happy-path ()
-  (harness-provider-openai-test--with-server
-      (lambda (process _request)
-        (run-at-time 0.05 nil
-                     (lambda () (when (process-live-p process) (delete-process process))))
-        (harness-provider-openai-test--sse-response
-         (list '(:choices [(:delta (:content "Hel"))])
-               '(:choices [(:delta (:content "lo"))])
-               '(:choices [(:delta (:reasoning_content "hm"))])
-               '(:choices [(:delta (:tool_calls [(:index 0 :id "call_1"
-                                                 :function (:name "read"
-                                                            :arguments "{\"path\""))]))])
-               '(:choices [(:delta (:tool_calls [(:index 0
-                                                  :function (:arguments ":\"/tmp/x\"}"))]))])
-               '(:choices [(:delta () :finish_reason "tool_calls")])
-               '(:usage (:prompt_tokens 11 :completion_tokens 7
-                         :prompt_tokens_details (:cached_tokens 3)))
-               "[DONE]")))
-    (harness-provider-openai-test--register test-base-url)
-    (let* ((text nil)
-           (thought nil)
-           (tool-updates nil)
-           (result (harness-provider-openai-test--run
-                    (list :model "test-openai/test-model"
-                          :system "Be brief."
-                          :messages (vector (list :role "user"
-                                                  :content (vector (list :type "text"
-                                                                         :text "read x"))))
-                          :tools (vector (list :name "read"
-                                               :description "Read a file"
-                                               :input-schema (list :type "object"
-                                                                   :properties (list :path (list :type "string"))
-                                                                   :required ["path"])))
-                          :max-output-tokens 128
-                          :thinking "high"
-                          :on-text (lambda (delta) (setq text (concat text delta)))
-                          :on-thought (lambda (delta) (setq thought (concat thought delta)))
-                          :on-tool-call (lambda (call) (push call tool-updates))))))
-      (should (equal text "Hello"))
-      (should (equal thought "hm"))
-      (should (equal (plist-get result :text) "Hello"))
-      (should (equal (plist-get result :thinking) "hm"))
-      (should (equal (plist-get result :stop-reason) "tool_use"))
-      (should (= (length (plist-get result :tool-calls)) 1))
-      (let ((call (aref (plist-get result :tool-calls) 0)))
-        (should (equal (plist-get call :id) "call_1"))
-        (should (equal (plist-get call :name) "read"))
-        (should (equal (plist-get call :arguments) '(:path "/tmp/x"))))
-      (should (equal (plist-get (plist-get result :usage) :input-tokens) 11))
-      (should (equal (plist-get (plist-get result :usage) :output-tokens) 7))
-      (should (equal (plist-get (plist-get result :usage) :cache-read) 3))
-      ;; The request itself: model, system message, tools, streaming flags.
-      (let ((body (harness-provider-openai-test--last-body)))
-        (should (equal (plist-get body :model) "test-model"))
-        (should (eq (plist-get body :stream) t))
-        (should (equal (plist-get body :max_completion_tokens) 128))
-        (should (equal (plist-get body :reasoning_effort) "high"))
-        (should (equal (plist-get (aref (plist-get body :messages) 0) :role) "system"))
-        (should (equal (plist-get (aref (plist-get body :messages) 0) :content) "Be brief."))
-        (should (equal (plist-get (aref (plist-get body :messages) 1) :role) "user"))
-        (should (equal (plist-get (aref (plist-get body :tools) 0) :type) "function"))
-        (should (equal (plist-get (plist-get (aref (plist-get body :tools) 0) :function) :name)
-                       "read"))))))
+(defun harness-openai-test--approx (a b)
+  "Non-nil when numbers A and B agree to a millionth."
+  (< (abs (- a b)) 1e-6))
 
-(ert-deftest harness-provider-openai-plain-text-stream ()
-  (harness-provider-openai-test--with-server
-      (lambda (process _request)
-        (run-at-time 0.05 nil
-                     (lambda () (when (process-live-p process) (delete-process process))))
-        (harness-provider-openai-test--sse-response
-         (list '(:choices [(:delta (:content "done") :finish_reason "stop")])
-               "[DONE]")))
-    (harness-provider-openai-test--register test-base-url)
-    (let ((result (harness-provider-openai-test--run
-                   (list :model "test-openai/test-model"
-                         :messages (vector (list :role "user"
-                                                 :content (vector (list :type "text"
-                                                                        :text "hi"))))))))
-      (should (equal (plist-get result :text) "done"))
-      (should (equal (plist-get result :stop-reason) "end_turn"))
-      (should-not (plist-get result :thinking))
-      (should (= (length (plist-get result :tool-calls)) 0)))))
+;;;; Registration and configuration
 
-(ert-deftest harness-provider-openai-http-error-is-provider-error ()
-  (harness-provider-openai-test--with-server
-      (lambda (_process _request)
-        (list (harness-test-http-response
-               401 '() "{\"error\":{\"message\":\"Invalid API key\"}}")))
-    (harness-provider-openai-test--register test-base-url)
-    (let ((deferred (harness-provider-complete
-                     (list :model "test-openai/test-model"
-                           :messages (vector (list :role "user"
-                                                   :content (vector (list :type "text"
-                                                                          :text "hi"))))))))
-      (harness-test-settle deferred 5)
-      (should (harness-deferred-rejected-p deferred))
-      (should (eq (car (harness-deferred-value deferred)) 'harness-provider-error))
-      (should (string-match-p "Invalid API key"
-                              (format "%S" (harness-deferred-value deferred)))))))
+(ert-deftest harness-provider-openai-registers-default-endpoints ()
+  (should (harness-provider-get 'openrouter))
+  (should (harness-provider-get 'openai))
+  (should (equal "OpenRouter" (harness-provider-label (harness-provider-get 'openrouter))))
+  (should (eq 'dynamic (plist-get (harness-provider-capabilities (harness-provider-get 'openrouter)) :pricing)))
+  (should-not (plist-get (harness-provider-capabilities (harness-provider-get 'openai)) :pricing))
+  (should (memq 'provider (harness-module-requires (harness-module-get 'provider-openai)))))
 
-(ert-deftest harness-provider-openai-missing-key-is-provider-error ()
-  (setenv "HARNESS_TEST_OPENAI_KEY" nil)
-  (harness-provider-openai-register-instance
-   '(:name "test-openai"
-     :base-url "http://127.0.0.1:1/v1"
-     :api-key-env "HARNESS_TEST_OPENAI_KEY"
-     :models (("test-model"))))
-  (let ((deferred (harness-provider-complete
-                   (list :model "test-openai/test-model"
-                         :messages (vector)))))
-    (harness-test-settle deferred 2)
-    (should (harness-deferred-rejected-p deferred))
-    (should (string-match-p "HARNESS_TEST_OPENAI_KEY"
-                            (format "%S" (harness-deferred-value deferred))))))
+(ert-deftest harness-provider-openai-add-and-remove-endpoint ()
+  (let ((saved harness-openai-endpoints))
+    (unwind-protect
+        (progn
+          (harness-openai-add-endpoint :id 'local :label "Local" :base-url "http://localhost:8080/v1"
+                                       :models '("llama" (:name "qwen" :context-window 32000))
+                                       :default-context 4096)
+          (should (harness-provider-get 'local))
+          (should (equal "Local" (harness-provider-label (harness-provider-get 'local))))
+          (let ((models (harness-test-await (funcall (harness-provider-models-fn (harness-provider-get 'local))))))
+            (should (equal '("llama" "qwen") (mapcar (lambda (m) (plist-get m :name)) models)))
+            (should (= 4096 (plist-get (car models) :context-window)))
+            (should (= 32000 (plist-get (cadr models) :context-window))))
+          ;; Setting the custom back through :set drops the provider again.
+          (funcall (get 'harness-openai-endpoints 'custom-set) 'harness-openai-endpoints saved)
+          (should-not (harness-provider-get 'local))
+          (should (harness-provider-get 'openrouter)))
+      (setq harness-openai-endpoints saved)
+      (harness-openai--register-all))))
 
-(ert-deftest harness-provider-openai-fetches-models-and-merges ()
-  (harness-provider-openai-test--with-server
-      (lambda (_process _request)
-        (list (harness-test-http-response
-               200 '() "{\"data\":[{\"id\":\"fetched-model\"}]}")))
-    (let ((instance (list :name "test-openai"
-                          :base-url test-base-url
-                          :api-key "test-key"
-                          :fetch-models t
-                          :models '(("static-model" :context-window 5)))))
-      (let* ((deferred (harness-provider-openai--models instance))
-             (models (progn (harness-test-settle deferred 5)
-                            (harness-deferred-value deferred))))
-        (should (equal (sort (mapcar (lambda (model) (plist-get model :model)) models)
-                             #'string<)
-                       '("fetched-model" "static-model")))))))
+(ert-deftest harness-provider-openai-api-key-resolution ()
+  (let ((auth-sources nil))
+    (should (equal "lit" (harness-openai--api-key '(:id x :base-url "https://h.example/v1" :api-key "lit"
+                                                        :api-key-env "HARNESS_TEST_NO_SUCH_VAR"))))
+    (with-environment-variables (("HARNESS_TEST_KEY_VAR" "from-env"))
+      (should (equal "from-env" (harness-openai--api-key '(:id x :base-url "https://h.example/v1"
+                                                               :api-key-env "HARNESS_TEST_KEY_VAR")))))
+    (with-environment-variables (("HARNESS_TEST_KEY_VAR" ""))
+      (should-not (harness-openai--api-key '(:id x :base-url "https://h.example/v1"
+                                                 :api-key-env "HARNESS_TEST_KEY_VAR"))))
+    ;; auth-source is consulted last.
+    (cl-letf (((symbol-function 'auth-source-search)
+               (lambda (&rest args)
+                 (when (and (equal (plist-get args :host) "h.example") (equal (plist-get args :user) "apikey"))
+                   (list (list :host "h.example" :secret (lambda () "from-auth-source")))))))
+      (should (equal "from-auth-source" (harness-openai--api-key '(:id x :base-url "https://h.example/v1")))))))
 
-(ert-deftest harness-provider-openai-price ()
-  (harness-provider-openai-test--with-server
-      (lambda (_process _request) nil)
-    (harness-provider-openai-test--register test-base-url)
-    (let ((cost (harness-provider-price
-                 "test-openai/test-model"
-                 '(:input-tokens 1000000 :output-tokens 1000000 :cache-read 0))))
-      (should (< (abs (- (plist-get cost :amount) 3.0)) 1e-9)))))
+;;;; Request body
 
-(ert-deftest harness-provider-openai-tool-result-conversion ()
-  (let ((messages (harness-provider-messages-from-entries
-                   (vector (list :sessionUpdate "tool_call" :toolCallId "c1" :name "bash"
-                                 :rawInput "{}")
-                           (list :sessionUpdate "tool_call_update" :toolCallId "c1"
-                                 :status "completed"
-                                 :content (vector (list :type "content"
-                                                        :content (list :type "text"
-                                                                       :text "output"))))))))
-    (let* ((converted (harness-provider-openai--messages messages))
-           (tool-message (aref converted 1)))
-      (should (equal (plist-get tool-message :role) "tool"))
-      (should (equal (plist-get tool-message :tool_call_id) "c1"))
-      (should (equal (plist-get tool-message :content) "output"))
-      (let ((call (aref (plist-get (aref converted 0) :tool_calls) 0)))
-        (should (equal (plist-get call :id) "c1"))
-        (should (equal (plist-get (plist-get call :function) :name) "bash"))))))
+(ert-deftest harness-provider-openai-request-body-shape ()
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (let* ((img (make-temp-file "harness-openai-img" nil ".png"))
+           (_ (with-temp-file img (set-buffer-multibyte nil) (insert "\211PNG\r\n")))
+           (request
+            (list :model "testrouter:vendor/model-1"
+                  :system "Be terse."
+                  :thinking "medium"
+                  :max-tokens 321
+                  :tools '((:name "echo" :description "Echo it."
+                            :schema (:type "object" :properties (:value (:type "string")) :required ("value")))
+                           (:name "noop"))
+                  :messages `((:role user :content ((:type "text" :text "look")
+                                                    (:type "image" :path ,img)
+                                                    (:type "image" :mime "image/jpeg" :data "QUJD")))
+                              (:role assistant :content ((:type "thinking" :text "hmm")
+                                                         (:type "text" :text "calling")
+                                                         (:type "tool_use" :id "call_1" :name "echo" :input (:value "a"))
+                                                         (:type "tool_use" :id "call_2" :name "noop" :input nil)))
+                              (:role tool :content ((:type "tool_result" :tool_use_id "call_1" :content "a!")
+                                                    (:type "tool_result" :tool_use_id "call_2" :content "" :is_error t)))
+                              (:role assistant :content ((:type "tool_use" :id "call_3" :name "echo" :input (:value "b"))))
+                              (:role user :content ((:type "tool_result" :tool_use_id "call_3" :content "b!")
+                                                    (:type "text" :text "and now?")))))))
+      (harness-openai-test--complete harness-openai-test-endpoint request)
+      (let* ((req (car harness-openai-test--requests))
+             (body (plist-get req :json))
+             (msgs (plist-get body :messages)))
+        (should (equal "https://openrouter.example/api/v1/chat/completions" (plist-get req :url)))
+        (should (equal "POST" (plist-get req :method)))
+        (should (equal "Bearer sk-test-not-a-real-key" (cdr (assoc "Authorization" (plist-get req :headers)))))
+        (should (equal "vendor/model-1" (plist-get body :model)))
+        (should (eq t (plist-get body :stream)))
+        (should (equal '(:include_usage t) (plist-get body :stream_options)))
+        (should (equal '(:include t) (plist-get body :usage)))
+        (should (equal '(:effort "medium") (plist-get body :reasoning)))
+        (should (= 321 (plist-get body :max_tokens)))
+        (should-not (plist-get body :reasoning_effort))
+        ;; tools
+        (should (equal '((:type "function"
+                          :function (:name "echo" :description "Echo it."
+                                     :parameters (:type "object" :properties (:value (:type "string")) :required ("value"))))
+                         (:type "function"
+                          :function (:name "noop" :description "" :parameters (:type "object" :properties :empty))))
+                       (plist-get body :tools)))
+        ;; messages
+        (should (equal '("system" "user" "assistant" "tool" "tool" "assistant" "tool" "user")
+                       (mapcar (lambda (m) (plist-get m :role)) msgs)))
+        (should (equal '(:role "system" :content "Be terse.") (nth 0 msgs)))
+        (let ((parts (plist-get (nth 1 msgs) :content)))
+          (should (equal '(:type "text" :text "look") (nth 0 parts)))
+          (should (equal (format "data:image/png;base64,%s" (base64-encode-string "\211PNG\r\n" t))
+                         (harness-plist-get-in (nth 1 parts) '(:image_url :url))))
+          (should (equal "data:image/jpeg;base64,QUJD" (harness-plist-get-in (nth 2 parts) '(:image_url :url)))))
+        (should (equal '(:role "assistant" :content "calling"
+                         :tool_calls ((:id "call_1" :type "function" :function (:name "echo" :arguments "{\"value\":\"a\"}"))
+                                      (:id "call_2" :type "function" :function (:name "noop" :arguments "{}"))))
+                       (nth 2 msgs)))
+        (should (equal '(:role "tool" :tool_call_id "call_1" :content "a!") (nth 3 msgs)))
+        (should (equal '(:role "tool" :tool_call_id "call_2" :content "") (nth 4 msgs)))
+        ;; assistant with only a tool call has null content
+        (should (equal '(:role "assistant" :content nil
+                         :tool_calls ((:id "call_3" :type "function" :function (:name "echo" :arguments "{\"value\":\"b\"}"))))
+                       (nth 5 msgs)))
+        (should (equal '(:role "tool" :tool_call_id "call_3" :content "b!") (nth 6 msgs)))
+        (should (equal '(:role "user" :content ((:type "text" :text "and now?"))) (nth 7 msgs)))
+        ;; the encoded body is valid JSON with null where expected
+        (should (string-match-p "\"content\":null" (harness-json-encode body))))
+      (delete-file img))))
 
-(ert-deftest harness-provider-openai-sends-images-inline ()
-  "Image blocks become image_url data parts, not empty text."
-  (let* ((messages (harness-provider-openai--messages
-                    (vector (list :role "user"
-                                  :content (vector
-                                            (list :type "text" :text "what is this?")
-                                            (list :type "image"
-                                                  :mime-type "image/png"
-                                                  :data "aGVsbG8="))))))
-         (message (aref messages 0))
-         (parts (append (plist-get message :content) nil))
-         (image (seq-find (lambda (part) (equal (plist-get part :type) "image_url")) parts)))
-    (should image)
-    (should (equal (plist-get (plist-get image :image_url) :url)
-                   "data:image/png;base64,aGVsbG8="))
-    (should (seq-some (lambda (part) (equal (plist-get part :type) "text")) parts))))
+(ert-deftest harness-provider-openai-request-body-plain-openai-dialect ()
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (harness-openai-test--complete harness-openai-test-openai-endpoint
+                                   '(:model "testopenai:gpt-x" :thinking "max" :max-tokens 10
+                                     :messages ((:role user :content ((:type "text" :text "hi"))))))
+    (let ((body (harness-openai-test--last-request-json)))
+      (should (equal "high" (plist-get body :reasoning_effort)))
+      (should-not (plist-get body :reasoning))
+      (should-not (plist-get body :usage))
+      (should-not (plist-get body :tools))
+      (should (= 10 (plist-get body :max_completion_tokens)))
+      (should-not (plist-get body :max_tokens))
+      (should-not (assoc "X-Title" (plist-get (car harness-openai-test--requests) :headers))))))
+
+;;;; Event streams
+
+(ert-deftest harness-provider-openai-text-answer-with-usage ()
+  (harness-openai-test-with-fake
+      `(("chat/completions"
+         . (:chunks
+            ;; chunks split mid-event to exercise SSE buffering
+            ("data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"think"
+             "ing\"},\"finish_reason\":null}]}\n\n"
+             ,(harness-openai-test--sse
+               '(:choices ((:index 0 :delta (:content "lo") :finish_reason "stop")))
+               '(:choices () :usage (:prompt_tokens 12 :completion_tokens 3 :total_tokens 15
+                                     :prompt_tokens_details (:cached_tokens 5) :cost 0.00042))
+               "[DONE]")))))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-endpoint
+                        '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "hi")))))))))
+      (should (equal '(start text thinking text usage done) (harness-openai-test--types events)))
+      (should (equal "Hel" (plist-get (nth 1 events) :delta)))
+      (should (equal "thinking" (plist-get (nth 2 events) :delta)))
+      (should (equal "lo" (plist-get (nth 3 events) :delta)))
+      (should (equal '(:type usage :input 12 :output 3 :cache-read 5 :cache-write 0 :cost 0.00042 :context 12)
+                     (nth 4 events)))
+      (should (equal '(:type done :stop-reason end-turn) (car (last events)))))))
+
+(ert-deftest harness-provider-openai-tool-call-assembled-from-fragments ()
+  (harness-openai-test-with-fake
+      `(("chat/completions"
+         . (:chunks
+            (,(harness-openai-test--sse
+               '(:choices ((:index 0 :delta (:role "assistant" :content nil
+                                             :tool_calls ((:index 0 :id "call_abc" :type "function"
+                                                           :function (:name "echo" :arguments ""))))
+                            :finish_reason nil)))
+               '(:choices ((:index 0 :delta (:tool_calls ((:index 0 :function (:arguments "{\"val")))) :finish_reason nil)))
+               '(:choices ((:index 0 :delta (:tool_calls ((:index 1 :id "call_def" :type "function"
+                                                           :function (:name "noop" :arguments "{}"))))
+                            :finish_reason nil)))
+               '(:choices ((:index 0 :delta (:tool_calls ((:index 0 :function (:arguments "ue\":\"x y\"}")))) :finish_reason nil)))
+               '(:choices ((:index 0 :delta () :finish_reason "tool_calls")))
+               '(:choices () :usage (:prompt_tokens 50 :completion_tokens 9))
+               "[DONE]")))))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-endpoint
+                        '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "go")))))))))
+      (should (equal '(start usage tool-call tool-call done) (harness-openai-test--types events)))
+      (should (equal '(:type tool-call :id "call_abc" :name "echo" :input (:value "x y") :respond nil) (nth 2 events)))
+      (should (equal '(:type tool-call :id "call_def" :name "noop" :input nil :respond nil) (nth 3 events)))
+      (should (equal '(:type done :stop-reason tool-use) (nth 4 events)))
+      (should (= 50 (plist-get (nth 1 events) :input)))
+      (should-not (plist-get (nth 1 events) :cost)))))
+
+(ert-deftest harness-provider-openai-length-and-stream-error ()
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "partial") :finish_reason "length")))
+                                          "[DONE]")))))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-endpoint
+                        '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "go")))))))))
+      (should (equal '(:type done :stop-reason max-tokens) (car (last events))))))
+  ;; A 200 stream that carries an error object ends with an error.
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:error (:message "Provider returned error" :code 502))
+                                          "[DONE]")))))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-endpoint
+                        '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "go")))))))))
+      (should (equal '(start done) (harness-openai-test--types events)))
+      (should (eq 'error (plist-get (cadr events) :stop-reason)))
+      (should (equal "Provider returned error" (plist-get (cadr events) :error))))))
+
+(ert-deftest harness-provider-openai-http-401-error ()
+  (harness-openai-test-with-fake
+      '(("chat/completions" . (:status 401 :chunks ("{\"error\":{\"message\":\"Invalid API key\",\"code\":401}}"))))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-endpoint
+                        '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "hi")))))))))
+      (should (equal '(start done) (harness-openai-test--types events)))
+      (should (eq 'error (plist-get (cadr events) :stop-reason)))
+      (should (string-match-p "Invalid API key" (plist-get (cadr events) :error)))
+      (should (string-match-p "401" (plist-get (cadr events) :error))))))
+
+(ert-deftest harness-provider-openai-missing-key-and-transport-error ()
+  (with-environment-variables (("HARNESS_TEST_MISSING_KEY" nil))
+    (harness-openai-test-with-fake nil
+      (let ((events (car (harness-openai-test--complete
+                          '(:id nokey :base-url "https://nokey.example/v1" :api-key-env "HARNESS_TEST_MISSING_KEY")
+                          '(:model "nokey:m" :messages ((:role user :content ((:type "text" :text "hi")))))))))
+        (should (equal '(start done) (harness-openai-test--types events)))
+        (should (eq 'error (plist-get (cadr events) :stop-reason)))
+        (should (string-match-p "HARNESS_TEST_MISSING_KEY" (plist-get (cadr events) :error)))
+        (should-not harness-openai-test--requests))))
+  ;; A transport failure reported by the HTTP layer.
+  (let ((events nil))
+    (cl-letf (((symbol-function 'harness-http-request)
+               (lambda (_url &rest args)
+                 (harness-run-soon (plist-get args :callback) nil nil "" '(curl "curl exited 7: connection refused"))
+                 (make-harness-http-handle :url "x"))))
+      (harness-openai--complete harness-openai-test-endpoint
+                                (list :model "testrouter:m"
+                                      :messages '((:role user :content ((:type "text" :text "hi"))))
+                                      :on-event (lambda (e) (push e events))))
+      (harness-test-wait (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type)))) 5)
+      (should (equal '(start done) (harness-openai-test--types (reverse events))))
+      (should (string-match-p "connection refused" (plist-get (car events) :error))))))
+
+(ert-deftest harness-provider-openai-cancel-emits-done-once ()
+  (harness-openai-test-with-fake '(("chat/completions" . (:hang t)))
+    (let* ((events nil)
+           (handle (harness-openai--complete
+                    harness-openai-test-endpoint
+                    (list :model "testrouter:m"
+                          :messages '((:role user :content ((:type "text" :text "hi"))))
+                          :on-event (lambda (e) (push e events))))))
+      (should (equal '(start) (harness-openai-test--types events)))
+      (funcall (plist-get handle :cancel))
+      (funcall (plist-get handle :cancel))
+      (should (equal '(start done) (harness-openai-test--types (reverse events))))
+      (should (equal '(:type done :stop-reason cancelled) (car events)))
+      ;; Late data or a late callback from the transport is ignored.
+      (let ((args (plist-get (car harness-openai-test--requests) :args)))
+        (funcall (plist-get args :on-chunk) (harness-openai-test--sse '(:choices ((:index 0 :delta (:content "late"))))))
+        (funcall (plist-get args :callback) 200 nil "" nil))
+      (should (= 2 (length events))))))
+
+(ert-deftest harness-provider-openai-through-bus ()
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "via bus") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (let ((saved harness-openai-endpoints) (events nil))
+      (unwind-protect
+          (progn
+            (apply #'harness-openai-add-endpoint harness-openai-test-endpoint)
+            (harness-call 'provider/complete
+                          (list :model "testrouter:m"
+                                :messages '((:role user :content ((:type "text" :text "hi"))))
+                                :on-event (lambda (e) (push e events))))
+            (harness-test-wait (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type)))) 5)
+            (should (equal '(start text done) (harness-openai-test--types (reverse events)))))
+        (setq harness-openai-endpoints saved)
+        (harness-openai--register-all)))))
+
+;;;; Models
+
+(ert-deftest harness-provider-openai-models-openrouter-mapping ()
+  (harness-openai-test-with-fake
+      `(("/models"
+         . (:body ,(harness-json-encode
+                    '(:data ((:id "vendor/smart" :name "Vendor: Smart" :context_length 200000
+                              :architecture (:input_modalities ("text" "image") :output_modalities ("text"))
+                              :pricing (:prompt "0.0000001" :completion "0.0000004"
+                                        :input_cache_read "0.000000025" :input_cache_write "0.000000125")
+                              :top_provider (:max_completion_tokens 32000 :context_length 200000)
+                              :supported_parameters ("tools" "reasoning" "temperature"))
+                             (:id "vendor/plain" :context_length 8192
+                              :pricing (:prompt "0.000001" :completion "0.000002")
+                              :supported_parameters ("temperature"))))))))
+    (harness-openai-clear-models-cache)
+    (let* ((models (harness-test-await (harness-openai--models harness-openai-test-endpoint)))
+           (smart (car models)) (plain (cadr models))
+           (pricing (plist-get smart :pricing)))
+      (should (equal "https://openrouter.example/api/v1/models" (plist-get (car harness-openai-test--requests) :url)))
+      (should (equal "Bearer sk-test-not-a-real-key"
+                     (cdr (assoc "Authorization" (plist-get (car harness-openai-test--requests) :headers)))))
+      (should (= 2 (length models)))
+      (should (equal "vendor/smart" (plist-get smart :name)))
+      (should (equal "Vendor: Smart" (plist-get smart :label)))
+      (should (= 200000 (plist-get smart :context-window)))
+      (should (= 32000 (plist-get smart :max-output)))
+      (should (equal '("text" "image") (plist-get smart :input-modalities)))
+      (should (equal '("low" "medium" "high") (plist-get smart :thinking-levels)))
+      (should (harness-openai-test--approx 0.1 (plist-get pricing :input)))
+      (should (harness-openai-test--approx 0.4 (plist-get pricing :output)))
+      (should (harness-openai-test--approx 0.025 (plist-get pricing :cache-read)))
+      (should (harness-openai-test--approx 0.125 (plist-get pricing :cache-write)))
+      (should (eq t (plist-get (plist-get smart :capabilities) :tools)))
+      (should (eq t (plist-get (plist-get smart :capabilities) :thinking)))
+      (should (eq t (plist-get (plist-get smart :capabilities) :vision)))
+      ;; plain model: no caching prices fall back to the input price, no thinking
+      (should (harness-openai-test--approx 1.0 (plist-get (plist-get plain :pricing) :input)))
+      (should (harness-openai-test--approx 1.0 (plist-get (plist-get plain :pricing) :cache-read)))
+      (should-not (plist-get plain :thinking-levels))
+      (should-not (plist-get (plist-get plain :capabilities) :tools))
+      ;; the second call is served from the cache
+      (let ((n (length harness-openai-test--requests)))
+        (should (= 2 (length (harness-test-await (harness-openai--models harness-openai-test-endpoint)))))
+        (should (= n (length harness-openai-test--requests))))
+      ;; and the provider normaliser produces full ids
+      (should (equal "testrouter:vendor/smart"
+                     (plist-get (harness-provider--normalise-model
+                                 (make-harness-provider :id 'testrouter :label "T") smart)
+                                :id))))
+    (harness-openai-clear-models-cache)))
+
+(ert-deftest harness-provider-openai-models-plain-and-failing ()
+  ;; Plain OpenAI ids only.
+  (harness-openai-test-with-fake
+      `(("/models" . (:body ,(harness-json-encode '(:object "list" :data ((:id "gpt-x" :object "model" :owned_by "openai")))))))
+    (harness-openai-clear-models-cache)
+    (let ((models (harness-test-await (harness-openai--models
+                                       (append harness-openai-test-openai-endpoint '(:default-context 400000))))))
+      (should (equal '(:name "gpt-x" :label "gpt-x" :context-window 400000) (car models)))))
+  ;; A failing endpoint resolves to an empty list with a warning, never rejects.
+  (harness-openai-test-with-fake '(("/models" . (:status 401 :body "{\"error\":{\"message\":\"nope\"}}")))
+    (harness-openai-clear-models-cache)
+    (let ((warned nil))
+      (add-hook 'harness-log-hook (lambda (level msg) (when (and (eq level 'warn) (string-match-p "nope" msg)) (setq warned t))))
+      (unwind-protect
+          (should (null (harness-test-await (harness-openai--models harness-openai-test-endpoint))))
+        (setq harness-log-hook nil))
+      (should warned)
+      ;; failures are not cached
+      (should-not (gethash 'testrouter harness-openai--models-cache))))
+  (harness-openai-clear-models-cache))
+
+;;;; Integration
+
+(defconst harness-openai-test-integration-model "openrouter:openai/gpt-4.1-nano")
+
+(defun harness-openai-test--run-live (request)
+  "Send REQUEST through the bus and return its events oldest first."
+  (let ((events nil))
+    (harness-call 'provider/complete
+                  (plist-put (copy-sequence request) :on-event (lambda (e) (push e events))))
+    (harness-test-wait (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type)))) 90 "live done")
+    (reverse events)))
+
+(defun harness-openai-test--text (events)
+  "Concatenate the text deltas in EVENTS."
+  (mapconcat (lambda (e) (if (eq (plist-get e :type) 'text) (plist-get e :delta) "")) events ""))
+
+(ert-deftest harness-provider-openai-integration-text ()
+  :tags '(integration)
+  (harness-test-skip-unless-integration)
+  (skip-unless (getenv "OPENROUTER_API_KEY"))
+  (let* ((events (harness-openai-test--run-live
+                  (list :model harness-openai-test-integration-model
+                        :system "You answer with a single word."
+                        :max-tokens 20
+                        :messages '((:role user :content ((:type "text" :text "Say the word pong.")))))))
+         (done (car (last events)))
+         (usage (cl-find 'usage events :key (lambda (e) (plist-get e :type)))))
+    (should (eq 'start (plist-get (car events) :type)))
+    (should (equal '(:type done :stop-reason end-turn) done))
+    (should (string-match-p "pong" (downcase (harness-openai-test--text events))))
+    (should usage)
+    (should (> (plist-get usage :input) 0))
+    (should (> (plist-get usage :output) 0))
+    (should (numberp (plist-get usage :cost)))
+    (should (= (plist-get usage :context) (plist-get usage :input)))))
+
+(ert-deftest harness-provider-openai-integration-tool-round-trip ()
+  :tags '(integration)
+  (harness-test-skip-unless-integration)
+  (skip-unless (getenv "OPENROUTER_API_KEY"))
+  (let* ((tools '((:name "echo" :description "Echo VALUE back through the tool runtime."
+                   :schema (:type "object" :properties (:value (:type "string" :description "Text to echo"))
+                            :required ("value")))))
+         (user '(:role user :content ((:type "text" :text "Call the echo tool with the value \"marble\". Then report the tool's exact output back to me."))))
+         (first (harness-openai-test--run-live
+                 (list :model harness-openai-test-integration-model :tools tools :max-tokens 200
+                       :messages (list user))))
+         (call (cl-find 'tool-call first :key (lambda (e) (plist-get e :type)))))
+    (should call)
+    (should (equal "echo" (plist-get call :name)))
+    (should (equal "marble" (plist-get (plist-get call :input) :value)))
+    (should (null (plist-get call :respond)))
+    (should (equal '(:type done :stop-reason tool-use) (car (last first))))
+    (let* ((assistant (list :role 'assistant
+                            :content (append
+                                      (let ((text (harness-openai-test--text first)))
+                                        (unless (string-empty-p text) (list (list :type "text" :text text))))
+                                      (list (list :type "tool_use" :id (plist-get call :id)
+                                                  :name "echo" :input (plist-get call :input))))))
+           (result (list :role 'tool
+                         :content (list (list :type "tool_result" :tool_use_id (plist-get call :id)
+                                              :content "ZEBRA-4242"))))
+           (second (harness-openai-test--run-live
+                    (list :model harness-openai-test-integration-model :tools tools :max-tokens 200
+                          :messages (list user assistant result)))))
+      (should (equal '(:type done :stop-reason end-turn) (car (last second))))
+      (should (string-match-p "ZEBRA-4242" (harness-openai-test--text second)))
+      (should (cl-find 'usage second :key (lambda (e) (plist-get e :type)))))))
 
 (provide 'harness-provider-openai-test)
 ;;; harness-provider-openai-test.el ends here

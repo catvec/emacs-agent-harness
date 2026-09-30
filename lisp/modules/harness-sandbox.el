@@ -1,437 +1,250 @@
-;;; harness-sandbox.el --- Kernel-enforced process confinement -*- lexical-binding: t; -*-
-
-;; This file is part of Emacs Agent Harness.
+;;; harness-sandbox.el --- Kernel-enforced confinement for tool processes  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Every process the harness spawns goes through `harness-sandbox-spawn'.
-;; The module picks a backend at startup, in preference order:
+;; Every process the harness spawns on behalf of a model can be routed
+;; through a kernel sandbox.  Isolation is enforced by the kernel
+;; (mount and PID namespaces), not by policy: the permission mode is a
+;; prompt-level hint, this is the boundary.
 ;;
-;;   1. bwrap          (bubblewrap: mount, pid, ipc, uts and net namespaces)
-;;   2. systemd-run    (transient user scope with systemd's sandboxing
-;;                      properties: ProtectSystem, ProtectHome, ...)
-;;   3. none           (unconfined; only when the policy allows it)
+;; A backend is picked when the module initialises, in preference
+;; order: `bwrap' (bubblewrap), `systemd-run --user', or none.  The
+;; `harness-sandbox-policy' setting from the config module decides what
+;; happens when no backend exists:
 ;;
-;; When a policy requires confinement and no backend is available, spawning
-;; fails closed.  When the default policy merely prefers confinement, the
-;; process runs unconfined and the human is warned loudly, once.
+;;   required   `sandbox/wrap' signals `harness-sandbox-unavailable'
+;;              (fail closed) and logs an error;
+;;   preferred  the command runs unconfined, with a warning in the log;
+;;   off        the command is always returned unchanged.
 ;;
-;; This is a security boundary enforced by the kernel, not by prompts.
-;; `:permission-mode' elsewhere in the harness is a prompt-level hint; it
-;; never decides whether the sandbox is used.
+;; What the sandbox sees: read-only /usr and /etc (plus the usual
+;; /lib, /lib64, /bin, /sbin as symlinks or read-only binds), a fresh
+;; /proc, /dev and /tmp, and the session's working directory
+;; read-write.  HOME is *not* mounted (credentials such as ~/.npmrc or
+;; ~/.aws stay out of reach) and $HOME points at an empty directory on
+;; the tmpfs; the only exception is a HOME that lies inside the working
+;; directory, which is then visible anyway.  Network access stays on by
+;; default because hosted providers and most build tools need it; pass
+;; `:network nil' to cut it, which is only correct for local models.
 ;;
-;; Filesystem inside bwrap: /usr (and non-merged /lib, /lib64, /bin,
-;; /sbin) read-only; a minimal /etc (certificates, DNS and identity files
-;; only -- never the whole of /etc); a fresh tmpfs for /tmp, which is also
-;; HOME and TMPDIR; the session working directory read-write; /proc and a
-;; minimal /dev.  The real HOME and every other user file are not mounted
-;; at all, so credentials like ~/.npmrc or ~/.ssh cannot leak into a tool
-;; process.  Extra paths can be granted per policy.  Network is allowed by
-;; default because hosted providers need it; disabling it is opt-in and
-;; only correct for local models.
+;; Remote working directories (TRAMP) are never wrapped: the sandbox
+;; binaries and the mounts would have to exist on the remote host, and
+;; the harness has no way to verify them there.  `sandbox/wrap'
+;; returns such commands unchanged and logs at debug level.
+;;
+;; Methods: `sandbox/wrap', `sandbox/status'.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
 (require 'harness-core)
+(require 'harness-util)
 
-(define-error 'harness-sandbox-error "Sandbox error" 'harness-error)
+(defvar harness-sandbox-policy)         ; defined by the config module
 
-(defgroup harness-sandbox nil
-  "Process confinement for harness-spawned processes."
-  :group 'harness)
+(define-error 'harness-sandbox-unavailable
+  "Sandbox required but no backend is available" 'harness-error)
 
 (defcustom harness-sandbox-backend 'auto
   "Which sandbox backend to use.
-`auto' picks the best available backend.  A specific symbol forces that
-backend (and falls back to unconfined only when the policy allows it)."
-  :type '(choice (const auto) (const bwrap) (const systemd-run) (const none)))
+`auto' picks the first available of bwrap and systemd-run; a specific
+symbol forces that backend (and counts as unavailable when its
+executable is missing); `none' disables wrapping regardless of policy
+detection, subject to `harness-sandbox-policy'."
+  :type '(choice (const auto) (const bwrap) (const systemd) (const none))
+  :group 'harness)
 
-(defcustom harness-sandbox-mode 'preferred
-  "Default confinement mode for spawned processes.
-`preferred' uses the chosen backend when available and warns when it is
-not; `required' fails closed; `none' never confines."
-  :type '(choice (const preferred) (const required) (const none)))
+(defcustom harness-sandbox-bwrap-program "bwrap"
+  "Name or path of the bubblewrap executable."
+  :type 'string :group 'harness)
 
-(defcustom harness-sandbox-home "/tmp"
-  "HOME inside the sandbox.
-The real home directory is never mounted; tools get a fresh tmpfs and an
-empty HOME so credentials and dotfiles cannot leak into them."
-  :type 'string)
+(defcustom harness-sandbox-systemd-run-program "systemd-run"
+  "Name or path of the systemd-run executable."
+  :type 'string :group 'harness)
 
-(cl-defstruct (harness-sandbox-policy (:constructor harness-sandbox-policy-create))
-  (mode 'preferred)             ; preferred, required, none
-  (network t)                   ; nil unshares the network
-  (writable nil)                ; extra read-write directories
-  (read-only nil))              ; extra read-only directories
+(defcustom harness-sandbox-extra-read-only-dirs nil
+  "Additional directories bound read-only into every sandbox.
+Useful for toolchains that live outside /usr, such as /opt or /nix."
+  :type '(repeat directory) :group 'harness)
 
-(defun harness-sandbox-policy (&rest properties)
-  "Build a `harness-sandbox-policy' from PROPERTIES.
-Accepted: :mode, :network, :writable, :read-only."
-  (harness-sandbox-policy-create
-   :mode (or (plist-get properties :mode) harness-sandbox-mode)
-   :network (if (plist-member properties :network)
-                (plist-get properties :network)
-              t)
-   :writable (plist-get properties :writable)
-   :read-only (plist-get properties :read-only)))
+(defcustom harness-sandbox-home "/tmp/harness-home"
+  "Path used as $HOME inside the sandbox.
+It lives on the sandbox's private /tmp, so it starts empty for every
+command and nothing written there survives."
+  :type 'string :group 'harness)
+
+(defconst harness-sandbox--system-dirs '("/lib" "/lib64" "/bin" "/sbin")
+  "Top-level directories mirrored as symlinks or read-only binds.")
 
 (defvar harness-sandbox--backend nil
-  "Resolved backend symbol, or nil when not resolved yet.")
+  "Backend chosen at initialisation: `bwrap', `systemd' or `none'.")
 
-(defvar harness-sandbox--warned nil
-  "Non-nil once the loud unconfined warning has been emitted.")
+(defvar harness-sandbox--available nil
+  "Backends whose executables were found at initialisation.")
 
-;;; Backend detection
+(defvar harness-sandbox--programs nil
+  "Alist of backend -> absolute executable path found at initialisation.")
 
-(defun harness-sandbox--probe (program &rest args)
-  "Return non-nil when PROGRAM with ARGS exits successfully."
-  (let ((exit-code
-         (condition-case nil
-             (apply #'call-process program nil nil nil args)
-           (error 1))))
-    (and (integerp exit-code) (zerop exit-code))))
+;;;; Detection
 
-(defun harness-sandbox-backend-usable-p (backend)
-  "Return non-nil when BACKEND can actually be used here."
-  (pcase backend
-    ('bwrap
-     (and (executable-find "bwrap")
-          (harness-sandbox--probe "bwrap" "--ro-bind" "/" "/" "--"
-                                  "/bin/true")))
-    ('systemd-run
-     (and (executable-find "systemd-run")
-          (harness-sandbox--probe "systemd-run" "--user" "--scope" "--quiet"
-                                  "/bin/true")))
-    ('none t)
-    (_ nil)))
+(defun harness-sandbox-detect ()
+  "Find the available backends and choose one.
+Return the chosen backend symbol.  Safe to call again: it refreshes
+`harness-sandbox--available' and `harness-sandbox--backend'."
+  (let ((bwrap (executable-find harness-sandbox-bwrap-program))
+        (systemd (executable-find harness-sandbox-systemd-run-program)))
+    (setq harness-sandbox--programs
+          (delq nil (list (and bwrap (cons 'bwrap bwrap))
+                          (and systemd (cons 'systemd systemd)))))
+    (setq harness-sandbox--available (mapcar #'car harness-sandbox--programs))
+    (setq harness-sandbox--backend
+          (pcase harness-sandbox-backend
+            ('auto (or (car harness-sandbox--available) 'none))
+            ('none 'none)
+            (forced (if (memq forced harness-sandbox--available) forced 'none))))
+    (harness-log 'info "sandbox: backend %s (available: %s, policy %s)"
+                 harness-sandbox--backend
+                 (if harness-sandbox--available
+                     (mapconcat #'symbol-name harness-sandbox--available ", ")
+                   "none")
+                 (harness-sandbox--policy nil))
+    harness-sandbox--backend))
 
-(defun harness-sandbox--detect ()
-  "Return the best available backend symbol."
-  (if (eq harness-sandbox-backend 'auto)
-      (or (seq-find #'harness-sandbox-backend-usable-p '(bwrap systemd-run)) 'none)
-    (if (harness-sandbox-backend-usable-p harness-sandbox-backend)
-        harness-sandbox-backend
-      'none)))
+(defun harness-sandbox--policy (cwd)
+  "Return the effective sandbox policy for a session at CWD."
+  (or (and cwd (not (file-remote-p cwd))
+           (harness-method-exists-p 'config/get)
+           (ignore-errors (harness-call 'config/get 'harness-sandbox-policy cwd)))
+      (and (boundp 'harness-sandbox-policy) harness-sandbox-policy)
+      'preferred))
 
-(defun harness-sandbox-backend ()
-  "Return the resolved backend, detecting it on first use."
-  (or harness-sandbox--backend
-      (setq harness-sandbox--backend
-            (if (eq harness-sandbox-backend 'auto)
-                (harness-sandbox--detect)
-              (if (harness-sandbox-backend-usable-p harness-sandbox-backend)
-                  harness-sandbox-backend
-                (progn
-                  (harness-log "sandbox: requested backend %s is not usable"
-                               harness-sandbox-backend)
-                  'none))))))
+;;;; Argument construction
 
-(defun harness-sandbox-refresh-backend ()
-  "Forget the cached backend so the next spawn re-detects it."
-  (interactive)
-  (setq harness-sandbox--backend nil
-        harness-sandbox--warned nil))
+(defun harness-sandbox--dir-args (dir mode)
+  "Return bwrap arguments exposing DIR with MODE (`ro' or `rw'), or nil."
+  (when (and dir (file-directory-p dir))
+    (let ((d (directory-file-name (expand-file-name dir))))
+      (list (if (eq mode 'rw) "--bind" "--ro-bind") d d))))
 
-(defun harness-sandbox-resolve-backend ()
-  "Detect the backend and warn when unconfined."
-  (let ((backend (harness-sandbox-backend)))
-    (when (and (eq backend 'none)
-               (not (eq harness-sandbox-mode 'none))
-               (not harness-sandbox--warned))
-      (setq harness-sandbox--warned t)
-      (display-warning
-       'harness
-       (concat "No sandbox backend (bwrap or systemd-run) is available; "
-               "harness-spawned processes will run UNCONFINED.  "
-               "Install bubblewrap, or set `harness-sandbox-mode' to `none' "
-               "to silence this warning.")
-       :warning))
-    backend))
+(defun harness-sandbox--system-dir-args ()
+  "Mirror /lib, /lib64, /bin and /sbin the way the host has them."
+  (cl-loop for d in harness-sandbox--system-dirs
+           for target = (file-symlink-p d)
+           append (cond (target (list "--symlink" target d))
+                        ((file-directory-p d) (list "--ro-bind" d d)))))
 
-;;; Command construction
+(defun harness-sandbox--home-inside-p (cwd)
+  "Non-nil when the real HOME lies inside CWD (and is thus visible anyway)."
+  (let ((home (getenv "HOME")))
+    (and home (harness-path-within-p cwd home))))
 
-(defun harness-sandbox--home-directory ()
-  "Return HOME inside the sandbox, never the real home directory."
-  harness-sandbox-home)
+(cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable)
+  "Build the bwrap command line running COMMAND in CWD.
+PROGRAM is the bwrap executable.  NETWORK nil unshares the network
+namespace; WRITABLE and READABLE list extra directories to expose."
+  (let ((cwd (directory-file-name (expand-file-name cwd))))
+    (append
+     (list program
+           "--ro-bind" "/usr" "/usr"
+           "--ro-bind" "/etc" "/etc")
+     (harness-sandbox--system-dir-args)
+     (cl-loop for d in harness-sandbox-extra-read-only-dirs
+              append (harness-sandbox--dir-args d 'ro))
+     (list "--proc" "/proc"
+           "--dev" "/dev"
+           "--tmpfs" "/tmp"
+           "--dir" harness-sandbox-home)
+     ;; Binds come after the tmpfs so a working directory under /tmp
+     ;; is not hidden by it.
+     (list "--bind" cwd cwd)
+     (cl-loop for d in writable append (harness-sandbox--dir-args d 'rw))
+     (cl-loop for d in readable append (harness-sandbox--dir-args d 'ro))
+     (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
+           "--die-with-parent" "--new-session"
+           "--chdir" cwd)
+     (unless (harness-sandbox--home-inside-p cwd)
+       (list "--setenv" "HOME" harness-sandbox-home))
+     (unless network (list "--unshare-net"))
+     (list "--")
+     command)))
 
-(defconst harness-sandbox--etc-entries
-  '("ssl" "ca-certificates" "resolv.conf" "hosts" "nsswitch.conf"
-    "passwd" "group" "localtime")
-  "Minimal /etc entries mounted read-only inside the sandbox.
-Deliberately not the whole of /etc: secrets such as shadow, ssh host keys
-or package-manager credentials must stay outside.")
+(cl-defun harness-sandbox--systemd-command (program cwd command &key (network t) writable readable)
+  "Build the systemd-run command line running COMMAND in CWD.
+PROGRAM is the systemd-run executable; NETWORK, WRITABLE and READABLE
+are as for `harness-sandbox--bwrap-command'.
 
-(defun harness-sandbox--bwrap-args (command args cwd policy)
-  "Build the bwrap argument list for COMMAND ARGS CWD and POLICY."
-  (let ((argv (list)))
-    ;; System trees, read-only.  On merged-/usr systems /lib, /lib64, /bin
-    ;; and /sbin are symlinks into /usr, so recreate the symlink instead.
-    (dolist (path '("/usr" "/lib" "/lib64" "/bin" "/sbin"))
-      (cond
-       ((file-symlink-p path)
-        (setq argv (append argv (list "--symlink" (file-symlink-p path) path))))
-       ((file-exists-p path)
-        (setq argv (append argv (list "--ro-bind" path path))))))
-    ;; Only the parts of /etc tools actually need.
-    (dolist (name harness-sandbox--etc-entries)
-      (let ((path (expand-file-name name "/etc")))
-        (when (file-exists-p path)
-          (setq argv (append argv (list "--ro-bind" path path))))))
-    (setq argv (append argv (list "--proc" "/proc"
-                                  "--dev" "/dev")))
-    ;; A fresh tmpfs for /tmp; the real home is not mounted at all.
-    (setq argv (append argv (list "--tmpfs" "/tmp"
-                                  "--setenv" "HOME" "/tmp"
-                                  "--setenv" "TMPDIR" "/tmp")))
-    (when (and cwd (file-directory-p cwd))
-      (setq argv (append argv (list "--bind" cwd cwd))))
-    (dolist (directory (harness-sandbox-policy-read-only policy))
-      (when (file-exists-p directory)
-        (setq argv (append argv (list "--ro-bind" directory directory)))))
-    (dolist (directory (harness-sandbox-policy-writable policy))
-      (when (file-exists-p directory)
-        (setq argv (append argv (list "--bind" directory directory)))))
-    (setq argv (append argv (list "--unshare-pid"
-                                  "--unshare-ipc"
-                                  "--unshare-uts"
-                                  "--die-with-parent"
-                                  "--new-session")))
-    (unless (harness-sandbox-policy-network policy)
-      (setq argv (append argv (list "--unshare-net"))))
-    (when (and cwd (file-directory-p cwd))
-      (setq argv (append argv (list "--chdir" cwd))))
-    (append argv (list "--" command) args)))
+Home directories are hidden with `ProtectHome=tmpfs' rather than
+`ProtectHome=yes': with the latter systemd cannot mount anything
+beneath /home, so a working directory in the user's home would be
+unreachable (systemd-run fails with status 200)."
+  (let ((cwd (directory-file-name (expand-file-name cwd))))
+    (append
+     (list program "--user" "--quiet" "--pipe" "--wait" "--collect"
+           (concat "--working-directory=" cwd)
+           "-p" "PrivateTmp=yes"
+           "-p" "ProtectHome=tmpfs"
+           "-p" (concat "BindPaths=" cwd)
+           "-p" (concat "ReadWritePaths=" cwd))
+     (cl-loop for d in writable
+              when (file-directory-p d)
+              append (list "-p" (concat "BindPaths=" (directory-file-name (expand-file-name d)))))
+     (cl-loop for d in readable
+              when (file-directory-p d)
+              append (list "-p" (concat "BindReadOnlyPaths=" (directory-file-name (expand-file-name d)))))
+     (unless network (list "-p" "PrivateNetwork=yes"))
+     (unless (harness-sandbox--home-inside-p cwd)
+       (list "--setenv=HOME=/tmp"))
+     (list "--")
+     command)))
 
-(defun harness-sandbox--systemd-run-args (command args cwd policy)
-  "Build the systemd-run argument list for COMMAND ARGS CWD and POLICY."
-  (let ((argv (list "--user" "--scope" "--quiet" "--pipe"
-                    "--property=ProtectSystem=strict"
-                    ;; The real home and the whole of /etc stay inaccessible.
-                    "--property=ProtectHome=yes"
-                    "--property=PrivateTmp=yes"
-                    "--property=PrivateDevices=yes"
-                    "--property=NoNewPrivileges=yes"
-                    "--property=ProtectKernelTunables=yes"
-                    "--property=ProtectKernelModules=yes"
-                    "--property=ProtectKernelLogs=yes"
-                    "--property=ProtectControlGroups=yes"
-                    "--property=ProtectClock=yes"
-                    "--property=ProtectHostname=yes"
-                    "--property=RestrictRealtime=yes"
-                    "--property=RestrictSUIDSGID=yes"
-                    "--setenv=HOME=/tmp"
-                    "--setenv=TMPDIR=/tmp")))
-    (when (and cwd (file-directory-p cwd))
-      (setq argv (append argv (list (format "--property=WorkingDirectory=%s" cwd)
-                                    (format "--property=ReadWritePaths=%s" cwd)))))
-    (dolist (directory (harness-sandbox-policy-read-only policy))
-      (when (file-exists-p directory)
-        (setq argv (append argv (list (format "--property=ReadOnlyPaths=%s" directory))))))
-    (dolist (directory (harness-sandbox-policy-writable policy))
-      (when (file-exists-p directory)
-        (setq argv (append argv (list (format "--property=ReadWritePaths=%s" directory))))))
-    (unless (harness-sandbox-policy-network policy)
-      (setq argv (append argv (list "--property=IPAddressDeny=any"))))
-    (append argv (list command) args)))
+;;;; Methods
 
-(defun harness-sandbox-wrap (command args cwd policy)
-  "Return the confined command for COMMAND ARGS in CWD under POLICY.
-
-The value is a plist:
-
-  :program   executable to run
-  :args      argument list
-  :backend   backend symbol actually used
-  :confined  non-nil when the kernel confines the process"
-  (setq policy (if (harness-sandbox-policy-p policy)
-                   policy
-                 (harness-sandbox-policy)))
-  (when (and cwd (not (file-remote-p cwd)) (not (file-directory-p cwd)))
-    (signal 'harness-sandbox-error
-            (list (format "Working directory does not exist: %s" cwd))))
-  (let ((mode (harness-sandbox-policy-mode policy)))
+(harness-defmethod sandbox/wrap (cwd command &rest opts)
+  "Return COMMAND (a list of strings) wrapped to run confined in CWD.
+OPTS: `:network' (default t; nil cuts network access), `:writable'
+(extra directories mounted read-write) and `:readable' (extra
+read-only directories).  A remote CWD or the `off' policy return
+COMMAND unchanged.  Signals `harness-sandbox-unavailable' when the
+policy is `required' and no backend exists."
+  (let ((policy (harness-sandbox--policy cwd))
+        (network (if (plist-member opts :network) (plist-get opts :network) t))
+        (writable (plist-get opts :writable))
+        (readable (plist-get opts :readable)))
     (cond
-     ((eq mode 'none)
-      (list :program command :args args :backend 'none :confined nil))
-     ((file-remote-p (expand-file-name cwd))
-      ;; The sandbox cannot follow TRAMP; remote processes are confined by
-      ;; the remote host, if at all.
-      (when (eq mode 'required)
-        (signal 'harness-sandbox-error
-                (list "Cannot confine a remote process")))
-      (harness-sandbox-resolve-backend)
-      (list :program command :args args :backend 'none :confined nil))
+     ((eq policy 'off) command)
+     ((file-remote-p cwd)
+      (harness-log 'debug "sandbox: remote cwd %s runs unconfined" cwd)
+      command)
+     ((eq harness-sandbox--backend 'bwrap)
+      (harness-sandbox--bwrap-command (alist-get 'bwrap harness-sandbox--programs) cwd command
+                                      :network network :writable writable :readable readable))
+     ((eq harness-sandbox--backend 'systemd)
+      (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
+                                        :network network :writable writable :readable readable))
+     ((eq policy 'required)
+      (harness-log 'error "sandbox: policy is `required' but no backend (bwrap, systemd-run) is available; refusing to run %S"
+                   (car command))
+      (signal 'harness-sandbox-unavailable
+              (list "harness-sandbox-policy is `required' but neither bwrap nor systemd-run is available")))
      (t
-      (let ((backend (harness-sandbox-backend)))
-        (pcase backend
-          ('bwrap
-           (list :program "bwrap"
-                 :args (harness-sandbox--bwrap-args command args cwd policy)
-                 :backend 'bwrap
-                 :confined t))
-          ('systemd-run
-           (list :program "systemd-run"
-                 :args (harness-sandbox--systemd-run-args command args cwd policy)
-                 :backend 'systemd-run
-                 :confined t))
-          (_
-           (when (eq mode 'required)
-             (signal 'harness-sandbox-error
-                     (list (concat "No sandbox backend available and the policy "
-                                   "requires confinement"))))
-           (harness-sandbox-resolve-backend)
-           (list :program command :args args :backend 'none :confined nil))))))))
+      (harness-log 'warn "sandbox: no backend available; running %S unconfined" (car command))
+      command))))
 
-;;; Spawning
+(harness-defmethod sandbox/status ()
+  "Return (:backend BACKEND :available (BACKENDS…) :policy POLICY)."
+  (list :backend (or harness-sandbox--backend 'none)
+        :available harness-sandbox--available
+        :policy (harness-sandbox--policy nil)))
 
-(cl-defstruct (harness-sandbox-process (:constructor harness-sandbox-process-create))
-  process
-  backend
-  confined
-  command
-  args)
+(defun harness-sandbox--init ()
+  "Detect backends.  Idempotent."
+  (harness-sandbox-detect))
 
-(defun harness-sandbox-command-line (wrapped)
-  "Return a human-readable command line for WRAPPED."
-  (mapconcat #'shell-quote-argument
-             (cons (plist-get wrapped :program) (plist-get wrapped :args))
-             " "))
-
-(defun harness-sandbox-spawn (&rest properties)
-  "Spawn a process through the sandbox.
-
-PROPERTIES:
-
-  :name       process name
-  :command    executable (required)
-  :args       argument list
-  :cwd        working directory
-  :policy     a `harness-sandbox-policy', defaults to the global one
-  :filter     output filter
-  :sentinel   process sentinel
-  :coding     coding system
-  :stderr     buffer for stderr (when separated)
-  :env        environment alist, defaults to the current environment
-
-Returns a `harness-sandbox-process'."
-  (declare (indent 1))
-  (let* ((command (plist-get properties :command))
-         (args (plist-get properties :args))
-         (cwd (or (plist-get properties :cwd) default-directory))
-         (policy (or (plist-get properties :policy) (harness-sandbox-policy)))
-         (wrapped (harness-sandbox-wrap command args cwd policy))
-         (process (let ((default-directory (file-name-as-directory
-                                            (expand-file-name cwd)))
-                        (process-environment (or (plist-get properties :env)
-                                                 process-environment)))
-                    (make-process
-                     :name (or (plist-get properties :name) "harness-sandbox")
-                     :command (cons (plist-get wrapped :program)
-                                    (plist-get wrapped :args))
-                     :coding (or (plist-get properties :coding) 'utf-8-unix)
-                     :connection-type 'pipe
-                     :noquery t
-                     :filter (plist-get properties :filter)
-                     :sentinel (plist-get properties :sentinel)
-                     :stderr (plist-get properties :stderr)))))
-    (harness-sandbox-process-create
-     :process process
-     :backend (plist-get wrapped :backend)
-     :confined (plist-get wrapped :confined)
-     :command command
-     :args args)))
-
-(defun harness-sandbox-spawn-sync (command args &rest properties)
-  "Run COMMAND with ARGS synchronously through the sandbox.
-PROPERTIES accepts the same keys as `harness-sandbox-spawn' plus
-`:output' (destination, default a temp buffer that is returned as a
-string) and `:timeout' (seconds, enforced by a watchdog that kills the
-process).  Returns (EXIT-CODE . OUTPUT)."
-  (let* ((buffer (generate-new-buffer " *harness-sandbox-sync*"))
-         (finished nil)
-         (cwd (or (plist-get properties :cwd) default-directory))
-         (policy (or (plist-get properties :policy) (harness-sandbox-policy)))
-         (wrapped (harness-sandbox-wrap command args cwd policy))
-         (timeout (plist-get properties :timeout))
-         (timed-out nil)
-         (process (let ((default-directory (file-name-as-directory
-                                            (expand-file-name cwd)))
-                        (process-environment (or (plist-get properties :env)
-                                                 process-environment)))
-                    (make-process
-                     :name (or (plist-get properties :name) "harness-sandbox-sync")
-                     :command (cons (plist-get wrapped :program)
-                                    (plist-get wrapped :args))
-                     :coding (or (plist-get properties :coding) 'utf-8-unix)
-                     :connection-type 'pipe
-                     :noquery t
-                     :buffer buffer
-                     :sentinel (lambda (process event)
-                                 (when (memq (process-status process)
-                                             '(exit signal failed))
-                                   (setq finished (cons (process-exit-status process)
-                                                        event)))))))
-         (watchdog (and timeout
-                        (run-at-time timeout nil
-                                     (lambda ()
-                                       (when (process-live-p process)
-                                         (setq timed-out t)
-                                         (delete-process process)))))))
-    (while (and (not finished) (process-live-p process))
-      (accept-process-output process 0.05))
-    (when watchdog (cancel-timer watchdog))
-    (when (process-live-p process)
-      (delete-process process))
-    (let ((output (with-current-buffer buffer
-                    (string-make-multibyte (buffer-string)))))
-      (kill-buffer buffer)
-      (cons (cond (timed-out 'timeout)
-                  ((car finished) (car finished))
-                  (t 'killed))
-            output))))
-
-;;; Service
-
-(defun harness-sandbox-service-status (&rest _args)
-  "Service: report the resolved backend and policy."
-  (list :backend (symbol-name (harness-sandbox-resolve-backend))
-        :confined (not (eq (harness-sandbox-backend) 'none))
-        :mode (symbol-name harness-sandbox-mode)
-        :available (vconcat
-                    (seq-filter #'harness-sandbox-backend-usable-p
-                                '(bwrap systemd-run)))))
-
-(defun harness-sandbox-service-wrap (&rest args)
-  "Service: wrap a command."
-  (harness-sandbox-wrap (plist-get args :command)
-                        (plist-get args :args)
-                        (or (plist-get args :cwd) default-directory)
-                        (plist-get args :policy)))
-
-(defun harness-sandbox-setup ()
-  "Set up the sandbox module."
-  (harness-sandbox-resolve-backend)
-  (harness-service-register
-   "sandbox"
-   :module 'harness-sandbox
-   :doc "Kernel-enforced confinement for harness-spawned processes."
-   :methods '((status . harness-sandbox-service-status)
-              (wrap . harness-sandbox-service-wrap))))
-
-(defun harness-sandbox-teardown ()
-  "Tear down the sandbox module."
-  (setq harness-sandbox--backend nil
-        harness-sandbox--warned nil))
-
-(harness-module-define 'harness-sandbox
-  :version harness-version
-  :description "Kernel-enforced process confinement (bwrap/systemd-run)."
-  :requires '((harness-core "0.1.0"))
-  :provides '(harness-sandbox)
-  :setup #'harness-sandbox-setup
-  :teardown #'harness-sandbox-teardown)
+(harness-define-module 'sandbox
+  :doc "Kernel sandbox (bwrap / systemd-run) for spawned tool processes."
+  :requires '(config)
+  :init #'harness-sandbox--init)
 
 (provide 'harness-sandbox)
 ;;; harness-sandbox.el ends here

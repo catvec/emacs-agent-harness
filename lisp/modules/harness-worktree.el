@@ -1,229 +1,239 @@
-;;; harness-worktree.el --- Git worktree management -*- lexical-binding: t; -*-
-
-;; This file is part of Emacs Agent Harness.
+;;; harness-worktree.el --- Git worktree management  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Sessions can live in a git worktree so parallel agents never fight over
-;; one checkout.  This module wraps `git worktree' (list, add, remove) and
-;; can create a session whose working directory is the new worktree, with
-;; the worktree recorded on the session for the UI and the merge queue.
+;; Sessions can live in a git worktree so parallel agents never step on
+;; each other's working copy.  This module wraps the handful of git
+;; commands that manage worktrees.  Every method is asynchronous: git
+;; runs through `harness-run-command' and the method returns a promise
+;; that resolves with parsed output or rejects with git's stderr.
+;;
+;; Nothing here touches sessions; the session module gives a session
+;; created with `:worktree PATH' that path as its cwd, and the merge
+;; module merges a worktree's branch back into its parent's cwd.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
 (require 'harness-core)
-(require 'harness-config)
-(require 'harness-session)
+(require 'harness-util)
+(require 'harness-project)
 
-(defcustom harness-worktree-root nil
-  "Directory under which new worktrees are created.
-Defaults to a sibling `<repo>.worktrees' directory next to the
-repository's parent, so worktrees never nest inside the checkout."
-  :type '(choice directory (const nil)))
+;;;; Customisation
+
+(defcustom harness-worktree-git-program "git"
+  "Name of the git executable used for worktree operations."
+  :type 'string :group 'harness)
+
+(defcustom harness-worktree-directory-function #'harness-worktree-default-directory
+  "Function returning the directory for a new worktree.
+Called with the repository ROOT and the BRANCH name; must return an
+absolute path that does not exist yet."
+  :type 'function :group 'harness)
 
 (defcustom harness-worktree-branch-prefix "harness/"
-  "Prefix added to generated worktree branches when a name is given."
-  :type 'string)
+  "Prefix of branch names generated for new worktrees."
+  :type 'string :group 'harness)
 
-(defun harness-worktree--git (directory &rest args)
-  "Run git ARGS in DIRECTORY.  Returns (EXIT-CODE . OUTPUT)."
-  (with-temp-buffer
-    (let ((default-directory (file-name-as-directory (expand-file-name directory)))
-          (process-environment (cons "GIT_TERMINAL_PROMPT=0" process-environment)))
-      (let ((code (apply #'process-file "git" nil (current-buffer) nil args)))
-        (cons code (string-trim (buffer-string)))))))
+(defun harness-worktree-default-directory (root branch)
+  "Return ROOT/../NAME-worktrees/BRANCH with slashes in BRANCH replaced.
+NAME is the repository's project name."
+  (let* ((root (directory-file-name (expand-file-name root)))
+         (name (harness-call 'project/name root))
+         (leaf (replace-regexp-in-string "/" "-" branch)))
+    (expand-file-name leaf (expand-file-name (concat name "-worktrees")
+                                             (file-name-directory root)))))
 
-(defun harness-worktree--git-ok (directory &rest args)
-  "Run git ARGS in DIRECTORY and return output, or signal a user error."
-  (let ((result (apply #'harness-worktree--git directory args)))
-    (if (zerop (car result))
-        (cdr result)
-      (signal 'harness-user-error
-              (list (format "git %s failed: %s"
-                            (string-join args " ")
-                            (or (cdr result) "no output")))))))
+;;;; Running git
 
-(defun harness-worktree-root-directory (directory)
-  "Return the repository root of DIRECTORY."
-  (harness-worktree--git-ok directory "rev-parse" "--show-toplevel"))
+(defun harness-worktree--error (args result)
+  "Return the error data for a failed git invocation of ARGS with RESULT."
+  (let* ((stderr (string-trim (or (plist-get result :stderr) "")))
+         (exit (plist-get result :exit))
+         (message (cond ((not (string-empty-p stderr)) stderr)
+                        ((eq exit 'timeout) (format "git %s timed out" (car args)))
+                        (t (format "git %s exited with status %s"
+                                   (string-join args " ") exit)))))
+    (list 'harness-error message)))
 
-(defun harness-worktree--parse-porcelain (output)
-  "Parse `git worktree list --porcelain' OUTPUT."
-  (let ((worktrees nil)
-        (current nil))
+(defun harness-worktree--git (cwd &rest args)
+  "Run git with ARGS in CWD; return a promise of its standard output.
+The promise rejects with `harness-error' carrying git's stderr when
+the command fails."
+  (let ((cwd (file-name-as-directory (expand-file-name cwd))))
+    (harness-then
+     (harness-run-command (cons harness-worktree-git-program args) :cwd cwd
+                          :name "harness-git")
+     (lambda (result)
+       (if (eql (plist-get result :exit) 0)
+           (plist-get result :stdout)
+         (signal 'harness-error (cdr (harness-worktree--error args result))))))))
+
+(defun harness-worktree--git-trimmed (cwd &rest args)
+  "Run git with ARGS in CWD; return a promise of the trimmed output."
+  (harness-then (apply #'harness-worktree--git cwd args) #'string-trim))
+
+;;;; Parsing
+
+(defun harness-worktree--parse-list (output)
+  "Parse the porcelain OUTPUT of `git worktree list' into worktree plists."
+  (let ((entries (split-string output "\n\n" t))
+        (first t)
+        out)
+    (dolist (entry entries)
+      (let ((wt (list :path nil :branch nil :head nil :bare nil
+                      :detached nil :locked nil :main nil)))
+        (dolist (line (split-string entry "\n" t))
+          (cond
+           ((string-prefix-p "worktree " line)
+            (setq wt (plist-put wt :path (file-name-as-directory (substring line 9)))))
+           ((string-prefix-p "HEAD " line)
+            (setq wt (plist-put wt :head (substring line 5))))
+           ((string-prefix-p "branch " line)
+            (setq wt (plist-put wt :branch (string-remove-prefix "refs/heads/" (substring line 7)))))
+           ((string= line "bare") (setq wt (plist-put wt :bare t)))
+           ((string= line "detached") (setq wt (plist-put wt :detached t)))
+           ((string-prefix-p "locked" line) (setq wt (plist-put wt :locked t)))
+           ((string-prefix-p "prunable" line) (setq wt (plist-put wt :prunable t)))))
+        (when (plist-get wt :path)
+          (when first (setq wt (plist-put wt :main t) first nil))
+          (push wt out))))
+    (nreverse out)))
+
+(defun harness-worktree--parse-status (output)
+  "Parse `git status --porcelain=v2 --branch' OUTPUT.
+Return (:dirty BOOL :ahead N :behind N :branch NAME-OR-NIL)."
+  (let ((dirty nil) (ahead 0) (behind 0) (branch nil))
     (dolist (line (split-string output "\n" t))
       (cond
-       ((string-prefix-p "worktree " line)
-        (when current (push current worktrees))
-        (setq current (list :path (substring line 9))))
-       ((string-prefix-p "HEAD " line)
-        (setq current (plist-put current :head (substring line 5))))
-       ((string-prefix-p "branch " line)
-        (let ((ref (substring line 7)))
-          (setq current (plist-put current :branch
-                                   (string-remove-prefix "refs/heads/" ref)))))
-       ((string= line "detached")
-        (setq current (plist-put current :detached t)))
-       ((string= line "bare")
-        (setq current (plist-put current :bare t)))
-       ((string= line "locked")
-        (setq current (plist-put current :locked t)))
-       ((string-prefix-p "prunable" line)
-        (setq current (plist-put current :prunable
-                                 (string-trim (string-remove-prefix "prunable" line)))))))
-    (when current (push current worktrees))
-    (nreverse worktrees)))
+       ((string-match "\\`# branch\\.ab \\+\\([0-9]+\\) -\\([0-9]+\\)" line)
+        (setq ahead (string-to-number (match-string 1 line))
+              behind (string-to-number (match-string 2 line))))
+       ((string-match "\\`# branch\\.head \\(.*\\)\\'" line)
+        (let ((name (match-string 1 line)))
+          (setq branch (unless (string= name "(detached)") name))))
+       ((string-prefix-p "#" line) nil)
+       (t (setq dirty t))))
+    (list :dirty dirty :ahead ahead :behind behind :branch branch)))
 
-(defun harness-worktree-list (&optional directory)
-  "List the worktrees of the repository containing DIRECTORY.
-The first entry is the main worktree."
-  (let ((output (harness-worktree--git-ok (or directory default-directory)
-                                          "worktree" "list" "--porcelain")))
-    (let ((worktrees (harness-worktree--parse-porcelain output)))
-      (when worktrees
-        (setf (plist-get (car worktrees) :main) t))
-      (mapcar (lambda (worktree)
-                (plist-put worktree :path
-                           (file-name-as-directory
-                            (expand-file-name (plist-get worktree :path)))))
-              worktrees))))
+(defun harness-worktree--same-path-p (a b)
+  "Non-nil when directory names A and B refer to the same place."
+  (string= (file-name-as-directory (harness-path-normalize a))
+           (file-name-as-directory (harness-path-normalize b))))
 
-(defun harness-worktree--slug (name)
-  "Turn NAME into a branch-safe slug."
-  (let ((slug (downcase (replace-regexp-in-string "[^[:alnum:]]+" "-" (string-trim name)))))
-    (string-trim slug "-" "-")))
+;;;; Methods
 
-(defun harness-worktree-create (&rest args)
-  "Create a worktree.
-ARGS: :repo (directory in the repository, default `default-directory'),
-:name (branch name; a `harness-worktree-branch-prefix' is added when
-missing), :base (starting revision, default HEAD), :path (default under
-`harness-worktree-root').  Returns the new worktree plist."
-  (let* ((repo (harness-worktree-root-directory
-                (or (plist-get args :repo) default-directory)))
-         (name (or (plist-get args :name) "session"))
-         (branch (if (string-match-p "/" name)
-                     name
-                   (concat harness-worktree-branch-prefix (harness-worktree--slug name))))
-         (base (or (plist-get args :base) "HEAD"))
-         (root (or harness-worktree-root
-                   (expand-file-name (concat (file-name-nondirectory (directory-file-name repo))
-                                             ".worktrees")
-                                     (file-name-directory (directory-file-name repo)))))
-         (requested (plist-get args :path))
-         (path (file-name-as-directory
-                (if requested
-                    (expand-file-name requested root)
-                  (expand-file-name (harness-worktree--slug name) root)))))
-    (when (file-exists-p path)
-      (signal 'harness-user-error (list (format "Worktree path already exists: %s" path))))
-    (make-directory root t)
-    ;; Reuse an existing branch when it is not a fresh name.
-    (let* ((branch-exists (zerop (car (harness-worktree--git
-                                       repo "rev-parse" "--verify" "--quiet"
-                                       (concat "refs/heads/" branch)))))
-           (output (if branch-exists
-                       (harness-worktree--git-ok repo "worktree" "add" path branch)
-                     (harness-worktree--git-ok repo "worktree" "add" "-b" branch path base))))
-      (ignore output)
-      (list :path path :branch branch :repo repo :base base))))
+(harness-defmethod worktree/list (root)
+  "Return a promise of the worktrees of the repository at ROOT.
+Each is (:path :branch :head :bare BOOL :detached BOOL :locked BOOL
+:main BOOL); the main worktree comes first."
+  (harness-then (harness-worktree--git root "worktree" "list" "--porcelain")
+                #'harness-worktree--parse-list))
 
-(defun harness-worktree--main-repo (path)
-  "Return the main repository root that owns the worktree at PATH.
-The removal runs there: the worktree's own directory disappears while the
-command runs."
-  (let ((common (harness-worktree--git-ok
-                 path "rev-parse" "--path-format=absolute" "--git-common-dir")))
-    (file-name-as-directory
-     (file-name-directory (directory-file-name (file-name-as-directory common))))))
+(defun harness-worktree--branch-exists-p (root branch)
+  "Return a promise of non-nil when BRANCH exists in the repository at ROOT."
+  (harness-then
+   (harness-run-command (list harness-worktree-git-program "rev-parse" "--verify" "--quiet"
+                              (concat "refs/heads/" branch))
+                        :cwd root :name "harness-git")
+   (lambda (result) (eql (plist-get result :exit) 0))))
 
-(defun harness-worktree-remove (path &optional force)
-  "Remove the worktree at PATH.  FORCE discards uncommitted changes."
-  (let ((repo (or (ignore-errors (harness-worktree--main-repo path))
-                  (ignore-errors (harness-worktree--git-ok path "rev-parse" "--show-toplevel"))
-                  (harness-worktree-root-directory default-directory))))
-    (harness-worktree--git-ok
-     repo "worktree" "remove" (if force "--force" "--") path)
-    (harness-worktree--git repo "worktree" "prune")
-    t))
+(defun harness-worktree--find (root path)
+  "Return a promise of the worktree plist for PATH in the repository at ROOT."
+  (harness-then
+   (harness-call 'worktree/list root)
+   (lambda (worktrees)
+     (or (cl-find-if (lambda (wt) (harness-worktree--same-path-p (plist-get wt :path) path))
+                     worktrees)
+         (list :path (file-name-as-directory (expand-file-name path)))))))
 
-(defun harness-worktree-session (&rest args)
-  "Create a worktree and a session that works in it.
-ARGS: :repo, :name, :base, :title, plus any `harness-session-create'
-arguments.  Returns (WORKTREE . SESSION)."
-  (let* ((worktree (harness-worktree-create
-                    :repo (plist-get args :repo)
-                    :name (plist-get args :name)
-                    :base (plist-get args :base)
-                    :path (plist-get args :path)))
-         (session (harness-session-create
-                   :cwd (plist-get worktree :path)
-                   :title (or (plist-get args :title)
-                              (format "%s (%s)"
-                                      (file-name-nondirectory
-                                       (directory-file-name (plist-get worktree :repo)))
-                                      (plist-get worktree :branch)))
-                   :parent-id (plist-get args :parent-id)
-                   :model (plist-get args :model)
-                   :thinking (plist-get args :thinking)
-                   :permission-mode (plist-get args :permission-mode)
-                   :worktree worktree)))
-    (cons worktree session)))
+(harness-defmethod worktree/create (root &rest opts)
+  "Create a worktree of the repository at ROOT; return a promise of its plist.
+OPTS: `:branch' (default a fresh `harness-worktree-branch-prefix' name),
+`:path' (default from `harness-worktree-directory-function') and `:base'
+(default HEAD).  A branch that already exists is checked out as is;
+otherwise it is created from `:base'.  Emits `worktree/created'."
+  (let* ((root (file-name-as-directory (expand-file-name root)))
+         (branch (or (plist-get opts :branch)
+                     (concat harness-worktree-branch-prefix (harness-short-id))))
+         (path (expand-file-name (or (plist-get opts :path)
+                                     (funcall harness-worktree-directory-function root branch))))
+         (base (or (plist-get opts :base) "HEAD")))
+    (harness-then
+     (harness-worktree--branch-exists-p root branch)
+     (lambda (exists)
+       (harness-ensure-directory (file-name-directory (directory-file-name path)))
+       (harness-then
+        (if exists
+            (harness-worktree--git root "worktree" "add" path branch)
+          (harness-worktree--git root "worktree" "add" "-b" branch path base))
+        (lambda (_)
+          (harness-then
+           (harness-worktree--find root path)
+           (lambda (wt)
+             (harness-emit 'worktree/created root wt)
+             wt))))))))
 
-(defun harness-worktree-service-list (&rest args)
-  "Service: list worktrees."
-  (vconcat (harness-worktree-list (plist-get args :directory))))
+(harness-defmethod worktree/remove (root path &optional force)
+  "Remove the worktree at PATH from the repository at ROOT.
+With FORCE, remove it even when it has local changes.  Return a
+promise of PATH.  Emits `worktree/removed'."
+  (let ((path (file-name-as-directory (expand-file-name path))))
+    (harness-then
+     (apply #'harness-worktree--git root
+            (append (list "worktree" "remove") (and force (list "--force")) (list path)))
+     (lambda (_)
+       (harness-emit 'worktree/removed root path)
+       path))))
 
-(defun harness-worktree-service-create (&rest args)
-  "Service: create a worktree."
-  (harness-worktree-create
-   :repo (plist-get args :repo)
-   :name (plist-get args :name)
-   :base (plist-get args :base)
-   :path (plist-get args :path)))
+(harness-defmethod worktree/prune (root)
+  "Prune stale worktree records of the repository at ROOT.
+Return a promise of the lines git printed about what it removed."
+  (let ((args (list "worktree" "prune" "-v")))
+    (harness-then
+     (harness-run-command (cons harness-worktree-git-program args)
+                          :cwd (file-name-as-directory (expand-file-name root))
+                          :name "harness-git")
+     (lambda (result)
+       (if (eql (plist-get result :exit) 0)
+           ;; git reports what it pruned on stderr.
+           (split-string (concat (plist-get result :stdout) "\n" (plist-get result :stderr)) "\n" t)
+         (signal 'harness-error (cdr (harness-worktree--error args result))))))))
 
-(defun harness-worktree-service-remove (&rest args)
-  "Service: remove a worktree."
-  (harness-worktree-remove (plist-get args :path) (plist-get args :force)))
+(harness-defmethod worktree/root-of (path)
+  "Return a promise of the main repository root for PATH.
+PATH may be inside any worktree of the repository (or a file in it)."
+  (let ((dir (if (file-directory-p path)
+                 (file-name-as-directory (expand-file-name path))
+               (file-name-directory (expand-file-name path)))))
+    (harness-then
+     (harness-worktree--git-trimmed dir "rev-parse" "--git-common-dir")
+     (lambda (common)
+       (let ((common (directory-file-name (expand-file-name common dir))))
+         (file-name-as-directory
+          (harness-path-normalize
+           (if (string= (file-name-nondirectory common) ".git")
+               (file-name-directory common)
+             common))))))))
 
-(defun harness-worktree-service-session (&rest args)
-  "Service: create a worktree and a session in it.
-Returns a plist with :worktree and :sessionId."
-  (let ((result (harness-worktree-session
-                 :repo (plist-get args :repo)
-                 :name (plist-get args :name)
-                 :base (plist-get args :base)
-                 :title (plist-get args :title)
-                 :parent-id (plist-get args :parent-id))))
-    (list :worktree (car result)
-          :sessionId (harness-session-id (cdr result)))))
+(harness-defmethod worktree/branch (path)
+  "Return a promise of the branch checked out at PATH, or nil when detached."
+  (harness-then (harness-worktree--git-trimmed path "branch" "--show-current")
+                (lambda (name) (unless (string-empty-p name) name))))
 
-(defun harness-worktree-setup ()
-  "Set up the worktree module."
-  (harness-service-register
-   "worktree"
-   :module 'harness-worktree
-   :doc "Git worktree listing, creation and session association."
-   :methods '((list . harness-worktree-service-list)
-              (create . harness-worktree-service-create)
-              (remove . harness-worktree-service-remove)
-              (session . harness-worktree-service-session))))
+(harness-defmethod worktree/status (path)
+  "Return a promise of (:dirty BOOL :ahead N :behind N :branch NAME) for PATH.
+Ahead and behind count commits relative to the upstream, 0 without one."
+  (harness-then (harness-worktree--git path "status" "--porcelain=v2" "--branch")
+                #'harness-worktree--parse-status))
 
-(defun harness-worktree-teardown ()
-  "Tear down the worktree module."
-  (harness-service-unregister "worktree"))
+(harness-declare-event 'worktree/created "(ROOT WORKTREE) after a worktree was added.")
+(harness-declare-event 'worktree/removed "(ROOT PATH) after a worktree was removed.")
 
-(harness-module-define 'harness-worktree
-  :version harness-version
-  :description "Git worktrees for parallel sessions."
-  :requires '((harness-core "0.1.0")
-              (harness-config "0.1.0")
-              (harness-session "0.1.0"))
-  :provides '(harness-worktree)
-  :setup #'harness-worktree-setup
-  :teardown #'harness-worktree-teardown)
+(harness-define-module 'worktree
+  :doc "Git worktree listing, creation, removal and status."
+  :requires '(project))
 
 (provide 'harness-worktree)
 ;;; harness-worktree.el ends here

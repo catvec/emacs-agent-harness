@@ -1,305 +1,650 @@
-;;; harness-usage.el --- Cost and usage accounting -*- lexical-binding: t; -*-
-
-;; This file is part of Emacs Agent Harness.
+;;; harness-usage.el --- Cost accounting and budgets  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Aggregates token and cost usage across sessions, projects and models
-;; from session metadata plus the timestamped `usage_update` entries the
-;; agent writes for every model call.  Also evaluates budgets (per
-;; session, project or global; per day, week, month or all time) and can
-;; enforce hard quotas before a turn starts.
+;; Every model call ends in a `session/usage' event.  This module prices
+;; it when the provider did not, writes one row per call to the `usage'
+;; table of usage.db (or to usage/records.jsonl when Emacs lacks
+;; SQLite), and answers questions about spending: summaries grouped by
+;; project, model, day, hour or session; totals; and continuous time
+;; series for charts.
+;;
+;; Budgets live in budgets.json.  A budget has a scope (one session,
+;; one project, or a calendar period across everything), an amount and
+;; a hardness.  Period budgets know how much of the period is left and
+;; split the remainder across the remaining days, business days or all.
+;; A session's own `:budget' plist is an implicit hard-or-soft budget
+;; with scope session.  Hard budgets stop the next turn through the
+;; `agent/before-turn' filter; every budget warns once at 80% and soft
+;; ones once more at 100%, as an event and as a session hint.
+;;
+;; Storage is one code path: rows are loaded from whichever backend is
+;; in use into plists and aggregated in Lisp.  SQLite only narrows the
+;; rows it returns; the Lisp filter and aggregation are the reference.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
 (require 'harness-core)
-(require 'harness-session)
+(require 'harness-util)
 
-(defcustom harness-usage-budgets nil
-  "Budgets to track and optionally enforce.
+(declare-function sqlite-execute "sqlite.c")
+(declare-function sqlite-select "sqlite.c")
 
-Each entry is a plist:
-  :scope      `global', `project' or `session'
-  :project    project root when :scope is `project'
-  :session-id session id when :scope is `session'
-  :period     `daily', `weekly', `monthly' or `all'
-  :amount     budget in the currency below
-  :currency   currency, default \"USD\"
-  :hard       when non-nil, refuse to start turns while over budget"
-  :type '(repeat (plist :key-type symbol :value-type sexp)))
+(defcustom harness-usage-warn-fraction 0.8
+  "Fraction of a budget at which the first warning is issued."
+  :type 'number :group 'harness)
 
-(defcustom harness-usage-week-starts-on 1
-  "Day a usage week starts on (0 = Sunday, 1 = Monday)."
-  :type 'natnum)
+(defconst harness-usage-jsonl-name "usage/records.jsonl"
+  "JSONL log of usage rows, used when SQLite is unavailable.")
 
-(defcustom harness-usage-transcript-scan-days 40
-  "How far back period reports read transcripts."
-  :type 'natnum)
+(defconst harness-usage-budgets-name "budgets.json"
+  "Store name of the budget list.")
 
-(defun harness-usage--infos ()
-  "Return every session info plist."
-  (if (harness-service-available-p "session" 'infos)
-      (append (harness-service-call "session" 'infos) nil)
-    nil))
+(defvar harness-usage-budgets nil
+  "Budgets as a list of plists, loaded from budgets.json.
+Each budget: (:id STRING :scope session|project|period :target
+SESSION-ID|ROOT|nil :amount USD :hard BOOL :period nil|day|week|month
+:days business|all :created FLOAT :label STRING-OR-NIL).")
 
-(defun harness-usage--usage-totals (&optional infos)
-  "Sum INFOS' all-time usage and cost."
-  (let ((infos (or infos (harness-usage--infos)))
-        (input 0) (output 0) (cache-read 0) (cache-write 0) (amount 0.0)
-        (currency "USD") (sessions 0))
-    (dolist (info infos)
-      (cl-incf sessions)
-      (let ((usage (plist-get info :usage)))
-        (cl-incf input (or (plist-get usage :input) 0))
-        (cl-incf output (or (plist-get usage :output) 0))
-        (cl-incf cache-read (or (plist-get usage :cache-read) 0))
-        (cl-incf cache-write (or (plist-get usage :cache-write) 0)))
-      (let ((cost (plist-get info :cost)))
-        (when (and cost (numberp (plist-get cost :amount)))
-          (cl-incf amount (plist-get cost :amount))
-          (setq currency (or (plist-get cost :currency) currency)))))
-    (list :sessions sessions :input input :output output
-          :cache-read cache-read :cache-write cache-write
-          :cost (list :amount amount :currency currency))))
+(defvar harness-usage--warned (make-hash-table :test 'equal)
+  "\"SESSION/BUDGET/PERIOD-START\" -> thresholds already warned about.")
 
-(defun harness-usage--group (infos key-function)
-  "Group INFOS by KEY-FUNCTION into a list of aggregated plists."
-  (let ((groups (make-hash-table :test #'equal)))
-    (dolist (info infos)
-      (let* ((key (funcall key-function info))
-             (entry (gethash key groups)))
-        (unless entry
-          (setq entry (list :key key :sessions 0 :input 0 :output 0
-                            :cost (list :amount 0.0 :currency "USD")))
-          (puthash key entry groups))
-        (setf (plist-get entry :sessions) (1+ (plist-get entry :sessions)))
-        (let ((usage (plist-get info :usage)))
-          (setf (plist-get entry :input) (+ (plist-get entry :input)
-                                            (or (plist-get usage :input) 0)))
-          (setf (plist-get entry :output) (+ (plist-get entry :output)
-                                             (or (plist-get usage :output) 0))))
-        (let ((cost (plist-get info :cost)))
-          (when (and cost (numberp (plist-get cost :amount)))
-            (setf (plist-get entry :cost)
-                  (list :amount (+ (plist-get (plist-get entry :cost) :amount)
-                                   (plist-get cost :amount))
-                        :currency (or (plist-get cost :currency) "USD")))))))
-    (sort (hash-table-values groups)
-          (lambda (a b) (> (plist-get (plist-get a :cost) :amount)
-                           (plist-get (plist-get b :cost) :amount))))))
+(defvar harness-usage--schema-db nil
+  "The SQLite handle whose schema was ensured most recently.")
 
-;;; Periods
+(defvar harness-usage--refreshed-models nil
+  "Non-nil once a catalogue refresh was requested because pricing was missing.")
 
-(defun harness-usage-period-start (period &optional now)
-  "Return the epoch at the start of PERIOD relative to NOW."
+(defconst harness-usage--columns
+  '(:id :ts :session :project :model :input :output :cache-read :cache-write :cost :turn)
+  "Row keys, in the order of the SELECT below.")
+
+(defconst harness-usage--select
+  "SELECT id, ts, session, project, model, input, output, cache_read, cache_write, cost, turn FROM usage"
+  "Projection matching `harness-usage--columns'.")
+
+(defconst harness-usage--schema
+  '("CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, ts REAL, session TEXT, project TEXT, model TEXT, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost REAL, turn INTEGER)"
+    "CREATE INDEX IF NOT EXISTS usage_ts ON usage (ts)"
+    "CREATE INDEX IF NOT EXISTS usage_session ON usage (session)"
+    "CREATE INDEX IF NOT EXISTS usage_project ON usage (project)")
+  "Statements that create the usage table and its indexes idempotently.")
+
+;;;; Small helpers
+
+(defun harness-usage--sym (value)
+  "Return VALUE interned when it is a string, else VALUE."
+  (if (stringp value) (intern value) value))
+
+(defun harness-usage--root (path)
+  "Normalise project root PATH for comparison."
+  (and path (file-name-as-directory (expand-file-name path))))
+
+(defun harness-usage--int (value)
+  "Return VALUE as an integer token count, 0 when absent."
+  (if (numberp value) (truncate value) 0))
+
+(defun harness-usage--empty-aggregate (key)
+  "Return a zero aggregate plist for KEY."
+  (list :key key :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :calls 0))
+
+;;;; Dates (local time)
+
+(defun harness-usage--date (time)
+  "Return TIME as a (YEAR MONTH DAY) list in local time."
+  (let ((d (decode-time time)))
+    (list (decoded-time-year d) (decoded-time-month d) (decoded-time-day d))))
+
+(defun harness-usage--encode (date &optional hour)
+  "Return the Lisp time of DATE (YEAR MONTH DAY) at HOUR (default 0).
+Out-of-range days and months are normalised by date arithmetic."
+  (encode-time (list 0 0 (or hour 0) (nth 2 date) (nth 1 date) (nth 0 date) nil -1 nil)))
+
+(defun harness-usage--day-start (date)
+  "Return the float time at which DATE starts."
+  (float-time (harness-usage--encode date)))
+
+(defun harness-usage--add-days (date n)
+  "Return DATE moved forward by N days."
+  (harness-usage--date (harness-usage--encode (list (nth 0 date) (nth 1 date) (+ (nth 2 date) n)) 12)))
+
+(defun harness-usage--weekday (date)
+  "Return the weekday of DATE, 0 being Sunday."
+  (decoded-time-weekday (decode-time (harness-usage--encode date 12))))
+
+(defun harness-usage--business-day-p (date)
+  "Non-nil when DATE is a Monday to Friday."
+  (<= 1 (harness-usage--weekday date) 5))
+
+(defun harness-usage--date-key (date)
+  "Format DATE as YYYY-MM-DD."
+  (format "%04d-%02d-%02d" (nth 0 date) (nth 1 date) (nth 2 date)))
+
+(defun harness-usage-day-key (time)
+  "Return the day bucket key of TIME, YYYY-MM-DD in local time."
+  (format-time-string "%Y-%m-%d" time))
+
+(defun harness-usage-hour-key (time)
+  "Return the hour bucket key of TIME, \"YYYY-MM-DD HH:00\" in local time."
+  (format-time-string "%Y-%m-%d %H:00" time))
+
+(defun harness-usage--hour-start (time)
+  "Return the float time of the hour containing TIME."
+  (let ((d (decode-time time)))
+    (float-time (encode-time (list 0 0 (decoded-time-hour d) (decoded-time-day d)
+                                   (decoded-time-month d) (decoded-time-year d) nil -1 nil)))))
+
+(defun harness-usage--dates-between (start end)
+  "Return the dates from START up to but excluding END."
+  (let ((limit (harness-usage--day-start end)) (date start) out)
+    (while (< (harness-usage--day-start date) limit)
+      (push date out)
+      (setq date (harness-usage--add-days date 1)))
+    (nreverse out)))
+
+(defun harness-usage-period-bounds (period &optional now)
+  "Return (START-DATE . END-DATE) of the calendar PERIOD containing NOW.
+PERIOD is `day', `week' (starting Monday) or `month'; END is exclusive."
+  (let* ((today (harness-usage--date (or now (float-time)))))
+    (pcase (harness-usage--sym period)
+      ('day (cons today (harness-usage--add-days today 1)))
+      ('week (let ((start (harness-usage--add-days today (- (mod (- (harness-usage--weekday today) 1) 7)))))
+               (cons start (harness-usage--add-days start 7))))
+      ('month (let ((start (list (nth 0 today) (nth 1 today) 1)))
+                (cons start (harness-usage--date (harness-usage--encode (list (nth 0 today) (1+ (nth 1 today)) 1) 12)))))
+      (other (error "Unknown budget period %s" other)))))
+
+(defun harness-usage--counted-day-p (date period days)
+  "Non-nil when DATE counts for planning a PERIOD budget split by DAYS.
+A day budget always counts its one day; otherwise weekends are skipped
+when DAYS is `business'."
+  (or (eq period 'day) (not (eq days 'business)) (harness-usage--business-day-p date)))
+
+;;;; Pricing
+
+(harness-defmethod usage/price (model-id usage)
+  "Return the USD cost of USAGE on MODEL-ID.
+USAGE has :input :output :cache-read :cache-write token counts; the
+model's `:pricing' is USD per million tokens.  A model without pricing
+costs 0 (logged at debug level) and a catalogue refresh is requested
+once so later calls can be priced."
+  (let* ((model (and (harness-method-exists-p 'provider/model)
+                     (harness-call 'provider/model model-id)))
+         (pricing (plist-get model :pricing)))
+    (if (null pricing)
+        (progn
+          (harness-log 'debug "usage: no pricing for %s; cost recorded as 0" model-id)
+          (unless harness-usage--refreshed-models
+            (setq harness-usage--refreshed-models t)
+            (when (harness-method-exists-p 'provider/models)
+              (ignore-errors (harness-call-async 'provider/models t))))
+          0.0)
+      (/ (+ (* (harness-usage--int (plist-get usage :input)) (or (plist-get pricing :input) 0))
+            (* (harness-usage--int (plist-get usage :output)) (or (plist-get pricing :output) 0))
+            (* (harness-usage--int (plist-get usage :cache-read)) (or (plist-get pricing :cache-read) 0))
+            (* (harness-usage--int (plist-get usage :cache-write)) (or (plist-get pricing :cache-write) 0)))
+         1000000.0))))
+
+;;;; Storage
+
+(defun harness-usage--ensure-schema (db)
+  "Create the usage table and indexes in DB if missing."
+  (dolist (sql harness-usage--schema) (sqlite-execute db sql)))
+
+(defun harness-usage--db ()
+  "Return the SQLite handle with the usage schema in place, or nil."
+  (let ((db (and (harness-method-exists-p 'store/sqlite)
+                 (condition-case err (harness-call 'store/sqlite)
+                   (error (harness-log 'warn "usage: sqlite unavailable: %S" err) nil)))))
+    (when db
+      (unless (eq db harness-usage--schema-db)
+        (harness-usage--ensure-schema db)
+        (setq harness-usage--schema-db db))
+      db)))
+
+(defun harness-usage--make-row (plist)
+  "Return a fresh, fully keyed usage row built from PLIST."
+  (let ((cost (plist-get plist :cost)) (turn (plist-get plist :turn)))
+    (list :id (plist-get plist :id)
+          :ts (float (or (plist-get plist :ts) (float-time)))
+          :session (plist-get plist :session)
+          :project (harness-usage--root (plist-get plist :project))
+          :model (plist-get plist :model)
+          :input (harness-usage--int (plist-get plist :input))
+          :output (harness-usage--int (plist-get plist :output))
+          :cache-read (harness-usage--int (plist-get plist :cache-read))
+          :cache-write (harness-usage--int (plist-get plist :cache-write))
+          :cost (float (if (numberp cost) cost 0))
+          :turn (and (numberp turn) (truncate turn)))))
+
+(defun harness-usage--insert (row)
+  "Persist ROW in SQLite or the JSONL log; return it with `:id' filled."
+  (let ((db (harness-usage--db)))
+    (if db
+        (progn
+          (sqlite-execute db "INSERT INTO usage (ts, session, project, model, input, output, cache_read, cache_write, cost, turn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                          (list (plist-get row :ts) (plist-get row :session) (plist-get row :project)
+                                (plist-get row :model) (plist-get row :input) (plist-get row :output)
+                                (plist-get row :cache-read) (plist-get row :cache-write)
+                                (plist-get row :cost) (plist-get row :turn)))
+          (plist-put row :id (caar (sqlite-select db "SELECT last_insert_rowid()"))))
+      (plist-put row :id (or (plist-get row :id) (harness-short-id)))
+      (harness-call 'store/append harness-usage-jsonl-name row)
+      row)))
+
+(defun harness-usage--row-matches-p (row opts)
+  "Non-nil when ROW satisfies the filters in OPTS.
+Filters: `:since' (inclusive), `:until' (exclusive), `:project',
+`:session' and `:model'."
+  (let ((ts (plist-get row :ts)))
+    (and (or (null (plist-get opts :since)) (>= ts (plist-get opts :since)))
+         (or (null (plist-get opts :until)) (< ts (plist-get opts :until)))
+         (or (null (plist-get opts :project))
+             (equal (harness-usage--root (plist-get opts :project)) (plist-get row :project)))
+         (or (null (plist-get opts :session)) (equal (plist-get opts :session) (plist-get row :session)))
+         (or (null (plist-get opts :model)) (equal (plist-get opts :model) (plist-get row :model))))))
+
+(defun harness-usage--rows-sqlite (db opts)
+  "Return rows from DB narrowed by the filters in OPTS."
+  (let (where args)
+    (when-let* ((v (plist-get opts :since))) (push "ts >= ?" where) (push v args))
+    (when-let* ((v (plist-get opts :until))) (push "ts < ?" where) (push v args))
+    (when-let* ((v (plist-get opts :project))) (push "project = ?" where) (push (harness-usage--root v) args))
+    (when-let* ((v (plist-get opts :session))) (push "session = ?" where) (push v args))
+    (when-let* ((v (plist-get opts :model))) (push "model = ?" where) (push v args))
+    (mapcar (lambda (values)
+              (cl-loop for k in harness-usage--columns for v in values append (list k v)))
+            (sqlite-select db (concat harness-usage--select
+                                      (if where (concat " WHERE " (string-join (nreverse where) " AND ")) "")
+                                      " ORDER BY ts, id")
+                           (nreverse args)))))
+
+(defun harness-usage--rows-jsonl (_opts)
+  "Return every row of the JSONL log."
+  (harness-call 'store/read-all harness-usage-jsonl-name))
+
+(defun harness-usage--rows (&rest opts)
+  "Return usage rows matching OPTS, oldest first.
+OPTS: `:since' `:until' (floats) `:project' ROOT `:session' ID `:model' ID.
+Rows come from SQLite when available, else from the JSONL log; the
+Lisp filter applies to both."
+  (let* ((db (harness-usage--db))
+         (rows (if db (harness-usage--rows-sqlite db opts) (harness-usage--rows-jsonl opts)))
+         (rows (cl-remove-if-not (lambda (r) (harness-usage--row-matches-p r opts)) rows)))
+    (sort rows (lambda (a b) (< (plist-get a :ts) (plist-get b :ts))))))
+
+(defun harness-usage--key (row group-by)
+  "Return the GROUP-BY key of ROW."
+  (pcase group-by
+    ('project (or (plist-get row :project) ""))
+    ('model (or (plist-get row :model) ""))
+    ('session (or (plist-get row :session) ""))
+    ('day (harness-usage-day-key (plist-get row :ts)))
+    ('hour (harness-usage-hour-key (plist-get row :ts)))
+    (other (error "Unknown usage grouping %s" other))))
+
+(defun harness-usage--aggregate (rows group-by)
+  "Sum ROWS per GROUP-BY key (nil for one aggregate); first-seen order."
+  (let ((table (make-hash-table :test 'equal)) order)
+    (dolist (r rows)
+      (let* ((key (and group-by (harness-usage--key r group-by)))
+             (agg (gethash key table)))
+        (unless agg
+          (setq agg (harness-usage--empty-aggregate key))
+          (puthash key agg table)
+          (push key order))
+        (dolist (k '(:input :output :cache-read :cache-write :cost))
+          (plist-put agg k (+ (plist-get agg k) (or (plist-get r k) 0))))
+        (plist-put agg :calls (1+ (plist-get agg :calls)))))
+    (mapcar (lambda (k) (gethash k table)) (nreverse order))))
+
+(defun harness-usage--bucket-keys (bucket since until)
+  "Return every BUCKET key from the bucket of SINCE through that of UNTIL."
+  (let (keys)
+    (pcase bucket
+      ('day (let ((date (harness-usage--date since)) (last (harness-usage-day-key until)))
+              (cl-loop repeat 100000
+                       for key = (harness-usage--date-key date)
+                       do (push key keys)
+                       until (not (string< key last))
+                       do (setq date (harness-usage--add-days date 1)))))
+      ('hour (let ((ts (harness-usage--hour-start since)) (last (harness-usage-hour-key until)))
+               (cl-loop repeat 1000000
+                        for key = (harness-usage-hour-key ts)
+                        do (unless (equal key (car keys)) (push key keys))
+                        until (not (string< key last))
+                        do (setq ts (+ ts 3600)))))
+      (other (error "Unknown series bucket %s" other)))
+    (nreverse keys)))
+
+;;;; Recording
+
+(defun harness-usage--countable-p (record)
+  "Non-nil when RECORD carries tokens or a cost, not just a turn count."
+  (cl-some (lambda (k) (numberp (plist-get record k)))
+           '(:input :output :cache-read :cache-write :cost)))
+
+(harness-defmethod usage/record (row)
+  "Persist usage ROW and return it with `:id' set.
+ROW: (:ts FLOAT :session ID :project ROOT :model ID :input N :output N
+:cache-read N :cache-write N :cost F :turn N); `:ts' defaults to now.
+Event `usage/recorded' ROW."
+  (let ((row (harness-usage--insert (harness-usage--make-row row))))
+    (harness-emit 'usage/recorded row)
+    row))
+
+(defun harness-usage--on-session-usage (id totals record)
+  "Record RECORD of session ID; TOTALS supplies the turn counter.
+Records that only carry `:turns' or `:context' are ignored.  A missing
+cost is computed from the model's pricing.  Budgets are checked after."
+  (when (and (harness-usage--countable-p record)
+             (harness-call 'session/exists-p id))
+    (let* ((session (harness-call 'session/get id))
+           (model (plist-get session :model))
+           (cost (plist-get record :cost)))
+      (harness-call 'usage/record
+                    (list :session id :project (plist-get session :project) :model model
+                          :input (plist-get record :input) :output (plist-get record :output)
+                          :cache-read (plist-get record :cache-read) :cache-write (plist-get record :cache-write)
+                          :cost (if (numberp cost) cost (harness-call 'usage/price model record))
+                          :turn (plist-get totals :turns)))
+      (harness-usage--check session))))
+
+;;;; Queries
+
+(harness-defmethod usage/summary (&rest opts)
+  "Return usage aggregated by OPTS `:group-by' (project|model|day|session|hour).
+Other OPTS filter rows: `:since' `:until' (floats, until exclusive)
+`:project' ROOT `:session' ID `:model' ID.  Each row is (:key STRING
+:input N :output N :cache-read N :cache-write N :cost F :calls N),
+sorted by cost descending, or by key ascending for day and hour."
+  (let* ((group-by (harness-usage--sym (or (plist-get opts :group-by) 'project)))
+         (aggs (harness-usage--aggregate (apply #'harness-usage--rows opts) group-by)))
+    (if (memq group-by '(day hour))
+        (sort aggs (lambda (a b) (string< (plist-get a :key) (plist-get b :key))))
+      (sort aggs (lambda (a b) (> (plist-get a :cost) (plist-get b :cost)))))))
+
+(harness-defmethod usage/totals (&rest opts)
+  "Return one aggregate (:input :output :cache-read :cache-write :cost :calls).
+OPTS are the filters of `usage/summary'."
+  (harness-plist-remove (or (car (harness-usage--aggregate (apply #'harness-usage--rows opts) nil))
+                            (harness-usage--empty-aggregate nil))
+                        :key))
+
+(harness-defmethod usage/series (&rest opts)
+  "Return a continuous time series of usage per OPTS `:bucket' (day|hour).
+Buckets run from `:since' (default: the first row) through `:until'
+\(default: now) with empty buckets filled in, so charts are continuous.
+The other filters of `usage/summary' apply.  Each point is
+\(:key STRING :cost F :input N :output N :cache-read N :cache-write N :calls N).
+Return nil when there are no rows and no `:since'."
+  (let* ((bucket (harness-usage--sym (or (plist-get opts :bucket) 'day)))
+         (rows (apply #'harness-usage--rows opts))
+         (since (or (plist-get opts :since) (and rows (plist-get (car rows) :ts))))
+         (until (or (plist-get opts :until) (float-time)))
+         (table (make-hash-table :test 'equal)))
+    (when since
+      (dolist (a (harness-usage--aggregate rows bucket))
+        (puthash (plist-get a :key) a table))
+      (mapcar (lambda (key) (or (gethash key table) (harness-usage--empty-aggregate key)))
+              (harness-usage--bucket-keys bucket since until)))))
+
+;;;; Budgets
+
+(defun harness-usage--normalise-budget (budget)
+  "Return a fresh copy of BUDGET with symbols interned and defaults filled."
+  (let* ((scope (harness-usage--sym (plist-get budget :scope)))
+         (target (plist-get budget :target))
+         (amount (plist-get budget :amount)))
+    (harness-plist-merge
+     budget
+     (list :scope scope
+           :period (harness-usage--sym (plist-get budget :period))
+           :days (or (harness-usage--sym (plist-get budget :days)) 'all)
+           :hard (harness-json-true-p (plist-get budget :hard))
+           :target (if (and target (memq scope '(project period))) (harness-usage--root target) target)
+           :amount (float (if (numberp amount) amount 0))))))
+
+(defun harness-usage--validate-budget (budget)
+  "Signal an error when BUDGET is malformed."
+  (unless (memq (plist-get budget :scope) '(session project period))
+    (error "Budget scope must be session, project or period"))
+  (unless (numberp (plist-get budget :amount)) (error "Budget needs a numeric :amount"))
+  (unless (memq (plist-get budget :period) '(nil day week month))
+    (error "Budget period must be day, week or month"))
+  (unless (memq (plist-get budget :days) '(all business))
+    (error "Budget :days must be all or business"))
+  (when (and (eq (plist-get budget :scope) 'period) (null (plist-get budget :period)))
+    (error "A period budget needs a :period"))
+  (when (and (memq (plist-get budget :scope) '(session project)) (null (plist-get budget :target)))
+    (error "A %s budget needs a :target" (plist-get budget :scope))))
+
+(defun harness-usage--save-budgets ()
+  "Write `harness-usage-budgets' to budgets.json."
+  (harness-call 'store/save harness-usage-budgets-name (harness-json-array harness-usage-budgets)))
+
+(defun harness-usage--load-budgets ()
+  "Load budgets.json into `harness-usage-budgets'."
+  (setq harness-usage-budgets
+        (mapcar #'harness-usage--normalise-budget
+                (cl-remove-if-not #'listp (harness-call 'store/load harness-usage-budgets-name)))))
+
+(defun harness-usage--implicit-budget (session)
+  "Return SESSION's own `:budget' as a budget plist, or nil."
+  (let ((b (plist-get session :budget)))
+    (when (and (listp b) (numberp (plist-get b :amount)))
+      (list :id (concat "session:" (plist-get session :id)) :scope 'session
+            :target (plist-get session :id) :amount (float (plist-get b :amount))
+            :hard (harness-json-true-p (plist-get b :hard)) :days 'all
+            :label "session" :implicit t))))
+
+(defun harness-usage--find-budget (id)
+  "Return the budget with ID: an explicit one, or a session's implicit one."
+  (cond
+   ((and (listp id) (plist-get id :scope)) (harness-usage--normalise-budget id))
+   ((cl-find id harness-usage-budgets :key (lambda (b) (plist-get b :id)) :test #'equal))
+   ((and (stringp id) (string-prefix-p "session:" id) (harness-method-exists-p 'session/exists-p))
+    (let ((sid (string-remove-prefix "session:" id)))
+      (and (harness-call 'session/exists-p sid)
+           (harness-usage--implicit-budget (harness-call 'session/get sid)))))))
+
+(defun harness-usage--budget-filter (budget)
+  "Return the row filters that select BUDGET's spending."
+  (let ((target (plist-get budget :target)))
+    (pcase (plist-get budget :scope)
+      ('session (list :session target))
+      ('project (list :project target))
+      ('period (and target (list :project target))))))
+
+(defun harness-usage--project-name (root)
+  "Return a display name for project ROOT."
+  (if (harness-method-exists-p 'project/name) (harness-call 'project/name root) root))
+
+(defun harness-usage-budget-label (budget)
+  "Return a short human label for BUDGET."
+  (or (plist-get budget :label)
+      (let ((period (pcase (plist-get budget :period)
+                      ('day "daily") ('week "weekly") ('month "monthly") (_ nil)))
+            (target (plist-get budget :target)))
+        (pcase (plist-get budget :scope)
+          ('session (string-join (delq nil (list "session" period)) " "))
+          ('project (string-join (delq nil (list "project" (harness-usage--project-name target) period)) " "))
+          ('period (concat (or period "period")
+                           (if target (format " for %s" (harness-usage--project-name target)) "")))
+          (_ (or (plist-get budget :id) "budget"))))))
+
+(defun harness-usage--budget-status (budget &optional now)
+  "Compute the status plist of BUDGET as of NOW (default: current time)."
   (let* ((now (or now (float-time)))
-         (decoded (decode-time now))
-         (start-of-day (let ((copy (copy-sequence decoded)))
-                         (setf (decoded-time-hour copy) 0
-                               (decoded-time-minute copy) 0
-                               (decoded-time-second copy) 0)
-                         (float-time (encode-time copy)))))
-    (cond
-     ((or (null period) (eq period 'all)) 0)
-     ((eq period 'daily) start-of-day)
-     ((eq period 'weekly) (let* ((weekday (nth 6 decoded))
-                                 (shift (mod (- weekday harness-usage-week-starts-on) 7)))
-                            (- start-of-day (* shift 86400))))
-     ((eq period 'monthly) (let ((copy (copy-sequence decoded)))
-                             (setf (decoded-time-day copy) 1
-                                   (decoded-time-hour copy) 0
-                                   (decoded-time-minute copy) 0
-                                   (decoded-time-second copy) 0)
-                             (float-time (encode-time copy))))
-     (t start-of-day))))
+         (period (plist-get budget :period))
+         (bounds (and period (harness-usage-period-bounds period now)))
+         (start (and bounds (harness-usage--day-start (car bounds))))
+         (end (and bounds (harness-usage--day-start (cdr bounds))))
+         (rows (apply #'harness-usage--rows
+                      (append (harness-usage--budget-filter budget)
+                              (and bounds (list :since start :until end)))))
+         (spent (plist-get (or (car (harness-usage--aggregate rows nil))
+                               (harness-usage--empty-aggregate nil))
+                           :cost))
+         (amount (float (or (plist-get budget :amount) 0)))
+         (remaining (max 0.0 (- amount spent)))
+         (days-left (and bounds
+                         (cl-count-if (lambda (d) (harness-usage--counted-day-p d period (plist-get budget :days)))
+                                      (harness-usage--dates-between (harness-usage--date now) (cdr bounds))))))
+    (list :budget budget :spent spent :amount amount :remaining remaining
+          :fraction (if (> amount 0) (/ spent amount) 1.0)
+          :hard (harness-json-true-p (plist-get budget :hard))
+          :per-day (and days-left (if (> days-left 0) (/ remaining days-left) 0.0))
+          :days-left days-left :period-start start :period-end end)))
 
-(defun harness-usage--entry-time (entry)
-  "Epoch of ENTRY's :time, or nil."
-  (let ((time (plist-get entry :time)))
-    (when (and time (stringp time))
-      (ignore-errors (float-time (date-to-time time))))))
+(harness-defmethod usage/budgets ()
+  "Return every explicit budget plist."
+  harness-usage-budgets)
 
-(defun harness-usage--entry-cost (entry)
-  "Cost amount of ENTRY."
-  (let ((cost (plist-get entry :cost)))
-    (if (and cost (numberp (plist-get cost :amount)))
-        (plist-get cost :amount)
-      0.0)))
+(harness-defmethod usage/set-budget (budget)
+  "Add BUDGET, or replace the budget with the same `:id'.  Return it.
+BUDGET: (:id :scope session|project|period :target SESSION-ID|ROOT|nil
+:amount USD :hard BOOL :period day|week|month :days business|all
+:label).  A missing `:id' and `:created' are generated.  Event
+`usage/budgets-changed' BUDGETS."
+  (let* ((b (harness-usage--normalise-budget budget))
+         (id (or (plist-get b :id) (harness-short-id))))
+    (harness-usage--validate-budget b)
+    (setq b (plist-put b :id id))
+    (setq b (plist-put b :created (or (plist-get b :created) (float-time))))
+    (setq harness-usage-budgets
+          (append (cl-remove id harness-usage-budgets :key (lambda (x) (plist-get x :id)) :test #'equal)
+                  (list b)))
+    (harness-usage--save-budgets)
+    (harness-emit 'usage/budgets-changed harness-usage-budgets)
+    b))
 
-(defun harness-usage--scan-start (&optional now)
-  "Earliest epoch period reports read transcripts from."
-  (- (or now (float-time)) (* 86400 harness-usage-transcript-scan-days)))
+(harness-defmethod usage/remove-budget (id)
+  "Remove the budget ID.  Return non-nil when one was removed."
+  (let ((before (length harness-usage-budgets)))
+    (setq harness-usage-budgets
+          (cl-remove id harness-usage-budgets :key (lambda (x) (plist-get x :id)) :test #'equal))
+    (when (< (length harness-usage-budgets) before)
+      (harness-usage--save-budgets)
+      (harness-emit 'usage/budgets-changed harness-usage-budgets)
+      t)))
 
-(defun harness-usage--scanned-entries (&optional since)
-  "Usage entries since SINCE (default: scan window)."
-  (let ((since (or since (harness-usage--scan-start))))
-    (if (harness-service-available-p "session" 'usage-entries)
-        (append (harness-service-call "session" 'usage-entries :since since) nil)
-      nil)))
+(harness-defmethod usage/budget-status (id &rest opts)
+  "Return the status of budget ID (or of a BUDGET plist passed as ID).
+\"session:SID\" names the implicit budget of session SID.  OPTS `:now'
+fixes the reference time.  Result: (:budget B :spent F :amount F
+:remaining F :fraction F :hard BOOL :per-day F :days-left N
+:period-start FLOAT :period-end FLOAT); the period fields are nil for
+budgets without a `:period'.  Period budgets count spending inside
+the current calendar day, week (from Monday) or month and split the
+remainder over the remaining days (Monday to Friday when `:days' is
+`business')."
+  (let ((budget (harness-usage--find-budget id)))
+    (unless budget (error "No budget %s" id))
+    (harness-usage--budget-status budget (plist-get opts :now))))
 
-(defun harness-usage--period-spend (period &optional entries project session-id)
-  "Sum cost of ENTRIES inside PERIOD.
-Limit to PROJECT and/or SESSION-ID when given.  Like the rest of the
-report, this never looks further back than
-`harness-usage-transcript-scan-days'."
-  (let ((start (max (harness-usage-period-start period)
-                    (harness-usage--scan-start)))
-        (amount 0.0))
-    (dolist (entry (or entries (harness-usage--scanned-entries start)))
-      (let ((time (harness-usage--entry-time entry)))
-        (when (and time (>= time start)
-                   (or (null project)
-                       (harness-usage--same-project-p
-                        (plist-get entry :projectRoot) project))
-                   (or (null session-id)
-                       (equal (plist-get entry :sessionId) session-id)))
-          (cl-incf amount (harness-usage--entry-cost entry)))))
-    amount))
+(harness-defmethod usage/plan-budget (amount period days &optional now)
+  "Split AMOUNT over the calendar PERIOD (day|week|month) containing NOW.
+Return ((:date \"YYYY-MM-DD\" :allowance F) …) for every date of the
+period; when DAYS is `business' weekends get an allowance of 0."
+  (let* ((period (harness-usage--sym period))
+         (days (or (harness-usage--sym days) 'all))
+         (bounds (harness-usage-period-bounds period now))
+         (dates (harness-usage--dates-between (car bounds) (cdr bounds)))
+         (counted (cl-count-if (lambda (d) (harness-usage--counted-day-p d period days)) dates))
+         (each (if (> counted 0) (/ (float amount) counted) 0.0)))
+    (mapcar (lambda (d)
+              (list :date (harness-usage--date-key d)
+                    :allowance (if (harness-usage--counted-day-p d period days) each 0.0)))
+            dates)))
 
-(defun harness-usage--same-project-p (a b)
-  "Whether A and B name the same project directory."
-  (and a b
-       (equal (file-name-as-directory (expand-file-name a))
-              (file-name-as-directory (expand-file-name b)))))
+;;;; Enforcement
 
-(defun harness-usage--budget-label (budget)
-  "Human label for BUDGET."
-  (format "%s budget (%s)"
-          (pcase (plist-get budget :scope)
-            ('project (or (plist-get budget :project) "project"))
-            ('session (format "session %s"
-                              (substring (or (plist-get budget :session-id) "?") 0 8)))
-            (_ "global"))
-          (or (plist-get budget :period) "all")))
+(defun harness-usage--session-budgets (session)
+  "Return every budget that applies to SESSION, implicit one last."
+  (let ((sid (plist-get session :id))
+        (project (plist-get session :project))
+        out)
+    (dolist (b harness-usage-budgets)
+      (let ((target (plist-get b :target)))
+        (when (pcase (plist-get b :scope)
+                ('session (equal target sid))
+                ('project (equal target project))
+                ('period (or (null target) (equal target project))))
+          (push b out))))
+    (let ((implicit (harness-usage--implicit-budget session)))
+      (when implicit (push implicit out)))
+    (nreverse out)))
 
-(defun harness-usage--budget-session (budget)
-  "Session id a session-scoped BUDGET applies to."
-  (and (eq (plist-get budget :scope) 'session)
-       (plist-get budget :session-id)))
+(harness-defmethod usage/session-budgets (session-id &rest opts)
+  "Return the status of every budget applying to SESSION-ID.
+OPTS `:now' fixes the reference time."
+  (mapcar (lambda (b) (harness-usage--budget-status b (plist-get opts :now)))
+          (harness-usage--session-budgets (harness-call 'session/get session-id))))
 
-;;; Summary
+(defun harness-usage--warn (sid budget status threshold text)
+  "Warn once per period about BUDGET reaching THRESHOLD for session SID.
+Emits `usage/budget-warning' with STATUS and adds TEXT as a hint."
+  (let* ((key (format "%s/%s/%s" sid (plist-get budget :id) (or (plist-get status :period-start) 0)))
+         (done (gethash key harness-usage--warned)))
+    (unless (member threshold done)
+      (dolist (th (list harness-usage-warn-fraction 1.0))
+        (when (<= th threshold) (cl-pushnew th done :test #'equal)))
+      (puthash key done harness-usage--warned)
+      (harness-emit 'usage/budget-warning sid budget status)
+      (when (harness-method-exists-p 'session/hint)
+        (harness-call 'session/hint sid text)))))
 
-(defun harness-usage-summary ()
-  "Return the complete usage report as a plist."
-  (let* ((infos (harness-usage--infos))
-         (entries (harness-usage--scanned-entries))
-         (projects (harness-usage--group infos (lambda (info)
-                                                 (or (plist-get info :projectRoot)
-                                                     "(none)"))))
-         (models (harness-usage--group
-                  infos (lambda (info) (or (plist-get info :model) "(no model)"))))
-         (budgets
-          (mapcar
-           (lambda (budget)
-             (let* ((period (or (plist-get budget :period) 'all))
-                    (project (and (eq (plist-get budget :scope) 'project)
-                                  (plist-get budget :project)))
-                    (budget-session (harness-usage--budget-session budget))
-                    (spent (if (eq period 'all)
-                               (cl-loop for info in infos
-                                        when (and (or (null project)
-                                                      (harness-usage--same-project-p
-                                                       (plist-get info :projectRoot) project))
-                                                  (or (null budget-session)
-                                                      (equal (plist-get info :sessionId)
-                                                             budget-session)))
-                                        sum (let ((cost (plist-get info :cost)))
-                                              (if (and cost (numberp (plist-get cost :amount)))
-                                                  (plist-get cost :amount)
-                                                0.0)))
-                             (harness-usage--period-spend period entries project
-                                                          budget-session)))
-                    (amount (or (plist-get budget :amount) 0)))
-               (list :label (harness-usage--budget-label budget)
-                     :scope (or (plist-get budget :scope) 'global)
-                     :project project
-                     :period period
-                     :amount amount
-                     :spent spent
-                     :remaining (- amount spent)
-                     :hard (and (plist-get budget :hard) t)
-                     :over (> spent amount)
-                     :currency (or (plist-get budget :currency) "USD"))))
-           harness-usage-budgets))
-         ;; Per-period spend table for the overview.
-         (periods (mapcar (lambda (period)
-                            (list :period period
-                                  :spent (harness-usage--period-spend period entries)))
-                          '(daily weekly monthly))))
-    (list :totals (harness-usage--usage-totals infos)
-          :projects projects
-          :models models
-          :sessions (vconcat (mapcar (lambda (info)
-                                       (list :sessionId (plist-get info :sessionId)
-                                             :title (plist-get info :title)
-                                             :projectRoot (plist-get info :projectRoot)
-                                             :model (plist-get info :model)
-                                             :status (plist-get info :status)
-                                             :updatedEpoch (or (plist-get info :updatedEpoch) 0)
-                                             :usage (plist-get info :usage)
-                                             :cost (plist-get info :cost)))
-                                     infos))
-          :periods periods
-          :budgets budgets)))
+(defun harness-usage--check (session &optional now)
+  "Evaluate SESSION's budgets as of NOW; warn on crossings.
+Return the reason a hard budget blocks the next turn, or nil."
+  (let ((sid (plist-get session :id)) reason)
+    (dolist (b (harness-usage--session-budgets session))
+      (let* ((st (harness-usage--budget-status b now))
+             (fraction (plist-get st :fraction))
+             (label (harness-usage-budget-label b))
+             (spent (harness-format-cost (plist-get st :spent)))
+             (amount (harness-format-cost (plist-get st :amount))))
+        (cond
+         ((and (plist-get st :hard) (>= fraction 1.0))
+          (unless reason
+            (setq reason (format "Budget %s exhausted: spent %s of %s" label spent amount))))
+         ((>= fraction 1.0)
+          (harness-usage--warn sid b st 1.0 (format "Budget %s exceeded: spent %s of %s" label spent amount)))
+         ((>= fraction harness-usage-warn-fraction)
+          (harness-usage--warn sid b st harness-usage-warn-fraction
+                               (format "Budget %s at %d%%: spent %s of %s"
+                                       label (round (* 100 fraction)) spent amount))))))
+    reason))
 
-;;; Service
+(defun harness-usage--before-turn (value next session)
+  "`agent/before-turn' handler: refuse the turn when a hard budget is spent.
+VALUE is the gate so far, NEXT continues the chain, SESSION is the plist."
+  (if (not (plist-get value :proceed))
+      (funcall next value)
+    (let ((reason (condition-case err (harness-usage--check session)
+                    (error (harness-log 'error "usage: budget check failed: %S" err) nil))))
+      (funcall next (if reason (list :proceed nil :reason reason) value)))))
 
-(defun harness-usage-service-summary (&rest _args)
-  "Service: the usage report."
-  (harness-usage-summary))
+;;;; Module
 
-(defun harness-usage-service-budget-check (&rest args)
-  "Service: check hard budgets before a turn of :session-id.
-Returns nil when allowed, or a plist (:blocked t :reason STRING)."
-  (let* ((session-id (plist-get args :session-id))
-         (session (and session-id (harness-session-load session-id)))
-         (project (and session (harness-session-project-root session))))
-    (catch 'blocked
-      (dolist (budget harness-usage-budgets)
-        (when (plist-get budget :hard)
-          (let* ((period (or (plist-get budget :period) 'all))
-                 (scope-project (and (eq (plist-get budget :scope) 'project)
-                                     (plist-get budget :project)))
-                 (scope-session (harness-usage--budget-session budget))
-                 (applies (and (or (null scope-project)
-                                   (harness-usage--same-project-p scope-project project))
-                               (or (null scope-session)
-                                   (equal scope-session session-id))))
-                 (amount (or (plist-get budget :amount) 0)))
-            (when applies
-              (let ((spent (harness-usage--period-spend period nil scope-project scope-session)))
-                (when (> spent amount)
-                  (throw 'blocked
-                         (list :blocked t
-                               :reason (format "%s is over budget (%.4f of %.4f %s); raise it or start a new period."
-                                               (harness-usage--budget-label budget)
-                                               spent amount
-                                               (or (plist-get budget :currency) "USD"))))))))))
-      nil)))
+(defun harness-usage--init ()
+  "Create the schema, load budgets and hook into the bus."
+  (harness-usage--db)
+  (harness-usage--load-budgets)
+  (harness-on 'session/usage #'harness-usage--on-session-usage)
+  (harness-add-filter 'agent/before-turn #'harness-usage--before-turn 30))
 
-(defun harness-usage-setup ()
-  "Set up the usage module."
-  (harness-service-register
-   "usage"
-   :module 'harness-usage
-   :doc "Token and cost accounting, periods and budgets."
-   :methods '((summary . harness-usage-service-summary)
-              (budget-check . harness-usage-service-budget-check))))
+(harness-declare-event 'usage/recorded "(ROW) after a usage row is stored.")
+(harness-declare-event 'usage/budget-warning "(SESSION-ID BUDGET STATUS) when a budget crosses 80% or 100%.")
+(harness-declare-event 'usage/budgets-changed "(BUDGETS) after a budget is added, replaced or removed.")
 
-(defun harness-usage-teardown ()
-  "Tear down the usage module."
-  (harness-service-unregister "usage"))
-
-(harness-module-define 'harness-usage
-  :version harness-version
-  :description "Usage and cost aggregation, periods and budgets."
-  :requires '((harness-core "0.1.0")
-              (harness-session "0.1.0"))
-  :provides '(harness-usage)
-  :setup #'harness-usage-setup
-  :teardown #'harness-usage-teardown)
+(harness-define-module 'usage
+  :doc "Cost accounting, usage summaries and budgets."
+  :requires '(store session provider)
+  :init #'harness-usage--init)
 
 (provide 'harness-usage)
 ;;; harness-usage.el ends here

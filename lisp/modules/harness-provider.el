@@ -1,355 +1,207 @@
-;;; harness-provider.el --- Completion provider registry and canonical format -*- lexical-binding: t; -*-
-
-;; This file is part of Emacs Agent Harness.
+;;; harness-provider.el --- Completion provider contract and registry  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Providers are generic: each one translates its wire format into the
-;; canonical shapes defined here, so the agent loop never learns
-;; provider-specific details.
-;;
-;; Canonical model id:  "provider/model", e.g. "openai/gpt-5".
-;;
-;; Canonical message (plist): :role ("user" "assistant" "tool") and
-;; :content (vector of parts).  Parts:
-;;
-;;   (:type "text"       :text "...")
-;;   (:type "image"      :mime-type "image/png" :data "<base64>")
-;;   (:type "audio"      :mime-type "audio/wav" :data "<base64>")
-;;   (:type "thinking"   :text "...")
-;;   (:type "tool-call"  :id "call_1" :name "read" :arguments <plist>)
-;;   (:type "tool-result" :tool-call-id "call_1"
-;;                        :content (vector parts) :is-error bool)
-;;
-;; Canonical tool spec: (:name :description :input-schema <JSON Schema>).
-;;
-;; Canonical completion result (the value `complete' resolves to):
-;;
-;;   (:text "..." :thinking "..." :tool-calls (vector (:id :name :arguments))
-;;    :stop-reason "end_turn"|"tool_use"|"max_tokens"|"refusal"
-;;    :usage (:input-tokens N :output-tokens N :cache-read N :cache-write N))
-;;
-;; Streaming is reported through the request's :on-text, :on-thought and
-;; :on-tool-call callbacks while the deferred is pending.
+;; A provider turns a request into a stream of events (see
+;; docs/architecture.md, "provider").  This module holds the registry,
+;; the model catalogue and the small amount of glue that keeps every
+;; provider honest: a request always ends with exactly one `done'
+;; event, and callbacks never see each other's errors.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'json)
-(require 'seq)
-(require 'subr-x)
 (require 'harness-core)
+(require 'harness-util)
 
-(define-error 'harness-provider-error "Completion provider error" 'harness-error)
+(defcustom harness-default-model "claude:claude-fable-5-1"
+  "Model used when nothing more specific is configured, as PROVIDER:NAME."
+  :type 'string :group 'harness)
 
-(cl-defstruct (harness-provider (:constructor harness-provider--make))
-  name
-  description
-  capabilities                ; list of symbols, informational
-  models-fn                   ; &optional -> list or deferred of model plists
-  complete-fn                 ; request plist -> deferred of result plist
-  price-fn                    ; model + usage -> plist (:amount :currency) or nil
-  token-fn                    ; model + text -> integer or nil
-  config)
+(cl-defstruct (harness-provider (:copier nil))
+  id label doc models-fn complete-fn fork-fn quota-fn capabilities)
 
-(defvar harness-provider--registry (make-hash-table :test #'equal)
-  "Provider name (string) -> `harness-provider'.")
+(defvar harness-providers (make-hash-table :test 'eq)
+  "Provider id -> `harness-provider'.")
 
-(defun harness-provider-register (name &rest properties)
-  "Register provider NAME with PROPERTIES.
+(cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities)
+  "Register provider ID.
+LABEL and DOC describe it.  MODELS is a function returning a promise of
+model plists.  COMPLETE takes a request plist and returns a handle
+plist with `:cancel'.  FORK, when given, takes (MODEL-ID STATE) and
+returns a promise of a new provider state.  QUOTA returns a promise of
+quota windows.  CAPABILITIES is the static capability plist."
+  (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
+                                     :models-fn models :complete-fn complete
+                                     :fork-fn fork :quota-fn quota
+                                     :capabilities capabilities)
+           harness-providers)
+  (setq harness-provider--models nil)
+  (when (boundp 'harness-provider--models-by-provider)
+    (remhash id harness-provider--models-by-provider))
+  id)
 
-  :description  one line shown in model switchers
-  :capabilities list of symbols: streaming, tool-calls, image-input,
-                audio-input, thinking, models-list, pricing, token-count
-  :models       function returning model plists, or a static list
-  :complete     function taking a request plist, returning a deferred
-  :price        function (MODEL USAGE) -> (:amount F :currency S)
-  :tokens       function (MODEL TEXT) -> integer
-  :config       arbitrary provider configuration
+(defun harness-provider-get (id)
+  "Return provider ID or nil."
+  (gethash id harness-providers))
 
-Returns the provider."
-  (declare (indent 1))
-  (let ((provider (harness-provider--make
-                   :name name
-                   :description (plist-get properties :description)
-                   :capabilities (plist-get properties :capabilities)
-                   :models-fn (plist-get properties :models)
-                   :complete-fn (plist-get properties :complete)
-                   :price-fn (plist-get properties :price)
-                   :token-fn (plist-get properties :tokens)
-                   :config (plist-get properties :config))))
-    (when harness-core--current-module
-      (harness-core-add-module-cleanup
-       harness-core--current-module (lambda () (harness-provider-unregister name))))
-    (puthash name provider harness-provider--registry)
-    provider))
+(defun harness-provider-parse-model (model-id)
+  "Split MODEL-ID \"provider:name\" into (PROVIDER-SYMBOL . NAME)."
+  (if (and model-id (string-match "\\`\\([a-z0-9_-]+\\):\\(.+\\)\\'" model-id))
+      (cons (intern (match-string 1 model-id)) (match-string 2 model-id))
+    (cons nil model-id)))
 
-(defun harness-provider-unregister (name)
-  "Remove provider NAME from the registry."
-  (remhash name harness-provider--registry))
+(defvar harness-provider--models nil "Cached list of model plists, or nil.")
+(defvar harness-provider--models-promise nil "In-flight refresh, if any.")
 
-(defun harness-provider-get (name)
-  "Return provider NAME, or nil."
-  (gethash name harness-provider--registry))
+(harness-defmethod provider/list ()
+  "Return registered providers as (:id :label :doc :capabilities) plists."
+  (let (out)
+    (maphash (lambda (id p)
+               (push (list :id id :label (harness-provider-label p)
+                           :doc (harness-provider-doc p)
+                           :capabilities (harness-provider-capabilities p))
+                     out))
+             harness-providers)
+    (sort out (lambda (a b) (string< (symbol-name (plist-get a :id)) (symbol-name (plist-get b :id)))))))
 
-(defun harness-provider-list ()
-  "Return all registered providers, sorted by name."
-  (sort (hash-table-values harness-provider--registry)
-        (lambda (a b) (string< (harness-provider-name a) (harness-provider-name b)))))
+(defun harness-provider--normalise-model (provider model)
+  "Fill defaults into MODEL from PROVIDER."
+  (let* ((name (plist-get model :name))
+         (pid (harness-provider-id provider))
+         (m (copy-sequence model)))
+    (setq m (plist-put m :provider pid))
+    (setq m (plist-put m :id (or (plist-get m :id) (format "%s:%s" pid name))))
+    (setq m (plist-put m :label (or (plist-get m :label) name)))
+    (setq m (plist-put m :provider-label (harness-provider-label provider)))
+    (setq m (plist-put m :context-window (or (plist-get m :context-window) 128000)))
+    (setq m (plist-put m :input-modalities (or (plist-get m :input-modalities) '("text"))))
+    (setq m (plist-put m :capabilities (harness-plist-merge (harness-provider-capabilities provider)
+                                                            (plist-get m :capabilities))))
+    m))
 
-(defun harness-provider-resolve (model-id)
-  "Split MODEL-ID (\"provider/model\") into (PROVIDER-NAME . MODEL).
-Signals `harness-user-error' when the id has no provider prefix."
-  (let ((slash (string-match "/" (or model-id ""))))
-    (unless slash
-      (signal 'harness-user-error
-              (list (format "Model id must be \"provider/model\": %s" model-id))))
-    (cons (substring model-id 0 slash)
-          (substring model-id (1+ slash)))))
+(defvar harness-provider--models-by-provider (make-hash-table :test 'eq)
+  "Provider id -> its normalised model list, filled as each provider answers.")
 
-(defun harness-provider-for-model (model-id)
-  "Return the provider object for MODEL-ID or signal."
-  (let* ((resolved (harness-provider-resolve model-id))
-         (provider (harness-provider-get (car resolved))))
-    (unless provider
-      (signal 'harness-user-error
-              (list (format "No provider named %s" (car resolved)))))
-    provider))
+(defun harness-provider--rebuild-cache ()
+  (let (all)
+    (maphash (lambda (_ models) (setq all (append all models))) harness-provider--models-by-provider)
+    (setq harness-provider--models all)))
 
-(defun harness-provider-model-name (model-id)
-  "Return the model part of MODEL-ID."
-  (cdr (harness-provider-resolve model-id)))
-
-;;; Model listing
-
-(defun harness-provider--normalize-models (provider models)
-  "Prefix MODELS from PROVIDER with the provider name and fill in defaults."
-  (mapcar (lambda (model)
-            (let* ((name (or (plist-get model :model) (plist-get model :name) "model"))
-                   (id (or (plist-get model :id)
-                           (format "%s/%s" (harness-provider-name provider) name))))
-              (append (list :id id
-                            :provider (harness-provider-name provider)
-                            :name (or (plist-get model :name) name))
-                      (harness-plist-omit-nil
-                       (list :description (plist-get model :description)
-                             :context-window (or (plist-get model :context-window)
-                                                 (plist-get model :contextWindow))
-                             :input-price (or (plist-get model :input-price)
-                                              (plist-get model :inputPrice))
-                             :output-price (or (plist-get model :output-price)
-                                               (plist-get model :outputPrice))
-                             :cache-read-price (plist-get model :cache-read-price)
-                             :thinking (plist-get model :thinking))))))
-          (append models nil)))
-
-(defun harness-provider--models-of (provider)
-  "Return a deferred resolving to PROVIDER's normalized model list."
-  (let ((models (when (harness-provider-models-fn provider)
-                  (let ((source (harness-provider-models-fn provider)))
-                    (if (functionp source) (funcall source) source)))))
-    (if (harness-deferred-p models)
-        (harness-deferred-then
-         models (lambda (value) (harness-provider--normalize-models provider value)))
-      (let ((deferred (harness-deferred-new)))
-        (harness-deferred-resolve deferred
-                                  (harness-provider--normalize-models provider models))
-        deferred))))
-
-(defun harness-provider-models ()
-  "Return a deferred resolving to the combined model list of all providers."
-  (let ((deferreds (mapcar #'harness-provider--models-of (harness-provider-list))))
-    (harness-deferred-then
-     (harness-deferred-all deferreds)
-     (lambda (lists)
-       (vconcat (seq-mapcat #'identity lists))))))
-
-;;; Completion
-
-(defun harness-provider-complete (request)
-  "Run REQUEST on the provider named by its :model.  Returns a deferred."
-  (let* ((model-id (plist-get request :model))
-         (provider (harness-provider-for-model model-id)))
-    (unless (harness-provider-complete-fn provider)
-      (signal 'harness-provider-error
-              (list (format "Provider %s cannot complete" (harness-provider-name provider)))))
-    (funcall (harness-provider-complete-fn provider) request)))
-
-(defun harness-provider-price (model-id usage)
-  "Return the cost plist for USAGE on MODEL-ID, or nil.
-USAGE has :input-tokens, :output-tokens, :cache-read, :cache-write."
-  (let* ((provider (harness-provider-for-model model-id))
-         (model (harness-provider-model-name model-id)))
-    (when (harness-provider-price-fn provider)
-      (funcall (harness-provider-price-fn provider) model usage))))
-
-(defun harness-provider-count-tokens (model-id text)
-  "Count tokens of TEXT as MODEL-ID sees them.
-Falls back to `harness-provider-estimate-tokens' when the provider has no
-tokenizer."
-  (let* ((provider (harness-provider-for-model model-id))
-         (model (harness-provider-model-name model-id)))
-    (if (and (harness-provider-token-fn provider) text)
-        (or (funcall (harness-provider-token-fn provider) model text)
-            (harness-provider-estimate-tokens text))
-      (harness-provider-estimate-tokens text))))
-
-(defun harness-provider-estimate-tokens (text)
-  "Estimate the token count of TEXT (roughly four characters per token)."
-  (if (or (null text) (string-empty-p text))
-      0
-    (max 1 (ceiling (/ (float (string-bytes text)) 4.0)))))
-
-(defun harness-provider-cost-from-prices (prices usage)
-  "Compute a cost plist from PRICES (per million tokens) and USAGE."
-  (when prices
-    (let ((amount
-           (+ (* (or (plist-get usage :input-tokens) 0)
-                 (/ (or (plist-get prices :input) 0) 1.0e6))
-              (* (or (plist-get usage :output-tokens) 0)
-                 (/ (or (plist-get prices :output) 0) 1.0e6))
-              (* (or (plist-get usage :cache-read) 0)
-                 (/ (or (plist-get prices :cache-read)
-                        (or (plist-get prices :input) 0)) 1.0e6)))))
-      (list :amount amount :currency "USD"))))
-
-;;; Transcript to canonical messages
-
-(defun harness-provider--parts-text (parts)
-  "Concatenate the text of PARTS."
-  (mapconcat (lambda (part) (or (plist-get part :text) "")) (append parts nil) ""))
-
-(defun harness-provider-messages-from-entries (entries)
-  "Convert harness transcript ENTRIES into canonical provider messages.
-ENTRIES is a vector of ACP-shaped update plists.  Consecutive assistant
-chunks merge; tool calls become assistant tool-call parts and the matching
-tool_call_update becomes a tool result.  System hints, plans and usage
-updates are not sent to the model."
-  (let ((messages nil)
-        (current-message nil))         ; (role . parts-list)
-    (cl-labels ((flush ()
-                  (when current-message
-                    (push (list :role (car current-message)
-                                :content (vconcat (nreverse (cdr current-message))))
-                          messages)
-                    (setq current-message nil)))
-                (ensure (role)
-                  (unless (and current-message (equal (car current-message) role))
-                    (flush)
-                    (setq current-message (cons role nil))))
-                (add-part (part)
-                  (push part (cdr current-message))))
-      (dolist (entry (append entries nil))
-        (let ((kind (plist-get entry :sessionUpdate))
-              (content (plist-get entry :content)))
-          (cond
-           ((equal kind "user_message_chunk")
-            (ensure "user")
-            (dolist (part (if (vectorp content) (append content nil) (list content)))
-              (when (and (listp part) (plist-get part :type))
-                (add-part (copy-sequence part)))))
-           ((equal kind "agent_message_chunk")
-            (ensure "assistant")
-            (add-part (if (vectorp content)
-                          (or (car (append content nil)) (list :type "text" :text ""))
-                        (copy-sequence content))))
-           ((equal kind "agent_thought_chunk")
-            (ensure "assistant")
-            (add-part (list :type "thinking"
-                            :text (harness-provider--parts-text
-                                   (if (vectorp content) content (list content))))))
-           ((equal kind "tool_call")
-            (ensure "assistant")
-            (add-part (list :type "tool-call"
-                            :id (plist-get entry :toolCallId)
-                            :name (or (plist-get entry :name) "")
-                            :arguments (harness-provider--parse-arguments
-                                        (plist-get entry :rawInput)))))
-           ((equal kind "tool_call_update")
-            (when (member (plist-get entry :status) '("completed" "failed"))
-              (flush)
-              (let ((call-id (plist-get entry :toolCallId)))
-                (push (list :role "tool"
-                            :content (vector (list :type "tool-result"
-                                                   :tool-call-id call-id
-                                                   :content (or (plist-get entry :content)
-                                                                (vector (list :type "text"
-                                                                              :text "")))
-                                                   :is-error (equal (plist-get entry :status)
-                                                                    "failed"))))
-                      messages))))
-           (t nil))))
-      (flush))
-    (vconcat (nreverse messages))))
-
-(defun harness-provider--parse-arguments (raw)
-  "Parse RAW tool arguments into a plist when possible."
+(harness-defmethod provider/models (&optional refresh)
+  "Return a promise of every model from every provider.
+Results are cached per provider as soon as that provider answers, so a
+slow endpoint never hides a fast one; REFRESH forces a new query.  A
+provider that fails is logged and skipped."
   (cond
-   ((null raw) nil)
-   ((listp raw) raw)
-   ((stringp raw)
-    (condition-case nil
-        (json-parse-string raw :object-type 'plist)
-      (error raw)))
-   (t raw)))
+   ((and harness-provider--models (not refresh)
+         (= (hash-table-count harness-provider--models-by-provider) (hash-table-count harness-providers)))
+    (harness-resolved harness-provider--models))
+   ((and harness-provider--models-promise (not refresh)
+         (not (harness-promise-settled-p harness-provider--models-promise)))
+    harness-provider--models-promise)
+   (t
+    (let (promises)
+      (maphash (lambda (id p)
+                 (when (harness-provider-models-fn p)
+                   (push (harness-then
+                          (condition-case err
+                              (harness-as-promise (funcall (harness-provider-models-fn p)))
+                            (error (harness-rejected err)))
+                          (lambda (models)
+                            (puthash id (mapcar (lambda (m) (harness-provider--normalise-model p m)) models)
+                                     harness-provider--models-by-provider)
+                            (harness-provider--rebuild-cache)
+                            (harness-emit 'provider/models-updated harness-provider--models)
+                            t)
+                          (lambda (e)
+                            (harness-log 'warn "provider %s: listing models failed: %s"
+                                         id (harness-error-message e))
+                            (unless (gethash id harness-provider--models-by-provider)
+                              (puthash id nil harness-provider--models-by-provider))
+                            nil))
+                         promises)))
+               harness-providers)
+      (setq harness-provider--models-promise
+            (harness-then (harness-all (nreverse promises))
+                          (lambda (_) harness-provider--models)))))))
 
-;;; Service
+(harness-defmethod provider/model (model-id)
+  "Return the model plist for MODEL-ID from the cache, or a minimal one."
+  (or (cl-find model-id harness-provider--models :key (lambda (m) (plist-get m :id)) :test #'equal)
+      (pcase-let ((`(,pid . ,name) (harness-provider-parse-model model-id)))
+        (let ((p (and pid (harness-provider-get pid))))
+          (if p
+              (harness-provider--normalise-model p (list :name name))
+            (list :id model-id :provider pid :name name :label (or name "?")
+                  :context-window 128000 :input-modalities '("text") :capabilities nil))))))
 
-(defun harness-provider-service-list (&rest _args)
-  "Service: list providers with their capabilities."
-  (vconcat
-   (mapcar (lambda (provider)
-             (list :name (harness-provider-name provider)
-                   :description (harness-provider-description provider)
-                   :capabilities (vconcat (harness-provider-capabilities provider))))
-           (harness-provider-list))))
+(harness-defmethod provider/capabilities (model-id)
+  "Return the capability plist for MODEL-ID."
+  (plist-get (harness-call 'provider/model model-id) :capabilities))
 
-(defun harness-provider-service-models (&rest _args)
-  "Service: return all models."
-  (harness-provider-models))
+(defun harness-provider--guard-events (on-event)
+  "Wrap ON-EVENT so errors are contained and `done' is delivered once."
+  (let ((done nil))
+    (lambda (event)
+      (unless done
+        (when (eq (plist-get event :type) 'done) (setq done t))
+        (condition-case err
+            (funcall on-event event)
+          (error (harness-log 'error "provider event handler failed on %S: %S"
+                              (plist-get event :type) err)))))))
 
-(defun harness-provider-service-complete (&rest args)
-  "Service: run a completion.
-The method takes a single request plist; keyword-style arguments are also
-accepted for convenience."
-  (harness-provider-complete
-   (if (and (= (length args) 1) (listp (car args)))
-       (car args)
-     args)))
+(harness-defmethod provider/complete (request)
+  "Start a completion for REQUEST; return a handle plist with `:cancel'.
+The provider is chosen from the request's `:model'.  Errors in setup
+are reported through the `:on-event' callback as a `done' event with
+`:stop-reason' error."
+  (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
+               (provider (and pid (harness-provider-get pid)))
+               (on-event (harness-provider--guard-events (or (plist-get request :on-event) #'ignore)))
+               (request (plist-put (copy-sequence request) :on-event on-event)))
+    (cond
+     ((null provider)
+      (funcall on-event (list :type 'done :stop-reason 'error
+                              :error (format "No provider for model %s" (plist-get request :model))))
+      (list :cancel #'ignore))
+     (t
+      (condition-case err
+          (let ((handle (funcall (harness-provider-complete-fn provider) request)))
+            (harness-emit 'provider/request-started pid request)
+            (or handle (list :cancel #'ignore)))
+        (error
+         (funcall on-event (list :type 'done :stop-reason 'error :error (harness-error-message err)))
+         (list :cancel #'ignore)))))))
 
-(defun harness-provider-service-price (&rest args)
-  "Service: estimate a cost."
-  (let ((args (if (and (= (length args) 1) (listp (car args))) (car args) args)))
-    (harness-provider-price (plist-get args :model) (plist-get args :usage))))
+(harness-defmethod provider/fork (model-id state)
+  "Ask MODEL-ID's provider to fork provider STATE.
+Return a promise of the new state, or of nil when unsupported."
+  (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model model-id))
+               (provider (and pid (harness-provider-get pid))))
+    (if (and provider (harness-provider-fork-fn provider))
+        (condition-case err
+            (harness-as-promise (funcall (harness-provider-fork-fn provider) model-id state))
+          (error (harness-rejected err)))
+      (harness-resolved nil))))
 
-(defun harness-provider-service-count-tokens (&rest args)
-  "Service: count tokens."
-  (let ((args (if (and (= (length args) 1) (listp (car args))) (car args) args)))
-    (harness-provider-count-tokens (plist-get args :model) (plist-get args :text))))
+(harness-defmethod provider/quota (provider-id)
+  "Return a promise of quota windows for PROVIDER-ID, or of nil."
+  (let ((p (harness-provider-get provider-id)))
+    (if (and p (harness-provider-quota-fn p))
+        (harness-as-promise (funcall (harness-provider-quota-fn p)))
+      (harness-resolved nil))))
 
-(defun harness-provider-setup ()
-  "Set up the provider module."
-  (harness-service-register
-   "provider"
-   :module 'harness-provider
-   :doc "Completion providers and model discovery."
-   :methods '((list . harness-provider-service-list)
-              (models . harness-provider-service-models)
-              (complete . harness-provider-service-complete)
-              (price . harness-provider-service-price)
-              (count-tokens . harness-provider-service-count-tokens))))
+(harness-declare-event 'provider/models-updated "(MODELS) after the catalogue refreshes.")
+(harness-declare-event 'provider/request-started "(PROVIDER-ID REQUEST) when a completion starts.")
 
-(defun harness-provider-teardown ()
-  "Tear down the provider module."
-  (clrhash harness-provider--registry))
+(defun harness-provider--init ()
+  "Warm the model catalogue in the background."
+  (harness-run-soon (lambda () (ignore-errors (harness-call 'provider/models)))))
 
-(harness-module-define 'harness-provider
-  :version harness-version
-  :description "Completion provider registry and canonical format."
-  :requires '((harness-core "0.1.0"))
-  :provides '(harness-provider)
-  :setup #'harness-provider-setup
-  :teardown #'harness-provider-teardown)
+(harness-define-module 'provider
+  :doc "Provider contract, registry and model catalogue."
+  :init #'harness-provider--init)
 
 (provide 'harness-provider)
 ;;; harness-provider.el ends here

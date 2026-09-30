@@ -1,261 +1,253 @@
-;;; harness-ui-sessions.el --- The session list -*- lexical-binding: t; -*-
-
-;; This file is part of Emacs Agent Harness.
+;;; harness-ui-sessions.el --- Session list  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; A `tabulated-list-mode' browser over the harness sessions: name, status,
-;; model, tokens, cost and age, scoped to the current project or all
-;; projects, with child sessions shown under their parent.  Everything is
-;; read and changed through ACP.
+;; A `tabulated-list-mode' buffer of sessions: status, name, kind,
+;; model, permission mode, context, cost, age and project.  Child
+;; sessions (forks, BTW conversations, sub-agents) are indented under
+;; their parents.  Scoped to the current project by default; `a'
+;; toggles all projects; `/' filters fuzzily; column headers sort.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'seq)
 (require 'subr-x)
 (require 'tabulated-list)
 (require 'harness-core)
+(require 'harness-util)
 (require 'harness-ui)
 
 (defgroup harness-ui-sessions nil
-  "Harness session list."
-  :group 'harness-ui)
+  "The session list." :group 'harness-ui)
 
-(defcustom harness-ui-sessions-scope 'project
-  "Whether the list shows `project' sessions or `all' sessions."
-  :type '(choice (const project) (const all)))
+(defcustom harness-ui-sessions-buffer-name "*harness sessions*"
+  "Name of the session list buffer."
+  :type 'string :group 'harness-ui-sessions)
 
-(defvar harness-ui-sessions--sessions nil
-  "Last session infos fetched from the harness.")
+(defvar-local harness-ui-sessions--project nil "Project root filter, or nil for all.")
+(defvar-local harness-ui-sessions--filter "" "Fuzzy filter text.")
+(defvar-local harness-ui-sessions--show-inactive t)
 
-(defvar harness-ui-sessions--tree nil
-  "Rows (info . depth) currently displayed.")
+(defun harness-ui-sessions--matches-p (s)
+  (and (or (null harness-ui-sessions--project)
+           (equal (plist-get s :project) harness-ui-sessions--project))
+       (or harness-ui-sessions--show-inactive
+           (not (equal (plist-get s :status) "inactive")))
+       (or (string-empty-p harness-ui-sessions--filter)
+           (harness-fuzzy-score harness-ui-sessions--filter
+                                (format "%s %s %s %s %s" (or (plist-get s :name) "") (plist-get s :model)
+                                        (plist-get s :status) (plist-get s :kind)
+                                        (plist-get s :permission-mode))))))
+
+(defun harness-ui-sessions--ordered ()
+  "Return matching sessions as (DEPTH . SESSION), parents before children."
+  (let* ((all (harness-ui-sessions))
+         (matching (cl-remove-if-not #'harness-ui-sessions--matches-p all))
+         (by-id (make-hash-table :test 'equal))
+         (children (make-hash-table :test 'equal))
+         (out nil))
+    (dolist (s all) (puthash (plist-get s :id) s by-id))
+    (dolist (s matching)
+      (let ((pid (plist-get s :parent-id)))
+        (if (and pid (gethash pid by-id) (cl-member pid matching :key (lambda (x) (plist-get x :id)) :test #'equal))
+            (push s (gethash pid children))
+          (push s (gethash :roots children)))))
+    (cl-labels ((walk (s depth)
+                  (push (cons depth s) out)
+                  (dolist (c (sort (copy-sequence (gethash (plist-get s :id) children))
+                                   (lambda (a b) (< (or (plist-get a :created) 0) (or (plist-get b :created) 0)))))
+                    (walk c (1+ depth)))))
+      (dolist (r (sort (copy-sequence (gethash :roots children))
+                       (lambda (a b) (> (or (plist-get a :updated) 0) (or (plist-get b :updated) 0)))))
+        (walk r 0)))
+    (nreverse out)))
+
+(defun harness-ui-sessions--entry (depth s)
+  (let* ((usage (plist-get s :usage))
+         (name (or (plist-get s :name) (propertize "unnamed" 'face 'harness-dim-face)))
+         (status (plist-get s :status))
+         (kind (or (plist-get s :kind) "main")))
+    (list (plist-get s :id)
+          (vector
+           (harness-ui-status-icon status)
+           (concat (make-string (* 2 depth) ?\s)
+                   (if (> depth 0) (propertize "↳ " 'face 'harness-dim-face) "")
+                   (propertize name 'face (if (equal status "blocked") 'harness-status-blocked-face 'default)))
+           (propertize status 'face (harness-ui-status-face status))
+           (if (equal kind "main") "" kind)
+           (harness-ui-model-label (plist-get s :model))
+           (or (plist-get s :permission-mode) "")
+           (harness-ui-format-context s)
+           (harness-format-cost (plist-get usage :cost))
+           (harness-relative-time (or (plist-get s :updated) 0))
+           (propertize (abbreviate-file-name (or (plist-get s :project) "")) 'face 'harness-dim-face)))))
+
+(defun harness-ui-sessions--refresh ()
+  (setq tabulated-list-entries
+        (mapcar (lambda (cell) (harness-ui-sessions--entry (car cell) (cdr cell)))
+                (harness-ui-sessions--ordered)))
+  (setq mode-line-process
+        (format " [%s%s%s]"
+                (if harness-ui-sessions--project "project" "all projects")
+                (if (string-empty-p harness-ui-sessions--filter) "" (format " /%s" harness-ui-sessions--filter))
+                (if harness-ui-sessions--show-inactive "" " active"))))
+
+(defun harness-ui-sessions--number< (col)
+  (lambda (a b)
+    (let ((x (harness-ui-session (car a))) (y (harness-ui-session (car b))))
+      (< (or (harness-plist-get-in x col) 0) (or (harness-plist-get-in y col) 0)))))
 
 (defvar harness-ui-sessions-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
     (define-key map (kbd "RET") #'harness-ui-sessions-open)
+    (define-key map (kbd "o") #'harness-ui-sessions-open-other)
+    (define-key map [mouse-1] #'harness-ui-sessions-mouse-open)
+    (define-key map (kbd "n") #'harness-new-session)
     (define-key map (kbd "f") #'harness-ui-sessions-fork)
-    (define-key map (kbd "r") #'harness-ui-sessions-rename)
     (define-key map (kbd "d") #'harness-ui-sessions-delete)
-    (define-key map (kbd "n") #'harness-ui-chat-new)
-    (define-key map (kbd "s") #'harness-ui-sessions-toggle-scope)
-    (define-key map (kbd "g") #'harness-ui-sessions-refresh)
-    map)
-  "Keymap for `harness-ui-sessions-mode'.")
-
-(define-derived-mode harness-ui-sessions-mode tabulated-list-mode "Harness-Sessions"
-  "Major mode for the harness session list."
-  :group 'harness-ui-sessions
-  (setq tabulated-list-format
-        [("" 3 nil)
-         ("Name" 40 t)
-         ("Status" 10 t)
-         ("Model" 22 t)
-         ("Tokens" 12 t)
-         ("Cost" 8 t)
-         ("Updated" 12 t)])
-  (setq tabulated-list-padding 1)
-  (setq tabulated-list-sort-key '("Updated" . t))
-  (add-hook 'tabulated-list-revert-hook #'harness-ui-sessions-refresh nil t)
-  (tabulated-list-init-header))
-
-(defun harness-ui-sessions--info-list ()
-  "Return the session infos matching the current scope."
-  (let ((project (or (project-current)
-                     (and (bound-and-true-p default-directory)
-                          (project-current nil default-directory)))))
-    (harness-deferred-then
-     (harness-ui-request "session/list"
-                         (append (list :mcpServers [])
-                                 (when (and (eq harness-ui-sessions-scope 'project) project)
-                                   (list :cwd (file-name-as-directory
-                                               (expand-file-name (project-root project)))))))
-     (lambda (result)
-       (setq harness-ui-sessions--sessions
-             (mapcar (lambda (session)
-                       (let ((meta (plist-get (plist-get session :_meta) :harness)))
-                         (append (list :sessionId (plist-get session :sessionId)
-                                       :cwd (plist-get session :cwd)
-                                       :title (plist-get session :title)
-                                       :updatedAt (plist-get session :updatedAt))
-                                 (when meta
-                                   (list :status (plist-get meta :status)
-                                         :model (plist-get meta :model)
-                                         :usage (plist-get meta :usage)
-                                         :cost (plist-get meta :cost)
-                                         :unread (plist-get meta :unread)
-                                         :parentId (plist-get meta :parentId)
-                                         :mode (plist-get meta :mode)
-                                         :permissionMode (plist-get meta :permissionMode))))))
-                     (append (plist-get result :sessions) nil)))
-       harness-ui-sessions--sessions))))
-
-(defun harness-ui-sessions--tree-rows (sessions)
-  "Order SESSIONS as a tree of (INFO . DEPTH)."
-  (let ((by-parent (make-hash-table :test #'equal))
-        (ids (make-hash-table :test #'equal))
-        (rows nil))
-    (dolist (session sessions)
-      (puthash (plist-get session :sessionId) t ids))
-    (dolist (session sessions)
-      (let ((parent (plist-get session :parentId)))
-        (when (and parent (gethash parent ids))
-          (push session (gethash parent by-parent)))))
-    (cl-labels ((emit (session depth)
-                  (push (cons session depth) rows)
-                  (dolist (child (reverse (gethash (plist-get session :sessionId)
-                                                   by-parent)))
-                    (emit child (1+ depth)))))
-      (dolist (session sessions)
-        (let ((parent (plist-get session :parentId)))
-          (unless (and parent (gethash parent ids))
-            (emit session 0)))))
-    (nreverse rows)))
-
-(defun harness-ui-sessions-refresh ()
-  "Refresh the session list."
-  (interactive)
-  (harness-deferred-then
-   (harness-ui-sessions--info-list)
-   (lambda (_sessions)
-     (let* ((buffer (get-buffer "*harness-sessions*")))
-       (with-current-buffer (or buffer (current-buffer))
-         (setq-local harness-ui-sessions--tree
-                     (harness-ui-sessions--tree-rows harness-ui-sessions--sessions))
-         (setq tabulated-list-entries
-               (mapcar #'harness-ui-sessions--entry harness-ui-sessions--tree))
-         (tabulated-list-print t))))))
-
-(defun harness-ui-sessions--entry (row)
-  "Build a tabulated entry for ROW, an (INFO . DEPTH) pair."
-  (let* ((info (car row))
-         (depth (cdr row))
-         (id (or (plist-get info :sessionId) ""))
-         (title (or (plist-get info :title) "(untitled)"))
-         (status (or (plist-get info :status) "idle"))
-         (usage (plist-get info :usage))
-         (cost (plist-get info :cost))
-         (indent (make-string (* 2 depth) ?\s))
-         (buttons (concat
-                   (propertize "▸" 'keymap (harness-ui-sessions--action-map #'harness-ui-sessions-open)
-                               'mouse-face 'highlight)
-                   " "
-                   (propertize "⎇" 'keymap (harness-ui-sessions--action-map #'harness-ui-sessions-fork)
-                               'mouse-face 'highlight)
-                   " "
-                   (propertize "✎" 'keymap (harness-ui-sessions--action-map #'harness-ui-sessions-rename)
-                               'mouse-face 'highlight)
-                   " "
-                   (propertize "✗" 'keymap (harness-ui-sessions--action-map #'harness-ui-sessions-delete)
-                               'mouse-face 'highlight))))
-    (list id
-          (vector buttons
-                  (propertize (concat indent title)
-                              'face (pcase status
-                                      ("running" 'success)
-                                      ("blocked" 'error)
-                                      (_ 'default)))
-                  (propertize status 'face (pcase status
-                                             ("running" 'success)
-                                             ("blocked" 'error)
-                                             (_ 'shadow)))
-                  (or (plist-get info :model) "—")
-                  (if usage
-                      (format "%d/%d"
-                              (or (plist-get usage :input) 0)
-                              (or (plist-get usage :output) 0))
-                    "—")
-                  (if cost (format "$%.3f" (or (plist-get cost :amount) 0)) "—")
-                  (or (plist-get info :updatedAt) "—")))))
-
-(defun harness-ui-sessions--action-map (command)
-  "Return a keymap invoking COMMAND on the session on this line."
-  (let ((map (make-sparse-keymap)))
-    (define-key map [mouse-1]
-                (lambda ()
-                  (interactive)
-                  (harness-ui-sessions--call-on-entry command)))
+    (define-key map (kbd "r") #'harness-ui-sessions-rename)
+    (define-key map (kbd "k") #'harness-ui-sessions-cancel)
+    (define-key map (kbd "x") #'harness-ui-sessions-deactivate)
+    (define-key map (kbd "/") #'harness-ui-sessions-filter)
+    (define-key map (kbd "a") #'harness-ui-sessions-toggle-scope)
+    (define-key map (kbd "i") #'harness-ui-sessions-toggle-inactive)
+    (define-key map (kbd "g") #'harness-ui-sessions-reload)
+    (define-key map (kbd "?") #'harness-menu)
     map))
 
-(defun harness-ui-sessions--session-at-point ()
-  "Return the session id of the line at point."
-  (tabulated-list-get-id))
+(define-derived-mode harness-ui-sessions-mode tabulated-list-mode "Sessions"
+  "Major mode listing harness sessions."
+  (setq tabulated-list-format
+        (vector (list "" 2 t)
+                (list "Name" 28 t)
+                (list "Status" 9 t)
+                (list "Kind" 9 t)
+                (list "Model" 26 t)
+                (list "Mode" 13 t)
+                (list "Context" 12 (harness-ui-sessions--number< '(:usage :context)))
+                (list "Cost" 8 (harness-ui-sessions--number< '(:usage :cost)))
+                (list "Updated" 9 (harness-ui-sessions--number< '(:updated)))
+                (list "Project" 30 t)))
+  (setq tabulated-list-padding 1)
+  (add-hook 'tabulated-list-revert-hook #'harness-ui-sessions--refresh nil t)
+  (tabulated-list-init-header))
 
-(defun harness-ui-sessions--call-on-entry (command)
-  "Invoke COMMAND for the entry at point."
-  (when (harness-ui-sessions--session-at-point)
-    (funcall command)))
+(defun harness-ui-sessions--redraw ()
+  "Redraw the list buffer if it exists, keeping point on the same session."
+  (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))
+    (with-current-buffer buf
+      (let ((id (tabulated-list-get-id)))
+        (harness-ui-sessions--refresh)
+        (tabulated-list-print t)
+        (when id
+          (goto-char (point-min))
+          (while (and (not (eobp)) (not (equal (tabulated-list-get-id) id)))
+            (forward-line 1))
+          (when (eobp) (goto-char (point-min))))))))
+
+(defun harness-ui-sessions--on-changed ()
+  (harness-debounce 'harness-ui-sessions 0.15 #'harness-ui-sessions--redraw))
 
 ;;;###autoload
-(defun harness-ui-sessions (&optional scope)
-  "Show the session list.
-SCOPE may be `project' or `all'."
-  (interactive)
-  (when scope
-    (setq harness-ui-sessions-scope scope))
-  (let ((buffer (get-buffer-create "*harness-sessions*")))
-    (with-current-buffer buffer
-      (harness-ui-sessions-mode))
-    (display-buffer buffer)
-    (harness-ui-sessions-refresh)
-    buffer))
+(defun harness-sessions (&optional all-projects)
+  "Show the session list, scoped to the current project unless ALL-PROJECTS."
+  (interactive "P")
+  (let ((project (unless all-projects
+                   (if (harness-method-exists-p 'project/root)
+                       (harness-call 'project/root default-directory)
+                     (file-name-as-directory (expand-file-name default-directory)))))
+        (buf (get-buffer-create harness-ui-sessions-buffer-name)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'harness-ui-sessions-mode) (harness-ui-sessions-mode))
+      (setq harness-ui-sessions--project project)
+      (harness-ui-sessions--refresh)
+      (tabulated-list-print t))
+    (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw)))
+    (pop-to-buffer buf)))
 
-(defun harness-ui-sessions-open ()
-  "Open the session at point in a chat buffer."
+(defun harness-ui-sessions--id ()
+  (or (tabulated-list-get-id) (user-error "No session on this line")))
+
+(defun harness-ui-sessions-open (&optional position)
+  "Open the session at point in POSITION."
+  (interactive (list (and current-prefix-arg (harness-ui-read-position))))
+  (let ((id (harness-ui-sessions--id)))
+    (harness-ui-call "_harness/session/resume" (list :id id)
+                     (lambda (_) (harness-ui-display-session id position)))))
+
+(defun harness-ui-sessions-open-other ()
+  "Open the session at point in the other position preset."
   (interactive)
-  (when-let* ((session-id (harness-ui-sessions--session-at-point)))
-    (harness-ui-chat-open session-id)))
+  (harness-ui-sessions-open (harness-ui-read-position)))
+
+(defun harness-ui-sessions-mouse-open (event)
+  "Open the session clicked in EVENT."
+  (interactive "e")
+  (mouse-set-point event)
+  (harness-ui-sessions-open))
 
 (defun harness-ui-sessions-fork ()
   "Fork the session at point."
   (interactive)
-  (when-let* ((session-id (harness-ui-sessions--session-at-point)))
-    (harness-deferred-then
-     (harness-ui-request "_harness/session/fork" (list :sessionId session-id))
-     (lambda (result)
-       (when-let* ((new-id (plist-get result :sessionId)))
-         (message "Forked to %s" new-id)
-         (harness-ui-sessions-refresh))))))
-
-(defun harness-ui-sessions-rename ()
-  "Rename the session at point."
-  (interactive)
-  (when-let* ((session-id (harness-ui-sessions--session-at-point)))
-    (let ((title (read-string "New name: ")))
-      (harness-deferred-then
-       (harness-ui-request "_harness/session/rename"
-                           (list :sessionId session-id :title title))
-       (lambda (_result) (harness-ui-sessions-refresh))))))
+  (harness-fork-session (harness-ui-sessions--id)))
 
 (defun harness-ui-sessions-delete ()
-  "Delete the session at point, after confirmation."
+  "Delete the session at point."
   (interactive)
-  (when-let* ((session-id (harness-ui-sessions--session-at-point)))
-    (when (yes-or-no-p (format "Delete session %s? " session-id))
-      (harness-deferred-then
-       (harness-ui-request "session/delete" (list :sessionId session-id))
-       (lambda (_result)
-         (harness-ui-sessions-refresh)
-         (message "Deleted %s" session-id))))))
+  (harness-delete-session (harness-ui-sessions--id)))
+
+(defun harness-ui-sessions-rename (name)
+  "Rename the session at point to NAME."
+  (interactive (list (read-string "Name: " (plist-get (harness-ui-session (harness-ui-sessions--id)) :name))))
+  (harness-rename-session name (harness-ui-sessions--id)))
+
+(defun harness-ui-sessions-cancel ()
+  "Cancel the running turn of the session at point."
+  (interactive)
+  (harness-cancel-turn (harness-ui-sessions--id)))
+
+(defun harness-ui-sessions-deactivate ()
+  "Mark the session at point inactive."
+  (interactive)
+  (harness-ui-call "_harness/session/deactivate" (list :id (harness-ui-sessions--id)) #'ignore))
+
+(defun harness-ui-sessions-filter (text)
+  "Filter the list by TEXT (fuzzy over name, model, status, kind, mode)."
+  (interactive (list (read-string "Filter: " harness-ui-sessions--filter)))
+  (setq harness-ui-sessions--filter text)
+  (harness-ui-sessions--redraw))
 
 (defun harness-ui-sessions-toggle-scope ()
-  "Switch between project sessions and all sessions."
+  "Toggle between the current project and all projects."
   (interactive)
-  (setq harness-ui-sessions-scope
-        (if (eq harness-ui-sessions-scope 'project) 'all 'project))
-  (message "Showing %s sessions" harness-ui-sessions-scope)
-  (harness-ui-sessions-refresh))
+  (setq harness-ui-sessions--project
+        (if harness-ui-sessions--project nil
+          (if (harness-method-exists-p 'project/root)
+              (harness-call 'project/root default-directory)
+            (file-name-as-directory (expand-file-name default-directory)))))
+  (harness-ui-sessions--redraw))
 
-(harness-module-define 'harness-ui-sessions
-  :version harness-version
-  :description "Session list with tree, filters and actions."
-  :requires '((harness-core "0.1.0")
-              (harness-ui "0.1.0")
-              (harness-ui-chat "0.1.0"))
-  :provides '(harness-ui-sessions)
-  :setup (lambda () nil))
+(defun harness-ui-sessions-toggle-inactive ()
+  "Show or hide inactive sessions."
+  (interactive)
+  (setq harness-ui-sessions--show-inactive (not harness-ui-sessions--show-inactive))
+  (harness-ui-sessions--redraw))
+
+(defun harness-ui-sessions-reload ()
+  "Reload sessions from the harness."
+  (interactive)
+  (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw))))
+
+(defun harness-ui-sessions--init ()
+  (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)
+  (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--redraw)
+  (define-key harness-ui-map (kbd "l") #'harness-sessions))
+
+(harness-define-module 'ui-sessions
+  :doc "Session list buffer."
+  :requires '(ui)
+  :init #'harness-ui-sessions--init)
 
 (provide 'harness-ui-sessions)
 ;;; harness-ui-sessions.el ends here

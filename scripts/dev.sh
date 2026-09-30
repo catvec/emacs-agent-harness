@@ -1,105 +1,43 @@
 #!/usr/bin/env bash
-# Drive a live GUI Emacs running the harness.
+# Drive a dedicated GUI Emacs daemon running the harness from this checkout.
 #
-#   scripts/dev.sh start        start the daemon + GUI frame
-#   scripts/dev.sh stop         stop it
-#   scripts/dev.sh restart      stop + start
-#   scripts/dev.sh eval EXPR    evaluate an expression in it
-#   scripts/dev.sh keys KEYS    send a kbd string (e.g. 'C-c h c')
-#   scripts/dev.sh shot [FILE]  screenshot the harness frame (default .dev/shot.png)
-#   scripts/dev.sh errors       show recent *Messages* output
-#   scripts/dev.sh status       is it running?
-#
-# Everything runs against the daemon named `harness-dev'.
-set -euo pipefail
+#   scripts/dev.sh start            start daemon + frame (idempotent)
+#   scripts/dev.sh stop | restart
+#   scripts/dev.sh status
+#   scripts/dev.sh eval EXPR        evaluate elisp, print the result
+#   scripts/dev.sh keys "C-c C-h"   send a real key sequence to the frame
+#   scripts/dev.sh shot [PATH]      screenshot the frame (default scripts/.dev/shot.png)
+#   scripts/dev.sh show BUFFER      display a buffer in the frame
+#   scripts/dev.sh errors           recent *Messages* and harness log warnings
+#   scripts/dev.sh reload           harness-reload
+set -u
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+SOCKET=${HARNESS_DEV_SOCKET:-harness-v3}
+DEVDIR="$ROOT/scripts/.dev"
+export HARNESS_DEV_STATE=${HARNESS_DEV_STATE:-$DEVDIR/state-$SOCKET}
+mkdir -p "$DEVDIR"
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEV_DIR="$REPO/scripts/.dev"
-SOCK="harness-dev"
-EMACS="${EMACS:-emacs}"
+ec() { emacsclient -s "$SOCKET" "$@"; }
+alive() { ec --eval t >/dev/null 2>&1; }
 
-mkdir -p "$DEV_DIR"
-
-ec() { emacsclient -s "$SOCK" "$@"; }
-
-# Always pick up the latest dev helpers, then evaluate the expression.
-ec_eval() {
-  emacsclient -s "$SOCK" \
-    --eval "(progn (load \"$REPO/scripts/harness-dev.el\" nil nil 'nomessage) nil)" \
-    --eval "(progn (harness-dev-frame) $1)"
-}
-
-start() {
-  if status >/dev/null 2>&1; then
-    echo "harness-dev already running"
-    return 0
-  fi
-  echo "starting harness-dev..."
-  "$EMACS" -Q --daemon="$SOCK" \
-           --load "$REPO/scripts/harness-dev.el" \
-           --eval '(progn (harness-dev-toggle-debug 1)
-                          (harness-dev-load-safely)
-                          (when (fboundp (quote harness-auto-reload-mode))
-                            (harness-auto-reload-mode 1)))' \
-           >"$DEV_DIR/daemon.out" 2>&1 &
-  for _ in $(seq 1 100); do
-    if ec --eval 't' >/dev/null 2>&1; then
-      # Create the frame inside the daemon: it is mapped without focus
-      # and lowered, so it never steals the user's focus or sits in
-      # front of their work.  Use `M-x
-      # harness-dev-focus' (interactive) to bring it up deliberately.
-      ec_eval '(harness-dev-frame)' >/dev/null 2>&1 || true
-      echo "ready (sock: $SOCK)"
-      return 0
+cmd=${1:-status}; shift || true
+case "$cmd" in
+  start)
+    if alive; then echo "daemon $SOCKET already running"; else
+      (cd "$ROOT" && emacs -Q --daemon="$SOCKET" -l "$ROOT/scripts/harness-dev.el" >"$DEVDIR/daemon.log" 2>&1)
+      for _ in $(seq 1 50); do alive && break; sleep 0.2; done
+      alive || { echo "daemon failed to start"; cat "$DEVDIR/daemon.log"; exit 1; }
     fi
-    sleep 0.2
-  done
-  echo "failed to start; see $DEV_DIR/daemon.out" >&2
-  cat "$DEV_DIR/daemon.out" >&2 || true
-  return 1
-}
-
-stop() {
-  if ec --eval '(save-buffers-kill-emacs t)' >/dev/null 2>&1; then
-    echo "stopped"
-  else
-    echo "not running"
-  fi
-}
-
-restart() { stop || true; sleep 0.5; start; }
-
-status() {
-  ec --eval 't' >/dev/null 2>&1
-}
-
-eval_expr() {
-  ec_eval "$1"
-}
-
-keys() {
-  ec_eval "(harness-dev-keys \"$1\")" >/dev/null
-}
-
-shot() {
-  # Export the frame from Emacs itself: no window capture, no focus
-  # change, no desktop portal.
-  local out="${1:-$DEV_DIR/shot.png}"
-  mkdir -p "$(dirname "$out")"
-  ec_eval "(harness-dev-export-frame \"$out\")" >/dev/null
-  echo "$out"
-}
-
-errors() { ec_eval '(harness-dev-errors)'; }
-
-case "${1:-}" in
-  start)   start ;;
-  stop)    stop ;;
-  restart) restart ;;
-  eval)    shift; eval_expr "$*" ;;
-  keys)    shift; keys "$*" ;;
-  shot)    shift; shot "${1:-}" ;;
-  errors)  errors ;;
-  status)  if status; then echo running; else echo stopped; exit 1; fi ;;
-  *) sed -n '2,20p' "$0"; exit 2 ;;
+    ec --eval '(progn (harness-dev-frame) t)' >/dev/null && echo "daemon $SOCKET up, frame ready" ;;
+  stop)
+    alive && ec --eval '(kill-emacs)' >/dev/null 2>&1; echo "stopped" ;;
+  restart) "$0" stop; sleep 0.5; "$0" start ;;
+  status) if alive; then echo "running"; else echo "not running"; exit 1; fi ;;
+  eval) ec --eval "$*" ;;
+  keys) ec --eval "(harness-dev-keys $(printf '%q' "$*" | sed 's/^/"/;s/$/"/'))" ;;
+  shot) out=${1:-$DEVDIR/shot.png}; ec --eval "(harness-dev-shot \"$out\")" >/dev/null && echo "$out" ;;
+  show) ec --eval "(harness-dev-show \"$1\")" ;;
+  errors) ec --eval '(harness-dev-errors)' | sed 's/^"//;s/"$//' | sed 's/\\n/\n/g;s/\\"/"/g' ;;
+  reload) ec --eval '(harness-reload)' ;;
+  *) echo "unknown command: $cmd"; exit 2 ;;
 esac

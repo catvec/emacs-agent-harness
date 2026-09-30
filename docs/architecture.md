@@ -1,441 +1,541 @@
-# Architecture
+# Architecture and module contracts
 
-This document is the API contract between the harness modules.  The design
-goal is that any module can be developed, tested, and replaced in isolation,
-and that the whole system can be driven over the Agent Client Protocol (ACP).
+This is the binding contract between modules.  A module may rely on
+anything written here and on nothing else about another module.  If a
+module needs something more, add it here first.
 
-Read [DESIGN.md](../DESIGN.md) for the product requirements.  This document
-only says how the pieces fit together and where the boundaries are.
-
-## Layering
+## Layers
 
 ```
-          presentation (Emacs UI) ── ACP client
-                     │
-                     │ ACP (JSON-RPC objects; local or TCP transport)
-                     ▼
-  state / business (agent, sessions) ── ACP agent server
-                     │
-        ┌────────────┼─────────────┐
-        ▼            ▼             ▼
-   completion      tools      permissions      config
-    provider
-                     │
-                     ▼
-                  kernel (modules, services, events, deferred)
+ Presentation   lisp/ui/*        Emacs buffers, faces, keymaps, mouse.  Talks ACP only.
+ ------------------------------- ACP (JSON-RPC; in-process lisp objects locally, TCP remotely)
+ State          session, agent, config, project, store, usage, naming, compaction,
+                worktree, merge, skills, perms, sandbox
+ Completion     provider, provider-openai, provider-claude
+ Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent
+ ------------------------------- bus (lisp/harness-core.el)
+ Core           harness.el (loader, reload), harness-core (methods, events, filters,
+                promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE)
 ```
 
-Dependency rules:
+The core never shows UI and never calls a model.  UI modules never
+`require` a state module and never touch a session struct: they hold
+an ACP connection (local by default) and render what arrives.  State
+modules never `require` a UI module.  That is the litmus test from
+DESIGN.md: every module is testable alone, with a fake connection or a
+fake provider, and without mocks of the rest.
 
-- The kernel depends on nothing.  It knows no ACP, no sessions, no LLMs.
-- Every module depends on the kernel.
-- The state layer depends on kernels, services and its own contracts.  It
-  never requires a UI module.
-- The presentation layer speaks **only** ACP.  It may not call state-layer
-  functions.  A UI feature that needs new state is a new ACP method or
-  session update, not a direct call.
-- Providers, tools, permission rules and config backends are leaf modules
-  that plug into their respective registries.
-- A module must be loadable and testable without any module it does not
-  declare in `:requires`.  Tests for it may only use the kernel plus fakes of
-  the services it consumes.
-
-`harness.el` is only a distribution bundle: it loads the default module set.
-Loading `harness-core.el` alone must start no UI, no network, no timers.
-As the package entry point it is self-locating: loading (or
-byte-compiling) it puts the `lisp/` directories next to itself on
-`load-path', so a checkout works with only the repository root on
-`load-path` (see "Install" in README.md).
-
-## The kernel (`harness-core.el`)
-
-### Modules
-
-A module is a feature file that declares a manifest:
+## The bus
 
 ```elisp
-(harness-module-define 'harness-session
-  :version "0.1.0"
-  :description "Sessions, transcripts and their storage."
-  :requires '((harness-core "0.1.0")
-              (harness-config "0.1.0"))
-  :provides '(harness-session)
-  :setup #'harness-session-setup
-  :teardown #'harness-session-teardown)
+(harness-define-module 'NAME :doc "…" :requires '(a b) :init #'fn :shutdown #'fn)
+(harness-defmethod session/get (id) "Doc." …)          ; registers method `session/get'
+(harness-call 'session/get id)                         ; sync; may return a promise
+(harness-call-async 'session/get id)                   ; always a promise
+(harness-on 'session/updated #'named-fn)               ; events; named fns dedupe on reload
+(harness-emit 'session/updated id changes)
+(harness-add-filter 'agent/system-prompt #'fn 40)      ; sync value transformer
+(harness-run-filter 'agent/system-prompt "" session)
+(harness-run-filter-async 'permission/decide decision request) ; async decision chain
 ```
 
-- Loading is `harness-module-load`, which `require`s the feature, loads its
-  dependencies first (recursively), then runs `:setup`.  `:setup` may use
-  dependencies; top-level forms may not.
-- `:teardown` must undo everything `:setup` did: services, event handlers,
-  timers, processes.  `harness-module-reload` uses it for hot reload.
-- The loader records which services and event handlers a module registered
-  while its `:setup` ran, and removes leftovers on teardown, so a module
-  cannot silently leak registrations.
-- `harness-module-list` reports each module's state: `defined`, `loaded`,
-  `set-up`, `error`.
-- `harness-module-loaded-file` and `harness-module-source-file` report the
-  file a module was loaded from and the file a reload would read next.
-  They differ when `load-prefer-newer` picks an edited `.el` over a stale
-  `.elc`, which is what a package manager's build directory looks like
-  after an edit; validation and restore-on-failure use them.
+Async filter gotcha: `harness-run-filter-async` adopts any promise a
+handler returns and calls NEXT with its value.  A handler that stores
+NEXT to call later (merge holds, budget prompts) must return nil.
 
-### Services
+An error signalled inside a `harness-then` handler rejects the derived
+promise *and* is logged (with a backtrace when `harness-debug-backtraces`
+is on), because a rejection nobody observes would otherwise vanish.
+Explicit rejections (`harness-reject`, `harness-rejected`) are not logged.
 
-A service is a named object with methods, the D-Bus analogue:
+Promises: `harness-make-promise`, `harness-resolve`, `harness-reject`,
+`harness-then`, `harness-all`, `harness-with-promise`, `harness-await`
+(tests only).  Long work returns a promise; never block the main thread.
+
+Naming: bus methods are `area/verb` symbols and are exactly the ACP
+extension methods (`_harness/area/verb` on the wire).  Events are
+`area/past-tense`.  Files: `lisp/modules/harness-NAME.el` defines
+module `NAME` and provides feature `harness-NAME`.
+
+Reload safety: keep state in `defvar`s (never re-initialised), register
+subscribers with named functions, and make `:init` idempotent.
+`harness-reload` compiles every file first and refuses to load anything
+if one fails.  After a reload the `harness/reloaded` event fires and the
+UI redraws every session buffer.
+
+## Data shapes
+
+All shapes are keyword plists (the JSON convention in harness-util:
+objects are plists, arrays are lists, `nil` is null, `:false` is false).
+Symbols used as enum values travel as strings over the wire and are
+interned back by the ACP layer for a fixed set of keys (`:status`,
+`:permission-mode`, `:kind`, `:behavior`, `:scope`).
+
+### Session
 
 ```elisp
-(harness-service-register
- "session"
- :module 'harness-session
- :doc "Sessions, transcripts and session lifecycle."
- :methods '((create   . harness-session-service-create)
-            (get      . harness-session-service-get)
-            (list     . harness-session-service-list)
-            (prompt   . harness-session-service-prompt)))
-
-(harness-service-call "session" 'create :cwd dir)
+(:id "uuid"  :name "short title or nil"  :kind main|fork|btw|subagent
+ :project "/abs/root/"  :cwd "/abs/dir/"  :host nil|"/ssh:user@host:"   ; TRAMP prefix
+ :worktree nil|"/abs/worktree/"
+ :model "PROVIDER:MODEL"            ; e.g. "claude:claude-fable-5-1"
+ :permission-mode ask|accept-edits|auto|yolo
+ :thinking nil|"low"|"medium"|"high"|"xhigh"|"max"
+ :non-interactive nil|t
+ :status idle|running|blocked|inactive
+ :parent-id nil|"uuid"  :fork-node nil|"node-id"
+ :created FLOAT  :updated FLOAT
+ :usage (:input N :output N :cache-read N :cache-write N :cost F :context N :turns N)
+ :context-window N
+ :budget nil|(:amount F :hard BOOL)
+ :head "node-id"
+ :queue ((:id "q1" :text "…" :attachments (ATTACHMENT…)) …)
+ :pending ((:id "p1" :kind permission|question :payload PLIST :created FLOAT) …)
+ :todos ((:id :text :status pending|in-progress|done) …)
+ :plan nil|"markdown"
+ :provider-state PLIST)                ; opaque, owned by the provider (e.g. CLI session id)
 ```
 
-Rules:
+`:usage :context` is the input size of the last request (prompt tokens
+incl. cache); the UI colours it against `:context-window`.
 
-- Method functions receive keyword arguments and return either a value or a
-  `harness-deferred` for work that is not instantaneous.
-- A method that returns a deferred is the norm for anything doing I/O,
-  model calls or work over N lines of text.
-- `harness-service-call` signals a `harness-service-missing` error when the
-  service or method does not exist.  Callers that need optional dependencies
-  use `harness-service-available-p`.
-- `harness-service-describe` returns the full introspection data for one
-  service; `harness-event-describe` the same for events.  `M-x
-  harness-describe` shows the live registry.  This is how a module author
-  discovers what other modules offer (the "D-Bus problem").
-
-### Events
-
-Events let a module publish facts without knowing who listens:
+### Node (conversation DAG)
 
 ```elisp
-(harness-event-define 'session-status-changed
-  :module 'harness-session
-  :doc "A session moved between idle, running and blocked."
-  :payload '((session . harness-session)
-             (status . symbol)
-             (previous . symbol)))
-
-(harness-emit 'session-status-changed :session s :status 'running :previous 'idle)
-
-(harness-on 'session-status-changed #'my-handler
-  :module 'my-module
-  :predicate (lambda (payload) ...))
+(:id "n-…" :parent "n-…"|nil :session "uuid" :ts FLOAT
+ :kind user|assistant|thinking|tool-call|tool-result|hint|compaction|plan
+ ;; user / assistant / thinking / hint / compaction / plan:
+ :content "text"  :blocks (BLOCK…)          ; blocks only when non-text content exists
+ ;; tool-call:
+ :tool "read_file" :call-id "toolu_…" :input PLIST :title "read_file src/x.el"
+ ;; tool-result:
+ :call-id "toolu_…" :output "text" :is-error BOOL :attachments (ATTACHMENT…)
+ :usage PLIST        ; assistant nodes: this response's usage
+ :meta PLIST)        ; anything else (model, duration, cost …)
 ```
 
-Rules:
+A session's transcript is the path root → `:head`.  A fork copies the
+ancestor chain (same node ids) into the new session and records
+`:parent-id` / `:fork-node`, so the tree view can merge families by id.
 
-- Every event is declared with `harness-event-define` before first use;
-  emitting an undeclared event signals an error outside of tests.
-- The payload is a plist.  `:payload` documents the keys, for humans and for
-  `harness-describe`.
-- Handlers run in emission order, are expected to be quick, and must not
-  signal; errors are caught, reported, and do not stop other handlers.
-- `harness-on` records the owning module so teardown/reload can remove
-  handlers even if the module forgot.
-- Modules that need cross-module request/response use services, not events.
-  Events are notifications only.
-
-### Deferreds
-
-`harness-deferred` is the one async primitive:
+### Content blocks (provider messages, prompts, attachments)
 
 ```elisp
-(let ((d (harness-deferred-new)))
-  (harness-deferred-then d #'on-ok #'on-error)
-  (harness-deferred-resolve d value)   ; later, from any callback
-  (harness-deferred-cancel d))         ; abortable work
+(:type "text" :text "…")
+(:type "image" :mime "image/png" :data "BASE64")            ; or :path "/abs" (read lazily)
+(:type "audio" :mime "audio/wav" :data "BASE64")
+(:type "file" :path "/abs/f" :size N :mime "text/plain")     ; reference only
+(:type "thinking" :text "…" :signature "…")
+(:type "tool_use" :id "…" :name "…" :input PLIST)
+(:type "tool_result" :tool_use_id "…" :content "…" :is_error BOOL)
 ```
 
-Deferreds are cancellable, multi-observer, and settle exactly once.  Any
-module exposing async work returns a deferred.  The ACP layer turns a
-deferred into a JSON-RPC response and `$/cancel`-style aborts.
+ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
 
-### Responsiveness
+### Usage record
 
-Emacs is single threaded, so "never block the UI thread" means:
+`(:input N :output N :cache-read N :cache-write N :cost F)`; cost in USD.
+When a provider reports no cost, `usage` computes one from pricing.
 
-- Socket and process I/O is always filter/callback based
-  (`make-network-process`), never `accept-process-output` loops.
-- Streaming deltas are coalesced and flushed on a timer (default 33 ms), not
-  one redisplay per token.
-- Work over large text runs in chunks scheduled with `run-at-time 0` or
-  `timer-set-idle-time`; a chunk is bounded by time (`harness-budget-run`),
-  not by line count.
-- Synchronous file I/O is allowed only for small local files with
-  `file-readable-p`-guarded paths.  Remote (TRAMP) and large operations must
-  go through the async helpers or a process.
+## Module contracts (state layer)
 
-The kernel provides `harness-budget-run`, `harness-defer`, and
-`harness-idle-coalesce` for this.
+### config
 
-## ACP (`harness-acp.el` and transports)
+Layered settings: directory `.dir-locals.el` (most specific) →
+project-root `.dir-locals.el` → customize default.  Variables are
+`defcustom`s with `:safe` predicates so dir-locals never prompt:
+`harness-model` (default "claude:claude-fable-5-1"),
+`harness-permission-mode`, `harness-thinking`,
+`harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
+`harness-non-interactive`, `harness-context-reserve`.
 
-`harness-acp.el` implements ACP v1 as specified at
-<https://agentclientprotocol.com/protocol/v1/overview>, over a transport
-interface.  It contains no session or model logic.
+- `config/get KEY CWD` → value for a session at CWD (KEY is the symbol).
+- `config/set KEY VALUE &key scope cwd` — scope `directory|project|global`;
+  default: project if a project is found, else directory.  Persists with
+  `add-dir-local-variable`/`customize-save-variable`.
+- `config/layers CWD` → `((global . V) (project . V) (directory . V))` for display.
+- Event `config/changed KEY VALUE SCOPE CWD`.
 
-- Agent-side methods: `initialize`, `session/new`, `session/load`,
-  `session/resume`, `session/close`, `session/list`, `session/delete`,
-  `session/prompt`, `session/set_mode`, `session/set_config_option`, and the
-  `session/cancel` notification.
-- Client-side methods: `session/request_permission`, `fs/read_text_file`,
-  `fs/write_text_file`, `terminal/*`.
-- Outbound notifications: `session/update` with the v1 update variants
-  (`user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk`,
-  `tool_call`, `tool_call_update`, `plan`, `available_commands_update`,
-  `current_mode_update`, `config_option_update`, `session_info_update`,
-  `usage_update`).
-- Extensions use the reserved `_harness/` prefix, advertised in
-  `initialize` under `agentCapabilities._meta`.
+### project
 
-Method handling is a table: ACP method → service method.  The ACP module
-calls services by name with the kernel's late binding, so it can be tested
-against fake services and state modules can be added or removed.  The table
-and the event-to-update mapping are the single place where the protocol
-surface is defined.
+- `project/root CWD` → root directory (project.el, falling back to CWD).
+- `project/name ROOT` → display name.
+- `project/files ROOT &optional QUERY LIMIT` → relative paths, fuzzy filtered.
 
-Transports implement `harness-acp-transport` objects with `send` (message
-plist → other side) and a receive callback.  Two ship in tree:
+### store
 
-- `harness-acp-inprocess.el`: direct function call to the peer's receive
-  handler.  Same process, no serialization, no sockets.  Used by the local
-  Emacs UI.
-- `harness-acp-tcp.el`: newline-delimited JSON over a TCP socket (or any
-  byte stream), non-blocking, used to control a harness on another host.
+Persistence under `harness-state-directory`:
+- `store/save NAME OBJ`, `store/load NAME` (JSON files, atomic write).
+- `store/append NAME OBJ`, `store/read-all NAME` (JSONL).
+- `store/sqlite` → open built-in sqlite handle for `usage.db` (nil when
+  Emacs lacks sqlite; callers fall back to JSONL).
+- `store/list PREFIX` → names.
 
-Both use the same ACP message plists; only framing differs.
+### session
 
-## Session state (`harness-session.el`)
+Owns session records, nodes, status, queue, pending requests, persistence
+(sessions/ID.json + sessions/ID.nodes.jsonl).
 
-A session is the unit of conversation:
+- `session/create &rest PLIST` — `:cwd` required; `:name :model
+  :permission-mode :thinking :kind :parent-id :host :worktree`.  Fills
+  project, defaults from `config/get`.  → session.  Event `session/created`.
+- `session/get ID`, `session/list &optional FILTER` (`:project :status
+  :kind :parent-id :active`), `session/delete ID`.
+- `session/update ID &rest PLIST` — settings and name; appends a `hint`
+  node ("model → …") and persists the setting through `config/set` when
+  `:persist t`.  Event `session/updated ID CHANGES`.
+- `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
+- `session/resume ID` (loads nodes, status idle), `session/deactivate ID`.
+- `session/fork ID &rest PLIST` — copies ancestor chain; `:kind fork|btw|subagent`,
+  `:name`, `:cwd` (defaults to parent's).  Asks the provider to fork its
+  state via `provider/fork` when supported.  → new session.
+- `session/nodes ID &optional (:limit N :before NODE-ID)` → path nodes,
+  oldest first; `session/node ID NODE-ID`; `session/tree ID` → every
+  node of the family (session + ancestors + forks) as a list with
+  `:session` set, plus `:sessions` summaries.
+- `session/append ID NODE` → node with id/ts/parent filled; advances head.
+  Event `session/node-added ID NODE`.
+- `session/update-node ID NODE-ID PLIST` (tool result streaming, titles).
+  Event `session/node-updated ID NODE`.
+- `session/set-head ID NODE-ID`.
+- `session/hint ID TEXT` → appends hint node.
+- `session/queue ID TEXT &optional ATTACHMENTS`, `session/queue-update ID QID TEXT`,
+  `session/queue-remove ID QID`, `session/queue-take ID` → items, cleared.
+  Event `session/queue-changed ID ITEMS`.
+- `session/pending-add ID REQUEST` → id; `session/pending-resolve ID PID ANSWER`;
+  `session/pending ID`.  Event `session/pending-changed ID ITEMS`.
+  Status becomes `blocked` while anything is pending.
+- `session/usage-add ID USAGE &optional CONTEXT` → accumulated usage.
+  Event `session/usage ID USAGE-TOTAL RECORD`.
+- `session/set-todos ID TODOS`, `session/set-plan ID TEXT`.
+- `session/messages ID` → provider messages (content blocks) built
+  from the path, tool calls paired with results.
+- `session/transcript-text ID` → searchable plain text.
+- Event `session/changed ID SESSION` fires after any of the above (for UIs
+  that just want to redraw).
 
-- identity: `sessionId` (uuid string), name, optional parent session
-- scope: `cwd` (absolute), project root, optional git worktree
-- configuration: model, thinking level, permission mode, mode
-- state: status (`idle`, `running`, `blocked`), transcript, usage, cost
-- relationships: parent/child tree for forks and subagents
-
-The transcript is an ordered vector of entries.  An entry is a plist shaped
-like an ACP `session/update` payload plus `:id` and `:time`.  Storing the
-ACP shape is deliberate: `session/load` replays stored updates, the UI
-renders the same objects that arrive live, and there is exactly one
-representation of "a thing that happened in a conversation".
-
-Storage lives under `(xdg-data-home)/harness/sessions/<project-id>/<id>/`:
-`session.json` (metadata) and `transcript.eld`/`transcript.jsonl`
-(append-only entries).  Reads are lazy: the session list loads metadata
-only.
-
-Session events: `session-created`, `session-deleted`, `session-updated`
-(name/model/config/status), `session-status-changed`, `session-entry-added`
-(one transcript entry), `session-usage-changed`.
-
-## Completion providers (`harness-provider.el`)
-
-Providers register against the `provider` service:
+### provider
 
 ```elisp
-(harness-provider-register
- "openai-compatible"
- :capabilities '(streaming tool-calls image-input thinking)
- :models #'harness-provider-openai-models
- :complete #'harness-provider-openai-complete
- :count-tokens #'...)
+(harness-define-provider 'ID
+  :label "Claude Code" :doc "…"
+  :models FN            ; () → promise of MODEL plists
+  :complete FN          ; (REQUEST) → HANDLE plist (:cancel FN)
+  :fork FN              ; (MODEL PROVIDER-STATE) → promise of new state    [optional]
+  :quota FN             ; () → promise of (:windows ((:name :used FRAC :resets FLOAT)…))  [optional]
+  :capabilities PLIST)  ; static defaults, merged with per-model ones
 ```
 
-`complete` receives a normalized request:
+MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
+:context-window N :max-output N :input-modalities ("text" "image")
+:thinking-levels (…) :pricing (:input F :output F :cache-read F :cache-write F)
+:capabilities (…))`.  Pricing is USD per million tokens.
+
+Capabilities: `:hosted-loop` (provider runs the tool loop and keeps the
+history; the agent only sends new user content), `:fork`, `:resume`,
+`:vision`, `:audio-in`, `:thinking`, `:cache-status`, `:quota`,
+`:compaction hosted`, `:cost-reported` (usage events carry `:cost`),
+`:pricing dynamic` (pricing comes from the model catalogue).
+
+REQUEST = `(:model "ID:NAME" :session SESSION :system "…" :messages (MSG…)
+:tools (TOOL-SPEC…) :thinking LEVEL :max-tokens N :provider-state PLIST
+:on-event FN)`.  MSG = `(:role user|assistant|tool :content (BLOCK…))`.
+TOOL-SPEC = `(:name :description :schema JSON-SCHEMA-PLIST)`.  For hosted
+loops only the trailing user message is sent.
+
+Events delivered to `:on-event` (one plist each, in order):
 
 ```elisp
-(:model "claude-sonnet-4-5" :messages (...) :tools (...) :thinking nil
- :max-output-tokens 4096 :abort d)
+(:type start)
+(:type text :delta "…")
+(:type thinking :delta "…")
+(:type tool-call :id "…" :name "…" :input PLIST :respond FN-OR-NIL)
+   ;; :respond present ⇒ hosted loop; call it with a tool result
+   ;; (:content "…" :is-error BOOL) and the provider continues the turn.
+(:type tool-result :id "…" :content "…" :is-error BOOL)  ; hosted loops echo results
+(:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N)
+(:type provider-state :state PLIST)     ; persist on the session
+(:type quota :windows (…))
+(:type hint :text "…")                  ; provider-side notices (compaction, retries)
+(:type done :stop-reason end-turn|tool-use|max-tokens|cancelled|error :error "…")
 ```
 
-and returns a deferred.  Streaming is reported through a callback plist:
-`on-text`, `on-thought`, `on-tool-call`, `on-usage`, `on-done` (stop reason),
-`on-error`.  Providers translate wire formats (SSE, JSON, SDK) into this one
-shape; the agent never sees provider-specific data.  Optional capabilities
-(quota, cache status, dynamic pricing) are extra service methods, and the
-UI enables features when a provider advertises them.
+Forking: `provider/fork` returns a new provider state that may be marked
+pending (for the CLI: `(:cli-session-id PARENT :fork-pending t)`); the
+first completion consumes it and emits a `provider-state` event that the
+agent persists, replacing the pending one.
 
-The built-in OpenAI-compatible provider (`harness-provider-openai.el`) is
-built on the async HTTP client service (`harness-http.el`).
+Methods: `provider/list`, `provider/models &optional REFRESH` (cached union
+across providers), `provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
+`provider/complete REQUEST` → HANDLE, `provider/fork MODEL-ID STATE` → promise,
+`provider/quota PROVIDER-ID`.  `harness-default-model` is
+"claude:claude-fable-5-1".
 
-## Tools (`harness-tools.el`)
+### tools
 
 ```elisp
-(harness-tool-register
- 'read
- :module 'harness-tools-emacs
- :description "..."
- :schema '((path . (:type string :required t)) ...)   ; JSON Schema
- :kind 'read
- :read-only t
- :handler #'harness-tool-emacs-read)
+(harness-define-tool "read_file"
+  :description "…"                       ; what the model sees
+  :schema '(:type "object" :properties (:path (:type "string" :description "…")) :required ("path"))
+  :kind read|write|exec|net|meta          ; permission class
+  :paths (lambda (input) (list …))        ; paths touched, for the jail
+  :coalescable t                          ; may be folded into a summary block in the UI
+  :title (lambda (input) "read_file x.el") ; short label
+  :handler (lambda (input ctx) …))        ; → RESULT | string | promise
 ```
 
-A handler receives a `harness-tool-context` (session, cwd, abort deferred,
-`report` callback) and arguments, and returns a deferred of a result plist:
+CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
+`:report` accepts a string for progress.  RESULT = `(:content "…"
+:is-error BOOL :attachments (…) :meta PLIST)`.
 
-```elisp
-(:content ((:type "text" :text "...")) :is-error nil
- :locations ((:path "..." :line 3)) :truncated nil :meta ...)
-```
+- `tools/list &optional SESSION-ID` → TOOL-SPECs, filtered through sync
+  filter `agent/tools` (value: list of names; args: session).
+- `tools/execute SESSION-ID CALL` (CALL = `(:id :name :input)`) → promise of
+  RESULT.  Pipeline: lookup → `permission/decide` (async filter) →
+  handler (with `harness-tools-timeout`) → context-bomb guard → sync
+  filter `tools/result` → events `tools/started`, `tools/finished`.
+- Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
+  saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
+  by the head plus an instruction to range-read that file.
+- Denied calls return `(:is-error t :content "Denied: REASON. HINT")`.
 
-Tools are the first choice to be implemented with native Emacs facilities;
-`bash` exists for what Emacs cannot do.  Context-bomb protection is a
-property of the registry: results larger than
-`harness-tools-max-output-bytes` are replaced by a truncated body plus an
-explicit instruction to use range parameters, unless the tool opts out with
-`:unbounded t`.
+### perms
 
-## Permissions (`harness-perms.el`)
+Async filter `permission/decide`: value is a DECISION
+`(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
+args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
+:paths (…))`.  Chain (priority): 10 jail, 20 mode, 30 auto (LLM judge),
+40 non-interactive, 90 ask-user (turns `ask` into a pending request
+and resolves when answered).
 
-Permission decisions are a chain: each function in
-`harness-permission-functions` returns `allow`, `deny` (with a
-constructive reason), `ask`, or nil to defer to the next one.  The chain
-runs as a deferred.  Independent rule modules (directory jail, auto mode,
-non-interactive mode) plug into the chain and are separately testable.
+- `permission/answer SESSION-ID PENDING-ID ANSWER` — ANSWER
+  `(:behavior allow|deny :scope once|session|always :reason)`, or an
+  option id string such as "allow-session" (what ACP clients send back).
+- `permission/allow-dir SESSION-ID DIR`, `permission/allowed-dirs SESSION-ID`
+  (the full effective root list), `permission/rules SESSION-ID`
+  (`(:mode :non-interactive :auto-allow :session :always :roots)`),
+  `permission/pending SESSION-ID`.
+- Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :behavior allow|deny)`;
+  session rules live in memory, always-rules in `harness-perms-rules`.
+- Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
+  :payload (:tool :input :kind :paths :call-id :title :options))`),
+  `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
+- Modes: `ask` (reads inside the jail allowed; everything else asks),
+  `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
+  `auto` (reads inside the jail allowed; a cheap model,
+  `harness-perms-auto-model`, decides the rest with a reason; falls back
+  to ask), `yolo` (allow everything; the jail still applies).  Tools in
+  `harness-perms-auto-allow-tools` are allowed in every mode.
+- Jail denials are final and carry a constructive hint listing the
+  allowed roots and how to widen them.
+- Non-interactive: `ask` becomes `deny` with the reason "non-interactive
+  mode: the user is away" and a hint to find another approach inside the
+  permitted scope; a steering message is sent to the agent once per call.
 
-`ask` turns into an ACP `session/request_permission` request when a client
-is attached; headless callers can supply their own asker.  Denials always
-carry a message that tells the model what to do instead.
+### sandbox
 
-## Configuration (`harness-config.el`)
+- `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…))` →
+  command list (bwrap / systemd-run / plain).  `sandbox/status` →
+  `(:backend bwrap|systemd|none :available (…) :policy …)`.  Fails closed
+  when `harness-sandbox-policy` is `required` and no backend exists.
 
-Settings are ordinary Emacs customization variables.  Resolution order,
-most specific last:
+### agent
 
-1. built-in defaults and the user's `custom-file` values
-2. project configuration (project root `.dir-locals.el` entry under the
-   `harness` pseudo-mode)
-3. directory configuration (nearest `.dir-locals.el` below the project root)
+- `agent/prompt SESSION-ID BLOCKS &optional OPTS` → promise of
+  `(:stop-reason …)`.  Idle session: starts a turn.  Running session:
+  steering — the text is queued and injected at the next step boundary
+  (appended to the next tool result, or sent as the next user turn if
+  the model stops first).  OPTS `:queue t` only queues.
+- `agent/cancel SESSION-ID`.
+- `agent/send-queue SESSION-ID` — sends every queued item as one turn.
+- Sync filter `agent/system-prompt` (value string, args session); sync
+  filter `agent/tools`; async filter `agent/before-turn` (value
+  `(:proceed t :reason)`, args session) — budgets, merge holds and
+  compaction hook in here; async filter `agent/step` at every step
+  boundary (same value shape) — merge holds pause here.
+- Events `agent/turn-started SID`, `agent/turn-ended SID REASON`,
+  `agent/stream SID NODE-ID KIND DELTA` (kind text|thinking),
+  `agent/tool-call SID NODE`, `agent/tool-result SID NODE`.
+- Turn loop: build system prompt → messages → `provider/complete`;
+  stream deltas into a live assistant/thinking node (created on first
+  delta, updated in place); on `tool-call` append a tool-call node, run
+  `tools/execute`, append the tool-result node; native loops re-call the
+  provider until `end-turn`; hosted loops respond through `:respond`.
+  Steering text is drained at every boundary.  `max-turns`
+  (`harness-agent-max-steps`, 200) ends runaway loops.
 
-Persistence uses Emacs' own `dir-locals` machinery
-(`add-dir-local-variable`), so settings never live in a parallel format.
-`harness-config-set` persists to the most specific file that already sets
-the variable, else the project file, else the global `custom-file`.
+### usage
 
-## Presentation (`harness-ui*.el`)
+- Subscribes `session/usage`; records to sqlite (`usage` table:
+  ts, session, project, model, input, output, cache_read, cache_write, cost).
+- `usage/summary &key group-by since until project` → rows
+  `(:key :input :output :cache-read :cache-write :cost :calls)`;
+  group-by `project|model|day|session`.
+- `usage/budgets`, `usage/set-budget BUDGET`, `usage/remove-budget ID`,
+  `usage/budget-status ID &rest (:now)` (ID may be "session:SID" for a
+  session's implicit budget) → `(:budget :spent :amount :remaining
+  :fraction :hard :per-day :days-left :period-start :period-end)`;
+  `usage/session-budgets SID`, `usage/plan-budget AMOUNT PERIOD DAYS`,
+  `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`.
+  BUDGET = `(:id :scope session|project|period :target ID-OR-ROOT
+  :amount F :hard BOOL :period day|week|month :days business|all)`.
+- Hard budgets block via `agent/before-turn`; soft ones emit
+  `usage/budget-warning` and a session hint at 80% and 100%.
+- Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
 
-UI modules are ACP clients.  `harness-ui.el` owns a client connection and
-re-broadcasts ACP notifications as Emacs events; feature modules render
-them.  The chat buffer, session list, conversation tree, notifier and
-config controls are separate modules so that, for example, the notifier can
-be tested by feeding it updates.
+### compaction
 
-Positions ("right side vertical split", ...) are presets applied when a
-session buffer is displayed; one session per position, opening another
-session in the same position replaces the buffer there.
+- `compaction/compact SESSION-ID` → promise; summarises the transcript
+  with the session's model, appends a `compaction` node whose `:meta`
+  points at the compacted head, sets it as head, hints before/after.
+- Auto: `agent/before-turn` compacts when
+  `context > window - harness-context-reserve` unless the provider
+  reports `:compaction hosted`.
 
-## Module inventory
+### naming
 
-| module | provides | requires |
+- `naming/name SESSION-ID` → promise of name.  Auto after the first
+  turn ends when the session has no name: forks provider state when
+  possible so the cached prefix is reused; hints "naming…" then the result.
+
+### skills
+
+- Scans `harness-skills-directories` (defaults: `~/.claude/skills`,
+  `./.claude/skills`, `~/.config/harness/skills`, `./.harness/skills`)
+  for `NAME/SKILL.md` with front matter.
+- `skills/list &optional CWD`, `skills/search QUERY &optional CWD`,
+  `skills/load NAME &optional CWD` → `(:name :description :content :path :source :files)`,
+  `skills/refresh`, `skills/expand TEXT CWD` → `(:text EXPANDED :skills (…))`
+  (explicit `/name` or `@skill:name` references get the skill content
+  attached; the compose UI calls this over ACP).
+- Tools `skill_search`, `skill_load`.  Adds a short skills index to the
+  system prompt via `agent/system-prompt`.
+
+### worktree
+
+- `worktree/list ROOT`, `worktree/create ROOT &key branch path base`,
+  `worktree/remove ROOT PATH &optional FORCE`, `worktree/prune ROOT`,
+  `worktree/root-of PATH`, `worktree/branch PATH`,
+  `worktree/status PATH` → `(:dirty :ahead :behind :branch)`.  All return promises.
+- Sessions created with `:worktree PATH` get `:cwd` = PATH.
+
+### merge
+
+- `merge/enqueue CHILD-SID PARENT-SID` → position; `merge/queue PARENT-SID`;
+  `merge/cancel CHILD-SID`.  When the parent reaches a step boundary
+  (`agent/step` filter) or is idle, the head of the queue gets the lock:
+  the harness runs `git merge --no-ff` of the child's branch in the
+  parent's cwd; on conflict the child session receives a steering
+  message describing the conflicts and its jail is widened to the
+  parent's cwd until it resolves; then the lock passes on.
+- `merge/status CHILD-SID`; the `merge_done` tool releases a conflict lock.
+- Events `merge/queued CHILD PARENT POSITION`, `merge/started`,
+  `merge/conflict CHILD PARENT FILES`, `merge/finished CHILD PARENT STATUS`
+  (merged|failed|aborted|cancelled).
+
+### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent
+
+Tool names and inputs (all paths relative to cwd or absolute; TRAMP
+prefixes come from the session host):
+
+| tool | input | kind |
 |---|---|---|
-| `harness-core` | kernel | — |
-| `harness-acp` | ACP protocol over transports | core |
-| `harness-acp-inprocess` | local transport | acp |
-| `harness-acp-tcp` | TCP transport | acp |
-| `harness-http` | `http` service | core |
-| `harness-config` | `config` service | core |
-| `harness-sandbox` | `sandbox` service | core |
-| `harness-session` | `session` service | core, config |
-| `harness-provider` | `provider` service | core |
-| `harness-provider-openai` | provider registration | provider, http |
-| `harness-provider-claude` | Claude CLI provider | provider |
-| `harness-tools` | `tool` service | core |
-| `harness-tools-emacs` | core tool set | tools, sandbox |
-| `harness-skills` | `skill` service, skill tools | config, tools |
-| `harness-perms` | `permission` service | tools |
-| `harness-perms-jail` | directory jail rules | perms, tools |
-| `harness-agent` | `agent` service | session, provider, tools, perms |
-| `harness-usage` | `usage` service | session |
-| `harness-worktree` | `worktree` service | config, session |
-| `harness-merge` | `merge` service, `merge` tool | session, agent, tools |
-| `harness-subagents` | `subagent` tool | agent, session, tools |
-| `harness-search` | `websearch` tool | http, tools |
-| `harness-plan` | `plan` tool | session, tools |
-| `harness-ui` | ACP client + events | acp, inprocess, perms |
-| `harness-ui-chat` | chat buffer | ui |
-| `harness-ui-ask` | approval/question panels | ui |
-| `harness-ui-sessions` | session list | ui, chat |
-| `harness-ui-tree` | conversation tree | ui, chat, sessions |
-| `harness-ui-config` | model/thinking/mode controls | ui |
-| `harness-ui-notifier` | blocked notifier | ui |
-| `harness-ui-usage` | usage and cost report | ui, usage |
-| `harness-ui-worktree` | worktree manager | ui |
+| `read_file` | path, offset, limit | read |
+| `write_file` | path, content | write |
+| `edit_file` | path, old_string, new_string, replace_all | write |
+| `list_dir` | path, depth | read |
+| `glob` | pattern, path | read |
+| `grep` | pattern, path, glob, case_sensitive, max_results | read |
+| `bash` | command, timeout, cwd | exec |
+| `elisp` | code | exec |
+| `emacs_buffers` | filter, all | read |
+| `emacs_buffer` | name, offset, limit | read |
+| `emacs_describe` | symbol | read |
+| `web_search` | query, count | net |
+| `web_fetch` | url, max_chars | net |
+| `emacs_messages` | count | read |
+| `ask_user` | question, options, allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
+| `session_info` | — | read |
+| `plan` | plan | meta |
+| `todo_write` | todos | meta |
+| `spawn_agent` | prompt, fork, model, name | meta |
+| `skill_search` / `skill_load` | query / name | read |
 
-`harness.el` loads: acp, inprocess, config, session, provider,
-provider-openai, provider-claude, tools, tools-emacs, perms, perms-jail, agent, usage,
-worktree, merge, subagents, search, plan, ui, and the UI feature modules selected by
-`harness-ui-modules` (all by default).  A user can replace any of them by
-customizing the list.
+Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
+`replace`); anything that can take long (grep, bash) runs as an
+asynchronous process started with `start-file-process` so TRAMP works.
 
-### Sub-agents
+### acp
 
-`harness-subagents` registers the `subagent` tool.  A call creates a new
-session whose parent is the calling session (so the conversation tree and
-the session list show it), inherits the caller's model and thinking level,
-runs the given prompt to completion and returns the child's final message
-as the tool result.  With `:fork` the child starts from a fork of the
-caller's transcript instead of an empty one.  Nesting is capped by
-`harness-subagents-max-depth`.
+Server: `acp/start &key host port` (default 127.0.0.1, port from
+`harness-acp-port`, 0 = ephemeral) → `(:host :port)`, `acp/stop`,
+`acp/status`.  Started by `:init` when `harness-acp-server-enabled`.
 
-## Sandbox
+Client API used by every UI:
 
-Every process the harness spawns goes through `harness-sandbox-spawn`.
-The backend is chosen at startup in preference order: bwrap,
-`systemd-run --user`, none.  Policies either prefer confinement (warn
-loudly once when no backend exists) or require it (fail closed).  bwrap
-gets read-only system trees, only the needed `/etc` entries, a tmpfs for
-`/tmp` used as HOME and TMPDIR (the real home is never mounted), a
-read-write session cwd, pid/ipc/uts namespaces and `--die-with-parent`;
-network is allowed unless a policy opts into `--unshare-net`.
-`:permission-mode` is a prompt-level hint and never a security boundary.
+```elisp
+(harness-acp-connect &optional ADDRESS)     ; nil → in-process; "host:port" → TCP
+(harness-acp-request CONN METHOD PARAMS)    ; → promise of result plist
+(harness-acp-notify CONN METHOD PARAMS)
+(harness-acp-set-handler CONN FN)           ; FN (METHOD PARAMS RESPOND); RESPOND nil for notifications
+(harness-acp-close CONN)
+(harness-acp-connection-p CONN) (harness-acp-connected-p CONN)
+```
 
-## ACP extension surface
+Wire: JSON-RPC 2.0, one message per line.  Standard ACP methods:
+`initialize`, `authenticate`, `session/new {cwd}` → `{sessionId}`,
+`session/load {sessionId}` (replays the transcript as updates),
+`session/prompt {sessionId, prompt:[blocks]}` → `{stopReason}`,
+`session/cancel`, `session/set_mode {sessionId, modeId}`,
+`session/set_model {sessionId, modelId}`.  Agent → client:
+`session/update {sessionId, update}` with `sessionUpdate` one of
+`user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk`,
+`tool_call`, `tool_call_update`, `plan`, `current_mode_update`, and
+the extension kinds `_harness/session` (full session plist after any
+change), `_harness/node` (a finalised or updated node), `_harness/hint`.
+Requests agent → client: `session/request_permission {sessionId, toolCall,
+options:[{optionId,name,kind}]}` → `{outcome:{outcome:"selected",optionId}}`
+and `_harness/ask_user {sessionId, requestId, question, options}` → `{answer}`.
 
-Beyond the standard ACP v1 methods, the harness and its UI agree on
-extensions under the reserved `_harness/` prefix (advertised in
-`initialize` under `agentCapabilities._meta.harness`):
+Extension methods: any bus method whose name starts with `session/`,
+`agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
+`config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`,
+`sandbox/status`, `harness/api` is callable as `_harness/NAME` with a
+params object whose keys become the plist arguments (`{"id": …}` →
+`:id`).  Methods take a single plist argument on the wire; the ACP
+layer maps positional bus signatures through a small table.
 
-- `_harness/session/info`, `_harness/session/fork`,
-  `_harness/session/rename`, `_harness/session/entries`
-- `_harness/agent/configuration`
-- `_harness/skills/list`, `_harness/skills/load`
-- notifications `_harness/session_status` (status, model, unread),
-  `_harness/sessions_changed`
-- the `_harness/question` request (client side), used by the agent's
-  `ask` tool.
+The local transport dispatches lisp objects directly, no JSON, and
+delivers notifications through `harness-run-soon` so callers are never
+re-entered.
 
-The session status extension exists because ACP has no session status
-notification, and the blocked notifier must work without a chat buffer.
+## Presentation contracts
 
-## Reload
+`harness-ui` owns the connection (`harness-ui-connection`, local by
+default; `harness-connect-remote` swaps it), the face set
+(`harness-user-face`, `harness-agent-face`, `harness-tool-face`,
+`harness-thinking-face`, `harness-hint-face`, warning ramps), the
+session cache updated from `_harness/session` updates, window
+positions (`harness-ui-display-session SID &optional POSITION`; presets
+`right`, `bottom`, `full`, `other`; one session per position, replacing),
+the global keymap and the transient menu `harness-menu`, and icons via
+`icons.el` (`define-icon`) with text fallbacks.  Every command has a
+mouse target: buttons, header-line segments, or mode-line segments.
 
-`harness-reload` reloads every loaded module safely: all sources are
-byte-compiled to a temporary location first; if any fails, nothing is
-touched.  Unloading removes services, handlers, features and the
-module's setup, but keeps function definitions and variable values in
-place, so outstanding dynamic bindings and caches survive.  If a module
-fails while loading, snapshots of every module's definitions restore the
-previous version and re-run its setup.  The kernel never reloads itself.
-Open sessions are re-adopted from kernel state after the session module
-reloads, and `harness-reloaded` makes UI modules redraw their buffers.
+Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
+list + attachments row + compose region at the bottom.  Rendering is
+incremental (append and in-place update by node id using markers);
+older history renders in chunks on demand so a million-token session
+stays snappy.  Markdown is rendered by the built-in renderer in
+`harness-ui-markdown` (headings, emphasis, code spans, fenced code with
+the language's major mode, lists, quotes, links).  Tool and thinking
+nodes collapse; runs of coalescable tools fold into a summary block.
+Auto-scroll follows unless the user scrolled up.
 
-## Testing
-
-- Every module has an ERT file in `test/`; `scripts/test.sh` runs them in
-  batch with `emacs -Q`.
-- A test loads only the kernel plus the module under test and fakes the
-  services it consumes.  `test/harness-test-helpers.el` provides a fake
-  provider, an in-memory session store, and an echo ACP client.
-- Live verification uses `scripts/dev.sh` (see `docs/dev-loop.md`): launch a
-  GUI Emacs, drive it, screenshot it, read `*Messages*`.
+Other buffers: sessions list (`tabulated-list-mode`, tree indentation for
+children, filter/sort by any column), conversation tree
+(`harness-ui-tree`), usage dashboard (`harness-ui-usage`, svg charts
+via svg.el), worktrees (`harness-ui-worktree`), notifier
+(`harness-ui-notify`: global mode-line segment with blocked/running/idle
+counts, clickable), BTW side window (`harness-ui-btw`), media
+(`harness-ui-media`: inline images, audio record/playback with svg
+meters, video thumbnails/open).

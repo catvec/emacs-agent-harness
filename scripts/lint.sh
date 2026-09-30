@@ -1,49 +1,18 @@
 #!/usr/bin/env bash
-# Compile every elisp file out of tree; report the first failure per file.
-#
-# Emacs prefers a .elc that is newer than its .el, so compiling next to the
-# sources would silently shadow edits.  This script always compiles to a
-# temporary directory instead.
-set -euo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EMACS="${EMACS:-emacs}"
-TMPDIR_LINT="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_LINT"' EXIT
-
-status=0
-while IFS= read -r file; do
-  # A reader pass catches unbalanced parentheses that byte-compile can
-  # silently truncate without failing.
-  syntax=$("$EMACS" -Q --batch --eval "(with-temp-buffer
-    (insert-file-contents \"$file\")
-    (goto-char (point-min))
-    (condition-case err
-        (progn (while (progn (skip-chars-forward \" \\t\\n\") (not (eobp)))
-                 (forward-list 1))
-               (princ \"ok\"))
-      (error (princ (format \"ERR %S at line %d\" err (line-number-at-pos (point)))))))" 2>&1 || true)
-  if [[ "$syntax" != *ok* ]]; then
-    printf '%-55s %s\n' "$(basename "$file")" "FAILED (syntax)"
-    echo "$syntax" | grep -v debug-early | head -3
-    status=1
-    continue
-  fi
-  out=$("$EMACS" -Q --batch -L "$REPO" -L "$REPO/lisp" -L "$REPO/lisp/modules" \
-        -L "$REPO/lisp/transports" -L "$REPO/lisp/ui" \
-        --eval "(progn (require 'bytecomp)
-                   (let ((byte-compile-warnings nil)
-                         (byte-compile-dest-file-function
-                          (lambda (_f) (expand-file-name \"out.elc\" \"$TMPDIR_LINT\"))))
-                     (condition-case err
-                         (progn (byte-compile-file \"$file\")
-                                (princ \"ok\"))
-                       (error (princ (format \"ERR %S\" err))))))" 2>&1 || true)
-  if [[ "$out" != *ok* ]]; then
-    printf '%-55s %s\n' "$(basename "$file")" "FAILED"
-    echo "$out" | grep -v debug-early | head -5
-    status=1
-  else
-    printf '%-55s ok\n' "$(basename "$file")"
-  fi
-done < <(find "$REPO" -name '*.el' -not -path '*/.git/*' -not -path '*/.dev/*' | sort)
+# Byte-compile every source file out of tree and fail on errors.
+set -u
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+files=(harness.el lisp/*.el lisp/modules/*.el lisp/ui/*.el)
+emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L . \
+  --eval "(setq byte-compile-dest-file-function (lambda (f) (expand-file-name (concat (file-name-nondirectory f) \"c\") \"$tmp\")))" \
+  --eval "(setq byte-compile-error-on-warn nil)" \
+  -f batch-byte-compile "${files[@]}" 2>&1 | grep -v '^Wrote ' 
+status=${PIPESTATUS[0]}
+if [ "${1:-}" = "--checkdoc" ]; then
+  emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L . \
+    --eval "(dolist (f (list $(printf '"%s" ' "${files[@]}"))) (checkdoc-file f))" 2>&1
+fi
 exit "$status"
