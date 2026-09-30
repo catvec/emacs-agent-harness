@@ -1,688 +1,253 @@
-;;; harness.el --- A coding agent harness for Emacs -*- lexical-binding: t; -*-
+;;; harness.el --- Emacs native agent harness  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 the emacs-agent-harness authors
-
-;; Author: the emacs-agent-harness authors
-;; Version: 0.1.0
+;; Copyright (C) 2026 Noah Huppert
+;; Author: Noah Huppert
+;; Version: 3.0.0
 ;; Package-Requires: ((emacs "29.1"))
-;; Keywords: tools, ai, convenience
-;; URL: https://git.sr.ht/~catvec/emacs-agent-harness
-
-;; This file is not part of GNU Emacs.
-
-;; This program is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+;; Keywords: tools, convenience
+;; URL: https://github.com/Noah-Huppert/emacs-agent-harness
 
 ;;; Commentary:
 
-;; The entry point: load the modules, provide the commands and the `C-c h'
-;; keymap, load plugins, and implement hot reload.
+;; The harness proper is only a module loader on top of `harness-core'.
+;; Every feature (sessions, providers, tools, the chat UI, the ACP
+;; server) is a module under lisp/modules or lisp/ui.  A harness with
+;; every module disabled starts, does nothing, and shows nothing.
 ;;
-;; Hot reload uses the built-in machinery rather than a loader of its own.
-;; Registries remember the file that registered them (`harness-unload-file'
-;; removes a file's tools and renderers), so `load' after `unload-feature' is
-;; enough; `harness-plugin-mode' watches the plugin directory with
-;; `file-notify-add-watch' and reloads a saved file; and `harness-reload'
-;; reloads the harness modules in dependency order.  A reload never touches
-;; live sessions or buffers -- only code -- and ends by running
-;; `harness-after-reload-hook', which the UI uses to re-render.
-;;
-;; The harness also extends itself with the same mechanism: the
-;; `harness_eval', `harness_define_tool', `harness_write_plugin' and
-;; `harness_reload' tools are registered here, so the agent editing its own
-;; source code and the person editing a plugin take the exact same path.
-;;
-;; See DESIGN.md sections 9.4, 13 and 13.1.
+;; Start it with `harness-start'.  Reload it after editing the sources
+;; with `harness-reload': each file is checked and compiled first and
+;; the running instance is only touched when all of them pass, so a
+;; broken edit never bricks live sessions.  `harness-auto-reload-mode'
+;; does this on every save while dogfooding.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'seq)
 (require 'filenotify)
-(require 'harness-core)
-(require 'harness-faces)
-(require 'harness-http)
-(require 'harness-provider)
-(require 'harness-provider-openai)
-(require 'harness-provider-process)
-(require 'harness-session)
-(require 'harness-tools)
-(require 'harness-perms)
-(require 'harness-agent)
-(require 'harness-context)
-(require 'harness-queue)
-(require 'harness-attachments)
-(require 'harness-subagents)
-(require 'harness-worktree)
-(require 'harness-mode-line)
-(require 'harness-ui-conversation)
-(require 'harness-ui-sessions)
-(require 'harness-ui-tree)
-(require 'harness-ui-ask)
-(require 'harness-ui-model)
+(require 'bytecomp)
 
-(defconst harness--directory
+(defconst harness-version "3.0.0" "Version of the harness.")
+
+(defconst harness-directory
   (file-name-directory (or load-file-name buffer-file-name
-                           (locate-library "harness")
-                           default-directory))
-  "Directory the harness was loaded from.
-`load-file-name' is bound while this file is loaded; the other clauses keep
-the value usable when the form is evaluated by hand (`eval-defun').")
+                           (locate-library "harness") default-directory))
+  "Directory containing harness.el.")
 
-(defcustom harness-bundled-plugins-directory
-  (expand-file-name "plugins" harness--directory)
-  "Directory of plugins that ship with the harness.
-They are loaded by `harness-setup' before `harness-plugins-directory', so a
-feature that can be expressed through the plugin API ships as a plugin and
-is distributed and loaded by default instead of growing the core.  A user
-plugin of the same name loads later and wins.  See DESIGN.md section 13.2."
-  :type 'directory
-  :group 'harness)
+(defgroup harness nil
+  "Emacs native agent harness."
+  :group 'tools :prefix "harness-")
 
-(defcustom harness-plugins-directory
-  (expand-file-name "agent-harness/plugins" user-emacs-directory)
-  "Directory whose `*.el' files are loaded as harness plugins.
-Loaded after `harness-bundled-plugins-directory', so the user's plugins can
-replace what the distribution ships."
-  :type 'directory
-  :group 'harness)
+(defcustom harness-module-directories '("lisp/modules" "lisp/ui")
+  "Directories, relative to `harness-directory', that hold module files.
+Every file named harness-NAME.el in them is a module called NAME."
+  :type '(repeat string) :group 'harness)
 
-(defcustom harness-plugin-auto-load t
-  "Whether `harness-setup' loads the plugins directory."
-  :type 'boolean
-  :group 'harness)
+(defcustom harness-enabled-modules t
+  "Modules to load: t for every discovered module, or a list of names."
+  :type '(choice (const :tag "All" t) (repeat symbol)) :group 'harness)
 
-(defcustom harness-plugin-mode-lighter " H-Reload"
-  "Mode line lighter for `harness-plugin-mode'."
-  :type 'string
-  :group 'harness)
+(defcustom harness-disabled-modules nil
+  "Modules never to load, by name."
+  :type '(repeat symbol) :group 'harness)
 
-(defcustom harness-plugin-watch-harness-directory nil
-  "Also watch the harness's own source directory for changes.
-Useful while developing the harness itself; off by default because reloading
-the harness is slower than reloading a plugin."
-  :type 'boolean
-  :group 'harness)
+(defcustom harness-state-directory (locate-user-emacs-file "harness/")
+  "Directory where the harness persists sessions, usage and settings."
+  :type 'directory :group 'harness)
 
-(defcustom harness-plugin-reload-delay 0.25
-  "Seconds to wait after a file changes before reloading it.
-Editors write a file more than once; this coalesces the writes."
-  :type 'number
-  :group 'harness)
+(defvar harness-started nil "Non-nil once `harness-start' has run.")
+(defvar harness-reload-hook nil "Hook run after a successful `harness-reload'.")
+(defvar harness-start-hook nil "Hook run after `harness-start'.")
 
-(defconst harness--modules
-  '(harness-core harness-faces harness-http harness-provider
-    harness-provider-openai harness-provider-process harness-session
-    harness-tools harness-perms harness-agent harness-context harness-queue
-    harness-attachments harness-subagents harness-worktree harness-mode-line harness-ui-conversation
-    harness-ui-sessions harness-ui-tree harness-ui-ask harness-ui-model
-    harness)
-  "Harness modules in dependency order, for `harness-reload'.")
+(defconst harness--self-file (expand-file-name "harness.el" harness-directory)
+  "Absolute path of this file, reloaded first by `harness-reload'.")
 
-(defvar harness--watch-descriptors nil
-  "Active file notification descriptors, for `harness-plugin-mode'.")
+(defconst harness--core-files '("lisp/harness-core.el" "lisp/harness-util.el" "lisp/harness-http.el")
+  "Files loaded before any module, in order, relative to `harness-directory'.")
 
-(defvar harness--reload-timers (make-hash-table :test #'equal)
-  "Pending per-file reload timers, keyed by file name.")
+(add-to-list 'load-path (expand-file-name "lisp" harness-directory))
+(require 'harness-core)
+(require 'harness-util)
 
-(defvar harness-setup-hook nil
-  "Hook run at the end of `harness-setup'.")
+(defun harness--path (relative)
+  (expand-file-name relative harness-directory))
 
-(defvar harness--setup-done nil
-  "Non-nil once `harness-setup' has run.")
+(defun harness--setup-load-path ()
+  (dolist (dir (cons "lisp" harness-module-directories))
+    (add-to-list 'load-path (harness--path dir))))
 
-
-;;; Setup
+(defun harness--file-module-name (file)
+  "Return the module name symbol for FILE (harness-NAME.el -> NAME)."
+  (intern (string-remove-prefix "harness-" (file-name-base file))))
 
-(defun harness-setup ()
-  "Prepare the harness: providers, permissions, plugins and hooks."
+(defun harness--module-files ()
+  "Return the enabled module files, sorted by directory then name."
+  (let (files)
+    (dolist (dir harness-module-directories)
+      (let ((full (harness--path dir)))
+        (when (file-directory-p full)
+          (dolist (f (directory-files full t "\\`harness-[a-z0-9-]+\\.el\\'"))
+            (let ((name (harness--file-module-name f)))
+              (when (and (or (eq harness-enabled-modules t)
+                             (memq name harness-enabled-modules))
+                         (not (memq name harness-disabled-modules)))
+                (push f files)))))))
+    (nreverse files)))
+
+(defun harness--load-file (file)
+  "Compile and load FILE with `harness--defining-module' bound to its module name."
+  (let ((harness--defining-module (harness--file-module-name file)))
+    (harness-load-compiled file)))
+
+(defvar harness--defining-module)
+
+;;;###autoload
+(defun harness-start ()
+  "Load the core and every enabled module, then initialise them.
+Return non-nil when every module loaded and initialised."
   (interactive)
-  (harness-provider-setup)
-  (harness-permission-rules-load)
-  (when harness-plugin-auto-load
-    (harness-load-plugins))
-  (setq harness--setup-done t)
-  (run-hooks 'harness-setup-hook)
-  (message "Harness ready: %d provider%s, %d model%s, %d tool%s"
-           (length (harness-provider-all))
-           (if (= (length (harness-provider-all)) 1) "" "s")
-           (length (harness-model-search))
-           (if (= (length (harness-model-search)) 1) "" "s")
-           (length (harness-tool-all))
-           (if (= (length (harness-tool-all)) 1) "" "s")))
-
-(defun harness-ensure-setup ()
-  "Run `harness-setup' once, lazily."
-  (unless harness--setup-done
-    (harness-setup)))
-
-
-;;; Plugins and hot reload
-
-(defun harness-plugin-files (&optional directory)
-  "Return the plugin files in DIRECTORY, in load order.
-DIRECTORY defaults to `harness-plugins-directory'."
-  (let ((directory (or directory harness-plugins-directory)))
-    (when (file-directory-p directory)
-      (sort (directory-files directory t "\\`[^.#].*\\.el\\'") #'string<))))
-
-(defun harness-plugin-directories ()
-  "Return the plugin directories, bundled ones before the user's.
-See `harness-bundled-plugins-directory' and `harness-plugins-directory'.
-Duplicate directories are collapsed so a file is never loaded twice."
-  (delete-dups
-   (delq nil (mapcar (lambda (directory)
-                       (when directory
-                         (file-name-as-directory (expand-file-name directory))))
-                     (list harness-bundled-plugins-directory
-                           harness-plugins-directory)))))
-
-(defun harness-plugin-files-all ()
-  "Return every plugin file, bundled plugins before user plugins."
-  (seq-mapcat #'harness-plugin-files (harness-plugin-directories)))
-
-(defun harness-plugin-file-p (file)
-  "Return non-nil when FILE is inside one of the plugin directories."
-  (let ((file (expand-file-name file)))
-    (seq-some (lambda (directory)
-                (string-prefix-p (file-name-as-directory (expand-file-name directory))
-                                 file))
-              (harness-plugin-directories))))
-
-(defun harness-file-features (file)
-  "Return the features provided by FILE."
-  (let* ((file (expand-file-name file))
-         (entry (assoc file load-history)))
-    (delq nil (mapcar (lambda (item)
-                        (and (consp item) (eq (car item) 'provide) (cdr item)))
-                      entry))))
-
-(defun harness-unload-file (file)
-  "Remove everything FILE registered: tools, renderers and its features.
-This is what lets a plugin be reloaded without accumulating dead
-registrations, and it uses the standard `unload-feature' to drop the
-functions and variables the file defined."
-  (dolist (name (harness-tools-for-file (expand-file-name file)))
-    (harness-unregister-tool name))
-  (dolist (kind (harness-renderers-for-file (expand-file-name file)))
-    (harness-remove-renderer kind))
-  (dolist (feature (harness-file-features file))
+  (harness--setup-load-path)
+  (dolist (f harness--core-files)
     (condition-case err
-        (unload-feature feature t)
-      (error (harness--log "could not unload %s: %s" feature
-                           (error-message-string err)))))
-  file)
-
-(defun harness-reload-plugin (file)
-  "Reload the plugin in FILE."
-  (interactive (list (or (and (buffer-file-name) (buffer-file-name))
-                         (read-file-name "Plugin: " harness-plugins-directory nil t
-                                         nil #'file-regular-p))))
-  (let ((file (expand-file-name file)))
-    (unless (file-readable-p file)
-      (user-error "Cannot read %s" file))
-    (harness-unload-file file)
-    (let ((load-prefer-newer t))
-      (load file nil 'nomessage))
-    (run-hooks 'harness-after-reload-hook)
-    (message "Reloaded %s" (file-name-nondirectory file))
-    file))
-
-(defun harness-load-plugins ()
-  "Load every plugin, bundled plugins before user plugins."
-  (interactive)
-  (let ((files (harness-plugin-files-all))
-        (loaded 0))
-    (dolist (file files)
+        (harness-load-compiled (harness--path f))
+      (error (harness-log 'error "compiling %s failed: %S; loading source" f err)
+             (load (harness--path f) nil 'nomessage))))
+  (let (failed)
+    (dolist (f (harness--module-files))
       (condition-case err
-          (progn
-            (let ((load-prefer-newer t))
-              (load file nil 'nomessage))
-            (setq loaded (1+ loaded)))
-        (error (harness--log "plugin %s failed: %s" file (error-message-string err))
-               (message "Harness plugin %s failed: %s"
-                        (file-name-nondirectory file) (error-message-string err)))))
-    (when (called-interactively-p 'interactive)
-      (message "Loaded %d plugin%s" loaded (if (= loaded 1) "" "s")))
-    loaded))
+          (harness--load-file f)
+        (error (push (cons (harness--file-module-name f) err) failed)
+               (harness-log 'error "loading %s failed: %S" f err))))
+    (harness-modules-init)
+    (setq harness-started t)
+    (run-hooks 'harness-start-hook)
+    (harness-emit 'harness/started)
+    (let ((broken (append (mapcar #'car failed)
+                          (mapcar #'harness-module-name
+                                  (cl-remove-if-not (lambda (m) (eq (harness-module-state m) 'failed))
+                                                    (harness-modules))))))
+      (cond (broken
+             (message "Harness %s started; modules failed: %s (see %s)"
+                      harness-version (mapconcat #'symbol-name broken ", ")
+                      harness-log-buffer-name))
+            ((called-interactively-p 'any)
+             (message "Harness %s started with %d modules"
+                      harness-version (length (harness-modules)))))
+      (null broken))))
 
-(defun harness-reload-plugins ()
-  "Reload every plugin, so edits take effect without a restart."
+(defun harness-stop ()
+  "Shut every module down."
   (interactive)
-  (dolist (file (harness-plugin-files-all))
-    (condition-case err
-        (harness-reload-plugin file)
-      (error (harness--log "plugin %s failed: %s" file (error-message-string err))
-             (message "Harness plugin %s failed: %s"
-                      (file-name-nondirectory file) (error-message-string err)))))
-  (run-hooks 'harness-after-reload-hook))
+  (when (featurep 'harness-core)
+    (harness-emit 'harness/stopping)
+    (harness-modules-shutdown))
+  (setq harness-started nil))
 
-(defun harness-reload (&optional quiet)
-  "Reload every harness module, keeping sessions and buffers alive.
+;;;; Safe reload
 
-Modules are loaded in dependency order, so a change to a lower module is
-picked up exactly as a restart would pick it up.  `defvar' does not re-run
-when the variable is already bound, so registries and session state survive;
-`defcustom' keeps the user's value."
-  (interactive)
-  (dolist (module harness--modules)
-    (let ((file (locate-library (symbol-name module))))
-      (when (and file (file-readable-p file))
-        (condition-case err
-            (let ((load-prefer-newer t))
-              (load file nil 'nomessage))
-          (error (harness--log "reload of %s failed: %s" module
-                               (error-message-string err))
-                 (message "Harness reload of %s failed: %s" module
-                          (error-message-string err)))))))
-  ;; Doom's autoloads are the one piece of the environment a reload can
-  ;; invalidate; refreshing them when Doom is present keeps new autoloaded
-  ;; commands working the way `doom/reload' would.
-  (when (fboundp 'doom/reload-autoloads)
-    (ignore-errors (doom/reload-autoloads)))
-  (harness-provider-setup)
-  (run-hooks 'harness-after-reload-hook)
-  (unless quiet
-    (message "Harness reloaded (%d modules); sessions and buffers kept"
-             (length harness--modules))))
+(defun harness--compile-directory ()
+  "Directory holding the byte-compiled files the harness loads."
+  (let ((dir (expand-file-name "elc/" harness-state-directory)))
+    (unless (file-directory-p dir) (make-directory dir t))
+    dir))
 
-(defun harness-reload-file (file)
-  "Reload whatever FILE is: a plugin, or a harness module."
-  (interactive (list (or (buffer-file-name)
-                         (read-file-name "Reload: " nil nil t nil #'file-regular-p))))
-  (if (harness-plugin-file-p file)
-      (harness-reload-plugin file)
-    (harness-unload-file file)
-    (let ((load-prefer-newer t))
-      (load file nil 'nomessage))
-    (run-hooks 'harness-after-reload-hook)
-    (message "Reloaded %s" (file-name-nondirectory file))))
+(defun harness--compiled-name (file)
+  "Return the .elc path in the compile directory for source FILE."
+  (expand-file-name (concat (file-name-nondirectory file) "c") (harness--compile-directory)))
 
-(defun harness--reload-after-change (file)
-  "Reload FILE after a short delay, coalescing repeated writes.
-
-Editors write more than once (a temp file, a rename, a mode line), so a reload
-is scheduled rather than run immediately; the timer is per file, and the last
-change wins."
-  (when-let* ((timer (gethash file harness--reload-timers)))
-    (cancel-timer timer))
-  (puthash file
-           (run-at-time harness-plugin-reload-delay nil
-                        (lambda ()
-                          (remhash file harness--reload-timers)
-                          (when (file-readable-p file)
-                            (condition-case err
-                                (harness-reload-file file)
-                              (error (message "Harness reload of %s failed: %s"
-                                              (file-name-nondirectory file)
-                                              (error-message-string err)))))))
-           harness--reload-timers)
-  file)
-
-(defun harness--watch-file (event)
-  "Reload the file described by file notification EVENT."
-  (let* ((descriptor (car event))
-         (action (cadr event))
-         (file (nth 2 event)))
-    (ignore descriptor)
-    (when (and (stringp file)
-               (string-suffix-p ".el" file)
-               (memq action '(created changed renamed)))
-      (harness--reload-after-change file))))
-
-(defvar harness--file-notify-support 'unknown
-  "Cached answer from `harness-file-notify-works-p'.")
-
-(defun harness-file-notify-works-p ()
-  "Return non-nil when file notifications actually fire in this Emacs.
-
-Batch Emacs, and some remote filesystems, cannot watch files.  The plugin mode
-still works there -- `harness-reload-plugins' does the same job on demand --
-and this predicate lets callers tell which world they are in."
-  (when (eq harness--file-notify-support 'unknown)
-    (let* ((directory (make-temp-file "harness-notify" t))
-           (seen nil)
-           (descriptor (ignore-errors
-                         (file-notify-add-watch
-                          directory '(change)
-                          (lambda (_event) (setq seen t))))))
-      (unwind-protect
-          (progn
-            (when descriptor
-              (with-temp-file (expand-file-name "probe" directory)
-                (insert "probe"))
-              (let ((tries 0))
-                (while (and (not seen) (< tries 20))
-                  (accept-process-output nil 0.05)
-                  (setq tries (1+ tries)))))
-            (setq harness--file-notify-support (and seen t)))
-        (when descriptor (ignore-errors (file-notify-rm-watch descriptor)))
-        (ignore-errors (delete-directory directory t)))))
-  harness--file-notify-support)
-
-(defun harness--watch-directory (directory)
-  "Watch DIRECTORY for changed Elisp files."
-  (when (file-directory-p directory)
-    (push (file-notify-add-watch directory '(change) #'harness--watch-file)
-          harness--watch-descriptors)))
-
-(define-minor-mode harness-plugin-mode
-  "Reload plugins (and optionally the harness) whenever they are saved."
-  :global t
-  :lighter harness-plugin-mode-lighter
-  :group 'harness
-  (if harness-plugin-mode
+(defun harness--compile-file (file)
+  "Byte-compile FILE into the compile directory; return the .elc path.
+Signal an error describing the first problem when FILE does not parse
+or compile.  Interpreted Emacs Lisp closures over large data can blow
+the evaluation depth (seen with parsed model catalogues), so the
+harness always runs compiled code, even while developing."
+  (condition-case err
       (progn
-        (unless (file-directory-p harness-plugins-directory)
-          (make-directory harness-plugins-directory t))
-        (harness--watch-directory harness-plugins-directory)
-        ;; Bundled plugins are part of the package, but watching them too keeps
-        ;; `plugins/' hot while the harness itself is being developed.
-        (harness--watch-directory harness-bundled-plugins-directory)
-        (when harness-plugin-watch-harness-directory
-          (harness--watch-directory
-           (file-name-directory (or (locate-library "harness") default-directory)))))
-    (dolist (descriptor harness--watch-descriptors)
-      (ignore-errors (file-notify-rm-watch descriptor)))
-    (setq harness--watch-descriptors nil)
-    (maphash (lambda (_file timer) (cancel-timer timer)) harness--reload-timers)
-    (clrhash harness--reload-timers)))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (emacs-lisp-mode)
+          (check-parens)
+          (goto-char (point-min))
+          (condition-case rerr
+              (while t (read (current-buffer)))
+            (end-of-file nil)
+            (error (error "%s" (error-message-string rerr)))))
+        (let* ((dest (harness--compiled-name file))
+               (byte-compile-dest-file-function (lambda (_f) dest))
+               (byte-compile-verbose nil)
+               (byte-compile-warnings nil)
+               (inhibit-message t)
+               (ok (byte-compile-file file)))
+          (unless (eq ok t)
+            (error "byte compilation failed (see *Compile-Log*)"))
+          dest))
+    (error (error "%s: %s" (file-name-nondirectory file) (error-message-string err)))))
 
-(defun harness-author-plugin (name)
-  "Create a new plugin NAME and open it for editing.
-The scaffold registers nothing but is byte-compile clean and reloads, which
-is the point: the loop from empty file to working tool is one save."
-  (interactive "sPlugin name: ")
-  (let* ((file (expand-file-name (concat (replace-regexp-in-string
-                                          "[^a-zA-Z0-9_-]" "-" name)
-                                         ".el")
-                                 harness-plugins-directory))
-         (feature (intern (file-name-base file))))
-    (make-directory harness-plugins-directory t)
-    (unless (file-exists-p file)
-      (with-temp-file file
-        (insert (format ";;; %s.el --- Harness plugin: %s -*- lexical-binding: t; -*-\n\n"
-                        (file-name-base file) name)
-                ";;; Commentary:\n\n"
-                ";; A harness plugin.  Everything here is hot reloadable:\n"
-                ";; `M-x harness-plugin-mode' reloads this file when it is saved.\n\n"
-                ";;; Code:\n\n"
-                "(require 'harness)\n\n"
-                ";; Register a tool with `harness-define-tool', a renderer with\n"
-                ";; `harness-add-renderer', or a hook function with `add-hook'.\n\n"
-                (format "(provide '%s)\n;;; %s.el ends here\n"
-                        feature (file-name-base file)))))
-    (find-file file)
-    file))
+(defun harness--check-file (file)
+  "Return nil when FILE compiles, else an error string."
+  (condition-case err
+      (progn (harness--compile-file file) nil)
+    (error (error-message-string err))))
 
-(defun harness-load-plugin-directory (&optional directory)
-  "Load every `*.el' file in DIRECTORY as a plugin.
-This is how a project-local plugin folder is picked up."
-  (interactive "DPlugin directory: ")
-  (let ((harness-plugins-directory (expand-file-name directory))
-        (harness-bundled-plugins-directory nil)
-        (harness-plugin-auto-load t))
-    (harness-load-plugins)))
+(defun harness-load-compiled (file)
+  "Compile FILE and load the result.  Used by tests and the loader."
+  (load (harness--compile-file file) nil 'nomessage))
 
-
-;;; Self-extension tools
-
-(harness-define-tool "harness_eval"
-  :description "Evaluate Emacs Lisp in the running Emacs. Use this to extend or inspect the harness itself."
-  :parameters '(:type "object"
-                :properties (:code (:type "string"
-                                   :description "Emacs Lisp to evaluate; the value is returned"))
-                :required ("code"))
-  :category 'execute
-  :approval 'ask
-  :function
-  (lambda (args _context)
-    (let* ((code (or (harness-tools-arg args :code) ""))
-           (result (eval (car (read-from-string code)) t)))
-      (harness-tool-result-create
-       :content (format "%S" result)
-       :error nil
-       :detail (list :kind 'elisp :code code)))))
-
-(harness-define-tool "harness_write_plugin"
-  :description "Write a harness plugin file and reload it. The plugin can register tools and renderers."
-  :parameters '(:type "object"
-                :properties (:name (:type "string" :description "Plugin file name, without .el")
-                             :code (:type "string" :description "The Elisp source"))
-                :required ("name" "code"))
-  :category 'edit
-  :approval 'ask
-  :function
-  (lambda (args _context)
-    (let* ((name (or (harness-tools-arg args :name) "plugin"))
-           (slug (replace-regexp-in-string "[^a-zA-Z0-9_-]" "-" name))
-           (code (or (harness-tools-arg args :code) ""))
-           (file (expand-file-name (concat slug ".el") harness-plugins-directory)))
-      (make-directory harness-plugins-directory t)
-      (let ((coding-system-for-write 'utf-8-unix)
-            (write-region-inhibit-fsync t))
-        (write-region code nil file nil 'silent))
-      (harness-reload-plugin file)
-      (harness-tool-result-create
-       :content (format "Wrote and reloaded %s" file)
-       :detail (list :kind 'edit :path file)))))
-
-(harness-define-tool "harness_define_tool"
-  :description "Define a new tool at runtime. The code is an Elisp body with the parsed arguments bound to `args' and the tool context to `context'."
-  :parameters '(:type "object"
-                :properties (:name (:type "string" :description "Tool name")
-                             :description (:type "string" :description "What the tool does, for the model")
-                             :parameters (:type "object" :description "JSON schema for the arguments")
-                             :code (:type "string" :description "Elisp body returning a harness-tool-result"))
-                :required ("name" "description" "code"))
-  :category 'edit
-  :approval 'ask
-  :function
-  (lambda (args _context)
-    (let* ((name (harness-tools-arg args :name))
-           (description (or (harness-tools-arg args :description) ""))
-           (parameters (harness-tools-arg args :parameters))
-           (code (or (harness-tools-arg args :code) "")))
-      (if (or (null name) (string-empty-p (format "%s" name)))
-          (harness-tool-result-create :content "harness_define_tool needs a name"
-                                      :error "no name")
-        (condition-case err
-            (let* ((forms (car (read-from-string (concat "(" code ")"))))
-                   (function (eval (append (list 'lambda '(args context)) forms) t)))
-              (harness-register-tool
-               (harness-tool--make
-                :name (format "%s" name)
-                :description description
-                :parameters parameters
-                :category 'meta
-                :approval 'ask
-                :function function))
-              (harness-tool-result-create
-               :content (format "Registered tool %s. It is available from the next request."
-                                name)
-               :detail (list :kind 'tool :name name)))
-          (error
-           (harness-tool-result-create
-            :content (format "Could not define %s: %s" name (error-message-string err))
-            :error (error-message-string err))))))))
-
-(harness-define-tool "harness_reload"
-  :description "Reload the harness or its plugins in the running Emacs. Use after editing harness or plugin code."
-  :parameters '(:type "object"
-                :properties (:what (:type "string"
-                                   :enum ("plugins" "harness" "plugin"))
-                             :file (:type "string"
-                                    :description "Required when what is plugin"))
-                :required ("what"))
-  :category 'meta
-  :approval 'allow
-  :function
-  (lambda (args _context)
-    (pcase (harness-tools-arg args :what)
-      ("plugins" (harness-reload-plugins)
-                 (harness-tool-result-create :content "Reloaded all plugins"))
-      ("harness" (harness-reload)
-                 (harness-tool-result-create :content "Reloaded the harness"))
-      ("plugin" (let ((file (harness-tools-arg args :file)))
-                  (unless file
-                    (harness-tool-result-create :content "harness_reload needs :file"
-                                                :error "no file"))
-                  (harness-reload-plugin file)
-                  (harness-tool-result-create
-                   :content (format "Reloaded %s" file))))
-      (_ (harness-tool-result-create :content "what must be plugins, harness or plugin"
-                                     :error "bad what")))))
-
-
-;;; Commands
-
-(defun harness-new-session (&optional name)
-  "Start a new session for the current project and open it."
+;;;###autoload
+(defun harness-reload ()
+  "Check every harness source file, then reload all of them in place.
+Running sessions and buffers are kept: definitions are replaced under
+them and `harness-reload-hook' plus the `harness/reloaded' event let
+the UI redraw.  When any file fails to compile nothing is loaded."
   (interactive)
-  (harness-ensure-setup)
-  (let ((session (harness-session-create (list :name name))))
-    (unless (harness-session-model session)
-      (message "No model selected yet; M-x harness-select-model"))
-    (harness-conversation-open session)))
+  (harness--setup-load-path)
+  (let* ((files (append (mapcar #'harness--path harness--core-files)
+                        (harness--module-files)))
+         (problems (delq nil (mapcar #'harness--check-file files))))
+    (if problems
+        (progn
+          (when (featurep 'harness-core)
+            (dolist (p problems) (harness-log 'error "reload refused: %s" p)))
+          (message "Harness reload refused: %s" (string-join problems "; "))
+          nil)
+      (let ((errors nil))
+        (load harness--self-file nil 'nomessage)
+        (dolist (f files)
+          (condition-case err
+              (if (member f (mapcar #'harness--path harness--core-files))
+                  (harness-load-compiled f)
+                (harness--load-file f))
+            (error (push (format "%s: %s" (file-name-nondirectory f) (error-message-string err)) errors))))
+        (harness-modules-init)
+        (run-hooks 'harness-reload-hook)
+        (harness-emit 'harness/reloaded)
+        (if errors
+            (message "Harness reloaded with errors: %s" (string-join (nreverse errors) "; "))
+          (message "Harness reloaded (%d files)" (length files)))
+        (null errors)))))
 
-(defun harness-resume-session (file)
-  "Resume a saved session and open it."
-  (interactive (list (harness-session--read-file "Resume session")))
-  (harness-ensure-setup)
-  (harness-conversation-open (harness-session-resume file)))
+;;;; Automatic reload while developing
 
-(defun harness-switch-session ()
-  "Switch to another live session, asking which."
-  (interactive)
-  (harness-conversation-open (harness-session--read-session "Switch to")))
+(defvar harness--watches nil)
 
-(defun harness-switch-blocked ()
-  "Switch to the next session that is waiting for the user.
-This is the command that makes a stalled run impossible to miss."
-  (interactive)
-  (let ((blocked (seq-filter #'harness-session-blocked-p (harness-session-list))))
-    (cond
-     ((null blocked) (message "No session is waiting for you"))
-     ((= (length blocked) 1) (harness-conversation-open (car blocked)))
-     (t (harness-conversation-open (harness-session--read-session "Blocked session"))))))
+(defun harness--auto-reload-callback (event)
+  (pcase-let ((`(,_ ,action ,file . ,_) event))
+    (when (and (memq action '(changed created renamed))
+               (string-suffix-p ".el" file)
+               (not (string-match-p "/\\.#\\|flycheck_\\|~\\'" file)))
+      (harness-debounce 'auto-reload 0.6 #'harness-reload))))
 
-(defun harness-cycle-sessions (&optional arg)
-  "Cycle through live sessions, most recently used last.
-With ARG, go backwards."
-  (interactive "p")
-  (let ((sessions (seq-filter (lambda (session)
-                                (buffer-live-p (harness-session-buffer session)))
-                              (harness-session-list))))
-    (if (null sessions)
-        (message "No open sessions")
-      (let* ((current (harness-conversation-session))
-             (index (or (cl-position current sessions) -1))
-             (count (length sessions))
-             (next (mod (+ index (if (> arg 0) 1 -1)) count)))
-        (harness-conversation-open (nth next sessions))))))
-
-(defun harness-abort-all ()
-  "Abort every running session."
-  (interactive)
-  (harness-agent-abort-all))
-
-(defun harness-open-at-project ()
-  "Open the most recent session of the current project, or start one."
-  (interactive)
-  (harness-ensure-setup)
-  (let* ((root (file-name-as-directory (expand-file-name default-directory)))
-         (records (harness-session-records root)))
-    (if (null records)
-        (harness-new-session)
-      (harness-conversation-open
-       (harness-session-resume (harness-plist-or-alist-get :file (car records)))))))
-
-(defun harness-toggle-thinking ()
-  "Toggle reasoning traces in the current conversation buffer."
-  (interactive)
-  (harness-conversation-toggle-thinking))
-
-(defun harness-eval-expression (code)
-  "Evaluate CODE in the running Emacs and show the result.
-The same operation the `harness_eval' tool performs, for a person at a
-keyboard."
-  (interactive "sEval: ")
-  (message "%S" (eval (car (read-from-string code)) t)))
-
-(defun harness-describe-session ()
-  "Show a description of the current session."
-  (interactive)
-  (let ((session (harness-conversation-session)))
-    (unless session (user-error "Not in a harness buffer"))
-    (message "%s · %s · %s · %s"
-             (harness-session-name session)
-             (harness-session-status-string session)
-             (harness-model-describe-current session)
-             (harness-usage-format (harness-session-usage-total session)))))
-
-
-;;; Keymap and global mode
-
-(defvar harness-command-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "n") #'harness-new-session)
-    (define-key map (kbd "o") #'harness-open-at-project)
-    (define-key map (kbd "r") #'harness-resume-session)
-    (define-key map (kbd "l") #'harness-list-sessions)
-    (define-key map (kbd "s") #'harness-search-sessions-ui)
-    (define-key map (kbd "b") #'harness-switch-blocked)
-    (define-key map (kbd "TAB") #'harness-cycle-sessions)
-    (define-key map (kbd "m") #'harness-select-model)
-    (define-key map (kbd "M") #'harness-list-models)
-    (define-key map (kbd "t") #'harness-tree)
-    (define-key map (kbd "q") #'harness-queue-edit)
-    (define-key map (kbd "a") #'harness-approve-next)
-    (define-key map (kbd "A") #'harness-toggle-auto-mode)
-    (define-key map (kbd "e") #'harness-eval-expression)
-    (define-key map (kbd "R") #'harness-reload)
-    (define-key map (kbd "P") #'harness-reload-plugins)
-    (define-key map (kbd "L") #'harness-plugin-mode)
-    (define-key map (kbd "N") #'harness-author-plugin)
-    (define-key map (kbd "f") #'harness-refresh-models)
-    (define-key map (kbd "x") #'harness-abort-all)
-    (define-key map (kbd "i") #'harness-index-rebuild)
-    (define-key map (kbd "d") #'harness-describe-session)
-    (define-key map (kbd "c") #'harness-compact-session)
-    (define-key map (kbd "w") #'harness-worktree-create)
-    (define-key map (kbd "W") #'harness-worktree-remove)
-    (define-key map (kbd "C-w") #'harness-worktree-switch)
-    (define-key map (kbd "F") #'harness-conversation-search)
-    (define-key map (kbd "h") #'harness-setup)
-    map)
-  "Keymap for harness commands, bound to `C-c h' by `global-harness-mode'.")
-
-(defvar global-harness-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c h") harness-command-map)
-    map)
-  "Global keymap for the harness.")
-
-(define-minor-mode global-harness-mode
-  "Global harness mode: key bindings and the blocked-session indicator.
-
-Named the way Emacs names global minor modes, so `global-harness-mode' reads
-like `global-display-line-numbers-mode' next to it in `M-x'."
-  :global t
-  :lighter nil
-  :group 'harness
-  :keymap global-harness-mode-map
-  (harness-mode-line-global-mode (if global-harness-mode 1 -1)))
+(define-minor-mode harness-auto-reload-mode
+  "Reload the harness whenever one of its source files changes on disk."
+  :global t :group 'harness
+  (dolist (w harness--watches) (ignore-errors (file-notify-rm-watch w)))
+  (setq harness--watches nil)
+  (when harness-auto-reload-mode
+    (dolist (dir (cons "." (cons "lisp" harness-module-directories)))
+      (let ((full (harness--path dir)))
+        (when (file-directory-p full)
+          (push (file-notify-add-watch full '(change) #'harness--auto-reload-callback)
+                harness--watches))))))
 
 (provide 'harness)
 ;;; harness.el ends here

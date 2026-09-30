@@ -1,910 +1,225 @@
-# DESIGN.md — Emacs Agent Harness
-
-Canonical design reference. `SPEC.md` is the original requirements (historical);
-this file is what the code is actually built against. When a decision changes,
-change this file in the same commit.
-
----
-
-## 1. Overview
-
-`emacs-agent-harness` is an LLM coding agent harness implemented entirely in
-Emacs Lisp, using native Emacs UI/UX idioms (major modes, hooks, `defcustom`,
-`tabulated-list-mode`, `widget`, `outline-mode`, text properties, faces,
-`project.el`).
-
-It is both an *application* (a Pi/Claude-Code-like agent) and a *platform*: the
-core is a small set of extensible registries and hooks, and every user-visible
-feature is written on top of them. The harness dogfoods itself — the agent can
-add tools, renderers, and commands to its own running instance via
-`harness_eval` / `harness_define_tool` / the plugin loader.
-
-### 1.1 Design constraints (from SPEC.md, treated as hard requirements)
-
-1. **Never block the Emacs main thread.** All network I/O uses
-   `make-network-process` with `:nowait t` + process filters/sentinels. No
-   `accept-process-output`, no `url-retrieve-synchronously`, no `sleep-for` in
-   request paths.
-2. **No expensive work on the main thread.** Streaming rendering is O(delta),
-   not O(buffer). Tool output is truncated before it is ever inserted. Session
-   search runs against an SQLite index, not by re-reading files. Parsing is
-   incremental per SSE line.
-3. **Built-ins only.** No third-party package is required at runtime
-   (`json`, `url-util`, `project`, `tabulated-list`, `widget`, `outline`,
-   `sqlite`, `gnutls` are all part of Emacs 29+). Optional integration is via
-   `with-eval-after-load` / `bound-and-true-p` only.
-4. **Follow Emacs patterns.** `lexical-binding: t`; `defcustom` for everything
-   user-visible; `harness-` prefix; `harness--` for private symbols; hooks for
-   every extension point; major modes for every buffer; `C-c <key>` prefix;
-   `thing-at-point`, `derived-mode-p`, `cl-defstruct`, `cl-defgeneric` where
-   the codebase already does.
-5. **Extensible from the start.** Registries + hooks + renderer dispatch. See
-   §9.
-
----
-
-## 2. Module map
-
-```
-emacs-agent-harness/
-├── harness.el                     entry point: custom group, keymap, autoloads,
-│                                  plugin loader, commands (new/resume/switch)
-├── lisp/
-│   ├── harness-core.el            structs, registries, hooks, ids, cost, utils
-│   ├── harness-faces.el           faces (themeable), status glyphs
-│   ├── harness-http.el            async HTTP/1.1 + SSE client
-│   ├── harness-provider.el        pluggable provider API: registry, generics,
-│   │                              model/price stats, stream event protocol
-│   ├── harness-provider-openai.el reference provider: OpenAI-compatible
-│   │                              /chat/completions (LiteLLM, DeepSeek, ...)
-│   ├── harness-provider-process.el transport helper for providers implemented
-│   │                              as an external process (streaming JSON over
-│   │                              stdio; the escape hatch for CLI providers)
-│   ├── harness-session.el         session lifecycle, persistence, project link,
-│   │                              sqlite content index / search
-│   ├── harness-tools.el           tool registry, core tools, async execution
-│   ├── harness-perms.el           permission policy, pending approvals, auto-mode
-│   ├── harness-agent.el           the run loop (streaming state machine)
-│   ├── harness-subagents.el       child sessions, personalities, model override
-│   ├── harness-attachments.el     @-notation completion and content attachment
-│   ├── harness-context.el         token budgeting, compaction, chunked search
-│   ├── harness-worktree.el        git worktree per session
-│   ├── harness-queue.el           queued messages + editable queue buffer
-│   ├── harness-ui-conversation.el conversation buffer + input area
-│   ├── harness-ui-sessions.el     tabulated-list session browser
-│   ├── harness-ui-tree.el         outline-based message tree
-│   ├── harness-ui-ask.el          widget-based ask-user-question UI
-│   ├── harness-ui-model.el        model selection UI
-│   └── harness-mode-line.el       per-buffer status line + global indicator
-├── plugins/                       plugins shipped and loaded by default (see
-│   └── harness-log.el             section 13.2): mirror *Messages* to a file
-└── test/                          ERT tests, mock provider, no network
-```
-
-Load order is the above order; `harness.el` `require`s everything. Modules lower
-in the list may not be required by modules higher in the list — they communicate
-through the hooks and registries defined in `harness-core.el`. That keeps the
-core independent of the UI and makes `harness-core` + `harness-provider` +
-`harness-agent` usable headless (tests, batch use).
-
----
-
-## 3. Data model (`harness-core.el`)
-
-All structs use `cl-defstruct` with `:copier` so events can carry snapshots.
-
-```elisp
-(cl-defstruct (harness-message ...)
-  id            ; string, unique within session ("m-<n>")
-  role          ; 'system | 'user | 'assistant | 'tool
-  content       ; string (utf-8)
-  thinking      ; string, reasoning trace (nil when absent)
-  tool-calls    ; list of harness-tool-call (assistant messages only)
-  tool-call-id  ; string (role 'tool only)
-  tool-name     ; string (role 'tool only)
-  status        ; 'complete | 'streaming | 'error | 'aborted
-  error         ; string or nil
-  timestamp     ; float (time-to-seconds)
-  duration      ; float or nil
-  usage         ; plist (:in N :out N :cache-read N :cache-write N :cost F)
-  meta)         ; plist, free for plugins
-
-(cl-defstruct (harness-tool-call ...)
-  id            ; provider tool_call id
-  name          ; tool name
-  args-string   ; raw JSON arguments as streamed (accumulated)
-  args          ; parsed alist, or nil if unparseable
-  status        ; 'pending | 'awaiting-approval | 'running | 'ok | 'error
-                ; | 'denied | 'aborted
-  result        ; string, full (untruncated) output
-  error         ; string or nil
-  detail        ; plist, tool-supplied structured detail for renderers
-  started finished
-  meta)
-
-(cl-defstruct (harness-session ...)
-  id            ; string, "<yyyymmddThhmmss>-<8 hex>"
-  name          ; user-visible name, defaults to a generated title
-  project-root  ; absolute path or nil
-  project-name  ; string (project.el name) or directory basename
-  file          ; absolute path of the .jsonl session file
-  provider      ; provider name (symbol)
-  model         ; model id string
-  messages      ; list of harness-message, oldest first
-  status        ; 'idle | 'working | 'streaming | 'awaiting-approval
-                ; | 'awaiting-answer | 'classifying | 'aborted | 'exited
-  status-detail ; plist, e.g. (:tool "bash" :reason "policy")
-  queue         ; list of harness-queued-message, oldest first
-  approvals     ; list of harness-approval still pending
-  usage         ; accumulator plist (:in :out :cache-read :cache-write :cost)
-  parent        ; parent session id or nil
-  children      ; list of child session ids
-  created updated
-  buffer        ; live conversation buffer, or nil
-  run           ; opaque run token for the in-flight provider request
-  title-generated ; bool, whether an LLM title was requested
-  meta)         ; plist, free for plugins and plugins-only state
-```
-
-`harness-approval`:
-
-```elisp
-(cl-defstruct (harness-approval ...)
-  id session tool-call
-  kind          ; 'tool | 'question
-  prompt        ; string shown to the user
-  detail        ; plist for renderers (diff, command, args, ...)
-  callback      ; function called with the decision
-  created)
-```
-
-`harness-queued-message`: `(id text created attachments)`.
-
-Registry: `harness--sessions` is an `equal`-hash of id → `harness-session`.
-`harness-session-list` returns sessions sorted by `updated` descending.
-Registries are also defined for tools, providers, models, renderers.
-
-### 3.0 JSON encoding conventions
-
-Everything that crosses the wire or hits disk is encoded by
-`harness-json-write' and decoded by `harness-json-read'.  The mapping is:
-
-| JSON | Lisp |
-|---|---|
-| object | plist (keyword keys) or alist (symbol/string keys) |
-| array | **vector** when the elements are objects or arrays; a list is fine for arrays of scalars |
-| null | nil |
-| false | `:false` |
-| string/number/bool | the obvious thing |
-
-The vector rule is not stylistic.  `json-encode' decides whether a list is an
-object or an array by looking at its shape, so a one element array of objects
-(`({"a": 1})`) is indistinguishable from an object and is silently encoded as
-one.  `harness-json-array` (`vconcat`) is the explicit way to say "this is an
-array"; tool specs, wire tool calls and persisted queues all go through it.
-Decoding always produces lists for arrays, which is fine: reading is
-unambiguous.
-
-### 3.1 Hooks (the extension contract)
-
-| Hook | Args | When |
-|---|---|---|
-| `harness-session-created-hook` | `session` | after a session enters the registry |
-| `harness-session-updated-hook` | `session events` | any mutation; `events` is a list of symbols |
-| `harness-session-deleted-hook` | `session` | session killed |
-| `harness-status-changed-hook` | `session old new` | status transition |
-| `harness-message-added-hook` | `session message` | message appended |
-| `harness-message-updated-hook` | `session message events` | in-place message mutation |
-| `harness-tool-call-updated-hook` | `session tool-call` | tool call state change |
-| `harness-stream-hook` | `session message kind text` | `kind` is `text`/`thinking` |
-| `harness-run-finished-hook` | `session` | run loop reached idle |
-| `harness-approval-added-hook` / `-resolved-hook` | `session approval [decision]` | approval lifecycle |
-| `harness-user-message-functions` | `session text` → text | transform an outgoing message (attachments use this) |
-| `harness-content-render-functions` | `content` → handled-p | render a message body (the attachment renderer uses this) |
-| `harness-run-aborted-hook` | `session` | a run was aborted (subagents stop their children) |
-| `harness-after-reload-hook` | – | the harness or a plugin was reloaded |
-| `harness-context-updated-hook` | `session` | the summary or context view changed |
-
-`events` symbols: `messages`, `stream`, `status`, `usage`, `queue`,
-`approvals`, `meta`. UI handlers switch on them; `messages` means "structure
-changed, re-sync", `stream` means "append-only delta, do the cheap thing".
-
----
-
-## 4. HTTP + SSE (`harness-http.el`)
-
-A purpose-built async HTTP/1.1 client. Not a general-purpose library — it
-supports exactly what LLM APIs need: POST/GET, headers, `Content-Length` and
-`Transfer-Encoding: chunked`, TLS, streaming callbacks.
-
-```elisp
-(harness-http-request
-  "https://api.example.com/v1/chat/completions"
-  :method "POST"
-  :headers '(("Authorization" . "Bearer sk-...") ("Accept" . "text/event-stream"))
-  :body "{\"stream\":true}"
-  :on-event  (lambda (event) ...)   ; one SSE event (data joined), or nil for raw
-  :on-chunk  (lambda (string) ...)  ; raw body bytes (decoded utf-8)
-  :on-complete (lambda (status headers body) ...)
-  :on-error  (lambda (err) ...))
-;; => a harness-http-request struct usable with `harness-http-cancel'
-```
-
-Implementation notes (non-blocking guarantees):
-
-- `open-network-stream` with `:nowait t` and `:type 'tls` for https. The
-  sentinel sends the request on `"open"`, and reports `failed` / `connection
-  broken` / `deleted` through `on-error`. DNS + TCP + TLS handshake therefore
-  never block.
-- The process coding system is `binary`; we decode UTF-8 ourselves. This avoids
-  Emacs' stream decoders corrupting a multibyte character split across TCP
-  segments.
-- Header parsing is incremental; only after `\r\n\r\n` do we start forwarding
-  body bytes.
-- Chunked decoding is a two-state machine (`size` / `data`), so a chunk header
-  split across two segments works.
-- SSE framing is line-based; `data:` lines are accumulated until a blank line.
-  Multi-line `data:` payloads are joined with `\n` (per the SSE spec).
-- `harness-http-timeout` (default 120s) is enforced with a timer that kills the
-  process; the timer is the only timer allocated per request.
-- `:on-event` is invoked with the raw event string; `harness-provider` performs
-  the JSON parse. This keeps `harness-http` protocol-agnostic and testable.
-- Nothing here touches a buffer that is visible; the process has no buffer
-  (`:buffer nil`), so there is no unbounded text accumulation.
-
-## 5. Providers — pluggable inference backends (`harness-provider.el`)
-
-A provider is anything that can (a) run an inference request and stream the
-result back, and (b) report stats about the models it can serve (id, label,
-context window, price). The standard OpenAI-compatible HTTP provider and a
-hypothetical provider that shells out to a CLI and talks JSON-RPC over stdio are
-both first-class implementations of the same interface. **Only the
-OpenAI-compatible provider ships**; the process transport that a CLI/JSON-RPC
-provider would need is provided as a helper so such a provider is a pure plugin.
-
-### 5.1 The interface
-
-The API is `cl-defgeneric`-based, so a plugin can define its own provider struct
-and implement methods on it without touching core:
-
-```elisp
-(cl-defgeneric harness-provider-capabilities (provider)
-  "Return a plist: (:streaming BOOL :tools BOOL :reasoning BOOL :images BOOL
-                    :usage-in-stream BOOL :system-role SYMBOL)")
-(cl-defgeneric harness-provider-chat (provider request callbacks)
-  "Start an inference request. Return an opaque handle (`harness-provider-cancel' on it).")
-(cl-defgeneric harness-provider-cancel (provider handle))
-(cl-defgeneric harness-provider-models (provider callback)
-  "Asynchronously report the models this provider serves.
-CALLBACK is called with a list of `harness-model-stats'. Must not block.")
-```
-
-`harness-provider-chat` is called by the agent loop and never by the UI. The
-core supplies `harness-provider-chat-async`, a wrapper that resolves the
-session's provider name → provider instance, normalises the transcript, applies
-capability fallbacks (e.g. renders tool results as text for providers without
-`:tools`), and guarantees exactly one terminal callback.
-
-### 5.2 Request and callbacks
-
-```elisp
-(cl-defstruct (harness-provider-request ...)
-  model messages tools system temperature max-tokens stream metadata)
-```
-
-`callbacks` is an open plist of closures; unknown keys are ignored, so the
-protocol can grow without breaking providers:
-
-| Key | Signature | Meaning |
-|---|---|---|
-| `:on-delta` | `(kind text)` | incremental output; `kind` ∈ `text`, `thinking` |
-| `:on-tool-call` | `(index tool-call)` | tool call created/updated (see §5.4) |
-| `:on-usage` | `(plist)` | token usage, may arrive mid-stream or at the end |
-| `:on-done` | `(finish-reason usage)` | exactly once, on success |
-| `:on-error` | `(error-symbol message)` | exactly once, on failure |
-
-`finish-reason` ∈ `stop`, `length`, `tool-calls`, `error`, `aborted`.
-
-### 5.3 Stats and pricing
-
-```elisp
-(cl-defstruct (harness-model-stats ...)
-  provider id label
-  context-window max-output
-  ;; prices are per 1M tokens, in `currency'
-  price-in price-out price-cache-read price-cache-write currency
-  capabilities               ; plist, as above
-  source)                    ; 'static | 'discovered | 'default
-```
-
-- `harness-models` (`defcustom`) is the static model table: a list of plists
-  (`:provider :id :label :context-window :price-in ...`) merged into
-  `harness-model-stats` by `harness-model-stats` (the lookup function).
-  Static entries win; discovered entries fill the gaps.
-- `harness-provider-models` may discover models at runtime (`/v1/models`,
-  `ollama list`, `--version` probing, ...). Results are cached in
-  `harness-model-cache` and refreshed on demand with `M-x
-  harness-refresh-models`; discovery is async and failure falls back to the
-  static table.
-- The mode line, model-selection UI and cost accounting all read stats through
-  the single function `harness-model-stats`, so a provider with no pricing
-  simply shows tokens and a nil cost (`harness-model-stats-price-p`).
-- `harness-usage-cost usage stats` computes the money for one usage plist;
-  `harness-session-usage` accumulates per session.
-
-### 5.4 Tool calls over a streaming protocol
-
-A provider must be able to express tool calls even if its wire protocol is not
-OpenAI's (e.g. a JSON-RPC CLI that sends whole `tool_use` blocks). The unit of
-transport between providers and the agent loop is therefore a
-`harness-tool-call` struct, not a JSON delta:
-
-- Providers that stream partial arguments (OpenAI) mutate `args-string` and
-  re-emit `:on-tool-call` with the same `index`;
-- Providers that emit a complete call (Anthropic-style, JSON-RPC CLI) emit it
-  once with `args-string` fully populated.
-
-The agent loop treats both identically: it accumulates nothing itself, it just
-records the latest struct per index. `harness-provider--parse-tool-args` parses
-`args-string` when the stream ends.
-
-### 5.5 Reference provider: OpenAI-compatible
-
-`harness-provider-openai.el` implements the interface for
-`/chat/completions`, covering LiteLLM, DeepSeek, OpenAI, Groq, vLLM, Ollama,
-llama.cpp server, OpenRouter, etc. It supports:
-
-- `stream: true` + `stream_options: {include_usage: true}`
-- `delta.content` → text deltas
-- `delta.reasoning_content` / `delta.reasoning` → thinking deltas
-- `delta.tool_calls[i]` accumulation keyed by `index`
-- `finish_reason` → terminal event
-- tool results and tool calls serialised to the OpenAI wire shape
-- a non-streaming fallback when `:stream` is nil
-
-A provider instance is created from a `defcustom` plist:
-
-```elisp
-(setq harness-providers
-      '((:name local :kind openai :label "LiteLLM"
-         :base-url "http://127.0.0.1:4000/v1" :api-key-env "LITELLM_API_KEY")
-        (:name work :kind process :label "Acme CLI"
-         :command "acme" :args ("serve" "--json") :api-key-env "ACME_KEY")))
-```
-
-`:kind` selects the implementing module: `openai` →
-`harness-provider-openai`, anything else → looked up in
-`harness-provider-kinds` (a registry a plugin populates).
-
-### 5.6 Process transport (`harness-provider-process.el`)
-
-For providers that are an external program rather than an HTTP endpoint, the
-core offers a transport (not a provider): a subprocess with
-newline-delimited-JSON framing, started lazily, with
-
-```elisp
-(harness-provider-process-request transport request &key on-message on-error)
-;; request -> one JSON line on stdin;
-;; each JSON line on stdout -> (on-message parsed-line)
-```
-
-and `harness-provider-process-transport` (struct) managing the child process,
-its stderr ring buffer, restart-on-crash, and shutdown. A JSON-RPC CLI provider
-is then ~100 lines in a plugin: implement `harness-provider-chat` by writing one
-JSON request and translating `on-message` notifications into the callbacks of
-§5.2. This transport is what makes the "custom provider" requirement reachable
-without core changes; no CLI-specific provider is implemented here
-intentionally.
-
-## 6. Session lifecycle, persistence, search (`harness-session.el`)
-
-- **Creation**: `harness-session-create` picks the project via
-  `project-current` (falling back to `default-directory`), names the session
-  from the project, and appends a header record to a new JSONL file under
-  `harness-session-directory/<project-slug>/`.
-- **Persistence**: one JSON object per line. Line 1 is the session header
-  (`{"type":"session",...}`), later lines are messages, queue snapshots and
-  title updates. Appends are `write-region` of a single line, so a crash loses
-  at most the in-flight assistant message. On resume the file is read once,
-  parsed line by line, and replayed.
-- **Index**: `harness-session-index` (SQLite, via the built-in `sqlite-open`)
-  stores `(session_id, project, message_id, role, text, ts)`. Rows are inserted
-  when a message is finalized (one prepared statement, no file I/O on the main
-  thread beyond the row insert). If Emacs lacks SQLite the index degrades to
-  `harness--search-fallback`, which greps the session directory in a subprocess.
-- **Search**: `harness-search-sessions` runs a `LIKE`-based query, returns a
-  list of `(session match-snippet)` and is presented by
-  `harness-ui-sessions` (search mode).
-- **Resume**: `harness-session-resume` re-reads the file, rebuilds the struct,
-  registers it, and opens the conversation buffer. Resumed sessions are idle;
-  the previous run state is never restored.
-- **Working directory**: every session has one (`harness-session-cwd`),
-  starting at the project root.  Tools, `@` attachment lookup and git resolve
-  against it, so moving a session -- to a git worktree, for example -- moves
-  all of them at once.  `M-x harness-set-working-directory` changes it and the
-  header line shows it.
-- **Project association**: `project.el` only (`project-current`,
-  `project-root`, `project-name`, `project-files`). `projectile` is used only
-  as an optional fallback when `project.el` finds nothing.
-- **Filtering**: status filters are computed from the live log
-  (`harness-session-blocked-p`, `harness-session-active-p`).
-
-## 7. Tools and permissions
-
-### 7.1 Tool registry (`harness-tools.el`)
-
-```elisp
-(harness-define-tool NAME
-  :description "..."          ; sent to the model
-  :parameters JSON-SCHEMA      ; plist, JSON-serialised for the provider
-  :category 'edit              ; for permission policies
-  :read-only BOOL              ; hint for auto-mode and parallel execution
-  :approval 'ask|'never        ; per-tool default
-  :function (lambda (args ctx) ...)
-  :async (lambda (args ctx done) ...)  ; alternative to :function
-  :render (lambda (tool-call) ...)     ; optional custom renderer
-  :include BOOL)
-```
-
-`ctx` is a `harness-tool-context` struct (`session`, `tool-call`, `cwd`,
-`abort-flag`). Synchronous tools return a `harness-tool-result`
-(`:content`, `:error`, `:detail`, `:meta`); async tools call `done` with one.
-Tools that need the user (approval, `ask_user_question`, subagents) are always
-async, because the run loop must stay non-blocking.
-
-Built-in tools: `bash`, `read`, `write`, `edit`, `glob`, `grep`, `todo`,
-`ask_user_question`, `spawn_subagent`, `harness_eval`, `harness_define_tool`.
-
-Large outputs are truncated by `harness-tool-truncate` before the result enters
-a message (default 64 KB / 2000 lines, tail-biased for command output). The full
-text is kept in the tool-call struct so the UI can expand it.
-
-### 7.2 Permissions (`harness-perms.el`)
-
-`harness-permission-policy` is a list of rules evaluated in order:
-
-```elisp
-((:tool "bash" :match "^git status" :action allow)
- (:tool "bash" :action ask)
- (:tool "read" :action allow)
- (:category edit :action ask)
- (:default ask))
-```
-
-Actions: `allow`, `ask`, `deny`, `auto`. `auto` means "ask the auto-mode
-classifier". `harness-permission-check` returns an action; a rule can also be
-minted at runtime by the user answering "always allow" (persisted in
-`harness-permission-rules-file`).
-
-**Approvals are asynchronous.** Creating one puts the session in
-`awaiting-approval`, records a `harness-approval` with a `callback`, and returns
-to the event loop. The user resolves it from the conversation buffer, the
-sessions list, or `M-x harness-approve-next`, whichever session they are looking
-at. The callback then continues the tool call. No `y-or-n-p`, no recursive
-edit — other sessions stay fully responsive.
-
-### 7.3 Auto mode
-
-When the verdict is `auto`, `harness-perms--classify` sends the tool call,
-the session's working directory and a short policy prompt to
-`harness-auto-mode-model` (a cheap model), and interprets a single-word reply
-(`allow` / `deny` / `ask`). While it runs the session status is `classifying`.
-Failures degrade to `ask`. This mirrors `@czottmann/pi-automode`.
-
-## 8. Agent loop (`harness-agent.el`)
-
-One run per session, all asynchronous:
-
-```
-send(text)
-  ├─ session status = working, queue drained first
-  ├─ append user message, persist
-  ├─ provider-chat(messages, tools)
-  │    ├─ on-delta text/thinking ─► append to open assistant message, stream hook
-  │    ├─ on-delta tool_call     ─► update tool-call struct in place
-  │    ├─ on-usage               ─► session usage accumulator
-  │    └─ on-done(finish)
-  │         ├─ no tool calls ─► status idle, run-finished-hook, drain queue
-  │         └─ tool calls    ─► execute in order (async chain)
-  │                ├─ permission → allow | ask(approval) | deny | auto
-  │                ├─ tool result becomes a role='tool' message
-  │                └─ all done ─► provider-chat again (next iteration)
-  └─ harness-agent-abort(session) cancels the request, marks messages aborted
-```
-
-- Iteration cap `harness-agent-max-iterations` (default 100) prevents runaway
-  loops; hitting it appends a system note and stops.
-- Tool calls are executed **sequentially** by default (deterministic ordering of
-  results); `harness-agent-parallel-tools` allows read-only calls to run
-  concurrently, with results still appended in the original order.
-- Aborting notifies the provider handle (`harness-http-cancel`), marks the open
-  assistant message `aborted`, resolves any pending approvals with `aborted`,
-  and sets status idle.
-- Queued messages are appended to the transcript when the queue is popped, not
-  when they are submitted, so the transcript order matches reality.
-- The system prompt is assembled per run from `harness-system-prompt` plus
-  `harness-system-prompt-functions` (project instructions, tool list, custom
-  personalities) — assembled fresh so plugins can inject context (e.g. current
-  file, git status) cheaply.
-
-## 9. UI architecture and extensibility
-
-### 9.1 Conversation buffer (`harness-ui-conversation.el`)
-
-`harness-conversation-mode` derives from `special-mode`; the transcript is
-entirely read-only (every rendered span carries the `read-only` text
-property).  The editable input lives in a separate buffer,
-`harness-conversation-input-mode` (a `text-mode` derivative), shown in a
-bottom side window so it stays pinned there instead of floating up under a
-short transcript.  Its keymap is not a child of `special-mode-map`, so the
-single keys that navigate the transcript never swallow typing.
-
-Rendering is incremental and marker-based:
-
-- `harness-ui--render-message` appends a message block and records
-  `(start . end)` markers in `harness-ui--markers` (a buffer-local hash keyed by
-  message id).
-- A `stream` event inserts the delta directly at the block's marker: O(delta)
-  work, no re-render.  A message is rendered before its first delta, so a
-  thinking delta opens the reasoning region (`thinking…` label, the trace, a
-  separator newline) before the body the first time it arrives, and later
-  deltas append above that separator.
-- A `messages` event re-renders only the messages whose markers are missing or
-  stale (normally: the current message).
-- The approval prompts and queued messages live in a region after the
-  messages, bounded by `harness-conversation--messages-end` and
-  `harness-conversation--extras-end`; it is cleared and re-rendered as a unit,
-  so a prompt never appears twice.
-- Approval prompts and the mode line spell out the keyboard answers.  The
-  keys are looked up live (`harness-key-hint`, `harness-command-key`), so a
-  hint can never drift from the keymap; the rendered buttons are a mouse
-  alternative.
-- Tool-call blocks are rendered by `harness-ui--render-tool-call`, dispatching
-  on the tool's `:render` function, with a default renderer that shows a
-  one-line header + truncated output (foldable with `TAB`).
-- Renderer dispatch is a registry: `harness-renderers` maps a message/part
-  `:kind` to a function. Plugins add renderers with
-  `harness-add-renderer`; the core's text/tool/diff/etc. renderers are
-  registered the same way, so nothing is special-cased.
-
-Input: the input side window is `harness-conversation-input-mode`.  The
-read-only `❯` prompt is the start of the buffer and everything after it is
-editable.  `RET` submits (`C-c C-c` is an alternative), `S-<return>`/`C-j`
-insert a newline, `C-c C-k` clears.  The window grows with the message up to
-`harness-ui-input-max-height` lines (`harness-ui-input-min-height` when
-empty) and then scrolls, so a long message never covers the transcript.
-Submitting while a run is in flight -- `working`, `streaming`, or blocked on
-an approval or a question -- enqueues instead.  The transcript window follows
-the stream only when it was already at the end (`harness-ui-follow`);
-`n`, `p`, `g`, `q` and `SPC` keep their transcript meaning there because
-typing happens in the other buffer.  Neither buffer shows line numbers:
-line numbers are turned off from `after-change-major-mode-hook', because Doom
-(and similar configs) enables them from `text-mode-hook', which runs after a
-mode's body and would otherwise undo an opt-out there and push the `❯' prompt
-to the right.
-
-Perf guards: `harness-ui-max-rendered-messages` (default 200) renders only the
-tail and leaves a "load earlier" button; `harness-ui-truncate-lines` reuses
-`harness-tool-truncate`.
-
-### 9.2 Other views
-
-- `harness-ui-sessions.el` — `harness-sessions-mode` (tabulated-list). Columns:
-  project, name, status, model, tokens/cost, updated. Commands: filter by
-  status (`/` then `i/w/b/a`), group by project (`g`), view (`RET`), resume,
-  rename, delete, kill, search (`s` uses §6 search). Blocked sessions sort first.
-- `harness-ui-tree.el` — `harness-tree-mode` derives from `outline-mode`. Each
-  message is a heading (collapsible with `TAB`/`S-TAB`); tool calls and results
-  are sub-headings. `RET` jumps to the message in the conversation buffer.
-- `harness-ui-ask.el` — `harness-ask-mode` uses `widget` to render *every*
-  request that blocks the run in one buffer.  A question gets one widget per
-  question (`radio-button-choice`, `editable-field`, `checkbox`) and a
-  description area; a tool permission gets the prompt, the arguments and
-  `[Allow]`/`[Always]`/`[Deny]` buttons.  `C-c C-c` confirms (send or allow),
-  `C-c C-k` declines (skip or deny), `C-c C-y` allows always, `TAB`/`S-TAB`
-  move and `RET` picks.  The header line and the intro say so, via the live
-  binding lookup.  The conversation buffer keeps an inline approval block with
-  the same live hints as a quick path.  Answers go back to the waiting tool
-  call through an async callback.  Resolving a request -- from the widget, the
-  minibuffer or the inline prompt -- dismisses the widget buffer: it is removed
-  from its window and killed, so a sequence of permissions cannot leave stale
-  windows behind.  Modeled on the customize UI.
-- `harness-ui-model.el` — `harness-select-model` (`completing-read` with
-  annotations), `harness-model-mode` for a browseable list with costs.
-- `harness-mode-line.el` — `harness-mode-line-mode` (buffer-local) sets
-  `mode-line-format` to a `(:eval ...)` that renders status, model, session
-  name, tokens, cost and pending-approval count. Global indicator via
-  `global-harness-mode` adds `harness-mode-line-global-string` to
-  `global-mode-string`, showing the number of blocked sessions.
-
-### 9.3 Window/buffer placement
-
-`harness-buffer-display` (defcustom, action list consumed by
-`display-buffer`) controls where each buffer opens: conversation
-(`harness-conversation-display-action`), sessions list, tree, ask buffer.
-Defaults: conversation in the selected window, the input in a bottom side
-window (`harness-ui-input-display-action`), auxiliary buffers via
-`display-buffer-at-bottom` / side windows. All go through `display-buffer`, so
-users can override with standard `display-buffer-alist` entries.
-
-### 9.4 Keymap layout
-
-`harness-command-map` on `C-c h`:
-
-| Key | Command |
-|---|---|
-| `C-c h n` | `harness-new-session` |
-| `C-c h r` | `harness-resume-session` |
-| `C-c h l` | `harness-list-sessions` |
-| `C-c h s` | `harness-search-sessions` |
-| `C-c h m` | `harness-select-model` |
-| `C-c h a` | `harness-approve-next` |
-| `C-c h A` | `harness-toggle-auto-mode` |
-| `C-c h t` | `harness-tree` |
-| `C-c h q` | `harness-queue-edit` |
-| `C-c h b` | `harness-switch-buffer` (next blocked session) |
-| `C-c h TAB` | `harness-switch-session` (cycle sessions) |
-| `C-c h c` | `harness-compact-session` |
-| `C-c h w` | `harness-worktree-create` |
-| `C-c h W` | `harness-worktree-remove` |
-| `C-c h C-w` | `harness-worktree-switch` |
-| `C-c h F` | `harness-conversation-search` (whole transcript, chunked) |
-
-In the conversation transcript: `C-c C-a` approve, `C-c C-y` approve always,
-`C-c C-d` deny, `C-c C-c` send (from the input), `C-c C-k` clear input,
-`C-c C-e` edit queued, `C-c C-t` tree, `C-c C-b` abort, `C-c C-f` search the
-transcript, `C-c C-z` compact, `C-c C-w` change the working directory, `TAB`
-folds tool output, `n`/`p` next/previous message, `g` refresh, `q` bury,
-`SPC` scroll.  In the input buffer: `RET`/`C-c C-c` send,
-`S-<return>`/`C-j` newline, `C-c C-k` clear, plus the approval keys.
-(`C-c C-A` is the same event as `C-c C-a`, so "always" is `C-c C-y`.)  Every
-key prompt in the UI is rendered from the actual binding, never from a literal.
-
-## 10. Subagents (`harness-subagents.el`)
-
-A subagent is a normal session with `parent` set. The `spawn_subagent` tool:
-
-```jsonc
-{"prompt": "...", "personality": "reviewer", "model": "optional-override",
- "background": false}
-```
-
-- The child inherits the parent's provider and model unless `model` or the
-  personality's `:model` overrides it.
-- `harness-personalities` is an alist of `(name . plist)` with `:model`,
-  `:system-prompt`, `:tools`; built-ins: `general`, `planner`, `reviewer`,
-  `researcher`.
-- The child's conversation buffer is created but **not** displayed; it is
-  reachable from the sessions list, `harness-view-subagents`, and
-  `harness-switch-session`. "View subagent using the first-class conversation
-  view" is exactly this: no separate viewer.
-- The parent's tool call completes with the child's final assistant text when
-  the child goes idle. `background: true` returns the session id immediately.
-- Child status changes are propagated to the parent's mode line so a parent
-  blocked on a subagent is visible.
-
-## 11. Queue (`harness-queue.el`)
-
-Submitting while a session is busy appends a `harness-queued-message`, which is
-rendered in a distinct "Queued" region at the end of the conversation buffer.
-`C-c C-e` opens `harness-queue-mode` (derived from `text-mode`): one message per
-section, separated by `\f` (form feed) so parsing is trivial, `C-c C-c` commits,
-`C-c C-k` discards, `C-c C-d` deletes the message under point. Order is
-preserved and the queue is persisted in the session file so it survives restart.
-
-## 12. Theming (`harness-faces.el`)
-
-Every visual element is a `defface` under the `harness` custom group, derived
-from existing Emacs faces (`font-lock-keyword-face`, `success`, `error`,
-`warning`, `shadow`, `mode-line-*`) so third-party themes colour the harness
-without any work. `harness-status-faces` maps each session status symbol to a
-face; `harness-status-glyphs` maps it to a short glyph. A theme can override
-both without touching code.
-
-## 13. Plugin system
-
-```elisp
-;; plugins/my-plugin.el                          (shipped, loaded by default)
-;; ~/.emacs.d/agent-harness/plugins/my-plugin.el (the user's, loaded after)
-(require 'harness)
-
-(harness-define-tool "deploy" ...)
-(harness-add-renderer :kind 'chart :function #'my-chart-render)
-(add-hook 'harness-run-finished-hook #'my-notifier)
-(define-key harness-conversation-mode-map (kbd "C-c C-p") #'my-command)
-(provide 'my-plugin)
-```
-
-- `harness-load-plugins` runs during `harness-setup`.  It loads
-  `harness-bundled-plugins-directory` (the `plugins/` directory shipped with
-  the harness) first, then `harness-plugins-directory` (the user's), each
-  `*.el` in alphabetical order.  Errors are caught and reported without
-  aborting startup, and a user plugin of the same name loads later and wins.
-- Plugins can be authored *by the agent itself*: the `harness_eval`,
-  `harness_define_tool` and `harness_write_plugin` tools let the running harness
-  extend its own session. This is the "dogfood its own core functionality"
-  requirement — every feature in this document could be added as a plugin.
-
-## 13.1 Hot reload
-
-Reloading a plugin must not mean restarting Emacs, and it must not leave the
-harness in a half-defined state.  The rule is: **use the built-in machinery,
-make everything re-loadable, and keep the registries honest.**
-
-What that means concretely:
-
-- **Nothing in the core is stateful in a way a reload destroys.**  Registries
-  are `defvar`'d hash tables (re-loading a file does not re-run `defvar` when
-  the variable is already bound), sessions and buffers are untouched by
-  redefining functions, and live runs keep working because their callbacks are
-  closures, not global function references.
-- **Registries remember their owner.**  `harness-define-tool` and
-  `harness-add-renderer` record the file that defined them
-  (`load-file-name` / `buffer-file-name`).  `harness-unload-file` removes that
-  file's tools and renderers before the file is re-loaded, so iteration does
-  not accumulate dead registrations.
-- **Reload is `load`, not a private loader.**  `harness-reload-plugin` calls
-  `harness-unload-file` then `load`; `harness-reload-plugins` does that for
-  every plugin; `harness-reload` reloads the harness modules in dependency
-  order (core first, `harness.el` last) so a change to a lower module is
-  picked up exactly like a restarted Emacs would.  `load-prefer-newer` is
-  respected, and byte-compiled files are used when current.
-- **`harness-plugin-mode`** is a global minor mode that watches the plugin
-  directory (and, when `harness-plugin-watch-harness-dir` is set, the harness
-  source directory) with `file-notify-add-watch`, debounces per file, and
-  reloads a file after it is saved.  This is what makes plugin development
-  feel live: edit, save, the tool list in the next request already has it.
-- **Coexistence with Doom.**  `harness-reload` calls
-  `doom/reload-autoloads` when it exists (guarded by `fboundp`, never
-  required), so a harness reload after adding an autoloaded command picks it
-  up the way `doom/reload` would.  `C-M-x`/`eval-defun`, `M-x load-file` and
-  `doom/reload` all work unchanged; the harness adds no reload engine of its
-  own.
-- **Reload is visible.**  `harness-reload` reports what it reloaded, and every
-  reload runs `harness-after-reload-hook`, which the UI uses to re-render
-  conversation buffers so a changed renderer takes effect immediately.
-- **The harness can reload itself.**  `harness_eval` evaluates Elisp in the
-  running instance and `harness_reload` is registered as a tool, so an agent
-  editing the harness (or a plugin) can call it directly and see the result in
-  its own next request.  This is the dogfooding requirement: the harness
-  extends itself with the same mechanism a person uses.
-
-## 13.2 Bundled plugins
-
-The core stays small by taking the plugin API seriously.  When a feature can
-be expressed as a tool, a renderer, a hook function or a provider, it ships
-as a plugin in `plugins/` rather than as another `harness-*` module.  Those
-plugins are distributed with the harness and loaded by default, so the user
-gets them without configuring anything and the core grows only the loader
-and the registries.  The first such plugin is `plugins/harness-log.el`, which
-mirrors `*Messages*` to `harness-log-file` so an unattended run is readable
-from outside Emacs.
-
-- `harness-bundled-plugins-directory` defaults to `plugins/` next to
-  `harness.el`.  `harness-load-plugins` loads it before
-  `harness-plugins-directory`, so a user plugin of the same name overrides a
-  bundled one.
-- Bundled plugins are ordinary plugins.  `harness-plugin-mode` watches
-  `plugins/` as well, `harness-reload-plugins` reloads them, and
-  `harness-plugin-file-p` treats a file in either directory as a plugin (so
-  `harness-reload-file` picks the plugin path for it).
-- A bundled plugin with effects outside the registries (a timer, an advice, a
-  hook) defines `FEATURE-unload-function` so a reload can undo them;
-  `unload-feature` only knows the definitions the file itself made.  See the
-  hot-reload rules in 13.1.
-- Tests that load plugins bind `harness-bundled-plugins-directory` out of the
-  way; a bundled plugin is exercised by its own tests, not by every test that
-  happens to call `harness-load-plugins`.
-
-## 14. Testing
-
-- `test/` holds ERT tests. Nothing in the test suite touches the network: a
-  mock provider returns scripted deltas and a mock HTTP server is a plain
-  `make-network-process` on port 0 that speaks an HTTP subset.
-- `test/harness-test-util.el` provides `harness-test-with-session`,
-  `harness-test-with-temp-home`, and a synchronous "wait until predicate"
-  helper built on `while` + `accept-process-output` (allowed in tests; it is the
-  one place blocking is fine).
-- `scripts/test.sh` runs byte-compilation with `-Werror`-style warnings and ERT
-  in batch.
-
-## 15. Attachments and long context
-
-### 15.1 `@` attachments (`harness-attachments.el`)
-
-While composing, `@` completes file and directory names of the session's
-working directory, fuzzy matched (`harness-attachments--fuzzy-score`), and
-what is picked is attached **by content**: the text of a file, or the listing
-of a directory, is appended to the message as an `<attached path=...>`
-block.  The agent therefore does not spend a turn finding the file and cannot
-be defeated by a path that moved in between.
-
-Two halves, deliberately separable:
-
-- **Completion** is a `completion-at-point-function` registered in the
-  conversation buffer.  Candidates come from the session's working directory,
-  so `@` follows a session into a git worktree, and the candidate cache is
-  keyed by the directory's mtime so completion does not re-walk a tree on
-  every keystroke.
-- **Expansion** is `harness-attachments-expand`, called through
-  `harness-user-message-functions` in `harness-agent-send`.  It lives in the
-  send path, not the UI, so a plugin, a queued message and a test attach the
-  same way.
-
-Budgets are enforced here rather than trusted to the model: a file larger than
-`harness-attachment-max-bytes` is truncated with a note, the total per message
-is capped, and a directory listing is bounded.  A reference that does not
-resolve to an existing path is left as ordinary text, which is what makes an
-at sign in prose harmless.
-
-Rendering is the `harness-content-render-functions` hook's first customer: the
-conversation view's text renderer offers content to those functions before
-falling back to plain text, so the attachment renderer adds folded, labelled
-sections without the core knowing about attachments.
-
-### 15.2 Long context (`harness-context.el`)
-
-A session can outlive its model's context window.  Three rules keep that
-graceful:
-
-1. **The transcript is not the request.**  `harness-context-build-messages`
-   returns what is actually sent: the summary plus a recent tail.  Nothing is
-   deleted by compaction, so the UI and search still see everything, and
-   `harness-context-summary-addition` delivers the summary through the system
-   prompt (a supported extension point) rather than as a fake message.
-2. **The buffer stays small.**  The conversation view renders a window of
-   messages; `harness-conversation-load-earlier` prepends only what is
-   missing instead of rebuilding, which keeps point and folds where they
-   were.
-3. **The big walks stay off the main thread.**  Searching a whole transcript
-   is chunked across timers (`harness-context-search`), and cross-session
-   search remains a SQLite query.  Sizing is O(1) per message because each
-   message caches its character count once.
-
-Compaction is a cheap-model request and therefore asynchronous: the run it
-interrupts waits for it, not the other way round.  A failure is recorded with
-a timestamp (`:summary-error-at`) so a broken summariser is not asked again on
-every turn, and the run degrades to the provider's error rather than looping.
-Token counts shown in the mode line come from the provider's usage; the
-*estimator* here is only used to decide when to compact and is deliberately
-crude.
-
-The context module is optional: the agent loop calls it through
-`fboundp`-guarded functions and falls back to sending the whole transcript, so
-`harness-core` + `harness-provider` + `harness-agent` remain usable headless.
-
-## 16. Git worktrees (`harness-worktree.el`)
-
-An agent that edits files should not do it in the working tree you are using.
-A session can create its own worktree on its own branch and work there.
-
-Because every filesystem path in the harness resolves through
-`harness-session-cwd` -- tools, `@` completion, the summariser's view of the
-project -- pointing the session at the worktree moves all of it at once, and
-the header line shows where it is working.  There is no separate "worktree
-mode" for any of the other modules to know about.
-
-- **Creating** runs git asynchronously (`git worktree add -b BRANCH PATH`); a
-  checkout of a large repository is exactly the kind of thing that must not
-  freeze Emacs.  The session's directory only changes once the checkout has
-  succeeded.  By default the worktree is created in a sibling directory
-  (`<project>-worktrees/<slug>`) rather than inside the project.
-- **Cleaning up** is opt-in on session close
-  (`harness-worktree-cleanup-on-exit`) and on Emacs exit
-  (`harness-worktree-cleanup-on-emacs-exit`), and it never discards work: git
-  refuses to remove a dirty worktree and the refusal is reported rather than
-  forced away.  `harness-worktree-remove` takes an explicit `force`.
-- **The agent can ask for one**: the `worktree` tool exposes create, list and
-  remove, because a worktree is as reasonable a request as a directory.
-
-## 17. Open questions / future work
-
-- Anthropic-native provider (currently reachable via LiteLLM or a compatible
-  gateway).
-- MCP client integration behind the same tool registry.
-- Session compaction / summarisation when context grows (hook point exists:
-  `harness-system-prompt-functions` + `harness-before-request-hook`).
-- Image/attachment parts in messages (struct has `meta`, renderer registry is
-  ready).
-- Native JSON-RPC bridge to external harnesses (the sibling
-  `emacs-llm-agent-status` protocol could be a provider/observer plugin).
+# Emacs Agent Harness
+This is the design document for the Emacs native agent harness. This document describes the indended features and technical architecture of the program. 
+
+# Table Of Contents
+- [Overview](#overview)
+- [Development Guidance](#development-guidance)
+- [Technical Architecture](#technical-architecture)
+- [User Experience](#user-experience)
+- [Features](#features)
+
+# Overview
+The agentic experience in Emacs as of yet has been well served by generic tools but not specialized to the strengths of Emacs. Additionally Emacs provides a powerful environment in which programs can interact with source code, external programs (shell, build and test systems ect), and use pre-made tools and patterns to complete complex workflows.
+
+The status quo is running a terminal emulator inside Emacs further inside which you run a harness which paints UI elements via curses style drawing commands. Although this gives you access to agentic tooling (Claude code, Pi, ect) it's obviously not an ideal experience (Many layers of indirection between UI, Emacs vterm is okay at best--doesn't compare to ghostty or kitty, curses GUIs aren't great to begin with).
+
+The combination of opportunities to take agentic tooling to the next level with the power of Emacs, and the underserved user experience which sub-par tools like TUI harnesses offer, is what provide an excellent opportunity to make a tool to serve these needs.
+
+# Development Guidance
+The first priority is to develop a workflow (set of tools, skills, docs, ect) which facilitate a closed loop hands on development cycle. An Emacs instance should be launched which can be manipulated and inspected / screenshot so that the agent can verify live that the code is working as intended. The code simply appearing implemented is not enough.
+
+It is very important to verify features as they are created. You should not create multiple features without testing each one before going on to the next.
+
+The architecture of this project is such that all modules should be developable in parallel once the core loader logic and API contracts are defined.
+
+Make sure both local emacs and remote client ACP are tested whenever new feature are added or when verifying functionality. 
+
+Since there will be many rounds of human feedback and interation even after your testing it should be safe and easy to reload the harness. This means if new harness code has an error and doesn't compile (if that's needed) or doesn't pass muster in some way it doesn't brick any existing sessions. Since we will be dogfooding the harness to develop the harness. After new code is verified it should be hot-reloaded into the current Emacs instance and all sessions via built in Emacs methods. Also redraw session buffers so if render bugs occured and were fixed they will work now.
+
+# Technical Architecture
+The architecture of this harness is inspired by the Pi coding agent, and other modular systems like very mod-able games, D-Bus + XDG + the whole linux desktop system, ect. The core of the harness should be entirely focused on loading modules and facilitating communication between modules. All functionality should be provided via addon modules (even if they are shipped in tree), a plain harness running with no modules shouldn't even show a UI or call a completion API. Different modules need to be able to communicate with the APIs of other modules. This includes making direct calls to enact an action, but also hooking into events which are caused by a module (ex., on question ask). 
+
+> Lesson Learned: Pi's biggest architectural failure is not solving for the D-Bus problem of having many different services with many different API surfaces and events. Plugins never played nice with each other unless the plugins in question were custom made to work with other plugins. 
+
+Typical concerns should be made like any user interface or business logic containing program. The business logic, state, and user interface should all be completely separate systems. They should have clearly defined boundaries (litnus test: can a module be easily tested without the presence of any of the other modules and without extensive mocks).
+
+Broadly the systems from top (closest to user) to bottom are:
+
+- Presentation 
+- State 
+- Completion provider 
+- Tool calls
+
+All implementation must follow Emacs and elisp best practices. Code should avoid running on the main UI thread by any means necessary, responsiveness is a top priority. Use built in Emacs functionality when available and allow for users to configure and customize the harness just like any other piece of standard Emacs functionality.
+
+The separation of presentation and state allows the harness to facilitate remote control of sessions. This should be done over an implementation of the Agent Client Protocol (ACP). This protocol should be used to communicate between the state / business layer and the presentation layer. The Emacs UI is simply a client talking ACP to the core of the harness. Make sure that all pieces of functionality can be exercised via the ACP. Make sure that the implementation of the ACP is Emacs optimized and does not slow down the harness nor the Emacs main UI thread. Over ACP the harness should feel snappy. This could be done via different transport mechanisms (for real servers use TCP messages and JSON, but for local maybe no server and just send lisp objects which are ACP messages directly to a callback handler function).
+
+# User Experience 
+The user experience of the harness must be amazing and designed with great care.
+
+- Minimal elegance: Choose what information will be shown on the UI and display it stylishly, choose specific user stories and serve them well with simple but powerful workflows, design as few number of features as possible which can be composed together to service multiple complex patterns
+- Always user built in Emacs UI tools, do not settle for using ASCII or UTF-8 tricks to create the UI which is needed
+- Responsiveness is a priority: Use UI pattnerns which make the harness feel snappy and quick, if an operation is going to take more than an instant show a loading state while it occurs and then show if it was a success or failure
+- Every action with a keyboard shortcut should have a place in the UI where you can click with your mouse to perform the same action
+- Polished to an extreme degree: seemless feeling to use like if apple designed a harness, subtle flourishes and good design choices, nothing which overwhelms and ruins the other elegance aspects
+
+# Features
+Most features specified here are standard to any agentic harness. 
+
+## Sessions
+At the core of any agentic session is a series of messages, and tool calls (from the agent), between the user and an agent. 
+
+- Sessions hold state about a single conversation: current project, its directory, the messages in the conversation, the model, permission mode, number of tokens consumed, total cost
+- Sessions can be either active because they are open in the user's harness (even if obscured by another session and running in the background, even when idle) or inactive because the user does not have them active 
+- Sessions can be resumed
+- Sessions can be forked 
+- Sessions are scoped to a specific project (auto-detected) 
+- Sessions can be idle (waiting for user to send next message), running (agent is generating tokens or ingesting tool calls, ect), blocked (waiting for user response to tool call or for permission)
+- Sessions can have a parent child relationship with another session 
+
+## Chat Interface
+Session messages should show up like a chat app, where older messages are at the top of the screen and newer messages are at the bottom. The sender and type of the message is identified by the styling of the message (human messages have a slightly lighter background, agent messages use the default background color, agent tool messages have a slightly styled colored background). The chat interface is also where the user can send new chat messages to the agent.
+
+Functional requirements:
+
+- All messages in session are visible in chat UI
+- Older messages can be viewed by scrolling up, you can return to newer messages by scrolling down
+- Text from all messages is aligned in the user's language direction (english is left to right)
+- The sender (agent or user) and type () of a message 
+- The sender of a message is identifiable by the background color of the message text (agents have a darker background color, users have a lighter background color)
+- If messages are too long they wrap to the next line matching the original line's indentation
+- Messages are formatted in Markdown and rendered as such
+- A message composition box should be displayed at the bottom of the chat history view
+- The message composition box supports multi-lined input, but by default is 1 line, and only expands to a maximum height if the user types a message which spans multiple lines
+- History of all messages can contain up to more or more than 1 million tokens, UI must remain responsive and performant with this high amount
+- Tool calls from the agent are shown in the correct chronological place in the chat history 
+- Tool calls are differentiable from agent and user text messages 
+- Tool call messages should show which tool was used, parameters of the tool, and the output of the tool 
+- The chat interface should automatically scroll down to show new messages when they arrive, unless the user has explicitly scrolled up and is viewing history in which case do not scroll
+- Some models output thinking text which should be visible in a darked text color as to lessen its importance in the conversation
+- Non-text messages (like thinking and tools) can be collapsed to just show the name of the tool / summary label, they can be uncollapsed to show details of the tool call and output / thinking text
+- Non-text messages can be coalesced into a summary block which indicates what and how many tools / thinking was used, this can be uncollapsed to show the tools in their collapsed state, and further uncollapsed to show tool output, only tools / non-text message types which are on an explicit allow list can be coalesced like this in order to prevent hiding of essential tools which block a session
+- The chat interface must be aware of how it opens in Emacs and what position it takes up, presets to open in several convenient places like on the right hand side vertically split
+- Only one session must be visible in each position, if a session is already open in a position and a different session must be opened with the same position preset--then that different session should replace the existing session, so that you can switch between sessions
+- System hint messages can be shown from the harness to tell the user when harness configuration (like session info: name, model, permission mode, ect) change, the text should be muted like thinking but distinct
+- Messages from the agent, the user, and thinking / tool messages should all have their contents be searchable
+
+### Image Video Audio Support 
+Modern models are multimodal and can declare capabilities such as understanding data in the form of text (common), image, video, and audio. This could include the support of each of those modes on input and / or output. A common configuration for coding agents is text and image input and text output. Especially key is the ability to handle uncommon MIME types in the user's clipboard. If you don't know what it is pass the data and the MIME type all of which are considered somewhat hostile user inputs, to the agent and see what it thinks.
+
+The conversation UI must be able to display images if the Emacs instance is capable. Ideally video is playable in emacs or at least a command to open the video and also do thumbnails w builtin emacs functionality. Audio should also be supported if the model supports it. Allow for audio input and audio output. Have good user interfaces which show what is clearly happening with all these modes (playback bars, volume, audio mic monitoring).
+
+### Queued Messages 
+If the agent is mid-turn and the user sends a message, it is delivered as a steering message: the agent injects it into the running turn at the next step boundary. While a tool call or a model stream is in flight the message cannot interrupt immediately, so it is held until that step finishes. A message can also be explicitly queued for the next turn with the Queue button or `C-c C-q`. Queued messages should be shown at the bottom of the chat interface right above the compose message box. Queued messages can be edited before they are sent by selecting the queued message from the queued message list and re-composing it. Queued messages should all be sent at the next possible turn in the session all at once.
+
+### File References
+Allow user messages to have references to files, who's absolute path and size in bytes will be attached in the user's message. These files are referenced by putting an at symbol followed by the file name. The harness should perform fuzzy searching for files matching the contents after the at symbol.
+
+If the user is in GUI mode of Emacs make use of the operating system drag file on to application behavior to attach that file to the message.
+
+Show attached files near the compose message box, use their relative path to the project root and shorten in the middle if needed, allow via this ui to open that file as a buffer or remove it from the message.
+
+### Skill References
+Allow user messages to have explicit reference to a skill, who's contents will be attached to the user's message.
+
+## Conversation Tree 
+The history of messages, tool calls, ect should be represented as a directed graph. A view should be provided which shows the nodes of this directed graph (only showing a short amount of the content from each message node) so you can navigate back in time and between forks of the conversation. The graph view should mirror a Git representation of commits and and branches.
+
+## Compaction
+As a conversation approaches the maximum number of tokens a model can fit in its context window it must be compacted down to a smaller size. Enough headroom must be left in the conversation so that the compaction output can be generated and swapped out for the previous full context. As a conversation approaches the compaction limit start highlighting the token count of the session in progressive warning colors.
+
+## Session List
+View sessions and switch between them.
+
+- Display list of sessions scoped to current project
+- Show name of session, all status types, tokens, model
+- Filter and sort list by any attribute of session
+- Child sessions should be shown in a tree under sessions
+
+## Session Blocked Notifier
+There should be a UI element placed outside of the harness UI to display how many sessions are blocked needing user input or idle or working. This should be visible from any other buffer when there is at least one session active in the current project or any other project (aka if there is an active session in the current emacs instance). The purpose of this indicator is to tell the user when they are needed (either to answer a question / approve something or to direct the agent on to the next task). So it should be a small but noticable and trackable UI element which has in mind the concept that users may be rapidly switching between projects and sessions.
+
+## Session Auto Naming 
+If a name is not provided when a session is made (not mandatory) then an agent will be used to name the conversation. This ability can be triggered at any time during the conversation, but it will auto trigger after the first initial message from the user. This should be done by forking the conversation using the same model (since the user's prompt will be cached after the first response from the model). A system hint from the harness should be shown to indicate renaming has started and then when it is done.
+
+## Permissions 
+Tool calls should have a permission hook which is responsible for performing some process (be it asking the user, automatically approving due to the tool, or a more advanced decision) to determine if the tool is allowed to run or not. Using this many advanced permission systems can be created. 
+
+### Directory Jail
+By default session should not be given permission to files outside of the current directory. Enforce this with read, write, search, ect commands. If a session wants to add another directory to its allow list the user must give permission. If an automatic tool call deny is required provide constructive information to the agent so it succeeds and doesn't require user intervention to use the correct directories, work with what you have.
+
+### Auto Mode
+User a cheap LLM to determine if a tool call is allowed. Give the details of the tool call (description as seen by agent) as well as the parameters and any other supporting context. The cheap LLM outputs a decision along with a reason.
+
+### Non-Interactive Mode 
+Using this hook system a mode can be enabled which forces the model to attempt to not get blocked waiting for user input. If enabled and a tool call would be disabled an automatic steering message is sent to the agent telling it that it should do everything in its power to find a different approach which respects the permission denial but also achieves the goal. The user of this mode is for when users start a task and know they will be stepping away for a while and want the session to get work done.
+
+## Completion API
+Model providers are generic. There is a set of API methods which model providers must implement in order to provide functionality needed for all the harness's usage. Provide a built in implementation of the OpenAI compatible completion API. Providers can provide extra optional capabilities enable features in the harness (like knowing your plan's quota, if a session is still in the KV cache, dynamic pricing).
+
+### Claude SDK
+To support users with subscription plans a completion API provider should be implemented which uses the official Claude Code SDK. This is in line with Anthropic's policy's on how external tools can use Claude.
+
+## Cost Tracking
+Each completion API call should be associated with a usage cost. Usage cost should be tracked for the session down to the message. Cost should be tracked across sessions and projects to provide aggregate information. 
+
+### Cost and Usage Overview
+A page should exist which shows graphs and stats about model, token, and cost usage broken down by project and other associated dimensions. 
+
+### Budgeting
+Budgets can be set on a per-session, per-project, and per time period basis. Budgets can be set as informational or as hard quotas. For time period based budgets planning tools should be provided to split the budget across the time period by days (configurable between business days or all days) or hours.
+
+## Git Worktree Aware 
+Sessions can be associated with a git worktree. The session's working directory should be set to the git worktree's directory. The harness should have the ability to manage the worktrees.
+
+## BTW
+Allow for side conversations to be quickly started to check on quick informal details about the conversation. This uses the fork functionality but presets a UI which shows the forked btw conversation over the current session. This way you can keep your current session running and not leave its output while also seeing the response to a btw conversation and even following up. When you are done this btw conversation can be easily closed and you can return to your main session as if nothing changed. Btw conversations, like any fork, should be visible in the converstaion tree.
+
+## Cache Aware
+The harness should use provider APIs to determine when tokens from a conversation are in the KV cache. This applies not only to the cache hit rate of token generation but also awareness of when a conversation's tokens have left a KV cache and replying with a new message would result in entire conversation being run through at full cost again. Workflows should be based around the reality of LLM inference, its auto-regressive nature, and how caching makes it better to fork a session then to start a sub-agent which needs to gather all the context again with new costly tokens.
+
+## Fork
+A new session can be created using the context and settings of another existing session. This lets new tasks or lines of thought be persued by parallel agents all sharing some initial state. This also leverages the auto-regressive LLM caching price model. Where tokens you already have are better than a fresh context in many cases. Forks should record their parent session and show up on the session list.
+
+## Sub-agents 
+Sub-agents should be able to be created by an agent as a tool call. Sub-agents just create a new fully fledged session with the context they are provided. Sub-agents should be able to be viewed using the normal session viewing UI. Sub-agents should have their session parent be recorded. A sub-agent can also be made out of a fork of a conversation if choosen.
+
+## Emacs MCP/Tool
+A tool should be provided to the agent to interact with the current Emacs session. This allows the agent to view buffers, emacs variables, eval functions, control emacs, help the user drive.
+
+## Emacs Native Tools
+All operating system modification tools should be implemented using built in Emacs functionality. Common tools like read, write, list, search should all use the built in Emacs tools which a user might use for those workflows. An elisp terminal should also be made available as an alternative for Bash. Additional tools like a bash tool or things not implementable in Emacs are allowed by the first choice is to implement a tool in Emacs. The implementation of a tool in Emacs must be fast and not block the main UI thread.
+
+## TRAMP
+The Emacs TRAMP functionality should be supported. A powerful part of Emacs is all the Emacs native workflows for reading, writing, listing, searching, ect files can also take place transparently on another system. This lets you use the power and familiar Emacs tools on remote machines. Tool calls can be configured to act on other hosts this way.
+
+## Merge Queue 
+Forked sessions can elect to try and submit their changes back to a main session. This is useful in cases where a small bug was found and a git worktree and session fork was spun up to fix the issue. Instead of submitting the change as a formal PR with overhead the changes from the worktree can be merged back into the parent sessions working directory. A queue of sessions who want to merge into a parent session is maintained, and only one session gets access to merge into the parent session at a time (this means the parent session itself may stop at points to allow another session to access its files). If any merge conflicts occur the child session is responsible for resolving them. 
+
+## Configuration File
+The global configuration must be overridable by project specific permissions which should be overridable by directory specific permissions. Files must persist these configuration options. A built in Emacs way for doing this must be used. If a setting like the permission mode or the model is set by the user it should be persisted in the most specific configuration file, preferring project configuration over directory configuration unless a directory configuration file is found or a project is not found.
+
+## Skills
+Should look in common locations for skill files. Should provide tooling to the model to search for skills to use. Should provide tooling to load a skill.
+
+## Model Switcher
+Provide a user interface to switch between models. The available models should be fetched by enumerating over all providers and asking for available models. The list of models should be searchable. Model names should indicate the provider of the model (Anthropic, Open Router, ect) and the name and version of the model.
+
+## Thinking Toggle 
+For models which provide a setting to set the thinking level provide an interface which can be used to switch between thinking levels.
+
+## Remote Session Connect 
+Using the Agent Client Protocol (ACP) the harness can connect to a harness server running on another host and control it fully using the UI running on the user's current machine. By default when the harness starts it should start an ACP server which the local harness UI then talks to. This should be configured for optimal local use, but can be relaxed to allow remote connections.
+
+## Plan Mode
+A tool which allows the agent to propose a detailed plan for a complex task. Gives the agent a way to gather its thoughts and lay out the full plan. The plan should include superpowers guidance and details on how it will be implemented. The unique presence of forking tools, sub-agents, and merge queues should be taken into account when planning the implementation.
+
+## Todo Tool
+Track todo items and allow the agent to update todo statuses.
+
+## Websearch Tool
+Allow the agent to search the web for content. This is a generic tool which should be implemented by a drop in provider. To start provide a built in implementation of the brave websearch API.
+
+## Context Bomb Protection
+If a tool output, file read, ect any type would cause an output of too large of a size which would screw up your context do not output it and instead require the use of range parameters to get the output. 
+
+## Actual Linux Jail
+For users who want to get very serious with it use a real Linux jail. Isolation is kernel-enforced, not policy-enforced. `harness-sandbox` picks a backend at startup and every tool spawn is routed through it.
+
+- Backends, in preference order: `bwrap`, `systemd-run --user`, `none`.
+- Fail closed if a policy requires confinement and no backend is available; warn loudly rather than silently running unconfined.
+- Filesystem: read-write session cwd; tmpfs, purposely not HOME or any other files to avoid very valuable files like npm credentials being accessible and minimal system or kernel mounts to prevent breakout or other attempts
+- Process: `--unshare-pid --unshare-ipc --unshare-uts --die-with-parent --new-session`.
+- Network: allowed by default (hosted providers need their API); `--unshare-net` is opt-in and only correct for local models.
+- `:permission-mode` is a prompt-level hint, never a security boundary.
+- Scope: only processes the harness spawns. Users launching `claude`/`codex` directly get those CLIs' native sandboxes.

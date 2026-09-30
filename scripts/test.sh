@@ -1,25 +1,24 @@
-#!/bin/sh
-# Byte-compile the harness and run the ERT suite.
-#
-# Usage: scripts/test.sh
-#
-# Set ERT_SELECTOR to run a subset, e.g.
-#     ERT_SELECTOR='"harness-http"'
-# Compilation warnings are errors: a warning here almost always means a real
-# bug (unbound variable, wrong arity, obsolete API).
-set -eu
-
-cd "$(dirname "$0")/.."
-
-EMACS="${EMACS:-emacs}"
-SELECTOR="${ERT_SELECTOR:-t}"
-
-echo "== byte-compiling =="
-"$EMACS" -Q --batch -L . -L lisp -L test \
-  --eval '(setq byte-compile-error-on-warn t)' \
-  -f batch-byte-compile lisp/*.el harness.el plugins/*.el test/*.el
-
-echo "== running tests =="
-ERT_SELECTOR="$SELECTOR" "$EMACS" -Q --batch -L . -L lisp -L test \
-  -l harness-test-runner \
-  --eval '(ert-run-tests-batch-and-exit (car (read-from-string (or (getenv "ERT_SELECTOR") "t"))))'
+#!/usr/bin/env bash
+# Run ERT suites, one clean Emacs per file.
+#   scripts/test.sh                      every test/*-test.el
+#   scripts/test.sh test/harness-core-test.el [SELECTOR]
+# Set HARNESS_INTEGRATION=1 to include tests that talk to real models.
+set -u
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+files=()
+selector=t
+if [ $# -gt 0 ]; then
+  for a in "$@"; do
+    if [ -f "$a" ]; then files+=("$a"); else selector="$a"; fi
+  done
+fi
+[ ${#files[@]} -eq 0 ] && files=(test/harness-*-test.el)
+fail=0
+for f in "${files[@]}"; do
+  echo "== $f"
+  emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L test -L . \
+    -l test/harness-test-helpers.el -l "$f" \
+    --eval "(ert-run-tests-batch-and-exit (quote $selector))" || fail=1
+done
+exit $fail

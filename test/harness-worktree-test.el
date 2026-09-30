@@ -1,225 +1,192 @@
-;;; harness-worktree-test.el --- Tests for git worktrees -*- lexical-binding: t; -*-
-
-;; Copyright (C) 2026 the emacs-agent-harness authors
-
-;; This file is not part of GNU Emacs.
-
-;;; Commentary:
-
-;; These tests build a real repository in a temporary directory and run real
-;; git, because the whole point of the feature is how it behaves with git.
-;; They are skipped when git is absent.
-
+;;; harness-worktree-test.el --- Tests for the worktree module  -*- lexical-binding: t; -*-
 ;;; Code:
 
-(require 'ert)
-(require 'harness-worktree)
-(require 'harness-mock-provider)
-(require 'harness-test-util)
+(require 'harness-test-helpers)
 
-(defun harness-worktree-test--git-available-p ()
-  "Return non-nil when git can be run."
-  (and (executable-find "git")
-       (zerop (ignore-errors (call-process "git" nil nil nil "--version")))))
+(defvar harness-worktree-directory-function)
 
-(defun harness-worktree-test--git (directory &rest arguments)
-  "Run git with ARGUMENTS in DIRECTORY and return its output.
-
-Signing is turned off explicitly: a temporary repository inherits the user's
-global `commit.gpgsign', and a test that pops up a pinentry prompt is a test
-that hangs forever and a dialog the user did not ask for.  The author and
-committer are set for the same reason -- the test must not depend on, or
-disturb, the user's git identity."
+(defun harness-worktree-test--git (dir &rest args)
+  "Run git ARGS synchronously in DIR; signal on failure, return stdout."
   (with-temp-buffer
-    (let ((default-directory (file-name-as-directory directory))
-          (process-environment
-           (append '("GIT_AUTHOR_NAME=Harness Test"
-                     "GIT_AUTHOR_EMAIL=harness-test@example.invalid"
-                     "GIT_COMMITTER_NAME=Harness Test"
-                     "GIT_COMMITTER_EMAIL=harness-test@example.invalid"
-                     ;; Belt and braces: no gpg program, no signing, no prompts.
-                     "GIT_CONFIG_COUNT=3"
-                     "GIT_CONFIG_KEY_0=commit.gpgsign"
-                     "GIT_CONFIG_VALUE_0=false"
-                     "GIT_CONFIG_KEY_1=tag.gpgsign"
-                     "GIT_CONFIG_VALUE_1=false"
-                     "GIT_CONFIG_KEY_2=gpg.program"
-                     "GIT_CONFIG_VALUE_2=false")
-                   process-environment)))
-      (apply #'call-process "git" nil t nil arguments)
-      (string-trim (buffer-string)))))
+    (let ((default-directory (file-name-as-directory dir)))
+      (unless (zerop (apply #'call-process "git" nil t nil args))
+        (error "git %s failed: %s" args (buffer-string)))
+      (buffer-string))))
+
+(defun harness-worktree-test--make-repo ()
+  "Create BASE/repo with one commit; return (BASE . ROOT)."
+  (let* ((base (harness-test-temp-dir))
+         (root (file-name-as-directory (expand-file-name "repo" base))))
+    (make-directory root t)
+    (harness-worktree-test--git root "init" "-q" "-b" "main")
+    (harness-worktree-test--git root "config" "user.name" "Harness Test")
+    (harness-worktree-test--git root "config" "user.email" "test@example.invalid")
+    (harness-worktree-test--git root "config" "commit.gpgsign" "false")
+    (with-temp-file (expand-file-name "README" root) (insert "hello\n"))
+    (harness-worktree-test--git root "add" "README")
+    (harness-worktree-test--git root "commit" "-q" "-m" "initial")
+    (cons base root)))
 
 (defmacro harness-worktree-test-with-repo (&rest body)
-  "Run BODY in a temporary git repository with a live `session'."
+  "Run BODY with `base' and `root' bound to a fresh git repository."
   (declare (indent 0))
-  `(harness-test-with-temp-session-dir
-     (let* ((repo (expand-file-name "project" harness-test--directory))
-            (harness-permission-policy '((:default allow)))
-            (harness-providers '((:name mock :kind harness-test :script ((:text "ok")))))
-            (harness-models '((:provider mock :id "mock-model")))
-            (harness-worktree-directory (expand-file-name "worktrees" harness-test--directory))
-            (default-directory (file-name-as-directory repo))
-            (session nil))
-       (make-directory repo t)
-       (harness-worktree-test--git repo "init" "-q" "-b" "main")
-       ;; Make sure the temporary repository can never ask for a key, even if
-       ;; something later runs git without the helper above.
-       (harness-worktree-test--git repo "config" "commit.gpgsign" "false")
-       (harness-worktree-test--git repo "config" "tag.gpgsign" "false")
-       (harness-worktree-test--git repo "config" "gpg.program" "false")
-       (with-temp-file (expand-file-name "README.md" repo)
-         (insert "hello\n"))
-       (harness-worktree-test--git repo "add" ".")
-       (harness-worktree-test--git repo "commit" "-q" "-m" "initial")
-       (setq session (harness-session-create (list :name "worktree test"
-                                                   :model "mock-model"
-                                                   :provider 'mock
-                                                   :directory repo)))
-       (harness-provider-setup)
-       ,@body)))
+  `(progn
+     (harness-test-reset-bus)
+     (harness-test-load-module 'project)
+     (harness-test-load-module 'worktree)
+     (let* ((repo (harness-worktree-test--make-repo))
+            (base (car repo))
+            (root (cdr repo)))
+       (ignore base root)
+       (unwind-protect (progn ,@body)
+         (ignore-errors (delete-directory base t))))))
 
-(defun harness-worktree-test--wait (predicate)
-  "Wait for PREDICATE, with a generous timeout because git is slow."
-  (harness-test-wait-for predicate 30))
+(defun harness-worktree-test--dir (path)
+  "Return PATH's truename as a directory name, for comparisons."
+  (file-name-as-directory (file-truename path)))
 
-(ert-deftest harness-worktree-test-create ()
-  "Creating a worktree moves the session into it."
-  (skip-unless (harness-worktree-test--git-available-p))
+(defun harness-worktree-test--find (worktrees path)
+  "Return the entry of WORKTREES whose :path is PATH."
+  (cl-find-if (lambda (wt) (string= (harness-worktree-test--dir (plist-get wt :path))
+                                    (harness-worktree-test--dir path)))
+              worktrees))
+
+(ert-deftest harness-worktree-list-main-only ()
   (harness-worktree-test-with-repo
-    (should (harness-worktree--repository-root session))
-    (should (equal (file-name-as-directory (harness-session-cwd session))
-                   (file-name-as-directory (expand-file-name
-                                            "project" harness-test--directory))))
-    (let ((done nil))
-      (harness-worktree-create session "harness/test-branch"
-                               (lambda (worktree) (setq done worktree)))
-      (should (harness-worktree-test--wait (lambda () done)))
-      (let ((worktree (harness-worktree-of session)))
-        (should worktree)
-        (should (equal (plist-get worktree :branch) "harness/test-branch"))
-        (should (file-directory-p (plist-get worktree :path)))
-        ;; The checkout is real, and the session works there.
-        (should (file-exists-p (expand-file-name "README.md" (plist-get worktree :path))))
-        (should (equal (file-name-as-directory (harness-session-cwd session))
-                       (file-name-as-directory (plist-get worktree :path))))
-        (should (harness-worktree-p (plist-get worktree :path)))
-        ;; git agrees the branch exists.
-        (should (string-match-p "harness/test-branch"
-                                (harness-worktree-test--git
-                                 (plist-get worktree :path) "rev-parse" "--abbrev-ref" "HEAD")))))))
+    (let ((wts (harness-test-await (harness-call 'worktree/list root))))
+      (should (= 1 (length wts)))
+      (let ((main (car wts)))
+        (should (plist-get main :main))
+        (should (equal "main" (plist-get main :branch)))
+        (should (= 40 (length (plist-get main :head))))
+        (should-not (plist-get main :bare))
+        (should-not (plist-get main :detached))
+        (should-not (plist-get main :locked))
+        (should (equal (harness-worktree-test--dir root) (harness-worktree-test--dir (plist-get main :path))))))))
 
-(ert-deftest harness-worktree-test-tools-use-it ()
-  "Tools run in the worktree once the session has moved."
-  (skip-unless (harness-worktree-test--git-available-p))
+(ert-deftest harness-worktree-create-list-status-remove ()
   (harness-worktree-test-with-repo
-    (let ((done nil))
-      (harness-worktree-create session nil (lambda (worktree) (setq done worktree)))
-      (should (harness-worktree-test--wait (lambda () done))))
-    ;; A tool that reports its directory: the session's cwd is the worktree.
-    (let* ((call (harness-tool-call-create
-                  :name "bash" :args-string (harness-json-write '(:command "pwd"))))
-           (finished nil))
-      (harness-tool-run call session (lambda (result) (setq finished result)))
-      (should (harness-worktree-test--wait (lambda () finished)))
-      (should (string-match-p (regexp-quote (directory-file-name
-                                             (harness-session-cwd session)))
-                              (harness-tool-call-result finished))))))
-
-(ert-deftest harness-worktree-test-list ()
-  "Listing worktrees reports the new one."
-  (skip-unless (harness-worktree-test--git-available-p))
-  (harness-worktree-test-with-repo
-    (let ((done nil))
-      (harness-worktree-create session nil (lambda (worktree) (setq done worktree)))
-      (should (harness-worktree-test--wait (lambda () done))))
-    (let ((worktrees (harness-worktree-list session)))
-      (should (>= (length worktrees) 2))
-      (should (seq-some (lambda (worktree)
-                          (string-match-p "worktrees"
-                                          (plist-get worktree :path)))
-                        worktrees)))))
-
-(ert-deftest harness-worktree-test-refuses-to-discard-work ()
-  "Removal fails while the worktree has uncommitted changes."
-  (skip-unless (harness-worktree-test--git-available-p))
-  (harness-worktree-test-with-repo
-    (let ((done nil))
-      (harness-worktree-create session nil (lambda (worktree) (setq done worktree)))
-      (should (harness-worktree-test--wait (lambda () done))))
-    (let* ((path (plist-get (harness-worktree-of session) :path))
-           (called nil)
-           (removed nil))
-      (with-temp-file (expand-file-name "dirty.txt" path)
-        (insert "uncommitted"))
-      (harness-worktree-remove session nil t
-                               (lambda (success) (setq called t removed success)))
-      ;; Wait for the callback, not for success: the point is that git refuses.
-      (should (harness-worktree-test--wait (lambda () called)))
-      (should-not removed)
+    (let* ((created nil) (removed nil)
+           (path (expand-file-name "wt-feature" base)))
+      (harness-on 'worktree/created (lambda (r wt) (push (cons r wt) created)))
+      (harness-on 'worktree/removed (lambda (r p) (push (cons r p) removed)))
+      ;; Create with an explicit branch and path.
+      (let ((wt (harness-test-await (harness-call 'worktree/create root :branch "feature/x" :path path))))
+        (should (equal "feature/x" (plist-get wt :branch)))
+        (should (equal (harness-worktree-test--dir path) (harness-worktree-test--dir (plist-get wt :path))))
+        (should-not (plist-get wt :main))
+        (should (file-exists-p (expand-file-name "README" path)))
+        (should (= 1 (length created)))
+        (should (equal "feature/x" (plist-get (cdar created) :branch))))
+      ;; The list shows it with its branch.
+      (let* ((wts (harness-test-await (harness-call 'worktree/list root)))
+             (entry (harness-worktree-test--find wts path)))
+        (should (= 2 (length wts)))
+        (should entry)
+        (should (equal "feature/x" (plist-get entry :branch)))
+        (should (plist-get (car wts) :main))
+        (should-not (plist-get entry :main)))
+      (should (equal "feature/x" (harness-test-await (harness-call 'worktree/branch path))))
+      (should (equal "main" (harness-test-await (harness-call 'worktree/branch root))))
+      ;; Clean, no upstream.
+      (should (equal '(:dirty nil :ahead 0 :behind 0 :branch "feature/x")
+                     (harness-test-await (harness-call 'worktree/status path))))
+      ;; Ahead of its upstream after a commit.
+      (harness-worktree-test--git path "branch" "--set-upstream-to=main")
+      (with-temp-file (expand-file-name "new.txt" path) (insert "x\n"))
+      (harness-worktree-test--git path "add" "new.txt")
+      (harness-worktree-test--git path "commit" "-q" "-m" "work")
+      (let ((st (harness-test-await (harness-call 'worktree/status path))))
+        (should-not (plist-get st :dirty))
+        (should (= 1 (plist-get st :ahead)))
+        (should (= 0 (plist-get st :behind))))
+      ;; Dirty after an untracked file appears.
+      (with-temp-file (expand-file-name "scratch.txt" path) (insert "dirty\n"))
+      (should (plist-get (harness-test-await (harness-call 'worktree/status path)) :dirty))
+      ;; Removing a dirty worktree without force rejects with git's stderr.
+      (let ((err (should-error (harness-test-await (harness-call 'worktree/remove root path))
+                               :type 'harness-error)))
+        (should (string-match-p "modified or untracked" (harness-error-message err))))
       (should (file-directory-p path))
-      ;; With force it goes.
-      (let ((forced nil)
-            (force-called nil))
-        (harness-worktree-remove session t t
-                                 (lambda (success) (setq force-called t forced success)))
-        (should (harness-worktree-test--wait (lambda () force-called)))
-        (should forced)
-        (should-not (file-directory-p path))))))
+      ;; With force it goes away.
+      (should (equal (file-name-as-directory path)
+                     (harness-test-await (harness-call 'worktree/remove root path t))))
+      (should-not (file-exists-p path))
+      (should (= 1 (length removed)))
+      (should (= 1 (length (harness-test-await (harness-call 'worktree/list root)))))
+      ;; The branch survives the worktree; creating again reuses it (no -b).
+      (let ((wt (harness-test-await (harness-call 'worktree/create root :branch "feature/x" :path path))))
+        (should (equal "feature/x" (plist-get wt :branch)))
+        (should (file-exists-p (expand-file-name "new.txt" path)))))))
 
-(ert-deftest harness-worktree-test-remove-restores-directory ()
-  "Removing a worktree returns the session to its project."
-  (skip-unless (harness-worktree-test--git-available-p))
+(ert-deftest harness-worktree-create-defaults-and-base ()
   (harness-worktree-test-with-repo
-    (let ((done nil))
-      (harness-worktree-create session nil (lambda (worktree) (setq done worktree)))
-      (should (harness-worktree-test--wait (lambda () done))))
-    (let ((path (plist-get (harness-worktree-of session) :path))
-          (removed nil)
-          (harness-worktree-delete-branch t))
-      (harness-worktree-remove session nil t (lambda (success) (setq removed success)))
-      (should (harness-worktree-test--wait (lambda () removed)))
-      (should removed)
-      (should-not (file-directory-p path))
-      (should-not (harness-worktree-of session))
-      (should (equal (file-name-as-directory (harness-session-cwd session))
-                     (file-name-as-directory (harness-session-project-root session)))))))
+    ;; Default branch and path come from the prefix and the directory function.
+    (let* ((wt (harness-test-await (harness-call 'worktree/create root)))
+           (branch (plist-get wt :branch))
+           (expected (expand-file-name (replace-regexp-in-string "/" "-" branch)
+                                       (expand-file-name "repo-worktrees" base))))
+      (should (string-prefix-p "harness/" branch))
+      (should (equal (harness-worktree-test--dir expected) (harness-worktree-test--dir (plist-get wt :path))))
+      (should (file-directory-p expected)))
+    ;; A custom directory function and an explicit base commit.
+    (let* ((harness-worktree-directory-function
+            (lambda (r b) (expand-file-name (concat "custom-" (file-name-nondirectory b))
+                                            (expand-file-name "elsewhere" (file-name-directory (directory-file-name r))))))
+           (head (string-trim (harness-worktree-test--git root "rev-parse" "HEAD"))))
+      (with-temp-file (expand-file-name "second" root) (insert "2\n"))
+      (harness-worktree-test--git root "add" "second")
+      (harness-worktree-test--git root "commit" "-q" "-m" "second")
+      (let ((wt (harness-test-await (harness-call 'worktree/create root :branch "old" :base head))))
+        (should (equal "old" (plist-get wt :branch)))
+        (should (equal (harness-worktree-test--dir (expand-file-name "elsewhere/custom-old" base))
+                       (harness-worktree-test--dir (plist-get wt :path))))
+        (should (equal head (plist-get wt :head)))
+        (should-not (file-exists-p (expand-file-name "second" (plist-get wt :path))))))
+    ;; Errors from git reject the promise with its stderr.
+    (let ((err (should-error (harness-test-await (harness-call 'worktree/create root :branch "old"))
+                             :type 'harness-error)))
+      (should (string-match-p "already" (harness-error-message err))))
+    (should-error (harness-test-await (harness-call 'worktree/list (harness-test-temp-dir)))
+                  :type 'harness-error)))
 
-(ert-deftest harness-worktree-test-tool ()
-  "The worktree tool creates and lists."
-  (skip-unless (harness-worktree-test--git-available-p))
+(ert-deftest harness-worktree-root-of-and-prune ()
   (harness-worktree-test-with-repo
-    (let ((created nil))
-      (harness-tool-run
-       (harness-tool-call-create
-        :name "worktree"
-        :args-string (harness-json-write '(:action "create" :branch "harness/tool-branch")))
-       session
-       (lambda (call) (setq created call)))
-      (should (harness-worktree-test--wait (lambda () created)))
-      (should (eq (harness-tool-call-status created) 'ok))
-      (should (string-match-p "harness/tool-branch" (harness-tool-call-result created))))
-    (let ((listed nil))
-      (harness-tool-run
-       (harness-tool-call-create :name "worktree"
-                                 :args-string (harness-json-write '(:action "list")))
-       session
-       (lambda (call) (setq listed call)))
-      (should (harness-worktree-test--wait (lambda () listed)))
-      (should (eq (harness-tool-call-status listed) 'ok))
-      (should (string-match-p "worktrees" (harness-tool-call-result listed))))))
+    (let* ((path (expand-file-name "wt-prune" base))
+           (wt (harness-test-await (harness-call 'worktree/create root :branch "prune-me" :path path))))
+      (ignore wt)
+      (make-directory (expand-file-name "sub/dir" path) t)
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-test-await (harness-call 'worktree/root-of (expand-file-name "sub/dir" path)))))
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-test-await (harness-call 'worktree/root-of (expand-file-name "README" path)))))
+      (should (equal (harness-worktree-test--dir root) (harness-test-await (harness-call 'worktree/root-of root))))
+      ;; Delete the directory behind git's back; prune drops the record.
+      (delete-directory path t)
+      (should (= 2 (length (harness-test-await (harness-call 'worktree/list root)))))
+      (let ((pruned (harness-test-await (harness-call 'worktree/prune root))))
+        (should (= 1 (length pruned)))
+        (should (string-match-p "wt-prune" (car pruned))))
+      (should (= 1 (length (harness-test-await (harness-call 'worktree/list root)))))
+      (should-not (harness-test-await (harness-call 'worktree/prune root))))))
 
-(ert-deftest harness-worktree-test-outside-a-repository ()
-  "Creating a worktree outside a repository reports the problem."
-  (harness-test-with-temp-session-dir
-    (let* ((harness-permission-policy '((:default allow)))
-           (harness-providers '((:name mock :kind harness-test :script ((:text "ok")))))
-           (harness-models '((:provider mock :id "mock-model")))
-           (default-directory (file-name-as-directory harness-test--directory))
-           (session (harness-session-create '(:name "plain" :model "mock-model"
-                                                      :provider mock))))
-      (should-not (harness-worktree--repository-root session))
-      (should-not (harness-worktree-create session nil nil))
-      (should-not (harness-worktree-of session)))))
+(ert-deftest harness-worktree-parsers ()
+  (let ((wts (harness-worktree--parse-list
+              (concat "worktree /repo\nHEAD 0123456789abcdef0123456789abcdef01234567\nbranch refs/heads/main\n\n"
+                      "worktree /repo-wt/a\nHEAD 89abcdef0123456789abcdef0123456789abcdef\ndetached\nlocked reason\n\n"
+                      "worktree /bare.git\nbare\n\n"))))
+    (should (equal '(:path "/repo/" :branch "main" :head "0123456789abcdef0123456789abcdef01234567"
+                     :bare nil :detached nil :locked nil :main t)
+                   (car wts)))
+    (should (plist-get (nth 1 wts) :detached))
+    (should (plist-get (nth 1 wts) :locked))
+    (should-not (plist-get (nth 1 wts) :branch))
+    (should (plist-get (nth 2 wts) :bare)))
+  (should (equal '(:dirty t :ahead 2 :behind 1 :branch "x")
+                 (harness-worktree--parse-status
+                  "# branch.oid abc\n# branch.head x\n# branch.upstream origin/x\n# branch.ab +2 -1\n1 .M N... 100644 100644 100644 abc abc f.el\n")))
+  (should (equal '(:dirty nil :ahead 0 :behind 0 :branch nil)
+                 (harness-worktree--parse-status "# branch.oid abc\n# branch.head (detached)\n"))))
 
 (provide 'harness-worktree-test)
 ;;; harness-worktree-test.el ends here

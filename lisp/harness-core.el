@@ -1,779 +1,643 @@
-;;; harness-core.el --- Core data model, registries and hooks for the agent harness -*- lexical-binding: t; -*-
+;;; harness-core.el --- Module bus for the Emacs agent harness  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 the emacs-agent-harness authors
+;; Copyright (C) 2026 Noah Huppert
 
-;; Author: the emacs-agent-harness authors
-;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1"))
-;; Keywords: tools, ai, convenience
-;; URL: https://git.sr.ht/~catvec/emacs-agent-harness
-
-;; This file is not part of GNU Emacs.
-
-;; This program is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+;; This file is part of the Emacs agent harness (v3).
 
 ;;; Commentary:
 
-;; This is the bottom of the dependency graph: it defines the data structures
-;; every other module shares, the registries they populate, and the hooks they
-;; use to talk to each other.  It must not `require' any other `harness-'
-;; module, so that `harness-core', `harness-http', `harness-provider' and
-;; `harness-agent' remain usable without any UI loaded.
+;; The core of the harness does exactly two things: it loads modules,
+;; and it lets modules talk to each other without knowing about each
+;; other.  Nothing here shows a UI or calls a model.
 ;;
-;; See DESIGN.md sections 3 (data model) and 9 (extensibility).
+;; Three primitives make up the bus:
+;;
+;; - Methods.  A module registers a named entry point with
+;;   `harness-register-method' and anybody calls it with `harness-call'.
+;;   A method may return a value directly or a `harness-promise' when
+;;   the work is asynchronous.  `harness-call-async' hides the difference.
+;;
+;; - Events.  A module announces that something happened with
+;;   `harness-emit'; interested parties subscribe with `harness-on'.
+;;   Subscribers never see each other's errors.
+;;
+;; - Filters.  A named chain of functions that each get to transform a
+;;   value (`harness-run-filter'), or asynchronously decide something
+;;   (`harness-run-filter-async').  Permission hooks are built on this.
+;;
+;; Modules describe themselves with `harness-define-module'.  The core
+;; initialises them in dependency order and isolates failures so a
+;; broken module never bricks the rest.
+;;
+;; Everything registered on the bus is introspectable with
+;; `harness-methods', `harness-events' and `harness-filters'; the ACP
+;; layer exposes that as the protocol surface.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'json)
-(require 'mule-util)
 (require 'subr-x)
-(require 'time-date)
-
-(defconst harness-version "0.1.0"
-  "Version of the agent harness.")
 
 (defgroup harness nil
-  "A coding agent harness implemented natively in Emacs."
+  "Emacs native agent harness."
   :group 'tools
   :prefix "harness-")
 
-(defgroup harness-faces nil
-  "Faces used by the agent harness."
-  :group 'harness
-  :prefix "harness-")
+(define-error 'harness-error "Harness error")
+(define-error 'harness-no-such-method "No such harness method" 'harness-error)
+(define-error 'harness-module-error "Harness module error" 'harness-error)
 
-(defgroup harness-sessions nil
-  "Session storage and browsing."
-  :group 'harness
-  :prefix "harness-")
+;;;; Logging
 
-(defgroup harness-providers nil
-  "Inference providers."
-  :group 'harness
-  :prefix "harness-")
-
-(defgroup harness-tools nil
-  "Tool definitions and permissions."
-  :group 'harness
-  :prefix "harness-")
-
-(defgroup harness-ui nil
-  "Buffers and user interface."
-  :group 'harness
-  :prefix "harness-")
-
-
-;;; Globals and debugging
-
-(defcustom harness-debug nil
-  "When non-nil, log harness internals to the *Messages* buffer.
-This is intentionally cheap to check; nothing else in the code base may
-`message' on a hot path."
-  :type 'boolean
+(defcustom harness-log-level 'info
+  "Minimum level of messages kept in the harness log buffer."
+  :type '(choice (const debug) (const info) (const warn) (const error))
   :group 'harness)
 
-(defun harness--log (format-string &rest args)
-  "Log FORMAT-STRING with ARGS when `harness-debug' is non-nil."
-  (when harness-debug
-    (apply #'message (concat "[harness] " format-string) args)))
+(defconst harness-log-buffer-name "*harness-log*")
+(defconst harness--log-levels '((debug . 0) (info . 1) (warn . 2) (error . 3)))
+(defcustom harness-log-max-lines 5000
+  "Maximum number of lines kept in the log buffer."
+  :type 'integer :group 'harness)
 
-(defvar harness-after-reload-hook nil
-  "Hook run after the harness or a plugin is reloaded.
-The UI uses this to re-render, so a changed renderer takes effect without
-restarting Emacs.  See DESIGN.md section 13.1.")
+(defvar harness-log-hook nil
+  "Functions called with (LEVEL MESSAGE) for every log entry.")
 
-(defvar harness--sessions (make-hash-table :test #'equal)
-  "Registry of live sessions, keyed by session id.")
+(defun harness-log (level fmt &rest args)
+  "Log FMT formatted with ARGS at LEVEL (debug, info, warn or error)."
+  (when (>= (or (alist-get level harness--log-levels) 1)
+            (or (alist-get harness-log-level harness--log-levels) 1))
+    (let ((msg (apply #'format-message fmt args)))
+      (with-current-buffer (get-buffer-create harness-log-buffer-name)
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert (format-time-string "%H:%M:%S.%3N ")
+                  (format "%-5s " (upcase (symbol-name level)))
+                  msg "\n")
+          (when (> (count-lines (point-min) (point-max)) harness-log-max-lines)
+            (goto-char (point-min))
+            (forward-line (/ harness-log-max-lines 4))
+            (delete-region (point-min) (point)))))
+      (run-hook-with-args 'harness-log-hook level msg)
+      msg)))
 
-(defvar harness--session-tails (make-hash-table :test #'equal)
-  "Cache of the last cons cell of each session's message list.
-Keyed by session id.  Kept in sync by `harness-session-append-message' so
-appending a message is O(1) instead of O(n); invalidated by
-`harness-session-set-messages' and `harness-session-remove'.")
+;;;; Promises
 
-(defvar harness--message-ids (make-hash-table :test #'equal)
-  "Counter used to generate unique message ids, keyed by session id.")
+(cl-defstruct (harness-promise (:constructor harness-promise--make)
+                               (:copier nil))
+  (state 'pending)        ; pending, resolved, rejected
+  value
+  callbacks)              ; list of (on-ok . on-err)
 
-
-;;; JSON helpers
+(defun harness-make-promise ()
+  "Return a new pending promise."
+  (harness-promise--make))
 
-;; The provider layer speaks JSON constantly.  `json-serialize' is implemented
-;; in C and is markedly faster than `json-encode' from json.el, so everything
-;; in the harness goes through these two functions and nothing else.
-;;
-;; Representation: alists (`(:key . "value")'), lists for arrays, `nil' for
-;; JSON null, `:false' for JSON false.  Keys may be symbols.
+(defun harness-promise-settled-p (promise)
+  "Non-nil when PROMISE is resolved or rejected."
+  (not (eq (harness-promise-state promise) 'pending)))
 
-(defun harness-json-read (string)
-  "Parse STRING as JSON into alists, lists, nil and :false."
-  (json-parse-string string
-                     :object-type 'alist
-                     :array-type 'list
-                     :null-object nil
-                     :false-object :false))
+(defvar harness--dispatch-depth 0
+  "How many promise callbacks are currently nested on the stack.")
 
-(defun harness-json-write (object &optional pretty)
-  "Serialise OBJECT to JSON text.
+(defconst harness--dispatch-max-depth 20
+  "Nesting beyond which callbacks are deferred to the command loop.")
 
-Objects are alists or plists with symbol keys, arrays are lists, `nil' is
-JSON null and `:false' is JSON false.  `json-encode' is used rather than
-`json-serialize' because the latter cannot tell a list-of-scalars (an array)
-from a plist (an object); requests are encoded once per turn, so the
-pure-Lisp encoder is not on any hot path.
-When PRETTY is non-nil, produce indented output."
-  (let ((json-encoding-pretty-print (and pretty t))
-        (json-null nil)
-        (json-false :false)
-        (json-array-type 'list))
-    (json-encode object)))
+(defun harness--promise-enqueue (promise cb)
+  "Run CB for settled PROMISE now, or from the command loop when deeply nested.
+Shallow chains keep their synchronous feel; a chain of a thousand
+promises resolving one another never grows the stack past the limit,
+and a callback that waits synchronously cannot deadlock the rest."
+  (if (>= harness--dispatch-depth harness--dispatch-max-depth)
+      (harness-run-soon #'harness--promise-dispatch promise cb)
+    (let ((harness--dispatch-depth (1+ harness--dispatch-depth)))
+      (harness--promise-dispatch promise cb))))
 
-(defun harness-json-array (list)
-  "Return LIST as a JSON array (a vector).
+(defun harness--promise-settle (promise state value)
+  (when (eq (harness-promise-state promise) 'pending)
+    (setf (harness-promise-state promise) state
+          (harness-promise-value promise) value)
+    (let ((callbacks (nreverse (harness-promise-callbacks promise))))
+      (setf (harness-promise-callbacks promise) nil)
+      (dolist (cb callbacks)
+        (harness--promise-enqueue promise cb))))
+  promise)
 
-`json-encode' cannot tell an array of objects from an object when the array
-has exactly one element, so any array whose elements are themselves objects
-or arrays must be passed through here.  Arrays of scalars are unambiguous and
-may stay lists."
-  (vconcat list))
-
-(defun harness-json-write-line (object)
-  "Serialise OBJECT to one line of JSON, terminated by a newline."
-  (concat (harness-json-write object) "\n"))
-
-(defun harness-json-true-p (value)
-  "Return non-nil when JSON VALUE is true (neither nil nor :false)."
-  (not (memq value '(nil :false))))
-
-(defun harness--key-modifier-count (key)
-  "Return the number of non-printing events in the KEY vector."
-  (let ((count 0))
-    (dotimes (index (length key))
-      (let ((event (aref key index)))
-        (unless (and (integerp event) (>= event 32) (/= event 127))
-          (setq count (1+ count)))))
-    count))
-
-(defun harness--key-better-p (a b)
-  "Return non-nil when key sequence A is a better hint than B."
-  (or (< (length a) (length b))
-      (and (= (length a) (length b))
-           (< (harness--key-modifier-count a)
-              (harness--key-modifier-count b)))))
-
-(defun harness--key-displayable-p (key)
-  "Return non-nil when KEY is a keyboard sequence worth showing.
-A menu-bar, mouse or toolbar binding is not something the user presses."
-  (and (> (length key) 0)
-       (integerp (aref key 0))))
-
-(defun harness-command-key (command &optional keymap)
-  "Return a display string of the keys bound to COMMAND, or nil.
-
-KEYMAP is a keymap or a list of keymaps and defaults to the current buffer's
-active keymaps, so a hint rendered in the UI always shows the binding the
-user would actually press instead of a hard-coded string that can drift when
-the keymap changes.  Menu, mouse and toolbar bindings are ignored and the
-shortest keyboard binding wins."
-  (let* ((keymaps (cond ((null keymap) (current-active-maps))
-                        ((keymapp keymap) (list keymap))
-                        (t keymap)))
-         (keys (where-is-internal command keymaps nil t))
-         (usable (cl-remove-if-not #'harness--key-displayable-p keys)))
-    (when usable
-      (key-description (car (sort usable #'harness--key-better-p))))))
-
-(defun harness-command-key-label (command &optional keymap)
-  "Return a\" (KEY)\" label for COMMAND, or \"\" when it has no keyboard
-binding."
-  (if-let* ((keys (harness-command-key command keymap)))
-      (format " (%s)" keys)
-    ""))
-
-(defun harness-key-hint (command &optional keymap)
-  "Return a propertized key hint for COMMAND, or nil when it is unbound.
-
-The binding is looked up live through `harness-command-key', so every key
-prompt in the UI shows the keys the user would actually press; passing
-KEYMAP targets a specific mode's map."
-  (when-let* ((keys (harness-command-key command keymap)))
-    (propertize keys 'face 'harness-muted)))
-
-(defun harness-key-hints (&rest commands)
-  "Return a propertized string of labels and live key hints from COMMANDS.
-Each argument is (LABEL . COMMAND) or (LABEL COMMAND KEYMAP); KEYMAP targets
-a mode's map so commands bound outside `current-active-maps' (widgets, for
-instance) still resolve.  A command with no keyboard binding is skipped."
-  (string-join
-   (delq nil
-         (mapcar (lambda (entry)
-                   (let* ((tail (cdr entry))
-                          (command (if (consp tail) (car tail) tail))
-                          (keymap (and (consp tail) (cadr tail)))
-                          (hint (harness-key-hint command keymap)))
-                     (when hint (format "%s %s" (car entry) hint))))
-                 commands))
-   ", "))
-
-(defun harness-alist-get (key alist)
-  "Return the value of KEY in ALIST.
-
-KEY may be a symbol, keyword or string, and ALIST keys may be symbols,
-keywords or strings; comparison is case sensitive.  The provider layer needs
-this because JSON keys arrive as symbols while configuration may use strings."
-  (let ((name (cond ((stringp key) key)
-                    ((keywordp key) (substring (symbol-name key) 1))
-                    (t (symbol-name key)))))
-    (cdr (or (assoc name alist)
-             (assq (intern name) alist)
-             (assoc (concat ":" name) alist)
-             (assq (intern (concat ":" name)) alist)))))
-
-(defun harness-plist-or-alist-get (key collection)
-  "Return the value of symbol KEY in COLLECTION, a plist or an alist."
-  (cond
-   ((null collection) nil)
-   ((keywordp (car collection)) (plist-get collection key))
-   ((consp (car collection)) (harness-alist-get key collection))
-   (t (plist-get collection key))))
-
-
-;;; Ids
-
-(defun harness--random-hex (n)
-  "Return N random hex characters."
-  (let ((out (make-string n ?0))
-        (chars "0123456789abcdef"))
-    (dotimes (i n)
-      (aset out i (aref chars (random 16))))
-    out))
-
-(defun harness-generate-id ()
-  "Generate a session id: sortable timestamp plus randomness."
-  (concat (format-time-string "%Y%m%dT%H%M%S")
-          "-"
-          (harness--random-hex 8)))
-
-(defun harness--next-message-id (session)
-  "Return the next unique message id for SESSION."
-  (let* ((id (harness-session-id session))
-         (n (1+ (gethash id harness--message-ids 0))))
-    (puthash id n harness--message-ids)
-    (format "m-%d" n)))
-
-(defun harness-reset-message-ids (session count)
-  "Set SESSION's message id counter to COUNT (used when loading a session)."
-  (puthash (harness-session-id session) count harness--message-ids))
-
-
-;;; Message
-
-(cl-defstruct (harness-message (:constructor harness--make-message)
-                               (:copier harness-message-copy))
-  "One entry in a session transcript.
-
-CONTENT is the assistant or user text.  THINKING is a reasoning trace when
-the provider exposes one.  Assistant messages carry TOOL-CALLS, tool result
-messages carry TOOL-CALL-ID and TOOL-NAME.  META is free for plugins."
-  (id nil)
-  (role nil)
-  (content "")
-  (thinking nil)
-  (tool-calls nil)
-  (tool-call-id nil)
-  (tool-name nil)
-  (status 'complete)
-  (error nil)
-  (timestamp nil)
-  (duration nil)
-  (usage nil)
-  (meta nil))
-
-(defun harness-message-create (session role &optional content)
-  "Create a message for SESSION with ROLE and CONTENT, with id and time set."
-  (harness--make-message
-   :id (harness--next-message-id session)
-   :role role
-   :content (or content "")
-   :timestamp (float-time)))
-
-(defun harness-message-finalize (message)
-  "Mark MESSAGE complete and record how long it took."
-  (when (and (harness-message-timestamp message)
-             (not (harness-message-duration message)))
-    (setf (harness-message-duration message)
-          (- (float-time) (harness-message-timestamp message))))
-  (unless (eq (harness-message-status message) 'error)
-    (setf (harness-message-status message) 'complete))
-  message)
-
-(defun harness-message-text (message)
-  "Return the plain text of MESSAGE, including tool calls as a short trailer."
-  (string-join
-   (delq nil
-         (list (harness-message-content message)
-               (when-let* ((calls (harness-message-tool-calls message)))
-                 (mapconcat (lambda (tc)
-                              (format "[tool %s]"
-                                      (harness-tool-call-name tc)))
-                            calls " "))))
-   "\n"))
-
-
-;;; Tool call
-
-(cl-defstruct (harness-tool-call (:constructor harness--make-tool-call)
-                                 (:copier harness-tool-call-copy))
-  "A tool invocation requested by the model and its outcome.
-
-STATUS is one of `pending', `awaiting-approval', `running', `ok', `error',
-`denied', `aborted'."
-  (id nil)
-  (name nil)
-  (args-string "")
-  (args nil)
-  (status 'pending)
-  (result nil)
-  (error nil)
-  (detail nil)
-  (started nil)
-  (finished nil)
-  (meta nil))
-
-(defun harness-tool-call-create (&rest args)
-  "Create a tool call from ARGS, which are passed to the struct constructor.
-A fresh id is generated when none is supplied."
-  (let ((call (apply #'harness--make-tool-call args)))
-    (unless (harness-tool-call-id call)
-      (setf (harness-tool-call-id call) (concat "tc-" (harness--random-hex 8))))
-    call))
-
-(defun harness-tool-call-parse-args (tool-call)
-  "Parse TOOL-CALL's argument string into `args' when possible.
-Returns the parsed value, or nil when the string is empty or malformed."
-  (let ((string (harness-tool-call-args-string tool-call)))
-    (when (and (stringp string) (not (string-empty-p (string-trim string))))
-      (condition-case nil
-          (setf (harness-tool-call-args tool-call)
-                (harness-json-read string))
+(defun harness--promise-dispatch (promise cb)
+  (let ((fn (if (eq (harness-promise-state promise) 'resolved) (car cb) (cdr cb))))
+    (when fn
+      (condition-case err
+          (if (and harness-debug-backtraces (fboundp 'handler-bind))
+              (handler-bind ((error #'harness--capture-backtrace))
+                (funcall fn (harness-promise-value promise)))
+            (funcall fn (harness-promise-value promise)))
         (error
-         (harness--log "could not parse args for %s: %s"
-                       (harness-tool-call-name tool-call) string)
-         nil)))))
+         (harness-log 'error "promise callback failed: %S%s" err
+                      (if (and harness-debug-backtraces harness--last-backtrace)
+                          (format "\n  frames: %s" (string-join (seq-take (cdr harness--last-backtrace) 40) " < "))
+                        "")))))))
 
-(defun harness-tool-call-arg (tool-call key &optional default)
-  "Return argument KEY of TOOL-CALL (a symbol), or DEFAULT."
-  (or (harness-plist-or-alist-get key (harness-tool-call-args tool-call))
-      default))
+(defun harness-resolve (promise value)
+  "Resolve PROMISE with VALUE.  If VALUE is itself a promise, adopt it."
+  (if (harness-promise-p value)
+      (progn (harness-then value
+                           (lambda (v) (harness-resolve promise v) nil)
+                           (lambda (e) (harness-reject promise e) nil))
+             promise)
+    (harness--promise-settle promise 'resolved value)))
 
-(defun harness-tool-call-summary (tool-call)
-  "Return a one line summary of TOOL-CALL for the mode line and headers."
-  (let ((name (harness-tool-call-name tool-call))
-        (args (harness-tool-call-args tool-call)))
-    (format "%s%s"
-            name
-            (if-let* ((s (and (listp args)
-                             (or (harness-plist-or-alist-get :command args)
-                                 (harness-plist-or-alist-get :file_path args)
-                                 (harness-plist-or-alist-get :path args)
-                                 (harness-plist-or-alist-get :pattern args)
-                                 (harness-plist-or-alist-get :query args)
-                                 (harness-plist-or-alist-get :prompt args)
-                                 (harness-plist-or-alist-get :description args)))))
-                (concat "(" (truncate-string-to-width
-                             (replace-regexp-in-string "\n" " " (format "%s" s))
-                             60 nil nil "…")
-                        ")")
-              ""))))
+(defun harness-reject (promise error)
+  "Reject PROMISE with ERROR (any object, usually an error data list)."
+  (harness--promise-settle promise 'rejected error))
 
-
-;;; Queued message
+(defcustom harness-debug-backtraces nil
+  "When non-nil, log a backtrace for errors caught in promise callbacks."
+  :type 'boolean :group 'harness)
 
-(cl-defstruct (harness-queued-message (:constructor harness--make-queued-message)
-                                      (:copier harness-queued-message-copy))
-  "A user message waiting for the current run to finish."
-  (id nil)
-  (text "")
-  (created nil)
-  (meta nil))
+(defvar harness--last-backtrace nil)
 
-(defun harness-queued-message-create (text)
-  "Create a queued message holding TEXT."
-  (harness--make-queued-message
-   :id (concat "q-" (harness--random-hex 8))
-   :text text
-   :created (float-time)))
+(defun harness--capture-backtrace (err)
+  "Remember a compact backtrace for ERR before the stack unwinds."
+  (let ((max-lisp-eval-depth (+ max-lisp-eval-depth 2000)))
+    (setq harness--last-backtrace
+          (condition-case nil
+              (let ((i 0) f (names nil))
+                (while (and (setq f (backtrace-frame i)) (< i 2000))
+                  (when (symbolp (cadr f)) (push (symbol-name (cadr f)) names))
+                  (setq i (1+ i)))
+                (cons err (nreverse names)))
+            (error (list err "backtrace unavailable"))))))
 
-
-;;; Approval
+(defun harness--call-handler (fn value)
+  "Call promise handler FN with VALUE.
+When `harness-debug-backtraces' is on, capture a backtrace on error."
+  (if (and harness-debug-backtraces (fboundp 'handler-bind))
+      (handler-bind ((error #'harness--capture-backtrace))
+        (funcall fn value))
+    (funcall fn value)))
 
-(cl-defstruct (harness-approval (:constructor harness--make-approval)
-                                (:copier harness-approval-copy))
-  "A decision the run loop is waiting for.
+(defun harness--note-handler-error (err fn)
+  "Log ERR signalled inside promise handler FN.
+A handler that signals is almost always a bug, and the rejection it
+produces may never be observed, so it is logged here."
+  (harness-log 'error "promise handler %s signalled: %S%s"
+               (let ((print-length 12) (print-level 3))
+                 (truncate-string-to-width (prin1-to-string fn) 400 nil nil "…"))
+               err
+               (if (and harness-debug-backtraces harness--last-backtrace)
+                   (format "\n  frames: %s" (string-join (seq-take (cdr harness--last-backtrace) 40) " < "))
+                 "")))
 
-KIND is `tool' (permission for a tool call) or `question' (the model asked
-the user something).  CALLBACK is called with the decision; it is the only
-thing that resumes the run."
-  (id nil)
-  (session nil)
-  (tool-call nil)
-  (kind 'tool)
-  (prompt "")
-  (detail nil)
-  (choices nil)
-  (callback nil)
-  (created nil))
+(defun harness-then (promise on-ok &optional on-err)
+  "Call ON-OK with the value of PROMISE, or ON-ERR with its error.
+Return a new promise resolved with the handler's return value.  A
+handler may itself return a promise, which is adopted."
+  (let ((next (harness-make-promise)))
+    (let ((cb (cons (lambda (v)
+                      (condition-case err
+                          (harness-resolve next (if on-ok (harness--call-handler on-ok v) v))
+                        (error (harness--note-handler-error err on-ok)
+                               (harness-reject next err))))
+                    (lambda (e)
+                      (if on-err
+                          (condition-case err
+                              (harness-resolve next (harness--call-handler on-err e))
+                            (error (harness--note-handler-error err on-err)
+                                   (harness-reject next err)))
+                        (harness-reject next e))))))
+      (if (harness-promise-settled-p promise)
+          (harness--promise-enqueue promise cb)
+        (push cb (harness-promise-callbacks promise))))
+    next))
 
-(defun harness-approval-create (&rest args)
-  "Create an approval from ARGS.
-An id and creation time are filled in when absent."
-  (let ((approval (apply #'harness--make-approval args)))
-    (unless (harness-approval-id approval)
-      (setf (harness-approval-id approval) (concat "ap-" (harness--random-hex 8))))
-    (unless (harness-approval-created approval)
-      (setf (harness-approval-created approval) (float-time)))
-    approval))
+(defun harness-catch (promise on-err)
+  "Attach ON-ERR to PROMISE, returning a new promise."
+  (harness-then promise nil on-err))
 
-
-;;; Session
+(defun harness-finally (promise fn)
+  "Call FN with no arguments once PROMISE settles either way."
+  (harness-then promise
+                (lambda (v) (funcall fn) v)
+                (lambda (e) (funcall fn) (signal 'harness-error (list e)))))
 
-(cl-defstruct (harness-session (:constructor harness--make-session)
-                               (:copier harness-session-copy))
-  "One agent conversation.
+(defun harness-resolved (value)
+  "Return a promise already resolved with VALUE."
+  (harness-resolve (harness-make-promise) value))
 
-MESSAGES is oldest-first.  TAIL is an internal pointer to the last cons of
-MESSAGES, maintained by `harness-session-append-message' so that appending is
-O(1); it is never serialised."
-  (id nil)
-  (name nil)
-  (project-root nil)
-  (project-name nil)
-  ;; The directory every tool, `@' attachment and command resolves against.
-  ;; It starts at the project root and can be moved -- to a git worktree, for
-  ;; example -- without changing which project the session belongs to.
-  (working-directory nil)
-  (file nil)
-  (provider nil)
-  (model nil)
-  (messages nil)
-  (tail nil)
-  (status 'idle)
-  (status-detail nil)
-  (queue nil)
-  (approvals nil)
-  (usage nil)
-  (parent nil)
-  (children nil)
-  (created nil)
-  (updated nil)
-  (buffer nil)
-  (run nil)
-  (title-generated nil)
-  (meta nil))
+(defun harness-rejected (error)
+  "Return a promise already rejected with ERROR."
+  (harness-reject (harness-make-promise) error))
 
-(defun harness-session-get (id)
-  "Return the session with ID, or nil."
-  (gethash id harness--sessions))
+(defun harness-all (promises)
+  "Return a promise resolved with the list of values of PROMISES, in order."
+  (let* ((result (harness-make-promise))
+         (n (length promises))
+         (values (make-vector (max n 1) nil))
+         (remaining n))
+    (if (zerop n)
+        (harness-resolve result nil)
+      (cl-loop for p in promises for i from 0 do
+               (let ((i i))
+                 (harness-then (if (harness-promise-p p) p (harness-resolved p))
+                               (lambda (v)
+                                 (aset values i v)
+                                 (when (zerop (cl-decf remaining))
+                                   (harness-resolve result (append values nil)))
+                                 nil)
+                               (lambda (e) (harness-reject result e) nil)))))
+    result))
 
-(defun harness-session-all ()
-  "Return all live sessions as a list."
-  (let (sessions)
-    (maphash (lambda (_id session) (push session sessions)) harness--sessions)
-    sessions))
+(defmacro harness-with-promise (bindings &rest body)
+  "Run BODY with (RESOLVE REJECT) from BINDINGS bound to settle a new promise.
+An error signalled by BODY rejects the promise.  Return the promise."
+  (declare (indent 1))
+  (let ((p (make-symbol "promise")))
+    `(let ((,p (harness-make-promise)))
+       (let ((,(car bindings) (lambda (v) (harness-resolve ,p v) nil))
+             (,(cadr bindings) (lambda (e) (harness-reject ,p e) nil)))
+         (ignore ,(car bindings) ,(cadr bindings))
+         (condition-case err
+             (progn ,@body)
+           (error (harness-reject ,p err))))
+       ,p)))
 
-(defun harness-session-list (&optional predicate)
-  "Return live sessions sorted by last update, most recent first.
-When PREDICATE is non-nil, only sessions for which it returns non-nil are
-included."
-  (let ((sessions (harness-session-all)))
-    (when predicate
-      (setq sessions (cl-remove-if-not predicate sessions)))
-    (sort sessions
-          (lambda (a b)
-            (> (or (harness-session-updated a) 0)
-               (or (harness-session-updated b) 0))))))
+(defun harness-await (promise &optional timeout)
+  "Block until PROMISE settles, return its value or signal its error.
+Waits at most TIMEOUT seconds (default 30).  This spins the event loop
+and is meant for tests and batch use, never for interactive code paths."
+  (let ((deadline (+ (float-time) (or timeout 30))))
+    (while (and (not (harness-promise-settled-p promise))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.02)
+      (unless (harness-promise-settled-p promise)
+        (sit-for 0.01)))
+    (pcase (harness-promise-state promise)
+      ('resolved (harness-promise-value promise))
+      ('rejected (let ((e (harness-promise-value promise)))
+                   (if (and (consp e) (symbolp (car e)) (get (car e) 'error-conditions))
+                       (signal (car e) (cdr e))
+                     (signal 'harness-error (list e)))))
+      (_ (signal 'harness-error (list "timed out waiting for promise"))))))
 
-(defun harness-session-put (session &optional quiet)
-  "Register SESSION in the live registry.
-Unless QUIET, run `harness-session-created-hook'."
-  (puthash (harness-session-id session) session harness--sessions)
-  (setf (harness-session-updated session) (float-time))
-  (unless quiet
-    (run-hook-with-args 'harness-session-created-hook session))
-  session)
+(defun harness-as-promise (value)
+  "Return VALUE if it is a promise, else a promise resolved with it."
+  (if (harness-promise-p value) value (harness-resolved value)))
 
-(defun harness-session-remove (session)
-  "Remove SESSION from the live registry.
-Does not touch the session file; see `harness-session-delete'."
-  (remhash (harness-session-id session) harness--sessions)
-  (remhash (harness-session-id session) harness--session-tails)
-  (remhash (harness-session-id session) harness--message-ids)
-  (run-hook-with-args 'harness-session-deleted-hook session))
+;;;; Scheduling helpers
 
-(defun harness-session-append-message (session message)
-  "Append MESSAGE to SESSION's transcript, in O(1)."
-  (let ((tail (harness-session-tail session)))
-    (cond
-     ((null tail)
-      (setf (harness-session-messages session) (list message))
-      (setf (harness-session-tail session) (harness-session-messages session)))
-     ((null (cdr tail))
-      (setcdr tail (list message))
-      (setf (harness-session-tail session) (cdr tail)))
-     (t
-      ;; The tail pointer is stale (something replaced the list); fall back to
-      ;; a linear scan rather than corrupting the transcript.
-      (let ((new-tail (last (harness-session-messages session))))
-        (setcdr new-tail (list message))
-        (setf (harness-session-tail session) (cdr new-tail))))))
-  message)
+(defun harness-run-soon (fn &rest args)
+  "Call FN with ARGS from the command loop as soon as possible.
+Use this to escape the dynamic extent of a process filter or a
+subscriber, or to keep an emitter non-reentrant."
+  (apply #'run-at-time 0 nil fn args))
 
-(defun harness-session-set-messages (session messages)
-  "Replace SESSION's transcript with MESSAGES.
-Maintains the tail pointer and resets the message id counter."
-  (setf (harness-session-messages session) messages)
-  (setf (harness-session-tail session) (last messages))
-  (harness-reset-message-ids session (length messages))
-  (run-hook-with-args 'harness-session-updated-hook session '(messages))
-  session)
+(defvar harness--debounce-timers (make-hash-table :test 'equal))
 
-(defun harness-session-last-message (session)
-  "Return SESSION's most recent message, or nil."
-  (car (harness-session-tail session)))
+(defun harness-debounce (key delay fn &rest args)
+  "Call FN with ARGS after DELAY seconds of no further calls with KEY."
+  (let ((timer (gethash key harness--debounce-timers)))
+    (when timer (cancel-timer timer))
+    (puthash key
+             (apply #'run-at-time delay nil
+                    (lambda (&rest a)
+                      (remhash key harness--debounce-timers)
+                      (apply fn a))
+                    args)
+             harness--debounce-timers)))
 
-(defun harness-session-messages-by-role (session role)
-  "Return SESSION's messages whose role is ROLE."
-  (cl-remove-if-not (lambda (m) (eq (harness-message-role m) role))
-                    (harness-session-messages session)))
+;;;; Methods
 
-(defun harness-session-system-message (session)
-  "Return the first system message of SESSION, or nil."
-  (car (harness-session-messages-by-role session 'system)))
+(cl-defstruct (harness-method (:copier nil))
+  name fn doc module params)
 
-
-;;; Status
+(defvar harness--methods (make-hash-table :test 'eq)
+  "Registered methods, keyed by symbol.")
 
-(defconst harness-status-list
-  '(idle working streaming awaiting-approval awaiting-answer classifying
-         aborted exited)
-  "All session statuses.")
+(cl-defun harness-register-method (name fn &key doc module params)
+  "Register FN as the implementation of method NAME.
+DOC describes it, MODULE names the owning module, PARAMS documents the
+argument plist keys.  Registering again replaces the previous
+implementation (this is what makes hot reloading safe)."
+  (unless (symbolp name) (error "Method name must be a symbol: %S" name))
+  (puthash name (make-harness-method :name name :fn fn :doc doc
+                                     :module module :params params)
+           harness--methods)
+  name)
 
-(defconst harness-status-blocked-list
-  '(awaiting-approval awaiting-answer)
-  "Statuses meaning the harness is waiting on the user.")
+(defun harness-unregister-method (name)
+  "Forget method NAME."
+  (remhash name harness--methods))
 
-(defconst harness-status-active-list
-  '(working streaming classifying)
-  "Statuses meaning the model is doing work.")
+(defun harness-method-exists-p (name)
+  "Non-nil when a method NAME is registered."
+  (and (gethash name harness--methods) t))
 
-(defun harness-status-blocked-p (status)
-  "Return non-nil when STATUS means a session waits for the user."
-  (memq status harness-status-blocked-list))
+(defun harness-call (name &rest args)
+  "Call method NAME with ARGS and return its result.
+Signals `harness-no-such-method' when nothing implements NAME."
+  (let ((m (gethash name harness--methods)))
+    (unless m (signal 'harness-no-such-method (list name)))
+    (apply (harness-method-fn m) args)))
 
-(defun harness-status-active-p (status)
-  "Return non-nil when STATUS means a session is busy."
-  (memq status harness-status-active-list))
+(defun harness-call-async (name &rest args)
+  "Call method NAME with ARGS and always return a promise.
+Synchronous results and signalled errors are wrapped."
+  (condition-case err
+      (harness-as-promise (apply #'harness-call name args))
+    (error (harness-rejected err))))
 
-(defun harness-session-blocked-p (session)
-  "Return non-nil when SESSION waits for the user."
-  (harness-status-blocked-p (harness-session-status session)))
-
-(defun harness-session-active-p (session)
-  "Return non-nil when SESSION is busy."
-  (harness-status-active-p (harness-session-status session)))
-
-(defun harness-session-notify (session &rest events)
-  "Notify the world that SESSION changed; EVENTS describes what changed.
-See DESIGN.md section 3.1 for the event symbols.  This is the single funnel
-for change notification, so a plugin only needs to add one hook function."
-  (setf (harness-session-updated session) (float-time))
-  (run-hook-with-args 'harness-session-updated-hook session events))
-
-(defun harness-session-set-status (session status &optional detail)
-  "Set SESSION's STATUS to STATUS, with optional DETAIL plist.
-Runs the status hook and notifies listeners."
-  (let ((old (harness-session-status session)))
-    (unless (eq old status)
-      (setf (harness-session-status session) status)
-      (setf (harness-session-status-detail session) detail)
-      (run-hook-with-args 'harness-status-changed-hook session old status))
-    (harness-session-notify session 'status))
-  status)
-
-(defun harness-session-status-string (session)
-  "Return a human readable status for SESSION, including detail."
-  (let ((status (harness-session-status session))
-        (detail (harness-session-status-detail session)))
-    (format "%s%s"
-            (capitalize (symbol-name status))
-            (if-let* ((extra (and detail (plist-get detail :label))))
-                (format " (%s)" extra)
-              ""))))
-
-
-;;; Usage and cost
-
-;; NOTE: cl-defstruct defines `harness-session-usage' as the accessor for the
-;; `usage' slot, so the summarising helper must use a different name.
-
-(defun harness-usage-add (a b)
-  "Add usage plists A and B, returning a new plist."
+(defun harness-methods ()
+  "Return a list of registered methods as plists, sorted by name."
   (let (out)
-    (dolist (key '(:in :out :cache-read :cache-write :cost :requests))
-      (let ((sum (+ (or (plist-get a key) 0) (or (plist-get b key) 0))))
-        (when (or (plist-get a key) (plist-get b key))
-          (setq out (plist-put out key sum)))))
-    ;; Preserve any other keys (plugins may add some) by preferring the newer.
-    (let (extra)
-      (dolist (pl (list a b))
-        (cl-loop for (k v) on pl by #'cddr
-                 unless (memq k '(:in :out :cache-read :cache-write :cost :requests))
-                 do (setq extra (plist-put extra k v))))
-      (cl-loop for (k v) on extra by #'cddr
-               do (setq out (plist-put out k v))))
-    out))
+    (maphash (lambda (k m)
+               (push (list :name k :doc (harness-method-doc m)
+                           :module (harness-method-module m)
+                           :params (harness-method-params m))
+                     out))
+             harness--methods)
+    (sort out (lambda (a b) (string< (symbol-name (plist-get a :name))
+                                     (symbol-name (plist-get b :name)))))))
 
-(defun harness-session-usage-total (session)
-  "Return SESSION's accumulated usage plist, defaulting to zeroes."
-  (or (harness-session-usage session)
-      '(:in 0 :out 0 :cost 0.0)))
+(defmacro harness-defmethod (name arglist docstring &rest body)
+  "Define a bus method NAME implemented by a function with ARGLIST and BODY.
+Also defines the function `harness-method/NAME' so it can be called and
+debugged like any other function.  DOCSTRING is the method's
+documentation."
+  (declare (indent defun) (doc-string 3))
+  (let ((fname (intern (format "harness-method/%s" name)))
+        (module (and (boundp 'harness--defining-module) harness--defining-module)))
+    (ignore module)
+    `(progn
+       (defun ,fname ,arglist ,docstring ,@body)
+       (harness-register-method ',name #',fname :doc ,docstring
+                                :module (and (boundp 'harness--defining-module)
+                                             harness--defining-module)))))
 
-(defun harness-session-add-usage (session usage)
-  "Add USAGE to SESSION's accumulator and notify listeners."
-  (setf (harness-session-usage session)
-        (harness-usage-add (harness-session-usage session) usage))
-  (harness-session-notify session 'usage)
-  (harness-session-usage session))
+;;;; Events
 
-(defun harness-usage-format (usage)
-  "Format USAGE for the mode line: tokens and money when known."
-  (let ((in (or (plist-get usage :in) 0))
-        (out (or (plist-get usage :out) 0))
-        (cost (plist-get usage :cost)))
-    (concat (format "%s↑ %s↓" (harness-format-count in) (harness-format-count out))
-            (when (and cost (> cost 0))
-              (format " %s" (harness-format-cost cost))))))
+(defvar harness--subscribers (make-hash-table :test 'eq)
+  "Event symbol -> list of (PRIORITY . FN), sorted by priority.")
 
-(defun harness-format-count (n)
-  "Format token count N compactly."
-  (cond
-   ((null n) "0")
-   ((>= n 1000000) (format "%.1fM" (/ n 1000000.0)))
-   ((>= n 1000) (format "%.1fk" (/ n 1000.0)))
-   (t (number-to-string (truncate n)))))
+(defvar harness--known-events (make-hash-table :test 'eq)
+  "Event symbol -> doc string, for introspection.")
 
-(defun harness-format-cost (cost)
-  "Format COST in US dollars."
-  (cond
-   ((null cost) "")
-   ((>= cost 1) (format "$%.2f" cost))
-   ((> cost 0) (format "$%.4f" cost))
-   (t "$0")))
+(defun harness-declare-event (event doc)
+  "Document EVENT with DOC so it shows up in `harness-events'."
+  (puthash event doc harness--known-events))
 
-
-;;; Text helpers
+(defun harness-on (event fn &optional priority)
+  "Call FN whenever EVENT is emitted.  Return a handle for `harness-off'.
+Lower PRIORITY runs first (default 50).  Subscribing the same FN to
+the same EVENT twice is a no-op, so modules can subscribe with named
+functions at load time and be reloaded safely.  Subscribe to `*' to
+receive every event as (EVENT . ARGS)."
+  (let* ((priority (or priority 50))
+         (subs (gethash event harness--subscribers)))
+    (unless (cl-find fn subs :key #'cdr :test #'equal)
+      (puthash event
+               (sort (cons (cons priority fn) subs) (lambda (a b) (< (car a) (car b))))
+               harness--subscribers))
+    (cons event fn)))
 
-(defcustom harness-truncate-chars 65536
-  "Maximum number of characters of tool output kept in a message.
-The full output stays available on the tool call struct for the UI to
-expand.  Truncating here is what keeps a runaway `cat' from freezing redisplay."
-  :type 'integer
-  :group 'harness-tools)
+(defun harness-off (handle)
+  "Cancel the subscription HANDLE returned by `harness-on'."
+  (let ((event (car handle)) (fn (cdr handle)))
+    (puthash event (cl-remove fn (gethash event harness--subscribers) :key #'cdr :test #'equal)
+             harness--subscribers)))
 
-(defcustom harness-truncate-lines 2000
-  "Maximum number of lines of tool output kept in a message."
-  :type 'integer
-  :group 'harness-tools)
+(defun harness-emit (event &rest args)
+  "Emit EVENT with ARGS to every subscriber.
+Errors in subscribers are logged and do not propagate.  Return the
+number of subscribers notified."
+  (let ((n 0))
+    (dolist (sub (gethash event harness--subscribers))
+      (cl-incf n)
+      (condition-case err
+          (apply (cdr sub) args)
+        (error (harness-log 'error "subscriber %S for %s failed: %S" (cdr sub) event err))))
+    (dolist (sub (gethash '* harness--subscribers))
+      (condition-case err
+          (funcall (cdr sub) event args)
+        (error (harness-log 'error "wildcard subscriber %S failed: %S" (cdr sub) err))))
+    n))
 
-(defun harness-truncate-string (string &optional max-chars max-lines tail)
-  "Truncate STRING, noting how much was dropped.
+(defun harness-emit-later (event &rest args)
+  "Like `harness-emit' but from the command loop, after the caller returns."
+  (apply #'harness-run-soon #'harness-emit event args))
 
-When TAIL is non-nil keep the end of STRING instead of the beginning, which
-is what command output wants.  MAX-CHARS defaults to `harness-truncate-chars'
-and MAX-LINES to `harness-truncate-lines'; a nil value means no limit."
-  (if (or (null string) (string-empty-p string))
-      (or string "")
-    (let* ((max-chars (or max-chars harness-truncate-chars))
-           (max-lines (or max-lines harness-truncate-lines))
-           (lines (1+ (cl-count ?\n string)))
-           (truncated nil))
-      (when (and max-lines (> lines max-lines))
-        ;; Keep the first (or last) MAX-LINES lines.  `string-match' returns the
-        ;; start of the match, so the head case needs `match-end'.
-        (setq string
-              (if tail
-                  (substring string
-                             (or (save-match-data
-                                   (when (string-match
-                                          (format "\\(?:[^\n]*\n\\)\\{%d\\}\\'"
-                                                  (- lines max-lines))
-                                          string)
-                                     (match-beginning 0)))
-                                 0))
-                (substring string 0 (save-match-data
-                                      (string-match
-                                       (format "\\(?:[^\n]*\n\\)\\{%d\\}"
-                                               max-lines)
-                                       string)
-                                      (match-end 0)))))
-        (setq truncated t))
-      (when (> (length string) max-chars)
-        (setq string
-              (if tail
-                  (substring string (- (length string) max-chars))
-                (substring string 0 max-chars)))
-        (setq truncated t))
-      (if truncated
-          (if tail
-              (format "[output truncated: showing last %s characters]\n%s"
-                      (harness-format-count (length string)) string)
-            (format "%s\n[output truncated: showing first %s characters]"
-                    string (harness-format-count (length string))))
-        string))))
+(defun harness-events ()
+  "Return the list of declared events as (EVENT . DOC)."
+  (let (out)
+    (maphash (lambda (k v) (push (cons k v) out)) harness--known-events)
+    (sort out (lambda (a b) (string< (symbol-name (car a)) (symbol-name (car b)))))))
 
-(defun harness-string-empty-p (string)
-  "Return non-nil when STRING is nil or contains only whitespace."
-  (or (null string) (string-empty-p (string-trim string))))
+;;;; Filters
 
-(defun harness-relative-path (path &optional directory)
-  "Return PATH relative to DIRECTORY (default `default-directory') when it is
-inside that directory; otherwise return PATH unchanged."
-  (let* ((dir (file-name-as-directory
-               (expand-file-name (or directory default-directory))))
-         (expanded (expand-file-name path dir)))
-    (if (string-prefix-p dir expanded)
-        (substring expanded (length dir))
-      expanded)))
+(defvar harness--filters (make-hash-table :test 'eq)
+  "Filter name -> list of (PRIORITY . FN), sorted by priority.")
 
-(defun harness-format-time (time)
-  "Format TIME (a float) for display, relative when recent."
-  (when time
-    (let ((seconds (- (float-time) time)))
-      (cond
-       ((< seconds 60) "now")
-       ((< seconds 3600) (format "%dm" (/ (truncate seconds) 60)))
-       ((< seconds 86400) (format "%dh" (/ (truncate seconds) 3600)))
-       ((< seconds 604800) (format "%dd" (/ (truncate seconds) 86400)))
-       (t (format-time-string "%Y-%m-%d" (seconds-to-time time)))))))
+(defun harness-add-filter (name fn &optional priority)
+  "Add FN to the filter chain NAME at PRIORITY (default 50, lower runs first).
+Adding the same FN twice is a no-op."
+  (let ((chain (gethash name harness--filters)))
+    (unless (cl-find fn chain :key #'cdr :test #'equal)
+      (puthash name (sort (cons (cons (or priority 50) fn) chain)
+                          (lambda (a b) (< (car a) (car b))))
+               harness--filters))
+    (cons name fn)))
 
-(defun harness-make-temp-file (prefix &optional suffix)
-  "Create an empty temporary file named PREFIX...SUFFIX and return its name."
-  (make-temp-file prefix nil suffix))
+(defun harness-remove-filter (name fn)
+  "Remove FN from the filter chain NAME."
+  (puthash name (cl-remove fn (gethash name harness--filters) :key #'cdr :test #'equal)
+           harness--filters))
 
-(defun harness-shell-quote (string)
-  "Quote STRING for safe inclusion in a POSIX shell command."
-  (shell-quote-argument string))
+(defun harness-run-filter (name value &rest args)
+  "Pass VALUE through every function in filter chain NAME.
+Each function is called as (FN VALUE . ARGS) and its return value
+becomes the next VALUE.  A function that signals is skipped."
+  (dolist (f (gethash name harness--filters) value)
+    (condition-case err
+        (setq value (apply (cdr f) value args))
+      (error (harness-log 'error "filter %S in %s failed: %S" (cdr f) name err)))))
+
+(defun harness-run-filter-async (name value &rest args)
+  "Run the asynchronous filter chain NAME starting from VALUE.
+Each function is called as (FN VALUE NEXT . ARGS) and must eventually
+call NEXT with the new value (or return a promise of it, in which case
+NEXT is called for it).  A function may stop the chain by calling NEXT
+with a value whose `:final' property is non-nil.  Return a promise of
+the final value."
+  (let ((chain (gethash name harness--filters))
+        (promise (harness-make-promise)))
+    (cl-labels ((step (value rest)
+                  (if (or (null rest)
+                          (and (listp value) (plist-get value :final)))
+                      (harness-resolve promise value)
+                    (let* ((fn (cdar rest))
+                           (called nil)
+                           (next (lambda (v)
+                                   (unless called
+                                     (setq called t)
+                                     (step v (cdr rest))))))
+                      (condition-case err
+                          (let ((ret (apply fn value next args)))
+                            (when (and (harness-promise-p ret) (not called))
+                              (harness-then ret next
+                                            (lambda (e)
+                                              (harness-log 'error "async filter %S rejected: %S" fn e)
+                                              (funcall next value)))))
+                        (error
+                         (harness-log 'error "async filter %S in %s failed: %S" fn name err)
+                         (funcall next value)))))))
+      (step value chain))
+    promise))
+
+(defun harness-filters ()
+  "Return the names of all filter chains that have handlers."
+  (let (out) (maphash (lambda (k _) (push k out)) harness--filters) out))
+
+;;;; Modules
+
+(cl-defstruct (harness-module (:copier nil))
+  name doc requires init-fn shutdown-fn file feature
+  (state 'registered)   ; registered, ready, failed, disabled
+  error)
+
+(defvar harness--modules (make-hash-table :test 'eq)
+  "Module name -> `harness-module'.")
+
+(defvar harness--defining-module nil
+  "Bound to the module name while its file is loading.")
+
+(defvar harness-module-init-hook nil
+  "Hook run with the module name after each module initialises.")
+
+(cl-defun harness-define-module (name &key doc requires init shutdown)
+  "Register module NAME.
+DOC describes it.  REQUIRES lists module names that must be ready
+first.  INIT is called once when the harness starts (or when the module
+is enabled later); SHUTDOWN when it stops.  Re-evaluating a definition
+while the module is ready keeps it ready and just refreshes the
+metadata, which is what a hot reload needs."
+  (let ((existing (gethash name harness--modules)))
+    (if existing
+        (setf (harness-module-doc existing) doc
+              (harness-module-requires existing) requires
+              (harness-module-init-fn existing) init
+              (harness-module-shutdown-fn existing) shutdown
+              (harness-module-file existing) (or load-file-name (harness-module-file existing)))
+      (puthash name (make-harness-module :name name :doc doc :requires requires
+                                         :init-fn init :shutdown-fn shutdown
+                                         :file load-file-name
+                                         :feature (intern (format "harness-%s" name)))
+               harness--modules)))
+  name)
+
+(defun harness-module-get (name)
+  "Return the module struct for NAME, or nil."
+  (gethash name harness--modules))
+
+(defun harness-module-ready-p (name)
+  "Non-nil when module NAME is initialised."
+  (let ((m (gethash name harness--modules)))
+    (and m (eq (harness-module-state m) 'ready))))
+
+(defun harness-modules ()
+  "Return all registered modules, sorted by name."
+  (let (out)
+    (maphash (lambda (_ m) (push m out)) harness--modules)
+    (sort out (lambda (a b) (string< (harness-module-name a) (harness-module-name b))))))
+
+(defun harness--module-order (names)
+  "Return NAMES topologically sorted by their requirements."
+  (let (order visiting)
+    (cl-labels ((visit (n)
+                  (cond ((memq n order))
+                        ((memq n visiting)
+                         (harness-log 'warn "module dependency cycle at %s" n))
+                        ((not (gethash n harness--modules))
+                         (harness-log 'warn "module %s requires unknown module" n))
+                        (t (push n visiting)
+                           (dolist (r (harness-module-requires (gethash n harness--modules)))
+                             (visit r))
+                           (setq visiting (delq n visiting))
+                           (push n order)))))
+      (mapc #'visit names))
+    (nreverse order)))
+
+(defun harness-module-start (name)
+  "Initialise module NAME if it is registered and not yet ready.
+Return non-nil on success.  Failures are recorded on the module."
+  (let ((m (gethash name harness--modules)))
+    (cond ((null m) nil)
+          ((eq (harness-module-state m) 'ready) t)
+          ((cl-notevery #'harness-module-ready-p (harness-module-requires m))
+           (setf (harness-module-state m) 'failed
+                 (harness-module-error m)
+                 (format "requirements not ready: %s"
+                         (cl-remove-if #'harness-module-ready-p (harness-module-requires m))))
+           (harness-log 'warn "module %s: %s" name (harness-module-error m))
+           nil)
+          (t (condition-case err
+                 (progn
+                   (when (harness-module-init-fn m) (funcall (harness-module-init-fn m)))
+                   (setf (harness-module-state m) 'ready (harness-module-error m) nil)
+                   (harness-log 'debug "module %s ready" name)
+                   (run-hook-with-args 'harness-module-init-hook name)
+                   t)
+               (error
+                (setf (harness-module-state m) 'failed (harness-module-error m) err)
+                (harness-log 'error "module %s failed to initialise: %S" name err)
+                nil))))))
+
+(defun harness-modules-init (&optional names)
+  "Initialise NAMES (default: every registered module) in dependency order.
+Return the list of module names that are ready."
+  (let ((names (or names (mapcar #'harness-module-name (harness-modules)))))
+    (dolist (n (harness--module-order names))
+      (harness-module-start n))
+    (cl-remove-if-not #'harness-module-ready-p names)))
+
+(defun harness-modules-shutdown ()
+  "Shut down every ready module, dependents first."
+  (dolist (n (reverse (harness--module-order (mapcar #'harness-module-name (harness-modules)))))
+    (let ((m (gethash n harness--modules)))
+      (when (eq (harness-module-state m) 'ready)
+        (condition-case err
+            (when (harness-module-shutdown-fn m) (funcall (harness-module-shutdown-fn m)))
+          (error (harness-log 'error "module %s failed to shut down: %S" n err)))
+        (setf (harness-module-state m) 'registered)))))
+
+(defun harness-module-disable (name)
+  "Mark module NAME disabled and shut it down if it was running."
+  (let ((m (gethash name harness--modules)))
+    (when m
+      (when (and (eq (harness-module-state m) 'ready) (harness-module-shutdown-fn m))
+        (ignore-errors (funcall (harness-module-shutdown-fn m))))
+      (setf (harness-module-state m) 'disabled))))
+
+(defun harness-describe-modules ()
+  "Describe every module and its state in a help buffer."
+  (interactive)
+  (with-help-window "*harness-modules*"
+    (dolist (m (harness-modules))
+      (princ (format "%-14s %-10s %s\n" (harness-module-name m)
+                     (harness-module-state m)
+                     (or (harness-module-doc m) "")))
+      (when (harness-module-error m)
+        (princ (format "               error: %S\n" (harness-module-error m)))))))
+
+;;;; Introspection
+
+(defun harness-describe-api ()
+  "Return a plist describing the whole bus: methods, events and filters."
+  (list :methods (harness-methods)
+        :events (mapcar (lambda (e) (list :name (car e) :doc (cdr e))) (harness-events))
+        :filters (harness-filters)
+        :modules (mapcar (lambda (m) (list :name (harness-module-name m)
+                                           :state (harness-module-state m)
+                                           :doc (harness-module-doc m)))
+                         (harness-modules))))
 
 (provide 'harness-core)
 ;;; harness-core.el ends here

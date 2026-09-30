@@ -1,0 +1,729 @@
+;;; harness-session.el --- Session records and the conversation DAG  -*- lexical-binding: t; -*-
+
+;;; Commentary:
+
+;; A session is a project-scoped conversation: settings, status, a
+;; directed graph of nodes (messages, thinking, tool calls, hints), a
+;; queue of messages waiting for the next turn, and pending requests
+;; that block it.  Everything a UI shows about a session comes from
+;; here through the bus; nothing here renders or calls a model.
+;;
+;; Persistence: sessions/ID.json holds the record, sessions/ID.nodes.jsonl
+;; is an append-only log of nodes and node updates.  Node logs are
+;; loaded lazily so listing a thousand sessions stays instant.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+(require 'harness-core)
+(require 'harness-util)
+
+(defvar harness-default-model)
+(defvar harness-state-directory)
+
+(defcustom harness-session-save-delay 0.3
+  "Seconds of quiet before a changed session record is written to disk."
+  :type 'number :group 'harness)
+
+(cl-defstruct (harness-session (:copier nil))
+  id name kind project cwd host worktree model permission-mode thinking non-interactive
+  (status 'idle) parent-id fork-node created updated
+  (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :context 0 :turns 0))
+  context-window budget head queue pending todos plan provider-state
+  ;; runtime only
+  (nodes (make-hash-table :test 'equal))
+  (loaded nil)
+  (runtime nil))
+
+(defvar harness-sessions (make-hash-table :test 'equal)
+  "Session id -> `harness-session'.")
+
+(defconst harness-session--public-keys
+  '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
+    :non-interactive :status :parent-id :fork-node :created :updated :usage
+    :context-window :budget :head :queue :pending :todos :plan :provider-state))
+
+(defconst harness-session--symbol-keys '(:kind :status :permission-mode)
+  "Keys whose values are symbols in memory and strings on disk.")
+
+(defconst harness-session--settings
+  '(:name :model :permission-mode :thinking :non-interactive :budget :context-window :cwd :host :worktree)
+  "Keys `session/update' accepts.")
+
+;;;; Conversions
+
+(defun harness-session--get (id)
+  "Return the session struct for ID or signal."
+  (or (gethash id harness-sessions)
+      (signal 'harness-error (list (format "No session %s" id)))))
+
+(defun harness-session-plist (s)
+  "Return the public plist of session struct S."
+  (list :id (harness-session-id s) :name (harness-session-name s)
+        :kind (harness-session-kind s) :project (harness-session-project s)
+        :cwd (harness-session-cwd s) :host (harness-session-host s)
+        :worktree (harness-session-worktree s) :model (harness-session-model s)
+        :permission-mode (harness-session-permission-mode s)
+        :thinking (harness-session-thinking s)
+        :non-interactive (harness-session-non-interactive s)
+        :status (harness-session-status s) :parent-id (harness-session-parent-id s)
+        :fork-node (harness-session-fork-node s) :created (harness-session-created s)
+        :updated (harness-session-updated s) :usage (harness-session-usage s)
+        :context-window (harness-session-context-window s)
+        :budget (harness-session-budget s) :head (harness-session-head s)
+        :queue (harness-session-queue s) :pending (harness-session-pending s)
+        :todos (harness-session-todos s) :plan (harness-session-plan s)
+        :provider-state (harness-session-provider-state s)))
+
+(defun harness-session--intern-values (plist)
+  "Turn string enum values in PLIST back into symbols."
+  (let ((pl (copy-sequence plist)))
+    (dolist (k harness-session--symbol-keys pl)
+      (let ((v (plist-get pl k)))
+        (when (stringp v) (setq pl (plist-put pl k (intern v))))))))
+
+(defun harness-session--from-plist (plist)
+  "Build a session struct from a stored PLIST."
+  (let* ((pl (harness-session--intern-values plist))
+         (s (make-harness-session)))
+    (setf (harness-session-id s) (plist-get pl :id)
+          (harness-session-name s) (plist-get pl :name)
+          (harness-session-kind s) (or (plist-get pl :kind) 'main)
+          (harness-session-project s) (plist-get pl :project)
+          (harness-session-cwd s) (plist-get pl :cwd)
+          (harness-session-host s) (plist-get pl :host)
+          (harness-session-worktree s) (plist-get pl :worktree)
+          (harness-session-model s) (plist-get pl :model)
+          (harness-session-permission-mode s) (or (plist-get pl :permission-mode) 'ask)
+          (harness-session-thinking s) (plist-get pl :thinking)
+          (harness-session-non-interactive s) (harness-json-true-p (plist-get pl :non-interactive))
+          (harness-session-status s) 'inactive
+          (harness-session-parent-id s) (plist-get pl :parent-id)
+          (harness-session-fork-node s) (plist-get pl :fork-node)
+          (harness-session-created s) (or (plist-get pl :created) (float-time))
+          (harness-session-updated s) (or (plist-get pl :updated) (float-time))
+          (harness-session-usage s) (or (plist-get pl :usage) (harness-session-usage s))
+          (harness-session-context-window s) (plist-get pl :context-window)
+          (harness-session-budget s) (plist-get pl :budget)
+          (harness-session-head s) (plist-get pl :head)
+          (harness-session-queue s) (plist-get pl :queue)
+          (harness-session-pending s) nil
+          (harness-session-todos s) (plist-get pl :todos)
+          (harness-session-plan s) (plist-get pl :plan)
+          (harness-session-provider-state s) (plist-get pl :provider-state))
+    s))
+
+;;;; Persistence
+
+(defun harness-session--meta-name (id) (format "sessions/%s.json" id))
+(defun harness-session--nodes-name (id) (format "sessions/%s.nodes.jsonl" id))
+
+(defun harness-session--save (id)
+  "Write the record of session ID now."
+  (let ((s (gethash id harness-sessions)))
+    (when s
+      (harness-call 'store/save (harness-session--meta-name id) (harness-session-plist s)))))
+
+(defun harness-session--touch (s)
+  "Mark S changed: update the timestamp, schedule a save, emit `session/changed'."
+  (setf (harness-session-updated s) (float-time))
+  (harness-debounce (list 'harness-session (harness-session-id s))
+                    harness-session-save-delay #'harness-session--save (harness-session-id s))
+  (harness-emit 'session/changed (harness-session-id s) (harness-session-plist s)))
+
+(defun harness-session-flush ()
+  "Write every session record now (used on exit)."
+  (maphash (lambda (id _) (ignore-errors (harness-session--save id))) harness-sessions))
+
+(defun harness-session--intern-node (node)
+  (let ((n (copy-sequence node)))
+    (when (stringp (plist-get n :kind)) (setq n (plist-put n :kind (intern (plist-get n :kind)))))
+    (when (plist-member n :is-error) (setq n (plist-put n :is-error (harness-json-true-p (plist-get n :is-error)))))
+    n))
+
+(defun harness-session--load-nodes (s)
+  "Load the node log of S into memory if not yet done."
+  (unless (harness-session-loaded s)
+    (let ((table (harness-session-nodes s)))
+      (dolist (rec (harness-call 'store/read-all (harness-session--nodes-name (harness-session-id s))))
+        (let ((rec (harness-session--intern-node rec)))
+          (if (equal (plist-get rec :_op) "update")
+              (let ((existing (gethash (plist-get rec :id) table)))
+                (when existing
+                  (puthash (plist-get rec :id)
+                           (harness-plist-merge existing (harness-plist-remove rec :_op))
+                           table)))
+            (puthash (plist-get rec :id) rec table)))))
+    (setf (harness-session-loaded s) t)))
+
+(defun harness-session--persist-node (s node &optional update)
+  (harness-call 'store/append (harness-session--nodes-name (harness-session-id s))
+                (if update (plist-put (copy-sequence node) :_op "update") node)))
+
+;;;; Path helpers
+
+(defun harness-session--path (s &optional head)
+  "Return the nodes of S from the root to HEAD, oldest first.
+HEAD defaults to the session head."
+  (harness-session--load-nodes s)
+  (let ((table (harness-session-nodes s))
+        (id (or head (harness-session-head s)))
+        (out nil) (seen (make-hash-table :test 'equal)))
+    (while (and id (not (gethash id seen)))
+      (puthash id t seen)
+      (let ((n (gethash id table)))
+        (if n
+            (progn (push n out) (setq id (plist-get n :parent)))
+          (setq id nil))))
+    out))
+
+(defun harness-session--config (key cwd)
+  (if (harness-method-exists-p 'config/get)
+      (ignore-errors (harness-call 'config/get key cwd))
+    (and (boundp key) (symbol-value key))))
+
+(defun harness-session--context-window (model)
+  (or (and (harness-method-exists-p 'provider/model)
+           (plist-get (harness-call 'provider/model model) :context-window))
+      128000))
+
+;;;; Methods: lifecycle
+
+(harness-defmethod session/create (&rest plist)
+  "Create a session.  PLIST needs `:cwd'; see docs/architecture.md for the rest."
+  (let* ((cwd (or (plist-get plist :cwd) (error "session/create needs :cwd")))
+         (host (or (plist-get plist :host) (file-remote-p cwd)))
+         (cwd (file-name-as-directory (expand-file-name cwd)))
+         (project (if (harness-method-exists-p 'project/root) (harness-call 'project/root cwd) cwd))
+         (model (or (plist-get plist :model) (harness-session--config 'harness-model cwd)
+                    (and (boundp 'harness-default-model) harness-default-model)))
+         (s (make-harness-session)))
+    (setf (harness-session-id s) (or (plist-get plist :id) (harness-uuid))
+          (harness-session-name s) (plist-get plist :name)
+          (harness-session-kind s) (or (plist-get plist :kind) 'main)
+          (harness-session-project s) project
+          (harness-session-cwd s) cwd
+          (harness-session-host s) host
+          (harness-session-worktree s) (plist-get plist :worktree)
+          (harness-session-model s) model
+          (harness-session-permission-mode s) (or (plist-get plist :permission-mode)
+                                                  (harness-session--config 'harness-permission-mode cwd) 'ask)
+          (harness-session-thinking s) (or (plist-get plist :thinking) (harness-session--config 'harness-thinking cwd))
+          (harness-session-non-interactive s) (or (plist-get plist :non-interactive)
+                                                  (harness-session--config 'harness-non-interactive cwd))
+          (harness-session-status s) 'idle
+          (harness-session-parent-id s) (plist-get plist :parent-id)
+          (harness-session-fork-node s) (plist-get plist :fork-node)
+          (harness-session-created s) (float-time)
+          (harness-session-updated s) (float-time)
+          (harness-session-context-window s) (or (plist-get plist :context-window)
+                                                 (harness-session--context-window model))
+          (harness-session-budget s) (or (plist-get plist :budget) (harness-session--config 'harness-budget cwd))
+          (harness-session-provider-state s) (plist-get plist :provider-state)
+          (harness-session-loaded s) t)
+    (puthash (harness-session-id s) s harness-sessions)
+    (harness-session--save (harness-session-id s))
+    (let ((pl (harness-session-plist s)))
+      (harness-emit 'session/created (harness-session-id s) pl)
+      (harness-emit 'session/changed (harness-session-id s) pl)
+      pl)))
+
+(harness-defmethod session/get (id)
+  "Return the public plist of session ID."
+  (harness-session-plist (harness-session--get id)))
+
+(harness-defmethod session/exists-p (id)
+  "Non-nil when session ID is known."
+  (and (gethash id harness-sessions) t))
+
+(harness-defmethod session/list (&optional filter)
+  "Return session plists matching FILTER, newest first.
+FILTER keys: :project :status :kind :parent-id :active."
+  (let (out)
+    (maphash
+     (lambda (_ s)
+       (when (and (or (null (plist-get filter :project))
+                      (equal (plist-get filter :project) (harness-session-project s)))
+                  (or (null (plist-get filter :status))
+                      (eq (plist-get filter :status) (harness-session-status s)))
+                  (or (null (plist-get filter :kind))
+                      (eq (plist-get filter :kind) (harness-session-kind s)))
+                  (or (null (plist-get filter :parent-id))
+                      (equal (plist-get filter :parent-id) (harness-session-parent-id s)))
+                  (or (null (plist-get filter :active))
+                      (not (eq (harness-session-status s) 'inactive))))
+         (push (harness-session-plist s) out)))
+     harness-sessions)
+    (sort out (lambda (a b) (> (plist-get a :updated) (plist-get b :updated))))))
+
+(harness-defmethod session/delete (id)
+  "Delete session ID and its files."
+  (let ((s (harness-session--get id)))
+    (harness-emit 'session/deleted id (harness-session-plist s))
+    (remhash id harness-sessions)
+    (harness-call 'store/delete (harness-session--meta-name id))
+    (harness-call 'store/delete (harness-session--nodes-name id))
+    t))
+
+(harness-defmethod session/resume (id)
+  "Make session ID active again (status idle) and load its nodes."
+  (let ((s (harness-session--get id)))
+    (harness-session--load-nodes s)
+    (when (eq (harness-session-status s) 'inactive)
+      (setf (harness-session-status s) 'idle)
+      (harness-emit 'session/status id 'idle))
+    (harness-emit 'session/resumed id)
+    (harness-session--touch s)
+    (harness-session-plist s)))
+
+(harness-defmethod session/deactivate (id)
+  "Mark session ID inactive (not open anywhere)."
+  (let ((s (harness-session--get id)))
+    (setf (harness-session-status s) 'inactive)
+    (harness-emit 'session/status id 'inactive)
+    (harness-emit 'session/deactivated id)
+    (harness-session--touch s)
+    (harness-session-plist s)))
+
+(harness-defmethod session/set-status (id status)
+  "Set the status of session ID to STATUS (idle, running, blocked, inactive)."
+  (let ((s (harness-session--get id)))
+    (unless (eq status (harness-session-status s))
+      (setf (harness-session-status s) status)
+      (harness-emit 'session/status id status)
+      (harness-session--touch s))
+    status))
+
+(defun harness-session--describe-change (key value)
+  (pcase key
+    (:name (format "renamed to %s" value))
+    (:model (format "model → %s" value))
+    (:permission-mode (format "permission mode → %s" value))
+    (:thinking (format "thinking → %s" (or value "default")))
+    (:non-interactive (format "non-interactive %s" (if value "on" "off")))
+    (:budget (if value (format "budget → %s%s" (harness-format-cost (plist-get value :amount))
+                               (if (plist-get value :hard) " (hard)" ""))
+               "budget removed"))
+    (:cwd (format "working directory → %s" (abbreviate-file-name value)))
+    (_ nil)))
+
+(harness-defmethod session/update (id &rest plist)
+  "Change settings of session ID from PLIST (see `harness-session--settings').
+With `:persist' non-nil, model, permission mode and thinking are also
+written to the configuration layer.  With `:silent' no hint is added."
+  (let* ((s (harness-session--get id))
+         (persist (plist-get plist :persist))
+         (silent (plist-get plist :silent))
+         changes)
+    (cl-loop for (k v) on plist by #'cddr
+             when (memq k harness-session--settings)
+             do (pcase k
+                  (:name (setf (harness-session-name s) v))
+                  (:model (setf (harness-session-model s) v
+                                (harness-session-context-window s) (harness-session--context-window v)))
+                  (:permission-mode (setf (harness-session-permission-mode s) (if (stringp v) (intern v) v)))
+                  (:thinking (setf (harness-session-thinking s) v))
+                  (:non-interactive (setf (harness-session-non-interactive s) (harness-json-true-p v)))
+                  (:budget (setf (harness-session-budget s) v))
+                  (:context-window (setf (harness-session-context-window s) v))
+                  (:cwd (setf (harness-session-cwd s) (file-name-as-directory (expand-file-name v))))
+                  (:host (setf (harness-session-host s) v))
+                  (:worktree (setf (harness-session-worktree s) v)))
+             (setq changes (plist-put changes k v)))
+    (when (and persist (harness-method-exists-p 'config/set))
+      (cl-loop for (k v) on changes by #'cddr
+               for var = (pcase k (:model 'harness-model) (:permission-mode 'harness-permission-mode)
+                                (:thinking 'harness-thinking) (:non-interactive 'harness-non-interactive))
+               when var do (ignore-errors (harness-call 'config/set var v :cwd (harness-session-cwd s)))))
+    (unless silent
+      (cl-loop for (k v) on changes by #'cddr
+               for text = (harness-session--describe-change k v)
+               when text do (harness-call 'session/hint id text)))
+    (harness-emit 'session/updated id changes)
+    (harness-session--touch s)
+    (harness-session-plist s)))
+
+(harness-defmethod session/set-provider-state (id state)
+  "Replace the opaque provider state of session ID with STATE."
+  (let ((s (harness-session--get id)))
+    (setf (harness-session-provider-state s) state)
+    (harness-session--touch s)
+    state))
+
+(harness-defmethod session/runtime (id &optional key value)
+  "Get or set the runtime (unpersisted) property KEY of session ID.
+With only ID return the whole runtime plist."
+  (let ((s (harness-session--get id)))
+    (cond ((null key) (harness-session-runtime s))
+          ((eq value :get) (plist-get (harness-session-runtime s) key))
+          (t (setf (harness-session-runtime s) (plist-put (harness-session-runtime s) key value))
+             value))))
+
+;;;; Methods: forks and trees
+
+(harness-defmethod session/fork (id &rest plist)
+  "Fork session ID; return a promise of the new session plist.
+PLIST may set `:kind' (fork, btw, subagent), `:name', `:cwd', `:model'
+and any other `session/create' key.  The ancestor chain is copied so
+the fork starts with the parent's transcript."
+  (let* ((parent (harness-session--get id))
+         (path (harness-session--path parent))
+         (child-plist (harness-plist-merge
+                       (list :cwd (harness-session-cwd parent)
+                             :host (harness-session-host parent)
+                             :worktree (harness-session-worktree parent)
+                             :model (harness-session-model parent)
+                             :permission-mode (harness-session-permission-mode parent)
+                             :thinking (harness-session-thinking parent)
+                             :non-interactive (harness-session-non-interactive parent)
+                             :budget (harness-session-budget parent)
+                             :kind 'fork
+                             :parent-id id
+                             :fork-node (harness-session-head parent)
+                             :provider-state (harness-session-provider-state parent))
+                       plist))
+         (child (apply #'harness-call 'session/create child-plist))
+         (cs (harness-session--get (plist-get child :id))))
+    (dolist (n path)
+      (puthash (plist-get n :id) n (harness-session-nodes cs))
+      (harness-session--persist-node cs n))
+    (setf (harness-session-head cs) (harness-session-head parent))
+    (harness-session--save (harness-session-id cs))
+    (harness-then
+     (if (harness-method-exists-p 'provider/fork)
+         (harness-catch (harness-call 'provider/fork (harness-session-model cs)
+                                      (harness-session-provider-state parent))
+                        (lambda (e) (harness-log 'warn "provider fork failed: %s" (harness-error-message e)) nil))
+       (harness-resolved nil))
+     (lambda (state)
+       (when state (setf (harness-session-provider-state cs) state))
+       (harness-session--save (harness-session-id cs))
+       (harness-emit 'session/forked id (harness-session-id cs))
+       (harness-session--touch cs)
+       (harness-session-plist cs)))))
+
+(defun harness-session--family (s)
+  "Return every session struct in the fork family of S."
+  (let ((root s))
+    (while (and (harness-session-parent-id root)
+                (gethash (harness-session-parent-id root) harness-sessions))
+      (setq root (gethash (harness-session-parent-id root) harness-sessions)))
+    (let ((family (list root)) (frontier (list root)))
+      (while frontier
+        (let ((cur (pop frontier)))
+          (maphash (lambda (_ c)
+                     (when (and (equal (harness-session-parent-id c) (harness-session-id cur))
+                                (not (memq c family)))
+                       (push c family) (push c frontier)))
+                   harness-sessions)))
+      (sort family (lambda (a b) (< (harness-session-created a) (harness-session-created b)))))))
+
+(harness-defmethod session/tree (id)
+  "Return (:sessions SUMMARIES :nodes NODES) for the family of session ID.
+Nodes shared by forks appear once, attributed to the session that
+created them; every node carries `:session'."
+  (let* ((s (harness-session--get id))
+         (family (harness-session--family s))
+         (seen (make-hash-table :test 'equal))
+         nodes)
+    (dolist (m family)
+      (harness-session--load-nodes m)
+      (maphash (lambda (nid n)
+                 (unless (gethash nid seen)
+                   (puthash nid t seen)
+                   (push (plist-put (copy-sequence n) :session (harness-session-id m)) nodes)))
+               (harness-session-nodes m)))
+    (list :sessions (mapcar (lambda (m) (list :id (harness-session-id m) :name (harness-session-name m)
+                                              :kind (harness-session-kind m) :head (harness-session-head m)
+                                              :parent-id (harness-session-parent-id m)
+                                              :fork-node (harness-session-fork-node m)
+                                              :status (harness-session-status m)))
+                            family)
+          :nodes (sort nodes (lambda (a b) (< (or (plist-get a :ts) 0) (or (plist-get b :ts) 0)))))))
+
+;;;; Methods: nodes
+
+(harness-defmethod session/nodes (id &optional opts)
+  "Return the transcript nodes of session ID, oldest first.
+OPTS `:limit' keeps the last N; `:before' NODE-ID returns the nodes
+strictly before that node."
+  (let* ((s (harness-session--get id))
+         (path (harness-session--path s))
+         (before (plist-get opts :before))
+         (limit (plist-get opts :limit)))
+    (when before
+      (setq path (cl-loop for n in path until (equal (plist-get n :id) before) collect n)))
+    (if (and limit (> (length path) limit)) (last path limit) path)))
+
+(harness-defmethod session/node (id node-id)
+  "Return node NODE-ID of session ID or nil."
+  (let ((s (harness-session--get id)))
+    (harness-session--load-nodes s)
+    (gethash node-id (harness-session-nodes s))))
+
+(harness-defmethod session/append (id node)
+  "Append NODE to session ID after the current head; return the stored node."
+  (let* ((s (harness-session--get id))
+         (n (copy-sequence node)))
+    (harness-session--load-nodes s)
+    (setq n (plist-put n :id (or (plist-get n :id) (concat "n-" (harness-short-id 10)))))
+    (setq n (plist-put n :session id))
+    (setq n (plist-put n :ts (or (plist-get n :ts) (float-time))))
+    (setq n (plist-put n :parent (harness-session-head s)))
+    (puthash (plist-get n :id) n (harness-session-nodes s))
+    (setf (harness-session-head s) (plist-get n :id))
+    (harness-session--persist-node s n)
+    (harness-emit 'session/node-added id n)
+    (harness-session--touch s)
+    n))
+
+(harness-defmethod session/update-node (id node-id &rest plist)
+  "Merge PLIST into node NODE-ID of session ID; return the node.
+With `:transient' non-nil the change is announced but not persisted
+\(streaming deltas); the final update persists."
+  (let* ((s (harness-session--get id))
+         (transient (plist-get plist :transient))
+         (changes (harness-plist-remove plist :transient))
+         (n (progn (harness-session--load-nodes s) (gethash node-id (harness-session-nodes s)))))
+    (unless n (signal 'harness-error (list (format "No node %s in %s" node-id id))))
+    (setq n (harness-plist-merge n changes))
+    (puthash node-id n (harness-session-nodes s))
+    (unless transient
+      (harness-session--persist-node s (plist-put (copy-sequence changes) :id node-id) t))
+    (harness-emit 'session/node-updated id n (and transient t))
+    n))
+
+(harness-defmethod session/set-head (id node-id)
+  "Move the head of session ID to NODE-ID (time travel within the DAG)."
+  (let ((s (harness-session--get id)))
+    (harness-session--load-nodes s)
+    (unless (gethash node-id (harness-session-nodes s))
+      (signal 'harness-error (list (format "No node %s" node-id))))
+    (setf (harness-session-head s) node-id)
+    (harness-emit 'session/head-moved id node-id)
+    (harness-session--touch s)
+    node-id))
+
+(harness-defmethod session/hint (id text)
+  "Append a system hint TEXT to session ID."
+  (harness-call 'session/append id (list :kind 'hint :content text)))
+
+;;;; Methods: queue, pending, usage, todos, plan
+
+(harness-defmethod session/queue (id text &optional attachments)
+  "Queue TEXT with ATTACHMENTS for the next turn of session ID; return the item."
+  (let* ((s (harness-session--get id))
+         (item (list :id (harness-short-id 6) :text text :attachments attachments :ts (float-time))))
+    (setf (harness-session-queue s) (append (harness-session-queue s) (list item)))
+    (harness-emit 'session/queue-changed id (harness-session-queue s))
+    (harness-session--touch s)
+    item))
+
+(harness-defmethod session/queue-update (id qid text &optional attachments)
+  "Replace the text (and attachments when given) of queued item QID in session ID."
+  (let ((s (harness-session--get id)))
+    (setf (harness-session-queue s)
+          (mapcar (lambda (it)
+                    (if (equal (plist-get it :id) qid)
+                        (let ((it (plist-put (copy-sequence it) :text text)))
+                          (if attachments (plist-put it :attachments attachments) it))
+                      it))
+                  (harness-session-queue s)))
+    (harness-emit 'session/queue-changed id (harness-session-queue s))
+    (harness-session--touch s)
+    (harness-session-queue s)))
+
+(harness-defmethod session/queue-remove (id qid)
+  "Remove queued item QID from session ID."
+  (let ((s (harness-session--get id)))
+    (setf (harness-session-queue s)
+          (cl-remove qid (harness-session-queue s) :key (lambda (it) (plist-get it :id)) :test #'equal))
+    (harness-emit 'session/queue-changed id (harness-session-queue s))
+    (harness-session--touch s)
+    (harness-session-queue s)))
+
+(harness-defmethod session/queue-take (id)
+  "Return and clear the queued items of session ID."
+  (let* ((s (harness-session--get id))
+         (items (harness-session-queue s)))
+    (setf (harness-session-queue s) nil)
+    (when items
+      (harness-emit 'session/queue-changed id nil)
+      (harness-session--touch s))
+    items))
+
+(defun harness-session--reconcile-status (s)
+  "Enter or leave `blocked' as pending requests come and go."
+  (let ((id (harness-session-id s)))
+    (cond ((and (harness-session-pending s) (not (eq (harness-session-status s) 'blocked)))
+           (setf (harness-session-runtime s)
+                 (plist-put (harness-session-runtime s) :status-before-block (harness-session-status s)))
+           (setf (harness-session-status s) 'blocked)
+           (harness-emit 'session/status id 'blocked))
+          ((and (null (harness-session-pending s)) (eq (harness-session-status s) 'blocked))
+           (let ((prev (or (plist-get (harness-session-runtime s) :status-before-block) 'idle)))
+             (setf (harness-session-status s) prev)
+             (harness-emit 'session/status id prev))))))
+
+(harness-defmethod session/pending-add (id request)
+  "Register a blocking REQUEST (:kind permission|question :payload …) on ID.
+Return the pending id.  The session becomes `blocked'."
+  (let* ((s (harness-session--get id))
+         (item (harness-plist-merge (list :id (harness-short-id 6) :created (float-time)) request)))
+    (setf (harness-session-pending s) (append (harness-session-pending s) (list item)))
+    (harness-session--reconcile-status s)
+    (harness-emit 'session/pending-changed id (harness-session-pending s))
+    (harness-session--touch s)
+    (plist-get item :id)))
+
+(harness-defmethod session/pending-resolve (id pid answer)
+  "Remove pending request PID from session ID with ANSWER; return the item or nil."
+  (let* ((s (harness-session--get id))
+         (item (cl-find pid (harness-session-pending s) :key (lambda (it) (plist-get it :id)) :test #'equal)))
+    (when item
+      (setf (harness-session-pending s)
+            (cl-remove pid (harness-session-pending s) :key (lambda (it) (plist-get it :id)) :test #'equal))
+      (harness-session--reconcile-status s)
+      (harness-emit 'session/pending-resolved id item answer)
+      (harness-emit 'session/pending-changed id (harness-session-pending s))
+      (harness-session--touch s))
+    item))
+
+(harness-defmethod session/pending (id)
+  "Return the pending requests of session ID."
+  (harness-session-pending (harness-session--get id)))
+
+(harness-defmethod session/usage-add (id record)
+  "Add usage RECORD to session ID.
+RECORD keys: :input :output :cache-read :cache-write :cost :context :turns.
+Counters accumulate; `:context' replaces.  Return the totals."
+  (let* ((s (harness-session--get id))
+         (u (copy-sequence (harness-session-usage s)))
+         (record (if (and (null (plist-get record :cost))
+                          (or (plist-get record :input) (plist-get record :output))
+                          (harness-method-exists-p 'usage/price))
+                     (plist-put (copy-sequence record) :cost
+                                (ignore-errors (harness-call 'usage/price (harness-session-model s) record)))
+                   record)))
+    (dolist (k '(:input :output :cache-read :cache-write :cost :turns))
+      (when (numberp (plist-get record k))
+        (setq u (plist-put u k (+ (or (plist-get u k) 0) (plist-get record k))))))
+    (when (numberp (plist-get record :context))
+      (setq u (plist-put u :context (plist-get record :context))))
+    (setf (harness-session-usage s) u)
+    (harness-emit 'session/usage id u record)
+    (harness-session--touch s)
+    u))
+
+(harness-defmethod session/set-todos (id todos)
+  "Replace the todo list of session ID with TODOS."
+  (let ((s (harness-session--get id)))
+    (setf (harness-session-todos s) todos)
+    (harness-emit 'session/todos id todos)
+    (harness-session--touch s)
+    todos))
+
+(harness-defmethod session/set-plan (id text)
+  "Set the current plan TEXT of session ID."
+  (let ((s (harness-session--get id)))
+    (setf (harness-session-plan s) text)
+    (harness-emit 'session/plan id text)
+    (harness-session--touch s)
+    text))
+
+;;;; Methods: derived views
+
+(defun harness-session--text-blocks (node)
+  (or (plist-get node :blocks)
+      (list (list :type "text" :text (or (plist-get node :content) "")))))
+
+(harness-defmethod session/messages (id)
+  "Return provider messages (:role :content BLOCKS) for the transcript of ID.
+Adjacent assistant-side nodes merge into one assistant message; tool
+results become user messages with tool_result blocks; the transcript
+starts at the last compaction node when one exists."
+  (let* ((s (harness-session--get id))
+         (path (harness-session--path s))
+         (start (cl-position-if (lambda (n) (eq (plist-get n :kind) 'compaction)) path :from-end t))
+         (path (if start (nthcdr start path) path))
+         (messages nil) (cur nil) (cur-role nil))
+    (cl-flet ((flush () (when cur
+                          (push (list :role cur-role :content (nreverse cur)) messages)
+                          (setq cur nil cur-role nil)))
+              (add (role block)
+                (unless (eq role cur-role) (setq cur nil cur-role role))
+                (push block cur)))
+      (dolist (n path)
+        (pcase (plist-get n :kind)
+          ('user (unless (eq cur-role 'user) (flush))
+                 (dolist (b (harness-session--text-blocks n)) (add 'user b)))
+          ('compaction (flush)
+                       (add 'user (list :type "text"
+                                        :text (concat "Summary of the conversation so far:\n\n"
+                                                      (plist-get n :content)))))
+          ('assistant (unless (eq cur-role 'assistant) (flush))
+                      (unless (harness-string-blank-p (plist-get n :content))
+                        (add 'assistant (list :type "text" :text (plist-get n :content)))))
+          ('thinking (unless (eq cur-role 'assistant) (flush))
+                     (unless (harness-string-blank-p (plist-get n :content))
+                       (add 'assistant (list :type "thinking" :text (plist-get n :content)
+                                             :signature (plist-get (plist-get n :meta) :signature)))))
+          ('tool-call (unless (eq cur-role 'assistant) (flush))
+                      (add 'assistant (list :type "tool_use" :id (plist-get n :call-id)
+                                            :name (plist-get n :tool) :input (or (plist-get n :input) :empty))))
+          ('tool-result (unless (eq cur-role 'user) (flush))
+                        (add 'user (list :type "tool_result" :tool_use_id (plist-get n :call-id)
+                                         :content (or (plist-get n :output) "")
+                                         :is_error (and (plist-get n :is-error) t))))
+          ('plan (unless (eq cur-role 'assistant) (flush))
+                 (add 'assistant (list :type "text" :text (concat "Plan:\n" (plist-get n :content)))))
+          (_ nil)))
+      (flush))
+    (nreverse messages)))
+
+(harness-defmethod session/transcript-text (id)
+  "Return the transcript of session ID as searchable plain text."
+  (mapconcat (lambda (n)
+               (pcase (plist-get n :kind)
+                 ('tool-call (format "[tool %s] %s" (plist-get n :tool) (or (plist-get n :title) "")))
+                 ('tool-result (format "[result] %s" (or (plist-get n :output) "")))
+                 (k (format "[%s] %s" k (or (plist-get n :content) "")))))
+             (harness-session--path (harness-session--get id)) "\n"))
+
+;;;; Init and reload
+
+(defun harness-session--load-all ()
+  "Load every persisted session record (nodes stay on disk until needed)."
+  (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
+    (let ((pl (harness-call 'store/load name)))
+      (when (and pl (plist-get pl :id) (not (gethash (plist-get pl :id) harness-sessions)))
+        (puthash (plist-get pl :id) (harness-session--from-plist pl) harness-sessions)))))
+
+(defun harness-session--on-kill-emacs () (harness-session-flush))
+
+(defun harness-session--init ()
+  (harness-session--load-all)
+  (add-hook 'kill-emacs-hook #'harness-session--on-kill-emacs))
+
+(dolist (ev '((session/created . "(ID SESSION)")
+              (session/changed . "(ID SESSION) after any change")
+              (session/updated . "(ID CHANGES) settings changed")
+              (session/status . "(ID STATUS)")
+              (session/deleted . "(ID SESSION)") (session/resumed . "(ID)") (session/deactivated . "(ID)")
+              (session/forked . "(PARENT-ID CHILD-ID)")
+              (session/node-added . "(ID NODE)") (session/node-updated . "(ID NODE TRANSIENT)")
+              (session/head-moved . "(ID NODE-ID)")
+              (session/queue-changed . "(ID ITEMS)") (session/pending-changed . "(ID ITEMS)")
+              (session/pending-resolved . "(ID ITEM ANSWER)")
+              (session/usage . "(ID TOTALS RECORD)") (session/todos . "(ID TODOS)") (session/plan . "(ID TEXT)")))
+  (harness-declare-event (car ev) (cdr ev)))
+
+(harness-define-module 'session
+  :doc "Session records, conversation DAG, queue and pending requests."
+  :requires '(store project)
+  :init #'harness-session--init
+  :shutdown #'harness-session-flush)
+
+(provide 'harness-session)
+;;; harness-session.el ends here

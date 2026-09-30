@@ -1,163 +1,87 @@
-# emacs-agent-harness
+# Emacs Agent Harness (v3)
 
-A coding-agent harness (Pi / Claude Code class) built entirely in Emacs Lisp,
-using native Emacs UI/UX: major modes, hooks, `defcustom`, `tabulated-list`,
-`widget`, `outline`, text properties, faces and `project.el`. Asynchronous
-throughout — no blocking work on the Emacs main thread, no third-party
-dependencies.
+An agent harness that is native to Emacs: sessions, tools, permissions,
+cost tracking and remote control are all Emacs Lisp, the UI is Emacs
+buffers, and the default model is Claude Fable 5.1 through the `claude`
+command line, so a Claude subscription is enough.
 
-`SPEC.md` is the original specification. `DESIGN.md` is the canonical design and
-describes exactly what the code does. `AGENTS.md` is the working guide for
-agents (and humans) changing this repository.
+![chat](docs/media/chat-tour.png)
 
-## Installation
+This is a clean-room implementation of [DESIGN.md](DESIGN.md).  The
+core only loads modules and passes messages between them; every feature
+is a module, and the UI talks to the rest over the Agent Client
+Protocol, in-process by default and over TCP to a remote Emacs.
 
-Emacs 29.1 or later and nothing else: the harness is built on built-in
-APIs, so there is no archive to add and no third-party package to install.
-Pick one of the routes below; each one ends at the same configuration in
-[Quick start](#quick-start).
+## Install
 
-### straight.el
-
-straight adds only the top level of a package's build directory to
-`load-path`, and it does not descend into subdirectories unless the recipe
-says so.  Name the modules under `lisp/` explicitly, and name `plugins` as a
-directory so the bundled plugins keep their subdirectory.  A bare glob is
-linked into the top level of the build directory, which is exactly where
-`(require 'harness)` looks for `harness-core` and the rest:
+Requires Emacs 29.1 or newer (31.1 is what it is developed on), `curl`,
+and the `claude` CLI logged in for the default provider.  Optional:
+`bwrap` for the kernel sandbox, `rg` for fast search, `OPENROUTER_API_KEY`
+or `OPENAI_API_KEY` for OpenAI-compatible providers, `BRAVE_API_KEY` for
+web search.
 
 ```elisp
-(straight-use-package
- '(emacs-agent-harness
-   :type git
-   :host sourcehut
-   :repo "~catvec/emacs-agent-harness"
-   :files ("harness.el" "lisp/*.el" "plugins")))
-```
+;; straight / Doom
+(package! harness :recipe (:host github :repo "Noah-Huppert/emacs-agent-harness" :branch "v3"
+                           :files ("harness.el" "lisp" "scripts")))
 
-With `use-package`, the recipe goes in `:straight` and the feature in the
-declaration name:
-
-```elisp
-(use-package harness
-  :straight (emacs-agent-harness
-             :type git :host sourcehut
-             :repo "~catvec/emacs-agent-harness"
-             :files ("harness.el" "lisp/*.el" "plugins"))
-  :config
-  ;; the Quick start configuration
-  )
-```
-
-### Doom Emacs
-
-Doom's package manager is straight, so declare the package the same way.
-In `$DOOMDIR/packages.el`:
-
-```elisp
-(package! emacs-agent-harness
-  :recipe (:host sourcehut
-           :repo "~catvec/emacs-agent-harness"
-           :files ("harness.el" "lisp/*.el" "plugins")))
-```
-
-then run `doom sync`.  `:files` is required for the reason above: with
-Doom's default recipe the modules stay in `lisp/`, and `(require 'harness)`
-does not find them.
-
-In `$DOOMDIR/config.el`:
-
-```elisp
-(use-package! harness
-  :init
-  ;; providers and models; see Quick start
-  :config
-  (harness-setup)
-  (global-harness-mode 1))
-```
-
-The package ships no autoload cookies, so the declaration loads it eagerly
-rather than deferring, and `harness-setup` runs once at startup.  Everything
-else is Doom-native: `harness-reload` refreshes Doom's autoloads through
-`doom/reload-autoloads` when it exists (DESIGN.md §13), and `doom/reload`,
-`doom sync` and `C-M-x` work unchanged.
-
-### Manual
-
-Clone the repository (or use the checkout you already have) and put both
-the root and `lisp/` on `load-path`:
-
-```elisp
-(add-to-list 'load-path "~/documents/ai/emacs-agent-harness")
-(add-to-list 'load-path "~/documents/ai/emacs-agent-harness/lisp")
+;; or a plain checkout
+(add-to-list 'load-path "~/src/emacs-agent-harness-v3")
 (require 'harness)
+(harness-start)          ; loads every module, starts the local ACP server
 ```
 
-## Quick start
+`harness-start` enables `harness-global-mode` (prefix `C-c a`) and the
+mode line notifier.  `M-x harness-menu` (`C-c a ?`) shows everything.
 
-```elisp
-;; Any OpenAI-compatible endpoint: LiteLLM, DeepSeek, OpenAI, Ollama, vLLM,
-;; llama.cpp server, OpenRouter, ...  Providers are pluggable (DESIGN.md §5).
-(setq harness-providers
-      '((:name local :kind openai :label "LiteLLM"
-         :base-url "http://127.0.0.1:4000/v1" :api-key-env "LITELLM_API_KEY"))
+## Use
 
-      harness-models
-      '((:provider local :id "deepseek-chat" :label "DeepSeek Chat"
-         :context-window 128000 :price-in 0.27 :price-out 1.10))
-
-      harness-default-model "deepseek-chat")
-
-(harness-setup)                 ; load plugins, open the session index
-(global-harness-mode 1)         ; mode-line indicator + key bindings
-```
-
-Then `M-x harness-new-session` (`C-c h n`).
-
-## Feature map
-
-| Feature | Where |
+| key | command |
 |---|---|
-| Conversation interface, streaming, input area | `lisp/harness-ui-conversation.el` |
-| Tool calls with formatted output | `lisp/harness-tools.el`, `lisp/harness-ui-conversation.el` |
-| Pluggable inference providers + model/price stats | `lisp/harness-provider.el`, `harness-provider-openai.el`, `harness-provider-process.el` |
-| Sessions named per project, resume, filter by status | `lisp/harness-session.el`, `lisp/harness-ui-sessions.el` |
-| Search sessions by content | `lisp/harness-session.el` (SQLite index) |
-| Tree view of session messages | `lisp/harness-ui-tree.el` |
-| Status line: model, cost, status | `lisp/harness-mode-line.el` |
-| Sub-agents: inherited/overridable models, personalities | `lisp/harness-subagents.el` |
-| Queued messages with editing | `lisp/harness-queue.el` |
-| Auto mode (ask a cheap model about commands) | `lisp/harness-perms.el` |
-| Ask-user-question UI (customize-style) | `lisp/harness-ui-ask.el` |
-| Control over where buffers open | `harness-buffer-display` (conversation), per-buffer `display-buffer` actions |
-| Model selection | `lisp/harness-ui-model.el` |
-| Themeable faces | `lisp/harness-faces.el` |
-| Plugins / self-extension / dogfooding | `harness-define-tool`, `harness-add-renderer`, `harness-load-plugins`, `harness_eval` tool |
-| Hot reload of the harness and plugins | `harness-reload`, `harness-plugin-mode`, `harness-unload-file` |
-| `@` file/directory attachments (content, fuzzy completion) | `lisp/harness-attachments.el` |
-| Per-session working directory | `harness-session-cwd`, `M-x harness-set-working-directory` |
-| Git worktrees per session | `lisp/harness-worktree.el` |
-| Long context: budgeting, compaction, chunked transcript search | `lisp/harness-context.el` |
+| `C-c a n` | new session in a directory (opens on the right by default) |
+| `C-c a s` / `C-c a l` | switch session / session list |
+| `C-c a m` `T` `p` `i` | model, thinking level, permission mode, non-interactive |
+| `C-c a f` / `C-c a b` | fork the session / BTW side conversation |
+| `C-c a t` `u` `w` | conversation tree, usage dashboard, worktrees |
+| `C-c a k` | cancel the running turn |
+| `C-c a c` | connect the UI to a remote harness |
+| `C-c a R` | reload the harness in place |
 
-## Directory index
+In a chat buffer: `RET` sends (steering the agent if it is mid-turn),
+`S-RET` newline, `C-c C-q` queues for the next turn, `@` completes
+project files as attachments, `/` completes skills, `C-c C-a` attaches a
+file, `C-c C-v` pastes a clipboard image, `TAB` folds a block.
+Permission and question panels appear inline above the compose box; the
+mode line shows how many sessions need you from any buffer.
 
-| Path | Contents |
+Settings persist through `.dir-locals.el` (project, then directory) and
+customize (global): `harness-model`, `harness-permission-mode`,
+`harness-thinking`, `harness-allowed-directories`, `harness-budget`,
+`harness-sandbox-policy`, `harness-non-interactive`.
+
+| | |
 |---|---|
-| `SPEC.md` | Original requirements (historical). |
-| `DESIGN.md` | Canonical architecture and interfaces. |
-| `AGENTS.md` | Conventions and workflow for agents working here. |
-| `harness.el` | Entry point: custom group, commands, keymap, plugin loader. |
-| `lisp/` | Implementation modules (see DESIGN.md §2). |
-| `test/` | ERT tests; no network access. |
-| `tasks/` | Task breakdown and progress index. |
-| `doc/` | Long-form documentation that does not fit the READMEs. |
+| ![permission](docs/media/chat-permission.png) | ![question](docs/media/chat-question.png) |
+| ![tree](docs/media/tree.png) | ![usage](docs/media/usage.png) |
+| ![worktrees](docs/media/worktrees.png) | ![dark](docs/media/chat-dark.png) |
 
-## Testing
+## Remote control
 
-```sh
-./scripts/test.sh          # byte-compile + ERT
-```
+The harness serves ACP on `127.0.0.1` (ephemeral port, see
+`harness-acp-port`, `harness-acp-allow-remote`, `harness-acp-token`).
+From another Emacs, `M-x harness-connect-remote host:port` swaps the UI's
+connection; `scripts/harness-acp-stdio` bridges stdio for editors that
+spawn ACP agents.
 
-## License
+## Architecture
 
-GPL-3.0-or-later, matching Emacs.
+See [docs/architecture.md](docs/architecture.md) for the module
+contracts, [docs/ui-guide.md](docs/ui-guide.md) for the presentation
+layer and [docs/dev-loop.md](docs/dev-loop.md) for the live development
+loop (`scripts/dev.sh`, `scripts/test.sh`, `scripts/lint.sh`).
+
+Modules: `config project store session agent provider provider-claude
+provider-openai provider-demo tools tools-fs tools-shell tools-emacs
+tools-web tools-agent perms sandbox usage compaction naming skills
+worktree merge acp` and, in the presentation layer, `ui ui-chat
+ui-sessions ui-tree ui-notify ui-usage ui-worktree ui-btw ui-media`.
