@@ -147,6 +147,7 @@ find the address without guessing the ephemeral port."
         (message "Harness ACP server listening on %s:%s"
                  harness-acp-server-host port))))
   (message "Harness ready (%d modules)" (length (harness-module-list)))
+  (harness-global-mode 1)
   t)
 
 ;;;###autoload
@@ -197,6 +198,41 @@ setup are restored for every module, so existing sessions keep working."
          (signal 'harness-module-error
                  (list (format "Reload failed (%s); the previous harness was restored"
                                (error-message-string err)))))))))
+
+;;; Global key bindings
+
+(defvar harness-command-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "n") #'harness-ui-chat-new)
+    (define-key map (kbd "s") #'harness-ui-sessions)
+    (define-key map (kbd "w") #'harness-ui-worktrees)
+    (define-key map (kbd "u") #'harness-ui-usage)
+    (define-key map (kbd "m") #'harness-ui-switch-model)
+    (define-key map (kbd "t") #'harness-ui-set-thinking)
+    (define-key map (kbd "p") #'harness-ui-set-permission-mode)
+    (define-key map (kbd "C") #'harness-ui-set-session-mode)
+    (define-key map (kbd "r") #'harness-reload)
+    (define-key map (kbd "S") #'harness-start)
+    (define-key map (kbd "q") #'harness-stop)
+    (define-key map (kbd "?") #'describe-prefix-bindings)
+    (define-key map (kbd "h") #'describe-prefix-bindings)
+    map)
+  "Prefix map for the harness' commands from anywhere in Emacs.
+Bound to `C-c h' by `harness-global-mode'.")
+
+;;;###autoload
+(define-minor-mode harness-global-mode
+  "Global harness command prefix.
+With the mode on, `C-c h' is a prefix for the common commands:
+new session, the session list, model/thinking/permission controls,
+reload, start and stop.  `harness-start' enables it; enable it by
+hand when starting the harness lazily from a key binding."
+  :global t
+  :lighter nil
+  :group 'harness
+  :keymap (let ((map (make-sparse-keymap)))
+            (define-key map (kbd "C-c h") harness-command-map)
+            map))
 
 ;;; Auto reload
 

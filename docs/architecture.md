@@ -406,8 +406,9 @@ Beyond the standard ACP v1 methods, the harness and its UI agree on
 extensions under the reserved `_harness/` prefix (advertised in
 `initialize` under `agentCapabilities._meta.harness`):
 
-- `_harness/session/info`, `_harness/session/fork`,
-  `_harness/session/rename`, `_harness/session/entries`
+- `_harness/session/info`, `_harness/session/steer`,
+  `_harness/session/fork`, `_harness/session/rename`,
+  `_harness/session/entries`
 - `_harness/agent/configuration`
 - `_harness/skills/list`, `_harness/skills/load`
 - notifications `_harness/session_status` (status, model, unread),

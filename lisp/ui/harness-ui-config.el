@@ -59,23 +59,48 @@
                    (_ value)))
         info)))))
 
+(defun harness-ui-config--candidate-label (candidate)
+  "Display label for one configuration value CANDIDATE."
+  (or (plist-get candidate :name)
+      (plist-get candidate :value)
+      (format "%s" candidate)))
+
 (defun harness-ui-config--choose (option)
-  "Prompt for one of OPTION's values, searchable."
+  "Prompt for one of OPTION's values.
+Returns the chosen value plist, or nil when the user quits.
+Completion candidates are the values' names; each carries its
+description as an annotation so the selector explains itself."
   (let* ((values (append (plist-get option :options) nil))
-         (table (lambda (string predicate action)
-                  (if (eq action 'metadata)
-                      '(metadata (category . harness-config-value))
-                    (complete-with-action action values string predicate))))
+         (candidates (mapcar (lambda (candidate)
+                               (cons (harness-ui-config--candidate-label candidate)
+                                     candidate))
+                             values))
+         (descriptions (let ((table (make-hash-table :test #'equal)))
+                         (dolist (candidate values)
+                           (when-let* ((description (plist-get candidate :description)))
+                             (puthash (harness-ui-config--candidate-label candidate)
+                                      description table)))
+                         table))
          (current (plist-get option :currentValue))
-         (default (or (seq-find (lambda (value)
-                                  (equal (plist-get value :value) current))
+         (default (or (seq-find (lambda (candidate)
+                                  (equal (plist-get candidate :value) current))
                                 values)
                       (car values))))
-    (completing-read
-     (format "%s: " (or (plist-get option :name) (plist-get option :id)))
-     table nil t nil nil
-     (plist-get default :name)
-     nil)))
+    (cdr (assoc (completing-read
+                 (format "%s: " (or (plist-get option :name) (plist-get option :id)))
+                 (lambda (string predicate action)
+                   (if (eq action 'metadata)
+                       (list 'metadata
+                             (cons 'category 'harness-config-value)
+                             (cons 'annotation-function
+                                   (lambda (candidate)
+                                     (when-let* ((description (gethash candidate descriptions)))
+                                       (concat "  " (propertize description
+                                                                 'face 'completions-annotations))))))
+                     (complete-with-action action candidates string predicate)))
+                 nil t nil nil
+                 (and default (harness-ui-config--candidate-label default)))
+                candidates))))
 
 (defun harness-ui-config--configure (option-id)
   "Prompt for and set OPTION-ID."
@@ -83,17 +108,9 @@
     (harness-deferred-then
      (harness-ui-config--option session-id option-id)
      (lambda (option)
-       (let* ((values (append (plist-get option :options) nil))
-              (choice (harness-ui-config--choose option))
-              (value (or (seq-find (lambda (candidate)
-                                     (equal (plist-get candidate :name) choice))
-                                   values)
-                         (seq-find (lambda (candidate)
-                                     (equal (plist-get candidate :value) choice))
-                                   values))))
-         (when value
-           (harness-ui-config-set-option session-id option-id
-                                         (plist-get value :value))))))))
+       (when-let* ((choice (harness-ui-config--choose option)))
+         (harness-ui-config-set-option session-id option-id
+                                       (plist-get choice :value)))))))
 
 ;;;###autoload
 (defun harness-ui-switch-model ()

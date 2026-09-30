@@ -34,6 +34,7 @@
     (define-key map (kbd "n") #'harness-ui-worktree-new-session)
     (define-key map (kbd "d") #'harness-ui-worktree-remove)
     (define-key map (kbd "g") #'harness-ui-worktree-refresh)
+    (define-key map (kbd "?") #'harness-ui-describe)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `harness-ui-worktree-mode'.")

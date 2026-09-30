@@ -45,6 +45,7 @@
     (define-key map (kbd "TAB") #'harness-ui-tree-toggle)
     (define-key map (kbd "RET") #'harness-ui-tree-open)
     (define-key map (kbd "g") #'harness-ui-tree-refresh)
+    (define-key map (kbd "?") #'harness-ui-describe)
     map)
   "Keymap for `harness-ui-tree-mode'.")
 

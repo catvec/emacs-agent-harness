@@ -80,6 +80,7 @@ both light and dark themes."
     (define-key map (kbd "TAB") #'forward-button)
     (define-key map (kbd "<backtab>") #'backward-button)
     (define-key map (kbd "RET") #'harness-ui-ask-press)
+    (define-key map (kbd "?") #'harness-ui-describe)
     (dotimes (digit 9)
       (let ((n (1+ digit)))
         (define-key map (number-to-string n)

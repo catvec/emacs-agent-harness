@@ -370,6 +370,7 @@ example on a hot reload); this makes them visible without reconnecting."
     ("session/set_mode" . harness-acp--method-session-set-mode)
     ("session/set_config_option" . harness-acp--method-session-set-config-option)
     ("_harness/session/info" . harness-acp--method-session-info)
+    ("_harness/session/steer" . harness-acp--method-session-steer)
     ("_harness/session/fork" . harness-acp--method-session-fork)
     ("_harness/session/rename" . harness-acp--method-session-rename)
     ("_harness/session/entries" . harness-acp--method-session-entries)
@@ -396,6 +397,7 @@ example on a hot reload); this makes them visible without reconnecting."
         :_meta (list :harness (list :version harness-version
                                     :sessionStatus t
                                     :queue t
+                                    :steer t
                                     :forks t)))
   "Capabilities advertised by the agent role.")
 
@@ -450,6 +452,19 @@ example on a hot reload); this makes them visible without reconnecting."
 (defun harness-acp--prompt-result (stop-reason)
   "Convert a service stop reason to a session/prompt result."
   (list :stopReason (or stop-reason "end_turn")))
+
+(defun harness-acp--method-session-steer (_connection params)
+  "Handle _harness/session/steer with PARAMS.
+The agent holds the message until the running step can be interrupted
+and injects it at the next step boundary."
+  (unless (harness-service-available-p "agent" 'steer)
+    (signal 'harness-acp-error
+            (list (alist-get 'method-not-found harness-acp-error-codes)
+                  "No agent service; cannot steer" nil)))
+  (harness-service-call "agent" 'steer
+                        :session-id (plist-get params :sessionId)
+                        :blocks (plist-get params :blocks)
+                        :text (plist-get params :text)))
 
 (defun harness-acp--method-session-cancel (_connection params)
   "Handle the session/cancel notification with PARAMS."

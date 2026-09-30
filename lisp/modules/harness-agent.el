@@ -273,6 +273,8 @@ with an explanation instead of spending more."
                (model (or (harness-agent--session-model info)
                           harness-agent-default-model
                           (harness-agent--first-model))))
+          (when model
+            (harness-agent--remember-model session-id info model))
           (cond
            (model
             (harness-agent--call-provider
@@ -325,6 +327,18 @@ with an explanation instead of spending more."
   (when (and harness-agent--model-cache
              (> (length harness-agent--model-cache) 0))
     (plist-get (aref harness-agent--model-cache 0) :id)))
+
+(defun harness-agent--remember-model (session-id info model)
+  "Record effective MODEL on SESSION-ID when the session has none.
+Without this the fallback (default or first available model) runs the
+turn while session info still reports no model, which the chat header
+and the model selector show."
+  (when (and model
+             (null (harness-agent--session-model info))
+             (harness-service-available-p "session" 'set-config))
+    (harness-service-call "session" 'set-config
+                          :session-id session-id
+                          :config-id "model" :value model)))
 
 (defun harness-agent--provider-request (session-id _turn info model)
   "Build the completion request for SESSION-ID."
@@ -505,17 +519,31 @@ with an explanation instead of spending more."
                       :content (list :type "text" :text text)))
         (harness-service-call "session" 'stream-end :session-id session-id :key key)))
     (cond
-     ((null tool-calls)
+     ((and (null tool-calls)
+           (not (harness-agent--steers-pending-p session-id)))
       (harness-agent--finish-turn session-id turn
                                   (or (plist-get result :stop-reason) "end_turn")))
      ((>= (harness-agent-turn-iterations turn) harness-agent-max-turn-requests)
       (harness-agent--finish-turn session-id turn "max_turn_requests"))
      (t
-      (harness-deferred-then
-       (harness-agent--execute-tools session-id turn tool-calls)
-       (lambda (_)
-         (cl-incf (harness-agent-turn-iterations turn))
-         (run-at-time 0 nil (lambda () (harness-agent--loop session-id turn)))))))))
+      (if tool-calls
+          (harness-deferred-then
+           (harness-agent--execute-tools session-id turn tool-calls)
+           (lambda (_) (harness-agent--continue-turn session-id turn)))
+        ;; No tool calls, but a steering message arrived while the model
+        ;; was producing what would have been the final step: keep the
+        ;; turn alive so the steer is injected at the next boundary.
+        (harness-agent--continue-turn session-id turn))))))
+
+(defun harness-agent--steers-pending-p (session-id)
+  "Non-nil when a steering message is waiting to be injected."
+  (let ((state (gethash session-id harness-agent--sessions)))
+    (and state (harness-agent-state-steers state))))
+
+(defun harness-agent--continue-turn (session-id turn)
+  "Schedule another step of TURN, counting against the request budget."
+  (cl-incf (harness-agent-turn-iterations turn))
+  (run-at-time 0 nil (lambda () (harness-agent--loop session-id turn))))
 
 (defun harness-agent--execute-tools (session-id turn tool-calls)
   "Execute every tool call of TOOL-CALLS sequentially.  Returns a deferred."
@@ -876,17 +904,23 @@ prompt cache usually covers it."
     nil))
 
 (defun harness-agent-steer (&rest args)
-  "Add steering text to the running turn, or start a turn with it."
+  "Add a steering message to the running turn, or start a turn with it.
+ARGS carry :session-id plus either :blocks (a vector of content
+blocks) or :text (plain text).  A turn cannot be interrupted while a
+tool call or a model stream is in flight, so the message is held in
+steering state and injected at the next step boundary."
   (let* ((session-id (plist-get args :session-id))
-         (text (plist-get args :text)))
+         (blocks (harness-agent--block-vector
+                  (or (plist-get args :blocks)
+                      (when-let* ((text (plist-get args :text)))
+                        (list (list :type "text" :text text)))))))
     (if (harness-agent--turn session-id)
         (let ((state (harness-agent--state session-id)))
           (setf (harness-agent-state-steers state)
                 (append (harness-agent-state-steers state)
-                        (list (list :type "text" :text text))))
+                        (append blocks nil)))
           nil)
-      (harness-agent-prompt :session-id session-id
-                            :prompt (vector (list :type "text" :text text))))))
+      (harness-agent-prompt :session-id session-id :prompt blocks))))
 
 ;;; Configuration
 

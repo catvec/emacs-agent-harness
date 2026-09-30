@@ -107,6 +107,9 @@
   `(let* ((harness-agent-test--storage (make-temp-file "harness-agent-" t))
           (harness-session-storage-directory harness-agent-test--storage)
           (harness-agent-max-turn-requests 10)
+          ;; Rebind dynamically so a test's `setq' of the fixtures cannot
+          ;; leak into the next test.
+          (harness-agent-test--models harness-agent-test--models)
           (harness-agent--model-cache harness-agent-test--models)
           (harness-agent-test--price nil)
           (directory (make-temp-file "harness-agent-project-" t))
@@ -295,6 +298,32 @@
                          (harness-agent-test--texts test-session-id))))
         (should (equal user-texts '("first" "second")))))))
 
+(ert-deftest harness-agent-steer-continues-the-turn ()
+  "A steer sent mid-turn is injected before the next model step."
+  (harness-agent-test--with-session
+    (setq harness-agent-test--responses
+          (list (list :hold t)
+                (list :text "answer after steer")))
+    (let ((deferred (harness-agent-test--prompt test-session-id "start")))
+      ;; The first model call is held, so the turn is running.
+      (should (harness-test-wait-for (lambda () harness-agent-test--held)))
+      (harness-agent-steer :session-id test-session-id
+                           :blocks (vector (list :type "text" :text "also do X")))
+      ;; Steering does not settle the prompt early.
+      (should (harness-deferred-pending-p deferred))
+      (harness-deferred-resolve harness-agent-test--held
+                                (list :text "first answer" :stop-reason "end_turn"))
+      (harness-test-settle deferred 10)
+      (should (equal (harness-deferred-value deferred) "end_turn"))
+      ;; The steer kept the turn alive for a second provider call, and the
+      ;; instruction is in the transcript the model sees.
+      (should (= (length harness-agent-test--requests) 2))
+      (should (cl-some (lambda (text) (and text (string-match-p "also do X" text)))
+                       (harness-agent-test--texts test-session-id)))
+      (let* ((request (car harness-agent-test--requests))
+             (messages (format "%S" (plist-get request :messages))))
+        (should (string-match-p "also do X" messages))))))
+
 (ert-deftest harness-agent-cancel-stops-the-turn ()
   (harness-agent-test--with-session
     (setq harness-agent-test--responses (list (list :hold t)))
@@ -375,6 +404,21 @@
       (let ((info (harness-service-call "session" 'info :session-id test-session-id)))
         (should (= (plist-get (plist-get info :cost) :amount) 0.25))
         (should (= (plist-get (plist-get info :usage) :input) 100))))))
+
+(ert-deftest harness-agent-records-the-fallback-model ()
+  "A session without a model adopts the resolved fallback model."
+  (harness-agent-test--with-session
+    (harness-service-call "session" 'set-config :session-id test-session-id
+                          :config-id "model" :value nil)
+    (should-not (plist-get (harness-service-call "session" 'info :session-id test-session-id)
+                           :model))
+    (setq harness-agent-test--responses (list (list :text "hi")))
+    (let ((deferred (harness-agent-test--prompt test-session-id "hi")))
+      (harness-test-settle deferred 10)
+      (should (equal (plist-get (harness-service-call "session" 'info
+                                                      :session-id test-session-id)
+                                :model)
+                     "mock/mock-model")))))
 
 (ert-deftest harness-agent-configuration-lists-models ()
   (harness-agent-test--with-session

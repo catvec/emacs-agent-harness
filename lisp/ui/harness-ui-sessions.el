@@ -42,6 +42,7 @@
     (define-key map (kbd "n") #'harness-ui-chat-new)
     (define-key map (kbd "s") #'harness-ui-sessions-toggle-scope)
     (define-key map (kbd "g") #'harness-ui-sessions-refresh)
+    (define-key map (kbd "?") #'harness-ui-describe)
     map)
   "Keymap for `harness-ui-sessions-mode'.")
 

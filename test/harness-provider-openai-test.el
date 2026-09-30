@@ -267,5 +267,39 @@ Inside BODY, `test-base-url' is bound to the instance URL."
                    "data:image/png;base64,aGVsbG8="))
     (should (seq-some (lambda (part) (equal (plist-get part :type) "text")) parts))))
 
+(ert-deftest harness-provider-openai-echoes-non-ascii-tool-arguments ()
+  "Tool calls with non-ASCII arguments survive the request body encoder."
+  (harness-provider-openai-test--with-server
+      (lambda (process _request)
+        (run-at-time 0.05 nil
+                     (lambda () (when (process-live-p process) (delete-process process))))
+        (harness-provider-openai-test--sse-response
+         (list '(:choices [(:delta (:content "ok") :finish_reason "stop")])
+               "[DONE]")))
+    (harness-provider-openai-test--register test-base-url)
+    (let ((result (harness-provider-openai-test--run
+                   (list :model "test-openai/test-model"
+                         :messages
+                         (vector
+                          (list :role "user"
+                                :content (vector (list :type "text" :text "fix it")))
+                          (list :role "assistant"
+                                :content
+                                (vector
+                                 (list :type "tool-call"
+                                       :id "call_1"
+                                       :name "edit"
+                                       :arguments '(:path "/tmp/x"
+                                                    :oldText "❯ old"
+                                                    :newText "❯ new")))))))))
+      (should (equal (plist-get result :text) "ok"))
+      (let* ((body (harness-provider-openai-test--last-body))
+             (assistant (aref (plist-get body :messages) 1))
+             (call (aref (plist-get assistant :tool_calls) 0))
+             (arguments (json-parse-string (plist-get (plist-get call :function) :arguments)
+                                           :object-type 'plist)))
+        (should (equal (plist-get arguments :oldText) "❯ old"))
+        (should (equal (plist-get arguments :newText) "❯ new"))))))
+
 (provide 'harness-provider-openai-test)
 ;;; harness-provider-openai-test.el ends here

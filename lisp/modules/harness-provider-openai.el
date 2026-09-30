@@ -150,11 +150,17 @@ Each entry is a plist:
 ;;; Request conversion
 
 (defun harness-provider-openai--arguments-json (arguments)
-  "Serialize ARGUMENTS for the wire."
+  "Serialize ARGUMENTS for the wire.
+Returns multibyte text: `json-serialize' produces UTF-8 bytes in a
+unibyte string, and nesting those bytes inside the request body makes
+the outer serialization reject non-ASCII content."
   (cond
-   ((stringp arguments) arguments)
+   ((stringp arguments)
+    (if (multibyte-string-p arguments)
+        arguments
+      (decode-coding-string arguments 'utf-8)))
    ((null arguments) "{}")
-   (t (json-serialize arguments))))
+   (t (harness-json-serialize arguments))))
 
 (defun harness-provider-openai--tool-result-text (content)
   "Flatten canonical tool-result CONTENT into text."

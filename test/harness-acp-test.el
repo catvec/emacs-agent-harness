@@ -75,6 +75,29 @@
     (should (eq (car error-seen) 'harness-acp-error))
     (should (eq (nth 0 (cdr error-seen)) -32601))))
 
+(ert-deftest harness-acp-steer-method-reaches-the-agent ()
+  "A client steers a session through `_harness/session/steer'."
+  (let ((received nil))
+    (unwind-protect
+        (progn
+          (harness-service-register
+           "agent"
+           :module 'harness-acp-test
+           :methods (list (cons 'steer
+                                (lambda (&rest args)
+                                  (setq received args)
+                                  nil))))
+          (let* ((pair (harness-acp-test--pair))
+                 (client (cdr pair)))
+            (harness-acp-connection-request
+             client "_harness/session/steer"
+             (list :sessionId "s1"
+                   :blocks (vector (list :type "text" :text "go left")))))
+          (should (equal (plist-get received :session-id) "s1"))
+          (should (equal (plist-get received :blocks)
+                         (vector (list :type "text" :text "go left")))))
+      (harness-service-unregister "agent"))))
+
 (ert-deftest harness-acp-handler-error-is-internal-error ()
   (let* ((pair (harness-acp-test--pair))
          (client (cdr pair))

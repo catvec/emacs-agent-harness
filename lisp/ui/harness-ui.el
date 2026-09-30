@@ -161,6 +161,13 @@ nPort: ")
   (harness-ui-request "session/prompt"
                       (list :sessionId session-id :prompt blocks)))
 
+(defun harness-ui-steer (session-id blocks)
+  "Steer SESSION-ID's running turn with BLOCKS.
+The agent injects the message at the next step boundary; when no turn
+is running it starts one with BLOCKS instead."
+  (harness-ui-request "_harness/session/steer"
+                      (list :sessionId session-id :blocks blocks)))
+
 (defun harness-ui-cancel (session-id)
   "Cancel SESSION-ID's running turn."
   (harness-acp-connection-notify harness-ui--client-connection
@@ -338,6 +345,113 @@ REQUEST is the plist from `harness-permission-check'."
 (defun harness-ui-refresh-all ()
   "Redraw every UI buffer (used after reloads)."
   (run-hooks 'harness-ui-refresh-functions))
+
+;;; Help
+
+(defvar harness-ui-describe-buffer-name "*Harness Help*"
+  "Buffer showing the commands available in a harness buffer.")
+
+(defvar-local harness-ui-describe--source nil
+  "Buffer whose commands the help buffer describes.")
+
+(defun harness-ui-describe--bindings (keymap)
+  "Return (KEY . COMMAND) bindings of KEYMAP, descending into prefixes."
+  (let (bindings)
+    (map-keymap
+     (lambda (event definition)
+       (unless (memq event '(remap menu-bar))
+         (ignore-errors
+           (let ((key (key-description (vector event))))
+             (cond
+              ((and (symbolp definition) (commandp definition))
+               (push (cons key definition) bindings))
+              ((keymapp definition)
+               (dolist (inner (harness-ui-describe--bindings definition))
+                 (push (cons (concat key " " (car inner)) (cdr inner))
+                       bindings))))))))
+     keymap)
+    (sort bindings (lambda (a b) (string< (car a) (car b))))))
+
+(defun harness-ui-describe--summary (command)
+  "Return a one-line summary of COMMAND."
+  (let ((doc (ignore-errors (documentation command))))
+    (cond
+     ((and doc (not (string-empty-p (string-trim doc))))
+      (car (split-string (string-trim doc) "\n")))
+     ((symbolp command) (symbol-name command))
+     (t "anonymous command"))))
+
+(defun harness-ui-describe--insert (prefix bindings)
+  "Insert BINDINGS as an aligned table with PREFIX before each key."
+  (let* ((keys (mapcar (lambda (binding) (concat prefix (car binding))) bindings))
+         (width (if keys (apply #'max (mapcar #'length keys)) 0)))
+    (dolist (binding bindings)
+      (let ((key (concat prefix (car binding))))
+        (insert "  " (propertize key 'face 'bold)
+                (make-string (- (+ width 2) (length key)) ?\s)
+                (harness-ui-describe--summary (cdr binding)) "\n")))))
+
+(defun harness-ui-describe--global-map ()
+  "Return the harness command prefix map, when one is available."
+  (let ((bound (key-binding (kbd "C-c h"))))
+    (cond
+     ((keymapp bound) bound)
+     ((and (boundp 'harness-command-map)
+           (keymapp (symbol-value 'harness-command-map)))
+      (symbol-value 'harness-command-map)))))
+
+(defvar harness-ui-describe-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "?") #'harness-ui-describe-refresh)
+    (define-key map (kbd "h") #'harness-ui-describe-refresh)
+    (define-key map (kbd "g") #'harness-ui-describe-refresh)
+    map)
+  "Keymap for the harness help buffer.")
+
+(define-derived-mode harness-ui-describe-mode special-mode "Harness-Help"
+  "Major mode for the harness command help buffer."
+  :group 'harness-ui
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t))
+
+(defun harness-ui-describe-refresh ()
+  "Redraw the help buffer for the buffer whose commands it describes."
+  (interactive)
+  (let ((source (and (boundp 'harness-ui-describe--source)
+                     (buffer-live-p harness-ui-describe--source)
+                     harness-ui-describe--source)))
+    (if source
+        (with-current-buffer source (harness-ui-describe))
+      (harness-ui-describe))))
+
+;;;###autoload
+(defun harness-ui-describe ()
+  "Show the harness commands available in this buffer.
+Every harness screen binds this to `?' — except the chat composer,
+where `?' types a question mark and help comes from the transcript."
+  (interactive)
+  (let* ((source (current-buffer))
+         (mode major-mode)
+         (local (harness-ui-describe--bindings (current-local-map)))
+         (global-map (harness-ui-describe--global-map))
+         (global (and global-map (harness-ui-describe--bindings global-map))))
+    (with-current-buffer (get-buffer-create harness-ui-describe-buffer-name)
+      (harness-ui-describe-mode)
+      (setq-local harness-ui-describe--source source)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (format "Harness commands — %s\n\n" mode) 'face 'bold))
+        (if local
+            (harness-ui-describe--insert "" local)
+          (insert "  (no buffer-specific commands)\n"))
+        (when global
+          (insert "\n" (propertize "Global commands\n\n" 'face 'bold))
+          (harness-ui-describe--insert "C-c h " global))
+        (insert "\n" (propertize "? refresh   q close   C-h m describe the mode\n"
+                                 'face 'shadow)))
+      (goto-char (point-min)))
+    (pop-to-buffer (get-buffer harness-ui-describe-buffer-name))))
 
 ;;; Service and module
 

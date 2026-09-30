@@ -191,7 +191,13 @@ theme's `button' face, which keeps action buttons looking like links
 while quiet toggles can stay in the shadow face."
   (let ((start (point)))
     (insert-text-button label
-                        'action (lambda (_button) (funcall callback))
+                        ;; Interactive commands (attaching a file prompts
+                        ;; for one) must run through their own interactive
+                        ;; spec, not be called with no arguments.
+                        'action (lambda (_button)
+                                  (if (commandp callback)
+                                      (call-interactively callback)
+                                    (funcall callback)))
                         'follow-link t
                         'mouse-face 'highlight
                         'help-echo (or (plist-get properties :help-echo)
@@ -220,6 +226,13 @@ quiet toggles stay quiet."
 (defun harness-ui-chat--mark-read-only (start end)
   "Mark START to END as read-only transcript text."
   (add-text-properties start end '(read-only t front-sticky t rear-nonsticky t)))
+
+(defun harness-ui-chat--mark-chrome (start end)
+  "Mark START to END as read-only composer chrome.
+Unlike `harness-ui-chat--mark-read-only' this leaves `rear-nonsticky'
+unset, so text cannot be inserted between the buttons; callers open the
+boundaries adjacent to the compose text explicitly."
+  (add-text-properties start end '(read-only t front-sticky t)))
 
 ;;; Markdown-lite fontification
 
@@ -720,7 +733,8 @@ region."
                                     "  # skill               C-c C-m  model\n"
                                     "  C-c C-u usage         C-c C-t  thinking\n"
                                     "  C-c C-q queue         C-c C-p  permissions\n"
-                                    "  C-c C-k cancel        C-c C-t  thinking\n")
+                                    "  C-c C-k cancel        C-c C-w  worktrees\n"
+                                    "  ? help                C-c C-a  attach\n")
                             'face 'shadow))
       (dolist (record (reverse harness-ui-chat--records))
         ;; One malformed record must not cost the user their transcript.
@@ -1030,31 +1044,45 @@ TEXT defaults to the composer's current contents."
                  (eq (char-before (1- (point))) ?\n)
                  (eq (char-before) ?\n))
       (insert "\n"))
-    (harness-ui-chat--render-queued)
-    (harness-ui-chat--render-attachments-line)
-    (insert (propertize "❯ " 'face 'harness-ui-prompt-face))
+    ;; Everything between the transcript and the typed text is chrome (the
+    ;; spacing line, the queued list, the attachments line and the prompt):
+    ;; mark it read-only so the user cannot edit or delete the buttons out
+    ;; of the buffer.
+    (let ((chrome-start (harness-ui-chat--safe-marker-position
+                         harness-ui-chat--transcript-end)))
+      (harness-ui-chat--render-queued)
+      (harness-ui-chat--render-attachments-line)
+      (insert (propertize "❯ " 'face 'harness-ui-prompt-face))
+      (harness-ui-chat--mark-chrome chrome-start (point))
+      ;; The space after the prompt is the left edge of the composer; with
+      ;; an empty draft `compose-start' is exactly this position.
+      (add-text-properties (1- (point)) (point) '(rear-nonsticky t)))
     (let ((start (point)))
       (insert (propertize text 'face 'harness-ui-compose-face))
       (setq harness-ui-chat--compose-start (copy-marker start)
             input-end (point)))
-    (insert "\n")
-    (insert (propertize "  " 'face 'shadow))
-    (harness-ui-chat--button (if running "Queue" "Send")
-                             (if running #'harness-ui-chat-queue #'harness-ui-chat-send)
-                             :help-echo (if running
-                                            "Queue for the next turn (C-c C-q)"
-                                          "Send (RET)"))
-    (insert (propertize "  ·  " 'face 'shadow))
-    (harness-ui-chat--button "Queue" #'harness-ui-chat-queue
-                             :help-echo "Queue for the next turn (C-c C-q)")
-    (insert (propertize "  ·  " 'face 'shadow))
-    (harness-ui-chat--button "Attach" #'harness-ui-chat-attach-file
-                             :help-echo "Attach a file (@)")
-    (when running
+    (let ((chrome-start (point)))
+      (insert "\n")
+      (insert (propertize "  " 'face 'shadow))
+      (harness-ui-chat--button "Send" #'harness-ui-chat-send
+                               :help-echo (if running
+                                              "Steer the running turn (RET)"
+                                            "Send (RET)"))
       (insert (propertize "  ·  " 'face 'shadow))
-      (harness-ui-chat--button "Stop" #'harness-ui-chat-cancel
-                               :help-echo "Cancel the running turn (C-c C-k)"))
-    (insert "\n")
+      (harness-ui-chat--button "Queue" #'harness-ui-chat-queue
+                               :help-echo "Queue for the next turn (C-c C-q)")
+      (insert (propertize "  ·  " 'face 'shadow))
+      (harness-ui-chat--button "Attach" #'harness-ui-chat-attach-file
+                               :help-echo "Attach a file (@)")
+      (when running
+        (insert (propertize "  ·  " 'face 'shadow))
+        (harness-ui-chat--button "Stop" #'harness-ui-chat-cancel
+                                 :help-echo "Cancel the running turn (C-c C-k)"))
+      (insert "\n")
+      (harness-ui-chat--mark-chrome chrome-start (point))
+      ;; The newline after the draft is the right edge of the composer:
+      ;; clearing `front-sticky' lets typing insert just before it.
+      (add-text-properties chrome-start (1+ chrome-start) '(front-sticky nil)))
     ;; The marker is created last: inserting at its position would drag it
     ;; along, and it must sit right after the typed text.
     (setq harness-ui-chat--compose-end (copy-marker input-end t))
@@ -1244,7 +1272,10 @@ TEXT defaults to the composer's current contents."
      (lambda (blocks) (delq nil blocks)))))
 
 (defun harness-ui-chat-send ()
-  "Send the composer's message, or queue it while a turn is running.
+  "Send the composer's message; while a turn runs, steer it.
+A running turn cannot always be interrupted (a tool call or a model
+stream may be in flight), in which case the agent holds the message
+and injects it at the next step boundary.
 #name references load skills and attach their contents."
   (interactive)
   (let ((text (string-trim (harness-ui-chat--compose-text))))
@@ -1260,12 +1291,7 @@ TEXT defaults to the composer's current contents."
                                   (harness-ui-chat--message-blocks text))))
              (ignore attachments)
              (if (eq harness-ui-chat--status 'running)
-                 (progn
-                   (setq harness-ui-chat--queue
-                         (append harness-ui-chat--queue (list (cons blocks text))))
-                   (with-current-buffer (current-buffer)
-                     (harness-ui-chat--render-composer))
-                   (message "Queued; it will be sent at the next turn"))
+                 (harness-ui-chat--steer-blocks blocks)
                (harness-ui-chat--send-blocks blocks)))))))))
 
 (defun harness-ui-chat--send-blocks (blocks)
@@ -1295,6 +1321,18 @@ TEXT defaults to the composer's current contents."
            (harness-ui-chat--refresh-header)
            (harness-ui-chat--render-composer)
            (message "Prompt failed: %S" error)))))))
+
+(defun harness-ui-chat--steer-blocks (blocks)
+  "Steer the running turn with BLOCKS.
+If a tool call or a model stream is in flight the agent holds the
+message and injects it at the next step boundary."
+  (setq harness-ui-chat--attachments nil)
+  (harness-ui-chat--render-composer)
+  (message "Steering; injected at the next step")
+  (harness-deferred-then
+   (harness-ui-steer harness-ui-chat--session-id blocks)
+   (lambda (_result) nil)
+   (lambda (error) (message "Steering failed: %S" error))))
 
 (defun harness-ui-chat-queue ()
   "Queue the composer's message for the next turn."
@@ -1517,7 +1555,7 @@ returns to the main session untouched."
   (goto-char (harness-ui-chat--compose-end-point)))
 
 (defun harness-ui-chat-ret ()
-  "RET in the composer sends the message."
+  "RET in the composer sends (or steers) the message."
   (interactive)
   ;; `harness-ui-chat-send' reads the composer itself, wherever point is.
   (harness-ui-chat-send))
@@ -1525,8 +1563,7 @@ returns to the main session untouched."
 (defun harness-ui-chat-newline ()
   "Insert a newline in the composer."
   (interactive)
-  (unless (>= (point) (harness-ui-chat--compose-point))
-    (goto-char (harness-ui-chat--compose-end-point)))
+  (harness-ui-chat--enter-composer)
   (insert "\n"))
 
 ;;; @file references
@@ -1553,13 +1590,24 @@ returns to the main session untouched."
             (or files
                 (ignore-errors (directory-files-recursively cwd "" ))))))
 
+(defun harness-ui-chat--at-composer-p ()
+  "Non-nil when point is inside the composer's editable text."
+  (and (>= (point) (harness-ui-chat--compose-point))
+       (<= (point) (harness-ui-chat--compose-end-point))))
+
+(defun harness-ui-chat--enter-composer ()
+  "Move point to the end of the draft when it is outside the composer.
+The transcript and the composer chrome are read-only, so typing there
+would only signal an error."
+  (unless (harness-ui-chat--at-composer-p)
+    (goto-char (harness-ui-chat--compose-end-point))))
+
 (defun harness-ui-chat--self-insert (arg)
   "Insert typed text in the composer, wherever point is.
-The transcript is read-only, so a plain `self-insert-command' would
-ring the bell there."
+The transcript and composer chrome are read-only, so a plain
+`self-insert-command' would ring the bell there."
   (interactive "p")
-  (unless (>= (point) (harness-ui-chat--compose-point))
-    (goto-char (harness-ui-chat--compose-end-point)))
+  (harness-ui-chat--enter-composer)
   (self-insert-command arg))
 
 (defun harness-ui-chat-quit ()
@@ -1568,6 +1616,13 @@ ring the bell there."
   (if (>= (point) (harness-ui-chat--compose-point))
       (harness-ui-chat--self-insert 1)
     (bury-buffer)))
+
+(defun harness-ui-chat-help ()
+  "Show this buffer's commands, or type a question mark while composing."
+  (interactive)
+  (if (>= (point) (harness-ui-chat--compose-point))
+      (harness-ui-chat--self-insert 1)
+    (harness-ui-describe)))
 
 (defvar harness-ui-chat-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1593,6 +1648,7 @@ ring the bell there."
     (define-key map (kbd "C-c C-v") #'harness-ui-chat-paste-image)
     (define-key map (kbd "C-c C-e") #'harness-ui-chat-back-to-end)
     (define-key map (kbd "C-c C-a") #'harness-ui-chat-attach-file)
+    (define-key map (kbd "?") #'harness-ui-chat-help)
     (define-key map (kbd "q") #'harness-ui-chat-quit)
     map)
   "Keymap for `harness-ui-chat-mode'.")

@@ -79,7 +79,7 @@ package is `harness`; `emacs-agent-harness` is only the repository.
 ```elisp
 (add-to-list 'load-path "/path/to/emacs-agent-harness")
 (require 'harness)
-(harness-start)
+(harness-start)   ; loads the modules and enables `harness-global-mode'
 ```
 
 ### straight.el
@@ -90,6 +90,8 @@ package is `harness`; `emacs-agent-harness` is only the repository.
            :files ("*.el" "README.md" "LICENSE"
                    "lisp/*.el" "lisp/modules/*.el"
                    "lisp/transports/*.el" "lisp/ui/*.el")))
+
+(harness-start)   ; loads the modules and enables `harness-global-mode'
 ```
 
 (Keep the `:files` list as it is: straight generates autoloads only for
@@ -116,8 +118,9 @@ In `~/.config/doom/config.el`:
   :init
   ;; (setenv "OPENAI_API_KEY" "...")   ; or another provider's key
   :config
-  ;; Start with Emacs.  Drop this line and run `M-x harness-start' by
-  ;; hand if you prefer to start the harness per session.
+  ;; Start with Emacs.  `harness-start' enables `harness-global-mode'
+  ;; (the `C-c h' command prefix).  Drop this line and run
+  ;; `M-x harness-start' by hand if you prefer to start per session.
   (harness-start))
 ```
 
@@ -172,13 +175,40 @@ Then:
 - `@` completes file references; `#name` attaches a skill.
 - `C-c C-s` opens the session list, `C-c C-m` the model switcher.
 
+`harness-start` also enables `harness-global-mode`, so the common
+commands are available from any buffer under the `C-c h` prefix.
+
+## Commands from anywhere
+
+`harness-global-mode` binds `C-c h` as a prefix for the harness commands
+from any buffer:
+
+| key | command |
+|---|---|
+| `C-c h n` | new session |
+| `C-c h s` | session list (switch between sessions) |
+| `C-c h w` | git worktrees |
+| `C-c h u` | usage and budgets |
+| `C-c h m` | switch model |
+| `C-c h t` | thinking level |
+| `C-c h p` | permission mode |
+| `C-c h C` | session mode (plan / code) |
+| `C-c h r` | reload the harness |
+| `C-c h S` | start the harness |
+| `C-c h q` | stop the harness |
+| `C-c h ?`, `C-c h h` | list the prefix's commands |
+
+Enable it by hand with `M-x harness-global-mode` if you start the harness
+lazily from elsewhere.  Every harness screen also answers `?` with a
+help buffer listing its own commands (see below).
+
 ## Chat buffer
 
 | key | action |
 |---|---|
-| `RET` | send (or queue while the agent is running) |
+| `RET` | send (steers while the agent is running) |
 | `S-RET`, `C-j` | newline in the message |
-| `C-c C-c` / `C-c C-q` | send / queue explicitly |
+| `C-c C-c` / `C-c C-q` | send (steer) / queue explicitly |
 | `C-c C-k` | cancel the running turn |
 | `C-c C-s` | session list |
 | `C-c C-m` | switch model |
@@ -186,6 +216,7 @@ Then:
 | `C-c C-a` | attach a file |
 | `C-c C-b` | ask in a side conversation (btw fork) |
 | `C-c C-e` | jump back to the message box |
+| `?` | help (types `?` while composing) |
 | `q` | bury the chat |
 
 Every action also exists as a clickable button in the composer line.
@@ -194,6 +225,14 @@ to expand.  Collapsed thinking previews its first line, tool lines show
 what they acted on and their status, and consecutive safe tool calls
 (`read`, `glob`, `search`, ...) coalesce into a summary line so long
 transcripts stay readable.
+
+Press `?` on any harness screen — chat, session list, worktrees, usage,
+the conversation tree or the approval panel — for a magit-style help
+buffer listing that screen's commands and the `C-c h` prefix; `q` closes
+it.  In the chat composer `?` is typed into the message instead, so use
+it from the transcript side when you want help.
+
+![The help buffer listing the chat's commands and the global C-c h prefix](docs/media/help.png)
 
 The agent can run work in a **sub-agent** session (`subagent` tool): a
 full session parented to the current one, shown in the session list, whose

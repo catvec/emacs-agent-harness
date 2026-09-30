@@ -211,6 +211,17 @@ shots() {
   scroll_chat_top
   shot chat
 
+  # Help: `?' on the transcript lists the chat's commands and the global
+  # `C-c h' prefix.
+  quiet '(let* ((id (symbol-value (quote harness-ui-current-session)))
+                (buffer (gethash id harness-ui-chat--buffers)))
+           (with-current-buffer buffer (harness-ui-describe))
+           t)'
+  sleep 0.5
+  frame_size 44
+  full_frame "*Harness Help*"
+  shot help
+
   # Permission panel, while the read of /etc/passwd waits for an answer.
   reset_ui
   demo harness-gui-demo-install

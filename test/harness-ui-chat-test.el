@@ -344,6 +344,123 @@
         (should (equal (plist-get (aref blocks 0) :text) "make it so")))
       (kill-buffer buffer))))
 
+(ert-deftest harness-ui-chat-composer-chrome-is-read-only ()
+  "The prompt, buttons and queued list are protected; the draft is not."
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (with-current-buffer buffer
+        ;; The draft accepts typed text, even while empty.
+        (goto-char (harness-ui-chat--compose-point))
+        (insert "draft")
+        (should (equal (harness-ui-chat--compose-text) "draft"))
+        ;; The prompt is read-only.
+        (goto-char (point-min))
+        (search-forward "❯")
+        (should-error (delete-region (match-beginning 0) (match-end 0))
+                      :type 'text-read-only)
+        ;; So is the button row: neither deletion nor insertion works.
+        (goto-char (point-min))
+        (search-forward "Send")
+        (let ((start (match-beginning 0))
+              (end (match-end 0)))
+          (should-error (delete-region start end) :type 'text-read-only)
+          (goto-char end)
+          (should-error (insert "!") :type 'text-read-only))
+        ;; Point parked after the buttons still types into the draft.
+        (goto-char (point-max))
+        (harness-ui-chat--enter-composer)
+        (insert "!")
+        (should (equal (harness-ui-chat--compose-text) "draft!"))
+        ;; A queued line is chrome too.
+        (setq harness-ui-chat--queue (list (cons nil "later")))
+        (harness-ui-chat--render-composer)
+        (goto-char (point-min))
+        (search-forward "Queued (1)")
+        (should-error (delete-region (match-beginning 0) (match-end 0))
+                      :type 'text-read-only)
+        ;; Clicking a queued item pulls it back into the draft.
+        (search-forward "[0]")
+        (button-activate (button-at (1- (point)))))
+      (with-current-buffer buffer
+        (should-not harness-ui-chat--queue)
+        (should (equal (harness-ui-chat--compose-text) "later")))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-attach-button-uses-interactive-spec ()
+  "Clicking Attach runs the command through `call-interactively'."
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer))
+          (file 'unset))
+      (cl-letf (((symbol-function 'harness-ui-chat-attach-file)
+                 (lambda (arg)
+                   (interactive (list "from-spec"))
+                   (setq file arg))))
+        (with-current-buffer buffer
+          (goto-char (point-min))
+          (search-forward "Attach")
+          (button-activate (button-at (1- (point))))))
+      (should (equal file "from-spec"))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-send-steers-a-running-turn ()
+  "Mid-turn Send steers the turn instead of queueing for the next one."
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer))
+          (steered nil)
+          (steer-session nil))
+      (with-current-buffer buffer
+        (setq harness-ui-chat--status 'running)
+        (harness-ui-chat--render-composer)
+        (goto-char (harness-ui-chat--compose-point))
+        (insert "go left"))
+      (cl-letf (((symbol-function 'harness-ui-steer)
+                 (lambda (session-id blocks)
+                   (setq steer-session session-id
+                         steered blocks)
+                   (harness-test-resolved nil))))
+        (with-current-buffer buffer
+          (harness-ui-chat-send)))
+      (should (equal steer-session "s1"))
+      (should (equal (plist-get (aref steered 0) :text) "go left"))
+      ;; Steering is not queueing: the queued list stays empty.
+      (should-not harness-ui-chat--queue)
+      (should (equal (harness-ui-chat--compose-text) ""))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-running-buttons-stay-send-and-queue ()
+  "The button row keeps stable Send and Queue labels while running."
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (with-current-buffer buffer
+        (setq harness-ui-chat--status 'running)
+        (harness-ui-chat--render-composer)
+        (goto-char (point-min))
+        (search-forward "Send")
+        (should (button-at (1- (point))))
+        (goto-char (point-min))
+        (search-forward "Queue")
+        (should (button-at (1- (point))))
+        (should (= (how-many "Queue" (point-min) (point-max)) 1)))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-help-composes-or-describes ()
+  "`?' types in the composer and opens help from the transcript."
+  (harness-ui-chat-test--with-stubs
+    (let ((buffer (harness-ui-chat-test--buffer)))
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (goto-char (harness-ui-chat--compose-point))
+              (let ((last-command-event ??))
+                (harness-ui-chat-help))
+              (should (equal (harness-ui-chat--compose-text) "?"))
+              (goto-char (point-min))
+              (harness-ui-chat-help)
+              (should (get-buffer "*Harness Help*")))
+        (when (get-buffer "*Harness Help*")
+          (kill-buffer "*Harness Help*"))
+        (kill-buffer buffer))))))
+
 (ert-deftest harness-ui-chat-attachments-become-resource-links ()
   (harness-ui-chat-test--with-stubs
     (let ((buffer (harness-ui-chat-test--buffer))
@@ -446,14 +563,14 @@
         (should (string-match-p "\[video: clip\.mp4\]" text)))
       (kill-buffer buffer))))
 
-(ert-deftest harness-ui-chat-queues-while-running ()
+(ert-deftest harness-ui-chat-queue-while-running ()
   (harness-ui-chat-test--with-stubs
     (let ((buffer (harness-ui-chat-test--buffer)))
       (with-current-buffer buffer
         (setq harness-ui-chat--status 'running)
         (goto-char (harness-ui-chat--compose-point))
         (insert "second thought")
-        (harness-ui-chat-send)
+        (harness-ui-chat-queue)
         (should (= (length harness-ui-chat--queue) 1))
         (should-not harness-ui-chat-test--sent)
         (should (string-match-p "Queued (1)" (harness-ui-chat-test--text buffer)))
@@ -625,6 +742,32 @@ Methods without an entry use `harness-ui-chat-test--stub-method'."
 (ert-deftest harness-ui-config-requires-a-session ()
   (let ((harness-ui-current-session nil))
     (should-error (harness-ui-switch-model) :type 'user-error)))
+
+(ert-deftest harness-ui-config-choose-labels-values ()
+  "The selector completes on value names, not on plist keys."
+  (let ((captured nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (prompt collection &rest _args)
+                 (setq captured
+                       (list :prompt prompt
+                             :candidates (funcall collection "" nil t)
+                             :metadata (funcall collection "" nil 'metadata)
+                             :default (nth 4 _args)))
+                 "High")))
+      (let ((choice (harness-ui-config--choose
+                     '(:id "thinking" :name "Thinking" :currentValue "medium"
+                       :options [(:value "low" :name "Low" :description "faster")
+                                 (:value "medium" :name "Medium" :description "normal")
+                                 (:value "high" :name "High" :description "deeper")]))))
+        (should (equal (plist-get choice :value) "high"))
+        (should (equal (plist-get captured :prompt) "Thinking: "))
+        (should (equal (plist-get captured :candidates) '("Low" "Medium" "High")))
+        (should (equal (plist-get captured :default) "Medium"))
+        (let ((metadata (plist-get captured :metadata)))
+          (should (eq (cdr (assq 'category (cdr metadata))) 'harness-config-value))
+          (let ((annotate (cdr (assq 'annotation-function (cdr metadata)))))
+            (should (equal (substring-no-properties (funcall annotate "High"))
+                           "  deeper"))))))))
 
 ;;; Notifier
 

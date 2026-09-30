@@ -59,6 +59,7 @@
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
     (define-key map (kbd "g") #'harness-ui-usage-refresh)
+    (define-key map (kbd "?") #'harness-ui-describe)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `harness-ui-usage-mode'.")
