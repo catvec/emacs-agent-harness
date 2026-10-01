@@ -28,6 +28,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-tools)
+(require 'harness-client-tools)
 
 (defcustom harness-bash-program "bash"
   "Shell used by the bash tool."
@@ -40,14 +41,6 @@
 (defcustom harness-bash-max-timeout 3600
   "Upper bound for the timeout a model may request for a bash command."
   :type 'number :group 'harness)
-
-(defcustom harness-elisp-timeout 30
-  "Seconds an elisp evaluation may take before it is abandoned."
-  :type 'number :group 'harness)
-
-(defcustom harness-elisp-max-value-chars 10000
-  "Printed values longer than this are elided in elisp results."
-  :type 'integer :group 'harness)
 
 ;;;; bash
 
@@ -133,80 +126,6 @@
 
 ;;;; elisp
 
-(defun harness-tools-shell--read-forms (code)
-  "Return the list of forms read from CODE."
-  (with-temp-buffer
-    (insert code)
-    (emacs-lisp-mode)
-    (goto-char (point-min))
-    (let (forms)
-      ;; Skip whitespace and comments between forms so a clean end of
-      ;; input is told apart from an unterminated form.
-      (while (progn (forward-comment (buffer-size)) (not (eobp)))
-        (push (condition-case nil
-                  (read (current-buffer))
-                (end-of-file (error "End of file during parsing: unbalanced form at line %d"
-                                    (line-number-at-pos))))
-              forms))
-      (nreverse forms))))
-
-(defun harness-tools-shell--messages-since (pos)
-  "Return the text of *Messages* from POS to the end, trimmed."
-  (let ((buf (get-buffer "*Messages*")))
-    (if (and buf (buffer-live-p buf))
-        (with-current-buffer buf
-          (string-trim (buffer-substring-no-properties (min pos (point-max)) (point-max))))
-      "")))
-
-(defun harness-tools-shell--messages-end ()
-  "Return the current end of *Messages*, or 1 when the buffer is absent."
-  (let ((buf (messages-buffer)))
-    (with-current-buffer buf (point-max))))
-
-(defun harness-tools-shell--eval (code)
-  "Evaluate CODE and return (VALUE OUTPUT MESSAGES).
-OUTPUT is what the forms printed to `standard-output'; MESSAGES are
-`message' calls logged while they ran."
-  (let* ((forms (harness-tools-shell--read-forms code))
-         (out (generate-new-buffer " *harness-elisp-out*" t))
-         (msg-start (harness-tools-shell--messages-end))
-         (value nil))
-    (unwind-protect
-        (let ((standard-output out)
-              (message-log-max t)
-              (inhibit-message t)
-              (debug-on-error nil))
-          (with-timeout (harness-elisp-timeout
-                         (error "Evaluation exceeded %ss" harness-elisp-timeout))
-            (dolist (form forms)
-              (setq value (eval form t))))
-          (list value
-                (with-current-buffer out (buffer-string))
-                (harness-tools-shell--messages-since msg-start)))
-      (when (buffer-live-p out) (kill-buffer out)))))
-
-(defun harness-tools-shell--elisp (input _ctx)
-  "Handler for the elisp tool with INPUT."
-  (let ((code (plist-get input :code)))
-    (if (or (not (stringp code)) (string-blank-p code))
-        (harness-tool-error "Missing code")
-      (condition-case err
-          (pcase-let ((`(,value ,output ,messages) (harness-tools-shell--eval code)))
-            (let ((printed (string-trim-right
-                            (condition-case perr
-                                (pp-to-string value)
-                              (error (format "%S [pp failed: %s]" value (error-message-string perr)))))))
-              (harness-tool-ok
-               (string-join
-                (delq nil
-                      (list (format "=> %s" (harness-truncate-end printed harness-elisp-max-value-chars))
-                            (unless (string-empty-p output)
-                              (concat "--- output ---\n" (string-trim-right output)))
-                            (unless (string-empty-p messages)
-                              (concat "--- messages ---\n" messages))))
-                "\n"))))
-        (error (harness-tool-error (format "Error: %s" (error-message-string err))))))))
-
 (harness-define-tool "elisp"
   :description "Evaluate Emacs Lisp in the running Emacs (lexical binding). Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation. Use it to inspect or drive Emacs, or as an alternative to bash for file work."
   :schema '(:type "object"
@@ -214,7 +133,7 @@ OUTPUT is what the forms printed to `standard-output'; MESSAGES are
             :required ("code"))
   :kind 'exec
   :title (lambda (input) (format "elisp %s" (harness-truncate-end (harness-first-line (plist-get input :code)) 70)))
-  :handler #'harness-tools-shell--elisp)
+  :handler (harness-tools-in-client "elisp"))
 
 (harness-define-module 'tools-shell
   :doc "bash (async, sandboxed when available) and elisp evaluation tools."

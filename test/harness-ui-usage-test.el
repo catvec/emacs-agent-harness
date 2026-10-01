@@ -96,8 +96,8 @@
       (harness-ui-usage-set-group 'model)
       (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
       (let ((text (harness-ui-usage-test-text)))
-        (should (string-match-p "demo · scripted" text))
-        (should (string-match-p "demo · other" text)))
+        (should (string-match-p "Demo scripted" text))
+        (should (string-match-p "other (demo)" text)))
       (harness-ui-usage-set-group 'day)
       (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
       (should (string-match-p (format-time-string "%b %-d, %Y") (harness-ui-usage-test-text)))
@@ -169,6 +169,18 @@
         (should (string-match-p "Allowance" text))
         (should (string-match-p (format-time-string "%Y-%m-%d") text))
         (should (= 7 (cl-count-if (lambda (l) (string-match-p "\\` [0-9]\\{4\\}-" l)) (split-string text "\n"))))))))
+
+(ert-deftest harness-ui-model-label-is-readable ()
+  "Model labels come from the catalogue, then a prettified slug, then name (provider)."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--models)
+    (should (equal "Claude Opus 5.5" (harness-ui-model-label "claude:claude-opus-5-5")))
+    (should (equal "Claude Haiku 4.5" (harness-ui-model-label "claude:claude-haiku-4-5-20251001")))
+    (should (equal "Claude Sonnet 5" (harness-ui-model-label "claude:claude-sonnet-5")))
+    (should (equal "scripted (demo)" (harness-ui-model-label "demo:scripted")))
+    (should (equal "?" (harness-ui-model-label nil)))
+    (puthash "openai:gpt-x" (list :id "openai:gpt-x" :label "GPT X") harness-ui--models)
+    (should (equal "GPT X" (harness-ui-model-label "openai:gpt-x")))))
 
 (provide 'harness-ui-usage-test)
 ;;; harness-ui-usage-test.el ends here

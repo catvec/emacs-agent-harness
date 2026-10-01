@@ -24,6 +24,11 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-acp)
+(require 'harness-server)
+(require 'harness-client-tools)
+(require 'harness-files)
+
+(defvar harness-directory)
 
 (declare-function harness-reload "harness")
 
@@ -38,8 +43,17 @@
     (((background dark)) :background "#2c313c" :extend t))
   "Background of messages written by the user." :group 'harness-ui)
 
+(defface harness-user-label-face '((t :inherit (bold font-lock-keyword-face)))
+  "Sender name above the user's messages." :group 'harness-ui)
+
+(defface harness-user-bar-face '((t :inherit font-lock-keyword-face))
+  "Bar down the left edge of the user's messages (foreground only)." :group 'harness-ui)
+
 (defface harness-agent-face '((t :inherit default))
   "Face of the agent's text." :group 'harness-ui)
+
+(defface harness-agent-label-face '((t :inherit (bold font-lock-type-face)))
+  "Sender name at the start of each agent turn." :group 'harness-ui)
 
 (defface harness-tool-face
   '((((background light)) :background "#eaf3ea" :extend t)
@@ -102,42 +116,37 @@
 
 ;;;; Icons
 
-(define-icon harness-icon-idle nil
-  '((emoji "●") (symbol "●") (text "idle"))
-  "Idle session." :version "29.1")
-(define-icon harness-icon-running nil
-  '((emoji "▶") (symbol "▶") (text "run"))
-  "Running session." :version "29.1")
-(define-icon harness-icon-blocked nil
-  '((emoji "⏸") (symbol "⏸") (text "wait"))
-  "Blocked session." :version "29.1")
-(define-icon harness-icon-inactive nil
-  '((emoji "○") (symbol "○") (text "off"))
-  "Inactive session." :version "29.1")
-(define-icon harness-icon-user nil
-  '((emoji "👤") (symbol "◆") (text "you"))
-  "The user." :version "29.1")
-(define-icon harness-icon-agent nil
-  '((emoji "🤖") (symbol "◇") (text "agent"))
-  "The agent." :version "29.1")
-(define-icon harness-icon-tool nil
-  '((emoji "🔧") (symbol "⚙") (text "tool"))
-  "A tool call." :version "29.1")
-(define-icon harness-icon-thinking nil
-  '((emoji "💭") (symbol "…") (text "think"))
-  "Thinking." :version "29.1")
-(define-icon harness-icon-collapsed nil
-  '((symbol "▸") (text "+"))
-  "Collapsed block." :version "29.1")
-(define-icon harness-icon-expanded nil
-  '((symbol "▾") (text "-"))
-  "Expanded block." :version "29.1")
-(define-icon harness-icon-send nil
-  '((emoji "➤") (symbol "➤") (text "send"))
-  "Send." :version "29.1")
-(define-icon harness-icon-attach nil
-  '((emoji "📎") (symbol "@") (text "attach"))
-  "Attachment." :version "29.1")
+;; Icons are monochrome SVGs drawn in `currentColor', so they take the
+;; colour of the face around them; terminals fall back to plain symbols.
+;; No emoji: they ignore the theme and vary wildly between fonts.
+
+(defun harness-ui-icon-file (name)
+  "Return the path of the SVG icon NAME shipped in the icons directory."
+  (expand-file-name (concat "icons/" name ".svg")
+                    (if (boundp 'harness-directory) harness-directory
+                      (file-name-directory (or (locate-library "harness") default-directory)))))
+
+(defmacro harness-ui-define-icon (name file symbol text doc)
+  "Define icon NAME from SVG FILE, falling back to SYMBOL then TEXT.
+DOC is its documentation."
+  `(define-icon ,name nil
+     (list (list 'image (harness-ui-icon-file ,file) :height '(1.1 . em))
+           (list 'symbol ,symbol)
+           (list 'text ,text))
+     ,doc :version "29.1"))
+
+(harness-ui-define-icon harness-icon-idle "idle" "●" "idle" "Idle session.")
+(harness-ui-define-icon harness-icon-running "running" "►" "run" "Running session.")
+(harness-ui-define-icon harness-icon-blocked "blocked" "‖" "wait" "Blocked session.")
+(harness-ui-define-icon harness-icon-inactive "inactive" "○" "off" "Inactive session.")
+(harness-ui-define-icon harness-icon-user "user" "◆" "you" "The user.")
+(harness-ui-define-icon harness-icon-agent "agent" "◇" "agent" "The agent.")
+(harness-ui-define-icon harness-icon-tool "tool" "◈" "tool" "A tool call.")
+(harness-ui-define-icon harness-icon-thinking "thinking" "…" "think" "Thinking.")
+(harness-ui-define-icon harness-icon-collapsed "collapsed" "▸" "+" "Collapsed block.")
+(harness-ui-define-icon harness-icon-expanded "expanded" "▾" "-" "Expanded block.")
+(harness-ui-define-icon harness-icon-attach "attach" "+" "attach" "Attachment.")
+(harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
 
 (defun harness-ui-icon (name)
   "Return the string for icon NAME (a symbol such as `harness-icon-idle')."
@@ -163,7 +172,9 @@
 ;;;; Connection
 
 (defvar harness-ui-connection nil "The ACP connection the UI talks through.")
-(defvar harness-ui-connection-address nil "Address of the current connection, nil when local.")
+(defvar harness-ui-connection-address nil
+  "Where the harness is: nil in this Emacs, `process' for the harness
+process `harness-start' manages (see `harness-process'), or \"host:port\".")
 
 (defvar harness-ui-update-functions nil
   "Functions called with (SESSION-ID UPDATE) for every `session/update'.
@@ -188,34 +199,74 @@ Same protocol as `harness-ui-permission-functions'.")
 (defvar harness-ui-redraw-hook nil
   "Hook run when every UI buffer should redraw (after a reload or reconnect).")
 
+(defvar harness-ui--server nil "The harness process this Emacs started, or nil.")
+(defvar harness-ui--server-address nil "(ADDRESS . TOKEN) of the running harness process.")
+(defvar harness-ui--server-stopping nil "Non-nil while the harness process is being stopped on purpose.")
+(defvar harness-ui--server-restarts nil "Start times of recent unplanned restarts.")
+(defvar harness-ui--queue nil
+  "Requests made before the harness process listened, newest first.
+Each is (METHOD PARAMS PROMISE); PROMISE is nil for notifications.")
+
 (defun harness-ui-connected-p ()
   "Non-nil when the UI has a live connection."
   (and harness-ui-connection (harness-acp-connected-p harness-ui-connection)))
 
 (defun harness-ui-connect (&optional address)
-  "Connect the UI to ADDRESS (nil for the in-process harness).
-Return the connection."
+  "Connect the UI to ADDRESS: nil for the in-process harness, `process'
+for the managed harness process, or \"host:port\".  Return the
+connection, or nil while the harness process is still starting; requests
+made meanwhile are queued and sent once it listens."
   (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
-  (setq harness-ui-connection (harness-acp-connect address)
+  (setq harness-ui-connection nil
         harness-ui-connection-address address)
+  (if (eq address 'process)
+      (if harness-ui--server-address
+          (harness-ui--open (car harness-ui--server-address) (cdr harness-ui--server-address))
+        (harness-ui--ensure-server)
+        nil)
+    (harness-ui--open address nil)))
+
+(defun harness-ui--open (address token)
+  "Open the connection to ADDRESS (nil: in-process) authenticating with TOKEN."
+  (setq harness-ui-connection (let ((harness-acp-token (or token harness-acp-token)))
+                                (harness-acp-connect address)))
   (harness-acp-set-handler harness-ui-connection #'harness-ui--dispatch)
   (harness-acp-on-close harness-ui-connection #'harness-ui--on-close)
   (harness-then (harness-acp-initialize harness-ui-connection)
-                (lambda (_) (harness-ui-refresh-sessions))
+                (lambda (_) (harness-ui-refresh-sessions) (harness-ui-refresh-models))
                 (lambda (e) (message "Harness: initialize failed: %s" (harness-error-message e))))
+  (harness-ui--flush-queue)
   harness-ui-connection)
 
 (defun harness-ui-connection ()
-  "Return the live connection, connecting locally if needed."
+  "Return the live connection, connecting if needed; nil while the harness
+process is starting."
   (if (harness-ui-connected-p) harness-ui-connection (harness-ui-connect harness-ui-connection-address)))
 
 (defun harness-ui--on-close ()
-  (message "Harness: connection closed%s"
-           (if harness-ui-connection-address (format " (%s)" harness-ui-connection-address) "")))
+  (unless (eq harness-ui-connection-address 'process) ; the supervisor reports that
+    (message "Harness: connection closed%s"
+             (if harness-ui-connection-address (format " (%s)" harness-ui-connection-address) ""))))
+
+(defun harness-ui--flush-queue ()
+  "Send every queued request over the open connection."
+  (let ((queue (nreverse harness-ui--queue)))
+    (setq harness-ui--queue nil)
+    (dolist (item queue)
+      (pcase-let ((`(,method ,params ,promise) item))
+        (if promise
+            (harness-then (harness-acp-request harness-ui-connection method params)
+                          (lambda (v) (harness-resolve promise v))
+                          (lambda (e) (harness-reject promise e)))
+          (harness-acp-notify harness-ui-connection method params))))))
 
 (defun harness-ui-request (method &optional params)
   "Send METHOD with PARAMS over the UI connection; return a promise."
-  (harness-acp-request (harness-ui-connection) method params))
+  (if-let* ((conn (harness-ui-connection)))
+      (harness-acp-request conn method params)
+    (let ((p (harness-make-promise)))
+      (push (list method params p) harness-ui--queue)
+      p)))
 
 (defun harness-ui-call (method params callback &optional on-error)
   "Request METHOD with PARAMS and call CALLBACK with the result.
@@ -227,7 +278,80 @@ Errors are shown in the echo area unless ON-ERROR handles them."
 
 (defun harness-ui-notify (method &optional params)
   "Send notification METHOD with PARAMS."
-  (harness-acp-notify (harness-ui-connection) method params))
+  (if-let* ((conn (harness-ui-connection)))
+      (harness-acp-notify conn method params)
+    (push (list method params nil) harness-ui--queue)))
+
+;;;; The harness process
+
+
+(defun harness-ui--ensure-server ()
+  "Start the harness process unless it runs or is starting.
+During init the start waits for `emacs-startup-hook', so settings made
+later in the init file still reach the process."
+  (cond
+   ((and harness-ui--server (process-live-p harness-ui--server)))
+   ((not after-init-time)
+    (add-hook 'emacs-startup-hook #'harness-ui--ensure-server))
+   (t
+    (remove-hook 'emacs-startup-hook #'harness-ui--ensure-server)
+    (setq harness-ui--server-address nil
+          harness-ui--server-stopping nil
+          harness-ui--server
+          (harness-server-spawn
+           :on-address (lambda (address token)
+                         (setq harness-ui--server-address (cons address token))
+                         (when (eq harness-ui-connection-address 'process)
+                           (harness-ui--open address token)
+                           (run-hooks 'harness-ui-redraw-hook)))
+           :on-exit #'harness-ui--on-server-exit)))))
+
+(defun harness-ui--on-server-exit (status)
+  "React to the harness process ending with STATUS: restart it unless stopped."
+  (setq harness-ui--server nil harness-ui--server-address nil)
+  (unless harness-ui--server-stopping
+    (let* ((now (float-time))
+           (recent (cl-remove-if (lambda (time) (< time (- now 60))) harness-ui--server-restarts)))
+      (setq harness-ui--server-restarts (cons now recent))
+      (if (>= (length recent) 5)
+          (progn
+            (harness-log 'error "harness process keeps exiting (status %s); not restarting" status)
+            (message "Harness process exited (status %s) 5 times in a minute; see M-x harness-show-log, then M-x harness-restart"
+                     status))
+        (harness-log 'warn "harness process exited (status %s); restarting" status)
+        (message "Harness process exited (status %s); restarting" status)
+        (run-at-time (expt 2 (length recent)) nil
+                     (lambda ()
+                       (when (eq harness-ui-connection-address 'process)
+                         (harness-ui--ensure-server))))))))
+
+(defun harness-ui--stop-server ()
+  "Stop the harness process cleanly."
+  (setq harness-ui--server-stopping t)
+  (when harness-ui--server (harness-server-stop harness-ui--server))
+  (setq harness-ui--server nil harness-ui--server-address nil))
+
+;;;###autoload
+(defun harness-restart ()
+  "Restart the harness process with the current configuration.
+Sessions persist; running turns are interrupted."
+  (interactive)
+  (unless (eq harness-ui-connection-address 'process)
+    (user-error "The harness does not run in its own process (see `harness-process')"))
+  (setq harness-ui--server-restarts nil)
+  (let ((old harness-ui--server))
+    (harness-ui--stop-server)
+    (if (and old (process-live-p old))
+        (set-process-sentinel old (lambda (p _e)
+                                    (unless (process-live-p p)
+                                      (harness-ui-connect 'process))))
+      (harness-ui-connect 'process))))
+
+(defun harness-ui-reload-server ()
+  "Ask the harness process to reload its modules in place."
+  (when (eq harness-ui-connection-address 'process)
+    (harness-ui-call "_harness/harness/reload" nil
+                     (lambda (_) (message "Harness process reloaded")))))
 
 (defun harness-ui--dispatch (method params respond)
   "Route an incoming METHOD with PARAMS; RESPOND is non-nil for requests."
@@ -245,12 +369,22 @@ Errors are shown in the echo area unless ON-ERROR handles them."
     ("_harness/ask_user"
      (unless (run-hook-with-args-until-success 'harness-ui-question-functions params respond)
        (harness-ui--default-question params respond)))
+    ("_harness/client/customize-save"
+     (condition-case err
+         (funcall respond (harness-client-tools-customize-save (plist-get params :symbol) (plist-get params :value)))
+       (error (harness-acp-respond-error respond -32000 (error-message-string err)))))
+    ("_harness/client/tool"
+     (funcall respond (harness-client-tools-run (plist-get params :name) (plist-get params :input))))
     ("_harness/event"
      (let ((event (plist-get params :event)) (args (plist-get params :args)))
+       (when (equal event "tools/file-written")
+         (harness-client-tools-revert-visiting (car args)))
        (when (member event '("session/created" "session/deleted"))
          (harness-ui-refresh-sessions))
        (when (equal event "harness/reloaded")
          (run-hooks 'harness-ui-redraw-hook))
+       (when (equal event "provider/models-updated")
+         (harness-ui-refresh-models))
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
@@ -327,6 +461,21 @@ Errors are shown in the echo area unless ON-ERROR handles them."
             (or (and name (not (string-empty-p name)) name)
                 (format "unnamed (%s)" (substring (or (plist-get session :id) "????") 0 4))))))
 
+;;;; Model catalogue cache
+
+(defvar harness-ui--models (make-hash-table :test 'equal)
+  "Model id -> model plist from the harness catalogue.")
+
+(defun harness-ui-refresh-models (&optional callback)
+  "Reload the model catalogue cache, redraw, then call CALLBACK with the models."
+  (harness-ui-call "_harness/provider/models" nil
+                   (lambda (models)
+                     (clrhash harness-ui--models)
+                     (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
+                     (run-hooks 'harness-ui-redraw-hook)
+                     (when callback (funcall callback models)))
+                   (unless callback #'ignore)))
+
 ;;;; Buffer-local session context
 
 (defvar-local harness-ui-session-id nil
@@ -344,7 +493,7 @@ Signal unless NOERROR when none can be found."
   "Read a session with completion showing PROMPT; PREDICATE filters."
   (let* ((sessions (harness-ui-sessions predicate))
          (table (mapcar (lambda (s) (cons (format "%s  %s  %s" (harness-ui-session-label s)
-                                                  (propertize (or (plist-get s :model) "") 'face 'harness-dim-face)
+                                                  (propertize (harness-ui-model-label (plist-get s :model)) 'face 'harness-dim-face)
                                                   (propertize (abbreviate-file-name (or (plist-get s :project) "")) 'face 'harness-dim-face))
                                           s))
                         sessions))
@@ -372,11 +521,29 @@ Signal unless NOERROR when none can be found."
                 'face (harness-ui-context-face context window)
                 'help-echo "Context tokens in use / context window")))
 
+(defun harness-ui--prettify-model-name (name)
+  "Return a readable form of model slug NAME, or nil when it has no known shape.
+\"claude-opus-5-5\" and \"claude-haiku-4-5-20251001\" become
+\"Claude Opus 5.5\" and \"Claude Haiku 4.5\"."
+  (when (string-match "\\`claude-\\([a-z]+\\)-\\([0-9]+\\)\\(?:-\\([0-9]\\)\\)?\\(?:-[0-9]\\{8\\}\\)?\\'" name)
+    (format "Claude %s %s%s" (capitalize (match-string 1 name)) (match-string 2 name)
+            (if (match-string 3 name) (concat "." (match-string 3 name)) ""))))
+
 (defun harness-ui-model-label (model-id)
-  "Return a short label for MODEL-ID, keeping the provider as a prefix."
-  (if (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id))
-      (format "%s · %s" (match-string 1 model-id) (match-string 2 model-id))
-    (or model-id "?")))
+  "Return a readable label for MODEL-ID.
+Uses the catalogue's label; falls back to a prettified slug, then to
+\"name (provider)\"."
+  (let* ((m (and model-id (gethash model-id harness-ui--models)))
+         (name (if (and model-id (string-match "\\`[^:]+:\\(.+\\)\\'" model-id))
+                   (match-string 1 model-id)
+                 model-id))
+         (label (plist-get m :label)))
+    (cond ((null model-id) "?")
+          ((and label (not (equal label name))) label)
+          ((and name (harness-ui--prettify-model-name name)))
+          ((not (equal name model-id))
+           (format "%s (%s)" name (substring model-id 0 (- (length model-id) (length name) 1))))
+          (t model-id))))
 
 (defun harness-ui-button (label action &rest props)
   "Insert a clickable LABEL running ACTION (a command or a function of the button).
@@ -462,16 +629,16 @@ Set by the chat module.")
 ;;;; Commands
 
 (defun harness-ui--default-directory ()
-  (if (harness-method-exists-p 'project/root)
-      (harness-call 'project/root default-directory)
-    default-directory))
+  (harness-files-project-root default-directory))
 
 ;;;###autoload
 (defun harness-new-session (directory &optional position)
   "Start a new session in DIRECTORY and show it in POSITION."
   (interactive (list (read-directory-name "Session directory: " (harness-ui--default-directory) nil t)
                      (and current-prefix-arg (harness-ui-read-position))))
-  (harness-ui-call "session/new" (list :cwd (expand-file-name directory))
+  (harness-ui-call "session/new" (list :cwd (expand-file-name directory)
+                                       ;; Rooted here, where the user's project setup lives.
+                                       :_harness (list :project (harness-files-project-root directory)))
                    (lambda (result)
                      (harness-ui-refresh-sessions
                       (lambda (_) (harness-ui-display-session (plist-get result :sessionId) position))))))
@@ -491,25 +658,31 @@ Set by the chat module.")
   "Choose a model for SESSION-ID (default the current buffer's session)."
   (interactive)
   (let ((sid (or session-id (harness-ui-current-session-id))))
-    (harness-ui-call "_harness/provider/models" nil
-                     (lambda (models)
-                       (let* ((table (mapcar (lambda (m)
-                                               (cons (plist-get m :id) m))
-                                             models))
-                              (completion-extra-properties
-                               (list :annotation-function
-                                     (lambda (id)
-                                       (let ((m (cdr (assoc id table))))
-                                         (format "  %s · %s · %s ctx%s"
-                                                 (or (plist-get m :provider-label) (plist-get m :provider))
-                                                 (plist-get m :label)
-                                                 (harness-format-tokens (plist-get m :context-window))
-                                                 (if-let* ((p (plist-get m :pricing)))
-                                                     (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
-                                                   ""))))))
-                              (choice (completing-read "Model: " table nil t)))
-                         (harness-ui-call "session/set_model" (list :sessionId sid :modelId choice)
-                                          (lambda (_) (message "Model → %s" choice))))))))
+    (harness-ui-refresh-models
+     (lambda (models)
+       (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
+              (table (cl-mapcar (lambda (m label)
+                                  ;; Two models sharing a label are told apart by id.
+                                  (cons (if (> (cl-count label labels :test #'equal) 1)
+                                            (format "%s (%s)" label (plist-get m :id))
+                                          label)
+                                        m))
+                                models labels))
+              (completion-extra-properties
+               (list :annotation-function
+                     (lambda (choice)
+                       (let ((m (cdr (assoc choice table))))
+                         (format "  %s · %s · %s ctx%s"
+                                 (or (plist-get m :provider-label) (plist-get m :provider))
+                                 (plist-get m :id)
+                                 (harness-format-tokens (plist-get m :context-window))
+                                 (if-let* ((p (plist-get m :pricing)))
+                                     (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
+                                   ""))))))
+              (choice (completing-read "Model: " table nil t))
+              (id (plist-get (cdr (assoc choice table)) :id)))
+         (harness-ui-call "session/set_model" (list :sessionId sid :modelId id)
+                          (lambda (_) (message "Model → %s" choice))))))))
 
 ;;;###autoload
 (defun harness-set-thinking (&optional session-id)
@@ -627,8 +800,22 @@ Set by the chat module.")
 (defun harness-ui--command-available-p (symbol)
   (fboundp symbol))
 
+(defun harness-ui--display-menu (buffer alist)
+  "Display the menu BUFFER, keeping it out of the windows around a side window.
+Sessions usually live in side windows, which cannot be split.  Actions
+such as `display-buffer-below-selected' then fall back to reusing
+another window, which transient fits horizontally to the menu and
+cannot delete afterwards, wrecking the layout.  So from a side window
+the menu gets a bottom side window of its own; elsewhere it follows
+`transient-display-buffer-action'.  ALIST is the action alist."
+  (if (window-parameter (selected-window) 'window-side)
+      (display-buffer-in-side-window
+       buffer (append '((side . bottom) (slot . 1) (dedicated . t)) alist))
+    (display-buffer buffer transient-display-buffer-action)))
+
 (transient-define-prefix harness-menu ()
   "The harness menu."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [["Sessions"
     ("n" "New session" harness-new-session)
     ("s" "Switch session" harness-switch-session)
@@ -657,6 +844,7 @@ Set by the chat module.")
   (run-hooks 'harness-ui-redraw-hook))
 
 (defun harness-ui--init ()
+  (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
   (harness-ui-connect harness-ui-connection-address)
   ;; A reload reaches the UI as the forwarded `harness/reloaded' event, for
   ;; local and remote harnesses alike, so no bus subscription is needed.
@@ -665,7 +853,8 @@ Set by the chat module.")
 (harness-define-module 'ui
   :doc "UI foundation: ACP connection, faces, positions, keymap and menu."
   :requires '(acp)
-  :init #'harness-ui--init)
+  :init #'harness-ui--init
+  :shutdown #'harness-ui--stop-server)
 
 (provide 'harness-ui)
 ;;; harness-ui.el ends here
