@@ -382,9 +382,9 @@ Signal unless NOERROR when none can be found."
                 'help-echo "Context tokens in use / context window")))
 
 (defun harness-ui-model-label (model-id)
-  "Return a short label for MODEL-ID, keeping the provider as a prefix."
+  "Return a short \"model (provider)\" label for MODEL-ID."
   (if (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id))
-      (format "%s · %s" (match-string 1 model-id) (match-string 2 model-id))
+      (format "%s (%s)" (match-string 2 model-id) (match-string 1 model-id))
     (or model-id "?")))
 
 (defun harness-ui-button (label action &rest props)
@@ -636,8 +636,22 @@ Set by the chat module.")
 (defun harness-ui--command-available-p (symbol)
   (fboundp symbol))
 
+(defun harness-ui--display-menu (buffer alist)
+  "Display the menu BUFFER, keeping it out of the windows around a side window.
+Sessions usually live in side windows, which cannot be split.  Actions
+such as `display-buffer-below-selected' then fall back to reusing
+another window, which transient fits horizontally to the menu and
+cannot delete afterwards, wrecking the layout.  So from a side window
+the menu gets a bottom side window of its own; elsewhere it follows
+`transient-display-buffer-action'.  ALIST is the action alist."
+  (if (window-parameter (selected-window) 'window-side)
+      (display-buffer-in-side-window
+       buffer (append '((side . bottom) (slot . 1) (dedicated . t)) alist))
+    (display-buffer buffer transient-display-buffer-action)))
+
 (transient-define-prefix harness-menu ()
   "The harness menu."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [["Sessions"
     ("n" "New session" harness-new-session)
     ("s" "Switch session" harness-switch-session)
