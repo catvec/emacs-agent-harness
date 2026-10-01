@@ -224,6 +224,19 @@
         (should (= 1 (length (harness-test-await
                               (harness-acp-request conn "_harness/task/list" (list :cwd default-directory))))))))))
 
+(defvar harness-model)
+(defvar harness-thinking)
+(defvar harness-tasks-thinking)
+
+(ert-deftest harness-tasks-settings-report-real-defaults ()
+  "Without task defaults, the settings are what the project configures."
+  (harness-tasks-test-with
+    (let ((harness-tasks-model nil) (harness-tasks-thinking nil)
+          (harness-model "demo:scripted") (harness-thinking "high"))
+      (let ((s (harness-call 'task/settings default-directory)))
+        (should (equal "demo:scripted" (plist-get s :model)))
+        (should (equal "high" (plist-get s :thinking)))))))
+
 (ert-deftest harness-tasks-submit-with-session-settings ()
   (harness-tasks-test-with
     (let* ((id (plist-get (harness-call 'task/submit default-directory "careful one"

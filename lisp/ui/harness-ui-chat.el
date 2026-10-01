@@ -1715,7 +1715,7 @@ the background it was rendered on, so it would show as a dark box."
      (harness-chat--segment (or (plist-get s :permission-mode) "ask") #'harness-set-permission-mode
                             "Permission mode (mouse-1: change)")
      "  "
-     (harness-chat--segment (format "%s %s" (harness-ui-icon 'harness-icon-thinking) (or (plist-get s :thinking) "default"))
+     (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
                             #'harness-set-thinking "Thinking level (mouse-1: change)" 'harness-dim-face)
      "  "
      (harness-ui-format-context s)

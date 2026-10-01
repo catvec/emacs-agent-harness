@@ -529,6 +529,10 @@ Signal unless NOERROR when none can be found."
     (format "Claude %s %s%s" (capitalize (match-string 1 name)) (match-string 2 name)
             (if (match-string 3 name) (concat "." (match-string 3 name)) ""))))
 
+(defun harness-ui-thinking-label (level)
+  "Return the label of thinking LEVEL, nil meaning the model's default."
+  (format "%s %s" (harness-ui-icon 'harness-icon-thinking) (or level "default")))
+
 (defun harness-ui-model-label (model-id)
   "Return a short, readable \"model (provider)\" label for MODEL-ID.
 The model part is the catalogue's label, else a prettified slug, else
