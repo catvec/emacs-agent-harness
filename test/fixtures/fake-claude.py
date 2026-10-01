@@ -4,9 +4,9 @@
 It speaks the subset of the Claude Code stream-json protocol that the
 provider relies on: the system/init banner, the SDK MCP handshake over
 control requests, streamed assistant text, a hosted tool call served by
-the harness, the tool-result echo, rate limit events and the final
-result.  It stays alive between turns so the keep-alive path is tested,
-and it honours an interrupt control request.
+the harness, the tool-result echo, rate limit events, usage reports
+and the final result.  It stays alive between turns so the keep-alive
+path is tested, and it honours an interrupt control request.
 
 Behaviour is chosen by the prompt text:
   "call echo"  -> issues a tools/call for mcp__harness__echo first
@@ -15,14 +15,37 @@ Behaviour is chosen by the prompt text:
   "die"        -> exits mid-turn without a result
 Anything else streams the text "hello" and finishes.
 
-If HARNESS_FAKE_CLAUDE_ARGV names a file, a JSON object with the argv, the
-cwd and the CLAUDECODE environment variable is written there.
+Like the real CLI, each result's total_cost_usd is the running total
+of the process: every turn adds 0.01, and --resume or --fork-session
+starts from 0.05, the spend the session restores.
+
+The environment picks the account:
+  HARNESS_FAKE_CLAUDE_AUTH=subscription  a claude.ai Max login: the
+      initialize answer names it, get_usage reports the plan's quota
+      and rate_limit_event messages carry its windows
+  HARNESS_FAKE_CLAUDE_AUTH=api           an API key: no quota, no
+      rate limit events
+  unset                                  an older CLI: no account in
+      the initialize answer and no get_usage control request
+  HARNESS_FAKE_CLAUDE_OVERAGE=1          rate limit events say the
+      account is drawing on extra usage
+
+The MCP handshake only runs when --mcp-config is given, so the
+provider's quota probe (initialize and get_usage, then end of input)
+works too.  If HARNESS_FAKE_CLAUDE_ARGV names a file, a JSON object
+with the argv, the cwd and the CLAUDECODE environment variable is
+written there.
 """
 
 import json
 import os
 import sys
 import uuid
+
+AUTH = os.environ.get("HARNESS_FAKE_CLAUDE_AUTH", "")
+OVERAGE = bool(os.environ.get("HARNESS_FAKE_CLAUDE_OVERAGE"))
+TURN_COST = 0.01
+RESTORED_COST = 0.05
 
 
 def emit(obj):
@@ -53,6 +76,48 @@ def arg_value(argv, flag):
     return None
 
 
+def account():
+    """The `account' of the initialize answer, or None."""
+    if AUTH == "subscription":
+        return {"email": "user@example.com",
+                "organization": "user@example.com's Organization",
+                "subscriptionType": "Claude Max", "apiProvider": "firstParty"}
+    if AUTH == "api":
+        return {"tokenSource": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY",
+                "apiProvider": "firstParty"}
+    return None
+
+
+def limit(kind, group, percent, resets, active, model=None):
+    return {"kind": kind, "group": group, "percent": percent, "severity": "normal",
+            "resets_at": resets, "is_active": active,
+            "scope": ({"model": {"id": None, "display_name": model}, "surface": None}
+                      if model else None)}
+
+
+def rate_limits():
+    """The plan's quota as the real get_usage reports it."""
+    session_reset = "2026-10-01T09:39:59.819728+00:00"
+    week_reset = "2026-10-03T13:59:59.819752+00:00"
+    return {
+        "five_hour": {"utilization": 8, "resets_at": session_reset},
+        "seven_day": {"utilization": 57, "resets_at": week_reset},
+        "seven_day_opus": None,
+        "seven_day_sonnet": None,
+        "extra_usage": {"is_enabled": False, "monthly_limit": 5000, "used_credits": 0,
+                        "utilization": 0, "currency": "USD", "decimal_places": 2,
+                        "disabled_reason": "out_of_credits"},
+        "limits": [limit("session", "session", 8, session_reset, False),
+                   limit("weekly_all", "weekly", 57, week_reset, True),
+                   limit("weekly_scoped", "weekly", 50, week_reset, False, "Fable")],
+        "spend": {"used": {"amount_minor": 0, "currency": "USD", "exponent": 2},
+                  "limit": {"amount_minor": 5000, "currency": "USD", "exponent": 2},
+                  "percent": 0, "severity": "normal", "enabled": False,
+                  "disabled_reason": "out_of_credits"},
+        "model_scoped": [{"display_name": "Fable", "utilization": 50, "resets_at": week_reset}],
+    }
+
+
 class Fake:
     def __init__(self, argv):
         self.argv = argv
@@ -67,6 +132,8 @@ class Fake:
         else:
             self.session_id = "fake-" + uuid.uuid4().hex[:8]
         self.model = arg_value(argv, "--model") or "fake-model"
+        self.total = RESTORED_COST if resume else 0.0
+        self.needs_handshake = "--mcp-config" in argv
 
     # -- plumbing ---------------------------------------------------------
 
@@ -121,6 +188,43 @@ class Fake:
         listed = self.mcp({"jsonrpc": "2.0", "id": self.rpc_id, "method": "tools/list"})
         self.tools = listed.get("result", {}).get("tools", [])
 
+    def answer(self, request_id, response):
+        emit({"type": "control_response",
+              "response": {"subtype": "success", "request_id": request_id,
+                           "response": response}})
+
+    def usage_report(self):
+        """What get_usage answers: the session's spend and the plan's quota."""
+        session = {"total_cost_usd": round(self.total, 6), "total_api_duration_ms": 0,
+                   "total_duration_ms": 0, "total_lines_added": 0,
+                   "total_lines_removed": 0, "model_usage": {}}
+        if AUTH == "subscription":
+            return {"session": session, "subscription_type": "max",
+                    "rate_limits_available": True, "rate_limits": rate_limits()}
+        return {"session": session, "subscription_type": None,
+                "rate_limits_available": False, "rate_limits": None}
+
+    def control(self, msg):
+        """Answer a control request from the harness."""
+        rid = msg.get("request_id")
+        sub = msg.get("request", {}).get("subtype")
+        if sub == "initialize":
+            response = {"commands": [], "models": []}
+            if account():
+                response["account"] = account()
+            self.answer(rid, response)
+            if self.needs_handshake:
+                self.handshake()
+        elif sub == "get_usage":
+            if AUTH:
+                self.answer(rid, self.usage_report())
+            else:
+                emit({"type": "control_response",
+                      "response": {"subtype": "error", "request_id": rid,
+                                   "error": "Unsupported control request subtype: get_usage"}})
+        else:
+            self.answer(rid, {})
+
     # -- turns --------------------------------------------------------------
 
     def stream(self, event):
@@ -132,10 +236,24 @@ class Fake:
 
     def result(self, subtype="success", is_error=False, text="hello",
                stop_reason="end_turn"):
+        self.total += TURN_COST
         emit({"type": "result", "subtype": subtype, "is_error": is_error,
               "duration_ms": 5, "num_turns": 1, "result": text,
-              "session_id": self.session_id, "total_cost_usd": 0.01,
+              "session_id": self.session_id, "total_cost_usd": round(self.total, 6),
               "usage": self.usage(), "stop_reason": stop_reason})
+
+    def rate_limit_event(self):
+        if AUTH == "api":
+            return
+        emit({"type": "rate_limit_event",
+              "rate_limit_info": {
+                  "status": "allowed", "resetsAt": 1800000000, "rateLimitType": "five_hour",
+                  "overageStatus": "allowed" if OVERAGE else "rejected",
+                  "isUsingOverage": OVERAGE,
+                  "unifiedWindows": {
+                      "five_hour": {"utilization": 0.09, "resetsAt": 1800000000},
+                      "seven_day": {"utilization": 0.42, "resetsAt": 1800500000}}},
+              "session_id": self.session_id})
 
     def turn(self, message):
         self.interrupted = False
@@ -144,6 +262,11 @@ class Fake:
             text = blocks
         else:
             text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        emit({"type": "system", "subtype": "init", "session_id": self.session_id,
+              "model": self.model, "cwd": os.getcwd(), "tools": [],
+              "mcp_servers": [{"name": "harness", "status": "connected"}],
+              "apiKeySource": "ANTHROPIC_API_KEY" if AUTH == "api" else "none",
+              "permissionMode": "bypassPermissions"})
         self.stream({"type": "message_start",
                      "message": {"id": "msg_1", "type": "message", "role": "assistant",
                                  "model": self.model, "content": [],
@@ -228,10 +351,7 @@ class Fake:
                           "content": [{"type": "thinking", "thinking": "", "signature": "sig"},
                                       {"type": "text", "text": "hello"}],
                           "stop_reason": "end_turn", "usage": self.usage()}})
-        emit({"type": "rate_limit_event",
-              "rate_limit_info": {"unifiedWindows": {
-                  "five_hour": {"utilization": 0.09, "resetsAt": 1800000000},
-                  "seven_day": {"utilization": 0.42, "resetsAt": 1800500000}}}})
+        self.rate_limit_event()
         self.result()
 
     # -- main loop ----------------------------------------------------------
@@ -243,23 +363,13 @@ class Fake:
                 json.dump({"argv": self.argv,
                            "cwd": os.getcwd(),
                            "claudecode": os.environ.get("CLAUDECODE")}, f)
-        emit({"type": "system", "subtype": "init", "session_id": self.session_id,
-              "model": self.model, "cwd": os.getcwd(), "tools": [],
-              "mcp_servers": [{"name": "harness", "status": "connected"}],
-              "permissionMode": "bypassPermissions"})
         while True:
             msg = self.next_message()
             if msg is None:
                 return
             kind = msg.get("type")
             if kind == "control_request":
-                sub = msg.get("request", {}).get("subtype")
-                emit({"type": "control_response",
-                      "response": {"subtype": "success",
-                                   "request_id": msg.get("request_id"),
-                                   "response": {}}})
-                if sub == "initialize":
-                    self.handshake()
+                self.control(msg)
             elif kind == "user":
                 self.turn(msg)
 

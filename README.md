@@ -65,6 +65,15 @@ mode line shows how many sessions need you from any buffer.
 Opening a closed (inactive) session shows it without waking it; it keeps
 its compose box, and the first message you send resumes it.
 
+Costs follow how the `claude` CLI is logged in.  With an API key (or
+Bedrock, Vertex, a gateway token) each turn shows what it costs.  With
+a Claude subscription (Pro, Max, Team) turns cost nothing per token.
+The session shows its plan and quota instead, for example `Max` with
+the 5-hour and weekly windows in the chat header, and the usage
+dashboard (`C-c a u`) lists every quota window with its reset time, the
+plan's extra usage, and the value at API prices the plan covered.
+Budgets count billed cost only.
+
 Settings persist through `.dir-locals.el` (project, then directory) and
 customize (global): `harness-model`, `harness-permission-mode`,
 `harness-thinking`, `harness-allowed-directories`, `harness-budget`,

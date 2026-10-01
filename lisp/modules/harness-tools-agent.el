@@ -230,11 +230,10 @@ Replace the todos of the session in CTX with those in INPUT."
          (own (cl-remove-if-not (lambda (n) (equal (plist-get n :session) child-id))
                                 (harness-call 'session/nodes child-id)))
          (last-assistant (cl-find-if (lambda (n) (eq (plist-get n :kind) 'assistant)) (reverse own)))
-         (calls (cl-count-if (lambda (n) (eq (plist-get n :kind) 'tool-call)) own))
-         (cost (or (plist-get (plist-get child :usage) :cost) 0)))
+         (calls (cl-count-if (lambda (n) (eq (plist-get n :kind) 'tool-call)) own)))
     (format "%s\n\n[sub-agent session: %s, %d tool calls, cost %s]"
             (or (plist-get last-assistant :content) "(the sub-agent produced no answer)")
-            child-id calls (harness-format-cost cost))))
+            child-id calls (harness-format-spend (plist-get child :usage)))))
 
 (defun harness-tools-agent--create-child (parent input child-id cwd worktree)
   "Return a promise of the child session plist for PARENT from INPUT.
@@ -321,6 +320,20 @@ Run INPUT's prompt in a child of the session in CTX."
 
 ;;;; Session info
 
+(defun harness-tools-agent--window-text (window)
+  "Describe the quota WINDOW plist in a few words."
+  (let ((used (round (* 100 (or (plist-get window :used) 0))))
+        (resets (plist-get window :resets)))
+    (concat (format "%s %d%% used" (or (plist-get window :label) (plist-get window :name)) used)
+            (if (numberp resets) (format-time-string " (resets %a %H:%M)" resets) ""))))
+
+(defun harness-tools-agent--quota-line (session-id)
+  "Return a line with the plan quota last reported to SESSION-ID, or \"\"."
+  (let ((windows (ignore-errors (harness-call 'session/runtime session-id :quota :get))))
+    (if windows
+        (format "Plan quota: %s\n" (mapconcat #'harness-tools-agent--window-text windows "; "))
+      "")))
+
 (defun harness-tools-agent--session-info (_input ctx)
   "Handler of the session_info tool: describe the session in CTX."
   (let* ((sid (plist-get ctx :session-id))
@@ -335,9 +348,10 @@ Run INPUT's prompt in a child of the session in CTX."
               (plist-get s :permission-mode) (plist-get s :status))
       (format "Usage: %s input, %s output, %s cache read, cost %s, %d turns, context %s of %s\n"
               (harness-format-tokens (plist-get u :input)) (harness-format-tokens (plist-get u :output))
-              (harness-format-tokens (plist-get u :cache-read)) (harness-format-cost (plist-get u :cost))
+              (harness-format-tokens (plist-get u :cache-read)) (harness-format-spend u)
               (or (plist-get u :turns) 0) (harness-format-tokens (plist-get u :context))
               (harness-format-tokens (plist-get s :context-window)))
+      (harness-tools-agent--quota-line sid)
       (format "Parent: %s\n" (or (plist-get s :parent-id) "none"))
       (format "Children: %s"
               (if children

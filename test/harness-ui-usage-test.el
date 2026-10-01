@@ -170,6 +170,99 @@
         (should (string-match-p (format-time-string "%Y-%m-%d") text))
         (should (= 7 (cl-count-if (lambda (l) (string-match-p "\\` [0-9]\\{4\\}-" l)) (split-string text "\n"))))))))
 
+(defun harness-ui-usage-test-max-quota (now)
+  "Return a Claude Max quota plist as the provider reports it at NOW."
+  (list :billing "subscription" :plan "max" :plan-label "Claude Max"
+        :account '(:email "user@example.com") :auth "claude.ai"
+        :windows (list (list :name "5h" :label "Current session (5 hours)" :used 0.09 :resets (+ now 3600))
+                       (list :name "7d" :label "This week, all models" :used 0.57 :resets (+ now 200000))
+                       (list :name "7d Fable" :label "This week, Fable" :used 0.5 :resets (+ now 200000)))
+        :extra '(:enabled :false :used 0.0 :limit 50.0 :disabled-reason "out_of_credits")
+        :updated now))
+
+(ert-deftest harness-ui-usage-plan-section-and-covered-cost ()
+  "A subscription's usage shows as covered by the plan, beside its quota."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (let* ((now (float-time))
+           (project (file-name-as-directory dir)))
+      (harness-ui-usage-test-request
+       "_harness/usage/record"
+       (list :row (list :ts now :session "s1" :project project :model "claude:claude-fable-5-1"
+                        :input 1000 :output 100 :cost 0 :list-cost 3.25 :billing "subscription")))
+      (harness-ui-usage-test-record now project "demo:scripted" 1.0)
+      (harness-ui--store-quota "claude" (harness-ui-usage-test-max-quota now))
+      (let ((text (harness-ui-usage-test-open)))
+        (should (string-match-p "\\$1\\.00 cost" text))
+        (should (string-match-p "\\$3\\.25 covered by plan" text))
+        (should (string-match-p "covered by plan, at API prices" text))
+        (should (string-match-p "Plan +\\[refresh\\]" text))
+        (should (string-match-p "Claude Max" text))
+        (should (string-match-p "user@example\\.com" text))
+        (should (string-match-p "Current session (5 hours)" text))
+        (should (string-match-p " 9%  resets in " text))
+        (should (string-match-p "57%" text))
+        (should (string-match-p "This week, Fable" text))
+        (should (string-match-p "Extra usage: off (out of credits), \\$0 used of \\$50\\.00" text))
+        (should (string-match-p "budgets count billed cost" text))
+        ;; The table: the plan's row first, by its value at API prices.
+        (should (string-match-p "Cost +Plan +Share" text))
+        (should (< (string-match "harness-tmp\\|harness-test" text) (length text))))
+      ;; Grouped by billing.
+      (harness-ui-usage-set-group 'billing)
+      (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
+      (let ((text (harness-ui-usage-test-text)))
+        (should (string-match-p "Subscription, covered by the plan" text))
+        (should (string-match-p "Not recorded" text))
+        (should (< (string-match "Subscription, covered" text) (string-match "Not recorded" text))))
+      ;; An API account says it bills per token.
+      (harness-ui--store-quota "claude" '(:billing "api" :auth "ANTHROPIC_API_KEY"))
+      (with-current-buffer harness-ui-usage-buffer-name
+        (let ((text (harness-ui-usage-test-text)))
+          (should (string-match-p "bills per token (ANTHROPIC_API_KEY)" text))
+          (should-not (string-match-p "budgets count billed cost" text)))))))
+
+(ert-deftest harness-ui-spend-says-who-pays ()
+  "Session costs read as prices when billed per token and as the plan otherwise."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (let* ((now (float-time))
+           (api (list :model "demo:scripted" :usage '(:cost 1.2 :list-cost 1.2 :billing "api")))
+           (plan (list :model "claude:claude-opus-5-5"
+                       :usage '(:cost 0.0 :list-cost 3.4 :billing "subscription" :plan "max")))
+           (mixed (list :model "claude:claude-opus-5-5"
+                        :usage '(:cost 0.4 :list-cost 3.8 :billing "extra-usage" :plan "max")))
+           (fresh (list :model "claude:claude-opus-5-5" :usage '(:cost 0.0)))
+           (old (list :model "claude:claude-opus-5-5" :usage '(:cost 2.0)))
+           (text (lambda (s &optional quota) (substring-no-properties (harness-ui-format-spend s quota)))))
+      (should (equal "$1.20" (funcall text api)))
+      (should (equal "Max" (funcall text plan)))
+      (should (equal "$0.400+Max" (funcall text mixed)))
+      (should (equal "$0" (funcall text fresh)))
+      (should (equal "$2.00" (funcall text old)))
+      (should (string-match-p "billed per token" (get-text-property 0 'help-echo (harness-ui-format-spend api))))
+      ;; Before its first call a session goes by its provider's account.
+      (harness-ui--store-quota "claude" (harness-ui-usage-test-max-quota now))
+      (should (equal "Max" (funcall text fresh)))
+      (should (equal "$2.00" (funcall text old)))
+      ;; The header form adds the session and weekly windows, not the quiet Fable one.
+      (should (equal "Max · 5h 9% · 7d 57%" (funcall text plan t)))
+      (let ((help (get-text-property 0 'help-echo (harness-ui-format-spend plan t))))
+        (should (string-match-p "Covered by Claude Max, not billed per token" help))
+        (should (string-match-p "at API prices: \\$3\\.40" help))
+        (should (string-match-p "Current session (5 hours): 9% used, resets in " help))
+        (should (string-match-p "Extra usage: off" help)))
+      (let ((help (get-text-property 0 'help-echo (harness-ui-format-spend mixed))))
+        (should (string-match-p "\\$0\\.400 billed as extra usage" help))
+        (should (string-match-p "\\$3\\.40 more at API prices covered by Claude Max" help)))
+      ;; A window close to its limit joins the header.
+      (harness-ui--store-quota "claude" (plist-put (harness-ui-usage-test-max-quota now) :windows
+                                                   '((:name "5h" :used 0.2) (:name "7d Fable" :used 0.96))))
+      (should (equal "Max · 5h 20% · 7d Fable 96%" (funcall text plan t)))
+      (should (eq 'harness-context-critical-face
+                  (get-text-property (1- (length (harness-ui-format-spend plan t))) 'face
+                                     (harness-ui-format-spend plan t)))))))
+
 (ert-deftest harness-ui-model-label-is-readable ()
   "Labels read \"model (provider)\", from the catalogue when it knows the model."
   (harness-ui-usage-test-with

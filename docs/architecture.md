@@ -135,7 +135,8 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :status idle|running|blocked|inactive
  :parent-id nil|"uuid"  :fork-node nil|"node-id"
  :created FLOAT  :updated FLOAT
- :usage (:input N :output N :cache-read N :cache-write N :cost F :context N :turns N)
+ :usage (:input N :output N :cache-read N :cache-write N :cost F :list-cost F :context N :turns N
+         :billing api|subscription|extra-usage :plan "max")    ; billing and plan of the latest call
  :context-window N
  :budget nil|(:amount F :hard BOOL)
  :head "node-id"
@@ -147,7 +148,10 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
 ```
 
 `:usage :context` is the input size of the last request (prompt tokens
-incl. cache); the UI colours it against `:context-window`.
+incl. cache); the UI colours it against `:context-window`.  `:cost`
+is what the session's calls were billed and `:list-cost` the same calls
+at API prices (they differ when a subscription paid); see "Usage
+record".
 
 ### Node (conversation DAG)
 
@@ -184,8 +188,25 @@ ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
 
 ### Usage record
 
-`(:input N :output N :cache-read N :cache-write N :cost F)`; cost in USD.
-When a provider reports no cost, `usage` computes one from pricing.
+`(:input N :output N :cache-read N :cache-write N :cost F :list-cost F
+:billing api|subscription|extra-usage|nil :plan ID)`; amounts in USD.
+
+- `:cost` is what the call was billed.  `:list-cost` is the call at
+  API list prices.  They are the same unless a subscription paid.
+- `:billing` says who paid:
+  - `api`: per token, through an API key, a bearer token or a cloud
+    provider.
+  - `subscription`: a plan such as Claude Max paid, so `:cost` is 0.
+  - `extra-usage`: the plan's extra usage, billed at API prices.
+  - nil: the provider did not say; it reads as per-token billing.
+- `:plan` is the subscription's id, such as "max".
+
+When a provider reports no cost, `session/usage-add` prices one from the
+model catalogue.  A missing list cost is the cost, or priced too when a
+subscription paid.  Budgets count `:cost`, so usage a plan covers spends
+none of them.  `harness-billing-of`, `harness-usage-list-cost`,
+`harness-usage-covered` and `harness-format-spend` (harness-util) read
+these keys on either side of ACP.
 
 ## Module contracts (state layer)
 
@@ -288,7 +309,7 @@ gone.
   :models FN            ; () → promise of MODEL plists
   :complete FN          ; (REQUEST) → HANDLE plist (:cancel FN)
   :fork FN              ; (MODEL PROVIDER-STATE) → promise of new state    [optional]
-  :quota FN             ; () → promise of (:windows ((:name :used FRAC :resets FLOAT)…))  [optional]
+  :quota FN             ; (&optional REFRESH) → promise of QUOTA (below)     [optional]
   :capabilities PLIST)  ; static defaults, merged with per-model ones
 ```
 
@@ -301,7 +322,9 @@ Capabilities: `:hosted-loop` (provider runs the tool loop and keeps the
 history; the agent only sends new user content), `:fork`, `:resume`,
 `:vision`, `:audio-in`, `:thinking`, `:cache-status`, `:quota`,
 `:compaction hosted`, `:cost-reported` (usage events carry `:cost`),
-`:pricing dynamic` (pricing comes from the model catalogue).
+`:billing` (usage events say who paid: `:billing`, `:plan`,
+`:list-cost`), `:pricing dynamic` (pricing comes from the model
+catalogue).
 
 REQUEST = `(:model "ID:NAME" :session SESSION :system "…" :messages (MSG…)
 :tools (TOOL-SPEC…) :thinking LEVEL :max-tokens N :provider-state PLIST
@@ -319,7 +342,8 @@ Events delivered to `:on-event` (one plist each, in order):
    ;; :respond present ⇒ hosted loop; call it with a tool result
    ;; (:content "…" :is-error BOOL) and the provider continues the turn.
 (:type tool-result :id "…" :content "…" :is-error BOOL)  ; hosted loops echo results
-(:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N)
+(:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N
+       :list-cost F-OR-NIL :billing api|subscription|extra-usage|nil :plan ID)  ; see Usage record
 (:type provider-state :state PLIST)     ; persist on the session
 (:type quota :windows (…))
 (:type hint :text "…")                  ; provider-side notices (compaction, retries)
@@ -334,8 +358,45 @@ agent persists, replacing the pending one.
 Methods: `provider/list`, `provider/models &optional REFRESH` (cached union
 across providers), `provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
 `provider/complete REQUEST` → HANDLE, `provider/fork MODEL-ID STATE` → promise,
-`provider/quota PROVIDER-ID`.  `harness-default-model` is
+`provider/quota PROVIDER-ID &optional REFRESH`.  `harness-default-model` is
 "claude:claude-fable-5-1".
+
+Billing and quota: `provider/quota` (PROVIDER-ID a symbol or its name;
+REFRESH asks for fresh data first) returns a promise of QUOTA, nil when
+the provider reports none:
+
+```elisp
+(:billing api|subscription|nil      ; who pays for the account's calls
+ :plan "max" :plan-label "Claude Max" :account (:email "..." :organization "...")
+ :auth "claude.ai"|"ANTHROPIC_API_KEY"|"bedrock"|...  :api-provider "firstParty"|...
+ :available BOOL                    ; the plan reports quota windows
+ :windows ((:name "5h" :label "Current session (5 hours)" :used FRACTION
+            :resets FLOAT :severity "normal" :active BOOL :model "Fable") ...)
+ :extra (:enabled BOOL :used F :limit F :currency "USD" :disabled-reason "...")
+ :limit-status "allowed"|"allowed_warning"|"rejected"
+ :using-extra BOOL                  ; calls draw on extra usage, billed at API prices
+ :updated FLOAT)                    ; when the windows were last reported
+```
+
+Event `provider/quota-updated PROVIDER-ID QUOTA` fires whenever a
+provider learns something new; the UI caches QUOTA from it.
+
+The Claude provider learns the billing from the `account` of each CLI
+process's initialize answer:
+- an API key, an API key helper, a bearer token or a cloud provider
+  bills per token;
+- a claude.ai login (Pro, Max, Team, Enterprise) is a subscription.
+
+Quota comes from the CLI's `get_usage` control request (the data behind
+`/usage`, no model call) and from `rate_limit_event` messages.  It is
+asked for again after a turn once `harness-provider-claude-quota-ttl`
+(60 s) has passed.  With no CLI process running, a short-lived probe
+process answers instead, sending no message.
+
+Each result's `total_cost_usd` is a running total for the process,
+seeded on `--resume` with the session's restored spend.  A turn
+therefore costs the difference to the previous total, starting from the
+`session.total_cost_usd` the spawn-time usage report gives.
 
 ### tools
 
@@ -478,10 +539,14 @@ request and resolves when answered).
 ### usage
 
 - Subscribes `session/usage`; records to sqlite (`usage` table:
-  ts, session, project, model, input, output, cache_read, cache_write, cost).
-- `usage/summary &key group-by since until project` → rows
-  `(:key :input :output :cache-read :cache-write :cost :calls)`;
-  group-by `project|model|day|session`.
+  ts, session, project, model, input, output, cache_read, cache_write, cost,
+  turn, list_cost, billing; older tables gain the last two in place).
+- `usage/summary &key group-by since until project session model billing` → rows
+  `(:key :input :output :cache-read :cache-write :cost :list-cost :calls)`;
+  group-by `project|model|day|hour|session|billing` (billing keys "api",
+  "subscription", "extra-usage", "" when unrecorded); sorted by list
+  cost.  `:cost` is what was billed, `:list-cost` the same usage at API
+  prices (rows from before list costs count their cost).
 - `usage/budgets`, `usage/set-budget BUDGET`, `usage/remove-budget ID`,
   `usage/budget-status ID &rest (:now)` (ID may be "session:SID" for a
   session's implicit budget) → `(:budget :spent :amount :remaining
@@ -491,7 +556,8 @@ request and resolves when answered).
   BUDGET = `(:id :scope session|project|period :target ID-OR-ROOT
   :amount F :hard BOOL :period day|week|month :days business|all)`.
 - Hard budgets block via `agent/before-turn`; soft ones emit
-  `usage/budget-warning` and a session hint at 80% and 100%.
+  `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
+  count billed cost, so calls a subscription covers spend none.
 - Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
 
 ### compaction
@@ -828,6 +894,18 @@ the top of in progress (latest started first) and completed lists the
 latest finished first; pending is the queue, in the order its tasks
 start, with the backlog among it (oldest first; only queued tasks have a
 place in line).
+
+Cost display: whatever shows what a session cost goes through
+`harness-ui-format-spend`.  That is a price when calls are billed per
+token, and the plan's name (`Max`) when a subscription pays, after any
+extra usage billed (`$0.40+Max`); the tooltip explains it and gives
+the value at API prices.  The chat header adds the plan's 5-hour and
+weekly windows (`Max · 5h 9% · 7d 57%`, coloured as they fill)
+and opens the usage dashboard.  The dashboard's Plan section shows
+every quota window with its reset time and the plan's extra usage,
+and its chart stacks what a plan covered on top of the billed cost.
+The UI keeps each provider's QUOTA from `provider/quota` and
+`provider/quota-updated` (`harness-ui-quota`).
 
 Other buffers: sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; scoped to the current project, its

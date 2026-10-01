@@ -6,14 +6,24 @@
 ;;
 ;;   header line   period selector [Today] [7 days] [30 days] [All] and
 ;;                 the group-by selector [Project] [Model] [Session] [Day]
-;;   totals strip  cost · input · output · cache read · cache write · calls
+;;                 [Billing]
+;;   totals strip  billed cost, what a plan covered, input, output,
+;;                 cache read, cache write and calls
 ;;   chart         an SVG column chart of cost per day (per hour for
 ;;                 Today) with an image map so hovering a column shows
-;;                 its date, cost and calls
-;;   table         `_harness/usage/summary' rows sorted by cost with a
-;;                 cost share bar
+;;                 its date, cost and calls; what a subscription covered
+;;                 stacks on top in a lighter shade
+;;   table         `_harness/usage/summary' rows sorted by their value at
+;;                 API prices, with the billed cost, what a plan covered
+;;                 and a share bar
+;;   plan          how each provider bills (per token, or a plan such as
+;;                 Claude Max) and the plan's quota windows as meters
+;;                 with their reset times, plus its extra usage
 ;;   budgets       every budget with a meter coloured by how much of it
 ;;                 is spent, plus [Add budget] [Remove] [Plan]
+;;
+;; Cost always means money billed.  A call a subscription pays for costs
+;; nothing; its value at API prices shows as covered by the plan.
 ;;
 ;; Why one buffer rather than a chart window stacked over a
 ;; `tabulated-list-mode' window: the dashboard is read as a whole and
@@ -25,8 +35,10 @@
 ;;
 ;; Everything arrives through ACP and is drawn only when all requests
 ;; of a refresh have settled; the buffer shows a loading line before
-;; the first paint.  Charts and meters are SVG (`svg.el') with text
-;; fallbacks for terminals; colours are read from the current theme.
+;; the first paint.  The plan section comes from the UI's quota cache
+;; and redraws whenever a provider reports new quota.  Charts and meters
+;; are SVG (`svg.el') with text fallbacks for terminals; colours are
+;; read from the current theme.
 
 ;;; Code:
 
@@ -71,8 +83,15 @@
   "Periods as (SYMBOL LABEL HELP).")
 
 (defconst harness-ui-usage--groups
-  '((project "Project") (model "Model") (session "Session") (day "Day"))
+  '((project "Project") (model "Model") (session "Session") (day "Day") (billing "Billing"))
   "Groupings as (SYMBOL LABEL).")
+
+(defconst harness-ui-usage--billing-labels
+  '(("api" . "API, billed per token")
+    ("subscription" . "Subscription, covered by the plan")
+    ("extra-usage" . "Extra usage, billed beyond the plan")
+    ("" . "Not recorded"))
+  "Table labels of the billing keys of `usage/summary'.")
 
 ;;;; Colours
 
@@ -82,10 +101,12 @@
 
 (defun harness-ui-usage--color (role)
   "Return the colour for ROLE in the current theme.
-ROLE is `accent', `warning', `danger', `text', `muted' or `grid'."
+ROLE is `accent', `plan' (a light accent for what a plan covered),
+`warning', `danger', `text', `muted' or `grid'."
   (let ((dark (harness-ui-usage--dark-p)))
     (pcase role
       ('accent (if dark "#3987e5" "#2a78d6"))
+      ('plan (if dark "#2b4a70" "#a9c9ef"))
       ('warning (if dark "#c98500" "#eda100"))
       ('danger (if dark "#e66767" "#e34948"))
       ('text (or (face-attribute 'default :foreground nil t) (if dark "white" "black")))
@@ -160,6 +181,8 @@ ROLE is `accent', `warning', `danger', `text', `muted' or `grid'."
                          (harness-ui-usage--render)))))))
       (setq harness-ui-usage--loading t harness-ui-usage--error nil)
       (setq header-line-format (harness-ui-usage--header))
+      ;; Plan quota arrives through the UI's cache and redraws on its own.
+      (harness-ui-refresh-quotas)
       (harness-then
        (harness-all (list (harness-ui-request "_harness/usage/totals" filters)
                           (harness-ui-request "_harness/usage/series" (append (list :bucket bucket) filters))
@@ -189,7 +212,7 @@ ROLE is `accent', `warning', `danger', `text', `muted' or `grid'."
 ;;;; SVG pieces
 
 (defun harness-ui-usage--rounded-top (svg x y w h r &rest props)
-  "Draw on SVG a bar at X Y of size W×H with top corners rounded by R.
+  "Draw on SVG a bar at X Y of size W by H with top corners rounded by R.
 PROPS are passed to `svg-node'."
   (let ((r (min r (/ w 2.0) h)))
     (apply #'svg-node svg 'path
@@ -211,6 +234,14 @@ PROPS are passed to `svg-node'."
       (if long (format "%s %d, %s" month d (match-string 1 key)) (format "%s %d" month d))))
    (t key)))
 
+(defun harness-ui-usage--money-text (point)
+  "Describe what series or table POINT cost, and what a plan paid for."
+  (let ((covered (harness-usage-covered point)))
+    (if (> covered 0)
+        (format "%s billed, %s covered by plan"
+                (harness-format-cost (plist-get point :cost)) (harness-format-cost covered))
+      (harness-format-cost (plist-get point :cost)))))
+
 (defun harness-ui-usage--nice-max (value)
   "Return a round number at or above VALUE for the top of the y axis."
   (if (<= value 0) 1.0
@@ -220,7 +251,9 @@ PROPS are passed to `svg-node'."
 
 (defun harness-ui-usage--chart (series bucket width)
   "Return an SVG image of cost per BUCKET (day or hour) for SERIES.
-The image is WIDTH pixels wide."
+The image is WIDTH pixels wide.  A column is the bucket's usage at API
+prices: the billed part in the accent colour, what a subscription
+covered stacked on top in the lighter plan colour."
   (let* ((height harness-ui-usage-chart-height)
          (left 52) (right 8) (top 10) (bottom 22)
          (plot-w (- width left right))
@@ -229,13 +262,14 @@ The image is WIDTH pixels wide."
          (slot (/ (float plot-w) n))
          (gap (max 2 (min 6 (* slot 0.25))))
          (bar-w (max 1 (min 24 (- slot gap))))
-         (max-cost (apply #'max 0.0 (mapcar (lambda (p) (float (or (plist-get p :cost) 0))) series)))
+         (max-cost (apply #'max 0.0 (mapcar #'harness-usage-list-cost series)))
          (top-value (harness-ui-usage--nice-max max-cost))
          (svg (svg-create width height))
          (font (harness-ui-usage--font))
          (muted (harness-ui-usage--color 'muted))
          (grid (harness-ui-usage--color 'grid))
          (accent (harness-ui-usage--color 'accent))
+         (plan (harness-ui-usage--color 'plan))
          (label-every (max 1 (ceiling (* n 44) (max 1 plot-w))))
          (map nil))
     ;; Gridlines and y labels at 0, 1/2 and the top.
@@ -247,18 +281,26 @@ The image is WIDTH pixels wide."
     ;; Bars, each with an image-map area covering its whole slot.
     (cl-loop for p in series for i from 0 do
              (let* ((cost (float (or (plist-get p :cost) 0)))
+                    (value (max cost (harness-usage-list-cost p)))
                     (x0 (+ left (* i slot)))
                     (bx (+ x0 (/ (- slot bar-w) 2)))
-                    (bh (if (> top-value 0) (* plot-h (/ cost top-value)) 0))
+                    (bh (if (> top-value 0) (* plot-h (/ value top-value)) 0))
                     (by (+ top (- plot-h bh)))
+                    (ch (if (> top-value 0) (* plot-h (/ cost top-value)) 0))
                     (label (harness-ui-usage--bucket-label (plist-get p :key) bucket))
-                    (tip (format "%s\n%s · %d calls · %s in / %s out"
+                    (tip (format "%s\n%s, %d calls, %s in / %s out"
                                  (harness-ui-usage--bucket-label (plist-get p :key) bucket t)
-                                 (harness-format-cost cost) (or (plist-get p :calls) 0)
+                                 (harness-ui-usage--money-text p) (or (plist-get p :calls) 0)
                                  (harness-format-tokens (plist-get p :input))
                                  (harness-format-tokens (plist-get p :output)))))
-               (when (> bh 0)
-                 (harness-ui-usage--rounded-top svg bx by bar-w (max bh 1.5) 4 :fill accent))
+               (cond
+                ((<= bh 0))
+                ((> value cost)
+                 ;; The whole column in the plan colour, the billed part over its foot.
+                 (harness-ui-usage--rounded-top svg bx by bar-w (max bh 1.5) 4 :fill plan)
+                 (when (> ch 0)
+                   (svg-rectangle svg bx (+ top (- plot-h ch)) bar-w ch :fill accent)))
+                (t (harness-ui-usage--rounded-top svg bx by bar-w (max bh 1.5) 4 :fill accent)))
                (when (zerop (mod i label-every))
                  (svg-text svg label :x (+ x0 (/ slot 2)) :y (- height 6) :text-anchor "middle"
                            :font-family font :font-size 11 :fill muted))
@@ -334,11 +376,17 @@ SELECTED highlights it."
 
 (defun harness-ui-usage--insert-totals (totals)
   "Insert the totals strip for TOTALS."
-  (let ((cell (lambda (value label)
-                (concat (propertize value 'face 'harness-usage-total-face)
-                        " " (propertize label 'face 'harness-dim-face) "    "))))
+  (let ((cell (lambda (value label &optional help)
+                (concat (propertize value 'face 'harness-usage-total-face 'help-echo help)
+                        " " (propertize label 'face 'harness-dim-face 'help-echo help) "    ")))
+        (covered (harness-usage-covered totals)))
     (insert "\n "
-            (funcall cell (harness-format-cost (plist-get totals :cost)) "cost")
+            (funcall cell (harness-format-cost (plist-get totals :cost)) "cost"
+                     "Billed: per-token calls and a plan's extra usage")
+            (if (> covered 0)
+                (funcall cell (harness-format-cost covered) "covered by plan"
+                         "What a subscription paid for, at API prices; not billed")
+              "")
             (funcall cell (harness-format-tokens (plist-get totals :input)) "input")
             (funcall cell (harness-format-tokens (plist-get totals :output)) "output")
             (funcall cell (harness-format-tokens (plist-get totals :cache-read)) "cache read")
@@ -346,27 +394,47 @@ SELECTED highlights it."
             (funcall cell (format "%d" (or (plist-get totals :calls) 0)) "calls")
             "\n\n")))
 
+(defun harness-ui-usage--chart-image (series bucket)
+  "Return the chart of SERIES per BUCKET, sized for the buffer's window.
+Images with a map are measured on the selected frame, so the frame that
+shows the buffer is selected while it is made: a refresh run from a
+timer in a daemon may otherwise find a terminal frame selected."
+  (let ((win (get-buffer-window (current-buffer) t)))
+    (with-selected-frame (if win (window-frame win) (selected-frame))
+      (harness-ui-usage--chart series bucket (harness-ui-usage--chart-width)))))
+
 (defun harness-ui-usage--chart-width ()
   "Return the pixel width available for the chart."
   (let ((win (get-buffer-window (current-buffer) t)))
     (max 320 (min 960 (- (if win (window-body-width win t) 800) 24)))))
 
 (defun harness-ui-usage--insert-chart (series)
-  "Insert the cost chart for SERIES."
+  "Insert the cost chart for SERIES, with a legend when a plan covered some."
   (let ((bucket (if (eq harness-ui-usage--period 'today) 'hour 'day)))
-    (insert " " (propertize (format "Cost per %s" bucket) 'face 'harness-usage-heading-face) "\n")
+    (insert " " (propertize (format "Cost per %s" bucket) 'face 'harness-usage-heading-face))
+    (when (cl-some (lambda (p) (> (harness-usage-covered p) 0)) series)
+      (insert "   " (propertize "■" 'face (list :foreground (harness-ui-usage--color 'accent)))
+              (propertize " billed   " 'face 'harness-dim-face)
+              (propertize "■" 'face (list :foreground (harness-ui-usage--color 'plan)))
+              (propertize " covered by plan, at API prices" 'face 'harness-dim-face)))
+    (insert "\n")
     (if (harness-ui-usage--graphic-p)
-        (insert " " (propertize " " 'display (harness-ui-usage--chart series bucket (harness-ui-usage--chart-width))
+        (insert " " (propertize " " 'display (harness-ui-usage--chart-image series bucket)
                                 'help-echo "Hover a column for its cost")
                 "\n\n")
-      ;; Text fallback: one line per bucket with a proportional bar.
-      (let ((max-cost (apply #'max 0.0 (mapcar (lambda (p) (float (or (plist-get p :cost) 0))) series))))
+      ;; Text fallback: one line per bucket with a bar for its value at API prices.
+      (let ((max-value (apply #'max 0.0 (mapcar #'harness-usage-list-cost series))))
         (dolist (p (last series 14))
-          (let ((cost (float (or (plist-get p :cost) 0))))
+          (let ((value (harness-usage-list-cost p))
+                (covered (harness-usage-covered p)))
             (insert (format "  %-8s %8s  " (harness-ui-usage--bucket-label (plist-get p :key) bucket)
-                            (harness-format-cost cost))
-                    (harness-ui-usage--meter-string (if (> max-cost 0) (/ cost max-cost) 0)
+                            (harness-format-cost (plist-get p :cost)))
+                    (harness-ui-usage--meter-string (if (> max-value 0) (/ value max-value) 0)
                                                     (harness-ui-usage--color 'accent) 200 30)
+                    (if (> covered 0)
+                        (propertize (format "  +%s covered by plan" (harness-format-cost covered))
+                                    'face 'harness-dim-face)
+                      "")
                     "\n")))
         (insert "\n")))))
 
@@ -380,25 +448,31 @@ SELECTED highlights it."
                 (if s (harness-truncate-end (or (plist-get s :name) (format "unnamed (%s)" (substring key 0 (min 8 (length key))))) 40)
                   (format "%s" (harness-truncate-end (or key "?") 40)))))
     ('day (harness-ui-usage--bucket-label key 'day t))
+    ('billing (let ((k (format "%s" (or key ""))))
+                (or (cdr (assoc k harness-ui-usage--billing-labels)) k)))
     (_ (format "%s" key))))
 
 (defun harness-ui-usage--insert-table (summary)
-  "Insert the summary table for SUMMARY rows."
+  "Insert the summary table for SUMMARY rows.
+Cost is what was billed and Plan what a subscription covered, at API
+prices; rows sort by, and Share divides, their value at API prices."
   (let* ((rows (sort (copy-sequence summary)
-                     (lambda (a b) (> (or (plist-get a :cost) 0) (or (plist-get b :cost) 0)))))
-         (total (apply #'+ (mapcar (lambda (r) (float (or (plist-get r :cost) 0))) rows)))
+                     (lambda (a b) (> (harness-usage-list-cost a) (harness-usage-list-cost b)))))
+         (total (apply #'+ (mapcar #'harness-usage-list-cost rows)))
          (labels (mapcar (lambda (r) (harness-ui-usage--row-label (plist-get r :key))) rows))
          (kw (max 8 (apply #'max 0 (mapcar #'string-width labels))))
-         (fmt (format " %%-%ds  %%8s  %%-14s %%8s %%8s %%9s %%9s %%6s\n" kw)))
+         (fmt (format " %%-%ds  %%8s  %%8s  %%-14s %%8s %%8s %%9s %%9s %%6s\n" kw)))
     (insert " " (propertize (format "By %s" (downcase (nth 1 (assq harness-ui-usage--group harness-ui-usage--groups))))
                             'face 'harness-usage-heading-face)
             "\n")
     (insert (propertize (format fmt (nth 1 (assq harness-ui-usage--group harness-ui-usage--groups))
-                                "Cost" "Share" "Input" "Output" "Cache r" "Cache w" "Calls")
-                        'face 'harness-usage-table-header-face))
+                                "Cost" "Plan" "Share" "Input" "Output" "Cache r" "Cache w" "Calls")
+                        'face 'harness-usage-table-header-face
+                        'help-echo "Cost: billed.  Plan: what a subscription covered, at API prices.  Share: of the usage at API prices."))
     (cl-loop for r in rows for label in labels do
              (let* ((cost (float (or (plist-get r :cost) 0)))
-                    (share (if (> total 0) (/ cost total) 0))
+                    (covered (harness-usage-covered r))
+                    (share (if (> total 0) (/ (harness-usage-list-cost r) total) 0))
                     (start (point)))
                (insert (format fmt
                                (if (eq harness-ui-usage--group 'session)
@@ -406,8 +480,9 @@ SELECTED highlights it."
                                                'help-echo "RET / mouse-1: open this session")
                                  label)
                                (harness-format-cost cost)
+                               (if (> covered 0) (harness-format-cost covered) "")
                                (concat (harness-ui-usage--meter-string share (harness-ui-usage--color 'accent) 64 8
-                                                                       (format "%.0f%% of the period's cost" (* 100 share)))
+                                                                       (format "%.0f%% of the period's usage" (* 100 share)))
                                        (propertize (format " %3.0f%%" (* 100 share)) 'face 'harness-dim-face))
                                (harness-format-tokens (plist-get r :input))
                                (harness-format-tokens (plist-get r :output))
@@ -417,6 +492,65 @@ SELECTED highlights it."
                (add-text-properties start (point) (list 'harness-ui-usage-row r 'mouse-face 'highlight))))
     (when (null rows)
       (insert (propertize "  nothing in this period\n" 'face 'harness-dim-face)))
+    (insert "\n")))
+
+(defun harness-ui-usage--provider-label (provider)
+  "Return the display name of PROVIDER, an id string, from the model catalogue."
+  (or (cl-some (lambda (m) (and (equal (format "%s" (plist-get m :provider)) provider)
+                                (plist-get m :provider-label)))
+               (hash-table-values harness-ui--models))
+      (capitalize provider)))
+
+(defun harness-ui-usage--insert-window (window)
+  "Insert a meter line for the plan quota WINDOW."
+  (let* ((used (float (or (plist-get window :used) 0)))
+         (role (cond ((>= used 0.95) 'danger) ((>= used 0.8) 'warning) (t 'accent)))
+         (reset (harness-ui-format-reset (plist-get window :resets))))
+    (insert (format "  %-28s " (harness-truncate-end (or (plist-get window :label) (plist-get window :name) "") 28))
+            (harness-ui-usage--meter-string used (harness-ui-usage--color role) 120 15
+                                            (harness-ui-describe-window window))
+            (propertize (format " %3.0f%%" (* 100 used)) 'face (if (>= used 0.8) 'warning 'default))
+            (propertize (if reset (concat "  resets " reset) "") 'face 'harness-dim-face)
+            "\n")))
+
+(defun harness-ui-usage--insert-plan (provider quota)
+  "Insert how PROVIDER bills and, when a subscription pays, its QUOTA."
+  (let ((label (propertize (harness-ui-usage--provider-label provider) 'face 'bold))
+        (email (harness-plist-get-in quota '(:account :email))))
+    (pcase (harness-billing-of quota)
+      ('api
+       (insert "  " label
+               (propertize (format " bills per token%s: the costs above are what you pay.\n"
+                                   (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) ""))
+                           'face 'harness-dim-face)))
+      ((or 'subscription 'extra-usage)
+       (insert "  " label "  "
+               (propertize (or (plist-get quota :plan-label) "Subscription") 'face 'harness-plan-face)
+               (if email (propertize (concat "  " email) 'face 'harness-dim-face) "")
+               "\n"
+               (propertize "  Calls the plan covers are not billed; their value at API prices shows as covered by plan.\n"
+                           'face 'harness-dim-face))
+       (pcase (plist-get quota :limit-status)
+         ("rejected" (insert (propertize "  The plan's limit is reached: calls fail until it resets.\n" 'face 'error)))
+         ("allowed_warning" (insert (propertize "  Close to the plan's limit.\n" 'face 'warning))))
+       (when (harness-json-true-p (plist-get quota :using-extra))
+         (insert (propertize "  Calls are drawing on extra usage, billed at API prices.\n" 'face 'warning)))
+       (if (plist-get quota :windows)
+           (mapc #'harness-ui-usage--insert-window (plist-get quota :windows))
+         (insert (propertize "  no quota reported yet\n" 'face 'harness-dim-face)))
+       (when-let* ((extra (harness-ui-describe-extra (plist-get quota :extra))))
+         (insert "  " (propertize extra 'face 'harness-dim-face) "\n"))
+       (when-let* ((updated (plist-get quota :updated)))
+         (insert (propertize (format "  updated %s\n" (harness-relative-time updated)) 'face 'harness-dim-face))))
+      (_ (insert "  " label (propertize " has not said how it bills yet.\n" 'face 'harness-dim-face))))))
+
+(defun harness-ui-usage--insert-plans ()
+  "Insert the plan section: how each provider bills, and its plan's quota."
+  (when-let* ((quotas (harness-ui-quotas)))
+    (insert " " (propertize "Plan" 'face 'harness-usage-heading-face) "  ")
+    (harness-ui-button "[refresh]" #'harness-ui-usage-refresh-plan :help "Ask for the plan's quota again (r)")
+    (insert "\n")
+    (dolist (q quotas) (harness-ui-usage--insert-plan (car q) (cdr q)))
     (insert "\n")))
 
 (defun harness-ui-usage--budget-label (budget)
@@ -473,6 +607,10 @@ SELECTED highlights it."
   (insert " ")
   (harness-ui-button "[plan]" #'harness-ui-usage-plan :help "Split an amount over a period by day (P)")
   (insert "\n")
+  (when (cl-some (lambda (q) (memq (harness-billing-of (cdr q)) '(subscription extra-usage)))
+                 (harness-ui-quotas))
+    (insert (propertize "  budgets count billed cost; calls a plan covers do not spend them\n"
+                        'face 'harness-dim-face)))
   (if statuses
       (dolist (st (sort (copy-sequence statuses)
                         (lambda (a b) (> (or (plist-get a :fraction) 0) (or (plist-get b :fraction) 0)))))
@@ -503,6 +641,7 @@ SELECTED highlights it."
                                     'face 'harness-dim-face))
           (harness-ui-usage--insert-chart (plist-get data :series))
           (harness-ui-usage--insert-table (plist-get data :summary))))
+      (harness-ui-usage--insert-plans)
       (harness-ui-usage--insert-budgets (plist-get data :statuses))))
     (goto-char (point-min))
     (forward-line (1- line))))
@@ -518,6 +657,7 @@ SELECTED highlights it."
     (define-key map (kbd "a") #'harness-ui-usage-add-budget)
     (define-key map (kbd "d") #'harness-ui-usage-remove-budget)
     (define-key map (kbd "P") #'harness-ui-usage-plan)
+    (define-key map (kbd "r") #'harness-ui-usage-refresh-plan)
     (define-key map (kbd "RET") #'harness-ui-usage-open)
     (define-key map [mouse-1] #'harness-ui-usage-mouse-open)
     (define-key map (kbd "TAB") #'forward-button)
@@ -558,6 +698,13 @@ SELECTED highlights it."
   (interactive)
   (harness-ui-usage--load (current-buffer)))
 
+(defun harness-ui-usage-refresh-plan ()
+  "Ask every provider that reports quota for fresh billing and quota data.
+The plan section redraws when the answers arrive."
+  (interactive)
+  (harness-ui-refresh-quotas t)
+  (message "Asking for the plan's quota"))
+
 (defun harness-ui-usage-set-period (period)
   "Show PERIOD (`today', `7d', `30d' or `all')."
   (interactive (list (intern (completing-read "Period: " (mapcar (lambda (p) (symbol-name (car p))) harness-ui-usage--periods) nil t))))
@@ -565,7 +712,7 @@ SELECTED highlights it."
   (harness-ui-usage--load (current-buffer)))
 
 (defun harness-ui-usage-set-group (group)
-  "Group the table by GROUP (`project', `model', `session' or `day')."
+  "Group the table by GROUP (`project', `model', `session', `day' or `billing')."
   (interactive (list (intern (completing-read "Group by: " (mapcar (lambda (g) (symbol-name (car g))) harness-ui-usage--groups) nil t))))
   (setq harness-ui-usage--group group)
   (harness-ui-usage--load (current-buffer)))
@@ -710,6 +857,13 @@ Defaults come from the budget on the current line when there is one."
   (when (member event '("usage/budget-warning" "agent/turn-ended" "usage/budgets-changed" "usage/recorded"))
     (harness-ui-usage--refresh-soon)))
 
+(defun harness-ui-usage--on-quota (_provider _quota)
+  "Redraw the dashboard, whose plan section shows the providers' quota."
+  (when-let* ((buf (get-buffer harness-ui-usage-buffer-name)))
+    (with-current-buffer buf
+      (when (and (derived-mode-p 'harness-ui-usage-mode) harness-ui-usage--data)
+        (harness-ui-usage--render)))))
+
 (defun harness-ui-usage--redraw ()
   "Rebuild the dashboard after a reload or reconnect."
   (when-let* ((buf (get-buffer harness-ui-usage-buffer-name)))
@@ -724,11 +878,12 @@ Defaults come from the budget on the current line when there is one."
 (defun harness-ui-usage--init ()
   "Wire the dashboard into the UI."
   (add-hook 'harness-ui-event-functions #'harness-ui-usage--on-event)
+  (add-hook 'harness-ui-quota-functions #'harness-ui-usage--on-quota)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-usage--redraw)
   (define-key harness-ui-map (kbd "u") #'harness-usage))
 
 (harness-define-module 'ui-usage
-  :doc "Usage and cost dashboard with charts and budgets."
+  :doc "Usage and cost dashboard with charts, plan quota and budgets."
   :requires '(ui)
   :init #'harness-ui-usage--init)
 

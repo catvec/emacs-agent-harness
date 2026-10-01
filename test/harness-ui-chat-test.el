@@ -197,6 +197,27 @@
         (should (string-match-p "idle" (harness-chat--mode-line)))
         (should (equal "" (harness-compose-text)))))))
 
+(ert-deftest harness-ui-chat-header-shows-the-plan ()
+  "A session a subscription pays for shows the plan and its quota, not a price."
+  (harness-ui-chat-test-with
+    (clrhash harness-ui--quotas)
+    (let* ((sid (harness-ui-chat-test-session "Plan test"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/usage-add sid '(:input 100 :output 10 :cost 0.0 :list-cost 0.5
+                                             :billing subscription :plan "pro"))
+      (harness-ui--store-quota "demo" '(:billing "subscription" :plan "pro" :plan-label "Claude Pro"
+                                        :windows ((:name "5h" :label "Current session (5 hours)" :used 0.42))))
+      (harness-test-wait (lambda () (equal "subscription"
+                                           (format "%s" (plist-get (plist-get (harness-ui-session sid) :usage) :billing))))
+                         5 "the session update")
+      (with-current-buffer buf
+        (let ((header (harness-chat--header)))
+          (should (string-match-p "Pro . 5h 42%" header))
+          (should-not (string-match-p "\\$0\\.5" header))
+          (let ((pos (string-match "Pro" header)))
+            (should (string-match-p "Covered by Claude Pro" (get-text-property pos 'help-echo header)))
+            (should (get-text-property pos 'local-map header))))))))
+
 (ert-deftest harness-ui-chat-streaming-appends-cheaply ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))

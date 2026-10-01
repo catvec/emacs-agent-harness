@@ -294,6 +294,70 @@ Return (PROJECT-A PROJECT-B)."
         (harness-await (harness-call 'agent/prompt wid "hello"))
         (should (= 3 (length warnings)))))))
 
+;;;; Billing
+
+(ert-deftest harness-usage-subscription-calls-cost-nothing ()
+  "Calls a plan pays for are free; their API price is kept as list cost."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session :budget '(:amount 0.005 :hard t)))
+           (price (harness-call 'usage/price "demo:scripted" '(:input 100000 :output 50000))))
+      (harness-call 'session/usage-add id
+                    '(:input 100000 :output 50000 :cost 0.0 :billing subscription :plan "max"))
+      (let ((u (plist-get (harness-call 'session/get id) :usage)))
+        (should (= 0.0 (plist-get u :cost)))
+        (should (harness-usage-test-near price (plist-get u :list-cost)))
+        (should (eq 'subscription (plist-get u :billing)))
+        (should (equal "max" (plist-get u :plan))))
+      ;; The plan's call spends none of the hard budget, so the next turn may run.
+      (should-not (harness-usage--check (harness-call 'session/get id)))
+      (harness-call 'session/usage-add id '(:input 10 :output 1 :cost 0.01 :billing api))
+      (let ((u (plist-get (harness-call 'session/get id) :usage)))
+        (should (harness-usage-test-near 0.01 (plist-get u :cost)))
+        (should (harness-usage-test-near (+ price 0.01) (plist-get u :list-cost)))
+        (should (eq 'api (plist-get u :billing))))
+      (should (harness-usage--check (harness-call 'session/get id)))
+      ;; Rows keep both figures and group by who paid.
+      (let* ((rows (harness-call 'usage/summary :group-by 'billing))
+             (sub (cl-find "subscription" rows :key (lambda (r) (plist-get r :key)) :test #'equal))
+             (api (cl-find "api" rows :key (lambda (r) (plist-get r :key)) :test #'equal)))
+        (should (= 2 (length rows)))
+        (should (equal sub (car rows)))
+        (should (= 0.0 (plist-get sub :cost)))
+        (should (harness-usage-test-near price (plist-get sub :list-cost)))
+        (should (harness-usage-test-near 0.01 (plist-get api :cost)))
+        (should (harness-usage-test-near 0.01 (plist-get api :list-cost))))
+      (let ((totals (harness-call 'usage/totals :session id)))
+        (should (harness-usage-test-near 0.01 (plist-get totals :cost)))
+        (should (harness-usage-test-near (+ price 0.01) (plist-get totals :list-cost))))
+      (should (= 1 (plist-get (harness-call 'usage/totals :billing "subscription") :calls)))
+      (should (= 0 (plist-get (harness-call 'usage/totals :billing "") :calls)))
+      (let ((day (car (last (harness-call 'usage/series :bucket 'day :since (- (float-time) 60))))))
+        (should (harness-usage-test-near (+ price 0.01) (plist-get day :list-cost)))))))
+
+(ert-deftest harness-usage-old-database-gains-billing-columns ()
+  "A usage table from before billing was kept is migrated in place."
+  (harness-usage-test-with
+    (when-let* ((db (harness-call 'store/sqlite)))
+      (sqlite-execute db "DROP TABLE usage")
+      (sqlite-execute db "CREATE TABLE usage (id INTEGER PRIMARY KEY, ts REAL, session TEXT, project TEXT, model TEXT, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost REAL, turn INTEGER)")
+      (sqlite-execute db "INSERT INTO usage (ts, session, project, model, input, output, cache_read, cache_write, cost, turn) VALUES (?, 's0', '/p/', 'm', 1, 1, 0, 0, 2.5, 1)"
+                      (list (float-time)))
+      ;; As after a reload of the module with an older schema in use.
+      (setq harness-usage--schema-db db)
+      (harness-call 'usage/record '(:session "s1" :project "/p/" :model "m" :input 1
+                                    :cost 0.0 :list-cost 1.0 :billing subscription))
+      (let ((columns (mapcar #'cadr (sqlite-select db "PRAGMA table_info(usage)"))))
+        (should (member "list_cost" columns))
+        (should (member "billing" columns)))
+      (let ((totals (harness-call 'usage/totals :project "/p/")))
+        (should (= 2 (plist-get totals :calls)))
+        (should (= 2.5 (plist-get totals :cost)))
+        (should (= 3.5 (plist-get totals :list-cost))))
+      (should (equal '("" "subscription")
+                     (sort (mapcar (lambda (r) (plist-get r :key))
+                                   (harness-call 'usage/summary :group-by 'billing :project "/p/"))
+                           #'string<))))))
+
 ;;;; JSONL fallback
 
 (ert-deftest harness-usage-jsonl-fallback-matches-sqlite ()

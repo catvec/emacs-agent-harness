@@ -6,8 +6,14 @@
 ;; it when the provider did not, writes one row per call to the `usage'
 ;; table of usage.db (or to usage/records.jsonl when Emacs lacks
 ;; SQLite), and answers questions about spending: summaries grouped by
-;; project, model, day, hour or session; totals; and continuous time
-;; series for charts.
+;; project, model, day, hour, session or billing; totals; and
+;; continuous time series for charts.
+;;
+;; A row's cost is what was billed.  Its list cost is what the call
+;; costs at API prices, and its billing says who paid: `api' (per
+;; token), `subscription' (a plan such as Claude Max paid, so the cost is
+;; 0) or `extra-usage' (a plan's extra usage, billed at API prices).
+;; Budgets count the cost, so usage a subscription covers spends none.
 ;;
 ;; Budgets live in budgets.json.  A budget has a scope (one session,
 ;; one project, or a calendar period across everything), an amount and
@@ -52,25 +58,33 @@ SESSION-ID|ROOT|nil :amount USD :hard BOOL :period nil|day|week|month
   "\"SESSION/BUDGET/PERIOD-START\" -> thresholds already warned about.")
 
 (defvar harness-usage--schema-db nil
-  "The SQLite handle whose schema was ensured most recently.")
+  "(DB . SCHEMA-VERSION) for the SQLite handle whose schema was ensured last.")
+
+(defconst harness-usage--schema-version 2
+  "Bumped whenever the schema gains columns, so open databases migrate.")
 
 (defvar harness-usage--refreshed-models nil
   "Non-nil once a catalogue refresh was requested because pricing was missing.")
 
 (defconst harness-usage--columns
-  '(:id :ts :session :project :model :input :output :cache-read :cache-write :cost :turn)
+  '(:id :ts :session :project :model :input :output :cache-read :cache-write :cost :turn
+    :list-cost :billing)
   "Row keys, in the order of the SELECT below.")
 
 (defconst harness-usage--select
-  "SELECT id, ts, session, project, model, input, output, cache_read, cache_write, cost, turn FROM usage"
+  "SELECT id, ts, session, project, model, input, output, cache_read, cache_write, cost, turn, list_cost, billing FROM usage"
   "Projection matching `harness-usage--columns'.")
 
 (defconst harness-usage--schema
-  '("CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, ts REAL, session TEXT, project TEXT, model TEXT, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost REAL, turn INTEGER)"
+  '("CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, ts REAL, session TEXT, project TEXT, model TEXT, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost REAL, turn INTEGER, list_cost REAL, billing TEXT)"
     "CREATE INDEX IF NOT EXISTS usage_ts ON usage (ts)"
     "CREATE INDEX IF NOT EXISTS usage_session ON usage (session)"
     "CREATE INDEX IF NOT EXISTS usage_project ON usage (project)")
   "Statements that create the usage table and its indexes idempotently.")
+
+(defconst harness-usage--added-columns
+  '(("list_cost" . "REAL") ("billing" . "TEXT"))
+  "Columns added since the first schema, as (NAME . TYPE), for older databases.")
 
 ;;;; Small helpers
 
@@ -88,7 +102,7 @@ SESSION-ID|ROOT|nil :amount USD :hard BOOL :period nil|day|week|month
 
 (defun harness-usage--empty-aggregate (key)
   "Return a zero aggregate plist for KEY."
-  (list :key key :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :calls 0))
+  (list :key key :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :list-cost 0.0 :calls 0))
 
 ;;;; Dates (local time)
 
@@ -190,8 +204,12 @@ once so later calls can be priced."
 ;;;; Storage
 
 (defun harness-usage--ensure-schema (db)
-  "Create the usage table and indexes in DB if missing."
-  (dolist (sql harness-usage--schema) (sqlite-execute db sql)))
+  "Create the usage table and indexes in DB if missing, adding newer columns."
+  (dolist (sql harness-usage--schema) (sqlite-execute db sql))
+  (let ((have (mapcar #'cadr (sqlite-select db "PRAGMA table_info(usage)"))))
+    (dolist (col harness-usage--added-columns)
+      (unless (member (car col) have)
+        (sqlite-execute db (format "ALTER TABLE usage ADD COLUMN %s %s" (car col) (cdr col)))))))
 
 (defun harness-usage--db ()
   "Return the SQLite handle with the usage schema in place, or nil."
@@ -199,14 +217,20 @@ once so later calls can be priced."
                  (condition-case err (harness-call 'store/sqlite)
                    (error (harness-log 'warn "usage: sqlite unavailable: %S" err) nil)))))
     (when db
-      (unless (eq db harness-usage--schema-db)
+      ;; Keyed by schema version too, so a reload that adds columns migrates.
+      (unless (equal (cons db harness-usage--schema-version) harness-usage--schema-db)
         (harness-usage--ensure-schema db)
-        (setq harness-usage--schema-db db))
+        (setq harness-usage--schema-db (cons db harness-usage--schema-version)))
       db)))
 
 (defun harness-usage--make-row (plist)
-  "Return a fresh, fully keyed usage row built from PLIST."
-  (let ((cost (plist-get plist :cost)) (turn (plist-get plist :turn)))
+  "Return a fresh, fully keyed usage row built from PLIST.
+A missing `:list-cost' is the cost; `:billing' is stored as a string."
+  (let* ((cost (plist-get plist :cost))
+         (cost (float (if (numberp cost) cost 0)))
+         (list-cost (plist-get plist :list-cost))
+         (billing (harness-billing-of plist))
+         (turn (plist-get plist :turn)))
     (list :id (plist-get plist :id)
           :ts (float (or (plist-get plist :ts) (float-time)))
           :session (plist-get plist :session)
@@ -216,19 +240,22 @@ once so later calls can be priced."
           :output (harness-usage--int (plist-get plist :output))
           :cache-read (harness-usage--int (plist-get plist :cache-read))
           :cache-write (harness-usage--int (plist-get plist :cache-write))
-          :cost (float (if (numberp cost) cost 0))
-          :turn (and (numberp turn) (truncate turn)))))
+          :cost cost
+          :turn (and (numberp turn) (truncate turn))
+          :list-cost (if (numberp list-cost) (float list-cost) cost)
+          :billing (and billing (symbol-name billing)))))
 
 (defun harness-usage--insert (row)
   "Persist ROW in SQLite or the JSONL log; return it with `:id' filled."
   (let ((db (harness-usage--db)))
     (if db
         (progn
-          (sqlite-execute db "INSERT INTO usage (ts, session, project, model, input, output, cache_read, cache_write, cost, turn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+          (sqlite-execute db "INSERT INTO usage (ts, session, project, model, input, output, cache_read, cache_write, cost, turn, list_cost, billing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                           (list (plist-get row :ts) (plist-get row :session) (plist-get row :project)
                                 (plist-get row :model) (plist-get row :input) (plist-get row :output)
                                 (plist-get row :cache-read) (plist-get row :cache-write)
-                                (plist-get row :cost) (plist-get row :turn)))
+                                (plist-get row :cost) (plist-get row :turn)
+                                (plist-get row :list-cost) (plist-get row :billing)))
           (plist-put row :id (caar (sqlite-select db "SELECT last_insert_rowid()"))))
       (plist-put row :id (or (plist-get row :id) (harness-short-id)))
       (harness-call 'store/append harness-usage-jsonl-name row)
@@ -237,14 +264,20 @@ once so later calls can be priced."
 (defun harness-usage--row-matches-p (row opts)
   "Non-nil when ROW satisfies the filters in OPTS.
 Filters: `:since' (inclusive), `:until' (exclusive), `:project',
-`:session' and `:model'."
+`:session', `:model' and `:billing' (\"\" selects rows without one)."
   (let ((ts (plist-get row :ts)))
     (and (or (null (plist-get opts :since)) (>= ts (plist-get opts :since)))
          (or (null (plist-get opts :until)) (< ts (plist-get opts :until)))
          (or (null (plist-get opts :project))
              (equal (harness-usage--root (plist-get opts :project)) (plist-get row :project)))
          (or (null (plist-get opts :session)) (equal (plist-get opts :session) (plist-get row :session)))
-         (or (null (plist-get opts :model)) (equal (plist-get opts :model) (plist-get row :model))))))
+         (or (null (plist-get opts :model)) (equal (plist-get opts :model) (plist-get row :model)))
+         (or (null (plist-get opts :billing))
+             (equal (format "%s" (plist-get opts :billing)) (harness-usage--row-billing row))))))
+
+(defun harness-usage--row-billing (row)
+  "Return ROW's billing as a string, \"\" when it was not recorded."
+  (let ((b (harness-billing-of row))) (if b (symbol-name b) "")))
 
 (defun harness-usage--rows-sqlite (db opts)
   "Return rows from DB narrowed by the filters in OPTS."
@@ -267,7 +300,8 @@ Filters: `:since' (inclusive), `:until' (exclusive), `:project',
 
 (defun harness-usage--rows (&rest opts)
   "Return usage rows matching OPTS, oldest first.
-OPTS: `:since' `:until' (floats) `:project' ROOT `:session' ID `:model' ID.
+OPTS: `:since' `:until' (floats) `:project' ROOT `:session' ID `:model' ID
+`:billing' NAME.
 Rows come from SQLite when available, else from the JSONL log; the
 Lisp filter applies to both."
   (let* ((db (harness-usage--db))
@@ -283,10 +317,12 @@ Lisp filter applies to both."
     ('session (or (plist-get row :session) ""))
     ('day (harness-usage-day-key (plist-get row :ts)))
     ('hour (harness-usage-hour-key (plist-get row :ts)))
+    ('billing (harness-usage--row-billing row))
     (other (error "Unknown usage grouping %s" other))))
 
 (defun harness-usage--aggregate (rows group-by)
-  "Sum ROWS per GROUP-BY key (nil for one aggregate); first-seen order."
+  "Sum ROWS per GROUP-BY key (nil for one aggregate); first-seen order.
+Rows recorded before list costs were kept count their cost as list cost."
   (let ((table (make-hash-table :test 'equal)) order)
     (dolist (r rows)
       (let* ((key (and group-by (harness-usage--key r group-by)))
@@ -297,6 +333,7 @@ Lisp filter applies to both."
           (push key order))
         (dolist (k '(:input :output :cache-read :cache-write :cost))
           (plist-put agg k (+ (plist-get agg k) (or (plist-get r k) 0))))
+        (plist-put agg :list-cost (+ (plist-get agg :list-cost) (harness-usage-list-cost r)))
         (plist-put agg :calls (1+ (plist-get agg :calls)))))
     (mapcar (lambda (k) (gethash k table)) (nreverse order))))
 
@@ -329,8 +366,9 @@ Lisp filter applies to both."
 (harness-defmethod usage/record (row)
   "Persist usage ROW and return it with `:id' set.
 ROW: (:ts FLOAT :session ID :project ROOT :model ID :input N :output N
-:cache-read N :cache-write N :cost F :turn N); `:ts' defaults to now.
-Event `usage/recorded' ROW."
+:cache-read N :cache-write N :cost F :list-cost F :billing NAME :turn N);
+`:ts' defaults to now, `:list-cost' to the cost.  Event `usage/recorded'
+ROW."
   (let ((row (harness-usage--insert (harness-usage--make-row row))))
     (harness-emit 'usage/recorded row)
     row))
@@ -338,37 +376,52 @@ Event `usage/recorded' ROW."
 (defun harness-usage--on-session-usage (id totals record)
   "Record RECORD of session ID; TOTALS supplies the turn counter.
 Records that only carry `:turns' or `:context' are ignored.  A missing
-cost is computed from the model's pricing.  Budgets are checked after."
+cost is computed from the model's pricing, and so is a missing list
+cost when a subscription paid.  Budgets are checked after."
   (when (and (harness-usage--countable-p record)
              (harness-call 'session/exists-p id))
     (let* ((session (harness-call 'session/get id))
            (model (plist-get session :model))
-           (cost (plist-get record :cost)))
+           (cost (plist-get record :cost))
+           (cost (if (numberp cost) cost (harness-call 'usage/price model record)))
+           (list-cost (plist-get record :list-cost))
+           (billing (harness-billing-of record)))
       (harness-call 'usage/record
                     (list :session id :project (plist-get session :project) :model model
                           :input (plist-get record :input) :output (plist-get record :output)
                           :cache-read (plist-get record :cache-read) :cache-write (plist-get record :cache-write)
-                          :cost (if (numberp cost) cost (harness-call 'usage/price model record))
+                          :cost cost
+                          :list-cost (cond ((numberp list-cost) list-cost)
+                                           ((eq billing 'subscription) (harness-call 'usage/price model record))
+                                           (t cost))
+                          :billing billing
                           :turn (plist-get totals :turns)))
       (harness-usage--check session))))
 
 ;;;; Queries
 
 (harness-defmethod usage/summary (&rest opts)
-  "Return usage aggregated by OPTS `:group-by' (project|model|day|session|hour).
+  "Return usage aggregated by OPTS `:group-by'.
+The grouping is project, model, day, session, hour or billing.
 Other OPTS filter rows: `:since' `:until' (floats, until exclusive)
-`:project' ROOT `:session' ID `:model' ID.  Each row is (:key STRING
-:input N :output N :cache-read N :cache-write N :cost F :calls N),
-sorted by cost descending, or by key ascending for day and hour."
+`:project' ROOT `:session' ID `:model' ID `:billing' NAME.  Each row is
+\(:key STRING :input N :output N :cache-read N :cache-write N :cost F
+:list-cost F :calls N), cost being what was billed and list cost the
+same usage at API prices; billing keys are \"api\", \"subscription\",
+\"extra-usage\", or \"\" when no billing was recorded.  Rows are sorted
+by list cost descending, or by key ascending for day and hour."
   (let* ((group-by (harness-usage--sym (or (plist-get opts :group-by) 'project)))
          (aggs (harness-usage--aggregate (apply #'harness-usage--rows opts) group-by)))
     (if (memq group-by '(day hour))
         (sort aggs (lambda (a b) (string< (plist-get a :key) (plist-get b :key))))
-      (sort aggs (lambda (a b) (> (plist-get a :cost) (plist-get b :cost)))))))
+      (sort aggs (lambda (a b)
+                   (let ((la (plist-get a :list-cost)) (lb (plist-get b :list-cost)))
+                     (or (> la lb) (and (= la lb) (> (plist-get a :cost) (plist-get b :cost))))))))))
 
 (harness-defmethod usage/totals (&rest opts)
-  "Return one aggregate (:input :output :cache-read :cache-write :cost :calls).
-OPTS are the filters of `usage/summary'."
+  "Return one aggregate of every row the filters in OPTS select.
+The aggregate is (:input :output :cache-read :cache-write :cost
+:list-cost :calls); OPTS are the filters of `usage/summary'."
   (harness-plist-remove (or (car (harness-usage--aggregate (apply #'harness-usage--rows opts) nil))
                             (harness-usage--empty-aggregate nil))
                         :key))
@@ -378,7 +431,8 @@ OPTS are the filters of `usage/summary'."
 Buckets run from `:since' (default: the first row) through `:until'
 \(default: now) with empty buckets filled in, so charts are continuous.
 The other filters of `usage/summary' apply.  Each point is
-\(:key STRING :cost F :input N :output N :cache-read N :cache-write N :calls N).
+\(:key STRING :cost F :list-cost F :input N :output N :cache-read N
+:cache-write N :calls N).
 Return nil when there are no rows and no `:since'."
   (let* ((bucket (harness-usage--sym (or (plist-get opts :bucket) 'day)))
          (rows (apply #'harness-usage--rows opts))

@@ -88,7 +88,7 @@
              (format "%S" (or (plist-get s :name) "(unnamed)"))
              (plist-get s :model)
              (abbreviate-file-name (or (plist-get s :cwd) ""))
-             (harness-format-cost (or (plist-get u :cost) 0))
+             (harness-format-spend u)
              (harness-relative-time (plist-get s :updated)))
      (if (plist-get s :parent-id) (format ", parent %s" (harness-tools-sessions--short (plist-get s :parent-id))) "")
      (if (plist-get s :queue) (format ", %d queued" (length (plist-get s :queue))) "")

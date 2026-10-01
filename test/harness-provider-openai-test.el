@@ -254,7 +254,8 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (equal "Hel" (plist-get (nth 1 events) :delta)))
       (should (equal "thinking" (plist-get (nth 2 events) :delta)))
       (should (equal "lo" (plist-get (nth 3 events) :delta)))
-      (should (equal '(:type usage :input 12 :output 3 :cache-read 5 :cache-write 0 :cost 0.00042 :context 12)
+      (should (equal '(:type usage :input 12 :output 3 :cache-read 5 :cache-write 0 :cost 0.00042
+                       :billing api :context 12)
                      (nth 4 events)))
       (should (equal '(:type done :stop-reason end-turn) (car (last events)))))))
 

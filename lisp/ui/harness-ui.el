@@ -11,6 +11,10 @@
 ;;   notifications and agent→client requests to hooks other UI modules
 ;;   join;
 ;; - a cache of session plists kept fresh from `_harness/session' updates;
+;; - a cache of each provider's billing and plan quota kept fresh from
+;;   `provider/quota-updated' events, and the helpers that show what a
+;;   session cost: a price when it is billed per token, the plan's name
+;;   and quota when a subscription pays for it;
 ;; - faces and icons;
 ;; - window positions: one session per preset position, replacing;
 ;; - the prefix keymap, the global minor mode and the transient menu.
@@ -113,6 +117,9 @@
 
 (defface harness-header-face '((t :inherit header-line))
   "Session header line." :group 'harness-ui)
+
+(defface harness-plan-face '((t :inherit font-lock-constant-face))
+  "The name of the subscription plan that pays for a session." :group 'harness-ui)
 
 ;;;; Icons
 
@@ -255,6 +262,7 @@ made meanwhile are queued and sent once it listens."
                 (lambda (_)
                   (harness-ui-refresh-sessions)
                   (harness-ui-refresh-models)
+                  (harness-ui-refresh-quotas)
                   (run-hooks 'harness-ui-connected-hook))
                 (lambda (e) (message "Harness: initialize failed: %s" (harness-error-message e))))
   (harness-ui--flush-queue)
@@ -409,6 +417,8 @@ tasks among them carry on once the process is back (see
          (run-hooks 'harness-ui-redraw-hook))
        (when (member event '("provider/models-updated" "harness/reloaded"))
          (harness-ui-refresh-models))
+       (when (equal event "provider/quota-updated")
+         (harness-ui--store-quota (car args) (cadr args)))
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
@@ -495,6 +505,182 @@ as needing input and its chat panel or task card answers it later."
                      (run-hooks 'harness-ui-redraw-hook)
                      (when callback (funcall callback models)))
                    (unless callback #'ignore)))
+
+;;;; Billing and plan quota cache
+
+(defvar harness-ui--quotas (make-hash-table :test 'equal)
+  "Provider id (a string) -> its billing and quota plist.
+The plist has the shape `provider/quota' returns.")
+
+(defvar harness-ui-quota-functions nil
+  "Functions called with (PROVIDER QUOTA) after PROVIDER's cached quota changes.")
+
+(defun harness-ui-quota (provider)
+  "Return the cached billing and quota plist of PROVIDER, or nil.
+PROVIDER is an id, a string or a symbol."
+  (gethash (format "%s" provider) harness-ui--quotas))
+
+(defun harness-ui-quotas ()
+  "Return every cached quota as (PROVIDER . QUOTA), sorted by provider id."
+  (let (out)
+    (maphash (lambda (k v) (when v (push (cons k v) out))) harness-ui--quotas)
+    (sort out (lambda (a b) (string< (car a) (car b))))))
+
+(defun harness-ui--store-quota (provider quota)
+  "Cache QUOTA for PROVIDER and run `harness-ui-quota-functions' when it changed."
+  (let ((key (format "%s" provider)))
+    (unless (equal quota (gethash key harness-ui--quotas))
+      (puthash key quota harness-ui--quotas)
+      (run-hook-with-args 'harness-ui-quota-functions key quota))))
+
+(defun harness-ui-refresh-quota (provider &optional refresh callback)
+  "Fetch PROVIDER's billing and quota into the cache, then call CALLBACK with it.
+REFRESH non-nil makes the provider ask for fresh data first."
+  (harness-ui-call "_harness/provider/quota"
+                   (list :providerId (format "%s" provider) :refresh (if refresh t :false))
+                   (lambda (quota)
+                     (harness-ui--store-quota provider quota)
+                     (when callback (funcall callback quota)))
+                   #'ignore))
+
+(defun harness-ui-refresh-quotas (&optional refresh)
+  "Fetch the billing and quota of every provider that reports them.
+REFRESH non-nil asks each for fresh data."
+  (harness-ui-call "_harness/provider/list" nil
+                   (lambda (providers)
+                     (dolist (p providers)
+                       (when (harness-json-true-p (plist-get (plist-get p :capabilities) :quota))
+                         (harness-ui-refresh-quota (plist-get p :id) refresh))))
+                   #'ignore))
+
+(defun harness-ui-session-provider (session)
+  "Return the provider id (a string) of SESSION's model, or nil."
+  (let ((model (plist-get session :model)))
+    (and (stringp model) (string-match "\\`\\([^:]+\\):" model) (match-string 1 model))))
+
+(defun harness-ui-session-quota (session)
+  "Return the cached billing and quota of SESSION's provider, or nil."
+  (when-let* ((provider (harness-ui-session-provider session)))
+    (harness-ui-quota provider)))
+
+(defun harness-ui-session-billing (session)
+  "Return how SESSION's calls are paid, a symbol or nil.
+The symbol is `api', `subscription' or `extra-usage'.  Its last
+recorded call decides.  Before it made any call, its provider's
+account does; calls recorded without a billing stay as recorded."
+  (let ((usage (plist-get session :usage)))
+    (or (harness-billing-of usage)
+        (and (zerop (or (plist-get usage :input) 0))
+             (zerop (or (plist-get usage :output) 0))
+             (zerop (or (plist-get usage :cost) 0))
+             (harness-billing-of (harness-ui-session-quota session))))))
+
+(defun harness-ui-quota-face (fraction)
+  "Return the face for a quota window with FRACTION of it used."
+  (let ((f (or fraction 0)))
+    (cond ((>= f 0.95) 'harness-context-critical-face)
+          ((>= f 0.85) 'harness-context-urgent-face)
+          ((>= f 0.70) 'harness-context-warning-face)
+          (t 'harness-dim-face))))
+
+(defun harness-ui-format-reset (time)
+  "Describe quota reset TIME: \"in 3h12m (14:30)\" within a day, else a date."
+  (when (numberp time)
+    (let ((left (- time (float-time))))
+      (cond ((<= left 0) "now")
+            ((< left 86400) (format "in %s (%s)" (harness-format-duration left)
+                                    (format-time-string "%H:%M" time)))
+            (t (format-time-string "%a %b %-d, %H:%M" time))))))
+
+(defun harness-ui-format-window (window)
+  "Return \"5h 9%\" for quota WINDOW, coloured by how much of it is used."
+  (let ((used (or (plist-get window :used) 0)))
+    (propertize (format "%s %d%%" (plist-get window :name) (round (* 100 used)))
+                'face (harness-ui-quota-face used))))
+
+(defun harness-ui-describe-window (window)
+  "Return a line about quota WINDOW: what it is, how much is used, when it resets."
+  (format "%s: %d%% used%s"
+          (or (plist-get window :label) (plist-get window :name))
+          (round (* 100 (or (plist-get window :used) 0)))
+          (if-let* ((reset (harness-ui-format-reset (plist-get window :resets))))
+              (concat ", resets " reset)
+            "")))
+
+(defun harness-ui-describe-extra (extra)
+  "Return a line about a plan's EXTRA usage (billed at API prices), or nil."
+  (when extra
+    (let ((used (plist-get extra :used)) (limit (plist-get extra :limit))
+          (reason (plist-get extra :disabled-reason)))
+      (concat "Extra usage: " (if (harness-json-true-p (plist-get extra :enabled)) "on" "off")
+              (if (and (stringp reason) (not (harness-json-true-p (plist-get extra :enabled))))
+                  (format " (%s)" (replace-regexp-in-string "_" " " reason))
+                "")
+              (if (numberp used) (format ", %s used" (harness-format-cost used)) "")
+              (if (numberp limit) (format " of %s" (harness-format-cost limit)) "")))))
+
+(defun harness-ui-quota-headline-windows (quota)
+  "Return the windows of QUOTA worth a glance: the 5-hour and weekly ones,
+and any other that is at least 70% used."
+  (cl-remove-if-not (lambda (w) (or (member (plist-get w :name) '("5h" "7d"))
+                                    (>= (or (plist-get w :used) 0) 0.7)))
+                    (plist-get quota :windows)))
+
+(defun harness-ui-plan-title (quota &optional plan)
+  "Return the plan's full name from QUOTA (\"Claude Max\"), or from PLAN's id."
+  (or (and (or (null plan) (equal plan (plist-get quota :plan))) (plist-get quota :plan-label))
+      (let ((name (harness-plan-name (or plan (plist-get quota :plan)))))
+        (and name (format "the %s plan" name)))
+      "the subscription"))
+
+(defun harness-ui-spend-help (session)
+  "Return the tooltip that explains what SESSION cost and who pays for it."
+  (let* ((usage (plist-get session :usage))
+         (quota (harness-ui-session-quota session))
+         (billing (harness-ui-session-billing session))
+         (cost (float (or (plist-get usage :cost) 0)))
+         (covered (harness-usage-covered usage))
+         (payer (harness-ui-plan-title quota (plist-get usage :plan))))
+    (string-join
+     (delq nil
+           (append
+            (list
+             (cond ((and (> covered 0) (> cost 0))
+                    (format "%s billed as extra usage; %s more at API prices covered by %s."
+                            (harness-format-cost cost) (harness-format-cost covered) payer))
+                   ((or (> covered 0) (memq billing '(subscription extra-usage)))
+                    (format "Covered by %s, not billed per token.\nThis session at API prices: %s."
+                            payer (harness-format-cost covered)))
+                   ((eq billing 'api)
+                    (format "Session cost: %s, billed per token%s."
+                            (harness-format-cost cost)
+                            (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) "")))
+                   (t (format "Session cost: %s." (harness-format-cost cost)))))
+            (when (memq billing '(subscription extra-usage))
+              (append (mapcar #'harness-ui-describe-window (plist-get quota :windows))
+                      (list (harness-ui-describe-extra (plist-get quota :extra)))))
+            (list "mouse-1: usage and plan quota")))
+     "\n")))
+
+(defun harness-ui-format-spend (session &optional with-quota)
+  "Return what SESSION cost, saying when a subscription pays for it.
+Per-token billing shows the cost (\"$1.20\").  When a plan pays, its
+name shows instead (\"Max\"), after any cost billed as extra usage
+\(\"$0.40+Max\").  WITH-QUOTA appends the plan's headline quota windows
+\(\"Max · 5h 9% · 7d 57%\").  The tooltip has the details."
+  (let* ((usage (plist-get session :usage))
+         (billing (harness-ui-session-billing session))
+         (cost (float (or (plist-get usage :cost) 0)))
+         (planned (or (> (harness-usage-covered usage) 0) (memq billing '(subscription extra-usage))))
+         (quota (harness-ui-session-quota session))
+         (name (propertize (or (harness-plan-name (or (plist-get usage :plan) (plist-get quota :plan))) "Plan")
+                           'face 'harness-plan-face))
+         (text (cond ((not planned) (harness-format-cost cost))
+                     ((> cost 0) (concat (harness-format-cost cost) "+" name))
+                     (t name)))
+         (windows (and with-quota planned (harness-ui-quota-headline-windows quota))))
+    (propertize (concat text (mapconcat (lambda (w) (concat " · " (harness-ui-format-window w))) windows ""))
+                'help-echo (harness-ui-spend-help session))))
 
 ;;;; Buffer-local session context
 

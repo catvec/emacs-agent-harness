@@ -170,6 +170,44 @@
           ((< usd 1) (format "$%.3f" usd))
           (t (format "$%.2f" usd)))))
 
+;;;; Billing
+
+(defun harness-billing-of (usage)
+  "Return how USAGE was paid: `api', `subscription', `extra-usage' or nil.
+USAGE is a usage record, a session's usage totals or a usage row; the
+value may have travelled over the wire as a string.  nil means the
+provider did not say, which reads as per-token billing."
+  (let ((b (plist-get usage :billing)))
+    (cond ((and b (symbolp b) (not (eq b :false))) b)
+          ((and (stringp b) (not (string-empty-p b))) (intern b)))))
+
+(defun harness-plan-name (plan)
+  "Return the display name of subscription PLAN (\"max\" gives \"Max\"), or nil."
+  (and (stringp plan) (not (string-empty-p plan))
+       (capitalize (replace-regexp-in-string "_" " " plan))))
+
+(defun harness-usage-list-cost (usage)
+  "Return what USAGE costs at API list prices: its `:list-cost', else its `:cost'."
+  (let ((list-cost (plist-get usage :list-cost)) (cost (plist-get usage :cost)))
+    (float (cond ((numberp list-cost) list-cost) ((numberp cost) cost) (t 0)))))
+
+(defun harness-usage-covered (usage)
+  "Return the part of USAGE a subscription paid for, at API list prices."
+  (max 0.0 (- (harness-usage-list-cost usage) (float (or (plist-get usage :cost) 0)))))
+
+(defun harness-format-spend (usage)
+  "Describe in words what USAGE cost, saying when a subscription paid.
+Per-token billing reads \"$1.20\"; usage a plan paid for reads
+\"$3.40 at API prices, covered by the Max plan\"."
+  (let* ((cost (float (or (plist-get usage :cost) 0)))
+         (covered (harness-usage-covered usage))
+         (name (harness-plan-name (plist-get usage :plan)))
+         (payer (if name (format "the %s plan" name) "the subscription")))
+    (cond ((<= covered 0) (harness-format-cost cost))
+          ((> cost 0) (format "%s billed, plus %s at API prices covered by %s"
+                              (harness-format-cost cost) (harness-format-cost covered) payer))
+          (t (format "%s at API prices, covered by %s" (harness-format-cost covered) payer)))))
+
 (defun harness-format-bytes (n)
   "Format byte count N as a human readable size."
   (file-size-human-readable (or n 0) 'iec " "))

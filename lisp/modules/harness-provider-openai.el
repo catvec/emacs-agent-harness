@@ -498,7 +498,8 @@ hides the others."
           (setf (harness-openai--stream-finish-reason stream) finish))))))
 
 (defun harness-openai--usage-event (usage)
-  "Build the usage event from an OpenAI USAGE object."
+  "Build the usage event from an OpenAI USAGE object.
+OpenAI-compatible endpoints bill per token, so the event says `api'."
   (let ((input (or (plist-get usage :prompt_tokens) 0))
         (cost (plist-get usage :cost)))
     (list :type 'usage
@@ -507,6 +508,7 @@ hides the others."
           :cache-read (or (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens)) 0)
           :cache-write 0
           :cost (and (numberp cost) cost)
+          :billing 'api
           :context input)))
 
 (defun harness-openai--stream-finish (stream reason &optional error)
