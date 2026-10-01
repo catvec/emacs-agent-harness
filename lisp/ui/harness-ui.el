@@ -530,20 +530,20 @@ Signal unless NOERROR when none can be found."
             (if (match-string 3 name) (concat "." (match-string 3 name)) ""))))
 
 (defun harness-ui-model-label (model-id)
-  "Return a readable label for MODEL-ID.
-Uses the catalogue's label; falls back to a prettified slug, then to
-\"name (provider)\"."
-  (let* ((m (and model-id (gethash model-id harness-ui--models)))
-         (name (if (and model-id (string-match "\\`[^:]+:\\(.+\\)\\'" model-id))
-                   (match-string 1 model-id)
-                 model-id))
-         (label (plist-get m :label)))
-    (cond ((null model-id) "?")
-          ((and label (not (equal label name))) label)
-          ((and name (harness-ui--prettify-model-name name)))
-          ((not (equal name model-id))
-           (format "%s (%s)" name (substring model-id 0 (- (length model-id) (length name) 1))))
-          (t model-id))))
+  "Return a readable \"model (provider)\" label for MODEL-ID.
+The model part is the catalogue's label, else a prettified slug, else
+the raw name; the provider part is the provider's label, else its id."
+  (if (not (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id)))
+      (or model-id "?")
+    (let* ((pid (match-string 1 model-id))
+           (name (match-string 2 model-id))
+           (m (gethash model-id harness-ui--models))
+           (label (plist-get m :label)))
+      (format "%s (%s)"
+              (or (and label (not (equal label name)) label)
+                  (harness-ui--prettify-model-name name)
+                  name)
+              (or (plist-get m :provider-label) pid)))))
 
 (defun harness-ui-button (label action &rest props)
   "Insert a clickable LABEL running ACTION (a command or a function of the button).
@@ -672,8 +672,7 @@ Set by the chat module.")
                (list :annotation-function
                      (lambda (choice)
                        (let ((m (cdr (assoc choice table))))
-                         (format "  %s · %s · %s ctx%s"
-                                 (or (plist-get m :provider-label) (plist-get m :provider))
+                         (format "  %s · %s ctx%s"
                                  (plist-get m :id)
                                  (harness-format-tokens (plist-get m :context-window))
                                  (if-let* ((p (plist-get m :pricing)))
