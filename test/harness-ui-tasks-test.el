@@ -24,6 +24,7 @@
 (defvar harness-tasks-max-running)
 (defvar harness-tasks-model)
 (defvar harness-tasks-worktrees)
+(defvar harness-ui-default-position)
 (defvar harness-acp-server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
@@ -62,6 +63,8 @@
            (harness-tasks-max-running 3)
            (harness-tasks-model "demo:scripted")
            (harness-tasks-worktrees nil)
+           ;; Full width: the content checks below are not about narrow windows.
+           (harness-ui-default-position (quote full))
            (harness-acp-token nil)
            (default-directory dir))
        (harness-add-filter 'permission/decide
@@ -113,7 +116,7 @@
       (should (string-empty-p (buffer-substring-no-properties harness-compose-start
                                                               harness-compose-end))))
     (harness-ui-tasks-test--wait-text board "Completed  1\\(.\\|\n\\)*Fix the flaky test")
-    (should (string-match-p "1 done" (with-current-buffer board (harness-ui-tasks--header))))))
+    (should (string-match-p "✓ 1\\|done 1" (with-current-buffer board (harness-ui-tasks--header))))))
 
 (ert-deftest harness-ui-tasks-compose-survives-redraws ()
   (harness-ui-tasks-test-with
@@ -173,7 +176,6 @@
         (should (eq 'harness-ui-tasks-submit (key-binding (kbd "C-c C-c"))))))))
 
 (defvar harness-ui-open-session-function)
-(defvar harness-ui-default-position)
 (declare-function harness-ui-display-buffer "harness-ui")
 (declare-function harness-ui-tasks-open "harness-ui-tasks")
 
@@ -249,6 +251,44 @@
                             :key (lambda (n) (plist-get n :kind)))))
         (should (equal file (plist-get (car (plist-get task :attachments)) :path)))
         (should (cl-some (lambda (b) (equal (plist-get b :path) file)) (plist-get user :blocks)))))))
+
+(defvar harness-ui-tasks--new)
+(declare-function harness-toggle-non-interactive "harness-ui")
+(declare-function harness-set-permission-mode "harness-ui")
+(declare-function harness-ui--setting-target "harness-ui")
+
+(ert-deftest harness-ui-tasks-session-settings ()
+  "The session setting commands set up new tasks from the box and change a task's session on its card."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (harness-test-wait (lambda () harness-ui-tasks--new) 5 "the defaults")
+      (should (equal "auto" (format "%s" (plist-get harness-ui-tasks--new :permission-mode))))
+      (goto-char harness-compose-end)
+      ;; The ordinary commands change the settings of the next task.
+      (should (consp (harness-ui--setting-target nil)))
+      (let ((before (plist-get harness-ui-tasks--new :non-interactive)))
+        (harness-toggle-non-interactive)
+        (should (eq (not before) (plist-get harness-ui-tasks--new :non-interactive))))
+      (cl-letf (((symbol-function 'read-multiple-choice) (lambda (&rest _) '(?a "ask"))))
+        (harness-set-permission-mode))
+      (should (equal "ask" (plist-get harness-ui-tasks--new :permission-mode)))
+      (insert "Configured task")
+      (harness-ui-tasks-submit))
+    (harness-ui-tasks-test--wait-text board "Completed  1")
+    (let* ((task (car (harness-call 'task/list default-directory)))
+           (sid (plist-get task :session))
+           (session (harness-call 'session/get sid)))
+      (should (eq 'ask (plist-get session :permission-mode)))
+      (should-not (plist-get session :non-interactive))
+      ;; On a started task's card the same commands change its session.
+      (with-current-buffer board
+        (goto-char (point-min))
+        (search-forward "Configured task")
+        (should (equal sid (harness-ui--setting-target nil)))
+        (cl-letf (((symbol-function 'read-multiple-choice) (lambda (&rest _) '(?y "yolo"))))
+          (harness-set-permission-mode)))
+      (harness-test-wait (lambda () (eq 'yolo (plist-get (harness-call 'session/get sid) :permission-mode)))
+                         5 "the session's mode to change"))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

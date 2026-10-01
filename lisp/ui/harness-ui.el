@@ -684,11 +684,47 @@ window selected now even when another frame is selected by then."
        (harness-ui-call "_harness/session/resume" (list :id (plist-get s :id))
                         (lambda (_) (harness-ui-display-session (plist-get s :id) position)))))))
 
+;;;; Session settings
+
+(defvar-local harness-ui-setting-target-function nil
+  "Function telling the session setting commands what to change in this buffer.
+It returns a session id, or (SETTINGS . SET) for settings that are not a
+session's yet: SETTINGS is a plist with a session's setting keys
+(`:model' `:thinking' `:permission-mode' `:non-interactive') and SET a
+function of KEY and VALUE storing one.  The task board uses it so the
+same commands set up the next task.  When it is nil or returns nil, the
+commands use `harness-ui-current-session-id'.")
+
+(defun harness-ui--setting-target (session-id)
+  "Return what the setting commands change.
+SESSION-ID when given, else the buffer's target, else a chosen session."
+  (or session-id
+      (and harness-ui-setting-target-function (funcall harness-ui-setting-target-function))
+      (harness-ui-current-session-id)))
+
+(defun harness-ui--setting-get (target key)
+  "Return the current value of setting KEY of TARGET."
+  (plist-get (if (stringp target) (harness-ui-session target) (car target)) key))
+
+(defun harness-ui--setting-set (target key value label)
+  "Set KEY to VALUE on TARGET and say LABEL when it is done."
+  (if (not (stringp target))
+      (progn (funcall (cdr target) key value)
+             (message "%s (for new tasks)" label))
+    (pcase key
+      (:model (harness-ui-call "session/set_model" (list :sessionId target :modelId value)
+                               (lambda (_) (message "%s" label))))
+      (:permission-mode (harness-ui-call "session/set_mode" (list :sessionId target :modeId value)
+                                         (lambda (_) (message "%s" label))))
+      (_ (harness-ui-call "_harness/session/update"
+                          (list :id target key (if (and (eq key :non-interactive) (not value)) :false value))
+                          (lambda (_) (message "%s" label)))))))
+
 ;;;###autoload
 (defun harness-set-model (&optional session-id)
   "Choose a model for SESSION-ID (default the current buffer's session)."
   (interactive)
-  (let ((sid (or session-id (harness-ui-current-session-id))))
+  (let ((target (harness-ui--setting-target session-id)))
     (harness-ui-refresh-models
      (lambda (models)
        (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
@@ -711,44 +747,44 @@ window selected now even when another frame is selected by then."
                                    ""))))))
               (choice (completing-read "Model: " table nil t))
               (id (plist-get (cdr (assoc choice table)) :id)))
-         (harness-ui-call "session/set_model" (list :sessionId sid :modelId id)
-                          (lambda (_) (message "Model → %s" choice))))))))
+         (harness-ui--setting-set target :model id (format "Model → %s" choice)))))))
 
 ;;;###autoload
 (defun harness-set-thinking (&optional session-id)
   "Choose a thinking level for SESSION-ID."
   (interactive)
-  (let* ((sid (or session-id (harness-ui-current-session-id)))
-         (session (harness-ui-session sid)))
-    (harness-ui-call "_harness/provider/model" (list :model-id (plist-get session :model))
-                     (lambda (model)
-                       (let* ((levels (or (plist-get model :thinking-levels) '("low" "medium" "high")))
-                              (choice (completing-read "Thinking: " (cons "default" levels) nil t)))
-                         (harness-ui-call "_harness/session/update"
-                                          (list :id sid :thinking (unless (equal choice "default") choice))
-                                          (lambda (_) (message "Thinking → %s" choice))))))))
+  (let* ((target (harness-ui--setting-target session-id))
+         (model (harness-ui--setting-get target :model))
+         (choose (lambda (levels)
+                   (let ((choice (completing-read "Thinking: " (cons "default" levels) nil t)))
+                     (harness-ui--setting-set target :thinking (unless (equal choice "default") choice)
+                                              (format "Thinking → %s" choice))))))
+    (if (null model)
+        (funcall choose '("low" "medium" "high"))
+      (harness-ui-call "_harness/provider/model" (list :model-id model)
+                       (lambda (m) (funcall choose (or (plist-get m :thinking-levels) '("low" "medium" "high"))))))))
 
 ;;;###autoload
 (defun harness-set-permission-mode (&optional session-id)
   "Choose the permission mode for SESSION-ID."
   (interactive)
-  (let* ((sid (or session-id (harness-ui-current-session-id)))
+  (let* ((target (harness-ui--setting-target session-id))
          (choice (read-multiple-choice "Permission mode"
                                        '((?a "ask" "Ask before writes, commands and network")
                                          (?e "accept-edits" "Reads and edits inside the project run freely")
                                          (?u "auto" "A cheap model judges each call")
                                          (?y "yolo" "Allow everything inside the jail")))))
-    (harness-ui-call "session/set_mode" (list :sessionId sid :modeId (cadr choice))
-                     (lambda (_) (message "Permission mode → %s" (cadr choice))))))
+    (harness-ui--setting-set target :permission-mode (cadr choice)
+                             (format "Permission mode → %s" (cadr choice)))))
 
 ;;;###autoload
 (defun harness-toggle-non-interactive (&optional session-id)
   "Toggle non-interactive mode for SESSION-ID."
   (interactive)
-  (let* ((sid (or session-id (harness-ui-current-session-id)))
-         (now (harness-json-true-p (plist-get (harness-ui-session sid) :non-interactive))))
-    (harness-ui-call "_harness/session/update" (list :id sid :non-interactive (if now :false t))
-                     (lambda (_) (message "Non-interactive %s" (if now "off" "on"))))))
+  (let* ((target (harness-ui--setting-target session-id))
+         (now (harness-json-true-p (harness-ui--setting-get target :non-interactive))))
+    (harness-ui--setting-set target :non-interactive (not now)
+                             (format "Non-interactive %s" (if now "off" "on")))))
 
 ;;;###autoload
 (defun harness-rename-session (name &optional session-id)

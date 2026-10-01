@@ -81,6 +81,10 @@
 (defvar-local harness-ui-tasks--project nil "Project root reported by the harness.")
 (defvar-local harness-ui-tasks--tasks nil "Task plists (wire shape).")
 (defvar-local harness-ui-tasks--settings nil "What `task/settings' returned.")
+(defvar-local harness-ui-tasks--new nil
+  "Settings the next submitted task starts with: a plist of `:model',
+`:thinking', `:permission-mode' and `:non-interactive', seeded from the
+harness's task defaults and changed with the usual session commands.")
 (defvar-local harness-ui-tasks--loading t)
 (defvar-local harness-ui-tasks--error nil "Last failure, shown above the compose box.")
 (defvar-local harness-ui-tasks--show-archived nil)
@@ -255,6 +259,9 @@
                   '(("Unarchive" harness-ui-tasks-archive "x") ("Open" harness-ui-tasks-open "RET"))
                 '(("Archive" harness-ui-tasks-archive "x") ("Reply" harness-ui-tasks-reply "m")
                   ("Open" harness-ui-tasks-open "RET")))))
+     (when (plist-get task :session)
+       '(("Model…" harness-set-model "C-c a m") ("Permission mode…" harness-set-permission-mode "C-c a p")
+         ("Thinking…" harness-set-thinking "C-c a T") ("Non-interactive" harness-toggle-non-interactive "C-c a i")))
      '(("Delete…" harness-ui-tasks-delete "D")))))
 
 (defun harness-ui-tasks--button (label action help)
@@ -289,20 +296,34 @@ A question's options come first, so it can be answered in one click."
 
 ;;;; Rendering
 
+(defun harness-ui-tasks--width ()
+  "Width the board is drawn for: its widest window, or 100 when hidden."
+  (let ((windows (get-buffer-window-list nil nil t)))
+    (if windows (apply #'max (mapcar #'window-body-width windows)) 100)))
+
+(defun harness-ui-tasks--fit (string room)
+  "STRING shortened to ROOM columns (at least 12), keeping its properties."
+  (let ((room (max 12 room)))
+    (if (<= (string-width string) room)
+        string
+      (concat (truncate-string-to-width string (1- room)) "…"))))
+
 (defun harness-ui-tasks--insert-card (task column position)
   (let* ((start (point))
          (session (harness-ui-tasks--session task))
+         (width (harness-ui-tasks--width))
          (meta (harness-ui-tasks--meta task column session))
-         (detail (harness-ui-tasks--detail task column session position))
-         (buttons (harness-ui-tasks--card-buttons task)))
+         (buttons (harness-ui-tasks--card-buttons task))
+         (detail (harness-ui-tasks--fit (or (harness-ui-tasks--detail task column session position) "")
+                                        (- width (string-width buttons) 7))))
     (insert "  " (harness-ui-tasks--icon task column session) " "
-            (propertize (harness-ui-tasks--title task)
+            (propertize (harness-ui-tasks--fit (harness-ui-tasks--title task) (- width (string-width meta) 7))
                         'face (if (eq column 'done) 'default 'harness-task-title-face)
                         'mouse-face 'highlight
                         'help-echo "mouse-1: open the session · mouse-3: actions")
             (propertize " " 'display `(space :align-to (- right ,(1+ (string-width meta)))))
             meta "\n"
-            "    " (or detail "")
+            "    " detail
             (propertize " " 'display `(space :align-to (- right ,(1+ (string-width buttons)))))
             buttons "\n")
     (put-text-property start (point) 'harness-task-id (plist-get task :id))))
@@ -419,17 +440,53 @@ Point and every window showing the board stay on the same task."
                              (or (plist-get (plist-get (harness-ui-tasks--pending (harness-ui-tasks--find id)) :payload)
                                             :question)
                                  "the question")))
-    (_ (concat "New task"
-               (let ((s harness-ui-tasks--settings))
-                 (if s (propertize
-                        (format "   %sruns %s%s · %s at a time"
-                                (if (harness-json-true-p (plist-get s :worktrees))
-                                    "own worktree, merged when done · " "")
-                                (or (plist-get s :permission-mode) "in the default mode")
-                                (if (harness-json-true-p (plist-get s :non-interactive)) ", non-interactive" "")
-                                (or (plist-get s :max-running) "any number"))
-                        'face 'harness-dim-face)
-                   ""))))))
+    (_ "New task")))
+
+(defun harness-ui-tasks--setting-button (label command help)
+  "A button LABEL running the session setting COMMAND on the new-task settings."
+  (propertize (harness-ui-tasks--button label (lambda () (call-interactively command)) help)
+              'face 'harness-dim-face))
+
+(defun harness-ui-tasks--new-settings-line ()
+  "The new-task settings, each a button changing it, and how tasks run."
+  (let ((new harness-ui-tasks--new)
+        (s harness-ui-tasks--settings))
+    (if (null s)
+        ""
+      (concat
+       " "
+       (mapconcat
+        #'identity
+        (list (harness-ui-tasks--setting-button
+               (if (plist-get new :model) (harness-ui-model-label (plist-get new :model)) "default model")
+               #'harness-set-model "Model of new tasks (C-c a m)")
+              (harness-ui-tasks--setting-button
+               (format "%s" (or (plist-get new :permission-mode) "default mode"))
+               #'harness-set-permission-mode "Permission mode of new tasks (C-c a p)")
+              (harness-ui-tasks--setting-button
+               (format "thinking %s" (or (plist-get new :thinking) "default"))
+               #'harness-set-thinking "Thinking level of new tasks (C-c a T)")
+              (harness-ui-tasks--setting-button
+               (if (harness-json-true-p (plist-get new :non-interactive)) "non-interactive" "interactive")
+               #'harness-toggle-non-interactive "Toggle non-interactive for new tasks (C-c a i)"))
+        (propertize " · " 'face 'harness-dim-face))
+       (propertize (format "   %s%s at a time"
+                           (if (harness-json-true-p (plist-get s :worktrees)) "own worktree, merged when done · " "")
+                           (or (plist-get s :max-running) "any number"))
+                   'face 'harness-dim-face)))))
+
+(defun harness-ui-tasks--set-new (key value)
+  "Set the new-task setting KEY to VALUE and show it."
+  (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
+  (harness-ui-tasks--render-tail))
+
+(defun harness-ui-tasks--setting-target ()
+  "Where the session setting commands apply on the board.
+The session of the started task at point, else the new-task settings."
+  (let ((task (and (not (harness-compose-in-p)) (harness-ui-tasks--task t))))
+    (if (and task (plist-get task :session))
+        (plist-get task :session)
+      (cons harness-ui-tasks--new #'harness-ui-tasks--set-new))))
 
 (defun harness-ui-tasks--render-tail (&optional text)
   "Draw the error line, the compose label, the attachments and the compose box.
@@ -459,6 +516,9 @@ TEXT replaces the compose contents; without it they are kept."
           (insert "  " (harness-ui-tasks--button "[cancel]" #'harness-ui-tasks-compose-reset
                                                  "Back to a new task (C-c C-k)")))
         (insert "\n")
+        (unless harness-ui-tasks--target
+          (let ((line (harness-ui-tasks--new-settings-line)))
+            (unless (string-empty-p line) (insert line "\n"))))
         (harness-compose-insert-attachments)
         (put-text-property start (point) 'read-only t)
         (harness-compose-insert text "C-c C-c submits · RET newline · @file · /skill · C-c C-a attaches · C-c C-k resets")))
@@ -504,17 +564,15 @@ TEXT replaces the compose contents; without it they are kept."
          (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
                      'face 'harness-status-blocked-face)
        "")
-     (format "  %s %d working  %s %d pending  %s %d done"
+     (format "  %s %d  %s %d  %s %d"
              (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)
              (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts)
              (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts))
      "   "
-     (harness-ui-tasks--segment "[New task]" #'harness-ui-tasks-compose "Describe a new task (a)")
-     " "
      (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
                                 "Make an ongoing session of this project a task (I)")
      " "
-     (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Show archived]")
+     (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
                                 #'harness-ui-tasks-toggle-archived "Show or hide archived tasks (A)")
      " "
      (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board (g)")
@@ -540,6 +598,13 @@ QUIET refreshes in the background, without the loading indicator."
                        (lambda (s) (when (buffer-live-p buffer)
                                      (with-current-buffer buffer
                                        (setq harness-ui-tasks--settings s)
+                                       (unless harness-ui-tasks--new
+                                         (setq harness-ui-tasks--new
+                                               (list :model (plist-get s :model)
+                                                     :thinking (plist-get s :thinking)
+                                                     :permission-mode (plist-get s :permission-mode)
+                                                     :non-interactive (harness-json-true-p
+                                                                       (plist-get s :non-interactive)))))
                                        (when (and (harness-compose-live-p) (null harness-ui-tasks--target))
                                          (harness-ui-tasks--render-tail)))))
                        #'ignore)
@@ -581,6 +646,10 @@ anything that moves a task without one, so a board never drifts.")
 (defun harness-ui-tasks--on-window-change (window)
   "Reload the board shown in WINDOW, which may have missed events while hidden."
   (harness-ui-tasks--refresh-soon (window-buffer window)))
+
+(defun harness-ui-tasks--on-resize (window)
+  "Redraw the board in WINDOW so its cards fit the new width."
+  (harness-ui-tasks--schedule-render (window-buffer window)))
 
 (defun harness-ui-tasks--on-event (event args)
   "Follow task events on every board; reload them after related events."
@@ -674,6 +743,8 @@ anything that moves a task without one, so a board never drifts.")
   (setq-local truncate-lines t
               header-line-format '(:eval (harness-ui-tasks--header)))
   (add-hook 'window-buffer-change-functions #'harness-ui-tasks--on-window-change nil t)
+  (add-hook 'window-size-change-functions #'harness-ui-tasks--on-resize nil t)
+  (setq harness-ui-setting-target-function #'harness-ui-tasks--setting-target)
   (harness-compose-setup :project (lambda () harness-ui-tasks--dir)
                          :placeholder #'harness-ui-tasks--placeholder
                          :redraw #'harness-ui-tasks--render-tail))
@@ -840,6 +911,13 @@ By default it takes the board's own position, replacing the board."
            (with-current-buffer buffer
              (harness-ui-tasks--send target text expanded atts))))))))
 
+(defun harness-ui-tasks--new-opts ()
+  "The new-task settings as `task/submit' options (unset ones are left out)."
+  (let ((new harness-ui-tasks--new))
+    (append (cl-loop for k in '(:model :thinking :permission-mode)
+                     when (plist-get new k) append (list k (plist-get new k)))
+            (and new (list :non-interactive (if (harness-json-true-p (plist-get new :non-interactive)) t :false))))))
+
 (defun harness-ui-tasks--send (target text expanded atts)
   "Send EXPANDED (typed as TEXT) with attachments ATTS for compose TARGET."
   (let ((buffer (current-buffer)))
@@ -854,7 +932,9 @@ By default it takes the board's own position, replacing the board."
        (message "Sent to the task's session"))
       (_
        (harness-ui-call
-        "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt expanded :opts (list :attachments atts))
+        "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt expanded
+                                     :opts (append (list :attachments atts)
+                                                   (harness-ui-tasks--new-opts)))
         (lambda (task)
           (when (buffer-live-p buffer)
             (with-current-buffer buffer

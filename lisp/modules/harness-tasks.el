@@ -70,6 +70,10 @@ task keeps working while nobody watches it."
   "Model of task sessions, or nil for the configured default."
   :type '(choice (const :tag "Configured default" nil) string) :group 'harness)
 
+(defcustom harness-tasks-thinking nil
+  "Thinking level of task sessions, or nil for the configured default."
+  :type '(choice (const :tag "Configured default" nil) string) :group 'harness)
+
 (defcustom harness-tasks-worktrees t
   "When non-nil, tasks in a git project work in a worktree and merge back.
 Each task gets a branch named after `harness-tasks-branch-prefix' and is
@@ -360,12 +364,17 @@ They hold a slot so a burst of submissions never overshoots the limit.")
       (let* ((task (harness-tasks--get id))
              (mode (or (plist-get task :permission-mode) harness-tasks-permission-mode))
              (model (or (plist-get task :model) harness-tasks-model))
+             (thinking (or (plist-get task :thinking) harness-tasks-thinking))
+             (non-interactive (if (plist-member task :non-interactive)
+                                  (harness-json-true-p (plist-get task :non-interactive))
+                                harness-tasks-non-interactive))
              (session (apply #'harness-call 'session/create
                              :cwd cwd
                              (append (and worktree (list :worktree worktree))
                                      (and mode (list :permission-mode mode))
                                      (and model (list :model model))
-                                     (and harness-tasks-non-interactive (list :non-interactive t)))))
+                                     (and thinking (list :thinking thinking))
+                                     (and non-interactive (list :non-interactive t)))))
              (sid (plist-get session :id)))
         (harness-tasks--set id :session sid)
         (harness-catch (harness-call-async 'agent/prompt sid (harness-tasks--blocks task))
@@ -435,7 +444,9 @@ The merge queue lives in memory, so a restart forgets it."
 (harness-defmethod task/submit (cwd prompt &optional opts)
   "Submit PROMPT as a new task in directory CWD; return the task.
 It starts at once when a slot is free, otherwise it waits as pending.
-OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
+OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
+`:thinking' and `:non-interactive' (an explicit false turns it off);
+missing ones come from the `harness-tasks-' defaults."
   (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
   (harness-tasks--load)
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
@@ -446,7 +457,11 @@ OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
                      :model (plist-get opts :model)
                      :permission-mode (let ((m (plist-get opts :permission-mode)))
                                         (if (stringp m) (intern m) m))
+                     :thinking (plist-get opts :thinking)
                      :state 'pending :created (float-time))))
+    (when (plist-member opts :non-interactive)
+      (setq task (plist-put task :non-interactive
+                            (if (harness-json-true-p (plist-get opts :non-interactive)) t :false))))
     (harness-tasks--put task)
     (harness-tasks--schedule)
     (harness-tasks--view (gethash (plist-get task :id) harness-tasks--table))))
@@ -512,6 +527,7 @@ or blocked session is in progress; an idle one waits for the user."
         :permission-mode harness-tasks-permission-mode
         :non-interactive harness-tasks-non-interactive
         :model harness-tasks-model
+        :thinking harness-tasks-thinking
         :worktrees (and cwd (harness-tasks--git-p (harness-tasks--project cwd)) t)))
 
 (harness-defmethod task/start (id)
