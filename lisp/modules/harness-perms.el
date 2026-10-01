@@ -7,7 +7,8 @@
 ;; module installs the chain that turns the initial `ask' into a
 ;; decision:
 ;;
-;;   10 jail             every path must lie inside an allowed root
+;;   10 jail             every path must lie inside an allowed root;
+;;                       otherwise the user is asked for the directory
 ;;   20 mode             ask / accept-edits / auto / yolo, plus standing rules
 ;;   30 auto             a cheap model judges what is still undecided
 ;;   40 non-interactive  the user is away: deny and steer the agent
@@ -77,6 +78,11 @@ When nil the session's own model is used."
 (defconst harness-perms-options '(allow-once allow-session allow-always deny-once deny-always)
   "Answer options offered to the user for a permission request.")
 
+(defconst harness-perms-dir-options '(allow-once allow-session allow-always deny-once)
+  "Answer options offered when a tool call reaches outside the allowed directories.
+`allow-session' grants the directory to the session, `allow-always'
+adds it to `harness-allowed-directories'.")
+
 ;;;; Small helpers
 
 (defun harness-perms--sym (value)
@@ -138,52 +144,123 @@ parts are compared."
                    (string-prefix-p dir p)))
            (harness-path-within-p rl pl)))))
 
+(defun harness-perms--granted (session)
+  "Return the directories granted to SESSION at runtime.
+Grants live on the session record (`:allowed-dirs') so they survive a
+restart; without a session module they live in
+`harness-perms--allowed-dirs'."
+  (cl-remove-duplicates
+   (append (plist-get session :allowed-dirs)
+           (gethash (plist-get session :id) harness-perms--allowed-dirs))
+   :test #'equal :from-end t))
+
+(defun harness-perms-dirs (session)
+  "Return the directories SESSION may touch as (:dir DIR :source SOURCE).
+SOURCE is `cwd', `worktree', `config' (`harness-allowed-directories'),
+`session' (granted at runtime) or `outputs'."
+  (let* ((cwd (or (plist-get session :cwd) default-directory))
+         (host (plist-get session :host))
+         (expand (lambda (d) (harness-perms--with-host
+                              (file-name-as-directory (expand-file-name d cwd)) host)))
+         (entry (lambda (source) (lambda (d) (list :dir (funcall expand d) :source source))))
+         (entries (append (list (funcall (funcall entry 'cwd) cwd))
+                          (and (plist-get session :worktree)
+                               (list (funcall (funcall entry 'worktree) (plist-get session :worktree))))
+                          (mapcar (funcall entry 'config)
+                                  (harness-perms--config 'harness-allowed-directories session))
+                          (mapcar (funcall entry 'session) (harness-perms--granted session))
+                          (list (list :dir (file-name-as-directory
+                                            (expand-file-name "outputs" harness-state-directory))
+                                      :source 'outputs)))))
+    (cl-remove-duplicates entries :test #'equal :key (lambda (e) (plist-get e :dir)) :from-end t)))
+
 (defun harness-perms-roots (session)
   "Return the directories SESSION may touch.
 That is its cwd, its worktree, `harness-allowed-directories', the
 directories granted at runtime and the tool output directory."
-  (let* ((cwd (or (plist-get session :cwd) default-directory))
-         (host (plist-get session :host))
-         (sid (plist-get session :id))
-         (expand (lambda (d) (harness-perms--with-host
-                              (file-name-as-directory (expand-file-name d cwd)) host)))
-         (roots (delq nil
-                      (append (list (funcall expand cwd))
-                              (and (plist-get session :worktree)
-                                   (list (funcall expand (plist-get session :worktree))))
-                              (mapcar expand (harness-perms--config 'harness-allowed-directories session))
-                              (mapcar expand (gethash sid harness-perms--allowed-dirs))
-                              (list (file-name-as-directory
-                                     (expand-file-name "outputs" harness-state-directory)))))))
-    (cl-remove-duplicates roots :test #'equal :from-end t)))
+  (mapcar (lambda (e) (plist-get e :dir)) (harness-perms-dirs session)))
 
 (defun harness-perms--outside (paths roots)
   "Return the first of PATHS that is not inside any of ROOTS, or nil."
   (cl-find-if (lambda (p) (not (cl-some (lambda (r) (harness-perms--within-p r p)) roots)))
               paths))
 
+(defun harness-perms--dir-of (path)
+  "Return the directory to grant so that PATH becomes reachable."
+  ;; Never touch the file system for a remote path: that would open
+  ;; a TRAMP connection from inside the permission chain.
+  (if (and (not (file-remote-p path)) (file-directory-p path))
+      (file-name-as-directory path)
+    (or (file-name-directory path) path)))
+
 (defun harness-perms--jail (decision next request)
-  "Deny REQUEST when a path lies outside the session's roots, else pass on.
-DECISION is the current value and NEXT continues the chain."
+  "Pass REQUEST on when its paths lie inside the session's roots.
+Otherwise ask the user for access to the directory, or deny when
+nobody can answer.  DECISION is the current value and NEXT continues
+the chain.  Directories in the request's `:jail-once' were allowed
+for this call only."
   (let ((paths (plist-get request :paths)))
     (if (null paths)
         (funcall next decision)
       (let* ((session (plist-get request :session))
-             (roots (harness-perms-roots session))
+             (roots (append (harness-perms-roots session) (plist-get request :jail-once)))
              (bad (harness-perms--outside paths roots)))
-        (if (null bad)
-            (funcall next decision)
-          ;; Never touch the file system for a remote path: that would open
-          ;; a TRAMP connection from inside the permission chain.
-          (let ((dir (if (and (not (file-remote-p bad)) (file-directory-p bad))
-                         (file-name-as-directory bad)
-                       (or (file-name-directory bad) bad))))
-            (funcall next
-                     (list :behavior 'deny :final t
-                           :reason (format "%s is outside the allowed directories" bad)
-                           :hint (format "Allowed roots: %s. Work inside them, or ask the user to grant access to %s with the allow-dir command."
-                                         (mapconcat #'abbreviate-file-name roots ", ")
-                                         (abbreviate-file-name dir))))))))))
+        (cond
+         ((null bad) (funcall next decision))
+         ((and (not (harness-perms--non-interactive-p session))
+               (harness-method-exists-p 'session/pending-add))
+          (harness-perms--ask-dir decision next request bad))
+         (t
+          (funcall next
+                   (list :behavior 'deny :final t
+                         :reason (format "%s is outside the allowed directories" bad)
+                         :hint (format "Allowed roots: %s. Work inside them, or ask the user to grant access to %s with the allow-dir command."
+                                       (mapconcat #'abbreviate-file-name roots ", ")
+                                       (abbreviate-file-name (harness-perms--dir-of bad)))))))))))
+
+(defun harness-perms--ask-dir (decision next request bad)
+  "Ask the user to grant the directory holding BAD to REQUEST's session.
+DECISION and NEXT continue the chain once `permission/answer' arrives."
+  (let* ((sid (plist-get (plist-get request :session) :id))
+         (dir (harness-perms--dir-of bad))
+         (pending (list :kind 'permission
+                        :payload (list :tool (plist-get request :tool)
+                                       :input (plist-get request :input)
+                                       :kind (plist-get request :kind)
+                                       :paths (plist-get request :paths)
+                                       :call-id (plist-get request :call-id)
+                                       :dir dir
+                                       :title (format "Access %s" (abbreviate-file-name dir))
+                                       :reason (format "%s wants %s, which is outside the allowed directories"
+                                                       (plist-get request :tool) (abbreviate-file-name bad))
+                                       :options harness-perms-dir-options)))
+         (pid (harness-call 'session/pending-add sid pending)))
+    (puthash pid (list :session-id sid :request request :next next :dir dir :decision decision)
+             harness-perms--waiting)
+    (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid))))
+
+(defun harness-perms--answer-dir (session-id waiting answer)
+  "Continue the jail for WAITING of SESSION-ID after the user's ANSWER.
+Return the denial, or `continue' when the chain goes on."
+  (let ((request (plist-get waiting :request))
+        (dir (plist-get waiting :dir))
+        (next (plist-get waiting :next)))
+    (if (not (eq (plist-get answer :behavior) 'allow))
+        (let ((d (list :behavior 'deny :final t
+                       :reason (or (plist-get answer :reason)
+                                   (format "the user denied access to %s" (abbreviate-file-name dir)))
+                       :hint "Do not retry; work inside the allowed directories.")))
+          (funcall next d)
+          d)
+      (pcase (plist-get answer :scope)
+        ('session (harness-call 'permission/allow-dir session-id dir))
+        ('always (harness-call 'permission/allow-dir session-id dir 'always))
+        (_ (setq request (plist-put (copy-sequence request) :jail-once
+                                    (cons dir (plist-get request :jail-once))))))
+      ;; Check again with the fresh session: other paths may lie elsewhere.
+      (harness-perms--jail (plist-get waiting :decision) next
+                           (plist-put (copy-sequence request) :session (harness-perms--session session-id)))
+      'continue)))
 
 ;;;; Mode and standing rules
 
@@ -423,39 +500,113 @@ lets the tool call continue.  Return the final decision."
     (unless waiting
       (signal 'harness-error (list (format "no pending permission %s" pending-id))))
     (remhash pending-id harness-perms--waiting)
-    (let* ((answer (harness-perms--parse-answer answer))
-           (request (plist-get waiting :request))
-           (behavior (plist-get answer :behavior))
-           (scope (plist-get answer :scope))
-           (decision (list :behavior behavior :final t
-                           :reason (or (plist-get answer :reason)
-                                       (if (eq behavior 'allow) "allowed by the user"
-                                         "denied by the user")))))
-      (when (memq scope '(session always))
-        (harness-perms-add-rule session-id (list :tool (plist-get request :tool) :behavior behavior) scope))
-      (when (harness-method-exists-p 'session/pending-resolve)
-        (condition-case err
-            (harness-call 'session/pending-resolve session-id pending-id answer)
-          (error (harness-log 'warn "perms: pending-resolve failed: %S" err))))
-      (funcall (plist-get waiting :next) decision)
-      decision)))
+    (if (plist-get waiting :dir)
+        (let ((answer (harness-perms--parse-answer answer)))
+          (harness-perms--resolve session-id pending-id answer)
+          (harness-perms--answer-dir session-id waiting answer))
+      (harness-perms--answer-tool session-id pending-id waiting answer))))
+
+(defun harness-perms--resolve (session-id pending-id answer)
+  "Mark PENDING-ID of SESSION-ID resolved with ANSWER."
+  (when (harness-method-exists-p 'session/pending-resolve)
+    (condition-case err
+        (harness-call 'session/pending-resolve session-id pending-id answer)
+      (error (harness-log 'warn "perms: pending-resolve failed: %S" err)))))
+
+(defun harness-perms--answer-tool (session-id pending-id waiting answer)
+  "Answer the tool permission WAITING (PENDING-ID of SESSION-ID) with ANSWER.
+Record session or standing rules and let the tool call continue."
+  (let* ((answer (harness-perms--parse-answer answer))
+         (request (plist-get waiting :request))
+         (behavior (plist-get answer :behavior))
+         (scope (plist-get answer :scope))
+         (decision (list :behavior behavior :final t
+                         :reason (or (plist-get answer :reason)
+                                     (if (eq behavior 'allow) "allowed by the user"
+                                       "denied by the user")))))
+    (when (memq scope '(session always))
+      (harness-perms-add-rule session-id (list :tool (plist-get request :tool) :behavior behavior) scope))
+    (harness-perms--resolve session-id pending-id answer)
+    (funcall (plist-get waiting :next) decision)
+    decision))
 
 ;;;; Methods for UIs and the agent
 
-(harness-defmethod permission/allow-dir (session-id dir)
-  "Grant SESSION-ID access to DIR for the rest of its life.
-Return the session's effective roots."
+(defun harness-perms--expand-dir (session dir)
+  "Return DIR expanded against SESSION's cwd, as a directory name."
+  (file-name-as-directory (expand-file-name dir (plist-get session :cwd))))
+
+(defun harness-perms--set-granted (session-id dirs)
+  "Make DIRS the runtime grants of SESSION-ID.
+They are stored on the session record when there is one."
+  (if (and (harness-method-exists-p 'session/update)
+           (ignore-errors (harness-call 'session/get session-id)))
+      (progn (remhash session-id harness-perms--allowed-dirs)
+             (harness-call 'session/update session-id :allowed-dirs dirs :silent t))
+    (puthash session-id dirs harness-perms--allowed-dirs)))
+
+(defun harness-perms--global-dirs (session)
+  "Return the global `harness-allowed-directories', expanded for SESSION."
+  (mapcar (lambda (d) (harness-perms--expand-dir session d))
+          (default-value 'harness-allowed-directories)))
+
+(harness-defmethod permission/allow-dir (session-id dir &optional scope)
+  "Grant SESSION-ID access to DIR.
+With SCOPE `always' DIR is added to the global
+`harness-allowed-directories'; otherwise the grant is kept with the
+session.  Return the session's effective roots."
   (let* ((session (harness-perms--session session-id))
-         (dir (file-name-as-directory (expand-file-name dir (plist-get session :cwd)))))
-    (unless (member dir (gethash session-id harness-perms--allowed-dirs))
-      (puthash session-id (append (gethash session-id harness-perms--allowed-dirs) (list dir))
-               harness-perms--allowed-dirs))
+         (dir (harness-perms--expand-dir session dir)))
+    (if (eq (harness-perms--sym scope) 'always)
+        (unless (member dir (harness-perms--global-dirs session))
+          (harness-save-user-option 'harness-allowed-directories
+                                    (append (default-value 'harness-allowed-directories) (list dir))))
+      (let ((granted (harness-perms--granted session)))
+        (unless (member dir granted)
+          (harness-perms--set-granted session-id (append granted (list dir))))))
     (harness-emit 'permission/dir-allowed session-id dir)
-    (harness-perms-roots session)))
+    (harness-perms-roots (harness-perms--session session-id))))
+
+(harness-defmethod permission/revoke-dir (session-id dir)
+  "Withdraw DIR from SESSION-ID.
+Removes a session grant, or else the entry in the global
+`harness-allowed-directories'.  The cwd, the worktree and directories
+set in a project's .dir-locals.el cannot be revoked here.  Return the
+session's effective roots."
+  (let* ((session (harness-perms--session session-id))
+         (dir (harness-perms--expand-dir session dir))
+         (granted (harness-perms--granted session))
+         (global (default-value 'harness-allowed-directories)))
+    (cond
+     ((member dir granted)
+      (harness-perms--set-granted session-id (remove dir granted)))
+     ((member dir (harness-perms--global-dirs session))
+      (harness-save-user-option
+       'harness-allowed-directories
+       (cl-remove-if (lambda (d) (equal dir (harness-perms--expand-dir session d))) global)))
+     (t (signal 'harness-error
+                (list (format "%s is not a grant (it comes from the cwd, the worktree or .dir-locals.el)"
+                              (abbreviate-file-name dir))))))
+    (harness-emit 'permission/dir-revoked session-id dir)
+    (harness-perms-roots (harness-perms--session session-id))))
 
 (harness-defmethod permission/allowed-dirs (session-id)
   "Return every directory SESSION-ID may touch."
   (harness-perms-roots (harness-perms--session session-id)))
+
+(harness-defmethod permission/dirs (session-id)
+  "Return the directories SESSION-ID may touch as (:dir :source :revocable).
+SOURCE is as in `harness-perms-dirs'.  An entry is revocable when it
+is a session grant or comes from the global `harness-allowed-directories'."
+  (let* ((session (harness-perms--session session-id))
+         (global (harness-perms--global-dirs session)))
+    (mapcar (lambda (e)
+              (append e (list :revocable
+                              (and (or (eq (plist-get e :source) 'session)
+                                       (and (eq (plist-get e :source) 'config)
+                                            (member (plist-get e :dir) global)))
+                                   t))))
+            (harness-perms-dirs session))))
 
 (harness-defmethod permission/rules (session-id)
   "Return the effective permission rules of SESSION-ID for display.
@@ -493,6 +644,8 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
                        "(SESSION-ID PENDING) when a tool call waits for the user's answer.")
 (harness-declare-event 'permission/dir-allowed
                        "(SESSION-ID DIR) after `permission/allow-dir' widened the jail.")
+(harness-declare-event 'permission/dir-revoked
+                       "(SESSION-ID DIR) after `permission/revoke-dir' narrowed the jail.")
 
 (defun harness-perms--init ()
   "Install the `permission/decide' chain.  Safe to call again."

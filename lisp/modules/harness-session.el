@@ -28,7 +28,7 @@
 
 (cl-defstruct (harness-session (:copier nil))
   id name kind project cwd host worktree model permission-mode thinking non-interactive
-  (status 'idle) parent-id fork-node created updated
+  allowed-dirs (status 'idle) parent-id fork-node created updated
   (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :context 0 :turns 0))
   context-window budget head queue pending todos plan provider-state
   ;; runtime only
@@ -41,14 +41,15 @@
 
 (defconst harness-session--public-keys
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
-    :non-interactive :status :parent-id :fork-node :created :updated :usage
+    :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
     :context-window :budget :head :queue :pending :todos :plan :provider-state))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
 
 (defconst harness-session--settings
-  '(:name :model :permission-mode :thinking :non-interactive :budget :context-window :cwd :host :worktree)
+  '(:name :model :permission-mode :thinking :non-interactive :allowed-dirs :budget :context-window
+    :cwd :host :worktree)
   "Keys `session/update' accepts.")
 
 ;;;; Conversions
@@ -67,6 +68,7 @@
         :permission-mode (harness-session-permission-mode s)
         :thinking (harness-session-thinking s)
         :non-interactive (harness-session-non-interactive s)
+        :allowed-dirs (harness-session-allowed-dirs s)
         :status (harness-session-status s) :parent-id (harness-session-parent-id s)
         :fork-node (harness-session-fork-node s) :created (harness-session-created s)
         :updated (harness-session-updated s) :usage (harness-session-usage s)
@@ -98,6 +100,7 @@
           (harness-session-permission-mode s) (or (plist-get pl :permission-mode) 'ask)
           (harness-session-thinking s) (plist-get pl :thinking)
           (harness-session-non-interactive s) (harness-json-true-p (plist-get pl :non-interactive))
+          (harness-session-allowed-dirs s) (let ((v (plist-get pl :allowed-dirs))) (and (listp v) v))
           (harness-session-status s) 'inactive
           (harness-session-parent-id s) (plist-get pl :parent-id)
           (harness-session-fork-node s) (plist-get pl :fork-node)
@@ -213,6 +216,7 @@ HEAD defaults to the session head."
           (harness-session-thinking s) (or (plist-get plist :thinking) (harness-session--config 'harness-thinking cwd))
           (harness-session-non-interactive s) (or (plist-get plist :non-interactive)
                                                   (harness-session--config 'harness-non-interactive cwd))
+          (harness-session-allowed-dirs s) (plist-get plist :allowed-dirs)
           (harness-session-status s) 'idle
           (harness-session-parent-id s) (plist-get plist :parent-id)
           (harness-session-fork-node s) (plist-get plist :fork-node)
@@ -326,6 +330,7 @@ written to the configuration layer.  With `:silent' no hint is added."
                   (:permission-mode (setf (harness-session-permission-mode s) (if (stringp v) (intern v) v)))
                   (:thinking (setf (harness-session-thinking s) v))
                   (:non-interactive (setf (harness-session-non-interactive s) (harness-json-true-p v)))
+                  (:allowed-dirs (setf (harness-session-allowed-dirs s) (and (listp v) v)))
                   (:budget (setf (harness-session-budget s) v))
                   (:context-window (setf (harness-session-context-window s) v))
                   (:cwd (setf (harness-session-cwd s) (file-name-as-directory (expand-file-name v))))
@@ -378,6 +383,7 @@ the fork starts with the parent's transcript."
                              :permission-mode (harness-session-permission-mode parent)
                              :thinking (harness-session-thinking parent)
                              :non-interactive (harness-session-non-interactive parent)
+                             :allowed-dirs (harness-session-allowed-dirs parent)
                              :budget (harness-session-budget parent)
                              :kind 'fork
                              :parent-id id

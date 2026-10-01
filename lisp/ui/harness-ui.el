@@ -928,6 +928,7 @@ the menu gets a bottom side window of its own; elsewhere it follows
     ("m" "Model" harness-set-model)
     ("T" "Thinking" harness-set-thinking)
     ("p" "Permission mode" harness-set-permission-mode)
+    ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" "Non-interactive" harness-toggle-non-interactive)
     ("r" "Rename" harness-rename-session)]
    ["Tools"

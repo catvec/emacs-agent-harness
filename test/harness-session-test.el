@@ -86,6 +86,28 @@
           (should (= 3 (cl-count id (plist-get tree :nodes) :key (lambda (n) (plist-get n :session)) :test #'equal))))
         (should (= 1 (length (harness-call 'session/list (list :parent-id id)))))))))
 
+(ert-deftest harness-session-directory-grants-persist-and-fork ()
+  (harness-session-test-with
+    (harness-test-load-module 'tools)
+    (harness-test-load-module 'perms)
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (extra (harness-test-temp-dir)))
+      (harness-call 'permission/allow-dir id extra)
+      (should (equal (list extra) (plist-get (harness-call 'session/get id) :allowed-dirs)))
+      ;; Granting is silent: no hint lands in the transcript.
+      (should (null (harness-call 'session/nodes id)))
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (clrhash harness-perms--allowed-dirs)
+      (harness-session--load-all)
+      (should (member extra (harness-call 'permission/allowed-dirs id)))
+      (let ((child (harness-await (harness-call 'session/fork id :kind 'fork))))
+        (should (equal (list extra) (plist-get child :allowed-dirs)))
+        (harness-call 'permission/revoke-dir (plist-get child :id) extra)
+        (should-not (member extra (harness-call 'permission/allowed-dirs (plist-get child :id))))
+        ;; The parent keeps its grant.
+        (should (member extra (harness-call 'permission/allowed-dirs id)))))))
+
 (ert-deftest harness-session-queue-and-pending ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))

@@ -108,7 +108,14 @@ Local in-process connections never need it."
     (:optionId "allow-always" :name "Always allow" :kind "allow_always")
     (:optionId "deny-once" :name "Deny" :kind "reject_once")
     (:optionId "deny-always" :name "Always deny" :kind "reject_always"))
-  "Options offered with every `session/request_permission'.")
+  "Options offered with a `session/request_permission' for a tool call.")
+
+(defconst harness-acp--dir-permission-options
+  '((:optionId "allow-once" :name "Allow once" :kind "allow_once")
+    (:optionId "allow-session" :name "Allow directory for this session" :kind "allow_always")
+    (:optionId "allow-always" :name "Always allow directory" :kind "allow_always")
+    (:optionId "deny-once" :name "Deny" :kind "reject_once"))
+  "Options offered when a tool call reaches outside the allowed directories.")
 
 (defconst harness-acp--forwarded-events
   '(session/created session/deleted session/queue-changed session/pending-changed
@@ -116,7 +123,7 @@ Local in-process connections never need it."
     provider/models-updated usage/budget-warning usage/budgets-changed
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed session/forked session/head-moved
-    question/answered task/changed task/deleted
+    question/answered task/changed task/deleted permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 
@@ -771,10 +778,12 @@ during a replay the full content is sent as one chunk."
                            :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
                            :kind (harness-acp--acp-tool-kind (plist-get payload :kind))
                            :rawInput (plist-get payload :input))
-           :options harness-acp--permission-options
+           :options (if (plist-get payload :dir) harness-acp--dir-permission-options
+                      harness-acp--permission-options)
            :_harness (list :pendingId pid
                            :tool (plist-get payload :tool)
                            :paths (plist-get payload :paths)
+                           :dir (plist-get payload :dir)
                            :reason (plist-get payload :reason)))
      (lambda (result)
        (let* ((outcome (plist-get result :outcome))

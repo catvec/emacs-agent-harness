@@ -365,10 +365,22 @@ and resolves when answered).
 - `permission/answer SESSION-ID PENDING-ID ANSWER` — ANSWER
   `(:behavior allow|deny :scope once|session|always :reason)`, or an
   option id string such as "allow-session" (what ACP clients send back).
-- `permission/allow-dir SESSION-ID DIR`, `permission/allowed-dirs SESSION-ID`
+- The jail asks instead of denying when a path lies outside the roots
+  and someone can answer: a pending `permission` request whose payload
+  carries `:dir` and the options allow-once / allow-session (grant the
+  directory to the session) / allow-always (add it to
+  `harness-allowed-directories`) / deny-once.  After a grant the rest
+  of the chain still decides the call itself.  Non-interactive sessions
+  are denied with a hint as before.
+- `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
+  grants every session), `permission/revoke-dir SESSION-ID DIR`,
+  `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|config|session|outputs
+  :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
   (the full effective root list), `permission/rules SESSION-ID`
   (`(:mode :non-interactive :auto-allow :session :always :roots)`),
   `permission/pending SESSION-ID`.
+- Session directory grants are stored on the session record
+  (`:allowed-dirs`), so they survive restarts and forks inherit them.
 - Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :behavior allow|deny)`;
   session rules live in memory, always-rules in `harness-perms-rules`.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
