@@ -1329,20 +1329,54 @@ The panel answers through RESPOND."
     (add-face-text-property start (point) 'harness-chat-panel-face t)
     (harness-chat--add-keymap start (point) harness-chat-panel-map)))
 
+(defun harness-chat--question-command (n)
+  "Return a command answering the question at point with its Nth option."
+  (lambda ()
+    (interactive)
+    (let* ((pid (harness-chat--pending-at-point))
+           (r (and pid (harness-chat--pending-record pid)))
+           (option (nth n (plist-get r :options))))
+      (if (and r (equal (plist-get r :kind) "question") option)
+          (harness-chat--answer-question pid option)
+        (user-error "No such option")))))
+
+(defvar harness-chat-question-map
+  (let ((map (make-sparse-keymap)))
+    (dotimes (i 9)
+      (define-key map (kbd (number-to-string (1+ i))) (harness-chat--question-command i)))
+    map)
+  "Keys active while point is on a question panel.")
+
 (defun harness-chat--insert-question-panel (r)
-  "Insert the panel for question record R."
+  "Insert the panel for question record R.
+The question and each option get a line of their own, wrapped under
+their indentation; digit keys pick an option while point is on the panel."
   (let ((pid (plist-get r :id))
         (start (point)))
-    (insert (propertize (concat " " (harness-ui-icon 'harness-chat-icon-question) " Question  ") 'face 'harness-label-face)
-            (propertize (or (plist-get r :question) "") 'face 'bold) "\n   ")
-    (dolist (option (plist-get r :options))
-      (insert (harness-chat--button (format "[%s]" option)
-                                    (lambda () (harness-chat--answer-question pid option))
-                                    :help "Answer with this option")
-              "  "))
-    (insert (propertize "or type an answer below and press C-c C-c" 'face 'harness-dim-face) "\n")
+    (insert (propertize (concat " " (harness-ui-icon 'harness-chat-icon-question) " Question") 'face 'harness-label-face)
+            "\n"
+            (propertize (concat "   " (or (plist-get r :question) "")) 'face 'bold 'wrap-prefix "   ")
+            "\n")
+    (when-let* ((options (plist-get r :options)))
+      (insert "\n")
+      (seq-do-indexed
+       (lambda (option i)
+         (insert (propertize "   " 'wrap-prefix "       ")
+                 (if (< i 9) (harness-chat--kbd (format " %d " (1+ i))) "   ")
+                 " "
+                 (propertize (harness-chat--button option
+                                                   (lambda () (harness-chat--answer-question pid option))
+                                                   :face 'default
+                                                   :help (if (< i 9) (format "Answer with this option (%d)" (1+ i))
+                                                           "Answer with this option"))
+                             'wrap-prefix "       ")
+                 "\n"))
+       options))
+    (insert (propertize (if (plist-get r :options) "\n   or type another answer below\n" "   type your answer below\n")
+                        'face 'harness-dim-face))
     (add-text-properties start (point) (list 'harness-chat-pending pid))
-    (add-face-text-property start (point) 'harness-chat-panel-face t)))
+    (add-face-text-property start (point) 'harness-chat-panel-face t)
+    (harness-chat--add-keymap start (point) harness-chat-question-map)))
 
 (defun harness-chat--insert-queue ()
   "Insert the queued messages list."
