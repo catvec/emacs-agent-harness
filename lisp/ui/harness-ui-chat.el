@@ -1420,7 +1420,7 @@ The panel answers through RESPOND."
           (insert (propertize " This session was deleted; the transcript stays readable.\n" 'face 'harness-hint-face)))
         ;; Compose box.
         (let ((label-start (point)))
-          (insert (propertize (concat " " (harness-ui-icon 'harness-icon-send) " ")
+          (insert (propertize (concat " " (harness-ui-icon 'harness-icon-send 'harness-compose-face) " ")
                               'face '(harness-dim-face harness-compose-face)
                               'help-echo "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, C-c C-a attaches"))
           (put-text-property start (point) 'read-only t)
@@ -1457,7 +1457,8 @@ The panel answers through RESPOND."
                      (propertize (cond (harness-chat--dead "session deleted")
                                        ((harness-chat--active-question) "type an answer and press C-c C-c")
                                        (t "Message…"))
-                                 'face 'harness-dim-face 'cursor t)
+                                 ;; Overlay strings miss the compose overlay's face.
+                                 'face '(harness-dim-face harness-compose-face) 'cursor t)
                    nil))))
 
 ;;;; Bottom anchoring

@@ -149,9 +149,19 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-attach "attach" "+" "attach" "Attachment.")
 (harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
 
-(defun harness-ui-icon (name)
-  "Return the string for icon NAME (a symbol such as `harness-icon-idle')."
-  (condition-case nil (icon-string name) (error "")))
+(defun harness-ui-icon (name &optional face)
+  "Return the string for icon NAME (a symbol such as `harness-icon-idle').
+An SVG keeps the background it was rendered on, so an icon shown on a
+coloured background passes that FACE to be rendered on its background."
+  (let* ((string (condition-case nil (icon-string name) (error "")))
+         (image (and (> (length string) 0) (get-text-property 0 'display string)))
+         (background (and face (face-background face nil t))))
+    (if (and background (eq (car-safe image) 'image))
+        (let ((string (copy-sequence string)))
+          (put-text-property 0 1 'display
+                             (append image (list :background background)) string)
+          string)
+      string)))
 
 (defun harness-ui-status-icon (status)
   "Return the icon string for session STATUS (symbol or string), with face."
