@@ -59,18 +59,18 @@
   "Prefix the CLI adds to the names of tools served by the harness.")
 
 (defconst harness-provider-claude-models
-  '((:name "claude-fable-5-1" :label "Claude Fable 5.1" :context-window 200000
+  '((:name "claude-fable-5-1" :label "Claude Fable 5.1" :context-window 1000000
      :max-output 128000 :input-modalities ("text" "image")
      :thinking-levels ("low" "medium" "high" "xhigh" "max")
-     :pricing (:input 15.0 :output 75.0 :cache-read 1.5 :cache-write 18.75))
-    (:name "claude-opus-5-5" :label "Claude Opus 5.5" :context-window 200000
+     :pricing (:input 10.0 :output 50.0 :cache-read 0.25 :cache-write 12.5))
+    (:name "claude-opus-5-5" :label "Claude Opus 5.5" :context-window 1000000
      :max-output 128000 :input-modalities ("text" "image")
      :thinking-levels ("low" "medium" "high" "xhigh" "max")
-     :pricing (:input 5.0 :output 25.0 :cache-read 0.5 :cache-write 6.25))
-    (:name "claude-sonnet-5" :label "Claude Sonnet 5" :context-window 200000
+     :pricing (:input 4.0 :output 20.0 :cache-read 0.2 :cache-write 5.0))
+    (:name "claude-sonnet-5" :label "Claude Sonnet 5" :context-window 1000000
      :max-output 64000 :input-modalities ("text" "image")
      :thinking-levels ("low" "medium" "high" "xhigh" "max")
-     :pricing (:input 3.0 :output 15.0 :cache-read 0.3 :cache-write 3.75))
+     :pricing (:input 2.0 :output 10.0 :cache-read 0.2 :cache-write 2.5))
     (:name "claude-haiku-4-5-20251001" :label "Claude Haiku 4.5" :context-window 200000
      :max-output 64000 :input-modalities ("text" "image")
      :thinking-levels ("low" "medium" "high")
