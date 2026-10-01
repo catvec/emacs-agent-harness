@@ -530,21 +530,27 @@ Signal unless NOERROR when none can be found."
             (if (match-string 3 name) (concat "." (match-string 3 name)) ""))))
 
 (defun harness-ui-model-label (model-id)
-  "Return a readable \"model (provider)\" label for MODEL-ID.
+  "Return a short, readable \"model (provider)\" label for MODEL-ID.
 The model part is the catalogue's label, else a prettified slug, else
-the raw name; the provider part is the provider's label, else its
-capitalized id."
+the raw name, less a leading word the provider part already says; the
+provider part is the provider's label, else its capitalized id."
   (if (not (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id)))
       (or model-id "?")
     (let* ((pid (match-string 1 model-id))
            (name (match-string 2 model-id))
            (m (gethash model-id harness-ui--models))
-           (label (plist-get m :label)))
+           (label (plist-get m :label))
+           (provider (or (plist-get m :provider-label) (capitalize pid)))
+           (model (or (and label (not (equal label name)) label)
+                      (harness-ui--prettify-model-name name)
+                      name))
+           ;; "Claude Opus 5.5 (Claude Code)" reads as "Opus 5.5 (Claude Code)".
+           (word (car (split-string provider))))
       (format "%s (%s)"
-              (or (and label (not (equal label name)) label)
-                  (harness-ui--prettify-model-name name)
-                  name)
-              (or (plist-get m :provider-label) (capitalize pid))))))
+              (if (and word (string-prefix-p (concat word " ") model t))
+                  (substring model (1+ (length word)))
+                model)
+              provider))))
 
 (defun harness-ui-button (label action &rest props)
   "Insert a clickable LABEL running ACTION (a command or a function of the button).

@@ -96,7 +96,7 @@
       (harness-ui-usage-set-group 'model)
       (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
       (let ((text (harness-ui-usage-test-text)))
-        (should (string-match-p "Demo scripted (Demo)" text))
+        (should (string-match-p "scripted (Demo)" text))
         (should (string-match-p "other (Demo)" text)))
       (harness-ui-usage-set-group 'day)
       (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
@@ -174,13 +174,15 @@
   "Labels read \"model (provider)\", from the catalogue when it knows the model."
   (harness-ui-usage-test-with
     (clrhash harness-ui--models)
-    (should (equal "Claude Opus 5.5 (Claude)" (harness-ui-model-label "claude:claude-opus-5-5")))
-    (should (equal "Claude Haiku 4.5 (Claude)" (harness-ui-model-label "claude:claude-haiku-4-5-20251001")))
-    (should (equal "Claude Sonnet 5 (Claude)" (harness-ui-model-label "claude:claude-sonnet-5")))
+    (should (equal "Opus 5.5 (Claude)" (harness-ui-model-label "claude:claude-opus-5-5")))
+    (should (equal "Haiku 4.5 (Claude)" (harness-ui-model-label "claude:claude-haiku-4-5-20251001")))
+    (should (equal "Sonnet 5 (Claude)" (harness-ui-model-label "claude:claude-sonnet-5")))
     (should (equal "scripted (Demo)" (harness-ui-model-label "demo:scripted")))
     (should (equal "?" (harness-ui-model-label nil)))
     (puthash "openai:gpt-x" (list :id "openai:gpt-x" :label "GPT X" :provider-label "OpenAI") harness-ui--models)
-    (should (equal "GPT X (OpenAI)" (harness-ui-model-label "openai:gpt-x")))))
+    (should (equal "GPT X (OpenAI)" (harness-ui-model-label "openai:gpt-x")))
+    (puthash "claude:claude-opus-5-5" (list :label "Claude Opus 5.5" :provider-label "Claude Code") harness-ui--models)
+    (should (equal "Opus 5.5 (Claude Code)" (harness-ui-model-label "claude:claude-opus-5-5")))))
 
 (provide 'harness-ui-usage-test)
 ;;; harness-ui-usage-test.el ends here
