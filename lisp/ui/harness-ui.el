@@ -1130,6 +1130,7 @@ the menu gets a bottom side window of its own; elsewhere it follows
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
+    ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
     ("c" "Connect remote" harness-connect-remote)
     ("R" "Reload harness" harness-reload)
     ("L" "Log" harness-show-log)]])
