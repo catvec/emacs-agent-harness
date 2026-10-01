@@ -40,8 +40,17 @@
     (((background dark)) :background "#2c313c" :extend t))
   "Background of messages written by the user." :group 'harness-ui)
 
+(defface harness-user-label-face '((t :inherit (bold font-lock-keyword-face)))
+  "Sender name above the user's messages." :group 'harness-ui)
+
+(defface harness-user-bar-face '((t :inherit font-lock-keyword-face))
+  "Bar down the left edge of the user's messages (foreground only)." :group 'harness-ui)
+
 (defface harness-agent-face '((t :inherit default))
   "Face of the agent's text." :group 'harness-ui)
+
+(defface harness-agent-label-face '((t :inherit (bold font-lock-type-face)))
+  "Sender name at the start of each agent turn." :group 'harness-ui)
 
 (defface harness-tool-face
   '((((background light)) :background "#eaf3ea" :extend t)
