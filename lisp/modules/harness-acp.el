@@ -88,7 +88,7 @@ Local in-process connections never need it."
 (defconst harness-acp-extension-prefixes
   '("session/" "agent/" "provider/" "tools/list" "usage/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "naming/" "sandbox/status"
-    "harness/api" "harness/version" "question/" "project/")
+    "harness/api" "harness/version" "harness/reload" "question/" "project/")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
 (defconst harness-acp--enum-keys

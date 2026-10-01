@@ -55,6 +55,19 @@ Every file named harness-NAME.el in them is a module called NAME."
   "Directory where the harness persists sessions, usage and settings."
   :type 'directory :group 'harness)
 
+(defcustom harness-process t
+  "Non-nil runs the harness in its own Emacs process, nil in this one.
+Emacs runs Lisp on one thread, so harness work done in this Emacs --
+tools, listings, model streams -- competes with typing and redisplay.
+With this on, this Emacs loads only the UI and the harness runs in a
+child `emacs --batch' it talks to over ACP (see harness-server.el).
+nil is for tests and for debugging the modules in place."
+  :type 'boolean :group 'harness)
+
+(defconst harness--client-module-files '("lisp/modules/harness-acp.el")
+  "Module files the UI loads besides lisp/ui when `harness-process' is on.
+Only the ACP client half is used: its TCP server stays off here.")
+
 (defvar harness-started nil "Non-nil once `harness-start' has run.")
 (defvar harness-reload-hook nil "Hook run after a successful `harness-reload'.")
 (defvar harness-start-hook nil "Hook run after `harness-start'.")
@@ -73,8 +86,12 @@ Every file named harness-NAME.el in them is a module called NAME."
   (expand-file-name relative harness-directory))
 
 (defun harness--setup-load-path ()
-  (dolist (dir (cons "lisp" harness-module-directories))
+  (dolist (dir (append '("lisp" "lisp/modules" "lisp/ui") harness-module-directories))
     (add-to-list 'load-path (harness--path dir))))
+
+(defun harness--module-directories ()
+  "Directories modules load from in this Emacs."
+  (if harness-process '("lisp/ui") harness-module-directories))
 
 (defun harness--file-module-name (file)
   "Return the module name symbol for FILE (harness-NAME.el -> NAME)."
@@ -82,8 +99,9 @@ Every file named harness-NAME.el in them is a module called NAME."
 
 (defun harness--module-files ()
   "Return the enabled module files, sorted by directory then name."
-  (let (files)
-    (dolist (dir harness-module-directories)
+  (let ((files (and harness-process
+                     (reverse (mapcar #'harness--path harness--client-module-files)))))
+    (dolist (dir (harness--module-directories))
       (let ((full (harness--path dir)))
         (when (file-directory-p full)
           (dolist (f (directory-files full t "\\`harness-[a-z0-9-]+\\.el\\'"))
@@ -100,6 +118,9 @@ Every file named harness-NAME.el in them is a module called NAME."
     (harness-load-compiled file)))
 
 (defvar harness--defining-module)
+(defvar harness-acp-server-enabled)
+(defvar harness-ui-connection-address)
+(declare-function harness-ui-reload-server "harness-ui")
 
 ;;;###autoload
 (defun harness-start ()
@@ -118,6 +139,12 @@ Return non-nil when every module loaded and initialised."
           (harness--load-file f)
         (error (push (cons (harness--file-module-name f) err) failed)
                (harness-log 'error "loading %s failed: %S" f err))))
+    (when harness-process
+      ;; The harness process serves ACP; this Emacs only connects to it.
+      (setq harness-acp-server-enabled nil)
+      (when (and (boundp 'harness-ui-connection-address)
+                 (not (stringp harness-ui-connection-address)))
+        (setq harness-ui-connection-address 'process)))
     (harness-modules-init)
     (setq harness-started t)
     (run-hooks 'harness-start-hook)
@@ -145,9 +172,13 @@ Return non-nil when every module loaded and initialised."
 
 ;;;; Safe reload
 
+(defvar harness-compile-subdirectory "elc/"
+  "Subdirectory of `harness-state-directory' for compiled files.
+The harness process uses its own so it never races the UI's compiles.")
+
 (defun harness--compile-directory ()
   "Directory holding the byte-compiled files the harness loads."
-  (let ((dir (expand-file-name "elc/" harness-state-directory)))
+  (let ((dir (expand-file-name harness-compile-subdirectory harness-state-directory)))
     (unless (file-directory-p dir) (make-directory dir t))
     dir))
 
@@ -189,9 +220,20 @@ harness always runs compiled code, even while developing."
       (progn (harness--compile-file file) nil)
     (error (error-message-string err))))
 
+(defun harness--compiled-fresh-p (file)
+  "Non-nil when FILE's .elc is newer than FILE, harness.el and the core files.
+Core files define the macros every module expands, so a change there
+recompiles everything."
+  (let ((elc (harness--compiled-name file)))
+    (and (file-exists-p elc)
+         (cl-every (lambda (src) (file-newer-than-file-p elc src))
+                   (cons file (cons harness--self-file (mapcar #'harness--path harness--core-files)))))))
+
 (defun harness-load-compiled (file)
-  "Compile FILE and load the result.  Used by tests and the loader."
-  (load (harness--compile-file file) nil 'nomessage))
+  "Compile FILE unless its .elc is fresh, and load the result.
+Used by tests and the loader."
+  (load (if (harness--compiled-fresh-p file) (harness--compiled-name file) (harness--compile-file file))
+        nil 'nomessage))
 
 ;;;###autoload
 (defun harness-reload ()
@@ -219,6 +261,8 @@ the UI redraw.  When any file fails to compile nothing is loaded."
                 (harness--load-file f))
             (error (push (format "%s: %s" (file-name-nondirectory f) (error-message-string err)) errors))))
         (harness-modules-init)
+        (when (and harness-process (fboundp 'harness-ui-reload-server))
+          (harness-ui-reload-server))
         (run-hooks 'harness-reload-hook)
         (harness-emit 'harness/reloaded)
         (if errors

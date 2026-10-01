@@ -24,6 +24,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-acp)
+(require 'harness-server)
 
 (declare-function harness-reload "harness")
 
@@ -163,7 +164,9 @@
 ;;;; Connection
 
 (defvar harness-ui-connection nil "The ACP connection the UI talks through.")
-(defvar harness-ui-connection-address nil "Address of the current connection, nil when local.")
+(defvar harness-ui-connection-address nil
+  "Where the harness is: nil in this Emacs, `process' for the harness
+process `harness-start' manages (see `harness-process'), or \"host:port\".")
 
 (defvar harness-ui-update-functions nil
   "Functions called with (SESSION-ID UPDATE) for every `session/update'.
@@ -188,34 +191,74 @@ Same protocol as `harness-ui-permission-functions'.")
 (defvar harness-ui-redraw-hook nil
   "Hook run when every UI buffer should redraw (after a reload or reconnect).")
 
+(defvar harness-ui--server nil "The harness process this Emacs started, or nil.")
+(defvar harness-ui--server-address nil "(ADDRESS . TOKEN) of the running harness process.")
+(defvar harness-ui--server-stopping nil "Non-nil while the harness process is being stopped on purpose.")
+(defvar harness-ui--server-restarts nil "Start times of recent unplanned restarts.")
+(defvar harness-ui--queue nil
+  "Requests made before the harness process listened, newest first.
+Each is (METHOD PARAMS PROMISE); PROMISE is nil for notifications.")
+
 (defun harness-ui-connected-p ()
   "Non-nil when the UI has a live connection."
   (and harness-ui-connection (harness-acp-connected-p harness-ui-connection)))
 
 (defun harness-ui-connect (&optional address)
-  "Connect the UI to ADDRESS (nil for the in-process harness).
-Return the connection."
+  "Connect the UI to ADDRESS: nil for the in-process harness, `process'
+for the managed harness process, or \"host:port\".  Return the
+connection, or nil while the harness process is still starting; requests
+made meanwhile are queued and sent once it listens."
   (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
-  (setq harness-ui-connection (harness-acp-connect address)
+  (setq harness-ui-connection nil
         harness-ui-connection-address address)
+  (if (eq address 'process)
+      (if harness-ui--server-address
+          (harness-ui--open (car harness-ui--server-address) (cdr harness-ui--server-address))
+        (harness-ui--ensure-server)
+        nil)
+    (harness-ui--open address nil)))
+
+(defun harness-ui--open (address token)
+  "Open the connection to ADDRESS (nil: in-process) authenticating with TOKEN."
+  (setq harness-ui-connection (let ((harness-acp-token (or token harness-acp-token)))
+                                (harness-acp-connect address)))
   (harness-acp-set-handler harness-ui-connection #'harness-ui--dispatch)
   (harness-acp-on-close harness-ui-connection #'harness-ui--on-close)
   (harness-then (harness-acp-initialize harness-ui-connection)
                 (lambda (_) (harness-ui-refresh-sessions))
                 (lambda (e) (message "Harness: initialize failed: %s" (harness-error-message e))))
+  (harness-ui--flush-queue)
   harness-ui-connection)
 
 (defun harness-ui-connection ()
-  "Return the live connection, connecting locally if needed."
+  "Return the live connection, connecting if needed; nil while the harness
+process is starting."
   (if (harness-ui-connected-p) harness-ui-connection (harness-ui-connect harness-ui-connection-address)))
 
 (defun harness-ui--on-close ()
-  (message "Harness: connection closed%s"
-           (if harness-ui-connection-address (format " (%s)" harness-ui-connection-address) "")))
+  (unless (eq harness-ui-connection-address 'process) ; the supervisor reports that
+    (message "Harness: connection closed%s"
+             (if harness-ui-connection-address (format " (%s)" harness-ui-connection-address) ""))))
+
+(defun harness-ui--flush-queue ()
+  "Send every queued request over the open connection."
+  (let ((queue (nreverse harness-ui--queue)))
+    (setq harness-ui--queue nil)
+    (dolist (item queue)
+      (pcase-let ((`(,method ,params ,promise) item))
+        (if promise
+            (harness-then (harness-acp-request harness-ui-connection method params)
+                          (lambda (v) (harness-resolve promise v))
+                          (lambda (e) (harness-reject promise e)))
+          (harness-acp-notify harness-ui-connection method params))))))
 
 (defun harness-ui-request (method &optional params)
   "Send METHOD with PARAMS over the UI connection; return a promise."
-  (harness-acp-request (harness-ui-connection) method params))
+  (if-let* ((conn (harness-ui-connection)))
+      (harness-acp-request conn method params)
+    (let ((p (harness-make-promise)))
+      (push (list method params p) harness-ui--queue)
+      p)))
 
 (defun harness-ui-call (method params callback &optional on-error)
   "Request METHOD with PARAMS and call CALLBACK with the result.
@@ -227,7 +270,80 @@ Errors are shown in the echo area unless ON-ERROR handles them."
 
 (defun harness-ui-notify (method &optional params)
   "Send notification METHOD with PARAMS."
-  (harness-acp-notify (harness-ui-connection) method params))
+  (if-let* ((conn (harness-ui-connection)))
+      (harness-acp-notify conn method params)
+    (push (list method params nil) harness-ui--queue)))
+
+;;;; The harness process
+
+
+(defun harness-ui--ensure-server ()
+  "Start the harness process unless it runs or is starting.
+During init the start waits for `emacs-startup-hook', so settings made
+later in the init file still reach the process."
+  (cond
+   ((and harness-ui--server (process-live-p harness-ui--server)))
+   ((not after-init-time)
+    (add-hook 'emacs-startup-hook #'harness-ui--ensure-server))
+   (t
+    (remove-hook 'emacs-startup-hook #'harness-ui--ensure-server)
+    (setq harness-ui--server-address nil
+          harness-ui--server-stopping nil
+          harness-ui--server
+          (harness-server-spawn
+           :on-address (lambda (address token)
+                         (setq harness-ui--server-address (cons address token))
+                         (when (eq harness-ui-connection-address 'process)
+                           (harness-ui--open address token)
+                           (run-hooks 'harness-ui-redraw-hook)))
+           :on-exit #'harness-ui--on-server-exit)))))
+
+(defun harness-ui--on-server-exit (status)
+  "React to the harness process ending with STATUS: restart it unless stopped."
+  (setq harness-ui--server nil harness-ui--server-address nil)
+  (unless harness-ui--server-stopping
+    (let* ((now (float-time))
+           (recent (cl-remove-if (lambda (time) (< time (- now 60))) harness-ui--server-restarts)))
+      (setq harness-ui--server-restarts (cons now recent))
+      (if (>= (length recent) 5)
+          (progn
+            (harness-log 'error "harness process keeps exiting (status %s); not restarting" status)
+            (message "Harness process exited (status %s) 5 times in a minute; see M-x harness-show-log, then M-x harness-restart"
+                     status))
+        (harness-log 'warn "harness process exited (status %s); restarting" status)
+        (message "Harness process exited (status %s); restarting" status)
+        (run-at-time (expt 2 (length recent)) nil
+                     (lambda ()
+                       (when (eq harness-ui-connection-address 'process)
+                         (harness-ui--ensure-server))))))))
+
+(defun harness-ui--stop-server ()
+  "Stop the harness process cleanly."
+  (setq harness-ui--server-stopping t)
+  (when harness-ui--server (harness-server-stop harness-ui--server))
+  (setq harness-ui--server nil harness-ui--server-address nil))
+
+;;;###autoload
+(defun harness-restart ()
+  "Restart the harness process with the current configuration.
+Sessions persist; running turns are interrupted."
+  (interactive)
+  (unless (eq harness-ui-connection-address 'process)
+    (user-error "The harness does not run in its own process (see `harness-process')"))
+  (setq harness-ui--server-restarts nil)
+  (let ((old harness-ui--server))
+    (harness-ui--stop-server)
+    (if (and old (process-live-p old))
+        (set-process-sentinel old (lambda (p _e)
+                                    (unless (process-live-p p)
+                                      (harness-ui-connect 'process))))
+      (harness-ui-connect 'process))))
+
+(defun harness-ui-reload-server ()
+  "Ask the harness process to reload its modules in place."
+  (when (eq harness-ui-connection-address 'process)
+    (harness-ui-call "_harness/harness/reload" nil
+                     (lambda (_) (message "Harness process reloaded")))))
 
 (defun harness-ui--dispatch (method params respond)
   "Route an incoming METHOD with PARAMS; RESPOND is non-nil for requests."
@@ -657,6 +773,7 @@ Set by the chat module.")
   (run-hooks 'harness-ui-redraw-hook))
 
 (defun harness-ui--init ()
+  (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
   (harness-ui-connect harness-ui-connection-address)
   ;; A reload reaches the UI as the forwarded `harness/reloaded' event, for
   ;; local and remote harnesses alike, so no bus subscription is needed.
@@ -665,7 +782,8 @@ Set by the chat module.")
 (harness-define-module 'ui
   :doc "UI foundation: ACP connection, faces, positions, keymap and menu."
   :requires '(acp)
-  :init #'harness-ui--init)
+  :init #'harness-ui--init
+  :shutdown #'harness-ui--stop-server)
 
 (provide 'harness-ui)
 ;;; harness-ui.el ends here
