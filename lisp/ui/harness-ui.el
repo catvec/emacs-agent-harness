@@ -533,22 +533,23 @@ Signal unless NOERROR when none can be found."
   "Return a short, readable \"model (provider)\" label for MODEL-ID.
 The model part is the catalogue's label, else a prettified slug, else
 the raw name, less a leading word the provider part already says; the
-provider part is the provider's label, else its capitalized id."
+provider part is the first word of the provider's label, else its
+capitalized id."
   (if (not (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id)))
       (or model-id "?")
     (let* ((pid (match-string 1 model-id))
            (name (match-string 2 model-id))
            (m (gethash model-id harness-ui--models))
            (label (plist-get m :label))
-           (provider (or (plist-get m :provider-label) (capitalize pid)))
+           (provider (or (car (split-string (or (plist-get m :provider-label) "")))
+                         (capitalize pid)))
            (model (or (and label (not (equal label name)) label)
                       (harness-ui--prettify-model-name name)
-                      name))
-           ;; "Claude Opus 5.5 (Claude Code)" reads as "Opus 5.5 (Claude Code)".
-           (word (car (split-string provider))))
+                      name)))
+      ;; "Claude Opus 5.5" from "Claude Code" reads as "Opus 5.5 (Claude)".
       (format "%s (%s)"
-              (if (and word (string-prefix-p (concat word " ") model t))
-                  (substring model (1+ (length word)))
+              (if (string-prefix-p (concat provider " ") model t)
+                  (substring model (1+ (length provider)))
                 model)
               provider))))
 

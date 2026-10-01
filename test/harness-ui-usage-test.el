@@ -182,7 +182,7 @@
     (puthash "openai:gpt-x" (list :id "openai:gpt-x" :label "GPT X" :provider-label "OpenAI") harness-ui--models)
     (should (equal "GPT X (OpenAI)" (harness-ui-model-label "openai:gpt-x")))
     (puthash "claude:claude-opus-5-5" (list :label "Claude Opus 5.5" :provider-label "Claude Code") harness-ui--models)
-    (should (equal "Opus 5.5 (Claude Code)" (harness-ui-model-label "claude:claude-opus-5-5")))))
+    (should (equal "Opus 5.5 (Claude)" (harness-ui-model-label "claude:claude-opus-5-5")))))
 
 (provide 'harness-ui-usage-test)
 ;;; harness-ui-usage-test.el ends here
