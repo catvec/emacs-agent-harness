@@ -645,6 +645,28 @@
     (should (get-text-property 0 'local-map seg))
     (should (eq 'mode-line-highlight (get-text-property 2 'mouse-face seg)))))
 
+(ert-deftest harness-ui-chat-menu-button-names-the-real-keys ()
+  ;; `?' types into the compose box, so the [menu] tooltip tells the menu's
+  ;; keys, and they follow a prefix moved off the default C-c a.
+  (harness-ui-chat-test-with
+    (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+          (w (selected-window)))
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (goto-char harness-compose-end)
+        (should (eq 'self-insert-command (key-binding "?")))
+        (let* ((header (harness-chat--header))
+               (pos (string-search "[menu]" header))
+               (help (get-text-property pos 'help-echo header)))
+          (should (functionp help))
+          (should (equal "The harness menu (C-c a ?)" (funcall help w header pos)))
+          ;; What `harness-ui-prefix-key' set to C-c h amounts to.
+          (let ((map (make-sparse-keymap)))
+            (define-key map (kbd "C-c h") harness-ui-map)
+            (setq-local minor-mode-overriding-map-alist (list (cons 'harness-global-mode map)))
+            (should (eq 'harness-menu (key-binding (kbd "C-c h ?"))))
+            (should (equal "The harness menu (C-c h ?)" (funcall help w header pos)))))))))
+
 ;; Doom's solaire-mode bakes the buffer's base colour into every image,
 ;; which drew the icons of a tool block as dark boxes.
 (ert-deftest harness-ui-chat-icons-show-face-background ()

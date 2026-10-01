@@ -211,8 +211,11 @@
 (defun harness-ui-sessions-make-task ()
   "Make the session at point a task, shown on its project's task board."
   (interactive)
-  (harness-ui-call "_harness/task/adopt" (list :session-id (harness-ui-sessions--id))
-                   (lambda (_) (message "Added to the task board (C-c a a)"))))
+  ;; The board's keys follow `harness-ui-prefix-key'; look them up here,
+  ;; in the list buffer, not in whatever buffer is current on the reply.
+  (let ((board (substitute-command-keys "\\[harness-tasks]" t)))
+    (harness-ui-call "_harness/task/adopt" (list :session-id (harness-ui-sessions--id))
+                     (lambda (_) (message "Added to the task board (%s)" board)))))
 
 (defun harness-ui-sessions-deactivate ()
   "Mark the session at point inactive."

@@ -1790,6 +1790,7 @@ COMMAND runs with the clicked window selected."
 
 (defun harness-chat--segment (text command help &optional face)
   "Return TEXT as a clickable segment running COMMAND, with HELP and FACE.
+HELP is the `help-echo': a string, or a function computing one on hover.
 Icons in TEXT stay clickable but are not hover-highlighted: an SVG keeps
 the background it was rendered on, so it would show as a dark box."
   (let ((text (propertize text 'face face 'help-echo help 'mouse-face 'mode-line-highlight
@@ -1801,6 +1802,15 @@ the background it was rendered on, so it would show as a dark box."
           (remove-text-properties pos next '(mouse-face nil) text))
         (setq pos next)))
     text))
+
+(defun harness-chat--menu-help (window _object _pos)
+  "Return the tooltip of the [menu] button in WINDOW's header line.
+It names the keys that open the menu there, following
+`harness-ui-prefix-key' and the user's bindings: in a chat buffer `?'
+types into the compose box.  A `help-echo' function, so the keymaps
+are searched on hover, not on every redisplay of the header line."
+  (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
+    (substitute-command-keys "The harness menu (\\[harness-menu])" t)))
 
 (defun harness-chat--header ()
   "Return the header line."
@@ -1833,7 +1843,7 @@ the background it was rendered on, so it would show as a dark box."
      "  "
      (propertize (harness-format-cost (plist-get usage :cost)) 'help-echo "Session cost")
      "  "
-     (harness-chat--segment "[menu]" #'harness-menu "The harness menu (C-c a ?)" 'harness-dim-face)
+     (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face)
      (if harness-chat--unseen
          (concat "  " (harness-chat--segment "↓ new messages" #'harness-chat-scroll-to-bottom
                                              "New content below (mouse-1: jump to it)" 'harness-status-blocked-face))
@@ -1956,7 +1966,11 @@ the background it was rendered on, so it would show as a dark box."
 
 (define-derived-mode harness-chat-mode special-mode "Chat"
   "Major mode of a harness session buffer.
-The transcript is read-only; the compose box at the bottom is editable."
+The transcript is read-only; the compose box at the bottom is editable.
+Typing anywhere goes to the box, `?' included, so the harness menu is
+on \\[harness-menu] here, or the [menu] button in the header line.
+
+\\{harness-chat-mode-map}"
   (setq buffer-read-only nil)
   (setq-local truncate-lines nil
               word-wrap t
