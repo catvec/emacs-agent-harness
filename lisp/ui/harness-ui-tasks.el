@@ -8,14 +8,20 @@
 ;;
 ;;   Requires your input   blocked on a permission or question, or stopped
 ;;   In progress           working, with its current todo and progress
-;;   Pending               waiting for a slot; editable, startable
+;;   Pending               waiting for a slot, or in the backlog (refined,
+;;                         waiting for you); editable, startable
 ;;   Completed             finished; reply to reopen, archive to hide
 ;;
 ;; and a compose box at the bottom: describe a task, C-c C-c submits it
-;; and it gets a session of its own.  The same box edits a pending task
-;; (e) or replies to a task's session (m) without leaving the board, and
-;; answers a task's question (m or [Answer]); C-g leaves such a box for a
-;; new task again, the question still waiting.
+;; and it gets a session of its own.  A toggle above the box (C-c C-t)
+;; switches between Submit, which starts the task, and Refine (backlog
+;; refinement, once called grooming), which has an agent write the task
+;; up and leaves it in Pending until you start it: jot things down now,
+;; pick them up later, even after a restart.  The same box edits a
+;; pending task (e), replies to a task's session (m) -- for a backlog
+;; task that is feedback on its write-up (r) -- without leaving the
+;; board, and answers a task's question (m or [Answer]); C-g leaves such
+;; a box for a new task again, the question still waiting.
 ;; RET or a click on a task opens its session in full.
 ;;
 ;; Everything comes over ACP (`_harness/task/…' plus the session cache),
@@ -43,6 +49,11 @@
   "Seconds between refreshes of the elapsed times on visible boards."
   :type 'number :group 'harness-ui-tasks)
 
+(defcustom harness-ui-tasks-refine-by-default nil
+  "When non-nil, new boards refine tasks for the backlog, not submit them.
+Either way the toggle above the compose box switches it per board."
+  :type 'boolean :group 'harness-ui-tasks)
+
 (defface harness-task-title-face '((t :inherit bold))
   "Task titles." :group 'harness-ui-tasks)
 (defface harness-task-section-face '((t :inherit (harness-label-face) :height 1.05))
@@ -51,6 +62,8 @@
   "Why a task needs the user." :group 'harness-ui-tasks)
 (defface harness-task-done-face '((t :inherit success))
   "The completed mark." :group 'harness-ui-tasks)
+(defface harness-task-choice-face '((t :inherit bold))
+  "The chosen side of the Submit / Refine toggle." :group 'harness-ui-tasks)
 
 (define-icon harness-icon-task-pending nil
   '((symbol "◌") (text "wait"))
@@ -94,7 +107,11 @@ harness's task defaults and changed with the usual session commands.")
 (defvar-local harness-ui-tasks--folded nil "Columns whose section is folded.")
 (defvar-local harness-ui-tasks--submitting nil "Prompts sent but not yet acknowledged.")
 (defvar-local harness-ui-tasks--target nil
-  "What the compose box does: nil (new task), (edit . ID) or (reply . ID).")
+  "What the compose box does: nil for a new task, else (KIND . ID).
+KIND is edit, reply, answer, or refine: feedback on a backlog task's
+write-up.")
+(defvar-local harness-ui-tasks--refine nil
+  "Non-nil when new tasks are refined for the backlog, not submitted.")
 (defvar-local harness-ui-tasks--list-end nil "Marker: end of the board, start of the tail.")
 
 (defun harness-ui-tasks--board-p (buffer)
@@ -119,6 +136,23 @@ into the board's drawing and loading checks this first."
 
 (defun harness-ui-tasks--archived-p (task)
   (harness-json-true-p (plist-get task :archived)))
+
+(defun harness-ui-tasks--backlog-p (task)
+  "Non-nil when TASK is in the backlog: it starts only when you start it."
+  (harness-json-true-p (plist-get task :backlog)))
+
+(defun harness-ui-tasks--refining-p (task)
+  "Non-nil while an agent writes TASK up, or after its write-up stopped."
+  (equal (plist-get task :state) "refining"))
+
+(defun harness-ui-tasks--unstarted-p (task)
+  "Non-nil when TASK has not started: queued, in the backlog or being written up."
+  (member (plist-get task :state) '("pending" "refining")))
+
+(defun harness-ui-tasks--writing-p (task)
+  "Non-nil while an agent writes TASK up: refining and not stopped.
+The task record says so as soon as it changes, unlike the session cache."
+  (and (harness-ui-tasks--refining-p task) (null (plist-get task :outcome))))
 
 (defun harness-ui-tasks--started (task)
   "When TASK started, else when it was submitted, else 0."
@@ -171,7 +205,10 @@ Only the kind: the request itself is read in the session."
 
 (defun harness-ui-tasks--icon (task column session)
   (pcase column
-    ('pending (propertize (harness-ui-icon 'harness-icon-task-pending) 'face 'harness-dim-face))
+    ('pending (cond ((harness-ui-tasks--refining-p task) (harness-ui-status-icon "running"))
+                    ((harness-ui-tasks--backlog-p task)
+                     (propertize (harness-ui-icon 'harness-icon-agent) 'face 'harness-dim-face))
+                    (t (propertize (harness-ui-icon 'harness-icon-task-pending) 'face 'harness-dim-face))))
     ('done (propertize (harness-ui-icon 'harness-icon-task-done) 'face 'harness-task-done-face))
     ('needs-input (if (plist-get session :pending)
                       (harness-ui-status-icon "blocked")
@@ -190,7 +227,11 @@ Only the kind: the request itself is read in the session."
                          ("merge-failed" (format "could not merge into %s: %s" (harness-ui-tasks--base task)
                                                  (or (plist-get task :error) "?")))
                          ("adopted" "waiting for your next message")
-                         (outcome (format "stopped: %s%s" (or outcome "?")
+                         ((and "interrupted" (guard (harness-ui-tasks--refining-p task)))
+                          "a restart interrupted its write-up: retry it, or edit it by hand")
+                         (outcome (format "%s: %s%s"
+                                          (if (harness-ui-tasks--refining-p task) "write-up stopped" "stopped")
+                                          (or outcome "?")
                                           (if (plist-get task :error) (concat " — " (plist-get task :error)) "")))))
                    'face 'harness-task-attention-face))
       ((guard (and (equal (plist-get task :state) "merging") (not (equal (plist-get session :status) "running"))))
@@ -207,11 +248,7 @@ Only the kind: the request itself is read in the session."
                                      ((equal (plist-get session :status) "running") "working…")
                                      (t "starting…")))
                            'face 'harness-dim-face))
-      ('pending (propertize (format "#%d in line%s" position
-                                    (if (string-match-p "\n" (plist-get task :prompt))
-                                        (concat " · " (harness-first-line
-                                                       (cadr (split-string (plist-get task :prompt) "\n" t)) 70))
-                                      ""))
+      ('pending (propertize (harness-ui-tasks--pending-detail task position todos)
                             'face 'harness-dim-face))
       ('done (propertize (let ((took (and (plist-get task :started) (plist-get task :finished)
                                           (format "took %s" (harness-ui-tasks--elapsed
@@ -223,6 +260,41 @@ Only the kind: the request itself is read in the session."
                                             took))
                             " · "))
                          'face 'harness-dim-face)))))
+
+(defun harness-ui-tasks--body-line (task)
+  "The first line of TASK's prompt after its first, shortened; nil if none.
+For a write-up that is the start of its body, under the title, read as
+plain text: no list, heading or emphasis markers."
+  (when-let* ((line (cadr (split-string (or (plist-get task :prompt) "") "\n" t "[ \t]+")))
+              (plain (string-trim
+                      (replace-regexp-in-string
+                       "\\*\\*\\|__\\|`" ""
+                       (replace-regexp-in-string "\\`\\(?:#+\\|[-*+]\\|[0-9]+[.)]\\)[ \t]+" "" line))))
+              ((not (string-empty-p plain))))
+    (harness-first-line plain 70)))
+
+(defconst harness-ui-tasks--dot (string #xb7)
+  "The middle dot that separates the facts on a card.")
+
+(defconst harness-ui-tasks--ellipsis (string #x2026)
+  "The ellipsis of a hint or a pending state.")
+
+(defun harness-ui-tasks--quote (text)
+  "TEXT between curly double quotes, as the compose labels name a task."
+  (concat (string #x201c) text (string #x201d)))
+
+(defun harness-ui-tasks--pending-detail (task position todos)
+  "The second line of pending TASK's card: what it waits for.
+POSITION is its place in line among queued tasks; TODOS its session's."
+  (let ((body (harness-ui-tasks--body-line task))
+        (sep (concat " " harness-ui-tasks--dot " ")))
+    (cond
+     ((harness-ui-tasks--refining-p task)
+      (or (nth 2 todos) (concat "an agent is writing it up" harness-ui-tasks--ellipsis)))
+     ((harness-ui-tasks--backlog-p task)
+      (concat (if (plist-get task :refined) "refined, start it when ready" "on hold")
+              (if body (concat sep body) "")))
+     (t (format "#%d in line%s" (or position 1) (if body (concat sep body) ""))))))
 
 (defun harness-ui-tasks--base (task)
   "The branch TASK merges into."
@@ -237,7 +309,12 @@ Only the kind: the request itself is read in the session."
           (delq nil
                 (list (and todos (not (eq column 'done)) (format "%d/%d" (nth 0 todos) (nth 1 todos)))
                       (pcase column
-                        ('pending (format "queued %s" (harness-relative-time (plist-get task :created))))
+                        ('pending (cond ((harness-ui-tasks--refining-p task) nil)
+                                        ((plist-get task :refined)
+                                         (format "refined %s" (harness-relative-time (plist-get task :refined))))
+                                        ((harness-ui-tasks--backlog-p task)
+                                         (format "added %s" (harness-relative-time (plist-get task :created))))
+                                        (t (format "queued %s" (harness-relative-time (plist-get task :created))))))
                         ('done (and (plist-get task :finished)
                                     (format "done %s" (harness-relative-time (plist-get task :finished)))))
                         (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))
@@ -257,14 +334,27 @@ Only the kind: the request itself is read in the session."
   (let ((column (harness-ui-tasks--column task)))
     (append
      (pcase column
-       ('pending '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
-                   ("Drop" harness-ui-tasks-cancel)))
+       ('pending
+        (cond
+         ((harness-ui-tasks--refining-p task)
+          '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
+            ("Stop" harness-ui-tasks-cancel)))
+         ((plist-get task :session)
+          '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
+            ("Open" harness-ui-tasks-open) ("Refine" harness-ui-tasks-refine)
+            ("Drop" harness-ui-tasks-cancel)))
+         (t '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
+              ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel)))))
        ('needs-input
         (pcase (plist-get (harness-ui-tasks--pending task) :kind)
           ("permission" '(("Allow" harness-ui-tasks-allow) ("Deny" harness-ui-tasks-deny)
                           ("Open" harness-ui-tasks-open) ("Stop" harness-ui-tasks-cancel)))
           ("question" '(("Answer" harness-ui-tasks-reply) ("Open" harness-ui-tasks-open)
                         ("Stop" harness-ui-tasks-cancel)))
+          ((guard (harness-ui-tasks--refining-p task))
+           '(("Retry" harness-ui-tasks-refine) ("Edit" harness-ui-tasks-edit)
+             ("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
+             ("Drop" harness-ui-tasks-cancel)))
           (_ (if (equal (plist-get task :outcome) "merge-failed")
                  '(("Retry merge" harness-ui-tasks-merge) ("Reply" harness-ui-tasks-reply)
                    ("Open" harness-ui-tasks-open) ("Mark done" harness-ui-tasks-complete))
@@ -276,7 +366,9 @@ Only the kind: the request itself is read in the session."
                   '(("Unarchive" harness-ui-tasks-archive) ("Open" harness-ui-tasks-open))
                 '(("Archive" harness-ui-tasks-archive) ("Reply" harness-ui-tasks-reply)
                   ("Open" harness-ui-tasks-open)))))
-     (when (plist-get task :session)
+     ;; Before it starts a task runs with the settings it was submitted
+     ;; with, not its write-up session's, so those are not offered.
+     (when (and (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
        '(("Model…" harness-set-model) ("Permission mode…" harness-set-permission-mode)
          ("Thinking…" harness-set-thinking) ("Non-interactive" harness-toggle-non-interactive)))
      '(("Delete…" harness-ui-tasks-delete)))))
@@ -363,8 +455,12 @@ Only the kind: the request itself is read in the session."
                                 ('pending "    no tasks waiting\n")
                                 (_ "    none yet\n"))
                               'face 'harness-dim-face))
-        (cl-loop for task in tasks for i from 1
-                 do (harness-ui-tasks--insert-card task column i))))
+        ;; Only queued tasks have a place in line; the backlog waits for you.
+        (let ((queued 0))
+          (dolist (task tasks)
+            (harness-ui-tasks--insert-card
+             task column (and (eq column 'pending) (not (harness-ui-tasks--backlog-p task))
+                              (cl-incf queued)))))))
     (insert "\n")))
 
 (defun harness-ui-tasks--insert-board ()
@@ -447,6 +543,9 @@ Point and every window showing the board stay on the same task."
                              (or (plist-get (plist-get (harness-ui-tasks--pending (harness-ui-tasks--find id)) :payload)
                                             :question)
                                  "the question")))
+    (`(refine . ,id) (concat "Refine "
+                             (harness-ui-tasks--quote
+                              (let ((task (harness-ui-tasks--find id))) (if task (harness-ui-tasks--title task) id)))))
     (_ "New task")))
 
 (defun harness-ui-tasks--setting-button (label command help)
@@ -477,10 +576,12 @@ Point and every window showing the board stay on the same task."
                (if (harness-json-true-p (plist-get new :non-interactive)) "non-interactive" "interactive")
                #'harness-toggle-non-interactive "Non-interactive mode of new tasks"))
         (propertize " · " 'face 'harness-dim-face))
-       (let ((notes (delq nil (list (and (harness-json-true-p (plist-get s :worktrees))
-                                         "own worktree, merged when done")
-                                    (and (plist-get s :max-running)
-                                         (format "%s at a time" (plist-get s :max-running)))))))
+       (let ((notes (if harness-ui-tasks--refine
+                        (list "an agent writes it up; you start it")
+                      (delq nil (list (and (harness-json-true-p (plist-get s :worktrees))
+                                           "own worktree, merged when done")
+                                      (and (plist-get s :max-running)
+                                           (format "%s at a time" (plist-get s :max-running))))))))
          (if notes
              (propertize (concat "   " (string-join notes " · ")) 'face 'harness-dim-face)
            ""))))))
@@ -492,11 +593,46 @@ Point and every window showing the board stay on the same task."
 
 (defun harness-ui-tasks--setting-target ()
   "Where the session setting commands apply on the board.
-The session of the started task at point, else the new-task settings."
+The session of the started task at point, else the new-task settings.
+A backlog task's session only writes it up, with settings of its own,
+so it counts as not started."
   (let ((task (and (not (harness-compose-in-p)) (harness-ui-tasks--task t))))
-    (if (and task (plist-get task :session))
+    (if (and task (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
         (plist-get task :session)
       (cons harness-ui-tasks--new #'harness-ui-tasks--set-new))))
+
+(defun harness-ui-tasks--mode-toggle ()
+  "The Submit / Refine toggle above the compose box, a button per side."
+  (let ((keys (substitute-command-keys "\\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-toggle-refine]")))
+    (cl-flet ((side (label refine help)
+                (let ((chosen (eq refine (and harness-ui-tasks--refine t))))
+                  (propertize
+                   (harness-ui-tasks--button
+                    (concat (harness-ui-icon (if chosen 'harness-icon-idle 'harness-icon-inactive)) " " label)
+                    (lambda () (harness-ui-tasks--set-refine refine))
+                    (format "%s (%s switches)" help keys))
+                   'face (if chosen 'harness-task-choice-face 'harness-dim-face)))))
+      (concat (side "Submit" nil "Submit: the task starts at once")
+              "  "
+              (side "Refine" t "Refine: an agent writes the task up, then it waits in Pending until you start it")))))
+
+(defun harness-ui-tasks--set-refine (refine)
+  "Refine new tasks from the compose box when REFINE, else submit them."
+  (setq harness-ui-tasks--refine (and refine t))
+  (harness-ui-tasks--render-tail)
+  (message (if refine
+               "Refine: an agent writes each new task up; it waits in Pending until you start it"
+             "Submit: each new task starts at once")))
+
+(defun harness-ui-tasks-toggle-refine (&optional arg)
+  "Switch the compose box between submitting new tasks and refining them.
+Submit starts a task at once.  Refine (backlog refinement, once called
+grooming) has an agent write it up first -- briefly, reading the code
+but changing nothing -- and the task then waits in Pending, across
+restarts, until you start it (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]).  With a prefix ARG, refine
+when it is positive and submit otherwise."
+  (interactive "P")
+  (harness-ui-tasks--set-refine (if arg (> (prefix-numeric-value arg) 0) (not harness-ui-tasks--refine))))
 
 (defun harness-ui-tasks--render-tail (&optional text)
   "Draw the error line, the compose label, the attachments and the compose box.
@@ -526,6 +662,8 @@ TEXT replaces the compose contents; without it they are kept."
             ;; Appended, so the dim settings note keeps its own face.
             (add-face-text-property 0 (length label) 'harness-label-face t label)
             (insert label))
+          (unless harness-ui-tasks--target
+            (insert "   " (harness-ui-tasks--mode-toggle)))
           (when harness-ui-tasks--target
             (insert "  " (harness-ui-tasks--button "[cancel]" #'harness-ui-tasks-compose-reset
                                                    (if (eq (car harness-ui-tasks--target) 'answer)
@@ -551,6 +689,9 @@ TEXT replaces the compose contents; without it they are kept."
 (defun harness-ui-tasks--placeholder ()
   "Return the hint for the empty compose box."
   (pcase harness-ui-tasks--target
+    (`(refine . ,_) (concat "What should change in the write-up" harness-ui-tasks--ellipsis))
+    ((guard (and (null harness-ui-tasks--target) harness-ui-tasks--refine))
+     (concat "Jot a task down: an agent writes it up for later" harness-ui-tasks--ellipsis))
     (`(edit . ,_) "New prompt…")
     (`(reply . ,_) "Message…")
     (`(answer . ,_) "Answer…")
@@ -731,6 +872,7 @@ anything that moves a task without one, so a board never drifts.")
   (define-key map (kbd "s") #'harness-ui-tasks-start)
   (define-key map (kbd "e") #'harness-ui-tasks-edit)
   (define-key map (kbd "m") #'harness-ui-tasks-reply)
+  (define-key map (kbd "r") #'harness-ui-tasks-refine)
   (define-key map (kbd "y") #'harness-ui-tasks-allow)
   (define-key map (kbd "n") #'harness-ui-tasks-deny)
   (define-key map (kbd "k") #'harness-ui-tasks-cancel)
@@ -755,6 +897,7 @@ anything that moves a task without one, so a board never drifts.")
   (set-keymap-parent map harness-compose-map)
   (define-key map (kbd "C-c C-c") #'harness-ui-tasks-submit)
   (define-key map (kbd "C-c C-k") #'harness-ui-tasks-compose-reset)
+  (define-key map (kbd "C-c C-t") #'harness-ui-tasks-toggle-refine)
   ;; C-g, as a remapping: completion popups (corfu, company) keep their
   ;; C-g, and with no box to leave it falls back to the global one.
   (define-key map [remap keyboard-quit] #'harness-ui-tasks-compose-quit)
@@ -806,7 +949,8 @@ argument it is read."
       (unless (derived-mode-p 'harness-ui-tasks-mode)
         (harness-ui-tasks-mode)
         (setq default-directory root
-              harness-ui-tasks--dir root)
+              harness-ui-tasks--dir root
+              harness-ui-tasks--refine harness-ui-tasks-refine-by-default)
         (harness-ui-tasks--render)
         (harness-ui-tasks--render-tail "")
         (goto-char harness-compose-end)
@@ -941,10 +1085,13 @@ That is `keyboard-quit', or what the global map remaps it to (Doom's
 
 (defun harness-ui-tasks-submit ()
   "Submit the compose box: a new task, an edited prompt, a message or an answer.
-/skill references are expanded and attachments go along, as in a chat."
+A new task starts, or with the toggle on Refine goes to the backlog
+\(see `harness-ui-tasks-toggle-refine').  /skill references are expanded
+and attachments go along, as in a chat."
   (interactive)
   (pcase-let* ((`(,text . ,atts) (harness-compose-take))
                (target harness-ui-tasks--target)
+               (refine harness-ui-tasks--refine)
                (buffer (current-buffer)))
     (when (and (eq (car target) 'answer) atts)
       (user-error "Answers cannot carry attachments"))
@@ -961,7 +1108,7 @@ That is `keyboard-quit', or what the global map remaps it to (Doom's
        (lambda (expanded)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
-             (harness-ui-tasks--send target text expanded atts))))))))
+             (harness-ui-tasks--send target text expanded atts refine))))))))
 
 (defun harness-ui-tasks--new-opts ()
   "The new-task settings as `task/submit' options (unset ones are left out)."
@@ -970,8 +1117,9 @@ That is `keyboard-quit', or what the global map remaps it to (Doom's
                      when (plist-get new k) append (list k (plist-get new k)))
             (and new (list :non-interactive (if (harness-json-true-p (plist-get new :non-interactive)) t :false))))))
 
-(defun harness-ui-tasks--send (target text expanded atts)
-  "Send EXPANDED (typed as TEXT) with attachments ATTS for compose TARGET."
+(defun harness-ui-tasks--send (target text expanded atts &optional refine)
+  "Send EXPANDED (typed as TEXT) with attachments ATTS for compose TARGET.
+A new task is refined for the backlog when REFINE is non-nil."
   (let ((buffer (current-buffer)))
     (pcase target
       (`(edit . ,id)
@@ -982,10 +1130,15 @@ That is `keyboard-quit', or what the global map remaps it to (Doom's
        (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
                                        "Sending the message")
        (message "Sent to the task's session"))
+      (`(refine . ,id)
+       (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
+                                       "Sending the feedback")
+       (message "Sent: the task is being written up again"))
       (_
        (harness-ui-call
         "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt expanded
                                      :opts (append (list :attachments atts)
+                                                   (and refine (list :refine t))
                                                    (harness-ui-tasks--new-opts)))
         (lambda (task)
           (when (buffer-live-p buffer)
@@ -1012,21 +1165,45 @@ That is `keyboard-quit', or what the global map remaps it to (Doom's
                                   "Starting the task"))
 
 (defun harness-ui-tasks-edit ()
-  "Edit the prompt of the pending task at point in the compose box."
+  "Edit the prompt of the pending task at point in the compose box.
+That is a backlog task's write-up too; one whose write-up stopped can
+be written by hand this way."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
-    (unless (equal (plist-get task :state) "pending") (user-error "Only pending tasks can be edited"))
+    (unless (harness-ui-tasks--unstarted-p task) (user-error "Only tasks that have not started can be edited"))
+    (when (harness-ui-tasks--writing-p task) (user-error "An agent is writing it up; wait for it or stop it (k)"))
     (setq harness-compose-attachments (plist-get task :attachments))
     (harness-ui-tasks--set-compose (plist-get task :prompt) (cons 'edit (plist-get task :id)))))
 
 (defun harness-ui-tasks-reply ()
-  "Write a message to the session of the task at point."
+  "Write a message to the session of the task at point.
+For a backlog task that is feedback on its write-up, which is written
+again (see `harness-ui-tasks-refine')."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (plist-get task :session) (user-error "This task has not started yet"))
     (harness-ui-tasks--set-compose
-     "" (cons (if (equal (plist-get (harness-ui-tasks--pending task) :kind) "question") 'answer 'reply)
+     "" (cons (cond ((equal (plist-get (harness-ui-tasks--pending task) :kind) "question") 'answer)
+                    ((equal (plist-get task :state) "pending") 'refine)
+                    (t 'reply))
               (plist-get task :id)))))
+
+(defun harness-ui-tasks-refine ()
+  "Have an agent write the task at point up for the backlog.
+A queued task is written up and then waits for you to start it.  For a
+backlog task the compose box takes your feedback, and the write-up is
+done again with it.  A write-up that stopped is retried."
+  (interactive)
+  (let ((task (harness-ui-tasks--task)))
+    (cond
+     ((not (harness-ui-tasks--unstarted-p task))
+      (user-error "This task has started; only tasks that have not can be refined"))
+     ((harness-ui-tasks--writing-p task) (user-error "An agent is writing it up already"))
+     ((and (equal (plist-get task :state) "pending") (plist-get task :session))
+      (harness-ui-tasks--set-compose "" (cons 'refine (plist-get task :id))))
+     (t (harness-ui-tasks--request-then "_harness/task/refine" (list :id (plist-get task :id))
+                                        "Refining the task")
+        (message "An agent is writing the task up")))))
 
 (defun harness-ui-tasks--answer (task answer)
   "Answer the question TASK's session is waiting on with ANSWER."
@@ -1060,10 +1237,13 @@ That is `keyboard-quit', or what the global map remaps it to (Doom's
   (harness-ui-tasks--permission "deny-once"))
 
 (defun harness-ui-tasks-cancel ()
-  "Stop the task at point, or drop it when it is still pending."
+  "Stop the task at point, or drop it when it is still pending.
+An agent writing a task up stops; once stopped, the task is dropped,
+and with a backlog task the session that wrote it up."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
-    (when (or (not (equal (plist-get task :state) "pending"))
+    (when (or (not (or (equal (plist-get task :state) "pending")
+                       (and (harness-ui-tasks--refining-p task) (not (harness-ui-tasks--writing-p task)))))
               (y-or-n-p (format "Drop pending task “%s”? " (harness-ui-tasks--title task))))
       (harness-ui-tasks--request-then "_harness/task/cancel" (list :id (plist-get task :id)) "Stopping the task"))))
 

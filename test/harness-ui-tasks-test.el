@@ -412,5 +412,104 @@
               (should (= 1 escapes)))
           (define-key global-map [remap keyboard-quit] old))))))
 
+;;;; Submit or Refine: the backlog
+
+(defvar harness-ui-tasks--refine)
+(defvar harness-ui-tasks--settings)
+(declare-function harness-ui-tasks-toggle-refine "harness-ui-tasks")
+(declare-function harness-ui-tasks-refine "harness-ui-tasks")
+(declare-function harness-ui-tasks-start "harness-ui-tasks")
+(declare-function harness-ui-tasks--task "harness-ui-tasks")
+(declare-function harness-ui-tasks--actions "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--tail-text (board)
+  "The compose end of BOARD (label, toggle, settings, box) as plain text."
+  (with-current-buffer board
+    (buffer-substring-no-properties harness-ui-tasks--list-end (point-max))))
+
+(defun harness-ui-tasks-test--goto-card (board text)
+  "Move point in BOARD to the card showing TEXT."
+  (with-current-buffer board
+    (goto-char (point-min))
+    (search-forward text)))
+
+(ert-deftest harness-ui-tasks-refine-toggle-fills-the-backlog ()
+  "With the toggle on Refine a new task is written up and waits in Pending for its start."
+  (harness-ui-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "Fix nested quotes in the parser\n\nHandle them in parse-args.")
+             (:type done :stop-reason end-turn))))
+      (with-current-buffer board
+        (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+        (should-not harness-ui-tasks--refine)
+        (should (string-match-p "New task +. Submit +. Refine" (harness-ui-tasks-test--tail-text board)))
+        (goto-char harness-compose-end)
+        (should (eq 'harness-ui-tasks-toggle-refine (key-binding (kbd "C-c C-t"))))
+        (harness-ui-tasks-toggle-refine)
+        (should harness-ui-tasks--refine)
+        (should (string-match-p "an agent writes it up" (harness-ui-tasks-test--tail-text board)))
+        (insert "the parser chokes on nested quotes")
+        (harness-ui-tasks-submit)
+        ;; The toggle stays on Refine for the next one.
+        (should harness-ui-tasks--refine))
+      (harness-ui-tasks-test--wait-text
+       board "Pending  1\\(.\\|\n\\)*Fix nested quotes in the parser\\(.\\|\n\\)*refined, start it when ready")
+      (should (string-match-p "In progress  0" (harness-ui-tasks-test--board-text board)))
+      (let ((task (car (harness-call 'task/list default-directory))))
+        (should (eq 'pending (plist-get task :state)))
+        (should (plist-get task :backlog))
+        (should (equal "the parser chokes on nested quotes" (plist-get task :note))))
+      ;; Its card starts it, and its session does the work.
+      (harness-ui-tasks-test--goto-card board "Fix nested quotes")
+      (with-current-buffer board
+        (should (equal '("Start now" "Edit")
+                       (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
+        (should (eq 'harness-ui-tasks-refine (key-binding (kbd "r"))))
+        (harness-ui-tasks-start))
+      (harness-ui-tasks-test--wait-text board "Completed  1")
+      ;; Back to Submit, a task starts at once again.
+      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (harness-ui-tasks-test--type-and-submit board "Straight to work")
+      (harness-ui-tasks-test--wait-text board "Completed  2"))))
+
+(ert-deftest harness-ui-tasks-refine-feedback-from-the-card ()
+  "r on a backlog task sends feedback, and the agent writes it up again."
+  (harness-ui-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "First write-up") (:type done :stop-reason end-turn))))
+      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (harness-ui-tasks-test--type-and-submit board "An idea")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*First write-up")
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Second write-up") (:type done :stop-reason end-turn))))
+        (harness-ui-tasks-test--goto-card board "First write-up")
+        (with-current-buffer board
+          (harness-ui-tasks-refine)
+          (should (eq 'refine (car harness-ui-tasks--target)))
+          (should (string-match-p "Refine .First write-up." (harness-ui-tasks-test--tail-text board)))
+          (insert "call it the second")
+          (harness-ui-tasks-submit)
+          (should-not harness-ui-tasks--target))
+        (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Second write-up")))))
+
+(ert-deftest harness-ui-tasks-refine-failure-needs-input ()
+  "A write-up that stops asks for you; written by hand, the task waits in the backlog."
+  (harness-ui-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (harness-ui-tasks-test--type-and-submit board "Shaky idea")
+      (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*write-up stopped: error")
+      (harness-ui-tasks-test--goto-card board "Shaky idea")
+      (with-current-buffer board
+        (should (equal "Retry" (caar (harness-ui-tasks--actions (harness-ui-tasks--task)))))
+        (harness-ui-tasks-edit)
+        (should (eq 'edit (car harness-ui-tasks--target)))
+        (delete-region harness-compose-start harness-compose-end)
+        (goto-char harness-compose-start)
+        (insert "Make the shaky idea solid")
+        (harness-ui-tasks-submit))
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Make the shaky idea solid\\(.\\|\n\\)*on hold"))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

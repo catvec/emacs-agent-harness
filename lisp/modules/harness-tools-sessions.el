@@ -694,19 +694,23 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
   (harness-tools-sessions--tasks-p)
   (let* ((prompt (or (plist-get input :prompt) ""))
          (cwd (or (plist-get input :cwd) (plist-get ctx :cwd)))
+         (refine (harness-json-true-p (plist-get input :refine)))
          (opts (append (and (plist-get input :model) (list :model (plist-get input :model)))
-                       (and (plist-get input :thinking) (list :thinking (plist-get input :thinking)))))
+                       (and (plist-get input :thinking) (list :thinking (plist-get input :thinking)))
+                       (and refine (list :refine t))))
          (task (harness-call 'task/submit cwd prompt opts)))
-    (harness-tool-ok (concat "Submitted.\n" (harness-tools-sessions--task-line task))
+    (harness-tool-ok (concat (if refine "Added to the backlog; an agent is writing it up.\n" "Submitted.\n")
+                             (harness-tools-sessions--task-line task))
                      :meta (list :task-id (plist-get task :id)))))
 
 (harness-define-tool "task_submit"
-  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when a slot is free. Returns the task id; follow it with task_wait or task_list."
+  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when a slot is free. With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. Returns the task id; follow it with task_wait or task_list."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "What the task should do; self-contained, the task does not see this conversation.")
                          :cwd (:type "string" :description "Project directory (default: this session's).")
                          :model (:type "string" :description "Model id (default: the task default).")
-                         :thinking (:type "string" :description "Thinking level (default: the task default)."))
+                         :thinking (:type "string" :description "Thinking level (default: the task default).")
+                         :refine (:type "boolean" :description "Write it up for the backlog instead of starting it (default false)."))
             :required ("prompt"))
   :kind 'meta
   :title (lambda (input) (format "task_submit %s" (harness-truncate-end (harness-first-line (or (plist-get input :prompt) "")) 60)))
@@ -759,7 +763,9 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
             ("needs-input" (eq column 'needs-input))
             ("active" (eq column 'active))
             ("changed" (not (equal (list column (plist-get task :state) (plist-get task :merge-status)) baseline)))
-            (_ (memq column '(done needs-input))))))))
+            ;; A backlog task that is written up waits for someone to start it.
+            (_ (or (memq column '(done needs-input))
+                   (and (eq (plist-get task :state) 'pending) (plist-get task :backlog) t))))))))
 
 (defun harness-tools-sessions--task-wait (input ctx)
   "Handler of task_wait."
@@ -800,7 +806,7 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                  ids "\n\n")))))))
 
 (harness-define-tool "task_wait"
-  :description "Wait for tasks without polling. until=settled (default) returns when each task is done or needs input; done, needs-input and active wait for that column; changed waits for any change of column, state or merge status. mode=all (default) waits for every task, any for the first. Returns each task's line and its session's last reply; on timeout it returns the same report, not an error."
+  :description "Wait for tasks without polling. until=settled (default) returns when each task is done or needs input, or is written up and waits in the backlog for someone to start it; done, needs-input and active wait for that column; changed waits for any change of column, state or merge status. mode=all (default) waits for every task, any for the first. Returns each task's line and its session's last reply; on timeout it returns the same report, not an error."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "A task id or unique prefix.")
                          :task_ids (:type "array" :items (:type "string") :description "Several tasks.")

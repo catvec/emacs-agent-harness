@@ -281,6 +281,195 @@
         (harness-tasks-test-wait-state id 'done)
         (should (eq 'done (plist-get (harness-tasks-test-task id) :column)))))))
 
+;;;; Backlog refinement: written up by an agent, started by the user
+;;
+;; Submitted with :refine, a task is written up by a read-only session
+;; and waits in pending until task/start, which hands it to that session.
+
+(declare-function harness-tasks--schedule "harness-tasks")
+(declare-function harness-tasks--recover-refinements "harness-tasks")
+
+(defconst harness-tasks-test-write-up
+  "Fix nested quotes in the parser\n\n- Handle nested quotes in `parse-args'.\n- Done when the quote tests pass.")
+
+(defun harness-tasks-test-refine (prompt &optional cwd)
+  "Submit PROMPT for the backlog; return the task id."
+  (plist-get (harness-call 'task/submit (or cwd default-directory) prompt (list :refine t)) :id))
+
+(defun harness-tasks-test-user-texts (sid)
+  "The user messages of session SID, oldest first."
+  (mapcar (lambda (n) (plist-get n :content))
+          (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes sid))))
+
+(ert-deftest harness-tasks-refine-writes-up-then-waits ()
+  "A refined task is written up by a read-only session, waits, then that session does it."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running nil)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (let* ((id (harness-tasks-test-refine "  the parser chokes on nested quotes  "))
+             (task (harness-tasks-test-task id))
+             (sid (plist-get task :session)))
+        (should (eq 'refining (plist-get task :state)))
+        (should (eq 'pending (plist-get task :column)))
+        (should (plist-get task :backlog))
+        (should (equal "the parser chokes on nested quotes" (plist-get task :note)))
+        (let ((session (harness-call 'session/get sid)))
+          ;; Asking with nobody to ask: reads only.
+          (should (eq 'ask (plist-get session :permission-mode)))
+          (should (plist-get session :non-interactive))
+          (should (equal "low" (plist-get session :thinking)))
+          (should (equal default-directory (plist-get session :cwd)))
+          (should-not (plist-get session :worktree))
+          (should (string-match-p "## Task refinement" (harness-run-filter 'agent/system-prompt "" session))))
+        (harness-tasks-test-wait-state id 'pending)
+        (setq task (harness-tasks-test-task id))
+        (should (equal harness-tasks-test-write-up (plist-get task :prompt)))
+        (should (plist-get task :refined))
+        (should (eq 'pending (plist-get task :column)))
+        ;; Free slots do not start a backlog task; only the user does.
+        (harness-tasks--schedule)
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (should (= 1 (length (harness-tasks-test-user-texts sid))))
+        (should (string-match-p "## Task refinement"
+                                (harness-run-filter 'agent/system-prompt "" (harness-call 'session/get sid))))
+        (harness-call 'task/start id)
+        (should (eq 'active (harness-tasks-test-state id)))
+        (should (equal sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-tasks-test-wait-state id 'done)
+        (let ((session (harness-call 'session/get sid)))
+          ;; The work runs with the task's settings, not the write-up's.
+          (should (eq 'auto (plist-get session :permission-mode)))
+          (should-not (equal "low" (plist-get session :thinking)))
+          (should-not (string-match-p "## Task refinement" (harness-run-filter 'agent/system-prompt "" session))))
+        ;; The start message carries the write-up and the words it came from.
+        (let ((texts (harness-tasks-test-user-texts sid)))
+          (should (= 2 (length texts)))
+          (should (equal "the parser chokes on nested quotes" (car texts)))
+          (should (string-match-p (regexp-quote harness-tasks-test-write-up) (cadr texts)))
+          (should (string-match-p "^> the parser chokes on nested quotes$" (cadr texts))))))))
+
+(ert-deftest harness-tasks-refine-failure-needs-input-then-retries ()
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+      (let ((id (harness-tasks-test-refine "a flaky idea")))
+        (harness-test-wait (lambda () (equal "boom" (plist-get (harness-tasks-test-task id) :error))) 5 "the error")
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'refining (plist-get task :state)))
+          (should (eq 'error (plist-get task :outcome)))
+          (should (eq 'needs-input (plist-get task :column)))
+          (should (equal "a flaky idea" (plist-get task :prompt))))
+        ;; A turn without a final message is no write-up either.
+        (let ((harness-provider-demo-script-override '((:type done :stop-reason end-turn))))
+          (harness-call 'task/refine id)
+          (harness-test-wait (lambda () (equal "the agent wrote no task description"
+                                               (plist-get (harness-tasks-test-task id) :error)))
+                             5 "no description"))
+        (let ((harness-provider-demo-script-override
+               '((:type text :delta "Make the flaky idea solid") (:type done :stop-reason end-turn))))
+          (harness-call 'task/refine id)
+          (harness-tasks-test-wait-state id 'pending)
+          (should (equal "Make the flaky idea solid" (plist-get (harness-tasks-test-task id) :prompt)))
+          (should-not (plist-get (harness-tasks-test-task id) :outcome)))))))
+
+(ert-deftest harness-tasks-refine-feedback-rewrites-the-task ()
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "First write-up") (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-refine "an idea")))
+        (harness-tasks-test-wait-state id 'pending)
+        (let ((harness-provider-demo-script-override
+               '((:type text :delta "Second write-up") (:type done :stop-reason end-turn))))
+          (harness-call 'task/prompt id "mention the docs too")
+          (harness-test-wait (lambda () (equal "Second write-up" (plist-get (harness-tasks-test-task id) :prompt)))
+                             5 "the new write-up"))
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (should (equal "an idea" (plist-get (harness-tasks-test-task id) :note)))
+        ;; Editing it by hand works as for any pending task.
+        (harness-call 'task/update id "Third, by hand")
+        (should (equal "Third, by hand" (plist-get (harness-tasks-test-task id) :prompt)))
+        (should (plist-get (harness-tasks-test-task id) :backlog))))))
+
+(ert-deftest harness-tasks-refine-cancel-stops-then-drops ()
+  "Cancelling stops a write-up in progress; once stopped, it drops the task and its session."
+  (harness-tasks-test-with
+    ;; A turn that never ends.
+    (let ((harness-provider-demo-script-override '((:type text :delta "Thinking about it"))))
+      (let* ((id (harness-tasks-test-refine "a slow idea"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (should-error (harness-call 'task/start id))
+        (should-error (harness-call 'task/update id "by hand"))
+        (should (harness-call 'task/cancel id))
+        (harness-test-wait (lambda () (eq 'cancelled (plist-get (harness-tasks-test-task id) :outcome)))
+                           5 "the write-up to stop")
+        (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+        (should-not (harness-call 'task/cancel id))
+        (should-not (gethash id harness-tasks--table))
+        (should-not (harness-call 'session/exists-p sid))))))
+
+(ert-deftest harness-tasks-refine-a-queued-task ()
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Queued, then written up") (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-submit "a queued idea")))
+        (should-not (plist-get (harness-tasks-test-task id) :session))
+        (harness-call 'task/refine id)
+        (harness-test-wait (lambda () (equal "Queued, then written up" (plist-get (harness-tasks-test-task id) :prompt)))
+                           5 "the write-up")
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :backlog))
+          (should (equal "a queued idea" (plist-get task :note)))
+          (should (plist-get task :session)))
+        (should-error (harness-call 'task/refine "t-nonexistent"))))))
+
+(defvar harness-tasks-refine-tool-calls)
+
+(ert-deftest harness-tasks-refine-told-to-finish-after-enough-calls ()
+  "A write-up that keeps looking around is steered, once, to write it up."
+  (harness-tasks-test-with
+    (let ((harness-tasks-refine-tool-calls 2)
+          (harness-provider-demo-script-override
+           '((:type tool-call :id "r1" :name "peek" :input (:n 1))
+             (:type tool-call :id "r2" :name "peek" :input (:n 2))
+             (:type tool-call :id "r3" :name "peek" :input (:n 3))
+             (:type text :delta "Look less next time")
+             (:type done :stop-reason end-turn))))
+      (let* ((id (harness-tasks-test-refine "a curious idea"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-tasks-test-wait-state id 'pending)
+        (should (equal "Look less next time" (plist-get (harness-tasks-test-task id) :prompt)))
+        (let ((steers (cl-remove-if-not (lambda (n) (and (eq (plist-get n :kind) 'user)
+                                                          (plist-get (plist-get n :meta) :steering)))
+                                        (harness-call 'session/nodes sid))))
+          (should (= 1 (length steers)))
+          (should (string-match-p "enough looking" (plist-get (car steers) :content))))))))
+
+(ert-deftest harness-tasks-backlog-survives-a-restart ()
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running nil)
+          (harness-provider-demo-script-override '((:type text :delta "Written up") (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-refine "for later")))
+        (harness-tasks-test-wait-state id 'pending)
+        (harness-tasks--save)
+        (clrhash harness-tasks--table)
+        (setq harness-tasks--loaded nil)
+        (let ((task (harness-tasks-test-task (plist-get (car (harness-call 'task/list)) :id))))
+          (harness-tasks--schedule)
+          (should (equal id (plist-get task :id)))
+          (should (eq 'pending (harness-tasks-test-state id)))
+          (should (plist-get task :backlog))
+          (should (equal "Written up" (plist-get task :prompt)))))
+      ;; A write-up a restart cut short waits for the user.
+      (let ((harness-provider-demo-script-override '((:type text :delta "Thinking"))))
+        (let ((id (harness-tasks-test-refine "cut short")))
+          (clrhash harness-agent--turns)
+          (harness-tasks--recover-refinements)
+          (should (eq 'interrupted (plist-get (harness-tasks-test-task id) :outcome)))
+          (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column))))))))
+
 ;;;; Naming: task sessions are titled like tickets
 
 (defvar harness-tasks-naming-prompt)
@@ -431,6 +620,38 @@ commits from call `harness-tasks-test--commit-on-call' on."
         (harness-tasks-test-wait-state id 'done)
         (should (= 2 harness-tasks-test--calls))
         (should (equal "two\n" (harness-tasks-test--main-text root)))))))
+
+(ert-deftest harness-tasks-git-refined-task-moves-into-its-worktree ()
+  "A backlog task is written up at the root; starting moves its session into a worktree."
+  (harness-tasks-test-with-git
+    (let* ((harness-provider-demo-script-override
+            '((:type text :delta "Change the shared file\n\nWrite two into shared.txt.")
+              (:type done :stop-reason end-turn)))
+           (id (harness-tasks-test-refine "shared.txt should say two"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-tasks-test-wait-state id 'pending)
+      (let ((session (harness-call 'session/get sid)))
+        (should (equal root (plist-get session :cwd)))
+        (should-not (plist-get session :worktree)))
+      (should-not (plist-get (harness-tasks-test-task id) :worktree))
+      (should (equal "one\n" (harness-tasks-test--main-text root)))
+      ;; The provider's conversation stays behind at the root.
+      (harness-call 'session/set-provider-state sid '(:cli-session-id "from-the-root"))
+      (setq harness-provider-demo-script-override
+            '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
+              (:type text :delta "Changed it.")
+              (:type done :stop-reason end-turn)))
+      (harness-call 'task/start id)
+      (harness-tasks-test-wait-state id 'done)
+      (let ((task (harness-tasks-test-task id))
+            (session (harness-call 'session/get sid)))
+        (should (equal sid (plist-get task :session)))
+        (should (string-prefix-p "task/change-the-shared-file-" (plist-get task :branch)))
+        (should (equal (plist-get task :worktree) (plist-get session :cwd)))
+        (should (equal (plist-get task :worktree) (plist-get session :worktree)))
+        (should-not (plist-get session :provider-state))
+        (should (plist-get task :merged)))
+      (should (equal "two\n" (harness-tasks-test--main-text root))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

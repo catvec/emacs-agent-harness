@@ -13,6 +13,9 @@
 ;;                 in a worktree it also writes and commits notes/ID.md
 ;;   "ask"         calls ask_user
 ;;   anything else echo the prompt back as markdown
+;;
+;; A session writing a backlog task up (the system prompt has the task
+;; refinement section) instead takes a quick look and writes it up.
 
 ;;; Code:
 
@@ -41,6 +44,8 @@
         (cwd (or (plist-get (plist-get request :session) :cwd) default-directory)))
     (cond
      (harness-provider-demo-script-override harness-provider-demo-script-override)
+     ((string-match-p "^## Task refinement" (or (plist-get request :system) ""))
+      (harness-provider-demo--write-up request cwd))
      ((string-match-p "\\btour\\b" text)
       `((:type thinking :delta "The user wants a tour. ")
         (:type thinking :delta "I will read a file, then summarise.")
@@ -94,6 +99,29 @@
       `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools` or `ask`." text))
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
+
+(defun harness-provider-demo--write-up (request cwd)
+  "Return the script that writes a backlog task up for REQUEST in CWD.
+The title comes from the first message, the note it is written from;
+a later message is feedback and lands under Also."
+  (let* ((texts (cl-loop for m in (plist-get request :messages)
+                         when (eq (plist-get m :role) 'user)
+                         append (cl-loop for b in (plist-get m :content)
+                                         when (equal (plist-get b :type) "text") collect (plist-get b :text))))
+         (note (string-trim (or (car texts) "the task")))
+         (feedback (and (cdr texts) (string-trim (car (last texts)))))
+         (title (let ((line (car (split-string note "\n" t))))
+                  (concat (upcase (substring line 0 1)) (substring line 1)))))
+    `((:type thinking :delta "A task for the backlog: a quick look, then the write-up.")
+      (:type tool-call :id "demo-r1" :name "list_dir" :input (:path ,cwd))
+      (:type text :delta ,(concat (truncate-string-to-width title 60) "\n\n"
+                                  "**What and why.** " note "\n\n"
+                                  "**Change.** The demo provider does not read code; a real agent names the files and functions here.\n\n"
+                                  "**Done when.** The behaviour above works and the test suite passes.\n\n"
+                                  "**Open questions.** None for the demo."
+                                  (if feedback (concat "\n\n**Also.** " feedback) "")))
+      (:type usage :input 700 :output 120 :cache-read 300 :cost 0.002 :context 900)
+      (:type done :stop-reason end-turn))))
 
 (defvar harness-provider-demo--continuations (make-hash-table :test 'equal)
   "Session id -> remaining script after a tool call, resumed on the next request.")
