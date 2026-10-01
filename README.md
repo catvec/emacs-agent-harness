@@ -10,7 +10,8 @@ command line, so a Claude subscription is enough.
 This is a clean-room implementation of [DESIGN.md](DESIGN.md).  The
 core only loads modules and passes messages between them; every feature
 is a module, and the UI talks to the rest over the Agent Client
-Protocol, in-process by default and over TCP to a remote Emacs.
+Protocol.  The harness runs in its own Emacs process, so nothing it
+does can freeze yours; your Emacs keeps only the UI.
 
 ## Install
 
@@ -22,17 +23,21 @@ web search.
 
 ```elisp
 ;; straight / Doom
-(package! harness :recipe (:host github :repo "Noah-Huppert/emacs-agent-harness" :branch "v3"
+(package! harness :recipe (:host sourcehut :repo "catvec/emacs-agent-harness"
                            :files ("harness.el" "lisp" "scripts")))
 
 ;; or a plain checkout
-(add-to-list 'load-path "~/src/emacs-agent-harness-v3")
+(add-to-list 'load-path "~/src/emacs-agent-harness")
 (require 'harness)
-(harness-start)          ; loads every module, starts the local ACP server
+(harness-start)          ; loads the UI and starts the harness process
 ```
 
 `harness-start` enables `harness-global-mode` (prefix `C-c a`) and the
-mode line notifier.  `M-x harness-menu` (`C-c a ?`) shows everything.
+mode line notifier, then starts the harness as `emacs --batch` in the
+background.  It gets every `harness-` variable you set; list other
+variables it needs in `harness-server-forward-variables`, or put code in
+`harness-server-init-file`.  `M-x harness-restart` restarts it with your
+current settings; its log is in `M-x harness-show-log`.  `M-x harness-menu` (`C-c a ?`) shows everything.
 
 ## Use
 
@@ -68,8 +73,9 @@ customize (global): `harness-model`, `harness-permission-mode`,
 
 ## Remote control
 
-The harness serves ACP on `127.0.0.1` (ephemeral port, see
-`harness-acp-port`, `harness-acp-allow-remote`, `harness-acp-token`).
+The harness process serves ACP on `127.0.0.1` (ephemeral port) with a
+token per start, written next to the address in the state directory
+(`acp-address`, `acp-token`; set `harness-acp-token` to choose it).
 From another Emacs, `M-x harness-connect-remote host:port` swaps the UI's
 connection; `scripts/harness-acp-stdio` bridges stdio for editors that
 spawn ACP agents.

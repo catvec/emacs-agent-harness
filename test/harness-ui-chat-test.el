@@ -133,7 +133,12 @@
         (let ((pos (harness-ui-chat-test-find buf "give me the tour")))
           (should pos)
           (should (harness-ui-chat-test-face-at (1- pos) 'harness-user-face))
-          (should (harness-ui-chat-test-find buf "you")))
+          ;; Sender names, not icons, tell the two sides apart.
+          (should (harness-ui-chat-test-face-at (- (harness-ui-chat-test-find buf "You") 1)
+                                                'harness-user-label-face))
+          (let ((agent (harness-ui-chat-test-find buf "Agent")))
+            (should (< pos agent))
+            (should (harness-ui-chat-test-face-at (1- agent) 'harness-agent-label-face))))
         ;; Thinking is collapsed under an overlay and expands.
         (let* ((think (car (harness-ui-chat-test-blocks buf "thinking")))
                (text-pos (harness-ui-chat-test-find buf "wants a tour")))
@@ -209,8 +214,11 @@
                                           :_harness (list :nodeId "n-live")))
         (let ((b (gethash "n-live" harness-chat--blocks)))
           (should (equal "Hello world" (harness-chat-block-content b)))
+          ;; Appended blocks stay outside the compose box and its background.
+          (should-not (memq harness-chat--compose-overlay (overlays-at (harness-chat-block-start b))))
           (should (= 1 (hash-table-count harness-chat--render-timers)))
-          (should (equal "Hello world"
+          ;; The first agent block of the turn opens with the sender line.
+          (should (equal "Agent\nHello world"
                          (string-trim (buffer-substring-no-properties (harness-chat-block-start b)
                                                                       (harness-chat-block-end b)))))
           ;; The final node replaces the text with the Markdown rendering.
@@ -407,7 +415,7 @@
           (harness-chat-toggle-group (harness-chat-group-id group))
           (should-not (invisible-p (harness-chat-block-start first)))
           (should (harness-chat-block-collapsed first))
-          (should (invisible-p (harness-ui-chat-test-find buf "read_file of a.el")))
+          (should (invisible-p (1- (harness-ui-chat-test-find buf "read_file of a.el"))))
           (should (harness-ui-chat-test-find buf "[collapse]"))
           (harness-chat-toggle-group (harness-chat-group-id group))
           (should (invisible-p (harness-chat-block-start first))))
@@ -501,11 +509,12 @@
 
 (ert-deftest harness-ui-chat-completion-sources ()
   (harness-ui-chat-test-with
-    (let* ((sid (harness-ui-chat-test-session))
-           (buf (harness-ui-chat-test-open sid))
-           (cwd (plist-get (harness-call 'session/get sid) :cwd)))
+    ;; Only projects are listed, so the session runs in a repository.
+    (let* ((cwd (harness-test-temp-dir))
+           (_ (let ((default-directory cwd)) (call-process "git" nil nil nil "init" "-q")))
+           (sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))
+           (buf (harness-ui-chat-test-open sid)))
       (with-temp-file (expand-file-name "notes.txt" cwd) (insert "x"))
-      (harness-call 'project/invalidate cwd)
       (with-current-buffer buf
         (setq harness-chat--files nil)
         (harness-chat--fetch-completions)
@@ -541,6 +550,14 @@
   (should (eq (lookup-key harness-chat-mode-map (kbd "C-c C-c")) #'harness-chat-send))
   (should (eq (lookup-key harness-chat-mode-map (kbd "RET")) #'harness-chat-newline))
   (should (eq (lookup-key harness-chat-mode-map (kbd "C-c C-k")) #'harness-chat-cancel)))
+
+(ert-deftest harness-ui-chat-segment-icons-not-highlighted ()
+  ;; An SVG icon keeps its own background, so the hover highlight skips it.
+  (let* ((icon (propertize " " 'display '(image :type svg :file "thinking.svg")))
+         (seg (harness-chat--segment (concat icon " max") #'ignore "help")))
+    (should-not (get-text-property 0 'mouse-face seg))
+    (should (get-text-property 0 'local-map seg))
+    (should (eq 'mode-line-highlight (get-text-property 2 'mouse-face seg)))))
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
