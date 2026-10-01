@@ -152,6 +152,20 @@
     (should-error (harness-test-await (harness-call 'worktree/list (harness-test-temp-dir)))
                   :type 'harness-error)))
 
+(ert-deftest harness-files-main-root-of-a-worktree ()
+  "A linked worktree's main root is the main checkout, without running git."
+  (harness-worktree-test-with-repo
+    (let ((path (expand-file-name "wt-main-root" base)))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "main-root" path)
+      (make-directory (expand-file-name "sub" path) t)
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-worktree-test--dir (harness-files-main-root (expand-file-name "sub" path)))))
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-worktree-test--dir (harness-files-main-root root))))
+      ;; Outside git it is the plain root.
+      (let ((plain (harness-test-temp-dir)))
+        (should (equal (file-name-as-directory plain) (harness-files-main-root plain)))))))
+
 (ert-deftest harness-worktree-root-of-and-prune ()
   (harness-worktree-test-with-repo
     (let* ((path (expand-file-name "wt-prune" base))

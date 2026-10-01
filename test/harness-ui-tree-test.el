@@ -4,6 +4,8 @@
 (require 'harness-test-helpers)
 (require 'harness-acp)
 
+(defvar harness-ui-default-position)
+
 (defmacro harness-ui-tree-test-with (&rest body)
   "Load the state layer, ACP, the UI foundation and the tree, then run BODY."
   (declare (indent 0))
@@ -100,7 +102,9 @@
            (b1 (harness-ui-tree-test-append cid "user" "branch question"))
            (n3 (harness-ui-tree-test-append sid "user" "trunk continues")))
       (should (equal n2 (plist-get child :fork-node)))
-      (harness-tree sid)
+      ;; Full width, so the labels below are not truncated to a side window.
+      (let ((harness-ui-default-position 'full))
+        (harness-tree sid))
       (should (derived-mode-p 'harness-ui-tree-mode))
       (should (equal "*harness tree: Trunk*" (buffer-name)))
       (harness-test-wait (lambda () harness-ui-tree--data) 5 "tree data")
