@@ -2,8 +2,9 @@
 
 ;;; Commentary:
 
-;; Sessions are scoped to a project.  Detection is delegated to
-;; project.el so it agrees with the rest of the user's Emacs.
+;; Sessions are scoped to a project.  Roots and file lists come from
+;; harness-files.el, shared with the UI so both agree on what a project
+;; is; see there for why listing never blocks.
 
 ;;; Code:
 
@@ -11,52 +12,33 @@
 (require 'project)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-files)
 
-(defvar harness-project--file-cache (make-hash-table :test 'equal)
-  "Root -> (TIMESTAMP . FILES) cache for `project/files'.")
-
-(defcustom harness-project-files-cache-seconds 5
-  "How long a project's file list is reused before it is recomputed."
-  :type 'number :group 'harness)
+(defvar projectile-projects-cache)
+(defvar projectile-projects-cache-time)
 
 (harness-defmethod project/root (cwd)
   "Return the project root directory for CWD, or CWD itself."
-  (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
-         (pr (ignore-errors (project-current nil cwd))))
-    (if pr
-        (file-name-as-directory (expand-file-name (project-root pr)))
-      cwd)))
+  (harness-files-project-root cwd))
 
 (harness-defmethod project/name (root)
   "Return a display name for the project at ROOT."
   (file-name-nondirectory (directory-file-name root)))
 
-(defun harness-project--files (root)
-  (let* ((root (file-name-as-directory (expand-file-name root)))
-         (cached (gethash root harness-project--file-cache)))
-    (if (and cached (< (- (float-time) (car cached)) harness-project-files-cache-seconds))
-        (cdr cached)
-      (let* ((pr (ignore-errors (project-current nil root)))
-             (files (if pr
-                        (mapcar (lambda (f) (file-relative-name f root)) (project-files pr))
-                      (mapcar (lambda (f) (file-relative-name f root))
-                              (directory-files-recursively root "" nil
-                                                           (lambda (d) (not (string-match-p "/\\.\\(git\\|hg\\)\\'" d))))))))
-        (puthash root (cons (float-time) files) harness-project--file-cache)
-        files))))
-
 (harness-defmethod project/files (root &optional query limit)
-  "Return files under ROOT relative to it, fuzzy filtered by QUERY, at most LIMIT."
-  (let ((files (harness-project--files root)))
-    (cond ((harness-string-blank-p query) (if limit (seq-take files limit) files))
-          (t (harness-fuzzy-filter query files nil limit)))))
+  "Return a promise of the files under project ROOT, relative to it.
+Fuzzy filtered by QUERY, at most LIMIT; nil when ROOT is not a project."
+  (harness-files-list-limited root query limit))
 
 (harness-defmethod project/invalidate (root)
-  "Forget the cached file list for ROOT."
-  (remhash (file-name-as-directory (expand-file-name root)) harness-project--file-cache))
+  "Forget projectile's cached file list for ROOT."
+  (let ((root (file-name-as-directory (expand-file-name root))))
+    (when (featurep 'projectile)
+      (remhash root projectile-projects-cache)
+      (remhash root projectile-projects-cache-time))))
 
 (harness-define-module 'project
-  :doc "Project detection through project.el.")
+  :doc "Project roots and non-blocking file lists (harness-files.el).")
 
 (provide 'harness-project)
 ;;; harness-project.el ends here

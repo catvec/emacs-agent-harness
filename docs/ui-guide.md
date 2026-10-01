@@ -32,7 +32,7 @@ Display
 
 - `(harness-ui-display-session ID &optional POSITION)` and `(harness-ui-display-buffer BUFFER POSITION)`; positions `right`, `left`, `bottom`, `full`, `other`; one session per position.  The chat module sets `harness-ui-open-session-function`.
 - Faces: `harness-user-face`, `harness-agent-face`, `harness-tool-face`, `harness-tool-error-face`, `harness-tool-title-face`, `harness-thinking-face`, `harness-hint-face`, `harness-summary-face`, `harness-dim-face`, `harness-label-face`, `harness-status-*-face`, `harness-context-*-face`, `harness-queue-face`, `harness-compose-face`.
-- Icons: `(harness-ui-icon 'harness-icon-running)` etc.; `(harness-ui-status-icon STATUS)`.
+- Icons: `(harness-ui-icon 'harness-icon-running)` etc.; `(harness-ui-status-icon STATUS)`.  Define new ones with `(harness-ui-define-icon NAME FILE SYMBOL TEXT DOC)`: FILE names a monochrome SVG in `icons/` drawn in `currentColor` (so it takes the surrounding face's colour), SYMBOL is the terminal fallback.  Never use emoji, and avoid codepoints with an emoji presentation (▶ ⏸ ⚙ ℹ ⚠ ▪) as symbols.
 - Helpers: `harness-ui-format-context`, `harness-ui-model-label`, `harness-ui-button`, `harness-ui-mouse-keymap`, `harness-format-tokens`, `harness-format-cost`, `harness-relative-time`, `harness-truncate-middle`.
 - Markdown: `(harness-ui-markdown-render TEXT)` → propertized string (`harness-ui-markdown.el`).
 - Keys: add commands to `harness-ui-map` (prefix `C-c a`) and entries to the `harness-menu` transient (append with `transient-append-suffix`).
@@ -40,7 +40,7 @@ Display
 ## Rules of the house
 
 - Built-in widgets only: `button.el`, `widget.el`, `tabulated-list-mode`, `transient`, `icons.el`, `svg.el`, `image.el`, header and mode lines.  No box-drawing UI except where the medium is a graph.
-- Never block: every request is asynchronous; show a lightweight loading state (`harness-dim-face` text, a header-line spinner) and replace it when the result arrives; failures show in the buffer, not just the echo area.
+- Never block: the UI runs in the user's Emacs and the harness in its own process (see "Processes" in architecture.md), so the only way to freeze the user is UI code itself.  Never call the bus (`harness-call`, `harness-method-exists-p`): the modules are not loaded here.  Project roots and file lists come from `harness-files` (`harness-files-project-root`, `harness-files-list` → promise).  Every request is asynchronous; show a lightweight loading state (`harness-dim-face` text, a header-line spinner) and replace it when the result arrives; failures show in the buffer, not just the echo area.
 - Every keyboard command has a mouse target: a button, a header-line segment or a mode-line segment with `help-echo`.
 - Redraw incrementally with markers and `inhibit-read-only`; never re-render the whole transcript on a delta.
 - Buffers must survive `harness-reload`: keep state in buffer-local variables, rebuild from `harness-ui-redraw-hook`.

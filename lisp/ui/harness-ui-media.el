@@ -72,12 +72,12 @@ The chat module sets it; when nil the path is only reported.")
 (defface harness-media-recording-face '((t :inherit (error bold)))
   "The recording indicator in the mode line." :group 'harness-ui-media)
 
-(define-icon harness-icon-play nil '((symbol "▶") (text "play")) "Play." :version "29.1")
-(define-icon harness-icon-pause nil '((symbol "⏸") (text "pause")) "Pause." :version "29.1")
-(define-icon harness-icon-stop nil '((symbol "■") (text "stop")) "Stop." :version "29.1")
-(define-icon harness-icon-volume nil '((symbol "🔊") (text "vol")) "Volume." :version "29.1")
-(define-icon harness-icon-video nil '((symbol "🎞") (text "video")) "Video." :version "29.1")
-(define-icon harness-icon-mic nil '((symbol "●") (text "REC")) "Recording." :version "29.1")
+(harness-ui-define-icon harness-icon-play "play" "►" "play" "Play.")
+(harness-ui-define-icon harness-icon-pause "pause" "‖" "pause" "Pause.")
+(harness-ui-define-icon harness-icon-stop "stop" "■" "stop" "Stop.")
+(harness-ui-define-icon harness-icon-volume "volume" "♪" "vol" "Volume.")
+(harness-ui-define-icon harness-icon-video "video" "▣" "video" "Video.")
+(harness-ui-define-icon harness-icon-mic "record" "●" "REC" "Recording.")
 
 ;;;; Common helpers
 

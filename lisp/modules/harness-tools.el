@@ -78,6 +78,20 @@
   "Return an error RESULT with MESSAGE."
   (append (list :content message :is-error t) props))
 
+(defun harness-tools-in-client (name)
+  "Return a tool handler that runs client tool NAME in the user's Emacs.
+The harness may run in its own process (see harness-server.el), so tools
+about the user's Emacs are executed there by `harness-client-tools-run',
+reached through a `_harness/client/tool' request to the UI."
+  (lambda (input _ctx)
+    (if (not (harness-method-exists-p 'client/request))
+        (harness-tool-error (format "%s needs the Emacs UI, which is not connected" name))
+      (harness-then (harness-call-async 'client/request "_harness/client/tool" (list :name name :input input))
+                    (lambda (r)
+                      (if (harness-json-true-p (plist-get r :is-error))
+                          (harness-tool-error (or (plist-get r :content) "failed"))
+                        (harness-tool-ok (or (plist-get r :content) ""))))))))
+
 (defun harness-tools--normalise-result (value)
   (cond ((and (listp value) (plist-member value :content))
          (plist-put (copy-sequence value) :is-error (and (plist-get value :is-error) t)))
@@ -215,6 +229,7 @@
 (harness-declare-event 'tools/started "(SESSION-ID CALL) before permission and execution.")
 (harness-declare-event 'tools/progress "(SESSION-ID CALL-ID TEXT) progress from a running tool.")
 (harness-declare-event 'tools/finished "(SESSION-ID CALL RESULT) after execution or denial.")
+(harness-declare-event 'tools/file-written "(PATH) after a tool wrote PATH; the UI reverts buffers visiting it.")
 (harness-declare-event 'permission/decided "(SESSION-ID REQUEST DECISION) after the permission chain.")
 
 (harness-define-module 'tools

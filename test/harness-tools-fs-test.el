@@ -11,6 +11,7 @@
   "Load the tools modules and allow everything."
   (harness-test-load-module 'tools)
   (harness-test-load-module 'tools-fs)
+  (harness-test-connect-ui-client)
   (harness-add-filter 'permission/decide #'harness-tools-fs-test--allow 10))
 
 (defun harness-tools-fs-test--call (name &rest input)
@@ -117,16 +118,18 @@
       (should-not (plist-get r :is-error))
       (should (string-search "Created sub/dir/new.txt (12 bytes, 2 lines)" (plist-get r :content)))
       (should (equal "hello\nworld\n" (harness-read-file (expand-file-name "sub/dir/new.txt" root)))))
-    ;; An unmodified buffer visiting the file is reverted.
+    ;; An unmodified buffer visiting the file is reverted by the UI, once
+    ;; the `tools/file-written' notification reaches it.
     (let ((buf (find-file-noselect (expand-file-name "sub/dir/new.txt" root))))
       (unwind-protect
           (progn
             (harness-tools-fs-test--call "write_file" :path "sub/dir/new.txt" :content "changed\n")
-            (should (equal "changed\n" (with-current-buffer buf (buffer-string))))
+            (harness-test-wait (lambda () (equal "changed\n" (with-current-buffer buf (buffer-string)))) 5 "revert")
             (should-not (buffer-modified-p buf))
             ;; A modified buffer is left alone.
             (with-current-buffer buf (goto-char (point-max)) (insert "local edit"))
             (harness-tools-fs-test--call "write_file" :path "sub/dir/new.txt" :content "again\n")
+            (sit-for 0.1)
             (should (string-search "local edit" (with-current-buffer buf (buffer-string)))))
         (with-current-buffer buf (set-buffer-modified-p nil))
         (kill-buffer buf)))

@@ -15,9 +15,38 @@ function address() {
   for (const f of candidates) { try { return fs.readFileSync(f, "utf8").trim(); } catch (_) {} }
   console.error("harness-acp-stdio: no address (set HARNESS_ACP_ADDRESS)"); process.exit(2);
 }
+function token() {
+  if (process.env.HARNESS_ACP_TOKEN) return process.env.HARNESS_ACP_TOKEN;
+  const dir = process.env.HARNESS_STATE_DIR || path.join(os.homedir(), ".emacs.d", "harness");
+  try { return fs.readFileSync(path.join(dir, "acp-token"), "utf8").trim(); } catch (_) { return null; }
+}
 const [host, port] = address().split(":");
+const secret = token();
 const sock = net.connect({ host, port: Number(port) });
-sock.on("connect", () => { process.stdin.pipe(sock); sock.pipe(process.stdout); });
+// The harness requires its token; authenticate on the editor's behalf
+// and swallow that one reply so the editor sees a plain ACP agent.
+const AUTH_ID = "harness-acp-stdio-auth";
+sock.on("connect", () => {
+  if (secret) {
+    sock.write(JSON.stringify({ jsonrpc: "2.0", id: AUTH_ID, method: "authenticate", params: { token: secret } }) + "\n");
+  }
+  process.stdin.pipe(sock);
+  let pending = "", authed = !secret;
+  sock.on("data", (chunk) => {
+    if (authed) { process.stdout.write(chunk); return; }
+    pending += chunk.toString("utf8");
+    let nl;
+    while (!authed && (nl = pending.indexOf("\n")) >= 0) {
+      const line = pending.slice(0, nl); pending = pending.slice(nl + 1);
+      let msg = null; try { msg = JSON.parse(line); } catch (_) {}
+      if (msg && msg.id === AUTH_ID) {
+        authed = true;
+        if (msg.error) { console.error("harness-acp-stdio: authentication failed: " + msg.error.message); process.exit(1); }
+      } else process.stdout.write(line + "\n");
+    }
+    if (authed && pending) { process.stdout.write(pending); pending = ""; }
+  });
+});
 sock.on("error", (e) => { console.error("harness-acp-stdio: " + e.message); process.exit(1); });
 sock.on("close", () => process.exit(0));
 process.stdin.on("end", () => sock.end());
