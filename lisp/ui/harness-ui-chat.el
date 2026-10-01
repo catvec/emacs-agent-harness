@@ -1482,11 +1482,18 @@ their indentation; digit keys pick an option while point is on the panel."
             ((< (cdr w) harness-chat--transcript-end)
              (set-window-start (car w) (cdr w) t))))))
 
+(defvar-local harness-chat-placeholder nil
+  "What the empty compose box says when nothing more pressing does.
+nil keeps the usual \"Message\" hint.  A deleted session, a question
+waiting for its answer and an inactive session have hints of their
+own.  The BTW module says what a side conversation is for with it.")
+
 (defun harness-chat--placeholder ()
   "Return the hint for the empty compose box."
   (cond (harness-chat--dead "session deleted")
         ((harness-chat--active-question) "type an answer and press C-c C-c")
         (harness-chat--inactive "Message\N{U+2026} (sending resumes this session)")
+        ((stringp harness-chat-placeholder) harness-chat-placeholder)
         (t "Message…")))
 
 ;;;; Bottom anchoring
@@ -1777,6 +1784,24 @@ crash) has every session closed, but one on screen here is open, as
 
 ;;;; Sending
 
+(defvar harness-chat-send-functions nil
+  "Functions run with the TEXT and ATTACHMENTS of each message sent.
+`harness-chat-send' and `harness-chat-queue' run them in the chat
+buffer as a message from its compose box goes out: TEXT as typed,
+before skill references are expanded, ATTACHMENTS as the box held
+them.  An answer to a question is not a message.  A function that
+signals stops neither the message nor the other functions.  The BTW
+module names a side conversation after its first message this way.")
+
+(defun harness-chat--run-send-functions (text atts)
+  "Run `harness-chat-send-functions' with TEXT and ATTS, demoting errors."
+  (run-hook-wrapped 'harness-chat-send-functions
+                    (lambda (fn text atts)
+                      (with-demoted-errors "harness-chat-send-functions: %S"
+                        (funcall fn text atts))
+                      nil)
+                    text atts))
+
 (defun harness-chat--clear-compose ()
   "Empty the compose box and the attachments."
   (setq harness-chat--editing nil)
@@ -1813,6 +1838,7 @@ While the agent is running the message steers the current turn."
                   (sid harness-ui-session-id))
         (harness-chat--drop-edited-queue-item)
         (harness-chat--clear-compose)
+        (harness-chat--run-send-functions text atts)
         (harness-compose-with-expanded-text
          text
          (lambda (expanded)
@@ -1830,6 +1856,7 @@ While the agent is running the message steers the current turn."
               (sid harness-ui-session-id))
     (harness-chat--drop-edited-queue-item)
     (harness-chat--clear-compose)
+    (harness-chat--run-send-functions text atts)
     (harness-compose-with-expanded-text
      text
      (lambda (expanded)

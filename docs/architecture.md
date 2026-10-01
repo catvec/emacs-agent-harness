@@ -869,7 +869,11 @@ signals is shown unformatted with a note, so one bad node never costs the
 buffer the rest of its transcript or its compose box.  Opening a session
 from any view never resumes it: an inactive session shows its transcript,
 a notice and the compose box, and the first message sent from it resumes
-it (through `agent/prompt`).
+it (through `agent/prompt`).  Other UI modules hook into a chat buffer
+without owning it: `harness-chat-send-functions` sees each message sent
+or queued from its box (the text as typed, and the attachments), and the
+buffer-local `harness-chat-placeholder` replaces the empty box's usual
+hint.
 
 Compose box (`harness-ui-compose`): the editable box shared by chat
 buffers and the task board.  A host calls `harness-compose-setup`
@@ -938,10 +942,15 @@ resolved to its main checkout once with `harness-files-main-checkout`),
 conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
 svg charts via svg.el), worktrees (`harness-ui-worktree`), notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle
-counts, clickable), BTW side window (`harness-ui-btw`: a fork of the
-session it is opened over, or, over a view that sets
-`harness-ui-btw-start-function`, a conversation the view starts; closing
-it returns there and closes an idle BTW, keeping it makes it a normal
+counts, clickable), BTW side window (`harness-ui-btw`: a blank fork of
+the session it is opened over, or, over a view that sets
+`harness-ui-btw-start-function`, a conversation the view starts, shown
+in the session's own chat buffer with point in its compose box, so the
+question is written and sent like any message; nothing is read in the
+minibuffer.  The first message names it `btw: ...`, unless it was named
+by hand.  Closing it returns there; a BTW nothing was asked in is
+deleted with its buffer, once the harness confirms it holds no node of
+its own, and an idle one is closed.  Keeping it makes it a normal
 session window in that place), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video thumbnails/open).

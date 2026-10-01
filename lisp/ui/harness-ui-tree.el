@@ -644,15 +644,19 @@ once FN's request settles.  FN receives (SID DONE) and must call DONE."
                                (funcall open (plist-get child :id))))))
                         (lambda (e) (funcall done) (message "Fork failed: %s" (harness-error-message e))))))))
 
-(defun harness-ui-tree-btw (question)
-  "Start a BTW side conversation asking QUESTION from the node at point."
-  (interactive (list (read-string "BTW: ")))
+(defun harness-ui-tree-btw ()
+  "Start a BTW side conversation from the node at point.
+It opens blank, for a question written in its compose box."
+  (interactive)
   (unless (fboundp 'harness-btw) (user-error "The BTW module is not loaded"))
-  (harness-ui-tree--at-node
-   (harness-ui-tree-node-at-point)
-   (lambda (sid done)
-     (harness-btw sid question)
-     (run-at-time 1 nil done))))
+  (let ((tree (current-buffer)))
+    (harness-ui-tree--at-node
+     (harness-ui-tree-node-at-point)
+     (lambda (sid done)
+       ;; Opened over the tree; the head moves back once the fork is made.
+       (harness-then (if (buffer-live-p tree) (with-current-buffer tree (harness-btw sid)) (harness-btw sid))
+                     (lambda (_) (funcall done))
+                     (lambda (_) (funcall done)))))))
 
 (defun harness-ui-tree-toggle ()
   "Expand or collapse the node at point."
