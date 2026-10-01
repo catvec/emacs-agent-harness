@@ -175,5 +175,78 @@ re-detected before BODY and restored afterwards."
             (should (file-exists-p (expand-file-name "outside-test" cwd)))))
       (delete-directory cwd t))))
 
+;;;; Git worktrees
+
+(defun harness-sandbox-test--git (dir &rest args)
+  "Run git ARGS synchronously in DIR; signal on failure, return stdout."
+  (with-temp-buffer
+    (let ((default-directory (file-name-as-directory dir)))
+      (unless (zerop (apply #'call-process "git" nil t nil args))
+        (error "git %s failed: %s" args (buffer-string)))
+      (buffer-string))))
+
+(defun harness-sandbox-test--worktree ()
+  "Make a repository with an identity and a linked worktree; return (ROOT . WT)."
+  (let* ((base (harness-test-temp-dir))
+         (root (file-name-as-directory (expand-file-name "repo" base)))
+         (wt (file-name-as-directory (expand-file-name "wt" base))))
+    (make-directory root t)
+    (harness-sandbox-test--git root "init" "-q" "-b" "main")
+    (harness-sandbox-test--git root "config" "user.name" "Sandbox Test")
+    (harness-sandbox-test--git root "config" "user.email" "sandbox@example.invalid")
+    (harness-sandbox-test--git root "config" "commit.gpgsign" "false")
+    (with-temp-file (expand-file-name "README" root) (insert "hi\n"))
+    (harness-sandbox-test--git root "add" "README")
+    (harness-sandbox-test--git root "commit" "-q" "-m" "initial")
+    (harness-sandbox-test--git root "worktree" "add" "-q" "-b" "work" wt)
+    (cons root wt)))
+
+(ert-deftest harness-sandbox-worktree-git-mounts ()
+  "A worktree's git directory is writable but its hooks and config are not."
+  (harness-sandbox-test--setup)
+  (let* ((repo (harness-sandbox-test--worktree))
+         (common (directory-file-name (expand-file-name ".git" (car repo))))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto))
+    (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+      (let ((cmd (harness-call 'sandbox/wrap (cdr repo) '("true"))))
+        (should (harness-sandbox-test--subseq-p (list "--bind" common common) cmd))
+        (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/hooks") (concat common "/hooks")) cmd))
+        (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/config") (concat common "/config")) cmd))
+        ;; Read-only binds come after the writable one, so they win.
+        (should (< (cl-position (concat common "/hooks") cmd :test #'equal)
+                   (cl-position "--unshare-pid" cmd :test #'equal)))
+        (should (harness-sandbox-test--subseq-p '("--setenv" "GIT_AUTHOR_NAME" "Sandbox Test") cmd))
+        (should (harness-sandbox-test--subseq-p '("--setenv" "GIT_COMMITTER_EMAIL" "sandbox@example.invalid") cmd)))
+      ;; A main checkout needs nothing extra: its .git is inside the cwd.
+      (should-not (member common (harness-call 'sandbox/wrap (car repo) '("true")))))
+    (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+      (let ((cmd (harness-call 'sandbox/wrap (cdr repo) '("true"))))
+        (should (member (concat "BindPaths=" common) cmd))
+        (should (member (concat "BindReadOnlyPaths=" common "/hooks") cmd))))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-worktree-commit ()
+  "Under the real bwrap, git commits in a worktree but cannot plant a hook."
+  (harness-sandbox-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (let* ((repo (harness-sandbox-test--worktree))
+         (wt (cdr repo))
+         (hook (expand-file-name ".git/hooks/post-merge" (car repo)))
+         (harness-sandbox-policy 'required)
+         (cmd (harness-call 'sandbox/wrap wt
+                            (list "sh" "-c"
+                                  (format "echo change > f && git add f && git -c commit.gpgsign=false commit -q -m inside && echo committed; echo x > %s 2>/dev/null || echo hook-refused"
+                                          hook))))
+         (r (harness-await (harness-run-command cmd :cwd wt :timeout 20))))
+    (when (and (not (eql 0 (plist-get r :exit))) (string-match-p "bwrap:" (plist-get r :stderr)))
+      (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get r :stderr)))))
+    (should (string-match-p "committed" (plist-get r :stdout)))
+    (should (string-match-p "hook-refused" (plist-get r :stdout)))
+    (should-not (file-exists-p hook))
+    (should (equal "inside\n" (harness-sandbox-test--git wt "log" "-1" "--format=%s")))
+    (should (equal "Sandbox Test\n" (harness-sandbox-test--git wt "log" "-1" "--format=%an")))))
+
 (provide 'harness-sandbox-test)
 ;;; harness-sandbox-test.el ends here

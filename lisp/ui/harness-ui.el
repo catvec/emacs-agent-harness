@@ -149,8 +149,21 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
 
 (defun harness-ui-icon (name)
-  "Return the string for icon NAME (a symbol such as `harness-icon-idle')."
-  (condition-case nil (icon-string name) (error "")))
+  "Return the string for icon NAME (a symbol such as `harness-icon-idle').
+An image icon carries no `:background', so its transparent parts show
+the face behind it (a tool block's colour, say).  Some packages, such as
+solaire-mode, bake the buffer's base colour into every image."
+  (condition-case nil
+      (let* ((s (icon-string name))
+             (spec (and (> (length s) 0) (get-text-property 0 'display s))))
+        (if (and (eq (car-safe spec) 'image) (plist-member (cdr spec) :background))
+            (propertize s 'display (cons 'image (harness-ui--plist-without (cdr spec) :background)))
+          s))
+    (error "")))
+
+(defun harness-ui--plist-without (plist key)
+  "Return a copy of PLIST without KEY."
+  (cl-loop for (k v) on plist by #'cddr unless (eq k key) nconc (list k v)))
 
 (defun harness-ui-status-icon (status)
   "Return the icon string for session STATUS (symbol or string), with face."
@@ -388,27 +401,23 @@ Sessions persist; running turns are interrupted."
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
+(defun harness-ui--leave-pending (params respond what)
+  "Leave WHAT (a permission or question request PARAMS) pending on its session.
+No buffer shows the session, so nothing prompts: declining through
+RESPOND keeps the request pending server side, where the session reads
+as needing input and its chat panel or task card answers it later."
+  (harness-acp-respond-error respond -32000 (format "no buffer shows this session; the %s stays pending" what))
+  (let ((session (harness-ui-session (plist-get params :sessionId))))
+    (message "Harness: %s needs your input" (if session (harness-ui-session-label session) "a session")))
+  t)
+
 (defun harness-ui--default-permission (params respond)
-  "Fallback permission prompt in the minibuffer when no UI module claimed it."
-  (let* ((tc (plist-get params :toolCall))
-         (choice (read-multiple-choice
-                  (format "Allow %s?" (or (plist-get tc :title) "tool"))
-                  '((?y "allow once") (?s "allow for session") (?a "always allow")
-                    (?n "deny") (?N "always deny")))))
-    (funcall respond
-             (list :outcome (list :outcome "selected"
-                                  :optionId (pcase (car choice)
-                                              (?y "allow-once") (?s "allow-session") (?a "allow-always")
-                                              (?N "deny-always") (_ "deny-once")))))
-    t))
+  "Fallback when no UI module claimed permission request PARAMS: leave it pending."
+  (harness-ui--leave-pending params respond "permission request"))
 
 (defun harness-ui--default-question (params respond)
-  (let* ((options (plist-get params :options))
-         (answer (if options
-                     (completing-read (concat (plist-get params :question) " ") options nil nil)
-                   (read-string (concat (plist-get params :question) " ")))))
-    (funcall respond (list :answer answer))
-    t))
+  "Fallback when no UI module claimed question PARAMS: leave it pending."
+  (harness-ui--leave-pending params respond "question"))
 
 ;;;###autoload
 (defun harness-connect-remote (address)
@@ -541,6 +550,10 @@ Signal unless NOERROR when none can be found."
   (let ((id (if mode (format "%s" mode) "ask")))
     (or (cadr (assoc id harness-ui-permission-modes)) id)))
 
+(defun harness-ui-thinking-label (level)
+  "Return the label of thinking LEVEL, nil meaning the model's default."
+  (format "%s %s" (harness-ui-icon 'harness-icon-thinking) (or level "default")))
+
 (defun harness-ui-model-label (model-id)
   "Return a short, readable \"model (provider)\" label for MODEL-ID.
 The model part is the catalogue's label, else a prettified slug, else
@@ -642,6 +655,29 @@ Set by the chat module.")
     (user-error "No chat module loaded"))
   (harness-ui-display-buffer (funcall harness-ui-open-session-function id) position))
 
+(defun harness-ui-display-view (buffer &optional position)
+  "Show BUFFER, a harness view such as the session list, in POSITION.
+Views share positions with sessions: a view replaces the session shown
+in its position and a session opened there replaces the view.  Without
+POSITION the view returns to the position it had last, else
+`harness-ui-default-position'.  Small transient windows (menus, help,
+the BTW overlay) do not go through here."
+  (harness-ui-display-buffer buffer (or position
+                                        (buffer-local-value 'harness-ui-position buffer)
+                                        harness-ui-default-position)))
+
+(defun harness-ui-session-opener (&optional position)
+  "Return a function of a session id that shows it where this view is.
+Call this when the command runs and the returned function later, from
+an asynchronous callback: the session takes POSITION, by default the
+current buffer's position (replacing the view), and opens from the
+window selected now even when another frame is selected by then."
+  (let ((position (or position harness-ui-position harness-ui-default-position))
+        (window (selected-window)))
+    (lambda (id)
+      (when (window-live-p window) (select-window window))
+      (harness-ui-display-session id position))))
+
 (defun harness-ui-read-position ()
   "Read a position name with completion."
   (intern (completing-read "Position: " (mapcar (lambda (p) (symbol-name (car p))) harness-ui-positions) nil t)))
@@ -673,11 +709,47 @@ Set by the chat module.")
        (harness-ui-call "_harness/session/resume" (list :id (plist-get s :id))
                         (lambda (_) (harness-ui-display-session (plist-get s :id) position)))))))
 
+;;;; Session settings
+
+(defvar-local harness-ui-setting-target-function nil
+  "Function telling the session setting commands what to change in this buffer.
+It returns a session id, or (SETTINGS . SET) for settings that are not a
+session's yet: SETTINGS is a plist with a session's setting keys
+(`:model' `:thinking' `:permission-mode' `:non-interactive') and SET a
+function of KEY and VALUE storing one.  The task board uses it so the
+same commands set up the next task.  When it is nil or returns nil, the
+commands use `harness-ui-current-session-id'.")
+
+(defun harness-ui--setting-target (session-id)
+  "Return what the setting commands change.
+SESSION-ID when given, else the buffer's target, else a chosen session."
+  (or session-id
+      (and harness-ui-setting-target-function (funcall harness-ui-setting-target-function))
+      (harness-ui-current-session-id)))
+
+(defun harness-ui--setting-get (target key)
+  "Return the current value of setting KEY of TARGET."
+  (plist-get (if (stringp target) (harness-ui-session target) (car target)) key))
+
+(defun harness-ui--setting-set (target key value label)
+  "Set KEY to VALUE on TARGET and say LABEL when it is done."
+  (if (not (stringp target))
+      (progn (funcall (cdr target) key value)
+             (message "%s (for new tasks)" label))
+    (pcase key
+      (:model (harness-ui-call "session/set_model" (list :sessionId target :modelId value)
+                               (lambda (_) (message "%s" label))))
+      (:permission-mode (harness-ui-call "session/set_mode" (list :sessionId target :modeId value)
+                                         (lambda (_) (message "%s" label))))
+      (_ (harness-ui-call "_harness/session/update"
+                          (list :id target key (if (and (eq key :non-interactive) (not value)) :false value))
+                          (lambda (_) (message "%s" label)))))))
+
 ;;;###autoload
 (defun harness-set-model (&optional session-id)
   "Choose a model for SESSION-ID (default the current buffer's session)."
   (interactive)
-  (let ((sid (or session-id (harness-ui-current-session-id))))
+  (let ((target (harness-ui--setting-target session-id)))
     (harness-ui-refresh-models
      (lambda (models)
        (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
@@ -700,28 +772,28 @@ Set by the chat module.")
                                    ""))))))
               (choice (completing-read "Model: " table nil t))
               (id (plist-get (cdr (assoc choice table)) :id)))
-         (harness-ui-call "session/set_model" (list :sessionId sid :modelId id)
-                          (lambda (_) (message "Model → %s" choice))))))))
+         (harness-ui--setting-set target :model id (format "Model → %s" choice)))))))
 
 ;;;###autoload
 (defun harness-set-thinking (&optional session-id)
   "Choose a thinking level for SESSION-ID."
   (interactive)
-  (let* ((sid (or session-id (harness-ui-current-session-id)))
-         (session (harness-ui-session sid)))
-    (harness-ui-call "_harness/provider/model" (list :model-id (plist-get session :model))
-                     (lambda (model)
-                       (let* ((levels (or (plist-get model :thinking-levels) '("low" "medium" "high")))
-                              (choice (completing-read "Thinking: " (cons "default" levels) nil t)))
-                         (harness-ui-call "_harness/session/update"
-                                          (list :id sid :thinking (unless (equal choice "default") choice))
-                                          (lambda (_) (message "Thinking → %s" choice))))))))
+  (let* ((target (harness-ui--setting-target session-id))
+         (model (harness-ui--setting-get target :model))
+         (choose (lambda (levels)
+                   (let ((choice (completing-read "Thinking: " (cons "default" levels) nil t)))
+                     (harness-ui--setting-set target :thinking (unless (equal choice "default") choice)
+                                              (format "Thinking → %s" choice))))))
+    (if (null model)
+        (funcall choose '("low" "medium" "high"))
+      (harness-ui-call "_harness/provider/model" (list :model-id model)
+                       (lambda (m) (funcall choose (or (plist-get m :thinking-levels) '("low" "medium" "high"))))))))
 
 ;;;###autoload
 (defun harness-set-permission-mode (&optional session-id)
   "Choose the permission mode for SESSION-ID."
   (interactive)
-  (let* ((sid (or session-id (harness-ui-current-session-id)))
+  (let* ((target (harness-ui--setting-target session-id))
          (table (mapcar (lambda (m) (cons (nth 1 m) m)) harness-ui-permission-modes))
          (completion-extra-properties
           (list :annotation-function
@@ -733,19 +805,18 @@ Set by the chat module.")
                                         '(metadata (display-sort-function . identity)
                                                    (cycle-sort-function . identity))
                                       (complete-with-action action table string pred)))
-                                  nil t))
-         (id (cadr (assoc choice table))))
-    (harness-ui-call "session/set_mode" (list :sessionId sid :modeId id)
-                     (lambda (_) (message "Permission mode → %s" choice)))))
+                                  nil t)))
+    (harness-ui--setting-set target :permission-mode (cadr (assoc choice table))
+                             (format "Permission mode → %s" choice))))
 
 ;;;###autoload
 (defun harness-toggle-non-interactive (&optional session-id)
   "Toggle non-interactive mode for SESSION-ID."
   (interactive)
-  (let* ((sid (or session-id (harness-ui-current-session-id)))
-         (now (harness-json-true-p (plist-get (harness-ui-session sid) :non-interactive))))
-    (harness-ui-call "_harness/session/update" (list :id sid :non-interactive (if now :false t))
-                     (lambda (_) (message "Non-interactive %s" (if now "off" "on"))))))
+  (let* ((target (harness-ui--setting-target session-id))
+         (now (harness-json-true-p (harness-ui--setting-get target :non-interactive))))
+    (harness-ui--setting-set target :non-interactive (not now)
+                             (format "Non-interactive %s" (if now "off" "on")))))
 
 ;;;###autoload
 (defun harness-rename-session (name &optional session-id)
@@ -789,7 +860,7 @@ Set by the chat module.")
 (defun harness-show-log ()
   "Show the harness log buffer."
   (interactive)
-  (pop-to-buffer harness-log-buffer-name))
+  (harness-ui-display-view (get-buffer-create harness-log-buffer-name)))
 
 ;;;; Keymap, menu, global mode
 
@@ -847,6 +918,7 @@ the menu gets a bottom side window of its own; elsewhere it follows
     ("n" "New session" harness-new-session)
     ("s" "Switch session" harness-switch-session)
     ("l" "Session list" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
+    ("a" "Task mode" harness-tasks :if (lambda () (harness-ui--command-available-p 'harness-tasks)))
     ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
     ("b" "BTW side conversation" harness-btw :if (lambda () (harness-ui--command-available-p 'harness-btw)))
     ("f" "Fork session" harness-fork-session)

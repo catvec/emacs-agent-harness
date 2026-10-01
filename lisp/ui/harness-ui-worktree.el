@@ -267,7 +267,7 @@
       (setq harness-ui-worktree--root (harness-ui-worktree--dir start)
             harness-ui-worktree--loading t)
       (harness-ui-worktree--redraw))
-    (pop-to-buffer buf)
+    (harness-ui-display-view buf)
     ;; Resolve to the main repository root so a worktree directory lists its siblings.
     (harness-ui-call "_harness/worktree/root-of" (list :path start)
                      (lambda (main)
@@ -360,7 +360,8 @@ When git refuses because of local changes, offer to force."
   "Start a new session whose working directory is the worktree at point."
   (interactive)
   (let ((path (harness-ui-worktree--path))
-        (buf (current-buffer)))
+        (buf (current-buffer))
+        (open (harness-ui-session-opener)))
     (harness-ui-call "session/new" (list :cwd path :_harness (list :worktree path))
                      (lambda (result)
                        (let ((sid (plist-get result :sessionId)))
@@ -368,14 +369,17 @@ When git refuses because of local changes, offer to force."
                           (lambda (_)
                             (when (buffer-live-p buf) (with-current-buffer buf (harness-ui-worktree--redraw)))
                             (if harness-ui-open-session-function
-                                (harness-ui-display-session sid)
+                                (funcall open sid)
                               (message "Session %s started in %s" (substring sid 0 8) (abbreviate-file-name path))))))))))
 
 (defun harness-ui-worktree-fork-session (session-id branch)
   "Fork SESSION-ID into a new worktree on BRANCH."
   (interactive (list (harness-ui-current-session-id) (harness-ui-worktree--read-branch)))
   (let ((buf (current-buffer))
-        (root harness-ui-worktree--root))
+        (root harness-ui-worktree--root)
+        ;; From the worktree list the fork replaces it; from a chat it opens beside it.
+        (open (harness-ui-session-opener (unless (derived-mode-p 'harness-ui-worktree-mode)
+                                           harness-ui-default-position))))
     (harness-ui-worktree--create
      root branch nil
      (lambda (wt)
@@ -387,7 +391,7 @@ When git refuses because of local changes, offer to force."
                              (lambda (_)
                                (when (buffer-live-p buf) (harness-ui-worktree--load buf))
                                (if harness-ui-open-session-function
-                                   (harness-ui-display-session (plist-get child :id))
+                                   (funcall open (plist-get child :id))
                                  (message "Forked into %s" (abbreviate-file-name path))))))))))))
 
 (defun harness-ui-worktree--show-queue (parent-id)

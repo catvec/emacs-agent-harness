@@ -13,7 +13,7 @@ module needs something more, add it here first.
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, naming, compaction,
-                worktree, merge, skills, perms, sandbox
+                worktree, merge, tasks, skills, perms, sandbox
  Completion     provider, provider-openai, provider-claude
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent
  ------------------------------- bus (lisp/harness-core.el)
@@ -391,6 +391,11 @@ and resolves when answered).
   command list (bwrap / systemd-run / plain).  `sandbox/status` →
   `(:backend bwrap|systemd|none :available (…) :policy …)`.  Fails closed
   when `harness-sandbox-policy` is `required` and no backend exists.
+- A CWD inside a linked git worktree also gets the repository's common
+  git directory read-write (its `hooks/` and `config` stay read-only, so
+  nothing planted there runs when the harness uses git unconfined) and
+  the host's `user.name`/`user.email` as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`,
+  so worktree sessions can commit.
 
 ### agent
 
@@ -486,6 +491,48 @@ and resolves when answered).
   `merge/conflict CHILD PARENT FILES`, `merge/finished CHILD PARENT STATUS`
   (merged|failed|aborted|cancelled).
 
+### tasks
+
+Task mode: one session per task.  TASK =
+`(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…)
+:state pending|active|merging|done :column pending|needs-input|active|done
+:session SID :outcome nil|end-turn|error|cancelled|merge-failed|merged|…
+:error "…" :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
+:conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F)`.
+`:column` is derived on every read: `needs-input` when the session is
+blocked on a request or the task stopped part way.
+
+- `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
+  :thinking :non-interactive)` → task; it starts when one of
+  `harness-tasks-max-running` slots is free.  Missing options come from
+  `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
+  `-non-interactive` (on); an explicit false turns non-interactive off.
+- `task/adoptable &optional CWD` lists the project's open sessions that
+  are not tasks; `task/adopt SESSION-ID` makes one a task (its first
+  message is the prompt; a worktree session keeps its worktree and merges
+  like any task; an idle one waits in `needs-input` with `:outcome adopted`).
+- Starting: in a git project (`harness-tasks-worktrees`) `worktree/create`
+  on branch `harness-tasks-branch-prefix` + slug + id, then a session in
+  that worktree (`harness-tasks-permission-mode`, non-interactive by
+  default) prompted with the task; a system-prompt section tells it to
+  commit on its branch and not merge.  Outside git the session runs in CWD.
+- A turn ending `end-turn` queues `merge/enqueue SID TARGET`, TARGET being
+  the project's root session named `harness-tasks-merge-session-name`
+  (created on demand); `merge/finished … merged` makes the task `done`.
+  Failures the agent can fix (uncommitted work) are steered by the merge
+  queue; others, or more than `harness-tasks-merge-attempts`, set
+  `:outcome merge-failed`.  Outside git `end-turn` makes it `done`.
+- `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
+  `task/start ID` (ignores the limit), `task/update ID PROMPT` (pending
+  only), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
+  steering; reopens),
+  `task/merge ID` (retry), `task/complete ID`, `task/archive ID &optional
+  RESTORE` (deactivates the session; removes a merged task's worktree and
+  branch), `task/archive-done &optional CWD`, `task/cancel ID`,
+  `task/delete ID &optional DELETE-SESSION` (keeps the worktree).
+- Events `task/changed TASK`, `task/deleted ID`.  Records persist in
+  `tasks.json`; merges in flight are queued again after a restart.
+
 ### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent
 
 Tool names and inputs (all paths relative to cwd or absolute; TRAMP
@@ -558,7 +605,7 @@ and `_harness/ask_user {sessionId, requestId, question, options}` → `{answer}`
 
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
-`config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`,
+`config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
 `sandbox/status`, `harness/api`, `harness/version`, `harness/reload` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
@@ -602,6 +649,38 @@ stays snappy.  Markdown is rendered by the built-in renderer in
 the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
 Auto-scroll follows unless the user scrolled up.
+
+Compose box (`harness-ui-compose`): the editable box shared by chat
+buffers and the task board.  A host calls `harness-compose-setup`
+(`:project`, `:placeholder`, `:redraw` functions; `:bottom` keeps the box at
+the bottom of the window) from its mode and
+`harness-compose-insert` where it draws the box; it gets multi-line
+editing, the placeholder, @file and /skill completion, attachments
+(`C-c C-a`, clipboard `C-c C-v`, drag and drop), skill expansion
+(`harness-compose-with-expanded-text`) and ACP attachment blocks.
+
+Views share positions with sessions: the task board, session list,
+usage dashboard, worktree list, conversation tree and log open through
+`harness-ui-display-view`, replacing the session in their position (and
+returning to the position they had last); a session opened from a view
+(`harness-ui-session-opener`) replaces the view.  Menus, help and the
+BTW overlay keep their own windows.
+
+Session settings: `harness-set-model`, `-thinking`, `-permission-mode`
+and `harness-toggle-non-interactive` change what the buffer's
+`harness-ui-setting-target-function` names -- a session id, or a
+settings plist with its setter -- and otherwise the current session.
+
+Task board (`harness-ui-tasks`, `C-c a a`): the project's tasks in four
+sections -- requires your input, in progress, pending, completed -- with
+each card's current todo, progress, elapsed time, cost and merge state,
+one-click answers to a blocked task's question or permission, and a
+compose box that submits a task, edits a pending one or messages a
+task's session.  RET opens the session.  The session setting commands
+change the task at point, or from the compose box the settings the next
+task starts with (shown as buttons under the New task label).  `I` or
+[Add session] makes an ongoing session a task.  Boards reload after any
+task, merge, turn, status, worktree or reload event.
 
 Other buffers: sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column), conversation tree
