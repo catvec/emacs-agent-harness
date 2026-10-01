@@ -10,6 +10,7 @@
 (defvar harness-tools)
 (defvar harness-agent--turns)
 (defvar harness-naming--running)
+(defvar harness-naming-system-prompt)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-agent-running-p "harness-agent")
 (declare-function harness-naming-sanitise "harness-naming")
@@ -100,6 +101,25 @@
         (should (= 3 (length (plist-get req :messages))))
         (should (string-match-p "3 to 6 words" (plist-get (car (last (plist-get last :content))) :text))))
       (should (zerop (hash-table-count harness-naming--running))))))
+
+(ert-deftest harness-naming-system-prompt-filter ()
+  "Modules add to a session's naming system prompt with `naming/system-prompt'."
+  (harness-naming-test-with
+    (let* ((id (harness-naming-test-answered-session))
+           (other (harness-naming-test-answered-session))
+           (harness-provider-demo-script-override harness-naming-test-script)
+           (systems nil))
+      (harness-add-filter 'naming/system-prompt
+                          (lambda (prompt session)
+                            (if (equal (plist-get session :id) id) (concat prompt "\n\nLike a ticket.") prompt)))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push (plist-get req :system) systems) (funcall orig req))))
+        (harness-await (harness-call 'naming/name id))
+        (harness-await (harness-call 'naming/name other)))
+      (should (equal (list harness-naming-system-prompt
+                           (concat harness-naming-system-prompt "\n\nLike a ticket."))
+                     systems)))))
 
 (ert-deftest harness-naming-name-error-rejects ()
   (harness-naming-test-with
