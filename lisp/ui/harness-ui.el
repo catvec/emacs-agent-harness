@@ -158,8 +158,10 @@ coloured background passes that FACE to be rendered on its background."
          (background (and face (face-background face nil t))))
     (if (and background (eq (car-safe image) 'image))
         (let ((string (copy-sequence string)))
+          ;; Replace, not append: solaire-mode already adds a :background.
           (put-text-property 0 1 'display
-                             (append image (list :background background)) string)
+                             (cons 'image (plist-put (copy-sequence (cdr image)) :background background))
+                             string)
           string)
       string)))
 
