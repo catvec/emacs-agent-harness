@@ -11,6 +11,12 @@
 ;; Persistence: sessions/ID.json holds the record, sessions/ID.nodes.jsonl
 ;; is an append-only log of nodes and node updates.  Node logs are
 ;; loaded lazily so listing a thousand sessions stays instant.
+;;
+;; Every session loads closed (`inactive'); opening one resumes it.  A
+;; session saved `running' or `blocked' belonged to a harness that
+;; stopped mid-turn (Emacs quit, `harness-restart', a crash), so loading
+;; settles that turn: tool calls left without a result get one saying
+;; they were interrupted, and a hint says what the session was doing.
 
 ;;; Code:
 
@@ -292,12 +298,16 @@ FILTER keys: :project :status :kind :parent-id :active."
     (harness-session-plist s)))
 
 (harness-defmethod session/set-status (id status)
-  "Set the status of session ID to STATUS (idle, running, blocked, inactive)."
+  "Set the status of session ID to STATUS (idle, running, blocked, inactive).
+The record is written at once rather than after `harness-session-save-delay',
+so a harness that dies mid-turn leaves the session saved as running and the
+next start settles its turn."
   (let ((s (harness-session--get id)))
     (unless (eq status (harness-session-status s))
       (setf (harness-session-status s) status)
       (harness-emit 'session/status id status)
-      (harness-session--touch s))
+      (harness-session--touch s)
+      (harness-session--save id))
     status))
 
 (defun harness-session--describe-change (key value)
@@ -700,12 +710,65 @@ starts at the last compaction node when one exists."
 
 ;;;; Init and reload
 
+(defconst harness-session-interrupted-output
+  "Interrupted: the harness stopped before this tool call finished."
+  "Result recorded for a tool call that a stopped harness never finished.")
+
+(defun harness-session--interrupted-text (pending)
+  "Describe what a session stopped mid-turn was doing.
+PENDING is the list of requests it was saved waiting on."
+  (let* ((item (car pending))
+         (kind (plist-get item :kind))
+         (payload (plist-get item :payload)))
+    (concat "Interrupted: the harness stopped "
+            (pcase (if (stringp kind) (intern kind) kind)
+              ('question (format "while waiting for an answer to: %s"
+                                 (harness-first-line (plist-get payload :question) 200)))
+              ('permission (format "while waiting for permission: %s"
+                                   (or (plist-get payload :title) (plist-get payload :tool) "a tool call")))
+              (_ "during this turn")))))
+
+(defun harness-session--settle (s pending)
+  "Close the turn of S that a stopped harness left unfinished.
+S was saved running or blocked, with PENDING the requests it waited on.
+Every tool call without a result gets one saying it was interrupted --
+providers that pair calls with results reject a transcript with an
+unanswered call -- and a hint says what the session was doing.  The
+requests themselves are gone: the turn that would read their answers
+ended with the process."
+  (let ((id (harness-session-id s))
+        (path (harness-session--path s))
+        (answered (make-hash-table :test 'equal)))
+    (dolist (n path)
+      (when (eq (plist-get n :kind) 'tool-result)
+        (puthash (plist-get n :call-id) t answered)))
+    (dolist (n path)
+      (when (and (eq (plist-get n :kind) 'tool-call)
+                 (not (gethash (plist-get n :call-id) answered)))
+        (harness-call 'session/append id
+                      (list :kind 'tool-result :call-id (plist-get n :call-id)
+                            :output harness-session-interrupted-output :is-error t
+                            :meta (list :interrupted t)))))
+    (harness-call 'session/hint id (harness-session--interrupted-text pending))
+    ;; Saved inactive now, so the next start does not settle it again.
+    (harness-session--save id)))
+
 (defun harness-session--load-all ()
-  "Load every persisted session record (nodes stay on disk until needed)."
-  (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
-    (let ((pl (harness-call 'store/load name)))
-      (when (and pl (plist-get pl :id) (not (gethash (plist-get pl :id) harness-sessions)))
-        (puthash (plist-get pl :id) (harness-session--from-plist pl) harness-sessions)))))
+  "Load every persisted session record (nodes stay on disk until needed).
+Sessions saved mid-turn are settled with `harness-session--settle'."
+  (let (interrupted)
+    (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
+      (let ((pl (harness-call 'store/load name)))
+        (when (and pl (plist-get pl :id) (not (gethash (plist-get pl :id) harness-sessions)))
+          (let ((s (harness-session--from-plist pl)))
+            (puthash (plist-get pl :id) s harness-sessions)
+            (when (member (plist-get pl :status) '("running" "blocked"))
+              (push (cons s (plist-get pl :pending)) interrupted))))))
+    (dolist (entry interrupted)
+      (condition-case err
+          (harness-session--settle (car entry) (cdr entry))
+        (error (harness-log 'warn "session %s: could not settle its interrupted turn: %S"
+                            (harness-session-id (car entry)) err))))))
 
 (defun harness-session--on-kill-emacs () (harness-session-flush))
 

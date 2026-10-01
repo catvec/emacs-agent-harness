@@ -68,6 +68,15 @@ customize (global): `harness-model`, `harness-permission-mode`,
 `harness-thinking`, `harness-allowed-directories`, `harness-budget`,
 `harness-sandbox-policy`, `harness-non-interactive`.
 
+Sessions and tasks live in `harness-state-directory` (`harness/` in your
+Emacs directory by default) and survive restarts of Emacs and of the
+harness process.
+After a restart sessions are closed until you open one again (`C-c a s`,
+`C-c a l`), with its whole transcript; a turn the restart cut short is
+marked in it.  The task board comes back as it was, and tasks that were
+working carry on by themselves (`harness-tasks-resume-interrupted` nil
+makes them wait for you instead).
+
 | | |
 |---|---|
 | ![permission](docs/media/chat-permission.png) | ![question](docs/media/chat-question.png) |

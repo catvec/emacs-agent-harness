@@ -1717,6 +1717,20 @@ fetched: older nodes outside the fetched window are skipped."
                  (harness-chat--load (harness-chat--at-bottom-p)))))
            harness-chat--buffers))
 
+(defun harness-chat--reopen-all ()
+  "Open again the closed sessions that chat buffers show.
+Run after connecting: a harness that just started (`harness-restart', a
+crash) has every session closed, but one on screen here is open, as
+`harness-open-session' made it."
+  (maphash (lambda (id buf)
+             (when (buffer-live-p buf)
+               (harness-ui-call "_harness/session/get" (list :id id)
+                                (lambda (session)
+                                  (when (equal (format "%s" (plist-get session :status)) "inactive")
+                                    (harness-ui-call "_harness/session/resume" (list :id id) #'ignore #'ignore)))
+                                #'ignore)))
+           harness-chat--buffers))
+
 ;;;; Sending
 
 (defun harness-chat--clear-compose ()
@@ -2057,6 +2071,7 @@ on \\[harness-menu] here, or the [menu] button in the header line.
   (add-hook 'harness-ui-permission-functions #'harness-chat--on-permission)
   (add-hook 'harness-ui-question-functions #'harness-chat--on-question)
   (add-hook 'harness-ui-redraw-hook #'harness-chat--redraw-all)
+  (add-hook 'harness-ui-connected-hook #'harness-chat--reopen-all)
   (define-key harness-ui-map (kbd "o") #'harness-open-latest-session)
   (define-key harness-ui-map (kbd "O") #'harness-open-session)
   (ignore-errors

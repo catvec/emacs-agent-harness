@@ -108,6 +108,65 @@
         ;; The parent keeps its grant.
         (should (member extra (harness-call 'permission/allowed-dirs id)))))))
 
+(defun harness-session-test-kinds (id)
+  (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes id)))
+
+(ert-deftest harness-session-interrupted-turn-settled-on-load ()
+  "A session saved mid-turn comes back closed, its tool calls answered."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append id '(:kind user :content "look around"))
+      (harness-call 'session/append id '(:kind tool-call :tool "read_file" :call-id "c1" :input (:path "a")))
+      (harness-call 'session/append id '(:kind tool-call :tool "bash" :call-id "c2" :input (:command "make")))
+      (harness-call 'session/append id '(:kind tool-result :call-id "c1" :output "A"))
+      ;; The process dies mid-turn: nothing is flushed, so the status
+      ;; change alone has to have reached the disk.
+      (harness-call 'session/set-status id 'running)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (eq 'inactive (plist-get (harness-call 'session/get id) :status)))
+      (should (equal '(user tool-call tool-call tool-result tool-result hint) (harness-session-test-kinds id)))
+      (let* ((nodes (harness-call 'session/nodes id))
+             (closed (nth 4 nodes)))
+        (should (equal "c2" (plist-get closed :call-id)))
+        (should (plist-get closed :is-error))
+        (should (equal harness-session-interrupted-output (plist-get closed :output)))
+        (should (equal "Interrupted: the harness stopped during this turn" (plist-get (nth 5 nodes) :content))))
+      ;; Every call has its result, as providers that pair them require.
+      (should (equal '("tool_result" "tool_result")
+                     (mapcar (lambda (b) (plist-get b :type))
+                             (plist-get (car (last (harness-call 'session/messages id))) :content))))
+      ;; Settled once: the next start leaves it alone.
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (= 1 (cl-count 'hint (harness-session-test-kinds id))))
+      ;; Sessions that were idle load untouched.
+      (let ((quiet (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+        (harness-call 'session/append quiet '(:kind tool-call :tool "bash" :call-id "c9"))
+        (harness-session-flush)
+        (clrhash harness-sessions)
+        (harness-session--load-all)
+        (should (equal '(tool-call) (harness-session-test-kinds quiet)))))))
+
+(ert-deftest harness-session-interrupted-question-named-in-hint ()
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append id '(:kind user :content "pick one"))
+      (harness-call 'session/append id '(:kind tool-call :tool "ask_user" :call-id "q1" :input (:question "Which colour?")))
+      (harness-call 'session/set-status id 'running)
+      (harness-call 'session/pending-add id '(:kind question :payload (:question "Which colour?\nAny will do." :call-id "q1")))
+      (should (eq 'blocked (plist-get (harness-call 'session/get id) :status)))
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (let ((s (harness-call 'session/get id)))
+        (should (eq 'inactive (plist-get s :status)))
+        ;; The turn that would read the answer is gone with the process.
+        (should-not (plist-get s :pending)))
+      (should (equal '(user tool-call tool-result hint) (harness-session-test-kinds id)))
+      (should (equal "Interrupted: the harness stopped while waiting for an answer to: Which colour?"
+                     (plist-get (car (last (harness-call 'session/nodes id))) :content))))))
+
 (ert-deftest harness-session-queue-and-pending ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))

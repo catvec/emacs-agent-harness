@@ -212,6 +212,12 @@ Same protocol as `harness-ui-permission-functions'.")
 (defvar harness-ui-redraw-hook nil
   "Hook run when every UI buffer should redraw (after a reload or reconnect).")
 
+(defvar harness-ui-connected-hook nil
+  "Hook run once the UI has connected to a harness and initialised it.
+That is at start, after the harness process restarts and after a switch
+to another harness; a harness that just started has every session
+closed, so what the UI shows may need opening again.")
+
 (defvar harness-ui--server nil "The harness process this Emacs started, or nil.")
 (defvar harness-ui--server-address nil "(ADDRESS . TOKEN) of the running harness process.")
 (defvar harness-ui--server-stopping nil "Non-nil while the harness process is being stopped on purpose.")
@@ -246,7 +252,10 @@ made meanwhile are queued and sent once it listens."
   (harness-acp-set-handler harness-ui-connection #'harness-ui--dispatch)
   (harness-acp-on-close harness-ui-connection #'harness-ui--on-close)
   (harness-then (harness-acp-initialize harness-ui-connection)
-                (lambda (_) (harness-ui-refresh-sessions) (harness-ui-refresh-models))
+                (lambda (_)
+                  (harness-ui-refresh-sessions)
+                  (harness-ui-refresh-models)
+                  (run-hooks 'harness-ui-connected-hook))
                 (lambda (e) (message "Harness: initialize failed: %s" (harness-error-message e))))
   (harness-ui--flush-queue)
   harness-ui-connection)
@@ -347,7 +356,9 @@ later in the init file still reach the process."
 ;;;###autoload
 (defun harness-restart ()
   "Restart the harness process with the current configuration.
-Sessions persist; running turns are interrupted."
+Sessions and tasks persist; running turns are interrupted, and the
+tasks among them carry on once the process is back (see
+`harness-tasks-resume-interrupted')."
   (interactive)
   (unless (eq harness-ui-connection-address 'process)
     (user-error "The harness does not run in its own process (see `harness-process')"))
