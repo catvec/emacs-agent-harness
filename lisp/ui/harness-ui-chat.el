@@ -1448,6 +1448,14 @@ The panel answers through RESPOND."
             ((< (cdr w) harness-chat--transcript-end)
              (set-window-start (car w) (cdr w) t))))))
 
+(defun harness-chat--hl-line-range ()
+  "Return the `hl-line-mode' range, nothing inside the compose box.
+The line highlight would cover the compose background, and outranking it
+would hide the region too."
+  (unless (and harness-chat--compose-overlay (overlay-buffer harness-chat--compose-overlay)
+               (>= (point) (overlay-start harness-chat--compose-overlay)))
+    (cons (line-beginning-position) (line-beginning-position 2))))
+
 (defun harness-chat--update-placeholder ()
   "Show a hint in the empty compose box."
   (when (and harness-chat--placeholder-overlay (overlay-buffer harness-chat--placeholder-overlay)
@@ -2151,7 +2159,8 @@ The transcript is read-only; the compose box at the bottom is editable."
               word-wrap t
               search-invisible 'open
               header-line-format '(:eval (harness-chat--header))
-              mode-line-format '(" " (:eval (harness-chat--mode-line)) "  " mode-line-misc-info))
+              mode-line-format '(" " (:eval (harness-chat--mode-line)) "  " mode-line-misc-info)
+              hl-line-range-function #'harness-chat--hl-line-range)
   (add-to-invisibility-spec 'harness-chat-fold)
   (add-hook 'completion-at-point-functions #'harness-chat-completion-at-point nil t)
   (add-hook 'pre-command-hook #'harness-chat--pre-command nil t)
