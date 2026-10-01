@@ -20,7 +20,9 @@
 ;; compaction summaries and runs of coalescable tools collapse under
 ;; overlays that isearch opens, so every word of the conversation stays
 ;; searchable.  History loads lazily: the newest
-;; `harness-chat-history-limit' nodes at open, older pages on demand.
+;; `harness-chat-history-limit' nodes at open, an older page whenever a
+;; window scrolls near the top, and blocks far above every window are
+;; dropped again so a long session never fills the buffer.
 ;;
 ;; Region bookkeeping: every block's text ends with a separator newline
 ;; that is never deleted, so re-rendering a block replaces the text
@@ -60,7 +62,8 @@
   :type 'integer :group 'harness-ui-chat)
 
 (defcustom harness-chat-history-page 100
-  "Number of older nodes loaded by \"Show earlier messages\"."
+  "Number of older nodes loaded when a window scrolls near the top.
+Once two pages of nodes lie above every window, all but one are dropped."
   :type 'integer :group 'harness-ui-chat)
 
 (defcustom harness-chat-compose-max-lines 8
@@ -145,6 +148,8 @@
 (defvar-local harness-chat--editing nil "Queue item id loaded into the compose box.")
 (defvar-local harness-chat--has-more nil "Non-nil when older nodes exist.")
 (defvar-local harness-chat--loading nil "Non-nil while the transcript is being fetched.")
+(defvar-local harness-chat--fetching nil "Non-nil while an older page is being fetched.")
+(defvar-local harness-chat--history-timer nil "Timer of the pending `harness-chat--manage-history'.")
 (defvar-local harness-chat--deferred nil "Updates that arrived while loading, newest first.")
 (defvar-local harness-chat--coalescable nil "Names of coalescable tools.")
 (defvar-local harness-chat--turn-start nil "Float time the running turn started.")
@@ -1410,9 +1415,7 @@ The panel answers through RESPOND."
 (defun harness-chat--render-top ()
   "Render the region above the first block (its separator newline stays)."
   (let ((text (cond (harness-chat--loading (propertize " loading…" 'face 'harness-dim-face))
-                    (harness-chat--has-more
-                     (concat " " (harness-chat--button "Show earlier messages" #'harness-chat-load-earlier
-                                                       :help "Load older history (C-c C-l)")))
+                    (harness-chat--has-more (propertize " loading earlier messages…" 'face 'harness-dim-face))
                     ((null harness-chat--order) (propertize " No messages yet." 'face 'harness-dim-face))
                     (t ""))))
     (add-text-properties 0 (length text) '(read-only t rear-nonsticky t) text)
@@ -1451,22 +1454,107 @@ The panel answers through RESPOND."
   "Return the id of the oldest rendered node."
   (car (last harness-chat--order)))
 
-(defun harness-chat-load-earlier ()
-  "Load the previous page of history above the transcript."
-  (interactive)
+(defun harness-chat--schedule-history (&rest _)
+  "Run `harness-chat--manage-history' shortly, once however often scrolled."
+  (unless harness-chat--history-timer
+    (let ((buf (current-buffer)))
+      (setq harness-chat--history-timer
+            (run-at-time 0.05 nil (lambda ()
+                                    (when (buffer-live-p buf)
+                                      (with-current-buffer buf
+                                        (setq harness-chat--history-timer nil)
+                                        (harness-chat--manage-history)))))))))
+
+(defun harness-chat--near-top-p (window)
+  "Non-nil when WINDOW starts less than a screen below the transcript top."
+  (save-excursion
+    (goto-char (window-start window))
+    (forward-line (- (window-body-height window)))
+    (<= (point) harness-chat--transcript-start)))
+
+(defun harness-chat--manage-history ()
+  "Load older history near the top of a window; drop it far above every window."
+  (let ((windows (harness-chat--windows)))
+    (unless (or harness-chat--loading harness-chat--fetching (null harness-chat--order) (null windows))
+      (if (and harness-chat--has-more (cl-some #'harness-chat--near-top-p windows))
+          (harness-chat--load-earlier)
+        (harness-chat--drop-earlier (apply #'min (mapcar #'window-start windows)))))))
+
+(defun harness-chat--load-earlier ()
+  "Fetch the previous page of history and render it above the transcript."
   (let ((buf (current-buffer))
         (before (harness-chat--oldest-id))
         (gen harness-chat--generation))
-    (unless before (user-error "Nothing rendered yet"))
+    (setq harness-chat--fetching t)
     (harness-ui-call "_harness/session/nodes"
                      (list :id harness-ui-session-id :opts (list :limit harness-chat-history-page :before before))
                      (lambda (nodes)
                        (when (buffer-live-p buf)
                          (with-current-buffer buf
-                           (when (= gen harness-chat--generation)
-                             (harness-chat--prepend-nodes nodes)
+                           (setq harness-chat--fetching nil)
+                           (when (and (= gen harness-chat--generation) (equal before (harness-chat--oldest-id)))
+                             (harness-chat--prepend-keeping-view nodes)
                              (setq harness-chat--has-more (>= (length nodes) harness-chat-history-page))
-                             (harness-chat--render-top))))))))
+                             (harness-chat--render-top)
+                             ;; A page shorter than the window leaves it near the top still.
+                             (harness-chat--schedule-history)))))
+                     (lambda (_err)
+                       (when (buffer-live-p buf)
+                         (with-current-buffer buf (setq harness-chat--fetching nil)))))))
+
+(defun harness-chat--prepend-keeping-view (nodes)
+  "Render NODES above the transcript without moving what the windows show.
+A window starting above the first block would otherwise show the new
+page from its top, and land near the top again."
+  (let* ((first (gethash (harness-chat--oldest-id) harness-chat--blocks))
+         (windows (cl-remove-if-not (lambda (w) (< (window-start w) (harness-chat-block-start first)))
+                                    (harness-chat--windows)))
+         (bottom (harness-chat--bottom-windows)))
+    (harness-chat--prepend-nodes nodes)
+    (let ((start (marker-position (harness-chat-block-start first))))
+      (dolist (w windows)
+        (if (memq w bottom)
+            (harness-chat--pin w)
+          (when (< (window-point w) start)
+            (set-window-point w start)
+            (when (eq w (selected-window)) (goto-char start)))
+          (set-window-start w start t))))))
+
+(defun harness-chat--drop-earlier (top)
+  "Drop the oldest blocks once two pages of them end above TOP, keeping one page."
+  (let* ((oldest (reverse harness-chat--order))
+         (above (cl-loop for id in oldest
+                         while (<= (harness-chat-block-end (gethash id harness-chat--blocks)) top)
+                         count t))
+         (drop (min (- above harness-chat-history-page)
+                    (- (length oldest) harness-chat-history-limit))))
+    (when (and (>= above (* 2 harness-chat-history-page)) (> drop 0))
+      (let ((victims (seq-take oldest drop))
+            (keep (gethash (nth drop oldest) harness-chat--blocks)))
+        (harness-chat--clear-groups)
+        (let ((inhibit-read-only t) (buffer-undo-list t))
+          (delete-region harness-chat--transcript-start (harness-chat-block-start keep)))
+        (dolist (id victims)
+          (let ((b (gethash id harness-chat--blocks)))
+            (harness-chat--cancel-render id)
+            (when (harness-chat-block-fold b) (delete-overlay (harness-chat-block-fold b)))
+            (when-let* ((r (harness-chat-block-result b))) (remhash (plist-get r :id) harness-chat--blocks))
+            (when-let* ((call (and (equal (harness-chat-block-kind b) "tool-call")
+                                   (plist-get (harness-chat-block-node b) :call-id))))
+              (remhash call harness-chat--calls))
+            (setq harness-chat--unfinished (delete id harness-chat--unfinished))
+            (remhash id harness-chat--blocks)
+            (set-marker (harness-chat-block-start b) nil)
+            (set-marker (harness-chat-block-end b) nil)))
+        (setq harness-chat--order (butlast harness-chat--order drop)
+              harness-chat--has-more t)
+        ;; The new first block opens a turn, as it would at open.
+        (let ((head (harness-chat--head-p (harness-chat-block-kind keep) nil)))
+          (unless (eq (not head) (not (harness-chat-block-head keep)))
+            (setf (harness-chat-block-head keep) head)
+            (harness-chat--rerender keep)))
+        (harness-chat--regroup)
+        (harness-chat--render-top)))))
 
 (defun harness-chat--prepend-nodes (nodes)
   "Render NODES (oldest first) above the current first block."
@@ -1548,7 +1636,8 @@ end afterwards."
                             (harness-chat--node-current-p (plist-get u :node)))
                    (harness-chat--apply-update u)))
                (setq harness-chat--deferred nil)
-               (when keep-bottom (harness-chat-scroll-to-bottom)))))))
+               (when keep-bottom (harness-chat-scroll-to-bottom))
+               (harness-chat--schedule-history))))))
      (lambda (err)
        (when (buffer-live-p buf)
          (with-current-buffer buf
@@ -1855,7 +1944,6 @@ the background it was rendered on, so it would show as a dark box."
     (define-key map (kbd "C-c C-y") #'harness-chat-allow-newest)
     (define-key map (kbd "C-c C-n") #'harness-chat-deny-newest)
     (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
-    (define-key map (kbd "C-c C-l") #'harness-chat-load-earlier)
     (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
     (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom)
     map)
@@ -1877,6 +1965,7 @@ The transcript is read-only; the compose box at the bottom is editable."
                          :bottom t)
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
+  (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)
   (add-hook 'kill-buffer-hook #'harness-chat--on-kill nil t))
 
 (defun harness-chat--post-command ()
@@ -1888,6 +1977,7 @@ The transcript is read-only; the compose box at the bottom is editable."
 (defun harness-chat--on-kill ()
   "Forget the buffer and its timers."
   (harness-chat--cancel-all-renders)
+  (when harness-chat--history-timer (cancel-timer harness-chat--history-timer))
   (when (eq (gethash harness-ui-session-id harness-chat--buffers) (current-buffer))
     (remhash harness-ui-session-id harness-chat--buffers)))
 

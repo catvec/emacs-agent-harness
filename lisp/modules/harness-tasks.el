@@ -22,8 +22,8 @@
 ;;
 ;; States:
 ;;
-;;   pending   submitted, waiting for a free slot
-;;             (`harness-tasks-max-running' tasks run at once)
+;;   pending   submitted, waiting for a free slot (only when
+;;             `harness-tasks-max-running' limits how many run at once)
 ;;   active    its session is working on it, or stopped part way
 ;;             (`:outcome' says why: error, cancelled, merge-failed…)
 ;;   merging   the agent finished; its branch is queued or merging
@@ -50,9 +50,9 @@
 (require 'harness-util)
 (require 'harness-files)
 
-(defcustom harness-tasks-max-running 3
+(defcustom harness-tasks-max-running nil
   "Tasks that may work at the same time; the rest wait as pending.
-nil means no limit."
+nil (the default) means no limit."
   :type '(choice (const :tag "No limit" nil) integer) :group 'harness)
 
 (defcustom harness-tasks-permission-mode 'auto
