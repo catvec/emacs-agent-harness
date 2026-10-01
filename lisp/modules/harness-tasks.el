@@ -521,14 +521,24 @@ or blocked session is in progress; an idle one waits for the user."
   "Return task ID."
   (harness-tasks--view (harness-tasks--get id)))
 
+(defun harness-tasks--config (key root)
+  "Return setting KEY as configured for a session at ROOT."
+  (if (and root (harness-method-exists-p 'config/get))
+      (ignore-errors (harness-call 'config/get key root))
+    (and (boundp key) (symbol-value key))))
+
 (harness-defmethod task/settings (&optional cwd)
-  "Return the settings task sessions start with (for CWD's project)."
-  (list :max-running harness-tasks-max-running
-        :permission-mode harness-tasks-permission-mode
-        :non-interactive harness-tasks-non-interactive
-        :model harness-tasks-model
-        :thinking harness-tasks-thinking
-        :worktrees (and cwd (harness-tasks--git-p (harness-tasks--project cwd)) t)))
+  "Return the settings task sessions start with (for CWD's project).
+Model and thinking are the values a new task would really get: the task
+defaults, else what the project configures."
+  (let ((root (and cwd (harness-tasks--project cwd))))
+    (list :max-running harness-tasks-max-running
+          :permission-mode harness-tasks-permission-mode
+          :non-interactive harness-tasks-non-interactive
+          :model (or harness-tasks-model (harness-tasks--config 'harness-model root)
+                     (and (boundp 'harness-default-model) harness-default-model))
+          :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
+          :worktrees (and root (harness-tasks--git-p root) t))))
 
 (harness-defmethod task/start (id)
   "Start pending task ID now, even when every slot is taken."

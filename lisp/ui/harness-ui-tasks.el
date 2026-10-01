@@ -458,13 +458,13 @@ Point and every window showing the board stay on the same task."
        (mapconcat
         #'identity
         (list (harness-ui-tasks--setting-button
-               (if (plist-get new :model) (harness-ui-model-label (plist-get new :model)) "default model")
+               (harness-ui-model-label (plist-get new :model))
                #'harness-set-model "Model of new tasks")
               (harness-ui-tasks--setting-button
                (format "%s" (or (plist-get new :permission-mode) "default mode"))
                #'harness-set-permission-mode "Permission mode of new tasks")
               (harness-ui-tasks--setting-button
-               (format "thinking %s" (or (plist-get new :thinking) "default"))
+               (harness-ui-thinking-label (plist-get new :thinking))
                #'harness-set-thinking "Thinking level of new tasks")
               (harness-ui-tasks--setting-button
                (if (harness-json-true-p (plist-get new :non-interactive)) "non-interactive" "interactive")
