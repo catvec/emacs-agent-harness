@@ -42,6 +42,12 @@
 ;;
 ;; Records persist in tasks.json; the sessions persist as usual.
 ;; Events `task/changed' (TASK) and `task/deleted' (ID) let a UI follow.
+;;
+;; A board can also host BTW side conversations (`task/btw'), where the
+;; user asks how the tasks are going.  The board has no session to fork,
+;; so such a conversation is a fresh `btw' session without a parent at
+;; the project root; `harness-tasks-btw-prompt' tells it to answer from
+;; the task and session tools.
 
 ;;; Code:
 
@@ -82,6 +88,14 @@ task keeps working while nobody watches it."
 A task's session name is its title on the board, so by default the
 model titles task sessions like tickets."
   :type '(choice (const :tag "Name tasks like other sessions" nil) string) :group 'harness)
+
+(defcustom harness-tasks-btw-prompt
+  "## Task board
+This is a side conversation the user opened from this project's task board to ask about its tasks: what each one is doing, how far along it is, what it changed, why it is stuck, which ones need the user. Answer from the live state and check it again for every question: task_list shows the board (each task's title, column, state, session, branch and what it waits on), session_read a task's session (its plan, todos, latest transcript and working directory, where git shows what it changed), session_search where something was said, and task_wait or session_wait wait for a task or a session to settle. Refer to tasks by title and id, and keep answers short. Change nothing (tasks, sessions or files) unless the user asks you to."
+  "Text added to the system prompt of BTW conversations about a task board.
+Such a conversation is opened from the board (`task/btw') to ask about
+its tasks; nil adds nothing."
+  :type '(choice (const :tag "Nothing" nil) string) :group 'harness)
 
 (defcustom harness-tasks-worktrees t
   "When non-nil, tasks in a git project work in a worktree and merge back.
@@ -323,6 +337,21 @@ so a board opened from a task's session shows the project's tasks."
       (concat prompt "\n\n" harness-tasks-naming-prompt)
     prompt))
 
+;;;; Side conversations about the board
+
+(defun harness-tasks--btw-p (session)
+  "Non-nil when SESSION is a BTW conversation about a task board.
+Those are the sessions `task/btw' starts: a BTW about a session is a
+fork of it, so only the board's have no parent."
+  (and (eq (plist-get session :kind) 'btw)
+       (null (plist-get session :parent-id))))
+
+(defun harness-tasks--btw-system-prompt (prompt session)
+  "Tell SESSION, when it is about a task board, how to answer (PROMPT filter)."
+  (if (and (harness-tasks--btw-p session) (not (harness-string-blank-p harness-tasks-btw-prompt)))
+      (concat prompt "\n\n" harness-tasks-btw-prompt "\n")
+    prompt))
+
 ;;;; Scheduling
 
 (defun harness-tasks--working-p (task)
@@ -487,10 +516,12 @@ missing ones come from the `harness-tasks-' defaults."
 
 (defun harness-tasks--adoptable-p (session)
   "Non-nil when SESSION may become a task.
-It must be open, not a task already and not a merge target."
+It must be open, not a task already, not a merge target and not a
+conversation about the board."
   (and (not (eq (plist-get session :status) 'inactive))
        (not (harness-tasks--by-session (plist-get session :id)))
-       (not (equal (plist-get session :name) harness-tasks-merge-session-name))))
+       (not (equal (plist-get session :name) harness-tasks-merge-session-name))
+       (not (harness-tasks--btw-p session))))
 
 (harness-defmethod task/adoptable (&optional cwd)
   "Return the open sessions of CWD's project (every project without CWD) that
@@ -532,6 +563,15 @@ or blocked session is in progress; an idle one waits for the user."
                                            (harness-tasks--set id :branch branch)))
                         #'ignore)))
       (harness-tasks--view task))))
+
+(harness-defmethod task/btw (cwd &optional name)
+  "Start a BTW conversation about the task board of CWD's project.
+Return its session, where the user asks how the tasks are going: a
+`btw' session named NAME at the project root, without a parent (a BTW
+about a session is a fork of it instead), which
+`harness-tasks-btw-prompt' tells to answer with the task and session
+tools.  The caller sends the first question."
+  (harness-call 'session/create :cwd (harness-tasks--project cwd) :kind 'btw :name name))
 
 (harness-defmethod task/list (&optional cwd)
   "Return the tasks of CWD's project, oldest first; every task without CWD."
@@ -667,6 +707,7 @@ Its worktree, if any, is kept: it may hold work nobody merged."
   (harness-on 'merge/conflict #'harness-tasks--on-merge-conflict)
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
+  (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
   (harness-run-soon #'harness-tasks--resume-merges)
   (harness-run-soon #'harness-tasks--schedule))

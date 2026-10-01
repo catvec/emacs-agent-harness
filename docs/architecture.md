@@ -725,7 +725,9 @@ or answer for a new task again: a question stays waiting, never
 cancelled).  RET opens the session.  The session setting commands
 change the task at point, or from the compose box the settings the next
 task starts with (shown as buttons under the New task label).  `I` or
-[Add session] makes an ongoing session a task.  Boards reload after any
+[Add session] makes an ongoing session a task.  `b` or [BTW] (or the
+usual BTW command) opens a BTW side conversation over the board about
+its tasks (`task/btw`).  Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at
 the top of in progress (latest started first) and completed lists the
 latest finished first; pending is the queue, in the order its tasks
@@ -736,6 +738,10 @@ children, filter/sort by any column), conversation tree
 (`harness-ui-tree`), usage dashboard (`harness-ui-usage`, svg charts
 via svg.el), worktrees (`harness-ui-worktree`), notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle
-counts, clickable), BTW side window (`harness-ui-btw`), media
+counts, clickable), BTW side window (`harness-ui-btw`: a fork of the
+session it is opened over, or, over a view that sets
+`harness-ui-btw-start-function`, a conversation the view starts; closing
+it returns there and closes an idle BTW, keeping it makes it a normal
+session window in that place), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video thumbnails/open).

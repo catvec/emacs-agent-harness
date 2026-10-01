@@ -16,7 +16,9 @@
 ;; (e) or replies to a task's session (m) without leaving the board, and
 ;; answers a task's question (m or [Answer]); C-g leaves such a box for a
 ;; new task again, the question still waiting.
-;; RET or a click on a task opens its session in full.
+;; RET or a click on a task opens its session in full.  b or [BTW] asks
+;; about the tasks in a BTW side conversation over the board, whose agent
+;; answers with the task and session tools (`task/btw').
 ;;
 ;; Everything comes over ACP (`_harness/task/…' plus the session cache),
 ;; so the board works against a remote harness too.  The list region is
@@ -70,6 +72,9 @@
 ;;;; Buffer state
 
 (defvar harness-ui-tasks-board-map)
+(defvar harness-ui-btw-start-function)
+(defvar harness-ui-btw-about)
+(declare-function harness-btw "harness-ui-btw")
 
 (defmacro harness-ui-tasks--with-task (id &rest body)
   "Run BODY with point on task ID's card."
@@ -588,6 +593,9 @@ TEXT replaces the compose contents; without it they are kept."
              (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts)
              (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts))
      "   "
+     (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
+                                "Ask about the tasks in a side conversation")
+     " "
      (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
                                 "Make an ongoing session of this project a task")
      " "
@@ -741,6 +749,7 @@ anything that moves a task without one, so a board never drifts.")
   (define-key map (kbd "D") #'harness-ui-tasks-delete)
   (define-key map (kbd "A") #'harness-ui-tasks-toggle-archived)
   (define-key map (kbd "I") #'harness-ui-tasks-adopt)
+  (define-key map (kbd "b") #'harness-ui-tasks-btw)
   (define-key map (kbd "g") #'harness-ui-tasks-refresh)
   (define-key map (kbd "q") #'quit-window)
   (define-key map (kbd "?") #'harness-menu))
@@ -770,6 +779,9 @@ anything that moves a task without one, so a board never drifts.")
   (add-hook 'window-buffer-change-functions #'harness-ui-tasks--on-window-change nil t)
   (add-hook 'window-size-change-functions #'harness-ui-tasks--on-resize nil t)
   (setq harness-ui-setting-target-function #'harness-ui-tasks--setting-target)
+  ;; A BTW over the board (b, [BTW], or the usual BTW command) asks about its tasks.
+  (setq-local harness-ui-btw-start-function #'harness-ui-tasks--start-btw
+              harness-ui-btw-about "the tasks")
   (harness-compose-setup :project (lambda () harness-ui-tasks--dir)
                          :placeholder #'harness-ui-tasks--placeholder
                          :redraw #'harness-ui-tasks--render-tail
@@ -1123,6 +1135,24 @@ That is `keyboard-quit', or what the global map remaps it to (Doom's
                (harness-ui-tasks--request-then "_harness/task/adopt" (list :session-id (plist-get session :id))
                                                "Adding the session"))))))
      (lambda (e) (harness-ui-tasks--fail buffer "Listing sessions" e)))))
+
+(defun harness-ui-tasks-btw ()
+  "Ask about the tasks in a BTW side conversation over the board.
+Its agent answers with the task and session tools: what a task is
+doing, how far along it is, what it changed, why it is stuck."
+  (interactive)
+  (unless (fboundp 'harness-btw) (user-error "The BTW module is not loaded"))
+  (call-interactively #'harness-btw))
+
+(defun harness-ui-tasks--start-btw (name)
+  "Start a conversation NAME about the board's tasks; return a promise of it.
+The BTW module calls this (`harness-ui-btw-start-function') to open a
+BTW over the board; a failure shows on the board too."
+  (setq harness-ui-tasks--error nil)
+  (let ((buffer (current-buffer))
+        (promise (harness-ui-request "_harness/task/btw" (list :cwd harness-ui-tasks--dir :name name))))
+    (harness-then promise #'ignore (lambda (e) (harness-ui-tasks--fail buffer "Starting a BTW" e)))
+    promise))
 
 (defun harness-ui-tasks-toggle-archived ()
   "Show or hide archived tasks."

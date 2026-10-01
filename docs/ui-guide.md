@@ -36,6 +36,7 @@ Display
 - Helpers: `harness-ui-format-context`, `harness-ui-model-label`, `harness-ui-button`, `harness-ui-mouse-keymap`, `harness-format-tokens`, `harness-format-cost`, `harness-relative-time`, `harness-truncate-middle`.
 - Markdown: `(harness-ui-markdown-render TEXT)` → propertized string (`harness-ui-markdown.el`).
 - Keys: add commands to `harness-ui-map` (prefix `C-c a`) and entries to the `harness-menu` transient (append with `transient-append-suffix`).
+- BTW over a view: a view without a session of its own can host BTW side conversations by setting, buffer-locally, `harness-ui-btw-start-function` (a function of the new session's name returning a promise of the session it starts, e.g. through `_harness/task/btw`) and `harness-ui-btw-about` (what the conversation is about, for the prompt and header).  `harness-btw` then starts that instead of forking, and closing the BTW returns to the view.
 
 ## Rules of the house
 
