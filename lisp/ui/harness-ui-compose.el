@@ -13,7 +13,9 @@
 ;;     becomes an attachment) and /skill completion at its start;
 ;;   - attachments: C-c C-a picks a file, C-c C-v pastes the clipboard
 ;;     (images and other MIME types), files dropped on the window attach;
-;;   - the text and attachments, kept across redraws of the host.
+;;   - the text and attachments, kept across redraws of the host;
+;;   - optionally, the box at the bottom of the window: a buffer shorter
+;;     than its window is padded at the top so it ends on the last line.
 ;;
 ;; Hosts read the box with `harness-compose-text' and
 ;; `harness-compose-take', expand /skill references with
@@ -40,6 +42,8 @@
 (defvar-local harness-compose--text "" "The box's text, kept across redraws.")
 (defvar-local harness-compose--files nil "Project files for @ completion.")
 (defvar-local harness-compose--skills nil "Skill names for / completion.")
+(defvar-local harness-compose--pads nil "Window -> overlay padding the buffer so the box sits at the bottom.")
+(defvar-local harness-compose--pad-at nil "Function returning where the padding goes, or nil for the top.")
 (defvar-local harness-compose--files-at nil "Start of the @ token whose completion last refreshed the files.")
 
 (defvar-local harness-compose-project-function (lambda () default-directory)
@@ -65,10 +69,17 @@
   (define-key map (kbd "C-c C-a") #'harness-compose-add-attachment)
   (define-key map (kbd "C-c C-v") #'harness-compose-attach-clipboard))
 
-(cl-defun harness-compose-setup (&key project placeholder redraw)
+(cl-defun harness-compose-setup (&key project placeholder redraw bottom)
   "Make this buffer host a compose box.
 PROJECT returns the project root, PLACEHOLDER the hint for the empty
-box, REDRAW redraws the box (it must call `harness-compose-insert')."
+box, REDRAW redraws the box (it must call `harness-compose-insert').
+With BOTTOM the box sits at the bottom of every window showing the
+buffer, the way a chat app keeps its input there: t pads the top of a
+short buffer, a function returning a position pads there instead (a
+board above the box stays at the top, the gap opens below it)."
+  (when bottom
+    (setq harness-compose--pad-at (and (functionp bottom) bottom))
+    (add-hook 'pre-redisplay-functions #'harness-compose-pad-window nil t))
   (when project (setq harness-compose-project-function project))
   (when placeholder (setq harness-compose-placeholder-function placeholder))
   (when redraw (setq harness-compose-redraw-function redraw))
@@ -162,6 +173,43 @@ would hide the region too.  Never nil: `global-hl-line-mode' needs a range."
              (harness-compose-live-p)
              (not (harness-compose-in-p)))
     (goto-char harness-compose-end)))
+
+(defun harness-compose-pad-window (window)
+  "Pad WINDOW so a buffer shorter than it ends at its bottom.
+Runs from `pre-redisplay-functions'; each window gets its own overlay."
+  (when (and (window-live-p window) (eq (window-buffer window) (current-buffer))
+             (harness-compose-live-p))
+    (setq harness-compose--pads
+          (cl-remove-if-not (lambda (p) (and (window-live-p (car p)) (overlay-buffer (cdr p))
+                                             (eq (window-buffer (car p)) (current-buffer))))
+                            harness-compose--pads))
+    (let* ((ov (or (alist-get window harness-compose--pads)
+                   (let ((o (make-overlay (point-min) (point-min) nil t)))
+                     (overlay-put o 'window window)
+                     (push (cons window o) harness-compose--pads)
+                     o)))
+           (at (if harness-compose--pad-at (funcall harness-compose--pad-at) (point-min)))
+           (body (window-body-height window t))
+           (key (list (buffer-modified-tick) body (window-body-width window t) (window-start window) at)))
+      (unless (equal key (overlay-get ov 'harness-compose-key))
+        (overlay-put ov 'harness-compose-key key)
+        (move-overlay ov at at)
+        (overlay-put ov 'before-string nil)
+        ;; Leave a line for the empty one after the box, where a host
+        ;; following the end puts the bottom of the window.
+        (let* ((line (frame-char-height (window-frame window)))
+               (used (cdr (window-text-pixel-size window (point-min) harness-compose-end nil body)))
+               (lines (/ (- body used line) line)))
+          (when (and (= (window-start window) (point-min)) (> lines 0))
+            (overlay-put ov 'before-string (make-string lines ?\n))))))))
+
+(defun harness-compose-repad (window)
+  "Drop WINDOW's padding so the next redisplay sizes it again.
+A host about to scroll WINDOW calls this first: `recenter' would count
+the padding as lines to keep in view."
+  (when-let* ((pad (alist-get window harness-compose--pads)))
+    (overlay-put pad 'before-string nil)
+    (overlay-put pad 'harness-compose-key nil)))
 
 ;;;; Editing and reading
 
