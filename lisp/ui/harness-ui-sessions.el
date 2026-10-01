@@ -7,6 +7,10 @@
 ;; sessions (forks, BTW conversations, sub-agents) are indented under
 ;; their parents.  Scoped to the current project by default; `a'
 ;; toggles all projects; `/' filters fuzzily; column headers sort.
+;;
+;; A project includes its linked git worktrees: a session there (a
+;; task's, a sub-agent's) has the worktree as its `:project', and is
+;; listed with the main checkout that worktree belongs to.
 
 ;;; Code:
 
@@ -25,13 +29,35 @@
   "Name of the session list buffer."
   :type 'string :group 'harness-ui-sessions)
 
-(defvar-local harness-ui-sessions--project nil "Project root filter, or nil for all.")
+(defvar-local harness-ui-sessions--project nil
+  "Main checkout the list is scoped to, or nil for all projects.")
 (defvar-local harness-ui-sessions--filter "" "Fuzzy filter text.")
 (defvar-local harness-ui-sessions--show-inactive t)
+(defvar-local harness-ui-sessions--main-roots nil
+  "Hash table: session project root -> the main checkout it belongs to.
+Which checkout a root belongs to does not change, and the list redraws
+on every session change, so each root is resolved once; `g' forgets them.")
+
+(defun harness-ui-sessions--main-root (root)
+  "Return the main checkout session project ROOT belongs to.
+A linked git worktree belongs to its main checkout.  A root gone from
+disk, like an archived task's worktree, belongs to the project around it.
+Remote roots are not looked at."
+  (when root
+    (let ((memo (or harness-ui-sessions--main-roots
+                    (setq harness-ui-sessions--main-roots (make-hash-table :test 'equal)))))
+      (or (gethash root memo)
+          (puthash root
+                   (cond ((file-remote-p root) root)
+                         ((file-directory-p root) (harness-files-main-checkout root))
+                         (t (harness-files-main-root root)))
+                   memo)))))
 
 (defun harness-ui-sessions--matches-p (s)
+  "Non-nil when session S belongs in the list: scope, status and filter."
   (and (or (null harness-ui-sessions--project)
-           (equal (plist-get s :project) harness-ui-sessions--project))
+           (equal (harness-ui-sessions--main-root (plist-get s :project))
+                  harness-ui-sessions--project))
        (or harness-ui-sessions--show-inactive
            (not (equal (plist-get s :status) "inactive")))
        (or (string-empty-p harness-ui-sessions--filter)
@@ -153,10 +179,12 @@
 
 ;;;###autoload
 (defun harness-sessions (&optional all-projects)
-  "Show the session list, scoped to the current project unless ALL-PROJECTS."
+  "Show the session list, scoped to the current project unless ALL-PROJECTS.
+The project includes its git worktrees, so its tasks' sessions are
+listed, and from a task's worktree the list shows the whole project."
   (interactive "P")
   (let ((project (unless all-projects
-                   (harness-files-project-root default-directory)))
+                   (harness-files-main-root default-directory)))
         (buf (get-buffer-create harness-ui-sessions-buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-sessions-mode) (harness-ui-sessions-mode))
@@ -230,7 +258,7 @@
   (interactive)
   (setq harness-ui-sessions--project
         (if harness-ui-sessions--project nil
-          (harness-files-project-root default-directory)))
+          (harness-files-main-root default-directory)))
   (harness-ui-sessions--redraw))
 
 (defun harness-ui-sessions-toggle-inactive ()
@@ -240,8 +268,10 @@
   (harness-ui-sessions--redraw))
 
 (defun harness-ui-sessions-reload ()
-  "Reload sessions from the harness."
+  "Reload sessions from the harness and resolve their projects again."
   (interactive)
+  (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))
+    (with-current-buffer buf (setq harness-ui-sessions--main-roots nil)))
   (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw))))
 
 (defun harness-ui-sessions--init ()

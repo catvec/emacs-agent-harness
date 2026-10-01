@@ -166,6 +166,49 @@
       (let ((plain (harness-test-temp-dir)))
         (should (equal (file-name-as-directory plain) (harness-files-main-root plain)))))))
 
+(ert-deftest harness-files-main-checkout-of-a-root ()
+  "A root's main checkout comes from its own .git file, CRLF or not."
+  (harness-worktree-test-with-repo
+    (let ((path (file-name-as-directory (expand-file-name "wt-checkout" base))))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "checkout" path)
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-worktree-test--dir (harness-files-main-checkout path))))
+      (should (equal root (harness-files-main-checkout root)))
+      ;; A directory below a root is not looked up the tree, unlike
+      ;; `harness-files-main-root'.
+      (let ((sub (expand-file-name "sub/" path)))
+        (make-directory sub)
+        (should (equal sub (harness-files-main-checkout sub))))
+      ;; A .git file with CRLF line ends.
+      (let ((crlf (file-name-as-directory (expand-file-name "wt-crlf" base)))
+            (dotgit (with-temp-buffer
+                      (insert-file-contents (expand-file-name ".git" path))
+                      (buffer-string))))
+        (make-directory crlf)
+        (with-temp-file (expand-file-name ".git" crlf)
+          (insert (replace-regexp-in-string "\n" "\r\n" dotgit)))
+        (should (equal (harness-worktree-test--dir root)
+                       (harness-worktree-test--dir (harness-files-main-checkout crlf)))))
+      ;; Remote roots come back untouched.
+      (let ((remote "/ssh:nobody@example.invalid:/srv/x/"))
+        (should (file-remote-p remote)) ; loads TRAMP before file access is watched
+        (cl-letf (((symbol-function 'file-regular-p) (lambda (&rest _) (error "Looked at"))))
+          (should (equal remote (harness-files-main-checkout remote))))))))
+
+(ert-deftest harness-files-main-checkout-non-ascii-path ()
+  "The .git file and commondir are read as UTF-8, as git writes them."
+  (skip-unless (eq 'utf-8 (coding-system-base
+                           (or file-name-coding-system default-file-name-coding-system 'undecided))))
+  (harness-worktree-test-with-repo
+    ;; wt- then u with diaeresis, n, i with diaeresis, c, o with stroke, d, e with acute.
+    (let* ((name (concat "wt-" (string #xfc ?n #xef ?c #xf8 ?d #xe9)))
+           (path (file-name-as-directory (expand-file-name name base))))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "unicode" path)
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-worktree-test--dir (harness-files-main-checkout path))))
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-worktree-test--dir (harness-files-main-root path)))))))
+
 (ert-deftest harness-worktree-root-of-and-prune ()
   (harness-worktree-test-with-repo
     (let* ((path (expand-file-name "wt-prune" base))
