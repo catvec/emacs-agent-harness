@@ -15,7 +15,8 @@ module needs something more, add it here first.
  State          session, agent, config, project, store, usage, naming, compaction,
                 worktree, merge, tasks, skills, perms, sandbox
  Completion     provider, provider-openai, provider-claude
- Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent
+ Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
+                tools-sessions
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE)
@@ -533,7 +534,7 @@ blocked on a request or the task stopped part way.
 - Events `task/changed TASK`, `task/deleted ID`.  Records persist in
   `tasks.json`; merges in flight are queued again after a restart.
 
-### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent
+### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions
 
 Tool names and inputs (all paths relative to cwd or absolute; TRAMP
 prefixes come from the session host):
@@ -560,10 +561,35 @@ prefixes come from the session host):
 | `todo_write` | todos | meta |
 | `spawn_agent` | prompt, fork, model, name | meta |
 | `skill_search` / `skill_load` | query / name | read |
+| `session_list` | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
+| `session_search` | query, regexp, all_projects, max_sessions, max_matches | read |
+| `session_read` | session_id, limit, before, kinds, max_chars | read |
+| `session_send` | session_id, message, mode (send/queue), wait | meta |
+| `session_control` | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
+| `session_wait` | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
+| `task_list` | column, include_archived, all_projects | read |
+| `task_submit` | prompt, cwd, model, thinking | meta |
+| `task_control` | task_id, action (start/message/cancel/merge/complete/archive/restore/delete), message | meta |
+| `task_wait` | task_id / task_ids, until (settled/done/needs-input/active/changed), mode, timeout_seconds | read |
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
 asynchronous process started with `start-file-process` so TRAMP works.
+
+The session and task tools (`tools-sessions`) let an agent coordinate the
+rest of the harness.  Sessions are named by id, a unique id prefix or a
+unique name; a session cannot message, control or wait on itself.
+Listing and search default to the current project (worktrees included).
+`session_search` greps the `sessions/*.nodes.jsonl` logs in a subprocess,
+so transcripts are not loaded into memory to be searched.  `session_send`
+prefixes the message with `[Message from session ID "NAME"]` and goes
+through `agent/prompt` (a turn, steering, or the queue).  Waits are
+entries re-checked on session and task events, settled by their
+condition, their timeout (`harness-tools-sessions-wait-default`, at most
+`-wait-max`) or the end of the waiting turn; a timeout is a report, not
+an error.  Nothing here grants permissions: permission requests and
+permission modes stay with the user, and `task_submit` uses the task
+defaults.  The task tools need the `tasks` module.
 
 `elisp` and the `emacs_*` tools are about the user's Emacs, so their
 handlers (`harness-tools-in-client NAME`) forward the call to the UI as
