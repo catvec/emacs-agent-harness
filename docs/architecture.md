@@ -502,8 +502,15 @@ Task mode: one session per task.  TASK =
 `:column` is derived on every read: `needs-input` when the session is
 blocked on a request or the task stopped part way.
 
-- `task/submit CWD PROMPT &optional (:attachments :model :permission-mode)` →
-  task; it starts when one of `harness-tasks-max-running` slots is free.
+- `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
+  :thinking :non-interactive)` → task; it starts when one of
+  `harness-tasks-max-running` slots is free.  Missing options come from
+  `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
+  `-non-interactive` (on); an explicit false turns non-interactive off.
+- `task/adoptable &optional CWD` lists the project's open sessions that
+  are not tasks; `task/adopt SESSION-ID` makes one a task (its first
+  message is the prompt; a worktree session keeps its worktree and merges
+  like any task; an idle one waits in `needs-input` with `:outcome adopted`).
 - Starting: in a git project (`harness-tasks-worktrees`) `worktree/create`
   on branch `harness-tasks-branch-prefix` + slug + id, then a session in
   that worktree (`harness-tasks-permission-mode`, non-interactive by
@@ -517,7 +524,8 @@ blocked on a request or the task stopped part way.
   `:outcome merge-failed`.  Outside git `end-turn` makes it `done`.
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
   `task/start ID` (ignores the limit), `task/update ID PROMPT` (pending
-  only), `task/prompt ID TEXT` (follow-up or steering; reopens),
+  only), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
+  steering; reopens),
   `task/merge ID` (retry), `task/complete ID`, `task/archive ID &optional
   RESTORE` (deactivates the session; removes a merged task's worktree and
   branch), `task/archive-done &optional CWD`, `task/cancel ID`,
@@ -642,12 +650,36 @@ the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
 Auto-scroll follows unless the user scrolled up.
 
+Compose box (`harness-ui-compose`): the editable box shared by chat
+buffers and the task board.  A host calls `harness-compose-setup`
+(`:project`, `:placeholder`, `:redraw` functions) from its mode and
+`harness-compose-insert` where it draws the box; it gets multi-line
+editing, the placeholder, @file and /skill completion, attachments
+(`C-c C-a`, clipboard `C-c C-v`, drag and drop), skill expansion
+(`harness-compose-with-expanded-text`) and ACP attachment blocks.
+
+Views share positions with sessions: the task board, session list,
+usage dashboard, worktree list, conversation tree and log open through
+`harness-ui-display-view`, replacing the session in their position (and
+returning to the position they had last); a session opened from a view
+(`harness-ui-session-opener`) replaces the view.  Menus, help and the
+BTW overlay keep their own windows.
+
+Session settings: `harness-set-model`, `-thinking`, `-permission-mode`
+and `harness-toggle-non-interactive` change what the buffer's
+`harness-ui-setting-target-function` names -- a session id, or a
+settings plist with its setter -- and otherwise the current session.
+
 Task board (`harness-ui-tasks`, `C-c a a`): the project's tasks in four
 sections -- requires your input, in progress, pending, completed -- with
 each card's current todo, progress, elapsed time, cost and merge state,
 one-click answers to a blocked task's question or permission, and a
 compose box that submits a task, edits a pending one or messages a
-task's session.  RET opens the session.
+task's session.  RET opens the session.  The session setting commands
+change the task at point, or from the compose box the settings the next
+task starts with (shown as buttons under the New task label).  `I` or
+[Add session] makes an ongoing session a task.  Boards reload after any
+task, merge, turn, status, worktree or reload event.
 
 Other buffers: sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column), conversation tree
