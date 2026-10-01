@@ -54,6 +54,7 @@ does on the task board).
 | `C-c a m` `T` `p` `i` | model, thinking level, permission mode, non-interactive |
 | `C-c a f` / `C-c a b` | fork the session / BTW side conversation: a blank fork in a side window under the session, point in its compose box (ask with `C-c C-c` as in any session); `C-c C-k` closes it, deleting it if nothing was asked, `C-c C-o` keeps it as a normal session |
 | `C-c a t` `u` `w` | conversation tree, usage dashboard, worktrees |
+| `C-c a S` | settings: every harness setting on one page, edited globally or for the current project (`s` switches) |
 | `C-c a k` | cancel the running turn |
 | `C-c a c` | connect the UI to a remote harness |
 | `C-c a R` | reload the harness in place |
@@ -80,9 +81,13 @@ plan's extra usage, and the value at API prices the plan covered.
 Budgets count billed cost only.
 
 Settings persist through `.dir-locals.el` (project, then directory) and
-customize (global): `harness-model`, `harness-permission-mode`,
+customize (global); the settings page (`C-c a S`, `M-x harness-settings`)
+edits them like a customize buffer, with a Global / Project toggle at
+the top, and shows where each value in effect comes from.  These layer:
+`harness-context-reserve`, `harness-model`, `harness-permission-mode`,
 `harness-thinking`, `harness-allowed-directories`, `harness-budget`,
-`harness-sandbox-policy`, `harness-non-interactive`.
+`harness-sandbox-policy`, `harness-non-interactive`.  The page lists
+the other harness options too; they have a global value only.
 
 Sessions and tasks live in `harness-state-directory` (`harness/` in your
 Emacs directory by default) and survive restarts of Emacs and of the
@@ -126,4 +131,5 @@ Modules: `config project store session agent provider provider-claude
 provider-openai provider-demo tools tools-fs tools-shell tools-emacs
 tools-web tools-agent tools-sessions perms sandbox usage compaction naming skills
 worktree merge tasks acp` and, in the presentation layer, `ui ui-chat
-ui-sessions ui-tasks ui-tree ui-notify ui-usage ui-worktree ui-btw ui-media`.
+ui-sessions ui-tasks ui-tree ui-notify ui-usage ui-worktree ui-btw ui-media
+ui-config`.

@@ -1254,6 +1254,7 @@ leaves the buffer's commands out, never the whole menu."
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
+    ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
     ("c" "Connect remote" harness-connect-remote)
     ("R" "Reload harness" harness-reload)
     ("L" "Log" harness-show-log)]]

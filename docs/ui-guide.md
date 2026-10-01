@@ -14,6 +14,7 @@ Connection and requests
 - `(harness-ui-request METHOD PARAMS)` → promise; `(harness-ui-call METHOD PARAMS CALLBACK &optional ON-ERROR)` for the common case; `(harness-ui-notify METHOD PARAMS)`.
 - Extension methods are `"_harness/NAME"` with params keyed by the bus method's argument names, e.g. `("_harness/session/nodes" (:id SID :opts (:limit 50)))`, `("_harness/session/update" (:id SID :name "x"))`, `("_harness/agent/cancel" (:session-id SID))`.
 - Standard ACP: `session/new {cwd}`, `session/prompt {sessionId prompt}`, `session/cancel`, `session/set_mode`, `session/set_model`, `session/load`.
+- Settings: `("_harness/config/describe" (:cwd DIR))` describes every harness option, `("_harness/config/set" (:key "harness-model" :value "\"demo:x\"" :printed t :scope "project" :cwd DIR))` and `_harness/config/unset` change one.  Values and customize types travel printed (`prin1`, read them back with `read`), so symbols, lists and nil survive JSON; `harness-ui-config` edits them with `wid-edit` widgets built from the types.
 
 Incoming traffic (add named functions to these lists)
 

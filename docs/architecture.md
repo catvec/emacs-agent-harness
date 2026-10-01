@@ -220,13 +220,42 @@ project-root `.dir-locals.el` → customize default.  Variables are
 `harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
 `harness-non-interactive`, `harness-context-reserve`.
 
-- `config/get KEY CWD` → value for a session at CWD (KEY is the symbol).
-- `config/set KEY VALUE &key scope cwd` — scope `directory|project|global`;
-  default: project if a project is found, else directory.  Persists with
-  `add-dir-local-variable`, or for `global` with `harness-save-user-option`,
-  which asks the UI's Emacs to `customize-save-variable` (its custom file).
+The other harness options (the `harness` customize group, less the
+ones that decide how the harness starts or reaches the UI:
+`harness-process`, `harness-state-directory`, the module lists, the
+`harness-server-*` and `harness-acp-*` options, minor modes) have a
+global value only.  Options named `...-api-key`, `-token`, `-secret`
+or `-password` are secrets: their values never leave the harness and
+never go to a `.dir-locals.el`.
+
+- `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
+  or its name; layered settings only).
+- `config/set KEY VALUE &key scope cwd printed` — scope
+  `directory|project|global`; default: project if a project is found,
+  else directory, and global for an option that does not layer.
+  `:printed t` says VALUE is the value printed with `prin1`, which is
+  how a JSON client sends symbols and lists.  The value must fit the
+  option's customize type, and a directory-local one its `:safe`
+  predicate.  Persists with `add-dir-local-variable` (no backup file
+  is left behind), or for `global` with `harness-save-user-option`,
+  which asks the UI's Emacs to `customize-save-variable` (its custom
+  file).
+- `config/unset KEY &key scope cwd` — removes KEY from that layer: a
+  `project` or `directory` scope deletes it from the `.dir-locals.el`
+  (and the file once nothing is left in it); `global` sets the option
+  back to its standard value.
 - `config/layers CWD` → `((global . V) (project . V) (directory . V))` for display.
-- Event `config/changed KEY VALUE SCOPE CWD`.
+- `config/describe CWD` → `(:cwd :root :project :in-project :files
+  :modules :settings)` for a settings page: every option, layered ones
+  first, each with its doc, customize `:type`, module, `:standard`,
+  `:global`, `:project`, `:directory` and effective `:value` with the
+  `:source` layer it comes from, plus the layers whose value does not
+  fit the type (`:invalid`).  Types and values are printed (`read`
+  them back), so they survive JSON; an unset layer is null, one set
+  to nil is `"nil"`.  A secret has `:has-value` instead of values.
+- Event `config/changed KEY VALUE SCOPE CWD` after a set or unset;
+  after an unset VALUE is the value now in effect at CWD, and for a
+  secret it is nil.
 
 ### project
 
@@ -896,6 +925,23 @@ returning to the position they had last); a session opened from a view
 (`harness-ui-session-opener`) replaces the view.  Menus, help and the
 BTW overlay keep their own windows.
 
+Settings page (`harness-ui-config`, `C-c a S`, `harness-settings`):
+every harness option on one page, like a customize buffer, about the
+project of the current buffer (in a chat buffer, of the session's
+working directory).  A Global / Project toggle at the top (`s`, or the
+radio buttons, or the header line) picks what is edited: the customize
+value, or the project's `.dir-locals.el` (a directory's, outside a
+project).  Session defaults, the layered settings, come first in both
+scopes; the other options are listed by module in the Global scope and
+folded into one line in the Project scope.  Each setting is a
+`wid-edit` widget built from its customize type, with its doc and
+where its value in effect comes from; toggles and menus save at once,
+text saves with RET (C-x C-s saves every edit).  [Remove override]
+deletes a project value, [Reset to default] a customized global one.
+Secrets show as set or not and are set through `read-passwd`; long
+texts open in `string-edit`.  The page reloads on `config/changed`,
+keeping edits not saved yet.
+
 Session settings: `harness-set-model`, `-thinking`, `-permission-mode`
 and `harness-toggle-non-interactive` change what the buffer's
 `harness-ui-setting-target-function` names -- a session id, or a
@@ -937,7 +983,7 @@ and its chart stacks what a plan covered on top of the billed cost.
 The UI keeps each provider's QUOTA from `provider/quota` and
 `provider/quota-updated` (`harness-ui-quota`).
 
-Other buffers: sessions list (`tabulated-list-mode`, tree indentation for
+Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; scoped to the current project, its
 git worktrees and so its tasks' sessions included, each session's root
 resolved to its main checkout once with `harness-files-main-checkout`),
