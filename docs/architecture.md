@@ -718,7 +718,10 @@ task's session.  RET opens the session.  The session setting commands
 change the task at point, or from the compose box the settings the next
 task starts with (shown as buttons under the New task label).  `I` or
 [Add session] makes an ongoing session a task.  Boards reload after any
-task, merge, turn, status, worktree or reload event.
+task, merge, turn, status, worktree or reload event.  New tasks show at
+the top of in progress (latest started first) and completed lists the
+latest finished first; pending is the queue, in the order its tasks
+start.
 
 Other buffers: sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column), conversation tree
