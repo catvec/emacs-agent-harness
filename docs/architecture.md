@@ -905,8 +905,9 @@ or answer for a new task again: a question stays waiting, never
 cancelled).  RET opens the session.  The session setting commands
 change the task at point, or from the compose box the settings the next
 task starts with (shown as buttons under the New task label).  A
-Submit / Refine toggle beside that label (`C-c C-t`) picks what a new
-task does: start, or go to the backlog, written up by an agent and
+Submit / Refine toggle beside that label, showing only the current mode
+(a click or `C-c C-t` switches it), picks what a new task does: start,
+or go to the backlog, written up by an agent and
 waiting in pending until you start it (`s`); `r` refines a queued task,
 retries a stopped write-up or sends feedback on a backlog task's.  `I` or
 [Add session] makes an ongoing session a task.  `b` or [BTW] (or the
