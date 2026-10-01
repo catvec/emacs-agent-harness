@@ -652,7 +652,8 @@ Auto-scroll follows unless the user scrolled up.
 
 Compose box (`harness-ui-compose`): the editable box shared by chat
 buffers and the task board.  A host calls `harness-compose-setup`
-(`:project`, `:placeholder`, `:redraw` functions) from its mode and
+(`:project`, `:placeholder`, `:redraw` functions; `:bottom` keeps the box at
+the bottom of the window) from its mode and
 `harness-compose-insert` where it draws the box; it gets multi-line
 editing, the placeholder, @file and /skill completion, attachments
 (`C-c C-a`, clipboard `C-c C-v`, drag and drop), skill expansion

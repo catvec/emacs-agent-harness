@@ -236,33 +236,33 @@ harness's task defaults and changed with the usual session commands.")
 ;;;; Actions (shared by keys, buttons and the context menu)
 
 (defun harness-ui-tasks--actions (task)
-  "Return (LABEL COMMAND KEY) for the actions that apply to TASK, primary first."
+  "Return (LABEL COMMAND) for the actions that apply to TASK, primary first."
   (let ((column (harness-ui-tasks--column task)))
     (append
      (pcase column
-       ('pending '(("Start now" harness-ui-tasks-start "s") ("Edit" harness-ui-tasks-edit "e")
-                   ("Drop" harness-ui-tasks-cancel "k")))
+       ('pending '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
+                   ("Drop" harness-ui-tasks-cancel)))
        ('needs-input
         (pcase (plist-get (harness-ui-tasks--pending task) :kind)
-          ("permission" '(("Allow" harness-ui-tasks-allow "y") ("Deny" harness-ui-tasks-deny "n")
-                          ("Open" harness-ui-tasks-open "RET") ("Stop" harness-ui-tasks-cancel "k")))
-          ("question" '(("Answer" harness-ui-tasks-reply "m") ("Open" harness-ui-tasks-open "RET")
-                        ("Stop" harness-ui-tasks-cancel "k")))
+          ("permission" '(("Allow" harness-ui-tasks-allow) ("Deny" harness-ui-tasks-deny)
+                          ("Open" harness-ui-tasks-open) ("Stop" harness-ui-tasks-cancel)))
+          ("question" '(("Answer" harness-ui-tasks-reply) ("Open" harness-ui-tasks-open)
+                        ("Stop" harness-ui-tasks-cancel)))
           (_ (if (equal (plist-get task :outcome) "merge-failed")
-                 '(("Retry merge" harness-ui-tasks-merge "M") ("Reply" harness-ui-tasks-reply "m")
-                   ("Open" harness-ui-tasks-open "RET") ("Mark done" harness-ui-tasks-complete "d"))
-               '(("Open" harness-ui-tasks-open "RET") ("Reply" harness-ui-tasks-reply "m")
-                 ("Mark done" harness-ui-tasks-complete "d"))))))
-       ('active '(("Open" harness-ui-tasks-open "RET") ("Steer" harness-ui-tasks-reply "m")
-                  ("Stop" harness-ui-tasks-cancel "k")))
+                 '(("Retry merge" harness-ui-tasks-merge) ("Reply" harness-ui-tasks-reply)
+                   ("Open" harness-ui-tasks-open) ("Mark done" harness-ui-tasks-complete))
+               '(("Open" harness-ui-tasks-open) ("Reply" harness-ui-tasks-reply)
+                 ("Mark done" harness-ui-tasks-complete))))))
+       ('active '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
+                  ("Stop" harness-ui-tasks-cancel)))
        ('done (if (harness-ui-tasks--archived-p task)
-                  '(("Unarchive" harness-ui-tasks-archive "x") ("Open" harness-ui-tasks-open "RET"))
-                '(("Archive" harness-ui-tasks-archive "x") ("Reply" harness-ui-tasks-reply "m")
-                  ("Open" harness-ui-tasks-open "RET")))))
+                  '(("Unarchive" harness-ui-tasks-archive) ("Open" harness-ui-tasks-open))
+                '(("Archive" harness-ui-tasks-archive) ("Reply" harness-ui-tasks-reply)
+                  ("Open" harness-ui-tasks-open)))))
      (when (plist-get task :session)
-       '(("Model…" harness-set-model "C-c a m") ("Permission mode…" harness-set-permission-mode "C-c a p")
-         ("Thinking…" harness-set-thinking "C-c a T") ("Non-interactive" harness-toggle-non-interactive "C-c a i")))
-     '(("Delete…" harness-ui-tasks-delete "D")))))
+       '(("Model…" harness-set-model) ("Permission mode…" harness-set-permission-mode)
+         ("Thinking…" harness-set-thinking) ("Non-interactive" harness-toggle-non-interactive)))
+     '(("Delete…" harness-ui-tasks-delete)))))
 
 (defun harness-ui-tasks--button (label action help)
   "Return a button string LABEL running ACTION (no arguments)."
@@ -290,7 +290,7 @@ A question's options come first, so it can be answered in one click."
                 (harness-ui-tasks--button
                  (format "[%s]" (car a))
                  (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
-                 (format "%s (%s)" (car a) (nth 2 a))))
+                 (car a)))
               (take (if options 1 2) (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))))
      " ")))
 
@@ -320,7 +320,7 @@ A question's options come first, so it can be answered in one click."
             (propertize (harness-ui-tasks--fit (harness-ui-tasks--title task) (- width (string-width meta) 7))
                         'face (if (eq column 'done) 'default 'harness-task-title-face)
                         'mouse-face 'highlight
-                        'help-echo "mouse-1: open the session · mouse-3: actions")
+                        'help-echo "Open the session")
             (propertize " " 'display `(space :align-to (- right ,(1+ (string-width meta)))))
             meta "\n"
             "    " detail
@@ -339,7 +339,7 @@ A question's options come first, so it can be answered in one click."
             (propertize (format "  %d" (length tasks)) 'face 'harness-dim-face))
     (when (and (eq column 'done) tasks (not folded))
       (let ((b (harness-ui-tasks--button "[Archive all]" #'harness-ui-tasks-archive-done
-                                         "Archive every completed task (X)")))
+                                         "Archive every completed task")))
         (insert (propertize " " 'display `(space :align-to (- right ,(1+ (string-width b))))) b)))
     (insert "\n")
     (put-text-property start (point) 'harness-task-section column)
@@ -369,7 +369,7 @@ A question's options come first, so it can be answered in one click."
     (insert "\n")
     (let ((groups (harness-ui-tasks--visible)))
       (if (and (null harness-ui-tasks--tasks) (null harness-ui-tasks--submitting))
-          (insert (propertize "  No tasks yet.  Describe one below and press C-c C-c:\n  it gets a session of its own and works on it while you do something else.\n\n"
+          (insert (propertize "  No tasks yet.  Describe one below: it gets a session of its own\n  and works on it while you do something else.\n\n"
                               'face 'harness-dim-face))
         (dolist (c harness-ui-tasks--columns)
           (harness-ui-tasks--insert-section (car c) (cadr c) (cdr (assq (car c) groups)))))))))
@@ -459,16 +459,16 @@ Point and every window showing the board stay on the same task."
         #'identity
         (list (harness-ui-tasks--setting-button
                (if (plist-get new :model) (harness-ui-model-label (plist-get new :model)) "default model")
-               #'harness-set-model "Model of new tasks (C-c a m)")
+               #'harness-set-model "Model of new tasks")
               (harness-ui-tasks--setting-button
                (format "%s" (or (plist-get new :permission-mode) "default mode"))
-               #'harness-set-permission-mode "Permission mode of new tasks (C-c a p)")
+               #'harness-set-permission-mode "Permission mode of new tasks")
               (harness-ui-tasks--setting-button
                (format "thinking %s" (or (plist-get new :thinking) "default"))
-               #'harness-set-thinking "Thinking level of new tasks (C-c a T)")
+               #'harness-set-thinking "Thinking level of new tasks")
               (harness-ui-tasks--setting-button
                (if (harness-json-true-p (plist-get new :non-interactive)) "non-interactive" "interactive")
-               #'harness-toggle-non-interactive "Toggle non-interactive for new tasks (C-c a i)"))
+               #'harness-toggle-non-interactive "Non-interactive mode of new tasks"))
         (propertize " · " 'face 'harness-dim-face))
        (propertize (format "   %s%s at a time"
                            (if (harness-json-true-p (plist-get s :worktrees)) "own worktree, merged when done · " "")
@@ -514,14 +514,14 @@ TEXT replaces the compose contents; without it they are kept."
           (insert label))
         (when harness-ui-tasks--target
           (insert "  " (harness-ui-tasks--button "[cancel]" #'harness-ui-tasks-compose-reset
-                                                 "Back to a new task (C-c C-k)")))
+                                                 "Back to a new task")))
         (insert "\n")
         (unless harness-ui-tasks--target
           (let ((line (harness-ui-tasks--new-settings-line)))
             (unless (string-empty-p line) (insert line "\n"))))
         (harness-compose-insert-attachments)
         (put-text-property start (point) 'read-only t)
-        (harness-compose-insert text "C-c C-c submits · RET newline · @file · /skill · C-c C-a attaches · C-c C-k resets")))
+        (harness-compose-insert text)))
     (set-marker harness-ui-tasks--list-end list-end)
     (pcase-dolist (`(,w . ,off) windows)
       (when (and off (window-live-p w))
@@ -532,10 +532,10 @@ TEXT replaces the compose contents; without it they are kept."
 (defun harness-ui-tasks--placeholder ()
   "Return the hint for the empty compose box."
   (pcase harness-ui-tasks--target
-    (`(edit . ,_) "the new prompt…  C-c C-c saves")
-    (`(reply . ,_) "a message for this task's session…  C-c C-c sends")
-    (`(answer . ,_) "your answer…  C-c C-c answers")
-    (_ "Describe a task…  C-c C-c submits · RET newline · @file · /skill")))
+    (`(edit . ,_) "New prompt…")
+    (`(reply . ,_) "Message…")
+    (`(answer . ,_) "Answer…")
+    (_ "Describe a task…")))
 
 (defun harness-ui-tasks--set-compose (text target)
   "Put TEXT in the compose box for TARGET and move there."
@@ -570,12 +570,12 @@ TEXT replaces the compose contents; without it they are kept."
              (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts))
      "   "
      (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
-                                "Make an ongoing session of this project a task (I)")
+                                "Make an ongoing session of this project a task")
      " "
      (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
-                                #'harness-ui-tasks-toggle-archived "Show or hide archived tasks (A)")
+                                #'harness-ui-tasks-toggle-archived "Show or hide archived tasks")
      " "
-     (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board (g)")
+     (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")
      (if harness-ui-tasks--loading (propertize "  loading…" 'face 'harness-dim-face) ""))))
 
 ;;;; Data
@@ -747,7 +747,9 @@ anything that moves a task without one, so a board never drifts.")
   (setq harness-ui-setting-target-function #'harness-ui-tasks--setting-target)
   (harness-compose-setup :project (lambda () harness-ui-tasks--dir)
                          :placeholder #'harness-ui-tasks--placeholder
-                         :redraw #'harness-ui-tasks--render-tail))
+                         :redraw #'harness-ui-tasks--render-tail
+                         ;; The board stays at the top; the gap opens between it and the box.
+                         :bottom (lambda () (marker-position harness-ui-tasks--list-end))))
 
 (defun harness-ui-tasks--buffer-name (dir)
   (format "*harness tasks: %s*" (file-name-nondirectory (directory-file-name dir))))
@@ -833,7 +835,7 @@ By default it takes the board's own position, replacing the board."
   (when-let* ((task (harness-ui-tasks--task t)))
     (popup-menu
      (cons (harness-ui-tasks--title task)
-           (mapcar (lambda (a) (vector (format "%s  (%s)" (car a) (nth 2 a)) (nth 1 a) t))
+           (mapcar (lambda (a) (vector (car a) (nth 1 a) t))
                    (harness-ui-tasks--actions task)))
      event)))
 
