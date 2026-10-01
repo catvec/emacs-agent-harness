@@ -820,6 +820,7 @@ the menu gets a bottom side window of its own; elsewhere it follows
     ("n" "New session" harness-new-session)
     ("s" "Switch session" harness-switch-session)
     ("l" "Session list" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
+    ("a" "Task mode" harness-tasks :if (lambda () (harness-ui--command-available-p 'harness-tasks)))
     ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
     ("b" "BTW side conversation" harness-btw :if (lambda () (harness-ui--command-available-p 'harness-btw)))
     ("f" "Fork session" harness-fork-session)
