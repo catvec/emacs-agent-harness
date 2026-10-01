@@ -290,5 +290,31 @@
       (harness-test-wait (lambda () (eq 'yolo (plist-get (harness-call 'session/get sid) :permission-mode)))
                          5 "the session's mode to change"))))
 
+(declare-function harness-ui-tasks--on-window-change "harness-ui-tasks")
+(declare-function harness-ui-tasks--on-resize "harness-ui-tasks")
+(declare-function harness-ui-tasks--refresh-soon "harness-ui-tasks")
+(declare-function harness-ui-tasks--schedule-render "harness-ui-tasks")
+(declare-function harness-ui-tasks--fetch "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-never-draws-into-other-buffers ()
+  "A session that replaces the board in its window is left alone by the board's hooks."
+  (harness-ui-tasks-test-with
+    (let ((session (get-buffer-create " *fake chat*")))
+      (unwind-protect
+          (let ((window (get-buffer-window board)))
+            (with-current-buffer session (insert "transcript\n"))
+            (set-window-buffer window session)
+            ;; The hooks and timers get the window's buffer as it is now.
+            (harness-ui-tasks--on-window-change window)
+            (harness-ui-tasks--on-resize window)
+            (harness-ui-tasks--refresh-soon session)
+            (harness-ui-tasks--schedule-render session)
+            (harness-ui-tasks--fetch session)
+            (with-current-buffer session (harness-ui-tasks--render) (harness-ui-tasks--render-tail))
+            (let ((deadline (+ (float-time) 0.8)))
+              (while (< (float-time) deadline) (accept-process-output nil 0.05)))
+            (should (equal "transcript\n" (with-current-buffer session (buffer-string)))))
+        (kill-buffer session)))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here
