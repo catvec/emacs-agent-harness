@@ -393,9 +393,17 @@
                                          respond))
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "Which colour?"))
-        (goto-char (1- (harness-ui-chat-test-find buf "[green]")))
+        (goto-char (1- (harness-ui-chat-test-find buf "green")))
         (harness-chat-push)
         (should (equal '((:answer "green")) answers))
+        (should (null harness-chat--pending))
+        ;; A digit on the panel picks that option.
+        (harness-chat--on-question (list :sessionId sid :requestId "q3" :question "Which shape?"
+                                         :options '("circle" "square"))
+                                   respond)
+        (goto-char (harness-ui-chat-test-find buf "Which shape?"))
+        (call-interactively (lookup-key (get-text-property (point) 'keymap) "2"))
+        (should (equal '(:answer "square") (car answers)))
         (should (null harness-chat--pending))
         ;; Free text goes through the compose box.
         (harness-chat--on-question (list :sessionId sid :requestId "q2" :question "Name?" :options nil) respond)
