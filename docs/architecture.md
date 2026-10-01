@@ -747,9 +747,11 @@ latest finished first; pending is the queue, in the order its tasks
 start.
 
 Other buffers: sessions list (`tabulated-list-mode`, tree indentation for
-children, filter/sort by any column), conversation tree
-(`harness-ui-tree`), usage dashboard (`harness-ui-usage`, svg charts
-via svg.el), worktrees (`harness-ui-worktree`), notifier
+children, filter/sort by any column; scoped to the current project, its
+git worktrees and so its tasks' sessions included, each session's root
+resolved to its main checkout once with `harness-files-main-checkout`),
+conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
+svg charts via svg.el), worktrees (`harness-ui-worktree`), notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle
 counts, clickable), BTW side window (`harness-ui-btw`), media
 (`harness-ui-media`: inline images, audio record/playback with svg
