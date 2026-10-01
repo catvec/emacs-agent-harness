@@ -1350,11 +1350,12 @@ and with a backlog task the session that wrote it up."
 
 (defun harness-ui-tasks-btw ()
   "Ask about the tasks in a BTW side conversation over the board.
-Its agent answers with the task and session tools: what a task is
-doing, how far along it is, what it changed, why it is stuck."
+It opens blank, for a question written in its compose box.  Its agent
+answers with the task and session tools: what a task is doing, how far
+along it is, what it changed, why it is stuck."
   (interactive)
   (unless (fboundp 'harness-btw) (user-error "The BTW module is not loaded"))
-  (call-interactively #'harness-btw))
+  (harness-btw))
 
 (defun harness-ui-tasks--start-btw (name)
   "Start a conversation NAME about the board's tasks; return a promise of it.

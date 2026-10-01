@@ -668,6 +668,41 @@
         (harness-ui-chat-test-type buf "anyone there?")
         (should-error (harness-chat-send) :type 'user-error)))))
 
+(ert-deftest harness-ui-chat-send-functions-see-each-message ()
+  ;; Every message sent or queued from the box runs
+  ;; `harness-chat-send-functions' with its text as typed and its
+  ;; attachments; a function that signals stops neither the message nor
+  ;; the others.  A host can replace the empty box's usual hint.
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (file (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
+           (seen nil))
+      (with-current-buffer buf
+        (should (equal "Message\N{U+2026}" (harness-chat--placeholder)))
+        (setq-local harness-chat-placeholder "Ask away")
+        (should (equal "Ask away" (harness-chat--placeholder)))
+        (add-hook 'harness-chat-send-functions (lambda (text atts) (push (list text atts) seen)) nil t)
+        (add-hook 'harness-chat-send-functions (lambda (&rest _) (error "A broken hook")) nil t))
+      (harness-ui-chat-test-prompt buf "  first message  ")
+      (should (equal '(("first message" nil)) seen))
+      (should (harness-ui-chat-test-find buf "first message"))
+      (with-current-buffer buf
+        (harness-ui-chat-test-type buf "for later")
+        (harness-compose-add-attachment file)
+        (harness-chat-queue))
+      (should (equal "for later" (car (car seen))))
+      (should (equal (list file) (mapcar (lambda (a) (plist-get a :path)) (cadr (car seen)))))
+      (harness-test-wait (lambda () (plist-get (harness-call 'session/get sid) :queue)) 5 "the queued message")
+      ;; An answer to a question is not a message.
+      (with-current-buffer buf
+        (setq seen nil)
+        (cl-letf (((symbol-function 'harness-chat--active-question) (lambda () (list :id "q1")))
+                  ((symbol-function 'harness-chat--answer-question) #'ignore))
+          (harness-ui-chat-test-type buf "red")
+          (harness-chat-send)))
+      (should-not seen))))
+
 (ert-deftest harness-ui-chat-inactive-session-reanimates-on-send ()
   ;; An inactive session opens as it is, with a notice and its compose box;
   ;; the first message sent from it resumes it and the notice goes away.

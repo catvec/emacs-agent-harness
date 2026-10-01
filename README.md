@@ -47,7 +47,7 @@ current settings; its log is in `M-x harness-show-log`.  `M-x harness-menu` (`C-
 | `C-c a s` / `C-c a l` | switch session / session list |
 | `C-c a a` | task mode: a board of one-session tasks, each in its own worktree and done once merged; `I` adds an ongoing session, `b` asks how the tasks are going in a BTW side conversation, and `C-c a m` `T` `p` `i` set the next task up (or change the task at point); `C-c C-t` switches the box between Submit (start now) and Refine (backlog refinement: an agent writes the task up and it waits in Pending, across restarts, until `s` starts it) |
 | `C-c a m` `T` `p` `i` | model, thinking level, permission mode, non-interactive |
-| `C-c a f` / `C-c a b` | fork the session / BTW side conversation |
+| `C-c a f` / `C-c a b` | fork the session / BTW side conversation: a blank fork in a side window under the session, point in its compose box (ask with `C-c C-c` as in any session); `C-c C-k` closes it, deleting it if nothing was asked, `C-c C-o` keeps it as a normal session |
 | `C-c a t` `u` `w` | conversation tree, usage dashboard, worktrees |
 | `C-c a k` | cancel the running turn |
 | `C-c a c` | connect the UI to a remote harness |
