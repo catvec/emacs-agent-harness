@@ -43,17 +43,5 @@ The side window is selected and not dedicated, as Doom leaves it."
       (should-not (window-parameter window 'window-side))
       (should (eq window (window-in-direction 'below (get-buffer-window other)))))))
 
-(ert-deftest harness-ui-icon-face-background ()
-  ;; An SVG keeps the background it was rendered on, so an icon on a
-  ;; coloured line is rendered on that line's background.
-  (cl-letf (((symbol-function 'icon-string)
-             ;; solaire-mode adds its own background to every image.
-             (lambda (_) (propertize " " 'display '(image :type svg :file "send.svg" :background "#000000")))))
-    (should (equal "#000000" (plist-get (cdr (get-text-property 0 'display (harness-ui-icon 'harness-icon-send)))
-                                        :background)))
-    (let ((spec (cdr (get-text-property 0 'display (harness-ui-icon 'harness-icon-send 'harness-compose-face)))))
-      (should (equal (face-background 'harness-compose-face nil t) (plist-get spec :background)))
-      (should (= 1 (cl-count :background spec))))))
-
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here
