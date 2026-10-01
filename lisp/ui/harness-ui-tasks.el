@@ -152,12 +152,12 @@ into the board's drawing and loading checks this first."
                        :text)))))
 
 (defun harness-ui-tasks--request (session)
-  "Describe the first pending request of SESSION."
+  "Say what kind of input the first pending request of SESSION needs.
+Only the kind: the request itself is read in the session."
   (when-let* ((item (car (plist-get session :pending))))
-    (let ((payload (plist-get item :payload)))
-      (if (equal (plist-get item :kind) "question")
-          (format "asks: %s" (or (plist-get payload :question) "a question"))
-        (format "wants to run %s" (or (plist-get payload :title) (plist-get payload :tool) "a tool"))))))
+    (if (equal (plist-get item :kind) "question")
+        "has a question for you"
+      "needs your permission")))
 
 (defun harness-ui-tasks--icon (task column session)
   (pcase column
@@ -280,26 +280,15 @@ into the board's drawing and loading checks this first."
   (car (plist-get (harness-ui-tasks--session task) :pending)))
 
 (defun harness-ui-tasks--card-buttons (task)
-  "Buttons for TASK's two most useful actions besides opening it.
-A question's options come first, so it can be answered in one click."
-  (let* ((id (plist-get task :id))
-         (pending (and (eq (harness-ui-tasks--column task) 'needs-input) (harness-ui-tasks--pending task)))
-         (options (and (equal (plist-get pending :kind) "question")
-                       (plist-get (plist-get pending :payload) :options))))
-    (string-join
-     (append
-      (mapcar (lambda (option)
-                (harness-ui-tasks--button (format "[%s]" option)
-                                          (lambda () (harness-ui-tasks--answer task option))
-                                          "Answer with this option"))
-              (take 3 options))
-      (mapcar (lambda (a)
-                (harness-ui-tasks--button
-                 (format "[%s]" (car a))
-                 (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
-                 (car a)))
-              (take (if options 1 2) (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))))
-     " ")))
+  "Buttons for TASK's two most useful actions besides opening it."
+  (let ((id (plist-get task :id)))
+    (mapconcat (lambda (a)
+                 (harness-ui-tasks--button
+                  (format "[%s]" (car a))
+                  (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
+                  (car a)))
+               (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))
+               " ")))
 
 ;;;; Rendering
 
