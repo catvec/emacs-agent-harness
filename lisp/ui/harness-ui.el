@@ -246,7 +246,7 @@ made meanwhile are queued and sent once it listens."
   (harness-acp-set-handler harness-ui-connection #'harness-ui--dispatch)
   (harness-acp-on-close harness-ui-connection #'harness-ui--on-close)
   (harness-then (harness-acp-initialize harness-ui-connection)
-                (lambda (_) (harness-ui-refresh-sessions))
+                (lambda (_) (harness-ui-refresh-sessions) (harness-ui-refresh-models))
                 (lambda (e) (message "Harness: initialize failed: %s" (harness-error-message e))))
   (harness-ui--flush-queue)
   harness-ui-connection)
@@ -396,6 +396,8 @@ Sessions persist; running turns are interrupted."
          (harness-ui-refresh-sessions))
        (when (equal event "harness/reloaded")
          (run-hooks 'harness-ui-redraw-hook))
+       (when (equal event "provider/models-updated")
+         (harness-ui-refresh-models))
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
@@ -472,6 +474,21 @@ Sessions persist; running turns are interrupted."
             (or (and name (not (string-empty-p name)) name)
                 (format "unnamed (%s)" (substring (or (plist-get session :id) "????") 0 4))))))
 
+;;;; Model catalogue cache
+
+(defvar harness-ui--models (make-hash-table :test 'equal)
+  "Model id -> model plist from the harness catalogue.")
+
+(defun harness-ui-refresh-models (&optional callback)
+  "Reload the model catalogue cache, redraw, then call CALLBACK with the models."
+  (harness-ui-call "_harness/provider/models" nil
+                   (lambda (models)
+                     (clrhash harness-ui--models)
+                     (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
+                     (run-hooks 'harness-ui-redraw-hook)
+                     (when callback (funcall callback models)))
+                   (unless callback #'ignore)))
+
 ;;;; Buffer-local session context
 
 (defvar-local harness-ui-session-id nil
@@ -489,7 +506,7 @@ Signal unless NOERROR when none can be found."
   "Read a session with completion showing PROMPT; PREDICATE filters."
   (let* ((sessions (harness-ui-sessions predicate))
          (table (mapcar (lambda (s) (cons (format "%s  %s  %s" (harness-ui-session-label s)
-                                                  (propertize (or (plist-get s :model) "") 'face 'harness-dim-face)
+                                                  (propertize (harness-ui-model-label (plist-get s :model)) 'face 'harness-dim-face)
                                                   (propertize (abbreviate-file-name (or (plist-get s :project) "")) 'face 'harness-dim-face))
                                           s))
                         sessions))
@@ -517,11 +534,29 @@ Signal unless NOERROR when none can be found."
                 'face (harness-ui-context-face context window)
                 'help-echo "Context tokens in use / context window")))
 
+(defun harness-ui--prettify-model-name (name)
+  "Return a readable form of model slug NAME, or nil when it has no known shape.
+\"claude-opus-5-5\" and \"claude-haiku-4-5-20251001\" become
+\"Claude Opus 5.5\" and \"Claude Haiku 4.5\"."
+  (when (string-match "\\`claude-\\([a-z]+\\)-\\([0-9]+\\)\\(?:-\\([0-9]\\)\\)?\\(?:-[0-9]\\{8\\}\\)?\\'" name)
+    (format "Claude %s %s%s" (capitalize (match-string 1 name)) (match-string 2 name)
+            (if (match-string 3 name) (concat "." (match-string 3 name)) ""))))
+
 (defun harness-ui-model-label (model-id)
-  "Return a short \"model (provider)\" label for MODEL-ID."
-  (if (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id))
-      (format "%s (%s)" (match-string 2 model-id) (match-string 1 model-id))
-    (or model-id "?")))
+  "Return a readable label for MODEL-ID.
+Uses the catalogue's label; falls back to a prettified slug, then to
+\"name (provider)\"."
+  (let* ((m (and model-id (gethash model-id harness-ui--models)))
+         (name (if (and model-id (string-match "\\`[^:]+:\\(.+\\)\\'" model-id))
+                   (match-string 1 model-id)
+                 model-id))
+         (label (plist-get m :label)))
+    (cond ((null model-id) "?")
+          ((and label (not (equal label name))) label)
+          ((and name (harness-ui--prettify-model-name name)))
+          ((not (equal name model-id))
+           (format "%s (%s)" name (substring model-id 0 (- (length model-id) (length name) 1))))
+          (t model-id))))
 
 (defun harness-ui-button (label action &rest props)
   "Insert a clickable LABEL running ACTION (a command or a function of the button).
@@ -636,25 +671,31 @@ Set by the chat module.")
   "Choose a model for SESSION-ID (default the current buffer's session)."
   (interactive)
   (let ((sid (or session-id (harness-ui-current-session-id))))
-    (harness-ui-call "_harness/provider/models" nil
-                     (lambda (models)
-                       (let* ((table (mapcar (lambda (m)
-                                               (cons (plist-get m :id) m))
-                                             models))
-                              (completion-extra-properties
-                               (list :annotation-function
-                                     (lambda (id)
-                                       (let ((m (cdr (assoc id table))))
-                                         (format "  %s · %s · %s ctx%s"
-                                                 (or (plist-get m :provider-label) (plist-get m :provider))
-                                                 (plist-get m :label)
-                                                 (harness-format-tokens (plist-get m :context-window))
-                                                 (if-let* ((p (plist-get m :pricing)))
-                                                     (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
-                                                   ""))))))
-                              (choice (completing-read "Model: " table nil t)))
-                         (harness-ui-call "session/set_model" (list :sessionId sid :modelId choice)
-                                          (lambda (_) (message "Model → %s" choice))))))))
+    (harness-ui-refresh-models
+     (lambda (models)
+       (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
+              (table (cl-mapcar (lambda (m label)
+                                  ;; Two models sharing a label are told apart by id.
+                                  (cons (if (> (cl-count label labels :test #'equal) 1)
+                                            (format "%s (%s)" label (plist-get m :id))
+                                          label)
+                                        m))
+                                models labels))
+              (completion-extra-properties
+               (list :annotation-function
+                     (lambda (choice)
+                       (let ((m (cdr (assoc choice table))))
+                         (format "  %s · %s · %s ctx%s"
+                                 (or (plist-get m :provider-label) (plist-get m :provider))
+                                 (plist-get m :id)
+                                 (harness-format-tokens (plist-get m :context-window))
+                                 (if-let* ((p (plist-get m :pricing)))
+                                     (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
+                                   ""))))))
+              (choice (completing-read "Model: " table nil t))
+              (id (plist-get (cdr (assoc choice table)) :id)))
+         (harness-ui-call "session/set_model" (list :sessionId sid :modelId id)
+                          (lambda (_) (message "Model → %s" choice))))))))
 
 ;;;###autoload
 (defun harness-set-thinking (&optional session-id)
