@@ -120,7 +120,7 @@ Local in-process connections never need it."
 (defconst harness-acp--forwarded-events
   '(session/created session/deleted session/queue-changed session/pending-changed
     session/status agent/turn-started agent/turn-ended agent/quota
-    provider/models-updated usage/budget-warning usage/budgets-changed
+    provider/models-updated provider/quota-updated usage/budget-warning usage/budgets-changed
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed session/forked session/head-moved
     question/answered task/changed task/deleted permission/dir-allowed permission/dir-revoked

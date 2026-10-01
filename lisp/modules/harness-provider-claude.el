@@ -23,6 +23,28 @@
 ;; - `--resume ID' recreates a session after a restart and `--resume ID
 ;;   --fork-session' implements `:fork': the new session starts from
 ;;   the parent's cached prefix.
+;; - Every new process is sent an `initialize' and a `get_usage' control
+;;   request.  The initialize answer names the account the CLI is logged
+;;   in with, which decides how turns are billed; the usage report (the
+;;   data behind the CLI's /usage, fetched without a model call) gives
+;;   the plan's quota and the cost total the process starts from.
+;;
+;; Pricing.  A `result' carries `total_cost_usd', a running total for
+;; the whole process that `--resume' seeds with the session's earlier
+;; spend, so a turn costs the difference to the previous total.  That
+;; figure is the CLI's estimate at API list prices.  With an API key, a
+;; bearer token or a cloud provider it is what the turn costs.  With a
+;; claude.ai subscription nobody pays it: the usage event says
+;; `:billing subscription' with the plan, `:cost 0' and the estimate as
+;; `:list-cost', unless the account is drawing on extra usage, which is
+;; billed at API prices (`:billing extra-usage').
+;;
+;; Quota.  The plan's windows (the 5-hour session, the week, per-model
+;; weeks) and its extra usage come from usage reports and
+;; `rate_limit_event' messages.  `provider/quota' returns them, fetched
+;; again through a live process, or a short-lived probe process when
+;; none runs, once they are older than `harness-provider-claude-quota-ttl';
+;; every change is announced as `provider/quota-updated'.
 ;;
 ;; Nothing here blocks: output is handled in a process filter, death in
 ;; a sentinel, and cancellation by an interrupt request plus a timer.
@@ -31,6 +53,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'parse-time)
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-provider)
@@ -52,6 +75,17 @@
 (defcustom harness-provider-claude-extra-args nil
   "Extra command line arguments appended to every `claude' invocation."
   :type '(repeat string) :group 'harness)
+
+(defcustom harness-provider-claude-quota-ttl 60
+  "Seconds after which the plan's quota report counts as stale.
+A stale report is fetched again after a turn and when `provider/quota'
+is asked.  The report comes from the CLI's usage endpoint and makes no
+model call.  nil fetches it only when nothing is known yet."
+  :type '(choice (const :tag "Only once" nil) number) :group 'harness)
+
+(defcustom harness-provider-claude-probe-timeout 20
+  "Seconds to wait for a usage report before answering with what is known."
+  :type 'number :group 'harness)
 
 ;;;; Constants
 
@@ -79,8 +113,19 @@
 
 (defconst harness-provider-claude-capabilities
   '(:hosted-loop t :fork t :resume t :vision t :thinking t :quota t
-    :compaction hosted :cost-reported t :cache-status t)
+    :compaction hosted :cost-reported t :billing t :cache-status t)
   "Capabilities of every Claude Code model.")
+
+(defconst harness-provider-claude--api-token-sources '("ANTHROPIC_AUTH_TOKEN" "apiKeyHelper")
+  "Token sources the CLI reports for credentials billed per token.")
+
+(defconst harness-provider-claude--window-keys
+  '((five_hour "5h" "Current session (5 hours)")
+    (seven_day "7d" "This week, all models")
+    (seven_day_opus "7d Opus" "This week, Opus")
+    (seven_day_sonnet "7d Sonnet" "This week, Sonnet")
+    (seven_day_oauth_apps "7d apps" "This week, apps"))
+  "Rate-limit window keys of the CLI as (KEY NAME LABEL).")
 
 ;;;; State
 
@@ -103,13 +148,56 @@
   cancel-timer       ; timer that kills the process after an interrupt
   pending-tools      ; list of (TOOL-USE-ID . NAME) awaiting a tools/call
   own-results        ; tool_use ids whose results the harness produced
-  context)           ; input size of the last API call, from stream usage
+  context            ; input size of the last API call, from stream usage
+  ;; Slots added later go last, see `harness-provider-claude--drop-stale-entries'.
+  account            ; how this process is billed, from its initialize answer
+  cost-total         ; the CLI's running cost total so far; nil while unknown
+  baseline-id        ; id of the usage request whose session total starts it
+  seen-output        ; non-nil once the CLI produced a reply or a result
+  probe)             ; non-nil for a quota probe, which serves no session
 
 (defvar harness-provider-claude--sessions (make-hash-table :test 'equal)
   "Harness session id -> `harness-provider-claude-session'.")
 
-(defvar harness-provider-claude--quota nil
-  "Last rate-limit windows seen, as (:name :used :resets) plists.")
+(defvar harness-provider-claude--status nil
+  "What the CLI last said about the account, in the shape `provider/quota' returns.")
+
+(defvar harness-provider-claude--refresh nil
+  "The usage request in flight as (REQUEST-ID PROMISE TIMER), or nil.")
+
+(defvar harness-provider-claude--probe nil
+  "The running quota probe record, or nil.")
+
+(defvar harness-provider-claude--request-count 0
+  "Counter that keeps control request ids unique.")
+
+(defvar harness-provider-claude--asked nil
+  "When a usage report was last asked for, as a float time.")
+
+(defun harness-provider-claude--drop-stale-entries ()
+  "Stop the CLI processes of records older than the current record layout.
+A reload keeps live records; one made before slots were added has no
+room for them, so its process stops and the session's next turn
+resumes the CLI session in a new one."
+  (let ((size (length (harness-provider-claude--make-session))))
+    (maphash (lambda (id entry)
+               (when (< (length entry) size)
+                 (let ((proc (harness-provider-claude-session-process entry))
+                       (stderr (harness-provider-claude-session-stderr entry))
+                       (fn (harness-provider-claude-session-on-event entry)))
+                   (when (process-live-p proc)
+                     (set-process-sentinel proc #'ignore)
+                     (set-process-filter proc #'ignore)
+                     (delete-process proc))
+                   (when (buffer-live-p stderr) (kill-buffer stderr))
+                   (when (and fn (harness-provider-claude-session-active entry))
+                     (ignore-errors
+                       (funcall fn '(:type done :stop-reason error
+                                     :error "The Claude provider was reloaded during this turn")))))
+                 (remhash id harness-provider-claude--sessions)))
+             harness-provider-claude--sessions)))
+
+(harness-provider-claude--drop-stale-entries)
 
 ;;;; Small helpers
 
@@ -215,10 +303,17 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
     (setf (harness-provider-claude-session-process entry) proc
           (harness-provider-claude-session-stderr entry) stderr
           (harness-provider-claude-session-buffer entry) ""
-          (harness-provider-claude-session-spawn-key entry) (list model effort system))
+          (harness-provider-claude-session-spawn-key entry) (list model effort system)
+          (harness-provider-claude-session-account entry) nil
+          ;; A fresh CLI session starts from zero; a resumed or forked
+          ;; one from the spend it restores, which the usage report says.
+          (harness-provider-claude-session-cost-total entry) (if resume nil 0.0)
+          (harness-provider-claude-session-seen-output entry) nil)
     (harness-provider-claude--send
      entry '(:type "control_request" :request_id "init-1"
              :request (:subtype "initialize" :sdkMcpServers ("harness"))))
+    (setf (harness-provider-claude-session-baseline-id entry)
+          (harness-provider-claude--request-usage entry))
     proc))
 
 (defun harness-provider-claude--kill (entry)
@@ -457,18 +552,414 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
                        :content (harness-provider-claude--result-text (plist-get block :content))
                        :is-error (harness-json-true-p (plist-get block :is_error)))))))))
 
+;;;; Account, billing and quota
+
+(defun harness-provider-claude--compact (plist)
+  "Return PLIST without the keys whose value is nil."
+  (let (out)
+    (cl-loop for (k v) on plist by #'cddr
+             when v do (setq out (append out (list k v))))
+    out))
+
+(defun harness-provider-claude--time (value)
+  "Return VALUE, epoch seconds or an ISO 8601 string, as a float time, or nil."
+  (cond ((numberp value) (float value))
+        ((and (stringp value) (not (string-empty-p value)))
+         (condition-case nil (float-time (parse-iso8601-time-string value)) (error nil)))))
+
+(defun harness-provider-claude--plan-id (label)
+  "Return the plan id of subscription LABEL (\"Claude Max\" gives \"max\"), or nil."
+  (when (and (stringp label) (string-match "\\([[:alnum:]_]+\\)[[:space:]]*\\'" label))
+    (let ((id (downcase (match-string 1 label))))
+      ;; Old CLIs called every login "Claude API".
+      (unless (member id '("api" "claude")) id))))
+
+(defun harness-provider-claude--plan-label (plan)
+  "Return the display name of subscription PLAN (\"max\" gives \"Claude Max\")."
+  (when (and (stringp plan) (not (string-empty-p plan)))
+    (concat "Claude " (capitalize (replace-regexp-in-string "_" " " plan)))))
+
+(defun harness-provider-claude-account-info (account)
+  "Classify ACCOUNT, the `account' plist of the CLI's initialize answer.
+Return (:billing BILLING :plan ID :plan-label LABEL :auth SOURCE
+:api-provider NAME :account (:email :organization)).  BILLING is
+`subscription' for a claude.ai login (Pro, Max, Team, Enterprise),
+`api' for an API key, an API key helper, a bearer token or a cloud
+provider (Bedrock, Vertex, Foundry), and nil when the answer does
+not say."
+  (let* ((provider (plist-get account :apiProvider))
+         (key (plist-get account :apiKeySource))
+         (token (plist-get account :tokenSource))
+         (label (plist-get account :subscriptionType))
+         (email (plist-get account :email))
+         (key (and (stringp key) (not (member key '("" "none"))) key))
+         (cloud (and (stringp provider) (not (member provider '("" "firstParty"))) provider))
+         (bearer (and (member token harness-provider-claude--api-token-sources) token))
+         (billing (cond ((or cloud key bearer) 'api)
+                        ((or (stringp label) (stringp email)
+                             (equal token "CLAUDE_CODE_OAUTH_TOKEN"))
+                         'subscription)))
+         (subscription (eq billing 'subscription))
+         (plan (and subscription (harness-provider-claude--plan-id label))))
+    (list :billing billing
+          :plan plan
+          :plan-label (and plan label)
+          :auth (or cloud key bearer
+                    (and (stringp token) (not (member token '("" "none"))) token)
+                    (and subscription "claude.ai"))
+          :api-provider (and (stringp provider) provider)
+          :account (and subscription (stringp email)
+                        (harness-provider-claude--compact
+                         (list :email email :organization (plist-get account :organization)))))))
+
+(defun harness-provider-claude--window-name (key)
+  "Return (NAME LABEL) of the rate-limit window KEY, a keyword or symbol."
+  (let* ((name (string-remove-prefix ":" (format "%s" key)))
+         (known (assq (intern name) harness-provider-claude--window-keys)))
+    (if known (cdr known) (list name (replace-regexp-in-string "_" " " name)))))
+
+(defun harness-provider-claude--limit-window (limit)
+  "Convert LIMIT, one entry of a usage report's `limits', into a window plist."
+  (let* ((kind (format "%s" (or (plist-get limit :kind) "limit")))
+         (scope (plist-get limit :scope))
+         (model (or (harness-plist-get-in scope '(:model :display_name))
+                    (harness-plist-get-in scope '(:surface :display_name))))
+         (percent (plist-get limit :percent)))
+    (harness-provider-claude--compact
+     (list :name (pcase kind
+                   ("session" "5h")
+                   ("weekly_all" "7d")
+                   ("weekly_scoped" (if model (concat "7d " model) "7d scoped"))
+                   (_ (if model (format "%s %s" kind model) kind)))
+           :label (pcase kind
+                    ("session" "Current session (5 hours)")
+                    ("weekly_all" "This week, all models")
+                    ("weekly_scoped" (concat "This week, " (or model "scoped")))
+                    (_ (concat (replace-regexp-in-string "_" " " kind)
+                               (if model (concat ", " model) ""))))
+           :kind kind
+           :model model
+           :used (and (numberp percent) (/ percent 100.0))
+           :resets (harness-provider-claude--time (plist-get limit :resets_at))
+           :severity (plist-get limit :severity)
+           :active (harness-json-true-p (plist-get limit :is_active))))))
+
+(defun harness-provider-claude--usage-windows (rate-limits)
+  "Return the quota windows a usage report's RATE-LIMITS describes.
+Recent CLIs list them under `limits'; older ones only name each window."
+  (let ((limits (plist-get rate-limits :limits)))
+    (if (consp limits)
+        (mapcar #'harness-provider-claude--limit-window limits)
+      (let (out)
+        (dolist (k harness-provider-claude--window-keys)
+          (let ((w (plist-get rate-limits (intern (format ":%s" (car k))))))
+            (when (and (consp w) (numberp (plist-get w :utilization)))
+              (push (harness-provider-claude--compact
+                     (list :name (nth 1 k) :label (nth 2 k)
+                           :used (/ (plist-get w :utilization) 100.0)
+                           :resets (harness-provider-claude--time (plist-get w :resets_at))))
+                    out))))
+        (dolist (m (plist-get rate-limits :model_scoped))
+          (when (numberp (plist-get m :utilization))
+            (let ((model (or (plist-get m :display_name) "model")))
+              (push (harness-provider-claude--compact
+                     (list :name (concat "7d " model) :label (concat "This week, " model)
+                           :model model :used (/ (plist-get m :utilization) 100.0)
+                           :resets (harness-provider-claude--time (plist-get m :resets_at))))
+                    out))))
+        (nreverse out)))))
+
+(defun harness-provider-claude--money (amount)
+  "Return AMOUNT, a (:amount_minor N :exponent E) plist, in major units, or nil."
+  (let ((minor (plist-get amount :amount_minor)))
+    (and (numberp minor) (/ minor (expt 10.0 (or (plist-get amount :exponent) 2))))))
+
+(defun harness-provider-claude--extra (rate-limits)
+  "Return the extra usage a usage report's RATE-LIMITS describes, or nil.
+The result is (:enabled BOOL :used F :limit F :currency STRING
+:disabled-reason STRING); extra usage is what a subscription draws on,
+at API prices, once a window is used up."
+  (let ((spend (plist-get rate-limits :spend))
+        (extra (plist-get rate-limits :extra_usage)))
+    (cond
+     ((consp spend)
+      (harness-provider-claude--compact
+       (list :enabled (harness-json-true-p (plist-get spend :enabled))
+             :used (harness-provider-claude--money (plist-get spend :used))
+             :limit (harness-provider-claude--money (plist-get spend :limit))
+             :currency (or (harness-plist-get-in spend '(:limit :currency))
+                           (harness-plist-get-in spend '(:used :currency))
+                           "USD")
+             :disabled-reason (plist-get spend :disabled_reason))))
+     ((consp extra)
+      (let ((scale (expt 10.0 (or (plist-get extra :decimal_places) 2)))
+            (used (plist-get extra :used_credits))
+            (limit (plist-get extra :monthly_limit)))
+        (harness-provider-claude--compact
+         (list :enabled (harness-json-true-p (plist-get extra :is_enabled))
+               :used (and (numberp used) (/ used scale))
+               :limit (and (numberp limit) (/ limit scale))
+               :currency (or (plist-get extra :currency) "USD")
+               :disabled-reason (plist-get extra :disabled_reason))))))))
+
+(defun harness-provider-claude--usage-changes (report)
+  "Return the account status changes a get_usage REPORT implies, or nil."
+  (when (or (plist-member report :rate_limits_available) (plist-member report :subscription_type))
+    (let* ((status harness-provider-claude--status)
+           (available (harness-json-true-p (plist-get report :rate_limits_available)))
+           (rate-limits (plist-get report :rate_limits))
+           (plan (plist-get report :subscription_type))
+           (plan (and (stringp plan) (not (string-empty-p plan)) (downcase plan))))
+      (append
+       (list :updated (float-time) :available available
+             :windows (and available (harness-provider-claude--usage-windows rate-limits))
+             :extra (and available (harness-provider-claude--extra rate-limits)))
+       (when plan
+         (list :plan plan
+               :plan-label (if (equal plan (plist-get status :plan))
+                               (or (plist-get status :plan-label) (harness-provider-claude--plan-label plan))
+                             (harness-provider-claude--plan-label plan))))
+       ;; A plan with quota is a subscription even when the account said nothing.
+       (when (and (null (plist-get status :billing)) (or plan available))
+         (list :billing 'subscription))))))
+
 (defun harness-provider-claude--windows (info)
-  "Convert the CLI's rate limit INFO into quota window plists."
+  "Convert the `unifiedWindows' of a rate_limit_event INFO into window plists."
   (let (out)
     (cl-loop for (key win) on (plist-get info :unifiedWindows) by #'cddr
-             do (push (list :name (pcase key
-                                    (:five_hour "5h")
-                                    (:seven_day "7d")
-                                    (_ (string-remove-prefix ":" (symbol-name key))))
-                            :used (plist-get win :utilization)
-                            :resets (plist-get win :resetsAt))
-                      out))
+             do (pcase-let ((`(,name ,label) (harness-provider-claude--window-name key)))
+                  (push (harness-provider-claude--compact
+                         (list :name name :label label
+                               :used (plist-get win :utilization)
+                               :resets (harness-provider-claude--time (plist-get win :resetsAt))))
+                        out)))
     (nreverse out)))
+
+(defun harness-provider-claude--merge-windows (old new)
+  "Return quota windows OLD updated with NEW ones, matched by name."
+  (let ((name (lambda (w) (plist-get w :name))))
+    (append (mapcar (lambda (w)
+                      (let ((n (cl-find (plist-get w :name) new :key name :test #'equal)))
+                        (if n (harness-plist-merge w n) w)))
+                    old)
+            (cl-remove-if (lambda (n) (cl-find (plist-get n :name) old :key name :test #'equal))
+                          new))))
+
+(defun harness-provider-claude--publish (changes)
+  "Merge CHANGES into the account status, announce it, and return it."
+  (let* ((old harness-provider-claude--status)
+         (new (harness-plist-merge old changes)))
+    (setq harness-provider-claude--status new)
+    (unless (equal old new)
+      (harness-emit 'provider/quota-updated 'claude new))
+    new))
+
+(defun harness-provider-claude--request-usage (entry)
+  "Ask ENTRY's CLI for a usage report; return the request id."
+  (let ((id (format "usage-%d" (cl-incf harness-provider-claude--request-count))))
+    (setq harness-provider-claude--asked (float-time))
+    (harness-provider-claude--send
+     entry (list :type "control_request" :request_id id
+                 :request '(:subtype "get_usage" :skip_behaviors t)))
+    id))
+
+(defun harness-provider-claude--handle-account (entry account)
+  "Remember how ENTRY's process is billed, from its ACCOUNT plist."
+  (let ((info (harness-provider-claude-account-info account)))
+    (setf (harness-provider-claude-session-account entry) info)
+    (harness-log 'info "provider-claude: %s bills %s%s"
+                 (harness-provider-claude-session-id entry)
+                 (pcase (plist-get info :billing)
+                   ('subscription "through a subscription")
+                   ('api (format "per token (%s)" (or (plist-get info :auth) "API")))
+                   (_ "in a way the CLI did not say"))
+                 (if (plist-get info :plan-label) (format " (%s)" (plist-get info :plan-label)) ""))
+    (harness-provider-claude--publish
+     (if (eq (plist-get info :billing) 'api)
+         ;; Plan quota does not apply to per-token billing.
+         (append info '(:available nil :windows nil :extra nil :limit-status nil :using-extra nil))
+       (harness-provider-claude--compact info)))))
+
+(defun harness-provider-claude--handle-usage (entry id report error)
+  "Handle the usage REPORT (nil after ERROR) answering request ID on ENTRY."
+  (when (equal id (harness-provider-claude-session-baseline-id entry))
+    (setf (harness-provider-claude-session-baseline-id entry) nil)
+    ;; The process's running cost total starts here, unless the CLI has
+    ;; already answered, in which case the total may include a turn.
+    (let ((total (harness-plist-get-in report '(:session :total_cost_usd))))
+      (when (and (numberp total) (not (harness-provider-claude-session-seen-output entry)))
+        (setf (harness-provider-claude-session-cost-total entry) (float total)))))
+  (if error
+      (harness-log 'debug "provider-claude: usage report failed: %s" error)
+    (when-let* ((changes (harness-provider-claude--usage-changes report)))
+      (when-let* ((windows (plist-get (harness-provider-claude--publish changes) :windows)))
+        (harness-provider-claude--emit entry (list :type 'quota :windows windows)))))
+  (harness-provider-claude--settle-refresh)
+  (when (harness-provider-claude-session-probe entry)
+    (harness-provider-claude--end-probe entry)))
+
+(defun harness-provider-claude--handle-rate-limit (entry info)
+  "Fold the rate_limit_event INFO into the account status and ENTRY's turn."
+  (let ((status (harness-provider-claude--publish
+                 (list :windows (harness-provider-claude--merge-windows
+                                 (plist-get harness-provider-claude--status :windows)
+                                 (harness-provider-claude--windows info))
+                       :limit-status (plist-get info :status)
+                       :using-extra (harness-json-true-p (plist-get info :isUsingOverage))))))
+    (when-let* ((windows (plist-get status :windows)))
+      (harness-provider-claude--emit entry (list :type 'quota :windows windows)))))
+
+(defun harness-provider-claude--handle-response (entry msg)
+  "Handle the CLI's answer MSG to one of our control requests on ENTRY."
+  (let* ((response (plist-get msg :response))
+         (id (plist-get response :request_id))
+         (ok (equal (plist-get response :subtype) "success"))
+         (payload (plist-get response :response)))
+    (cond
+     ((equal id "init-1")
+      (when-let* ((account (and ok (plist-get payload :account))))
+        (harness-provider-claude--handle-account entry account)))
+     ((and (stringp id) (string-prefix-p "usage-" id))
+      (harness-provider-claude--handle-usage entry id (and ok payload)
+                                             (unless ok (or (plist-get response :error) "failed"))))
+     (t (harness-log 'debug "provider-claude: control_response %S" response)))))
+
+(defun harness-provider-claude--turn-cost (entry msg)
+  "Return the API-price cost of the turn that result MSG ends on ENTRY, or nil.
+The CLI reports a running total for its process, so the turn costs the
+difference to the total before it; a total below that one means the
+CLI started counting again.  Nil when the starting total is unknown, so
+the turn is priced from the model catalogue instead."
+  (let ((total (plist-get msg :total_cost_usd))
+        (base (harness-provider-claude-session-cost-total entry)))
+    (when (numberp total)
+      (setf (harness-provider-claude-session-cost-total entry) (float total)))
+    (cond ((not (numberp total)) nil)
+          ((null base) nil)
+          ((>= total base) (- total base))
+          (t (float total)))))
+
+(defun harness-provider-claude--billing-fields (entry cost)
+  "Return the billing part of a usage event on ENTRY whose API price is COST."
+  (let* ((status harness-provider-claude--status)
+         (info (or (harness-provider-claude-session-account entry) status))
+         (billing (plist-get info :billing))
+         (plan (or (plist-get status :plan) (plist-get info :plan))))
+    (pcase billing
+      ('subscription
+       (if (plist-get status :using-extra)
+           (list :billing 'extra-usage :plan plan :cost cost :list-cost cost)
+         (list :billing 'subscription :plan plan :cost 0.0 :list-cost cost)))
+      (_ (list :billing billing :cost cost :list-cost cost)))))
+
+(defun harness-provider-claude--stale-p ()
+  "Non-nil when the account status should be fetched again.
+Asking counts like an answer, so a CLI that cannot report usage is not
+asked again before `harness-provider-claude-quota-ttl' has passed."
+  (let* ((status harness-provider-claude--status)
+         (last (max (or (plist-get status :updated) 0) (or harness-provider-claude--asked 0))))
+    (cond ((zerop last) t)
+          ((eq (plist-get status :billing) 'api) nil)
+          ((null harness-provider-claude-quota-ttl) nil)
+          (t (> (- (float-time) last) harness-provider-claude-quota-ttl)))))
+
+(defun harness-provider-claude--live-entry ()
+  "Return a session record with a live CLI process, idle ones first, or nil."
+  (let (best)
+    (maphash (lambda (_ e)
+               (when (and (process-live-p (harness-provider-claude-session-process e))
+                          (or (null best)
+                              (and (harness-provider-claude-session-active best)
+                                   (not (harness-provider-claude-session-active e)))))
+                 (setq best e)))
+             harness-provider-claude--sessions)
+    best))
+
+(defun harness-provider-claude--settle-refresh ()
+  "Resolve the usage request in flight with what is known now."
+  (when-let* ((refresh harness-provider-claude--refresh))
+    (setq harness-provider-claude--refresh nil)
+    (cancel-timer (nth 2 refresh))
+    (harness-resolve (nth 1 refresh) harness-provider-claude--status)))
+
+(defun harness-provider-claude--refresh (&optional entry)
+  "Fetch a fresh usage report; return a promise of the account status.
+ENTRY's process asks when it is alive, else any live process, else a
+probe started for the purpose.  The promise resolves with what is known
+once the report arrives, or after `harness-provider-claude-probe-timeout'."
+  (if harness-provider-claude--refresh
+      (nth 1 harness-provider-claude--refresh)
+    (let ((promise (harness-make-promise)))
+      (condition-case err
+          (let* ((asker (or (and entry (process-live-p (harness-provider-claude-session-process entry)) entry)
+                            (harness-provider-claude--live-entry)
+                            (harness-provider-claude--start-probe)))
+                 (id (harness-provider-claude--request-usage asker)))
+            (setq harness-provider-claude--refresh
+                  (list id promise (run-at-time harness-provider-claude-probe-timeout nil
+                                                #'harness-provider-claude--settle-refresh))))
+        (error
+         (harness-log 'warn "provider-claude: cannot ask for usage: %s" (harness-error-message err))
+         (harness-resolve promise harness-provider-claude--status)))
+      promise)))
+
+(defun harness-provider-claude--start-probe ()
+  "Return the quota probe, starting a CLI process that only answers reports.
+The probe sends no message, so it makes no model call; it exits once
+its usage report has arrived."
+  (if (and harness-provider-claude--probe
+           (process-live-p (harness-provider-claude-session-process harness-provider-claude--probe)))
+      harness-provider-claude--probe
+    (let* ((entry (harness-provider-claude--make-session :id "quota-probe" :probe t))
+           (default-directory (file-name-as-directory (expand-file-name temporary-file-directory)))
+           (process-environment (harness-provider-claude--environment))
+           (stderr (generate-new-buffer " *harness-claude-probe-stderr*" t))
+           (proc (condition-case err
+                     (make-process :name "harness-claude-probe"
+                                   :command (append (list harness-provider-claude-program
+                                                          "-p" "--input-format" "stream-json"
+                                                          "--output-format" "stream-json" "--verbose"
+                                                          "--tools" "" "--strict-mcp-config")
+                                                    harness-provider-claude-extra-args)
+                                   :coding '(utf-8 . utf-8)
+                                   :connection-type 'pipe
+                                   :noquery t
+                                   :stderr stderr
+                                   :filter (lambda (_p chunk) (harness-provider-claude--filter entry chunk))
+                                   :sentinel (lambda (p _e) (harness-provider-claude--probe-sentinel entry p)))
+                   (error (kill-buffer stderr) (signal (car err) (cdr err))))))
+      (when-let* ((ep (get-buffer-process stderr)))
+        (set-process-query-on-exit-flag ep nil)
+        (set-process-sentinel ep #'ignore))
+      (setf (harness-provider-claude-session-process entry) proc
+            (harness-provider-claude-session-stderr entry) stderr)
+      (setq harness-provider-claude--probe entry)
+      (harness-log 'info "provider-claude: probing the account and its quota")
+      (harness-provider-claude--send
+       entry '(:type "control_request" :request_id "init-1" :request (:subtype "initialize")))
+      (run-at-time (+ 5 harness-provider-claude-probe-timeout) nil
+                   #'harness-provider-claude--end-probe entry t)
+      entry)))
+
+(defun harness-provider-claude--end-probe (entry &optional kill)
+  "Let the probe ENTRY exit by closing its input, or KILL it."
+  (let ((proc (harness-provider-claude-session-process entry)))
+    (when (process-live-p proc)
+      (if kill (delete-process proc) (process-send-eof proc)))))
+
+(defun harness-provider-claude--probe-sentinel (entry proc)
+  "Clean up after the probe ENTRY once its process PROC has ended."
+  (unless (process-live-p proc)
+    (unless (zerop (process-exit-status proc))
+      (harness-log 'warn "provider-claude: the quota probe exited with status %s%s"
+                   (process-exit-status proc)
+                   (let ((tail (harness-provider-claude--stderr-tail entry)))
+                     (if (string-empty-p tail) "" (concat ": " (harness-truncate-end tail 300))))))
+    (let ((buf (harness-provider-claude-session-stderr entry)))
+      (when (buffer-live-p buf) (kill-buffer buf)))
+    (when (eq harness-provider-claude--probe entry)
+      (setq harness-provider-claude--probe nil))
+    (harness-provider-claude--settle-refresh)))
 
 (defun harness-provider-claude--handle-init (entry msg)
   "Handle the system/init banner MSG on ENTRY."
@@ -478,6 +969,11 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
           (harness-provider-claude-session-model entry) model)
     (harness-log 'info "provider-claude: session %s is CLI session %s (%s)"
                  (harness-provider-claude-session-id entry) id model)
+    ;; CLIs whose initialize answer has no account still name an API key here.
+    (let ((key (plist-get msg :apiKeySource)))
+      (when (and (null (harness-provider-claude-session-account entry))
+                 (stringp key) (not (member key '("" "none"))))
+        (harness-provider-claude--handle-account entry (list :apiKeySource key))))
     (harness-provider-claude--emit
      entry (list :type 'provider-state :state (list :cli-session-id id :model model)))
     (dolist (server (plist-get msg :mcp_servers))
@@ -501,13 +997,17 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
                        (string-prefix-p "error" subtype))))
     (when-let* ((id (plist-get msg :session_id)))
       (setf (harness-provider-claude-session-cli-session-id entry) id))
+    (setf (harness-provider-claude-session-seen-output entry) t)
     (harness-provider-claude--emit
-     entry (list :type 'usage :input input
-                 :output (or (plist-get usage :output_tokens) 0)
-                 :cache-read cache-read :cache-write cache-write
-                 :cost (plist-get msg :total_cost_usd)
-                 :context (or (harness-provider-claude-session-context entry)
-                              (+ input cache-read cache-write))))
+     entry (append (list :type 'usage :input input
+                         :output (or (plist-get usage :output_tokens) 0)
+                         :cache-read cache-read :cache-write cache-write
+                         :context (or (harness-provider-claude-session-context entry)
+                                      (+ input cache-read cache-write)))
+                   (harness-provider-claude--billing-fields
+                    entry (harness-provider-claude--turn-cost entry msg))))
+    (when (harness-provider-claude--stale-p)
+      (harness-provider-claude--refresh entry))
     (harness-provider-claude--finish
      entry
      (cond ((harness-provider-claude-session-cancelled entry)
@@ -527,8 +1027,7 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
   (let ((type (plist-get msg :type)))
     (pcase type
       ("control_request" (harness-provider-claude--handle-control entry msg))
-      ("control_response"
-       (harness-log 'debug "provider-claude: control_response %S" (plist-get msg :response)))
+      ("control_response" (harness-provider-claude--handle-response entry msg))
       ("system"
        (pcase (plist-get msg :subtype)
          ("init" (harness-provider-claude--handle-init entry msg))
@@ -537,13 +1036,12 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
            entry '(:type hint :text "Context compacted by Claude Code")))
          (sub (harness-log 'debug "provider-claude: system/%s" sub))))
       ("stream_event" (harness-provider-claude--handle-stream entry (plist-get msg :event)))
-      ("assistant" (harness-provider-claude--handle-assistant entry (plist-get msg :message)))
+      ("assistant"
+       (setf (harness-provider-claude-session-seen-output entry) t)
+       (harness-provider-claude--handle-assistant entry (plist-get msg :message)))
       ("user" (harness-provider-claude--handle-user-echo entry (plist-get msg :message)))
       ("rate_limit_event"
-       (setq harness-provider-claude--quota
-             (harness-provider-claude--windows (plist-get msg :rate_limit_info)))
-       (harness-provider-claude--emit
-        entry (list :type 'quota :windows harness-provider-claude--quota)))
+       (harness-provider-claude--handle-rate-limit entry (plist-get msg :rate_limit_info)))
       ("result" (harness-provider-claude--handle-result entry msg))
       (_ (harness-log 'debug "provider-claude: ignoring %s message" type)))))
 
@@ -663,9 +1161,14 @@ resumes it with --fork-session so the cached prefix is reused."
   (let ((id (plist-get state :cli-session-id)))
     (harness-resolved (and id (list :cli-session-id id :fork-pending t)))))
 
-(defun harness-provider-claude--quota ()
-  "Return a promise of the last rate-limit windows seen."
-  (harness-resolved (list :windows harness-provider-claude--quota)))
+(defun harness-provider-claude--quota (&optional refresh)
+  "Return a promise of how the account is billed and of its plan quota.
+The shape is the one `provider/quota' documents.  A new usage report is
+fetched first when REFRESH is non-nil or the last one is stale (see
+`harness-provider-claude-quota-ttl'); it makes no model call."
+  (if (or refresh (harness-provider-claude--stale-p))
+      (harness-provider-claude--refresh)
+    (harness-resolved harness-provider-claude--status)))
 
 (defun harness-provider-claude--models ()
   "Return a promise of the static model catalogue."
@@ -680,9 +1183,12 @@ resumes it with --fork-session so the cached prefix is reused."
     t))
 
 (defun harness-provider-claude-close-all ()
-  "Shut down every CLI process."
+  "Shut down every CLI process, the quota probe included."
   (dolist (id (hash-table-keys harness-provider-claude--sessions))
-    (harness-provider-claude-close id)))
+    (harness-provider-claude-close id))
+  (when harness-provider-claude--probe
+    (harness-provider-claude--end-probe harness-provider-claude--probe t))
+  (harness-provider-claude--settle-refresh))
 
 (defun harness-provider-claude--on-session-gone (session-id &rest _)
   "Close the process for SESSION-ID when its session is deleted or deactivated."

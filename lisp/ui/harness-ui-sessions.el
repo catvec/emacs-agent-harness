@@ -64,8 +64,7 @@
     (nreverse out)))
 
 (defun harness-ui-sessions--entry (depth s)
-  (let* ((usage (plist-get s :usage))
-         (name (or (plist-get s :name) (propertize "unnamed" 'face 'harness-dim-face)))
+  (let* ((name (or (plist-get s :name) (propertize "unnamed" 'face 'harness-dim-face)))
          (status (plist-get s :status))
          (kind (or (plist-get s :kind) "main")))
     (list (plist-get s :id)
@@ -79,7 +78,7 @@
            (harness-ui-model-label (plist-get s :model))
            (if-let* ((m (plist-get s :permission-mode))) (harness-ui-permission-mode-label m) "")
            (harness-ui-format-context s)
-           (harness-format-cost (plist-get usage :cost))
+           (harness-ui-format-spend s)
            (harness-relative-time (or (plist-get s :updated) 0))
            (propertize (file-name-nondirectory (directory-file-name (or (plist-get s :project) ""))) 'face 'harness-dim-face)))))
 
@@ -97,6 +96,12 @@
   (lambda (a b)
     (let ((x (harness-ui-session (car a))) (y (harness-ui-session (car b))))
       (< (or (harness-plist-get-in x col) 0) (or (harness-plist-get-in y col) 0)))))
+
+(defun harness-ui-sessions--spend< (a b)
+  "Order entries A and B by what their sessions cost at API prices.
+Sessions a plan pays for cost nothing but still sort by how much they used."
+  (< (harness-usage-list-cost (plist-get (harness-ui-session (car a)) :usage))
+     (harness-usage-list-cost (plist-get (harness-ui-session (car b)) :usage))))
 
 (defvar harness-ui-sessions-mode-map
   (let ((map (make-sparse-keymap)))
@@ -128,7 +133,7 @@
                 (list "Model" 26 t)
                 (list "Mode" 13 t)
                 (list "Context" 12 (harness-ui-sessions--number< '(:usage :context)))
-                (list "Cost" 8 (harness-ui-sessions--number< '(:usage :cost)))
+                (list "Cost" 10 #'harness-ui-sessions--spend<)
                 (list "Updated" 9 (harness-ui-sessions--number< '(:updated)))
                 (list "Project" 30 t)))
   (setq tabulated-list-padding 1)

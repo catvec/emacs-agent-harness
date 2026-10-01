@@ -14,18 +14,37 @@
 (defvar harness-provider-claude-program)
 (defvar harness-provider-claude-interrupt-timeout)
 (defvar harness-provider-claude--sessions)
+(defvar harness-provider-claude--status)
+(defvar harness-provider-claude--asked)
+(defvar harness-provider-claude--probe)
 (declare-function harness-provider-claude-close "harness-provider-claude")
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 (declare-function harness-provider-claude--command "harness-provider-claude")
 (declare-function harness-provider-claude-session-process "harness-provider-claude")
+(declare-function harness-provider-claude-account-info "harness-provider-claude")
+(declare-function harness-provider-claude--usage-changes "harness-provider-claude")
+(declare-function harness-provider-claude--usage-windows "harness-provider-claude")
+(declare-function harness-provider-claude--windows "harness-provider-claude")
+(declare-function harness-provider-claude--merge-windows "harness-provider-claude")
+(declare-function harness-provider-claude--drop-stale-entries "harness-provider-claude")
+(declare-function harness-provider-claude--make-session "harness-provider-claude")
 
 (defun harness-provider-claude-test--setup ()
-  "Fresh bus with the provider registry and the Claude provider loaded."
+  "Fresh bus with the provider registry and the Claude provider loaded.
+Processes, the usage report and the quota probe of earlier tests go."
   (harness-test-reset-bus)
   (harness-test-load-module 'provider)
   (harness-test-load-module 'provider-claude)
   (setq harness-provider-claude-program (harness-test-fixture "fake-claude.py"))
-  (clrhash harness-provider-claude--sessions))
+  (harness-provider-claude-close-all)
+  (clrhash harness-provider-claude--sessions)
+  (setq harness-provider-claude--status nil
+        harness-provider-claude--asked nil
+        harness-provider-claude--probe nil))
+
+(defun harness-provider-claude-test--near (a b)
+  "Non-nil when numbers A and B are equal within rounding."
+  (and (numberp a) (numberp b) (< (abs (- a b)) 1e-9)))
 
 (defconst harness-provider-claude-test--echo-tool
   '(:name "echo" :description "Echo TEXT back to the caller."
@@ -335,6 +354,207 @@ tool is answered with \"echo: TEXT\"."
       (should (equal (base64-encode-string "png") (harness-plist-get-in (nth 2 blocks) '(:source :data)))))
     (delete-file img)))
 
+;;;; Billing and quota
+
+(defconst harness-provider-claude-test--usage-report
+  "{\"session\":{\"total_cost_usd\":0.25,\"total_api_duration_ms\":0,\"total_duration_ms\":22671,\"model_usage\":{}},\"subscription_type\":\"max\",\"rate_limits_available\":true,\"rate_limits\":{\"five_hour\":{\"utilization\":8,\"resets_at\":\"2026-10-01T09:39:59.819728+00:00\",\"limit_dollars\":null,\"locked_reason\":null},\"seven_day\":{\"utilization\":57,\"resets_at\":\"2026-10-03T13:59:59.819752+00:00\"},\"seven_day_opus\":null,\"seven_day_sonnet\":null,\"extra_usage\":{\"is_enabled\":false,\"monthly_limit\":5000,\"used_credits\":0,\"utilization\":0,\"currency\":\"USD\",\"decimal_places\":2,\"disabled_reason\":\"out_of_credits\"},\"limits\":[{\"kind\":\"session\",\"group\":\"session\",\"percent\":8,\"severity\":\"normal\",\"resets_at\":\"2026-10-01T09:39:59.819728+00:00\",\"scope\":null,\"is_active\":false},{\"kind\":\"weekly_all\",\"group\":\"weekly\",\"percent\":57,\"severity\":\"normal\",\"resets_at\":\"2026-10-03T13:59:59.819752+00:00\",\"scope\":null,\"is_active\":true},{\"kind\":\"weekly_scoped\",\"group\":\"weekly\",\"percent\":50,\"severity\":\"normal\",\"resets_at\":\"2026-10-03T13:59:59.819934+00:00\",\"scope\":{\"model\":{\"id\":null,\"display_name\":\"Fable\"},\"surface\":null},\"is_active\":false}],\"spend\":{\"used\":{\"amount_minor\":0,\"currency\":\"USD\",\"exponent\":2},\"limit\":{\"amount_minor\":5000,\"currency\":\"USD\",\"exponent\":2},\"percent\":0,\"enabled\":false,\"disabled_reason\":\"out_of_credits\"}}}"
+  "A get_usage answer of Claude Code 2.1.286 logged in to Claude Max.")
+
+(ert-deftest harness-provider-claude-account-billing ()
+  "The initialize answer's account says who pays: a plan or the API."
+  (harness-provider-claude-test--setup)
+  (let ((sub (harness-provider-claude-account-info
+              '(:email "user@example.com" :organization "user@example.com's Organization"
+                :subscriptionType "Claude Max" :apiProvider "firstParty")))
+        (key (harness-provider-claude-account-info
+              '(:tokenSource "claude.ai" :apiKeySource "ANTHROPIC_API_KEY" :apiProvider "firstParty")))
+        (bedrock (harness-provider-claude-account-info '(:apiProvider "bedrock")))
+        (bearer (harness-provider-claude-account-info
+                 '(:tokenSource "ANTHROPIC_AUTH_TOKEN" :apiProvider "firstParty")))
+        (old (harness-provider-claude-account-info '(:email "user@example.com" :subscriptionType "Claude API")))
+        (unknown (harness-provider-claude-account-info '(:tokenSource "none"))))
+    (should (eq 'subscription (plist-get sub :billing)))
+    (should (equal "max" (plist-get sub :plan)))
+    (should (equal "Claude Max" (plist-get sub :plan-label)))
+    (should (equal "claude.ai" (plist-get sub :auth)))
+    (should (equal "user@example.com" (harness-plist-get-in sub '(:account :email))))
+    (should (eq 'api (plist-get key :billing)))
+    (should (equal "ANTHROPIC_API_KEY" (plist-get key :auth)))
+    (should-not (plist-get key :plan))
+    (should-not (plist-get key :account))
+    (should (eq 'api (plist-get bedrock :billing)))
+    (should (equal "bedrock" (plist-get bedrock :auth)))
+    (should (eq 'api (plist-get bearer :billing)))
+    ;; Old CLIs called subscriptions "Claude API"; the email still tells.
+    (should (eq 'subscription (plist-get old :billing)))
+    (should-not (plist-get old :plan))
+    (should-not (plist-get unknown :billing))))
+
+(ert-deftest harness-provider-claude-usage-report-and-rate-limits ()
+  "Usage reports and rate limit events become quota windows."
+  (harness-provider-claude-test--setup)
+  (let* ((changes (harness-provider-claude--usage-changes
+                   (harness-json-parse harness-provider-claude-test--usage-report)))
+         (windows (plist-get changes :windows))
+         (extra (plist-get changes :extra)))
+    (should (equal "max" (plist-get changes :plan)))
+    (should (equal "Claude Max" (plist-get changes :plan-label)))
+    (should (eq 'subscription (plist-get changes :billing)))
+    (should (plist-get changes :available))
+    (should (equal '("5h" "7d" "7d Fable") (mapcar (lambda (w) (plist-get w :name)) windows)))
+    (should (= 0.08 (plist-get (nth 0 windows) :used)))
+    (should (= 0.57 (plist-get (nth 1 windows) :used)))
+    (should (equal "Current session (5 hours)" (plist-get (nth 0 windows) :label)))
+    (should (equal "This week, Fable" (plist-get (nth 2 windows) :label)))
+    (should (equal "Fable" (plist-get (nth 2 windows) :model)))
+    (should (= 1790847599.0 (plist-get (nth 0 windows) :resets)))
+    (should (plist-get (nth 1 windows) :active))
+    (should-not (plist-get (nth 0 windows) :active))
+    (should-not (plist-get extra :enabled))
+    (should (= 50.0 (plist-get extra :limit)))
+    (should (= 0.0 (plist-get extra :used)))
+    (should (equal "out_of_credits" (plist-get extra :disabled-reason)))
+    ;; Reports without `limits' name each window instead.
+    (let ((named (harness-provider-claude--usage-windows
+                  '(:five_hour (:utilization 12 :resets_at "2026-10-01T09:39:59Z")
+                    :seven_day_opus (:utilization 30)))))
+      (should (equal '("5h" "7d Opus") (mapcar (lambda (w) (plist-get w :name)) named)))
+      (should (= 0.12 (plist-get (car named) :used))))
+    ;; An API key has no plan quota.
+    (let ((api (harness-provider-claude--usage-changes
+                '(:session (:total_cost_usd 0) :subscription_type nil :rate_limits_available :false))))
+      (should (plist-member api :windows))
+      (should-not (plist-get api :windows))
+      (should-not (plist-get api :available)))
+    ;; A CLI that answered nothing useful changes nothing.
+    (should-not (harness-provider-claude--usage-changes nil))
+    ;; Rate limit events update the windows they name and keep the rest.
+    (let ((merged (harness-provider-claude--merge-windows
+                   windows
+                   (harness-provider-claude--windows
+                    '(:unifiedWindows (:five_hour (:utilization 0.2 :resetsAt 1790847600)
+                                       :seven_day_sonnet (:utilization 0.1)))))))
+      (should (equal '("5h" "7d" "7d Fable" "7d Sonnet") (mapcar (lambda (w) (plist-get w :name)) merged)))
+      (should (= 0.2 (plist-get (car merged) :used)))
+      (should (= 1790847600.0 (plist-get (car merged) :resets)))
+      (should (equal "Current session (5 hours)" (plist-get (car merged) :label))))))
+
+(ert-deftest harness-provider-claude-subscription-turns-cost-nothing ()
+  "A Claude subscription pays: turns cost 0, with their API price as list cost."
+  (harness-provider-claude-test--setup)
+  (let ((process-environment (cons "HARNESS_FAKE_CLAUDE_AUTH=subscription" process-environment))
+        (updates nil))
+    (harness-on 'provider/quota-updated (lambda (pid quota) (push (cons pid quota) updates)))
+    (let* ((first (car (harness-provider-claude-test--run (harness-provider-claude-test--request "sub1" "hi"))))
+           (second (car (harness-provider-claude-test--run (harness-provider-claude-test--request "sub1" "again")))))
+      ;; The CLI reports running totals of 0.01 and 0.02: each turn is 0.01.
+      (dolist (events (list first second))
+        (let ((u (harness-provider-claude-test--find events 'usage)))
+          (should (eq 'subscription (plist-get u :billing)))
+          (should (equal "max" (plist-get u :plan)))
+          (should (equal 0.0 (plist-get u :cost)))
+          (should (harness-provider-claude-test--near 0.01 (plist-get u :list-cost)))))
+      ;; The turn heard about the plan's quota.
+      (let ((q (harness-provider-claude-test--find first 'quota)))
+        (should (member "7d Fable" (mapcar (lambda (w) (plist-get w :name)) (plist-get q :windows)))))
+      (let ((q (harness-test-await (harness-call 'provider/quota 'claude))))
+        (should (eq 'subscription (plist-get q :billing)))
+        (should (equal "max" (plist-get q :plan)))
+        (should (equal "Claude Max" (plist-get q :plan-label)))
+        (should (equal "user@example.com" (harness-plist-get-in q '(:account :email))))
+        (should (equal '("5h" "7d" "7d Fable") (mapcar (lambda (w) (plist-get w :name)) (plist-get q :windows))))
+        ;; The rate limit event of the turn refreshed the 5-hour window.
+        (should (= 0.09 (plist-get (car (plist-get q :windows)) :used)))
+        (should (= 50.0 (harness-plist-get-in q '(:extra :limit))))
+        (should (numberp (plist-get q :updated)))
+        (should-not (plist-get q :using-extra)))
+      (should updates)
+      (should (eq 'claude (car (car updates))))
+      (should (eq 'subscription (plist-get (cdr (car updates)) :billing))))
+    (harness-provider-claude-close "sub1")))
+
+(ert-deftest harness-provider-claude-extra-usage-is-billed ()
+  "Past the plan's limit with extra usage on, turns cost their API price."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment (append '("HARNESS_FAKE_CLAUDE_AUTH=subscription" "HARNESS_FAKE_CLAUDE_OVERAGE=1")
+                                      process-environment))
+         (events (car (harness-provider-claude-test--run (harness-provider-claude-test--request "ex1" "hi"))))
+         (u (harness-provider-claude-test--find events 'usage)))
+    (should (eq 'extra-usage (plist-get u :billing)))
+    (should (harness-provider-claude-test--near 0.01 (plist-get u :cost)))
+    (should (harness-provider-claude-test--near 0.01 (plist-get u :list-cost)))
+    (should (plist-get (harness-test-await (harness-call 'provider/quota 'claude)) :using-extra))
+    (harness-provider-claude-close "ex1")))
+
+(ert-deftest harness-provider-claude-api-key-turns-are-billed ()
+  "With an API key a turn costs what the CLI estimates, and there is no quota."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment (cons "HARNESS_FAKE_CLAUDE_AUTH=api" process-environment))
+         (first (car (harness-provider-claude-test--run (harness-provider-claude-test--request "api1" "hi"))))
+         (second (car (harness-provider-claude-test--run (harness-provider-claude-test--request "api1" "again")))))
+    (dolist (events (list first second))
+      (let ((u (harness-provider-claude-test--find events 'usage)))
+        (should (eq 'api (plist-get u :billing)))
+        (should (harness-provider-claude-test--near 0.01 (plist-get u :cost)))
+        (should (harness-provider-claude-test--near 0.01 (plist-get u :list-cost)))
+        (should-not (plist-get u :plan))))
+    (should-not (harness-provider-claude-test--find first 'quota))
+    (let ((q (harness-test-await (harness-call 'provider/quota 'claude))))
+      (should (eq 'api (plist-get q :billing)))
+      (should (equal "ANTHROPIC_API_KEY" (plist-get q :auth)))
+      (should-not (plist-get q :windows)))
+    (harness-provider-claude-close "api1")))
+
+(ert-deftest harness-provider-claude-resume-counts-only-new-spend ()
+  "A resumed CLI session restores its earlier spend; only the new turn counts."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment (cons "HARNESS_FAKE_CLAUDE_AUTH=api" process-environment))
+         (events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "r1" "hi" :provider-state '(:cli-session-id "old-1")))))
+         (u (harness-provider-claude-test--find events 'usage)))
+    ;; The fake reports 0.06 in all, 0.05 of it restored.
+    (should (harness-provider-claude-test--near 0.01 (plist-get u :cost))))
+  (harness-provider-claude-close "r1")
+  ;; A CLI that cannot report usage leaves the first resumed turn unpriced,
+  ;; so the session prices it from the catalogue; the next turn is exact.
+  (let* ((first (car (harness-provider-claude-test--run
+                      (harness-provider-claude-test--request "r2" "hi" :provider-state '(:cli-session-id "old-2")))))
+         (second (car (harness-provider-claude-test--run (harness-provider-claude-test--request "r2" "again")))))
+    (should (plist-member (harness-provider-claude-test--find first 'usage) :cost))
+    (should-not (plist-get (harness-provider-claude-test--find first 'usage) :cost))
+    (should (harness-provider-claude-test--near 0.01 (plist-get (harness-provider-claude-test--find second 'usage) :cost))))
+  (harness-provider-claude-close "r2"))
+
+(ert-deftest harness-provider-claude-quota-probe-without-sessions ()
+  "With no CLI running, `provider/quota' asks a probe that makes no model call."
+  (harness-provider-claude-test--setup)
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (append (list "HARNESS_FAKE_CLAUDE_AUTH=subscription"
+                                            (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file))
+                                      process-environment))
+         (q (harness-test-await (harness-call 'provider/quota "claude" t) 15)))
+    (should (eq 'subscription (plist-get q :billing)))
+    (should (equal "Claude Max" (plist-get q :plan-label)))
+    (should (= 3 (length (plist-get q :windows))))
+    ;; The probe exits once it has answered, and served no MCP tools.
+    (harness-test-wait (lambda () (null harness-provider-claude--probe)) 10 "the probe to exit")
+    (let ((argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+      (should-not (member "--mcp-config" argv))
+      (should-not (member "--model" argv)))
+    ;; A fresh report is not fetched again.
+    (should (eq q (harness-test-await (harness-call 'provider/quota 'claude))))))
+
+(ert-deftest harness-provider-claude-reload-drops-old-records ()
+  "Records made before the latest slots were added are closed on load."
+  (harness-provider-claude-test--setup)
+  (let ((old (apply #'record 'harness-provider-claude-session "old" (make-list 14 nil)))
+        (new (harness-provider-claude--make-session :id "new")))
+    (puthash "old" old harness-provider-claude--sessions)
+    (puthash "new" new harness-provider-claude--sessions)
+    (harness-provider-claude--drop-stale-entries)
+    (should-not (gethash "old" harness-provider-claude--sessions))
+    (should (eq new (gethash "new" harness-provider-claude--sessions)))))
+
 ;;;; Integration
 
 (ert-deftest harness-provider-claude-integration-real-cli ()
@@ -372,7 +592,13 @@ tool is answered with \"echo: TEXT\"."
       (should (stringp (plist-get state :cli-session-id))))
     (let ((usage (harness-provider-claude-test--find events 'usage)))
       (should (numberp (plist-get usage :cost)))
-      (should (> (plist-get usage :context) 0)))
+      (should (> (plist-get usage :context) 0))
+      ;; The account decides who pays; the list price is this turn's alone.
+      (should (memq (plist-get usage :billing) '(api subscription extra-usage)))
+      (should (numberp (plist-get usage :list-cost)))
+      (when (eq (plist-get usage :billing) 'subscription)
+        (should (= 0.0 (plist-get usage :cost)))
+        (should (plist-get (harness-test-await (harness-call 'provider/quota 'claude) 30) :windows))))
     (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
     (should (= 1 (cl-count 'done types)))
     (harness-provider-claude-close "integration")))

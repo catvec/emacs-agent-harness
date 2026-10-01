@@ -231,7 +231,9 @@ the next step boundary; the running turn's promise is returned.  OPTS
        (harness-call 'session/usage-add sid
                      (list :input (plist-get ev :input) :output (plist-get ev :output)
                            :cache-read (plist-get ev :cache-read) :cache-write (plist-get ev :cache-write)
-                           :cost (plist-get ev :cost) :context (plist-get ev :context))))
+                           :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
+                           :billing (plist-get ev :billing) :plan (plist-get ev :plan)
+                           :context (plist-get ev :context))))
       ('provider-state (harness-call 'session/set-provider-state sid (plist-get ev :state)))
       ('quota (harness-call 'session/runtime sid :quota (plist-get ev :windows))
               (harness-emit 'agent/quota sid (plist-get ev :windows)))

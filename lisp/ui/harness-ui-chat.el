@@ -1802,13 +1802,34 @@ the background it was rendered on, so it would show as a dark box."
         (setq pos next)))
     text))
 
+(defun harness-chat-show-usage ()
+  "Show the usage dashboard, with the plan's quota."
+  (interactive)
+  (if (fboundp 'harness-usage)
+      (harness-usage)
+    (user-error "The usage dashboard (module ui-usage) is not loaded")))
+
+(defun harness-chat--spend-segment (session)
+  "Return the header segment showing what SESSION cost and who pays for it.
+Per-token billing shows the cost; a subscription shows its plan and
+quota.  Clicking it opens the usage dashboard."
+  (let ((text (copy-sequence (harness-ui-format-spend session t))))
+    (add-text-properties 0 (length text)
+                         (list 'mouse-face 'mode-line-highlight
+                               'local-map (harness-chat--segment-map #'harness-chat-show-usage))
+                         text)
+    text))
+
+(defun harness-chat--on-quota (_provider _quota)
+  "Redraw the header lines, which show the plan's quota."
+  (force-mode-line-update t))
+
 (defun harness-chat--header ()
   "Return the header line."
   (let* ((s (harness-chat--session))
          (status (or (plist-get s :status) "idle"))
          (running (equal status "running"))
-         (name (or (plist-get s :name) "unnamed"))
-         (usage (plist-get s :usage)))
+         (name (or (plist-get s :name) "unnamed")))
     (concat
      " "
      (if running
@@ -1831,7 +1852,7 @@ the background it was rendered on, so it would show as a dark box."
      "  "
      (harness-ui-format-context s)
      "  "
-     (propertize (harness-format-cost (plist-get usage :cost)) 'help-echo "Session cost")
+     (harness-chat--spend-segment s)
      "  "
      (harness-chat--segment "[menu]" #'harness-menu "The harness menu (C-c a ?)" 'harness-dim-face)
      (if harness-chat--unseen
@@ -2006,6 +2027,7 @@ The transcript is read-only; the compose box at the bottom is editable."
   (setq harness-ui-open-session-function #'harness-chat-buffer)
   (add-hook 'harness-ui-update-functions #'harness-chat--on-update)
   (add-hook 'harness-ui-event-functions #'harness-chat--on-event)
+  (add-hook 'harness-ui-quota-functions #'harness-chat--on-quota)
   (add-hook 'harness-ui-permission-functions #'harness-chat--on-permission)
   (add-hook 'harness-ui-question-functions #'harness-chat--on-question)
   (add-hook 'harness-ui-redraw-hook #'harness-chat--redraw-all)

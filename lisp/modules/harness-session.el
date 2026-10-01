@@ -29,7 +29,7 @@
 (cl-defstruct (harness-session (:copier nil))
   id name kind project cwd host worktree model permission-mode thinking non-interactive
   allowed-dirs (status 'idle) parent-id fork-node created updated
-  (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :context 0 :turns 0))
+  (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :list-cost 0.0 :context 0 :turns 0))
   context-window budget head queue pending todos plan provider-state
   ;; runtime only
   (nodes (make-hash-table :test 'equal))
@@ -601,23 +601,49 @@ Return the pending id.  The session becomes `blocked'."
   "Return the pending requests of session ID."
   (harness-session-pending (harness-session--get id)))
 
+(defun harness-session--price-record (model record)
+  "Return RECORD for MODEL with a missing `:cost' and `:list-cost' priced.
+The cost is what was billed and the list cost what the call costs at
+API prices: the same thing unless a subscription paid, when only the
+list cost needs pricing.  Records without tokens are returned as is."
+  (if (not (or (plist-get record :input) (plist-get record :output)))
+      record
+    (let* ((priced 'unset)
+           (price (lambda ()
+                    (when (eq priced 'unset)
+                      (setq priced (and (harness-method-exists-p 'usage/price)
+                                        (ignore-errors (harness-call 'usage/price model record)))))
+                    priced))
+           (cost (plist-get record :cost))
+           (cost (if (numberp cost) cost (funcall price)))
+           (list-cost (plist-get record :list-cost))
+           (list-cost (cond ((numberp list-cost) list-cost)
+                            ((eq (harness-billing-of record) 'subscription) (funcall price))
+                            (t cost))))
+      (harness-plist-merge record (list :cost cost :list-cost list-cost)))))
+
 (harness-defmethod session/usage-add (id record)
   "Add usage RECORD to session ID.
-RECORD keys: :input :output :cache-read :cache-write :cost :context :turns.
-Counters accumulate; `:context' replaces.  Return the totals."
+RECORD keys: :input :output :cache-read :cache-write :cost :list-cost
+:context :turns, and :billing and :plan saying how the call was paid.
+Counters accumulate; `:context' replaces, and so do `:billing' and
+`:plan' when RECORD has a billing.  A missing `:cost' is priced from
+the model catalogue; a missing `:list-cost', the call at API prices,
+is the cost, or priced when a subscription paid.  Return the totals."
   (let* ((s (harness-session--get id))
          (u (copy-sequence (harness-session-usage s)))
-         (record (if (and (null (plist-get record :cost))
-                          (or (plist-get record :input) (plist-get record :output))
-                          (harness-method-exists-p 'usage/price))
-                     (plist-put (copy-sequence record) :cost
-                                (ignore-errors (harness-call 'usage/price (harness-session-model s) record)))
-                   record)))
-    (dolist (k '(:input :output :cache-read :cache-write :cost :turns))
+         (record (harness-session--price-record (harness-session-model s) record)))
+    ;; Totals from before list costs were kept count as list cost too.
+    (when (and (numberp (plist-get record :list-cost)) (not (numberp (plist-get u :list-cost))))
+      (setq u (plist-put u :list-cost (float (or (plist-get u :cost) 0)))))
+    (dolist (k '(:input :output :cache-read :cache-write :cost :list-cost :turns))
       (when (numberp (plist-get record k))
         (setq u (plist-put u k (+ (or (plist-get u k) 0) (plist-get record k))))))
     (when (numberp (plist-get record :context))
       (setq u (plist-put u :context (plist-get record :context))))
+    (when (harness-billing-of record)
+      (setq u (plist-put u :billing (harness-billing-of record)))
+      (setq u (plist-put u :plan (plist-get record :plan))))
     (setf (harness-session-usage s) u)
     (harness-emit 'session/usage id u record)
     (harness-session--touch s)

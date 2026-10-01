@@ -222,7 +222,7 @@ Only the kind: the request itself is read in the session."
   "The right-aligned facts of TASK's card."
   (let* ((todos (harness-ui-tasks--todos session))
          (started (plist-get task :started))
-         (cost (plist-get (plist-get session :usage) :cost))
+         (usage (plist-get session :usage))
          (parts
           (delq nil
                 (list (and todos (not (eq column 'done)) (format "%d/%d" (nth 0 todos) (nth 1 todos)))
@@ -231,7 +231,8 @@ Only the kind: the request itself is read in the session."
                         ('done (and (plist-get task :finished)
                                     (format "done %s" (harness-relative-time (plist-get task :finished)))))
                         (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))
-                      (and cost (> cost 0) (harness-format-cost cost))))))
+                      (and session (> (harness-usage-list-cost usage) 0)
+                           (harness-ui-format-spend session))))))
     (propertize (string-join parts " · ") 'face 'harness-dim-face)))
 
 (defun harness-ui-tasks--elapsed (seconds)

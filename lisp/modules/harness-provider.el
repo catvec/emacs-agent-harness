@@ -29,8 +29,9 @@
 LABEL and DOC describe it.  MODELS is a function returning a promise of
 model plists.  COMPLETE takes a request plist and returns a handle
 plist with `:cancel'.  FORK, when given, takes (MODEL-ID STATE) and
-returns a promise of a new provider state.  QUOTA returns a promise of
-quota windows.  CAPABILITIES is the static capability plist."
+returns a promise of a new provider state.  QUOTA takes an optional
+REFRESH flag and returns a promise of billing and quota information
+\(see `provider/quota').  CAPABILITIES is the static capability plist."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
@@ -185,15 +186,29 @@ Return a promise of the new state, or of nil when unsupported."
           (error (harness-rejected err)))
       (harness-resolved nil))))
 
-(harness-defmethod provider/quota (provider-id)
-  "Return a promise of quota windows for PROVIDER-ID, or of nil."
-  (let ((p (harness-provider-get provider-id)))
-    (if (and p (harness-provider-quota-fn p))
-        (harness-as-promise (funcall (harness-provider-quota-fn p)))
-      (harness-resolved nil))))
+(defun harness-provider--accepts-arg-p (fn)
+  "Non-nil when function FN can be called with one argument."
+  (let ((arity (func-arity fn)))
+    (or (eq (cdr arity) 'many) (>= (cdr arity) 1))))
+
+(harness-defmethod provider/quota (provider-id &optional refresh)
+  "Return a promise of PROVIDER-ID's billing and quota information, or of nil.
+PROVIDER-ID is a symbol or its name.  REFRESH non-nil asks the provider
+to fetch fresh data first.  The value is (:billing api|subscription|nil
+:plan ID :plan-label LABEL :windows ((:name :label :used FRACTION
+:resets FLOAT ...) ...) :extra PLIST :updated FLOAT ...); see
+docs/architecture.md."
+  (let* ((p (harness-provider-get (if (stringp provider-id) (intern provider-id) provider-id)))
+         (fn (and p (harness-provider-quota-fn p))))
+    (cond ((null fn) (harness-resolved nil))
+          ((and (harness-json-true-p refresh) (harness-provider--accepts-arg-p fn))
+           (harness-as-promise (funcall fn t)))
+          (t (harness-as-promise (funcall fn))))))
 
 (harness-declare-event 'provider/models-updated "(MODELS) after the catalogue refreshes.")
 (harness-declare-event 'provider/request-started "(PROVIDER-ID REQUEST) when a completion starts.")
+(harness-declare-event 'provider/quota-updated
+                       "(PROVIDER-ID QUOTA) when a provider learns new billing or quota information.")
 
 (defun harness-provider--init ()
   "Warm the model catalogue in the background."
