@@ -201,11 +201,8 @@ DECISION is the current value and NEXT continues the chain."
                 (append (gethash sid harness-perms--session-rules) harness-perms-rules))))
 
 (defun harness-perms--save-rules ()
-  "Persist `harness-perms-rules' through customize when a custom file exists."
-  (when (and custom-file (not noninteractive))
-    (condition-case err
-        (customize-save-variable 'harness-perms-rules harness-perms-rules)
-      (error (harness-log 'warn "perms: could not save rules: %S" err)))))
+  "Persist `harness-perms-rules' in the user's custom file."
+  (harness-save-user-option 'harness-perms-rules harness-perms-rules))
 
 (defun harness-perms-add-rule (session-id rule scope)
   "Record RULE for SESSION-ID with SCOPE (`session' or `always')."

@@ -40,7 +40,7 @@ Display
 ## Rules of the house
 
 - Built-in widgets only: `button.el`, `widget.el`, `tabulated-list-mode`, `transient`, `icons.el`, `svg.el`, `image.el`, header and mode lines.  No box-drawing UI except where the medium is a graph.
-- Never block: every request is asynchronous; show a lightweight loading state (`harness-dim-face` text, a header-line spinner) and replace it when the result arrives; failures show in the buffer, not just the echo area.
+- Never block: the UI runs in the user's Emacs and the harness in its own process (see "Processes" in architecture.md), so the only way to freeze the user is UI code itself.  Never call the bus (`harness-call`, `harness-method-exists-p`): the modules are not loaded here.  Project roots and file lists come from `harness-files` (`harness-files-project-root`, `harness-files-list` → promise).  Every request is asynchronous; show a lightweight loading state (`harness-dim-face` text, a header-line spinner) and replace it when the result arrives; failures show in the buffer, not just the echo area.
 - Every keyboard command has a mouse target: a button, a header-line segment or a mode-line segment with `help-echo`.
 - Redraw incrementally with markers and `inhibit-read-only`; never re-render the whole transcript on a delta.
 - Buffers must survive `harness-reload`: keep state in buffer-local variables, rebuild from `harness-ui-redraw-hook`.

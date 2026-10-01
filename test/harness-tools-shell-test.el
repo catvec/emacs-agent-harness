@@ -11,6 +11,7 @@
   "Load the tools modules and allow everything."
   (harness-test-load-module 'tools)
   (harness-test-load-module 'tools-shell)
+  (harness-test-connect-ui-client)
   (harness-add-filter 'permission/decide #'harness-tools-shell-test--allow 10))
 
 (defun harness-tools-shell-test--call (name &rest input)

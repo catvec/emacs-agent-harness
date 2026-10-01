@@ -509,11 +509,12 @@
 
 (ert-deftest harness-ui-chat-completion-sources ()
   (harness-ui-chat-test-with
-    (let* ((sid (harness-ui-chat-test-session))
-           (buf (harness-ui-chat-test-open sid))
-           (cwd (plist-get (harness-call 'session/get sid) :cwd)))
+    ;; Only projects are listed, so the session runs in a repository.
+    (let* ((cwd (harness-test-temp-dir))
+           (_ (let ((default-directory cwd)) (call-process "git" nil nil nil "init" "-q")))
+           (sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))
+           (buf (harness-ui-chat-test-open sid)))
       (with-temp-file (expand-file-name "notes.txt" cwd) (insert "x"))
-      (harness-call 'project/invalidate cwd)
       (with-current-buffer buf
         (setq harness-chat--files nil)
         (harness-chat--fetch-completions)

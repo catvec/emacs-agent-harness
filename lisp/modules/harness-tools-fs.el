@@ -106,16 +106,9 @@
     (mapconcat (lambda (l) (prog1 (format "%6d\t%s" n l) (cl-incf n)))
                lines "\n")))
 
-(defun harness-tools-fs--revert-visiting (path)
-  "Revert an unmodified live buffer visiting PATH so it shows the new content."
-  (let ((buf (find-buffer-visiting path)))
-    (when (and buf (buffer-live-p buf) (not (buffer-modified-p buf)))
-      (with-current-buffer buf
-        (harness-ignore-errors-logged "revert after tool write"
-          (revert-buffer :ignore-auto :noconfirm :preserve-modes))))))
-
 (defun harness-tools-fs--write (path content)
-  "Write CONTENT to PATH creating parents, then revert its visiting buffer."
+  "Write CONTENT to PATH creating parents, then announce it.
+The UI reverts unmodified buffers visiting PATH on `tools/file-written'."
   (let ((dir (file-name-directory path)))
     (when (and dir (not (file-directory-p dir)))
       (make-directory dir t)))
@@ -123,7 +116,7 @@
     (with-temp-buffer
       (insert content)
       (write-region (point-min) (point-max) path nil 'silent)))
-  (harness-tools-fs--revert-visiting path))
+  (harness-emit 'tools/file-written path))
 
 ;;;; read_file
 
