@@ -76,7 +76,7 @@ Functional requirements:
 - Older messages can be viewed by scrolling up, you can return to newer messages by scrolling down
 - Text from all messages is aligned in the user's language direction (english is left to right)
 - The sender (agent or user) and type () of a message 
-- The sender of a message is identifiable by the background color of the message text (agents have a darker background color, users have a lighter background color)
+- The sender of a message is identifiable at a glance: user messages open with a "You" name line and a colored bar down their left edge on a slightly lighter background; each agent turn opens with an "Agent" name line on the default background
 - If messages are too long they wrap to the next line matching the original line's indentation
 - Messages are formatted in Markdown and rendered as such
 - A message composition box should be displayed at the bottom of the chat history view
