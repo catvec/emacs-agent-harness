@@ -1449,11 +1449,12 @@ The panel answers through RESPOND."
              (set-window-start (car w) (cdr w) t))))))
 
 (defun harness-chat--hl-line-range ()
-  "Return the `hl-line-mode' range, nothing inside the compose box.
+  "Return the `hl-line-mode' range, empty inside the compose box.
 The line highlight would cover the compose background, and outranking it
-would hide the region too."
-  (unless (and harness-chat--compose-overlay (overlay-buffer harness-chat--compose-overlay)
-               (>= (point) (overlay-start harness-chat--compose-overlay)))
+would hide the region too.  Never nil: `global-hl-line-mode' needs a range."
+  (if (and harness-chat--compose-overlay (overlay-buffer harness-chat--compose-overlay)
+           (>= (point) (overlay-start harness-chat--compose-overlay)))
+      (cons (point) (point))
     (cons (line-beginning-position) (line-beginning-position 2))))
 
 (defun harness-chat--update-placeholder ()

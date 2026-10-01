@@ -567,7 +567,9 @@
         (goto-char (point-min))
         (should (harness-chat--hl-line-range))
         (goto-char harness-chat--compose-end)
-        (should-not (harness-chat--hl-line-range))))))
+        (let ((range (harness-chat--hl-line-range)))
+          (should (consp range))
+          (should (= (car range) (cdr range))))))))
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
