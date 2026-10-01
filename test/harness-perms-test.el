@@ -165,6 +165,33 @@
   (let ((harness-perms-auto-allow-tools '("spawn_agent")))
     (should (eq 'allow (harness-perms-test--behavior "spawn_agent" 'meta)))))
 
+(ert-deftest harness-perms-web-search-needs-no-approval ()
+  ;; web_search only sends its query to the configured search provider,
+  ;; so it is allowed in every mode; web_fetch reaches any host and asks.
+  (harness-perms-test--setup :permission-mode 'ask)
+  (should (member "web_search" harness-perms-auto-allow-tools))
+  (should (eq 'allow (harness-perms-test--behavior "web_search" 'net)))
+  (should (eq 'deny (harness-perms-test--behavior "web_fetch" 'net)))
+  (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'accept-edits))
+  (should (eq 'allow (harness-perms-test--behavior "web_search" 'net))))
+
+(ert-deftest harness-perms-rules-beat-auto-allow ()
+  ;; web_search used to ask, so a user may have answered deny-always: the
+  ;; rule must still hold now that the tool needs no approval.
+  (harness-perms-test--setup :permission-mode 'ask)
+  (let ((harness-perms-rules '((:tool "web_search" :behavior deny))))
+    (let ((d (harness-perms-test--decide (harness-perms-test--request "web_search" 'net))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (string-match-p "standing rule" (plist-get d :reason)))
+      (should (plist-get d :hint)))
+    ;; Only the named tool: the rest of the list still needs no approval.
+    (should (eq 'allow (harness-perms-test--behavior "todo_write" 'meta))))
+  ;; Session rules and kind rules apply as well.
+  (harness-perms-add-rule "s1" '(:tool "todo_write" :behavior deny) 'session)
+  (should (eq 'deny (harness-perms-test--behavior "todo_write" 'meta)))
+  (harness-perms-add-rule "s1" '(:kind net :behavior deny) 'session)
+  (should (eq 'deny (harness-perms-test--behavior "web_search" 'net))))
+
 (ert-deftest harness-perms-standing-rules ()
   (harness-perms-test--setup :permission-mode 'ask)
   (should (eq 'deny (harness-perms-test--behavior "bash" 'exec)))
@@ -292,6 +319,36 @@
     (let ((harness-non-interactive t))
       (should (equal "non-interactive mode: the user is away"
                      (plist-get (harness-perms-test--decide (harness-perms-test--request "bash" 'exec)) :reason))))))
+
+(ert-deftest harness-perms-task-sessions-can-search-the-web ()
+  ;; Task sessions run in auto mode, non-interactive.  web_search used to
+  ;; be left to the judge, which often denied network access as out of
+  ;; scope; whatever it left undecided was denied as nobody could answer.
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-test-load-module 'tools-web)
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"network calls are out of scope\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-perms-auto-model "judge:small")
+         (harness-websearch-providers nil)
+         (harness-websearch-provider 'fake)
+         (prompts nil))
+    (harness-register-method 'agent/prompt (lambda (sid blocks) (push (cons sid blocks) prompts) (harness-resolved nil)))
+    (harness-websearch-register-provider
+     'fake (lambda (query _count) (list (list :title (concat "About " query) :url "https://example.org/"))))
+    (let ((r (harness-test-await (harness-call 'tools/execute "s1"
+                                               (list :id "c1" :name "web_search" :input '(:query "emacs"))))))
+      (should-not (plist-get r :is-error))
+      (should (string-match-p "About emacs" (plist-get r :content))))
+    ;; Decided without asking the judge, and nothing to steer.
+    (should (null (funcall probe 'requests)))
+    (should (null prompts))
+    ;; web_fetch can reach any host, so the judge still decides it.
+    (let ((d (harness-perms-test--decide (list :session harness-perms-test--session :tool "web_fetch" :kind 'net
+                                               :input '(:url "https://example.org/") :call-id "c2"))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (equal "network calls are out of scope" (plist-get d :reason))))
+    (should (= 1 (length (funcall probe 'requests))))))
 
 ;;;; Asking the user
 
