@@ -56,7 +56,7 @@
            (s (harness-ui-media-render-attachment (list :path wav :mime "audio/wav" :size (harness-file-size wav) :name "clip.wav")))
            (plain (substring-no-properties s)))
       ;; Play button, name, progress, times and volume.
-      (should (string-match-p "▶" plain))
+      (should (string-match-p "►" plain))
       (should (string-match-p "clip.wav" plain))
       (should (string-match-p "0:00 / 0:02" plain))
       (should (string-match-p "80%" plain))
@@ -68,7 +68,7 @@
       (should (= 2.0 (harness-ui-media--wav-duration wav)))
       (should (= 2.0 (harness-ui-media--duration wav)))
       ;; A MIME type is guessed from the extension when missing.
-      (should (string-match-p "▶" (substring-no-properties (harness-ui-media-render-attachment (list :path wav)))))
+      (should (string-match-p "►" (substring-no-properties (harness-ui-media-render-attachment (list :path wav)))))
       ;; Terminal fallback draws a text bar; on a graphic display an SVG.
       (if (and (display-graphic-p) (image-type-available-p 'svg))
           (should (harness-ui-media-test-has-p s (lambda (p) (let ((d (plist-get p 'display))) (and (consp d) (eq (plist-get (cdr d) :type) 'svg))))))
@@ -90,12 +90,12 @@
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
                   (should (string-prefix-p "before " text))
                   (should (string-match-p " after\n" text))
-                  (should (= 2 (cl-count-if (lambda (l) (string-match-p "⏸.*0:01 / 0:03" l)) (split-string text "\n")))))
+                  (should (= 2 (cl-count-if (lambda (l) (string-match-p "‖.*0:01 / 0:03" l)) (split-string text "\n")))))
                 ;; Stopping keeps the position and shows the play button again.
                 (harness-ui-media-stop wav)
                 (should-not (process-live-p proc))
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (= 2 (cl-count-if (lambda (l) (string-match-p "▶.*0:01 / 0:03" l)) (split-string text "\n"))))))
+                  (should (= 2 (cl-count-if (lambda (l) (string-match-p "►.*0:01 / 0:03" l)) (split-string text "\n"))))))
             (when (process-live-p proc) (delete-process proc))))))))
 
 (ert-deftest harness-ui-media-video-thumbnail-and-file ()
@@ -196,7 +196,7 @@
            (harness-ui-media-volume 0))
       (harness-ui-media-play wav)
       (should (harness-ui-media--playing-p wav))
-      (should (string-match-p "⏸" (substring-no-properties (harness-ui-media-render-attachment (list :path wav :mime "audio/wav")))))
+      (should (string-match-p "‖" (substring-no-properties (harness-ui-media-render-attachment (list :path wav :mime "audio/wav")))))
       (harness-ui-media-stop wav)
       (should-not (harness-ui-media--playing-p wav)))))
 

@@ -97,15 +97,9 @@
     (((background dark)) :background "#262a3a" :extend t))
   "Background of plan blocks." :group 'harness-ui-chat)
 
-(define-icon harness-chat-icon-plan nil
-  '((emoji "📋") (symbol "≡") (text "plan"))
-  "A plan." :version "29.1")
-(define-icon harness-chat-icon-compaction nil
-  '((emoji "⟲") (symbol "⟲") (text "compact"))
-  "A compaction." :version "29.1")
-(define-icon harness-chat-icon-question nil
-  '((symbol "?") (text "?"))
-  "A question." :version "29.1")
+(harness-ui-define-icon harness-chat-icon-plan "plan" "≡" "plan" "A plan.")
+(harness-ui-define-icon harness-chat-icon-compaction "compaction" "⟲" "compact" "A compaction.")
+(harness-ui-define-icon harness-chat-icon-question "question" "?" "?" "A question.")
 
 (defconst harness-chat--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
   "Frames of the running spinner.")
@@ -168,7 +162,7 @@
 
 (defmacro harness-chat--with-display (&rest body)
   "Run BODY with the frame showing this buffer selected, so icons match it.
-Icons pick emoji, symbol or text variants from the selected frame; a
+Icons pick image, symbol or text variants from the selected frame; a
 render triggered from a timer or an emacsclient eval would otherwise
 use whatever frame happens to be selected."
   (declare (indent 0))
@@ -594,7 +588,9 @@ opening the file is returned instead."
 (defun harness-chat--render-error (block)
   "Return the body of local error BLOCK."
   (harness-chat--margin
-   (propertize (concat "⚠ " (or (plist-get (harness-chat-block-node block) :content) "") "\n") 'face 'error)))
+   (propertize (concat (harness-ui-icon 'harness-icon-warning) " "
+                       (or (plist-get (harness-chat-block-node block) :content) "") "\n")
+               'face 'error)))
 
 (defun harness-chat--render-group (group)
   "Return the body of the summary block of GROUP."

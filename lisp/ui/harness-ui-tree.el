@@ -65,12 +65,8 @@
     (((background dark)) :background "#2a2f3a" :extend t))
   "Rows of the session the tree was opened for." :group 'harness-ui-tree)
 
-(define-icon harness-icon-hint nil
-  '((symbol "ℹ") (text "hint"))
-  "A harness hint." :version "29.1")
-(define-icon harness-icon-fork nil
-  '((symbol "↱") (text "fork"))
-  "A fork begins." :version "29.1")
+(harness-ui-define-icon harness-icon-hint "hint" "ⓘ" "hint" "A harness hint.")
+(harness-ui-define-icon harness-icon-fork "fork" "↱" "fork" "A fork begins.")
 
 ;;;; Buffer state
 

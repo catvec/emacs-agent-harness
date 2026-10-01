@@ -25,6 +25,8 @@
 (require 'harness-util)
 (require 'harness-acp)
 
+(defvar harness-directory)
+
 (declare-function harness-reload "harness")
 
 (defgroup harness-ui nil
@@ -102,42 +104,38 @@
 
 ;;;; Icons
 
-(define-icon harness-icon-idle nil
-  '((emoji "●") (symbol "●") (text "idle"))
-  "Idle session." :version "29.1")
-(define-icon harness-icon-running nil
-  '((emoji "▶") (symbol "▶") (text "run"))
-  "Running session." :version "29.1")
-(define-icon harness-icon-blocked nil
-  '((emoji "⏸") (symbol "⏸") (text "wait"))
-  "Blocked session." :version "29.1")
-(define-icon harness-icon-inactive nil
-  '((emoji "○") (symbol "○") (text "off"))
-  "Inactive session." :version "29.1")
-(define-icon harness-icon-user nil
-  '((emoji "👤") (symbol "◆") (text "you"))
-  "The user." :version "29.1")
-(define-icon harness-icon-agent nil
-  '((emoji "🤖") (symbol "◇") (text "agent"))
-  "The agent." :version "29.1")
-(define-icon harness-icon-tool nil
-  '((emoji "🔧") (symbol "⚙") (text "tool"))
-  "A tool call." :version "29.1")
-(define-icon harness-icon-thinking nil
-  '((emoji "💭") (symbol "…") (text "think"))
-  "Thinking." :version "29.1")
-(define-icon harness-icon-collapsed nil
-  '((symbol "▸") (text "+"))
-  "Collapsed block." :version "29.1")
-(define-icon harness-icon-expanded nil
-  '((symbol "▾") (text "-"))
-  "Expanded block." :version "29.1")
-(define-icon harness-icon-send nil
-  '((emoji "➤") (symbol "➤") (text "send"))
-  "Send." :version "29.1")
-(define-icon harness-icon-attach nil
-  '((emoji "📎") (symbol "@") (text "attach"))
-  "Attachment." :version "29.1")
+;; Icons are monochrome SVGs drawn in `currentColor', so they take the
+;; colour of the face around them; terminals fall back to plain symbols.
+;; No emoji: they ignore the theme and vary wildly between fonts.
+
+(defun harness-ui-icon-file (name)
+  "Return the path of the SVG icon NAME shipped in the icons directory."
+  (expand-file-name (concat "icons/" name ".svg")
+                    (if (boundp 'harness-directory) harness-directory
+                      (file-name-directory (or (locate-library "harness") default-directory)))))
+
+(defmacro harness-ui-define-icon (name file symbol text doc)
+  "Define icon NAME from SVG FILE, falling back to SYMBOL then TEXT.
+DOC is its documentation."
+  `(define-icon ,name nil
+     (list (list 'image (harness-ui-icon-file ,file) :height '(1.1 . em))
+           (list 'symbol ,symbol)
+           (list 'text ,text))
+     ,doc :version "29.1"))
+
+(harness-ui-define-icon harness-icon-idle "idle" "●" "idle" "Idle session.")
+(harness-ui-define-icon harness-icon-running "running" "►" "run" "Running session.")
+(harness-ui-define-icon harness-icon-blocked "blocked" "‖" "wait" "Blocked session.")
+(harness-ui-define-icon harness-icon-inactive "inactive" "○" "off" "Inactive session.")
+(harness-ui-define-icon harness-icon-user "user" "◆" "you" "The user.")
+(harness-ui-define-icon harness-icon-agent "agent" "◇" "agent" "The agent.")
+(harness-ui-define-icon harness-icon-tool "tool" "◈" "tool" "A tool call.")
+(harness-ui-define-icon harness-icon-thinking "thinking" "…" "think" "Thinking.")
+(harness-ui-define-icon harness-icon-collapsed "collapsed" "▸" "+" "Collapsed block.")
+(harness-ui-define-icon harness-icon-expanded "expanded" "▾" "-" "Expanded block.")
+(harness-ui-define-icon harness-icon-send "send" "→" "send" "Send.")
+(harness-ui-define-icon harness-icon-attach "attach" "+" "attach" "Attachment.")
+(harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
 
 (defun harness-ui-icon (name)
   "Return the string for icon NAME (a symbol such as `harness-icon-idle')."
