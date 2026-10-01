@@ -77,7 +77,7 @@
            (propertize status 'face (harness-ui-status-face status))
            (if (equal kind "main") "" kind)
            (harness-ui-model-label (plist-get s :model))
-           (or (plist-get s :permission-mode) "")
+           (if-let* ((m (plist-get s :permission-mode))) (harness-ui-permission-mode-label m) "")
            (harness-ui-format-context s)
            (harness-format-cost (plist-get usage :cost))
            (harness-relative-time (or (plist-get s :updated) 0))
