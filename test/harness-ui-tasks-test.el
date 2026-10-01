@@ -316,5 +316,87 @@
             (should (equal "transcript\n" (with-current-buffer session (buffer-string)))))
         (kill-buffer session)))))
 
+(declare-function harness-ui-tasks-reply "harness-ui-tasks")
+(declare-function harness-ui-tasks--set-compose "harness-ui-tasks")
+(declare-function harness-compose-text "harness-ui-compose")
+(declare-function harness-compose-in-p "harness-ui-compose")
+
+(defun harness-ui-tasks-test--c-g ()
+  "Press C-g in the current buffer; return `quit' when it quits."
+  (condition-case nil
+      (progn (call-interactively (key-binding (kbd "C-g"))) nil)
+    (quit 'quit)))
+
+(ert-deftest harness-ui-tasks-c-g-leaves-the-answer-box ()
+  "C-g leaves the answer box for a new task; the question is not cancelled."
+  (harness-ui-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type tool-call :id "demo-q" :name "ask_user"
+                    :input (:question "Which colour?" :options ("red" "green")))
+             (:type text :delta "Noted.")
+             (:type done :stop-reason end-turn))))
+      (harness-test-load-module 'tools-agent)
+      (harness-ui-tasks-test--type-and-submit board "Pick a colour")
+      (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*has a question for you")
+      (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
+        (with-current-buffer board
+          (goto-char (point-min))
+          (search-forward "Pick a colour")
+          (harness-ui-tasks-reply)
+          (should (eq 'answer (car harness-ui-tasks--target)))
+          (should (harness-compose-in-p))
+          (insert "gre")
+          (should (eq 'harness-ui-tasks-compose-quit (key-binding (kbd "C-g"))))
+          (should-not (harness-ui-tasks-test--c-g))
+          (should-not harness-ui-tasks--target)
+          (should (equal "" (harness-compose-text)))
+          (should (string-match-p "New task" (buffer-substring-no-properties harness-ui-tasks--list-end
+                                                                              (point-max)))))
+        ;; The question still waits, on the session and on the card...
+        (should (= 1 (length (harness-call 'question/pending sid))))
+        (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*has a question for you")
+        ;; ...where [Answer] comes back to it.
+        (with-current-buffer board
+          (goto-char (point-min))
+          (search-forward "Pick a colour")
+          (harness-ui-tasks-reply)
+          (should (eq 'answer (car harness-ui-tasks--target)))
+          (insert "green")
+          (harness-ui-tasks-submit))
+        (harness-test-wait (lambda () (null (harness-call 'question/pending sid))) 5 "the question to be answered")
+        (harness-ui-tasks-test--wait-text board "Completed  1")))))
+
+(ert-deftest harness-ui-tasks-c-g-otherwise-quits-as-usual ()
+  "With a region or nothing to leave, C-g quits the usual way, globally remapped too."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (goto-char harness-compose-end)
+      (insert "a new task")
+      ;; Nothing to leave: it quits, and the new task's text stays.
+      (should (eq 'quit (harness-ui-tasks-test--c-g)))
+      (should (equal "a new task" (harness-compose-text)))
+      ;; An active region is deactivated first; the box stays.
+      (harness-ui-tasks--set-compose "half a message" (cons 'reply "t1"))
+      (let ((transient-mark-mode t))
+        (set-mark harness-compose-start)
+        (should (region-active-p))
+        (should (eq 'quit (harness-ui-tasks-test--c-g)))
+        (should-not (region-active-p))
+        (should (equal '(reply . "t1") harness-ui-tasks--target))
+        (should (equal "half a message" (harness-compose-text))))
+      ;; A global remapping of `keyboard-quit' (Doom's `doom/escape') runs
+      ;; once there is no box left to leave.
+      (let* ((escapes 0)
+             (old (lookup-key global-map [remap keyboard-quit])))
+        (define-key global-map [remap keyboard-quit] (lambda () (interactive) (cl-incf escapes)))
+        (unwind-protect
+            (progn
+              (should-not (harness-ui-tasks-test--c-g))
+              (should-not harness-ui-tasks--target)
+              (should (= 0 escapes))
+              (should-not (harness-ui-tasks-test--c-g))
+              (should (= 1 escapes)))
+          (define-key global-map [remap keyboard-quit] old))))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

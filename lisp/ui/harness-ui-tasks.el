@@ -13,7 +13,9 @@
 ;;
 ;; and a compose box at the bottom: describe a task, C-c C-c submits it
 ;; and it gets a session of its own.  The same box edits a pending task
-;; (e) or replies to a task's session (m) without leaving the board.
+;; (e) or replies to a task's session (m) without leaving the board, and
+;; answers a task's question (m or [Answer]); C-g leaves such a box for a
+;; new task again, the question still waiting.
 ;; RET or a click on a task opens its session in full.
 ;;
 ;; Everything comes over ACP (`_harness/task/…' plus the session cache),
@@ -518,7 +520,9 @@ TEXT replaces the compose contents; without it they are kept."
             (insert label))
           (when harness-ui-tasks--target
             (insert "  " (harness-ui-tasks--button "[cancel]" #'harness-ui-tasks-compose-reset
-                                                   "Back to a new task")))
+                                                   (if (eq (car harness-ui-tasks--target) 'answer)
+                                                       "Back to a new task (C-g); the question stays waiting"
+                                                     "Back to a new task (C-g)"))))
           (insert "\n")
           (unless harness-ui-tasks--target
             ;; Fitted to the window: a wider line is drawn truncated but
@@ -743,6 +747,9 @@ anything that moves a task without one, so a board never drifts.")
   (set-keymap-parent map harness-compose-map)
   (define-key map (kbd "C-c C-c") #'harness-ui-tasks-submit)
   (define-key map (kbd "C-c C-k") #'harness-ui-tasks-compose-reset)
+  ;; C-g, as a remapping: completion popups (corfu, company) keep their
+  ;; C-g, and with no box to leave it falls back to the global one.
+  (define-key map [remap keyboard-quit] #'harness-ui-tasks-compose-quit)
   (define-key map (kbd "C-c C-n") #'harness-ui-tasks-next)
   (define-key map (kbd "C-c C-p") #'harness-ui-tasks-previous))
 
@@ -899,6 +906,30 @@ By default it takes the board's own position, replacing the board."
   (interactive)
   (setq harness-compose-attachments nil)
   (harness-ui-tasks--set-compose "" nil))
+
+(defun harness-ui-tasks-compose-quit ()
+  "Leave the answer, message or edit box; otherwise quit as usual.
+On the board \\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-compose-quit] runs this.  Leaving is what
+`harness-ui-tasks-compose-reset' does: the box describes a new task
+again.  A question it was answering is not cancelled: it stays waiting
+on its task, whose card's [Answer] comes back to it.  With an active
+region, completion in progress, an open minibuffer or no such box to
+leave, this quits the usual way instead."
+  (interactive)
+  (if (or (null harness-ui-tasks--target) (region-active-p)
+          completion-in-region-mode (active-minibuffer-window))
+      (harness-ui-tasks--keyboard-quit)
+    (let ((answering (eq (car harness-ui-tasks--target) 'answer)))
+      (harness-ui-tasks-compose-reset)
+      (message (if answering "The question is still waiting" "Back to a new task")))))
+
+(defun harness-ui-tasks--keyboard-quit ()
+  "Quit the usual way, which the board's own remapping hides.
+That is `keyboard-quit', or what the global map remaps it to (Doom's
+`doom/escape', say)."
+  (let ((command (or (command-remapping 'keyboard-quit nil (current-global-map)) #'keyboard-quit)))
+    (setq this-command command)
+    (call-interactively command)))
 
 (defun harness-ui-tasks-submit ()
   "Submit the compose box: a new task, an edited prompt, a message or an answer.

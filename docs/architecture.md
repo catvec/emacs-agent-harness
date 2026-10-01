@@ -713,8 +713,10 @@ Task board (`harness-ui-tasks`, `C-c a a`): the project's tasks in four
 sections -- requires your input, in progress, pending, completed -- with
 each card's current todo, progress, elapsed time, cost and merge state,
 one-click answers to a blocked task's question or permission, and a
-compose box that submits a task, edits a pending one or messages a
-task's session.  RET opens the session.  The session setting commands
+compose box that submits a task, edits a pending one, messages a
+task's session or answers its question (`C-g` leaves an edit, message
+or answer for a new task again: a question stays waiting, never
+cancelled).  RET opens the session.  The session setting commands
 change the task at point, or from the compose box the settings the next
 task starts with (shown as buttons under the New task label).  `I` or
 [Add session] makes an ongoing session a task.  Boards reload after any
