@@ -458,7 +458,7 @@ Point and every window showing the board stay on the same task."
                (harness-ui-model-label (plist-get new :model))
                #'harness-set-model "Model of new tasks")
               (harness-ui-tasks--setting-button
-               (format "%s" (or (plist-get new :permission-mode) "default mode"))
+               (if-let* ((m (plist-get new :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
                #'harness-set-permission-mode "Permission mode of new tasks")
               (harness-ui-tasks--setting-button
                (harness-ui-thinking-label (plist-get new :thinking))

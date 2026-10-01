@@ -538,6 +538,18 @@ Signal unless NOERROR when none can be found."
     (format "Claude %s %s%s" (capitalize (match-string 1 name)) (match-string 2 name)
             (if (match-string 3 name) (concat "." (match-string 3 name)) ""))))
 
+(defconst harness-ui-permission-modes
+  '(("ask" "Ask" "Ask before writes, commands and network")
+    ("accept-edits" "Accept Edits" "Reads and edits inside the project run freely")
+    ("auto" "Auto" "A cheap model judges each call")
+    ("yolo" "YOLO" "Allow everything inside the jail"))
+  "Permission modes as (ID LABEL DESCRIPTION), least to most permissive.")
+
+(defun harness-ui-permission-mode-label (mode)
+  "Return the display label for permission MODE (a symbol or string)."
+  (let ((id (if mode (format "%s" mode) "ask")))
+    (or (cadr (assoc id harness-ui-permission-modes)) id)))
+
 (defun harness-ui-thinking-label (level)
   "Return the label of thinking LEVEL, nil meaning the model's default."
   (format "%s %s" (harness-ui-icon 'harness-icon-thinking) (or level "default")))
@@ -782,13 +794,20 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
   "Choose the permission mode for SESSION-ID."
   (interactive)
   (let* ((target (harness-ui--setting-target session-id))
-         (choice (read-multiple-choice "Permission mode"
-                                       '((?a "ask" "Ask before writes, commands and network")
-                                         (?e "accept-edits" "Reads and edits inside the project run freely")
-                                         (?u "auto" "A cheap model judges each call")
-                                         (?y "yolo" "Allow everything inside the jail")))))
-    (harness-ui--setting-set target :permission-mode (cadr choice)
-                             (format "Permission mode → %s" (cadr choice)))))
+         (table (mapcar (lambda (m) (cons (nth 1 m) m)) harness-ui-permission-modes))
+         (completion-extra-properties
+          (list :annotation-function
+                (lambda (choice) (concat "  " (nth 2 (cdr (assoc choice table)))))))
+         (choice (completing-read "Permission mode: "
+                                  (lambda (string pred action)
+                                    ;; Keep the least-to-most-permissive order.
+                                    (if (eq action 'metadata)
+                                        '(metadata (display-sort-function . identity)
+                                                   (cycle-sort-function . identity))
+                                      (complete-with-action action table string pred)))
+                                  nil t)))
+    (harness-ui--setting-set target :permission-mode (cadr (assoc choice table))
+                             (format "Permission mode → %s" choice))))
 
 ;;;###autoload
 (defun harness-toggle-non-interactive (&optional session-id)
