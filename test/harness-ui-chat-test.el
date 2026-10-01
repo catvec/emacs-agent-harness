@@ -446,39 +446,93 @@
 
 ;;;; History
 
+;; Markers still delimit every block exactly.
+(defun harness-ui-chat-test-check-markers ()
+  "Assert that the block markers of the current buffer tile the transcript."
+  (let ((prev (marker-position harness-chat--transcript-start)))
+    (dolist (id (reverse harness-chat--order))
+      (let ((b (gethash id harness-chat--blocks)))
+        (should (= prev (marker-position (harness-chat-block-start b))))
+        (setq prev (marker-position (harness-chat-block-end b)))))
+    (should (= prev (marker-position harness-chat--transcript-end)))))
+
+(defun harness-ui-chat-test-oldest-content ()
+  "Return the content of the oldest rendered node."
+  (plist-get (harness-chat-block-node (gethash (car (last harness-chat--order)) harness-chat--blocks)) :content))
+
 (ert-deftest harness-ui-chat-lazy-history ()
   (harness-ui-chat-test-with
-    (let ((sid (harness-ui-chat-test-session "Long")))
+    (let ((sid (harness-ui-chat-test-session "Long"))
+          (w (selected-window)))
       (dotimes (i 150) (harness-call 'session/hint sid (format "hint number %d" i)))
       (let ((buf (harness-ui-chat-test-open sid)))
         (with-current-buffer buf
           (should (= 60 (length harness-chat--order)))
           (should harness-chat--has-more)
-          (should (harness-ui-chat-test-find buf "Show earlier messages"))
+          (should-not (harness-ui-chat-test-find buf "Show earlier messages"))
           (should (harness-ui-chat-test-find buf "hint number 90"))
           (should-not (harness-ui-chat-test-find buf "hint number 89"))
           (let ((pos (harness-ui-chat-test-find buf "hint number 149")))
             (should (harness-ui-chat-test-face-at (1- pos) 'harness-hint-face)))
-          (goto-char (1- (harness-ui-chat-test-find buf "Show earlier messages")))
-          (harness-chat-push))
+          ;; Scrolling to the top loads the older page by itself.
+          (set-window-buffer w buf)
+          (set-window-start w (point-min))
+          (set-window-point w (point-min))
+          (harness-chat--manage-history))
         (harness-test-wait (lambda () (with-current-buffer buf (= 150 (length harness-chat--order)))) 5 "older page")
         (with-current-buffer buf
           (should-not harness-chat--has-more)
-          (should-not (harness-ui-chat-test-find buf "Show earlier messages"))
           (should (< (harness-ui-chat-test-find buf "hint number 0")
                      (harness-ui-chat-test-find buf "hint number 89")
                      (harness-ui-chat-test-find buf "hint number 90")
                      (harness-ui-chat-test-find buf "hint number 149")))
-          (should (equal "hint number 0"
-                         (plist-get (harness-chat-block-node (gethash (car (last harness-chat--order)) harness-chat--blocks))
+          (should (equal "hint number 0" (harness-ui-chat-test-oldest-content)))
+          ;; The window still shows what it showed before the page arrived.
+          (should (equal "hint number 90"
+                         (plist-get (harness-chat-block-node
+                                     (gethash (get-text-property (window-start w) 'harness-chat-node)
+                                              harness-chat--blocks))
                                     :content)))
-          ;; Markers still delimit every block exactly.
-          (let ((prev (marker-position harness-chat--transcript-start)))
-            (dolist (id (reverse harness-chat--order))
-              (let ((b (gethash id harness-chat--blocks)))
-                (should (= prev (marker-position (harness-chat-block-start b))))
-                (setq prev (marker-position (harness-chat-block-end b)))))
-            (should (= prev (marker-position harness-chat--transcript-end)))))))))
+          (harness-ui-chat-test-check-markers))))))
+
+(ert-deftest harness-ui-chat-history-unloads ()
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session "Long"))
+          (w (selected-window))
+          (kept nil)
+          (harness-chat-history-limit 20)
+          (harness-chat-history-page 20))
+      (dotimes (i 100) (harness-call 'session/hint sid (format "hint number %d" i)))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (set-window-buffer w buf)
+        ;; Keep scrolling to the top until the whole history is loaded.
+        (harness-test-wait (lambda ()
+                             (with-current-buffer buf
+                               (set-window-start w (point-min))
+                               (set-window-point w (point-min))
+                               (harness-chat--manage-history)
+                               (not harness-chat--has-more)))
+                           10 "whole history")
+        (with-current-buffer buf
+          (should (= 100 (length harness-chat--order)))
+          ;; Back at the bottom, all but a page of what lies above is dropped.
+          (harness-chat-scroll-to-bottom)
+          (harness-chat--manage-history)
+          (should (< (length harness-chat--order) 100))
+          (should harness-chat--has-more)
+          (should-not (harness-ui-chat-test-find buf "hint number 0"))
+          (should (harness-ui-chat-test-find buf "hint number 99"))
+          (should (= (length harness-chat--order) (hash-table-count harness-chat--blocks)))
+          (harness-ui-chat-test-check-markers)
+          ;; Scrolling up again brings it back.
+          (setq kept (length harness-chat--order))
+          (set-window-start w (point-min))
+          (set-window-point w (point-min))
+          (harness-chat--manage-history))
+        (harness-test-wait (lambda () (with-current-buffer buf (not harness-chat--fetching))) 5 "reloaded")
+        (with-current-buffer buf
+          (should (= (+ kept 20) (length harness-chat--order)))
+          (harness-ui-chat-test-check-markers))))))
 
 ;;;; Redraw and deletion
 
