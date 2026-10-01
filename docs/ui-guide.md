@@ -19,7 +19,7 @@ Incoming traffic (add named functions to these lists)
 
 - `harness-ui-update-functions` `(SESSION-ID UPDATE)` for every `session/update`; `(plist-get UPDATE :sessionUpdate)` is one of `agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk`, `tool_call`, `tool_call_update`, `plan`, `current_mode_update`, `_harness/node` (`:node` is a full node plist), `_harness/session` (`:session`), `_harness/hint`, `_harness/session_deleted`.
 - `harness-ui-event-functions` `(EVENT ARGS)` for `_harness/event`: `agent/turn-started`, `agent/turn-ended`, `session/queue-changed`, `session/pending-changed`, `session/status`, `agent/quota`, `usage/budget-warning`, `merge/queued`, `merge/finished`, `config/changed`, `harness/reloaded`, …
-- `harness-ui-permission-functions` and `harness-ui-question-functions` `(PARAMS RESPOND)`: return non-nil to own the request; call `RESPOND` with `(:outcome (:outcome "selected" :optionId ID))` / `(:answer STRING)`.
+- `harness-ui-permission-functions` and `harness-ui-question-functions` `(PARAMS RESPOND)`: return non-nil to own the request; call `RESPOND` with `(:outcome (:outcome "selected" :optionId ID))` / `(:answer STRING)`. When nothing owns one (no chat buffer shows the session), the UI never prompts: it declines, the request stays pending on the session, which then reads as needing input, and its chat panel or task card answers it later.
 - `harness-ui-sessions-changed-hook`, `harness-ui-redraw-hook` (reload/reconnect: rebuild your buffers from scratch).
 
 Session cache and context

@@ -139,6 +139,74 @@ Return the chosen backend symbol.  Safe to call again: it refreshes
   (let ((home (getenv "HOME")))
     (and home (harness-path-within-p cwd home))))
 
+;;;; Git worktrees
+
+;; A linked worktree's .git is a file pointing into the main repository's
+;; git directory, which lies outside the worktree.  Without it git cannot
+;; commit, so the sandbox mounts it read-write -- except its hooks and
+;; config, which stay read-only: the harness runs git unconfined in the
+;; main checkout (the merge queue), and a planted hook or core.hooksPath
+;; would run there outside the jail.  The sandbox hides ~/.gitconfig, so
+;; the host's commit identity is passed in through the environment.
+
+(defvar harness-sandbox--git-identity (make-hash-table :test 'equal)
+  "Git common dir -> (NAME . EMAIL) as the host's git config gives them.")
+
+(defun harness-sandbox--read-file-line (file)
+  (with-temp-buffer (insert-file-contents file) (string-trim (buffer-string))))
+
+(defun harness-sandbox--worktree-git (cwd)
+  "When CWD is inside a linked git worktree, describe its git directory.
+Return (:common DIR :protected (PATH…)) or nil."
+  (let* ((top (locate-dominating-file cwd ".git"))
+         (dotgit (and top (expand-file-name ".git" top))))
+    (when (and dotgit (file-regular-p dotgit))
+      (let* ((line (harness-sandbox--read-file-line dotgit))
+             (gitdir (and (string-match "\\`gitdir: *\\(.+\\)\\'" line)
+                          (expand-file-name (match-string 1 line) top)))
+             (commondir (and gitdir (expand-file-name "commondir" gitdir)))
+             (common (and gitdir
+                          (file-name-as-directory
+                           (if (file-exists-p commondir)
+                               (expand-file-name (harness-sandbox--read-file-line commondir) gitdir)
+                             gitdir)))))
+        (when (and common (file-directory-p common))
+          (list :common common
+                :protected (cl-remove-if-not #'file-exists-p
+                                             (list (expand-file-name "hooks" common)
+                                                   (expand-file-name "config" common)))))))))
+
+(defun harness-sandbox--git-identity (common)
+  "Return the host's (NAME . EMAIL) for the repository at COMMON, cached."
+  (with-memoization (gethash common harness-sandbox--git-identity)
+    (let ((default-directory common)
+          (get (lambda (key) (ignore-errors (car (process-lines "git" "config" "--get" key))))))
+      (cons (funcall get "user.name") (funcall get "user.email")))))
+
+(defun harness-sandbox--git-env (common)
+  "Return (VAR . VALUE) pairs carrying the host's commit identity for COMMON."
+  (let ((id (harness-sandbox--git-identity common)))
+    (append (and (car id) (list (cons "GIT_AUTHOR_NAME" (car id)) (cons "GIT_COMMITTER_NAME" (car id))))
+            (and (cdr id) (list (cons "GIT_AUTHOR_EMAIL" (cdr id)) (cons "GIT_COMMITTER_EMAIL" (cdr id)))))))
+
+(defun harness-sandbox--bwrap-git-args (cwd)
+  "Return the bwrap arguments that let git work in a worktree at CWD."
+  (when-let* ((git (harness-sandbox--worktree-git cwd)))
+    (let ((common (directory-file-name (plist-get git :common))))
+      (append (list "--bind" common common)
+              (cl-loop for p in (plist-get git :protected) append (list "--ro-bind" p p))
+              (cl-loop for (var . value) in (harness-sandbox--git-env (plist-get git :common))
+                       append (list "--setenv" var value))))))
+
+(defun harness-sandbox--systemd-git-args (cwd)
+  "Return the systemd-run arguments that let git work in a worktree at CWD."
+  (when-let* ((git (harness-sandbox--worktree-git cwd)))
+    (let ((common (directory-file-name (plist-get git :common))))
+      (append (list "-p" (concat "BindPaths=" common) "-p" (concat "ReadWritePaths=" common))
+              (cl-loop for p in (plist-get git :protected) append (list "-p" (concat "BindReadOnlyPaths=" p)))
+              (cl-loop for (var . value) in (harness-sandbox--git-env (plist-get git :common))
+                       collect (format "--setenv=%s=%s" var value))))))
+
 (cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable)
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
@@ -160,6 +228,7 @@ namespace; WRITABLE and READABLE list extra directories to expose."
      (list "--bind" cwd cwd)
      (cl-loop for d in writable append (harness-sandbox--dir-args d 'rw))
      (cl-loop for d in readable append (harness-sandbox--dir-args d 'ro))
+     (harness-sandbox--bwrap-git-args cwd)
      (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
            "--die-with-parent" "--new-session"
            "--chdir" cwd)
@@ -192,6 +261,7 @@ unreachable (systemd-run fails with status 200)."
      (cl-loop for d in readable
               when (file-directory-p d)
               append (list "-p" (concat "BindReadOnlyPaths=" (directory-file-name (expand-file-name d)))))
+     (harness-sandbox--systemd-git-args cwd)
      (unless network (list "-p" "PrivateNetwork=yes"))
      (unless (harness-sandbox--home-inside-p cwd)
        (list "--setenv=HOME=/tmp"))

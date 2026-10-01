@@ -36,14 +36,28 @@ absolute path that does not exist yet."
   "Prefix of branch names generated for new worktrees."
   :type 'string :group 'harness)
 
+(defcustom harness-worktree-subdirectory ".worktrees"
+  "Directory inside the repository root that holds default worktrees.
+`worktree/create' writes a `.gitignore' of `*' into it so the main
+checkout's status stays clean."
+  :type 'string :group 'harness)
+
 (defun harness-worktree-default-directory (root branch)
-  "Return ROOT/../NAME-worktrees/BRANCH with slashes in BRANCH replaced.
-NAME is the repository's project name."
-  (let* ((root (directory-file-name (expand-file-name root)))
-         (name (harness-call 'project/name root))
-         (leaf (replace-regexp-in-string "/" "-" branch)))
-    (expand-file-name leaf (expand-file-name (concat name "-worktrees")
-                                             (file-name-directory root)))))
+  "Return ROOT/.worktrees/BRANCH with slashes in BRANCH replaced.
+The parent directory is `harness-worktree-subdirectory'."
+  (let ((leaf (replace-regexp-in-string "/" "-" branch)))
+    (expand-file-name leaf (expand-file-name harness-worktree-subdirectory root))))
+
+(defun harness-worktree--ignore-container (root path)
+  "Keep the directory holding worktree PATH out of ROOT's git status.
+When PATH's parent is strictly inside ROOT, write a `.gitignore' of
+`*' there unless one exists."
+  (let* ((parent (file-name-directory (directory-file-name path)))
+         (ignore (expand-file-name ".gitignore" parent)))
+    (when (and (file-in-directory-p parent root)
+               (not (harness-worktree--same-path-p parent root))
+               (not (file-exists-p ignore)))
+      (harness-write-file-atomically ignore "*\n"))))
 
 ;;;; Running git
 
@@ -164,6 +178,7 @@ otherwise it is created from `:base'.  Emits `worktree/created'."
      (harness-worktree--branch-exists-p root branch)
      (lambda (exists)
        (harness-ensure-directory (file-name-directory (directory-file-name path)))
+       (harness-worktree--ignore-container root path)
        (harness-then
         (if exists
             (harness-worktree--git root "worktree" "add" path branch)

@@ -125,10 +125,12 @@
     (let* ((wt (harness-test-await (harness-call 'worktree/create root)))
            (branch (plist-get wt :branch))
            (expected (expand-file-name (replace-regexp-in-string "/" "-" branch)
-                                       (expand-file-name "repo-worktrees" base))))
+                                       (expand-file-name ".worktrees" root))))
       (should (string-prefix-p "harness/" branch))
       (should (equal (harness-worktree-test--dir expected) (harness-worktree-test--dir (plist-get wt :path))))
-      (should (file-directory-p expected)))
+      (should (file-directory-p expected))
+      ;; The container ignores itself, so the main checkout stays clean.
+      (should (equal "" (harness-worktree-test--git root "status" "--porcelain"))))
     ;; A custom directory function and an explicit base commit.
     (let* ((harness-worktree-directory-function
             (lambda (r b) (expand-file-name (concat "custom-" (file-name-nondirectory b))
@@ -149,6 +151,20 @@
       (should (string-match-p "already" (harness-error-message err))))
     (should-error (harness-test-await (harness-call 'worktree/list (harness-test-temp-dir)))
                   :type 'harness-error)))
+
+(ert-deftest harness-files-main-root-of-a-worktree ()
+  "A linked worktree's main root is the main checkout, without running git."
+  (harness-worktree-test-with-repo
+    (let ((path (expand-file-name "wt-main-root" base)))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "main-root" path)
+      (make-directory (expand-file-name "sub" path) t)
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-worktree-test--dir (harness-files-main-root (expand-file-name "sub" path)))))
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-worktree-test--dir (harness-files-main-root root))))
+      ;; Outside git it is the plain root.
+      (let ((plain (harness-test-temp-dir)))
+        (should (equal (file-name-as-directory plain) (harness-files-main-root plain)))))))
 
 (ert-deftest harness-worktree-root-of-and-prune ()
   (harness-worktree-test-with-repo
