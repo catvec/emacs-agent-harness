@@ -32,7 +32,7 @@ Display
 
 - `(harness-ui-display-session ID &optional POSITION)` and `(harness-ui-display-buffer BUFFER POSITION)`; positions `right`, `left`, `bottom`, `full`, `other`; one session per position.  The chat module sets `harness-ui-open-session-function`.
 - Faces: `harness-user-face`, `harness-agent-face`, `harness-tool-face`, `harness-tool-error-face`, `harness-tool-title-face`, `harness-thinking-face`, `harness-hint-face`, `harness-summary-face`, `harness-dim-face`, `harness-label-face`, `harness-status-*-face`, `harness-context-*-face`, `harness-queue-face`, `harness-compose-face`.
-- Icons: `(harness-ui-icon 'harness-icon-running)` etc.; `(harness-ui-status-icon STATUS)`.
+- Icons: `(harness-ui-icon 'harness-icon-running)` etc.; `(harness-ui-status-icon STATUS)`.  Define new ones with `(harness-ui-define-icon NAME FILE SYMBOL TEXT DOC)`: FILE names a monochrome SVG in `icons/` drawn in `currentColor` (so it takes the surrounding face's colour), SYMBOL is the terminal fallback.  Never use emoji, and avoid codepoints with an emoji presentation (▶ ⏸ ⚙ ℹ ⚠ ▪) as symbols.
 - Helpers: `harness-ui-format-context`, `harness-ui-model-label`, `harness-ui-button`, `harness-ui-mouse-keymap`, `harness-format-tokens`, `harness-format-cost`, `harness-relative-time`, `harness-truncate-middle`.
 - Markdown: `(harness-ui-markdown-render TEXT)` → propertized string (`harness-ui-markdown.el`).
 - Keys: add commands to `harness-ui-map` (prefix `C-c a`) and entries to the `harness-menu` transient (append with `transient-append-suffix`).
