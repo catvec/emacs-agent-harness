@@ -66,7 +66,7 @@
 (defun harness-ui-chat-test-open (sid)
   "Open the chat buffer of SID and wait until it has rendered."
   (let ((buf (harness-chat-buffer sid)))
-    (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-chat--compose-end)))
+    (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-compose-end)))
                        5 "chat buffer loaded")
     buf))
 
@@ -78,7 +78,7 @@
 (defun harness-ui-chat-test-type (buf text)
   "Type TEXT into the compose box of BUF."
   (with-current-buffer buf
-    (goto-char harness-chat--compose-end)
+    (goto-char harness-compose-end)
     (insert text)))
 
 (defun harness-ui-chat-test-prompt (buf text)
@@ -182,9 +182,9 @@
         ;; Every block is read-only; the compose box is not.
         (should (get-text-property (1+ (point-min)) 'read-only))
         (harness-ui-chat-test-type buf "z")
-        (should (equal "z" (harness-chat--compose-text)))
+        (should (equal "z" (harness-compose-text)))
         (should (equal default-directory (plist-get (harness-ui-session sid) :cwd)))
-        (harness-chat--set-compose "")
+        (harness-compose-set "")
         ;; Copying the last response yields its Markdown.
         (harness-chat-copy-last-response)
         (should (string-prefix-p "# Tour" (current-kill 0)))
@@ -195,7 +195,7 @@
           (should (string-match-p "\\$0.0042" header))
           (should (string-match-p "2.0k/" header)))
         (should (string-match-p "idle" (harness-chat--mode-line)))
-        (should (equal "" (harness-chat--compose-text)))))))
+        (should (equal "" (harness-compose-text)))))))
 
 (ert-deftest harness-ui-chat-streaming-appends-cheaply ()
   (harness-ui-chat-test-with
@@ -215,7 +215,7 @@
         (let ((b (gethash "n-live" harness-chat--blocks)))
           (should (equal "Hello world" (harness-chat-block-content b)))
           ;; Appended blocks stay outside the compose box and its background.
-          (should-not (memq harness-chat--compose-overlay (overlays-at (harness-chat-block-start b))))
+          (should-not (memq harness-compose-overlay (overlays-at (harness-chat-block-start b))))
           (should (= 1 (hash-table-count harness-chat--render-timers)))
           ;; The first agent block of the turn opens with the sender line.
           (should (equal "Agent\nHello world"
@@ -245,7 +245,7 @@
       (harness-test-wait (lambda () (with-current-buffer buf (= 80 (length harness-chat--order)))) 5 "hints rendered")
       (set-window-buffer w buf)
       (with-current-buffer buf
-        (set-window-point w harness-chat--compose-end)
+        (set-window-point w harness-compose-end)
         (should (harness-chat--at-bottom-p w))
         (set-window-start w (point-min))
         (set-window-point w (point-min))
@@ -275,14 +275,14 @@
       (with-current-buffer buf (harness-chat-queue))
       (harness-test-wait (lambda () (with-current-buffer buf (= 1 (length harness-chat--queue)))) 5 "queued")
       (with-current-buffer buf
-        (should (equal "" (harness-chat--compose-text)))
+        (should (equal "" (harness-compose-text)))
         (should (harness-ui-chat-test-find buf "queued for the next turn (1)"))
         (let ((pos (harness-ui-chat-test-find buf "later")))
           (should (harness-ui-chat-test-face-at (1- pos) 'harness-queue-face)))
         ;; Edit: the text comes back into the compose box; sending removes the item.
         (let ((qid (plist-get (car harness-chat--queue) :id)))
           (harness-chat-edit-queued qid)
-          (should (equal "later" (harness-chat--compose-text)))
+          (should (equal "later" (harness-compose-text)))
           (should (equal qid harness-chat--editing))
           (harness-ui-chat-test-type buf " please")))
       (harness-ui-chat-test-prompt buf "")
@@ -335,7 +335,7 @@
         (call-interactively (lookup-key harness-chat-panel-map (kbd "s")))
         (should (equal "allow-session" (plist-get (plist-get (car answers) :outcome) :optionId)))
         (harness-chat--on-permission (plist-put (copy-sequence params) :_harness (list :pendingId "p3" :tool "bash")) respond)
-        (goto-char harness-chat--compose-end)
+        (goto-char harness-compose-end)
         (harness-chat-deny-newest)
         (should (equal "deny-once" (plist-get (plist-get (car answers) :outcome) :optionId)))
         (should (null harness-chat--pending))))))
@@ -376,12 +376,12 @@
         (should (null harness-chat--pending))
         ;; Free text goes through the compose box.
         (harness-chat--on-question (list :sessionId sid :requestId "q2" :question "Name?" :options nil) respond)
-        (should (string-match-p "type an answer" (format "%s" (overlay-get harness-chat--placeholder-overlay 'before-string))))
+        (should (string-match-p "type an answer" (format "%s" (overlay-get harness-compose--placeholder 'before-string))))
         (harness-ui-chat-test-type buf "purple")
         (harness-chat-send)
         (should (equal '(:answer "purple") (car answers)))
         (should (null harness-chat--pending))
-        (should (equal "" (harness-chat--compose-text)))))))
+        (should (equal "" (harness-compose-text)))))))
 
 ;;;; Coalescing
 
@@ -411,6 +411,15 @@
           (should (= 5 (length (harness-chat-group-members group))))
           (should (invisible-p (harness-chat-block-start first)))
           (should (invisible-p (harness-ui-chat-test-find buf "read_file c.el")))
+          ;; The hidden stretch starts on a plain newline: one starting on
+          ;; the first member's fold icon would still draw that icon.
+          (let ((ov (harness-chat-group-overlay group)))
+            (should (eq (char-after (overlay-start ov)) ?\n))
+            (should-not (get-text-property (overlay-start ov) 'display))
+            (should (= (overlay-end ov)
+                       (1- (harness-chat-block-end
+                            (gethash (car (last (harness-chat-group-members group))) harness-chat--blocks)))))
+            (should-not (invisible-p (overlay-end ov))))
           ;; Expanding shows the individual, still collapsed, blocks.
           (harness-chat-toggle-group (harness-chat-group-id group))
           (should-not (invisible-p (harness-chat-block-start first)))
@@ -480,21 +489,21 @@
       (harness-ui-chat-test-prompt buf "hello there")
       (harness-ui-chat-test-type buf "a draft in progress")
       (with-current-buffer buf
-        (harness-chat-add-attachment (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
+        (harness-compose-add-attachment (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
         (should (harness-ui-chat-test-find buf "chat-test.el")))
       (run-hooks 'harness-ui-redraw-hook)
       (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-chat--order))) 5 "redrawn")
       (with-current-buffer buf
-        (should (equal "a draft in progress" (harness-chat--compose-text)))
-        (should (= 1 (length harness-chat--attachments)))
+        (should (equal "a draft in progress" (harness-compose-text)))
+        (should (= 1 (length harness-compose-attachments)))
         (should (harness-ui-chat-test-find buf "hello there"))
         (should (harness-ui-chat-test-find buf "You said"))
-        (should (harness-chat--in-compose-p (point)))
-        (let ((blocks (harness-chat--attachment-block (car harness-chat--attachments))))
+        (should (harness-compose-in-p (point)))
+        (let ((blocks (harness-compose-attachment-block (car harness-compose-attachments))))
           (should (equal "resource_link" (plist-get blocks :type)))
           (should (string-prefix-p "file://" (plist-get blocks :uri))))
-        (harness-chat-remove-attachment (plist-get (car harness-chat--attachments) :path))
-        (should (null harness-chat--attachments))))))
+        (harness-compose-remove-attachment (plist-get (car harness-compose-attachments) :path))
+        (should (null harness-compose-attachments))))))
 
 (ert-deftest harness-ui-chat-session-deleted ()
   (harness-ui-chat-test-with
@@ -516,12 +525,12 @@
            (buf (harness-ui-chat-test-open sid)))
       (with-temp-file (expand-file-name "notes.txt" cwd) (insert "x"))
       (with-current-buffer buf
-        (setq harness-chat--files nil)
-        (harness-chat--fetch-completions)
-        (harness-test-wait (lambda () harness-chat--files) 5 "files fetched")
-        (should (member "notes.txt" harness-chat--files))
+        (setq harness-compose--files nil)
+        (harness-compose-fetch-completions)
+        (harness-test-wait (lambda () harness-compose--files) 5 "files fetched")
+        (should (member "notes.txt" harness-compose--files))
         (harness-ui-chat-test-type buf "see @not")
-        (let ((capf (harness-chat-completion-at-point)))
+        (let ((capf (harness-compose-completion-at-point)))
           (should capf)
           (should (= (nth 1 capf) (point)))
           (should (equal "not" (buffer-substring (nth 0 capf) (nth 1 capf))))
@@ -530,25 +539,25 @@
           (delete-region (nth 0 capf) (nth 1 capf))
           (insert "notes.txt")
           (funcall (plist-get (nthcdr 3 capf) :exit-function) "notes.txt" 'finished)
-          (should (equal "see " (harness-chat--compose-text)))
-          (should (equal (expand-file-name "notes.txt" cwd) (plist-get (car harness-chat--attachments) :path)))
-          (should (equal "text/plain" (plist-get (car harness-chat--attachments) :mime)))
+          (should (equal "see " (harness-compose-text)))
+          (should (equal (expand-file-name "notes.txt" cwd) (plist-get (car harness-compose-attachments) :path)))
+          (should (equal "text/plain" (plist-get (car harness-compose-attachments) :mime)))
           (should (harness-ui-chat-test-find buf "notes.txt (1 B)")))
         ;; A slash at the start completes skills; elsewhere it does not.
-        (setq harness-chat--skills '("review" "deploy"))
+        (setq harness-compose--skills '("review" "deploy"))
         (harness-chat--clear-compose)
         (harness-ui-chat-test-type buf "/rev")
-        (should (member "review" (all-completions "rev" (nth 2 (harness-chat-completion-at-point)))))
+        (should (member "review" (all-completions "rev" (nth 2 (harness-compose-completion-at-point)))))
         (harness-chat--clear-compose)
         (harness-ui-chat-test-type buf "a /rev")
-        (should-not (harness-chat-completion-at-point))
-        (should (harness-chat--skill-reference-p "please /review this"))
-        (should-not (harness-chat--skill-reference-p "a/review"))))))
+        (should-not (harness-compose-completion-at-point))
+        (should (harness-compose-skill-reference-p "please /review this"))
+        (should-not (harness-compose-skill-reference-p "a/review"))))))
 
 (ert-deftest harness-ui-chat-test-compose-keys ()
   "C-c C-c sends, RET adds a newline, C-c C-k cancels."
   (should (eq (lookup-key harness-chat-mode-map (kbd "C-c C-c")) #'harness-chat-send))
-  (should (eq (lookup-key harness-chat-mode-map (kbd "RET")) #'harness-chat-newline))
+  (should (eq (lookup-key harness-chat-mode-map (kbd "RET")) #'harness-compose-newline))
   (should (eq (lookup-key harness-chat-mode-map (kbd "C-c C-k")) #'harness-chat-cancel)))
 
 (ert-deftest harness-ui-chat-segment-icons-not-highlighted ()
@@ -559,15 +568,34 @@
     (should (get-text-property 0 'local-map seg))
     (should (eq 'mode-line-highlight (get-text-property 2 'mouse-face seg)))))
 
+;; Doom's solaire-mode bakes the buffer's base colour into every image,
+;; which drew the icons of a tool block as dark boxes.
+(ert-deftest harness-ui-chat-icons-show-face-background ()
+  (cl-letf (((symbol-function 'icon-string)
+             (lambda (_) (propertize " " 'display '(image :type svg :file "tool.svg" :background "#12111E" :scale 1)))))
+    (let ((spec (get-text-property 0 'display (harness-ui-icon 'harness-icon-tool))))
+      (should (equal spec '(image :type svg :file "tool.svg" :scale 1))))))
+
+(ert-deftest harness-ui-chat-summary-skips-title-values ()
+  ;; The summary line leaves out what the title already shows.
+  (should-not (harness-chat--input-summary '(:command "ls -la") "bash ls -la"))
+  (should (equal (harness-chat--input-summary '(:pattern "defun" :glob "*.el") "grep defun in .")
+                 "glob: *.el"))
+  (should (equal (harness-chat--input-summary '(:question "Which?" :options ("A" "B")) "ask_user Which?")
+                 "options: A, B"))
+  (let ((long "/home/someone/projects/a-rather-long-directory-name/sub"))
+    (should-not (harness-chat--input-summary (list :path long) (concat "glob *.el in " long "/"))))
+  (should (equal (harness-chat--input-summary '(:path "a.el")) "path: a.el")))
+
 (ert-deftest harness-ui-chat-hl-line-skips-compose ()
   ;; hl-line would paint over the compose background, so it stops short of it.
   (harness-ui-chat-test-with
     (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session))))
       (with-current-buffer buf
         (goto-char (point-min))
-        (should (harness-chat--hl-line-range))
-        (goto-char harness-chat--compose-end)
-        (let ((range (harness-chat--hl-line-range)))
+        (should (harness-compose-hl-line-range))
+        (goto-char harness-compose-end)
+        (let ((range (harness-compose-hl-line-range)))
           (should (consp range))
           (should (= (car range) (cdr range))))))))
 

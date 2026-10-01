@@ -550,7 +550,7 @@ SELECTED highlights it."
         (setq harness-ui-usage--period harness-ui-usage-default-period
               harness-ui-usage--group 'project))
       (harness-ui-usage--render))
-    (pop-to-buffer buf)
+    (harness-ui-display-view buf)
     (harness-ui-usage--load buf)))
 
 (defun harness-ui-usage-refresh ()
@@ -590,14 +590,16 @@ SELECTED highlights it."
   (interactive)
   (cond
    ((get-text-property (point) 'harness-ui-usage-session)
-    (let ((sid (get-text-property (point) 'harness-ui-usage-session)))
+    (let ((sid (get-text-property (point) 'harness-ui-usage-session))
+          (open (harness-ui-session-opener)))
       (harness-ui-call "_harness/session/resume" (list :id sid)
-                       (lambda (_) (harness-ui-display-session sid)))))
+                       (lambda (_) (funcall open sid)))))
    ((button-at (point)) (push-button))
    ((and (eq harness-ui-usage--group 'session) (get-text-property (point) 'harness-ui-usage-row))
-    (let ((sid (plist-get (get-text-property (point) 'harness-ui-usage-row) :key)))
+    (let ((sid (plist-get (get-text-property (point) 'harness-ui-usage-row) :key))
+          (open (harness-ui-session-opener)))
       (harness-ui-call "_harness/session/resume" (list :id sid)
-                       (lambda (_) (harness-ui-display-session sid)))))
+                       (lambda (_) (funcall open sid)))))
    (t (user-error "Nothing to open here"))))
 
 (defun harness-ui-usage-mouse-open (event)

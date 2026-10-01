@@ -9,6 +9,8 @@
 ;;
 ;;   "tour"        thinking, text, a read_file call, markdown
 ;;   "tools"       two coalescable tool calls, then a bash call
+;;   "work"        a todo list worked through with tool calls (task mode);
+;;                 in a worktree it also writes and commits notes/ID.md
 ;;   "ask"         calls ask_user
 ;;   anything else echo the prompt back as markdown
 
@@ -56,6 +58,32 @@
         (:type text :delta "Done.")
         (:type usage :input 900 :output 60 :cache-read 0 :cache-write 900 :cost 0.003 :context 1500)
         (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bwork\\b" text)
+      (let ((todos (lambda (&rest statuses)
+                     (list :todos (cl-mapcar (lambda (id label status) (list :id id :text label :status status))
+                                             '("1" "2" "3")
+                                             '("Survey the project" "Make the change" "Check the result")
+                                             statuses)))))
+        `((:type thinking :delta "A task. I will plan it as todos and work through them.")
+          (:type tool-call :id "demo-w1" :name "todo_write" :input ,(funcall todos "in-progress" "pending" "pending"))
+          (:type tool-call :id "demo-w2" :name "list_dir" :input (:path ,cwd))
+          (:type tool-call :id "demo-w3" :name "todo_write" :input ,(funcall todos "done" "in-progress" "pending"))
+          (:type text :delta "Making the change.\n")
+          (:type tool-call :id "demo-w4" :name "glob" :input (:pattern "*.el" :path ,cwd))
+          ;; In a task's worktree, make and commit a real change, as the task prompt asks.
+          ,@(when-let* ((session (plist-get request :session))
+                        ((plist-get session :worktree))
+                        (name (format "notes/%s.md" (substring (plist-get session :id) 0 8))))
+              `((:type tool-call :id "demo-w4a" :name "write_file"
+                       :input (:path ,(expand-file-name name cwd) :content ,(format "# %s\n\nDone by the demo agent.\n" text)))
+                (:type tool-call :id "demo-w4b" :name "bash"
+                       :input (:command ,(format "git add -A && git -c user.name=Demo -c user.email=demo@example.invalid commit -q --no-gpg-sign -m 'Add %s'" name)))))
+          (:type tool-call :id "demo-w5" :name "todo_write" :input ,(funcall todos "done" "done" "in-progress"))
+          (:type tool-call :id "demo-w6" :name "grep" :input (:pattern "defun" :path ,cwd))
+          (:type tool-call :id "demo-w7" :name "todo_write" :input ,(funcall todos "done" "done" "done"))
+          (:type text :delta "Done: surveyed the project, made the change and checked it.")
+          (:type usage :input 2400 :output 220 :cache-read 1800 :cost 0.006 :context 2600)
+          (:type done :stop-reason end-turn))))
      ((string-match-p "\\bask\\b" text)
       `((:type text :delta "I need to check something with you.\n")
         (:type tool-call :id "demo-q" :name "ask_user" :input (:question "Which colour?" :options ("red" "green" "blue")))
