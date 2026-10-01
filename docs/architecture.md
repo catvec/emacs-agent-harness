@@ -383,6 +383,7 @@ and resolves when answered).
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
 - Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :behavior allow|deny)`;
   session rules live in memory, always-rules in `harness-perms-rules`.
+  The mode stage checks them first, before the auto-allow list and the mode.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
@@ -391,7 +392,10 @@ and resolves when answered).
   `auto` (reads inside the jail allowed; a cheap model,
   `harness-perms-auto-model`, decides the rest with a reason; falls back
   to ask), `yolo` (allow everything; the jail still applies).  Tools in
-  `harness-perms-auto-allow-tools` are allowed in every mode.
+  `harness-perms-auto-allow-tools` are allowed in every mode: the meta
+  tools, skill and Emacs lookups, and `web_search`, which only sends its
+  query to the configured search provider, so task sessions can search.
+  `web_fetch` reaches any URL and stays with the mode (the judge in auto).
 - Jail denials are final and carry a constructive hint listing the
   allowed roots and how to widen them.
 - Non-interactive: `ask` becomes `deny` with the reason "non-interactive

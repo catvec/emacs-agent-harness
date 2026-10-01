@@ -38,8 +38,13 @@
 
 (defcustom harness-perms-auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
-    "emacs_buffers" "emacs_describe" "emacs_messages")
-  "Tools that never need approval, in every permission mode."
+    "emacs_buffers" "emacs_describe" "emacs_messages" "web_search")
+  "Tools that never need approval, in every permission mode.
+`web_search' is included because it only sends its query to the
+configured `harness-websearch-provider', so even unattended task
+sessions can look things up; `web_fetch' is not, because it reaches
+whatever URL the agent names.  Standing rules in `harness-perms-rules'
+are checked first and can still deny any of these tools."
   :type '(repeat string) :group 'harness)
 
 (defcustom harness-perms-rules nil
@@ -302,13 +307,14 @@ DECISION is returned unchanged when the mode leaves the question open."
          (mode (harness-perms--mode-of session))
          (rule (harness-perms--find-rule request)))
     (cond
-     ((member tool harness-perms-auto-allow-tools)
-      (list :behavior 'allow :reason (format "%s never needs approval" tool)))
+     ;; Rules come first: the user's explicit answer beats the defaults.
      (rule
       (if (eq (harness-perms--sym (plist-get rule :behavior)) 'deny)
           (list :behavior 'deny :reason (format "denied by a standing rule for %s" (or (plist-get rule :tool) "every tool"))
                 :hint "Do not retry this call; choose a different approach.")
         (list :behavior 'allow :reason (format "allowed by a standing rule for %s" (or (plist-get rule :tool) "every tool")))))
+     ((member tool harness-perms-auto-allow-tools)
+      (list :behavior 'allow :reason (format "%s never needs approval" tool)))
      ((eq mode 'yolo) (list :behavior 'allow :reason "yolo mode"))
      ((and (eq mode 'accept-edits) (memq kind '(read write)))
       (list :behavior 'allow :reason (format "%ss inside the allowed directories are accepted" kind)))
@@ -330,11 +336,14 @@ DECISION is the current value and NEXT continues the chain."
   "You are the permission judge for an autonomous coding agent running inside Emacs.
 The agent wants to run a tool.  Decide whether the call is safe and within the
 user's evident intent.  Allow ordinary development work inside the allowed
-directories.  Deny anything destructive or irreversible outside the project
-(deleting or overwriting unrelated files, force pushes, changing system
-configuration, exfiltrating secrets, network calls to unexpected hosts, or
-installing software system-wide).  When unsure, deny with a reason the agent
-can act on.  Reply with exactly one line of JSON and nothing else:
+directories.  Looking things up on the web (documentation, references, issue
+trackers, package registries) is ordinary development work too, as long as the
+URL does not carry secrets or project data.  Deny anything destructive or
+irreversible outside the project (deleting or overwriting unrelated files,
+force pushes, changing system configuration, exfiltrating secrets, network
+calls to unexpected hosts, or installing software system-wide).  When unsure,
+deny with a reason the agent can act on.  Reply with exactly one line of JSON
+and nothing else:
 {\"decision\":\"allow\"|\"deny\",\"reason\":\"one short sentence\"}"
   "System prompt for the auto-mode judge.")
 
