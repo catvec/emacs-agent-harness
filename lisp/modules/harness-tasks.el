@@ -70,6 +70,10 @@ task keeps working while nobody watches it."
   "Model of task sessions, or nil for the configured default."
   :type '(choice (const :tag "Configured default" nil) string) :group 'harness)
 
+(defcustom harness-tasks-thinking nil
+  "Thinking level of task sessions, or nil for the configured default."
+  :type '(choice (const :tag "Configured default" nil) string) :group 'harness)
+
 (defcustom harness-tasks-worktrees t
   "When non-nil, tasks in a git project work in a worktree and merge back.
 Each task gets a branch named after `harness-tasks-branch-prefix' and is
@@ -360,12 +364,17 @@ They hold a slot so a burst of submissions never overshoots the limit.")
       (let* ((task (harness-tasks--get id))
              (mode (or (plist-get task :permission-mode) harness-tasks-permission-mode))
              (model (or (plist-get task :model) harness-tasks-model))
+             (thinking (or (plist-get task :thinking) harness-tasks-thinking))
+             (non-interactive (if (plist-member task :non-interactive)
+                                  (harness-json-true-p (plist-get task :non-interactive))
+                                harness-tasks-non-interactive))
              (session (apply #'harness-call 'session/create
                              :cwd cwd
                              (append (and worktree (list :worktree worktree))
                                      (and mode (list :permission-mode mode))
                                      (and model (list :model model))
-                                     (and harness-tasks-non-interactive (list :non-interactive t)))))
+                                     (and thinking (list :thinking thinking))
+                                     (and non-interactive (list :non-interactive t)))))
              (sid (plist-get session :id)))
         (harness-tasks--set id :session sid)
         (harness-catch (harness-call-async 'agent/prompt sid (harness-tasks--blocks task))
@@ -435,7 +444,9 @@ The merge queue lives in memory, so a restart forgets it."
 (harness-defmethod task/submit (cwd prompt &optional opts)
   "Submit PROMPT as a new task in directory CWD; return the task.
 It starts at once when a slot is free, otherwise it waits as pending.
-OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
+OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
+`:thinking' and `:non-interactive' (an explicit false turns it off);
+missing ones come from the `harness-tasks-' defaults."
   (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
   (harness-tasks--load)
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
@@ -446,10 +457,58 @@ OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
                      :model (plist-get opts :model)
                      :permission-mode (let ((m (plist-get opts :permission-mode)))
                                         (if (stringp m) (intern m) m))
+                     :thinking (plist-get opts :thinking)
                      :state 'pending :created (float-time))))
+    (when (plist-member opts :non-interactive)
+      (setq task (plist-put task :non-interactive
+                            (if (harness-json-true-p (plist-get opts :non-interactive)) t :false))))
     (harness-tasks--put task)
     (harness-tasks--schedule)
     (harness-tasks--view (gethash (plist-get task :id) harness-tasks--table))))
+
+(defun harness-tasks--adoptable-p (session)
+  "Non-nil when SESSION may become a task.
+It must be open, not a task already and not a merge target."
+  (and (not (eq (plist-get session :status) 'inactive))
+       (not (harness-tasks--by-session (plist-get session :id)))
+       (not (equal (plist-get session :name) harness-tasks-merge-session-name))))
+
+(harness-defmethod task/adoptable (&optional cwd)
+  "Return the open sessions of CWD's project (every project without CWD) that
+are not tasks yet, newest first."
+  (harness-tasks--load)
+  (cl-remove-if-not #'harness-tasks--adoptable-p
+                    (harness-call 'session/list (and cwd (list :project (harness-tasks--project cwd))))))
+
+(harness-defmethod task/adopt (session-id)
+  "Make the ongoing session SESSION-ID a task and return the task.
+Its first message becomes the task's prompt; a session in a git worktree
+keeps it and is merged through the merge queue like any task.  A running
+or blocked session is in progress; an idle one waits for the user."
+  (harness-tasks--load)
+  (let ((session (harness-call 'session/get session-id)))
+    (unless (harness-tasks--adoptable-p session)
+      (error "Session %s is already a task or cannot become one" session-id))
+    (let* ((first (cl-find 'user (harness-call 'session/nodes session-id) :key (lambda (n) (plist-get n :kind))))
+           (prompt (or (and first (not (harness-string-blank-p (plist-get first :content)))
+                            (plist-get first :content))
+                       (plist-get session :name) "Adopted session"))
+           (worktree (plist-get session :worktree))
+           (task (list :id (concat "t-" (harness-short-id 8))
+                       :project (plist-get session :project) :cwd (plist-get session :cwd)
+                       :prompt (string-trim prompt) :session session-id :adopted t
+                       :worktree worktree
+                       :state 'active
+                       :outcome (unless (memq (plist-get session :status) '(running blocked)) 'adopted)
+                       :created (plist-get session :created) :started (plist-get session :created))))
+      (harness-tasks--put task)
+      (when (and worktree (harness-method-exists-p 'worktree/branch))
+        (let ((id (plist-get task :id)))
+          (harness-then (harness-call-async 'worktree/branch worktree)
+                        (lambda (branch) (when (gethash id harness-tasks--table)
+                                           (harness-tasks--set id :branch branch)))
+                        #'ignore)))
+      (harness-tasks--view task))))
 
 (harness-defmethod task/list (&optional cwd)
   "Return the tasks of CWD's project, oldest first; every task without CWD."
@@ -468,6 +527,7 @@ OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
         :permission-mode harness-tasks-permission-mode
         :non-interactive harness-tasks-non-interactive
         :model harness-tasks-model
+        :thinking harness-tasks-thinking
         :worktrees (and cwd (harness-tasks--git-p (harness-tasks--project cwd)) t)))
 
 (harness-defmethod task/start (id)
@@ -477,15 +537,15 @@ OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
     (harness-tasks--start task)
     (harness-call 'task/get id)))
 
-(harness-defmethod task/update (id prompt)
-  "Replace the prompt of pending task ID with PROMPT."
+(harness-defmethod task/update (id prompt &optional attachments)
+  "Replace the prompt of pending task ID with PROMPT and its ATTACHMENTS."
   (let ((task (harness-tasks--get id)))
     (unless (eq (plist-get task :state) 'pending) (error "Only pending tasks can be edited"))
     (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
-    (harness-tasks--set id :prompt (string-trim prompt))))
+    (harness-tasks--set id :prompt (string-trim prompt) :attachments attachments)))
 
-(harness-defmethod task/prompt (id text)
-  "Send TEXT to the session of task ID: a follow-up, or steering mid-turn."
+(harness-defmethod task/prompt (id text &optional attachments)
+  "Send TEXT and ATTACHMENTS to the session of task ID: a follow-up, or steering."
   (let ((task (harness-tasks--get id)))
     (unless (harness-tasks--session task) (error "Task %s has no session yet" id))
     (when (plist-get task :worktree-removed)
@@ -495,7 +555,8 @@ OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
         (harness-call 'session/resume sid))
       (when (plist-get task :archived) (harness-tasks--set id :archived nil))
       (harness-tasks--set id :merge-attempts 0)
-      (harness-catch (harness-call-async 'agent/prompt sid text)
+      (harness-catch (harness-call-async 'agent/prompt sid
+                                         (harness-tasks--blocks (list :prompt text :attachments attachments)))
                      (lambda (e) (harness-tasks--fail id e)))
       t)))
 

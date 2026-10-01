@@ -224,6 +224,34 @@
         (should (= 1 (length (harness-test-await
                               (harness-acp-request conn "_harness/task/list" (list :cwd default-directory))))))))))
 
+(ert-deftest harness-tasks-submit-with-session-settings ()
+  (harness-tasks-test-with
+    (let* ((id (plist-get (harness-call 'task/submit default-directory "careful one"
+                                        (list :permission-mode "ask" :thinking "high" :non-interactive :false))
+                          :id))
+           (session (harness-call 'session/get (plist-get (harness-tasks-test-task id) :session))))
+      (should (eq 'ask (plist-get session :permission-mode)))
+      (should (equal "high" (plist-get session :thinking)))
+      (should-not (plist-get session :non-interactive)))))
+
+(ert-deftest harness-tasks-adopt-ongoing-session ()
+  (harness-tasks-test-with
+    (let ((sid (plist-get (harness-call 'session/create :cwd default-directory :model "demo:scripted") :id)))
+      (harness-test-await (harness-call-async 'agent/prompt sid "Tidy the imports"))
+      (should (member sid (mapcar (lambda (s) (plist-get s :id)) (harness-call 'task/adoptable default-directory))))
+      (let* ((task (harness-call 'task/adopt sid))
+             (id (plist-get task :id)))
+        (should (equal "Tidy the imports" (plist-get task :prompt)))
+        (should (equal sid (plist-get task :session)))
+        ;; An idle session is waiting for the user.
+        (should (eq 'needs-input (plist-get task :column)))
+        (should-not (member sid (mapcar (lambda (s) (plist-get s :id)) (harness-call 'task/adoptable default-directory))))
+        (should-error (harness-call 'task/adopt sid))
+        ;; From here on it is an ordinary task.
+        (harness-call 'task/prompt id "and sort them")
+        (harness-tasks-test-wait-state id 'done)
+        (should (eq 'done (plist-get (harness-tasks-test-task id) :column)))))))
+
 ;;;; Git: worktree, merge queue, done only when merged
 
 (defvar harness-merge--queues)

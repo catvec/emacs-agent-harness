@@ -30,13 +30,11 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-ui-compose)
 
 (defgroup harness-ui-tasks nil
   "Task mode." :group 'harness-ui)
 
-(defcustom harness-ui-tasks-session-position 'right
-  "Position a task's session opens in from the board."
-  :type 'symbol :group 'harness-ui-tasks)
 
 (defcustom harness-ui-tasks-tick 15
   "Seconds between refreshes of the elapsed times on visible boards."
@@ -83,6 +81,10 @@
 (defvar-local harness-ui-tasks--project nil "Project root reported by the harness.")
 (defvar-local harness-ui-tasks--tasks nil "Task plists (wire shape).")
 (defvar-local harness-ui-tasks--settings nil "What `task/settings' returned.")
+(defvar-local harness-ui-tasks--new nil
+  "Settings the next submitted task starts with: a plist of `:model',
+`:thinking', `:permission-mode' and `:non-interactive', seeded from the
+harness's task defaults and changed with the usual session commands.")
 (defvar-local harness-ui-tasks--loading t)
 (defvar-local harness-ui-tasks--error nil "Last failure, shown above the compose box.")
 (defvar-local harness-ui-tasks--show-archived nil)
@@ -91,9 +93,6 @@
 (defvar-local harness-ui-tasks--target nil
   "What the compose box does: nil (new task), (edit . ID) or (reply . ID).")
 (defvar-local harness-ui-tasks--list-end nil "Marker: end of the board, start of the tail.")
-(defvar-local harness-ui-tasks--compose-start nil)
-(defvar-local harness-ui-tasks--compose-end nil)
-(defvar-local harness-ui-tasks--placeholder nil "Overlay showing the compose hint.")
 
 (defun harness-ui-tasks--buffers ()
   "Return every live board buffer."
@@ -170,11 +169,12 @@
     (pcase column
       ('needs-input
        (propertize (or (harness-ui-tasks--request session)
-                       (if (equal (plist-get task :outcome) "merge-failed")
-                           (format "could not merge into %s: %s" (harness-ui-tasks--base task)
-                                   (or (plist-get task :error) "?"))
-                         (format "stopped: %s%s" (or (plist-get task :outcome) "?")
-                                 (if (plist-get task :error) (concat " — " (plist-get task :error)) ""))))
+                       (pcase (plist-get task :outcome)
+                         ("merge-failed" (format "could not merge into %s: %s" (harness-ui-tasks--base task)
+                                                 (or (plist-get task :error) "?")))
+                         ("adopted" "waiting for your next message")
+                         (outcome (format "stopped: %s%s" (or outcome "?")
+                                          (if (plist-get task :error) (concat " — " (plist-get task :error)) "")))))
                    'face 'harness-task-attention-face))
       ((guard (and (equal (plist-get task :state) "merging") (not (equal (plist-get session :status) "running"))))
        (propertize (pcase (plist-get task :merge-status)
@@ -259,6 +259,9 @@
                   '(("Unarchive" harness-ui-tasks-archive "x") ("Open" harness-ui-tasks-open "RET"))
                 '(("Archive" harness-ui-tasks-archive "x") ("Reply" harness-ui-tasks-reply "m")
                   ("Open" harness-ui-tasks-open "RET")))))
+     (when (plist-get task :session)
+       '(("Model…" harness-set-model "C-c a m") ("Permission mode…" harness-set-permission-mode "C-c a p")
+         ("Thinking…" harness-set-thinking "C-c a T") ("Non-interactive" harness-toggle-non-interactive "C-c a i")))
      '(("Delete…" harness-ui-tasks-delete "D")))))
 
 (defun harness-ui-tasks--button (label action help)
@@ -293,20 +296,34 @@ A question's options come first, so it can be answered in one click."
 
 ;;;; Rendering
 
+(defun harness-ui-tasks--width ()
+  "Width the board is drawn for: its widest window, or 100 when hidden."
+  (let ((windows (get-buffer-window-list nil nil t)))
+    (if windows (apply #'max (mapcar #'window-body-width windows)) 100)))
+
+(defun harness-ui-tasks--fit (string room)
+  "STRING shortened to ROOM columns (at least 12), keeping its properties."
+  (let ((room (max 12 room)))
+    (if (<= (string-width string) room)
+        string
+      (concat (truncate-string-to-width string (1- room)) "…"))))
+
 (defun harness-ui-tasks--insert-card (task column position)
   (let* ((start (point))
          (session (harness-ui-tasks--session task))
+         (width (harness-ui-tasks--width))
          (meta (harness-ui-tasks--meta task column session))
-         (detail (harness-ui-tasks--detail task column session position))
-         (buttons (harness-ui-tasks--card-buttons task)))
+         (buttons (harness-ui-tasks--card-buttons task))
+         (detail (harness-ui-tasks--fit (or (harness-ui-tasks--detail task column session position) "")
+                                        (- width (string-width buttons) 7))))
     (insert "  " (harness-ui-tasks--icon task column session) " "
-            (propertize (harness-ui-tasks--title task)
+            (propertize (harness-ui-tasks--fit (harness-ui-tasks--title task) (- width (string-width meta) 7))
                         'face (if (eq column 'done) 'default 'harness-task-title-face)
                         'mouse-face 'highlight
                         'help-echo "mouse-1: open the session · mouse-3: actions")
             (propertize " " 'display `(space :align-to (- right ,(1+ (string-width meta)))))
             meta "\n"
-            "    " (or detail "")
+            "    " detail
             (propertize " " 'display `(space :align-to (- right ,(1+ (string-width buttons)))))
             buttons "\n")
     (put-text-property start (point) 'harness-task-id (plist-get task :id))))
@@ -423,34 +440,68 @@ Point and every window showing the board stay on the same task."
                              (or (plist-get (plist-get (harness-ui-tasks--pending (harness-ui-tasks--find id)) :payload)
                                             :question)
                                  "the question")))
-    (_ (concat "New task"
-               (let ((s harness-ui-tasks--settings))
-                 (if s (propertize
-                        (format "   %sruns %s%s · %s at a time"
-                                (if (harness-json-true-p (plist-get s :worktrees))
-                                    "own worktree, merged when done · " "")
-                                (or (plist-get s :permission-mode) "in the default mode")
-                                (if (harness-json-true-p (plist-get s :non-interactive)) ", non-interactive" "")
-                                (or (plist-get s :max-running) "any number"))
-                        'face 'harness-dim-face)
-                   ""))))))
+    (_ "New task")))
+
+(defun harness-ui-tasks--setting-button (label command help)
+  "A button LABEL running the session setting COMMAND on the new-task settings."
+  (propertize (harness-ui-tasks--button label (lambda () (call-interactively command)) help)
+              'face 'harness-dim-face))
+
+(defun harness-ui-tasks--new-settings-line ()
+  "The new-task settings, each a button changing it, and how tasks run."
+  (let ((new harness-ui-tasks--new)
+        (s harness-ui-tasks--settings))
+    (if (null s)
+        ""
+      (concat
+       " "
+       (mapconcat
+        #'identity
+        (list (harness-ui-tasks--setting-button
+               (if (plist-get new :model) (harness-ui-model-label (plist-get new :model)) "default model")
+               #'harness-set-model "Model of new tasks (C-c a m)")
+              (harness-ui-tasks--setting-button
+               (format "%s" (or (plist-get new :permission-mode) "default mode"))
+               #'harness-set-permission-mode "Permission mode of new tasks (C-c a p)")
+              (harness-ui-tasks--setting-button
+               (format "thinking %s" (or (plist-get new :thinking) "default"))
+               #'harness-set-thinking "Thinking level of new tasks (C-c a T)")
+              (harness-ui-tasks--setting-button
+               (if (harness-json-true-p (plist-get new :non-interactive)) "non-interactive" "interactive")
+               #'harness-toggle-non-interactive "Toggle non-interactive for new tasks (C-c a i)"))
+        (propertize " · " 'face 'harness-dim-face))
+       (propertize (format "   %s%s at a time"
+                           (if (harness-json-true-p (plist-get s :worktrees)) "own worktree, merged when done · " "")
+                           (or (plist-get s :max-running) "any number"))
+                   'face 'harness-dim-face)))))
+
+(defun harness-ui-tasks--set-new (key value)
+  "Set the new-task setting KEY to VALUE and show it."
+  (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
+  (harness-ui-tasks--render-tail))
+
+(defun harness-ui-tasks--setting-target ()
+  "Where the session setting commands apply on the board.
+The session of the started task at point, else the new-task settings."
+  (let ((task (and (not (harness-compose-in-p)) (harness-ui-tasks--task t))))
+    (if (and task (plist-get task :session))
+        (plist-get task :session)
+      (cons harness-ui-tasks--new #'harness-ui-tasks--set-new))))
 
 (defun harness-ui-tasks--render-tail (&optional text)
-  "Draw the error line, the compose label and the compose box.
+  "Draw the error line, the compose label, the attachments and the compose box.
 TEXT replaces the compose contents; without it they are kept."
+  (harness-compose-capture)
   (let* ((inhibit-read-only t)
          (buffer-undo-list t)
-         (text (or text (harness-ui-tasks--compose-text)))
-         (in-compose (harness-ui-tasks--in-compose-p))
-         (offset (and in-compose (- (point) harness-ui-tasks--compose-start)))
+         (offset (and (harness-compose-in-p) (- (point) harness-compose-start)))
          (list-end (marker-position harness-ui-tasks--list-end))
          ;; Windows whose point is in the tail go back to the same spot of the box.
          (windows (mapcar (lambda (w)
                             (let ((p (window-point w)))
-                              (cons w (and harness-ui-tasks--compose-start (>= p list-end)
-                                           (max 0 (- p harness-ui-tasks--compose-start))))))
+                              (cons w (and (harness-compose-live-p) (>= p list-end)
+                                           (max 0 (- p harness-compose-start))))))
                           (get-buffer-window-list nil nil t))))
-    (when harness-ui-tasks--placeholder (delete-overlay harness-ui-tasks--placeholder))
     (save-excursion
       (delete-region list-end (point-max))
       (goto-char list-end)
@@ -465,54 +516,32 @@ TEXT replaces the compose contents; without it they are kept."
           (insert "  " (harness-ui-tasks--button "[cancel]" #'harness-ui-tasks-compose-reset
                                                  "Back to a new task (C-c C-k)")))
         (insert "\n")
-        (let ((label (point)))
-          (insert (propertize "❯ "
-                              'face '(harness-dim-face harness-compose-face)
-                              'help-echo "C-c C-c submits · RET newline · C-c C-k resets"))
-          (put-text-property start (point) 'read-only t)
-          (put-text-property (1- (point)) (point) 'rear-nonsticky t)
-          (setq harness-ui-tasks--compose-start (copy-marker (point)))
-          (insert text)
-          (let ((end (point)))
-            (insert (propertize "\n" 'read-only t))
-            (setq harness-ui-tasks--compose-end (copy-marker end t)))
-          (let ((ov (make-overlay label (point) nil t t)))
-            (overlay-put ov 'face 'harness-compose-face)
-            (overlay-put ov 'harness-ui-tasks t)))
-        (setq harness-ui-tasks--placeholder (make-overlay (1- (point)) (point)))
-        (harness-ui-tasks--update-placeholder)))
+        (unless harness-ui-tasks--target
+          (let ((line (harness-ui-tasks--new-settings-line)))
+            (unless (string-empty-p line) (insert line "\n"))))
+        (harness-compose-insert-attachments)
+        (put-text-property start (point) 'read-only t)
+        (harness-compose-insert text "C-c C-c submits · RET newline · @file · /skill · C-c C-a attaches · C-c C-k resets")))
     (set-marker harness-ui-tasks--list-end list-end)
     (pcase-dolist (`(,w . ,off) windows)
       (when (and off (window-live-p w))
-        (set-window-point w (min (+ harness-ui-tasks--compose-start off) harness-ui-tasks--compose-end))))
+        (set-window-point w (min (+ harness-compose-start off) harness-compose-end))))
     (set-buffer-modified-p nil)
-    (when offset (goto-char (min (+ harness-ui-tasks--compose-start offset) harness-ui-tasks--compose-end)))))
+    (when offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))))
 
-(defun harness-ui-tasks--update-placeholder ()
-  (when (and harness-ui-tasks--placeholder (overlay-buffer harness-ui-tasks--placeholder))
-    (overlay-put harness-ui-tasks--placeholder 'before-string
-                 (and (= harness-ui-tasks--compose-start harness-ui-tasks--compose-end)
-                      (propertize (pcase harness-ui-tasks--target
-                                    (`(edit . ,_) "the new prompt…  C-c C-c saves")
-                                    (`(reply . ,_) "a message for this task's session…  C-c C-c sends")
-                                    (`(answer . ,_) "your answer…  C-c C-c answers")
-                                    (_ "Describe a task…  C-c C-c submits · RET newline"))
-                                  'face 'harness-dim-face 'cursor t)))))
-
-(defun harness-ui-tasks--compose-text ()
-  (if (and harness-ui-tasks--compose-start (marker-buffer harness-ui-tasks--compose-start))
-      (buffer-substring-no-properties harness-ui-tasks--compose-start harness-ui-tasks--compose-end)
-    ""))
-
-(defun harness-ui-tasks--in-compose-p ()
-  (and harness-ui-tasks--compose-start (marker-buffer harness-ui-tasks--compose-start)
-       (>= (point) harness-ui-tasks--compose-start) (<= (point) harness-ui-tasks--compose-end)))
+(defun harness-ui-tasks--placeholder ()
+  "Return the hint for the empty compose box."
+  (pcase harness-ui-tasks--target
+    (`(edit . ,_) "the new prompt…  C-c C-c saves")
+    (`(reply . ,_) "a message for this task's session…  C-c C-c sends")
+    (`(answer . ,_) "your answer…  C-c C-c answers")
+    (_ "Describe a task…  C-c C-c submits · RET newline · @file · /skill")))
 
 (defun harness-ui-tasks--set-compose (text target)
   "Put TEXT in the compose box for TARGET and move there."
   (setq harness-ui-tasks--target target)
   (harness-ui-tasks--render-tail text)
-  (goto-char harness-ui-tasks--compose-end)
+  (goto-char harness-compose-end)
   (dolist (w (get-buffer-window-list nil nil t)) (set-window-point w (point))))
 
 ;;;; Header line
@@ -535,14 +564,15 @@ TEXT replaces the compose contents; without it they are kept."
          (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
                      'face 'harness-status-blocked-face)
        "")
-     (format "  %s %d working  %s %d pending  %s %d done"
+     (format "  %s %d  %s %d  %s %d"
              (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)
              (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts)
              (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts))
      "   "
-     (harness-ui-tasks--segment "[New task]" #'harness-ui-tasks-compose "Describe a new task (a)")
+     (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
+                                "Make an ongoing session of this project a task (I)")
      " "
-     (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Show archived]")
+     (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
                                 #'harness-ui-tasks-toggle-archived "Show or hide archived tasks (A)")
      " "
      (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board (g)")
@@ -558,16 +588,24 @@ TEXT replaces the compose contents; without it they are kept."
       (harness-ui-tasks--render)
       (harness-ui-tasks--render-tail))))
 
-(defun harness-ui-tasks--fetch (buffer)
-  "Load BUFFER's project root, tasks and settings from the harness."
+(defun harness-ui-tasks--fetch (buffer &optional quiet)
+  "Load BUFFER's project root, tasks and settings from the harness.
+QUIET refreshes in the background, without the loading indicator."
   (with-current-buffer buffer
-    (setq harness-ui-tasks--loading t)
+    (unless quiet (setq harness-ui-tasks--loading t))
     (let ((dir harness-ui-tasks--dir))
       (harness-ui-call "_harness/task/settings" (list :cwd dir)
                        (lambda (s) (when (buffer-live-p buffer)
                                      (with-current-buffer buffer
                                        (setq harness-ui-tasks--settings s)
-                                       (when (and harness-ui-tasks--compose-start (null harness-ui-tasks--target))
+                                       (unless harness-ui-tasks--new
+                                         (setq harness-ui-tasks--new
+                                               (list :model (plist-get s :model)
+                                                     :thinking (plist-get s :thinking)
+                                                     :permission-mode (plist-get s :permission-mode)
+                                                     :non-interactive (harness-json-true-p
+                                                                       (plist-get s :non-interactive)))))
+                                       (when (and (harness-compose-live-p) (null harness-ui-tasks--target))
                                          (harness-ui-tasks--render-tail)))))
                        #'ignore)
       (harness-ui-call
@@ -591,8 +629,32 @@ TEXT replaces the compose contents; without it they are kept."
                     (lambda () (when (buffer-live-p buffer)
                                  (with-current-buffer buffer (harness-ui-tasks--render))))))
 
+(defconst harness-ui-tasks--refresh-events
+  '("merge/queued" "merge/started" "merge/conflict" "merge/finished"
+    "agent/turn-started" "agent/turn-ended" "session/status" "session/pending-changed"
+    "session/created" "session/deleted" "worktree/created" "worktree/removed"
+    "harness/reloaded" "config/changed")
+  "Events after which every board quietly reloads its tasks.
+`task/changed' and `task/deleted' update a board directly; these catch
+anything that moves a task without one, so a board never drifts.")
+
+(defun harness-ui-tasks--refresh-soon (buffer)
+  "Reload BUFFER's tasks in the background, once a burst of events settles."
+  (harness-debounce (list 'harness-ui-tasks-refresh buffer) 0.3
+                    (lambda () (when (buffer-live-p buffer) (harness-ui-tasks--fetch buffer t)))))
+
+(defun harness-ui-tasks--on-window-change (window)
+  "Reload the board shown in WINDOW, which may have missed events while hidden."
+  (harness-ui-tasks--refresh-soon (window-buffer window)))
+
+(defun harness-ui-tasks--on-resize (window)
+  "Redraw the board in WINDOW so its cards fit the new width."
+  (harness-ui-tasks--schedule-render (window-buffer window)))
+
 (defun harness-ui-tasks--on-event (event args)
-  "Follow `task/changed' and `task/deleted' on every board."
+  "Follow task events on every board; reload them after related events."
+  (when (member event harness-ui-tasks--refresh-events)
+    (mapc #'harness-ui-tasks--refresh-soon (harness-ui-tasks--buffers)))
   (pcase event
     ("task/changed"
      (let ((task (car args)))
@@ -656,6 +718,7 @@ TEXT replaces the compose contents; without it they are kept."
   (define-key map (kbd "X") #'harness-ui-tasks-archive-done)
   (define-key map (kbd "D") #'harness-ui-tasks-delete)
   (define-key map (kbd "A") #'harness-ui-tasks-toggle-archived)
+  (define-key map (kbd "I") #'harness-ui-tasks-adopt)
   (define-key map (kbd "g") #'harness-ui-tasks-refresh)
   (define-key map (kbd "q") #'quit-window)
   (define-key map (kbd "?") #'harness-menu))
@@ -666,6 +729,8 @@ TEXT replaces the compose contents; without it they are kept."
   "Keymap of `harness-ui-tasks-mode'.")
 
 (let ((map harness-ui-tasks-mode-map))
+  ;; The compose box's keys (RET newline, C-c C-a, C-c C-v).
+  (set-keymap-parent map harness-compose-map)
   (define-key map (kbd "C-c C-c") #'harness-ui-tasks-submit)
   (define-key map (kbd "C-c C-k") #'harness-ui-tasks-compose-reset)
   (define-key map (kbd "C-c C-n") #'harness-ui-tasks-next)
@@ -677,7 +742,12 @@ TEXT replaces the compose contents; without it they are kept."
   (setq buffer-read-only nil)
   (setq-local truncate-lines t
               header-line-format '(:eval (harness-ui-tasks--header)))
-  (add-hook 'post-command-hook #'harness-ui-tasks--update-placeholder nil t))
+  (add-hook 'window-buffer-change-functions #'harness-ui-tasks--on-window-change nil t)
+  (add-hook 'window-size-change-functions #'harness-ui-tasks--on-resize nil t)
+  (setq harness-ui-setting-target-function #'harness-ui-tasks--setting-target)
+  (harness-compose-setup :project (lambda () harness-ui-tasks--dir)
+                         :placeholder #'harness-ui-tasks--placeholder
+                         :redraw #'harness-ui-tasks--render-tail))
 
 (defun harness-ui-tasks--buffer-name (dir)
   (format "*harness tasks: %s*" (file-name-nondirectory (directory-file-name dir))))
@@ -690,11 +760,17 @@ TEXT replaces the compose contents; without it they are kept."
 (declare-function project-root "project")
 
 ;;;###autoload
-(defun harness-tasks (&optional directory)
+(defun harness-tasks (&optional directory position)
   "Show the task board of DIRECTORY's project (the current one by default).
 Task mode runs one session per task: submit tasks from the compose box
-at the bottom and follow them from pending to completed."
-  (interactive (list (if current-prefix-arg (read-directory-name "Project: ") default-directory)))
+at the bottom and follow them from pending to completed.
+
+The board takes a position like a session does (`harness-ui-positions')
+and replaces whatever is shown there; opening a task's session from it
+puts the session in the same position.  POSITION defaults to the one the
+board had last, then to `harness-ui-default-position'; with a prefix
+argument it is read."
+  (interactive (list default-directory (and current-prefix-arg (harness-ui-read-position))))
   (let* ((dir (file-name-as-directory (expand-file-name (or directory default-directory))))
          (root (file-name-as-directory (expand-file-name (harness-ui-tasks--local-root dir))))
          (buf (get-buffer-create (harness-ui-tasks--buffer-name root))))
@@ -705,11 +781,11 @@ at the bottom and follow them from pending to completed."
               harness-ui-tasks--dir root)
         (harness-ui-tasks--render)
         (harness-ui-tasks--render-tail "")
-        (goto-char harness-ui-tasks--compose-end))
+        (goto-char harness-compose-end)
+        (harness-compose-fetch-completions))
       (harness-ui-tasks--fetch buf))
     (harness-ui-refresh-sessions)
-    (pop-to-buffer-same-window buf)
-    buf))
+    (harness-ui-display-view buf position)))
 
 ;;;; Commands
 
@@ -727,20 +803,15 @@ at the bottom and follow them from pending to completed."
                      (lambda (e) (harness-ui-tasks--fail buffer what e)))))
 
 (defun harness-ui-tasks-open (&optional position)
-  "Open the session of the task at point (in POSITION)."
+  "Open the session of the task at point in POSITION.
+By default it takes the board's own position, replacing the board."
   (interactive)
   (let* ((task (harness-ui-tasks--task))
-         (sid (plist-get task :session)))
+         (sid (plist-get task :session))
+         (open (harness-ui-session-opener position)))
     (unless sid (user-error "This task has not started yet; s starts it now"))
-    ;; The reply arrives later, when another frame may be selected: open
-    ;; the session next to the board it was asked from.
-    (let ((window (selected-window)))
-      (harness-ui-call "_harness/session/resume" (list :id sid)
-                       (lambda (_)
-                         (if (window-live-p window)
-                             (with-selected-window window
-                               (harness-ui-display-session sid (or position harness-ui-tasks-session-position)))
-                           (harness-ui-display-session sid (or position harness-ui-tasks-session-position))))))))
+    (harness-ui-call "_harness/session/resume" (list :id sid)
+                     (lambda (_) (funcall open sid)))))
 
 (defun harness-ui-tasks-open-other ()
   "Open the session of the task at point in a position read from the user."
@@ -808,34 +879,62 @@ at the bottom and follow them from pending to completed."
   (interactive)
   (if harness-ui-tasks--target
       (harness-ui-tasks--set-compose "" nil)
-    (goto-char harness-ui-tasks--compose-end)))
+    (goto-char harness-compose-end)))
 
 (defun harness-ui-tasks-compose-reset ()
   "Empty the compose box and make it describe a new task again."
   (interactive)
+  (setq harness-compose-attachments nil)
   (harness-ui-tasks--set-compose "" nil))
 
 (defun harness-ui-tasks-submit ()
-  "Submit the compose box: a new task, an edited prompt or a message."
+  "Submit the compose box: a new task, an edited prompt, a message or an answer.
+/skill references are expanded and attachments go along, as in a chat."
   (interactive)
-  (let ((text (string-trim (harness-ui-tasks--compose-text)))
-        (target harness-ui-tasks--target)
-        (buffer (current-buffer)))
-    (when (string-empty-p text) (user-error "Describe the task first"))
-    (setq harness-ui-tasks--error nil)
+  (pcase-let* ((`(,text . ,atts) (harness-compose-take))
+               (target harness-ui-tasks--target)
+               (buffer (current-buffer)))
+    (when (and (eq (car target) 'answer) atts)
+      (user-error "Answers cannot carry attachments"))
+    (setq harness-ui-tasks--error nil
+          harness-compose-attachments nil)
+    (harness-ui-tasks--set-compose "" nil)
+    (if (eq (car target) 'answer)
+        (harness-ui-tasks--answer (harness-ui-tasks--find (cdr target)) text)
+      (unless target
+        (push text harness-ui-tasks--submitting)
+        (harness-ui-tasks--render))
+      (harness-compose-with-expanded-text
+       text
+       (lambda (expanded)
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (harness-ui-tasks--send target text expanded atts))))))))
+
+(defun harness-ui-tasks--new-opts ()
+  "The new-task settings as `task/submit' options (unset ones are left out)."
+  (let ((new harness-ui-tasks--new))
+    (append (cl-loop for k in '(:model :thinking :permission-mode)
+                     when (plist-get new k) append (list k (plist-get new k)))
+            (and new (list :non-interactive (if (harness-json-true-p (plist-get new :non-interactive)) t :false))))))
+
+(defun harness-ui-tasks--send (target text expanded atts)
+  "Send EXPANDED (typed as TEXT) with attachments ATTS for compose TARGET."
+  (let ((buffer (current-buffer)))
     (pcase target
       (`(edit . ,id)
-       (harness-ui-tasks--request-then "_harness/task/update" (list :id id :prompt text) "Editing the task")
+       (harness-ui-tasks--request-then "_harness/task/update" (list :id id :prompt expanded :attachments atts)
+                                       "Editing the task")
        (message "Task updated"))
       (`(reply . ,id)
-       (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text text) "Sending the message")
+       (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
+                                       "Sending the message")
        (message "Sent to the task's session"))
-      (`(answer . ,id) (harness-ui-tasks--answer (harness-ui-tasks--find id) text))
       (_
-       (push text harness-ui-tasks--submitting)
-       (harness-ui-tasks--render)
        (harness-ui-call
-        "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt text)
+        "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt expanded
+                                     :opts (append (list :attachments atts)
+                                                   (harness-ui-tasks--new-opts)))
         (lambda (task)
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
@@ -848,10 +947,11 @@ at the bottom and follow them from pending to completed."
             (with-current-buffer buffer
               (setq harness-ui-tasks--submitting (delete text harness-ui-tasks--submitting))
               (harness-ui-tasks--render)
-              (when (string-empty-p (string-trim (harness-ui-tasks--compose-text)))
+              ;; Give the text back unless something new was typed meanwhile.
+              (when (and (string-empty-p (string-trim (harness-compose-text))) (null harness-compose-attachments))
+                (setq harness-compose-attachments atts)
                 (harness-ui-tasks--render-tail text))
-              (harness-ui-tasks--fail buffer "Submitting the task" e)))))))
-    (harness-ui-tasks--set-compose "" nil)))
+              (harness-ui-tasks--fail buffer "Submitting the task" e)))))))))
 
 (defun harness-ui-tasks-start ()
   "Start the pending task at point now, even when every slot is busy."
@@ -864,6 +964,7 @@ at the bottom and follow them from pending to completed."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (equal (plist-get task :state) "pending") (user-error "Only pending tasks can be edited"))
+    (setq harness-compose-attachments (plist-get task :attachments))
     (harness-ui-tasks--set-compose (plist-get task :prompt) (cons 'edit (plist-get task :id)))))
 
 (defun harness-ui-tasks-reply ()
@@ -951,6 +1052,25 @@ at the bottom and follow them from pending to completed."
        (list :id (plist-get task :id)
              :delete-session (and (plist-get task :session) (y-or-n-p "Delete its session too? ")))
        "Deleting the task"))))
+
+(defun harness-ui-tasks-adopt ()
+  "Make an ongoing session of this project a task, chosen with completion."
+  (interactive)
+  (let ((buffer (current-buffer)))
+    (harness-ui-call
+     "_harness/task/adoptable" (list :cwd harness-ui-tasks--dir)
+     (lambda (sessions)
+       (if (null sessions)
+           (message "Every ongoing session of this project is already a task")
+         (dolist (s sessions) (harness-ui-cache-session s))
+         (let* ((ids (mapcar (lambda (s) (plist-get s :id)) sessions))
+                (session (harness-ui-read-session "Make a task of: "
+                                                  (lambda (s) (member (plist-get s :id) ids)))))
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (harness-ui-tasks--request-then "_harness/task/adopt" (list :session-id (plist-get session :id))
+                                               "Adding the session"))))))
+     (lambda (e) (harness-ui-tasks--fail buffer "Listing sessions" e)))))
 
 (defun harness-ui-tasks-toggle-archived ()
   "Show or hide archived tasks."

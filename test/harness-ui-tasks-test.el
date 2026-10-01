@@ -24,14 +24,15 @@
 (defvar harness-tasks-max-running)
 (defvar harness-tasks-model)
 (defvar harness-tasks-worktrees)
+(defvar harness-ui-default-position)
 (defvar harness-acp-server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-ui--sessions)
 (defvar harness-ui-tasks--loading)
 (defvar harness-ui-tasks--tasks)
-(defvar harness-ui-tasks--compose-start)
-(defvar harness-ui-tasks--compose-end)
+(defvar harness-compose-start)
+(defvar harness-compose-end)
 (defvar harness-ui-tasks--target)
 (defvar harness-ui-tasks--list-end)
 (declare-function harness-tasks "harness-ui-tasks")
@@ -62,6 +63,8 @@
            (harness-tasks-max-running 3)
            (harness-tasks-model "demo:scripted")
            (harness-tasks-worktrees nil)
+           ;; Full width: the content checks below are not about narrow windows.
+           (harness-ui-default-position (quote full))
            (harness-acp-token nil)
            (default-directory dir))
        (harness-add-filter 'permission/decide
@@ -82,7 +85,7 @@
 (defun harness-ui-tasks-test--type-and-submit (board text)
   "Type TEXT into BOARD's compose box and submit it."
   (with-current-buffer board
-    (goto-char harness-ui-tasks--compose-end)
+    (goto-char harness-compose-end)
     (insert text)
     (harness-ui-tasks-submit)))
 
@@ -102,7 +105,7 @@
   (harness-ui-tasks-test-with
     (should (string-match-p "No tasks yet" (harness-ui-tasks-test--board-text board)))
     (with-current-buffer board
-      (should (= harness-ui-tasks--compose-start harness-ui-tasks--compose-end))
+      (should (= harness-compose-start harness-compose-end))
       (should (string-match-p "Tasks" (harness-ui-tasks--header)))
       (should-not (buffer-modified-p)))))
 
@@ -110,22 +113,22 @@
   (harness-ui-tasks-test-with
     (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
     (with-current-buffer board
-      (should (string-empty-p (buffer-substring-no-properties harness-ui-tasks--compose-start
-                                                              harness-ui-tasks--compose-end))))
+      (should (string-empty-p (buffer-substring-no-properties harness-compose-start
+                                                              harness-compose-end))))
     (harness-ui-tasks-test--wait-text board "Completed  1\\(.\\|\n\\)*Fix the flaky test")
-    (should (string-match-p "1 done" (with-current-buffer board (harness-ui-tasks--header))))))
+    (should (string-match-p "✓ 1\\|done 1" (with-current-buffer board (harness-ui-tasks--header))))))
 
 (ert-deftest harness-ui-tasks-compose-survives-redraws ()
   (harness-ui-tasks-test-with
     (with-current-buffer board
-      (goto-char harness-ui-tasks--compose-end)
+      (goto-char harness-compose-end)
       (insert "half typed")
-      (let ((offset (- (point) harness-ui-tasks--compose-start)))
+      (let ((offset (- (point) harness-compose-start)))
         (harness-ui-tasks--render)
         (harness-ui-tasks--render)
-        (should (equal "half typed" (buffer-substring-no-properties harness-ui-tasks--compose-start
-                                                                   harness-ui-tasks--compose-end)))
-        (should (= offset (- (point) harness-ui-tasks--compose-start)))))))
+        (should (equal "half typed" (buffer-substring-no-properties harness-compose-start
+                                                                   harness-compose-end)))
+        (should (= offset (- (point) harness-compose-start)))))))
 
 (ert-deftest harness-ui-tasks-edit-pending ()
   (harness-ui-tasks-test-with
@@ -137,10 +140,10 @@
         (search-forward "First draft")
         (harness-ui-tasks-edit)
         (should (eq 'edit (car harness-ui-tasks--target)))
-        (should (equal "First draft" (buffer-substring-no-properties harness-ui-tasks--compose-start
-                                                                     harness-ui-tasks--compose-end)))
-        (delete-region harness-ui-tasks--compose-start harness-ui-tasks--compose-end)
-        (goto-char harness-ui-tasks--compose-start)
+        (should (equal "First draft" (buffer-substring-no-properties harness-compose-start
+                                                                     harness-compose-end)))
+        (delete-region harness-compose-start harness-compose-end)
+        (goto-char harness-compose-start)
         (insert "Second draft")
         (harness-ui-tasks-submit)
         (should-not harness-ui-tasks--target))
@@ -168,9 +171,124 @@
         (should (eq 'harness-ui-tasks-open (key-binding (kbd "RET"))))
         (should (eq 'harness-ui-tasks-merge (key-binding (kbd "M"))))
         ;; The compose box types letters instead.
-        (goto-char harness-ui-tasks--compose-end)
+        (goto-char harness-compose-end)
         (should (eq 'self-insert-command (key-binding (kbd "s"))))
         (should (eq 'harness-ui-tasks-submit (key-binding (kbd "C-c C-c"))))))))
+
+(defvar harness-ui-open-session-function)
+(declare-function harness-ui-display-buffer "harness-ui")
+(declare-function harness-ui-tasks-open "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-shares-session-positions ()
+  "The board and sessions replace each other in the same position."
+  (harness-ui-tasks-test-with
+    (let* ((session-buf (get-buffer-create " *fake session*"))
+           (harness-ui-open-session-function (lambda (_id) session-buf)))
+      (unwind-protect
+          (let ((window (get-buffer-window board)))
+            (should (eq harness-ui-default-position (buffer-local-value 'harness-ui-position board)))
+            (should window)
+            ;; A session shown in the board's position takes its window.
+            (harness-ui-display-buffer session-buf harness-ui-default-position)
+            (should (eq session-buf (window-buffer window)))
+            (should-not (get-buffer-window board))
+            ;; Opening the board again puts it back in that window.
+            (harness-tasks default-directory)
+            (should (eq board (window-buffer window)))
+            ;; Opening a task's session from the board replaces the board.
+            (harness-ui-tasks-test--type-and-submit board "Open me")
+            (harness-ui-tasks-test--wait-text board "Completed  1")
+            (with-selected-window window
+              (goto-char (point-min))
+              (search-forward "Open me")
+              (harness-ui-tasks-open))
+            (harness-test-wait (lambda () (eq session-buf (window-buffer window))) 5 "the session to replace the board")
+            (should-not (get-buffer-window board)))
+        (kill-buffer session-buf)))))
+
+(defvar harness-compose-attachments)
+(defvar harness-compose--files)
+(declare-function harness-compose-completion-at-point "harness-ui-compose")
+(declare-function harness-compose-add-attachment "harness-ui-compose")
+(declare-function harness-compose-fetch-completions "harness-ui-compose")
+
+(ert-deftest harness-ui-tasks-compose-is-the-chat-box ()
+  "The board's compose box completes @files, newlines on RET and attaches."
+  (harness-ui-tasks-test-with
+    ;; Only projects are listed for @ completion, so this board is for a repository.
+    (let* ((repo (harness-test-temp-dir))
+           (file (expand-file-name "notes.txt" repo))
+           (default-directory repo))
+      (call-process "git" nil nil nil "init" "-q")
+      (with-temp-file file (insert "notes\n"))
+      (setq board (harness-tasks repo))
+      (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-tasks--loading board))) 5 "the board")
+      (with-current-buffer board
+        (goto-char harness-compose-end)
+        (should (eq 'harness-compose-newline (key-binding (kbd "RET"))))
+        (should (eq 'harness-compose-add-attachment (key-binding (kbd "C-c C-a"))))
+        ;; @file completion offers the project's files.
+        (setq harness-compose--files nil)
+        (harness-compose-fetch-completions)
+        (harness-test-wait (lambda () harness-compose--files) 5 "files fetched")
+        (insert "Summarise @no")
+        (let ((capf (harness-compose-completion-at-point)))
+          (should capf)
+          (should (member "notes.txt" (all-completions "no" (nth 2 capf)))))
+        (delete-region harness-compose-start harness-compose-end)
+        ;; An attachment travels with the submitted task.
+        (insert "Summarise the notes")
+        (harness-compose-add-attachment file)
+        (should (= 1 (length harness-compose-attachments)))
+        (harness-ui-tasks-submit)
+        (should-not harness-compose-attachments))
+      (harness-test-wait (lambda () (let ((task (car (harness-call 'task/list default-directory))))
+                                      (and task (plist-get task :session)
+                                           (eq 'done (plist-get task :state)))))
+                         5 "the task to finish")
+      (let* ((task (car (harness-call 'task/list default-directory)))
+             (user (cl-find 'user (harness-call 'session/nodes (plist-get task :session))
+                            :key (lambda (n) (plist-get n :kind)))))
+        (should (equal file (plist-get (car (plist-get task :attachments)) :path)))
+        (should (cl-some (lambda (b) (equal (plist-get b :path) file)) (plist-get user :blocks)))))))
+
+(defvar harness-ui-tasks--new)
+(declare-function harness-toggle-non-interactive "harness-ui")
+(declare-function harness-set-permission-mode "harness-ui")
+(declare-function harness-ui--setting-target "harness-ui")
+
+(ert-deftest harness-ui-tasks-session-settings ()
+  "The session setting commands set up new tasks from the box and change a task's session on its card."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (harness-test-wait (lambda () harness-ui-tasks--new) 5 "the defaults")
+      (should (equal "auto" (format "%s" (plist-get harness-ui-tasks--new :permission-mode))))
+      (goto-char harness-compose-end)
+      ;; The ordinary commands change the settings of the next task.
+      (should (consp (harness-ui--setting-target nil)))
+      (let ((before (plist-get harness-ui-tasks--new :non-interactive)))
+        (harness-toggle-non-interactive)
+        (should (eq (not before) (plist-get harness-ui-tasks--new :non-interactive))))
+      (cl-letf (((symbol-function 'read-multiple-choice) (lambda (&rest _) '(?a "ask"))))
+        (harness-set-permission-mode))
+      (should (equal "ask" (plist-get harness-ui-tasks--new :permission-mode)))
+      (insert "Configured task")
+      (harness-ui-tasks-submit))
+    (harness-ui-tasks-test--wait-text board "Completed  1")
+    (let* ((task (car (harness-call 'task/list default-directory)))
+           (sid (plist-get task :session))
+           (session (harness-call 'session/get sid)))
+      (should (eq 'ask (plist-get session :permission-mode)))
+      (should-not (plist-get session :non-interactive))
+      ;; On a started task's card the same commands change its session.
+      (with-current-buffer board
+        (goto-char (point-min))
+        (search-forward "Configured task")
+        (should (equal sid (harness-ui--setting-target nil)))
+        (cl-letf (((symbol-function 'read-multiple-choice) (lambda (&rest _) '(?y "yolo"))))
+          (harness-set-permission-mode)))
+      (harness-test-wait (lambda () (eq 'yolo (plist-get (harness-call 'session/get sid) :permission-mode)))
+                         5 "the session's mode to change"))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here
