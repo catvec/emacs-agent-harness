@@ -110,6 +110,7 @@
     (define-key map (kbd "r") #'harness-ui-sessions-rename)
     (define-key map (kbd "k") #'harness-ui-sessions-cancel)
     (define-key map (kbd "x") #'harness-ui-sessions-deactivate)
+    (define-key map (kbd "T") #'harness-ui-sessions-make-task)
     (define-key map (kbd "/") #'harness-ui-sessions-filter)
     (define-key map (kbd "a") #'harness-ui-sessions-toggle-scope)
     (define-key map (kbd "i") #'harness-ui-sessions-toggle-inactive)
@@ -206,6 +207,12 @@
   "Cancel the running turn of the session at point."
   (interactive)
   (harness-cancel-turn (harness-ui-sessions--id)))
+
+(defun harness-ui-sessions-make-task ()
+  "Make the session at point a task, shown on its project's task board."
+  (interactive)
+  (harness-ui-call "_harness/task/adopt" (list :session-id (harness-ui-sessions--id))
+                   (lambda (_) (message "Added to the task board (C-c a a)"))))
 
 (defun harness-ui-sessions-deactivate ()
   "Mark the session at point inactive."

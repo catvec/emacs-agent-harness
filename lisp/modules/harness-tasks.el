@@ -451,6 +451,50 @@ OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
     (harness-tasks--schedule)
     (harness-tasks--view (gethash (plist-get task :id) harness-tasks--table))))
 
+(defun harness-tasks--adoptable-p (session)
+  "Non-nil when SESSION may become a task.
+It must be open, not a task already and not a merge target."
+  (and (not (eq (plist-get session :status) 'inactive))
+       (not (harness-tasks--by-session (plist-get session :id)))
+       (not (equal (plist-get session :name) harness-tasks-merge-session-name))))
+
+(harness-defmethod task/adoptable (&optional cwd)
+  "Return the open sessions of CWD's project (every project without CWD) that
+are not tasks yet, newest first."
+  (harness-tasks--load)
+  (cl-remove-if-not #'harness-tasks--adoptable-p
+                    (harness-call 'session/list (and cwd (list :project (harness-tasks--project cwd))))))
+
+(harness-defmethod task/adopt (session-id)
+  "Make the ongoing session SESSION-ID a task and return the task.
+Its first message becomes the task's prompt; a session in a git worktree
+keeps it and is merged through the merge queue like any task.  A running
+or blocked session is in progress; an idle one waits for the user."
+  (harness-tasks--load)
+  (let ((session (harness-call 'session/get session-id)))
+    (unless (harness-tasks--adoptable-p session)
+      (error "Session %s is already a task or cannot become one" session-id))
+    (let* ((first (cl-find 'user (harness-call 'session/nodes session-id) :key (lambda (n) (plist-get n :kind))))
+           (prompt (or (and first (not (harness-string-blank-p (plist-get first :content)))
+                            (plist-get first :content))
+                       (plist-get session :name) "Adopted session"))
+           (worktree (plist-get session :worktree))
+           (task (list :id (concat "t-" (harness-short-id 8))
+                       :project (plist-get session :project) :cwd (plist-get session :cwd)
+                       :prompt (string-trim prompt) :session session-id :adopted t
+                       :worktree worktree
+                       :state 'active
+                       :outcome (unless (memq (plist-get session :status) '(running blocked)) 'adopted)
+                       :created (plist-get session :created) :started (plist-get session :created))))
+      (harness-tasks--put task)
+      (when (and worktree (harness-method-exists-p 'worktree/branch))
+        (let ((id (plist-get task :id)))
+          (harness-then (harness-call-async 'worktree/branch worktree)
+                        (lambda (branch) (when (gethash id harness-tasks--table)
+                                           (harness-tasks--set id :branch branch)))
+                        #'ignore)))
+      (harness-tasks--view task))))
+
 (harness-defmethod task/list (&optional cwd)
   "Return the tasks of CWD's project, oldest first; every task without CWD."
   (harness-tasks--load)

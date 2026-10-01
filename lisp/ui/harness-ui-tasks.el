@@ -165,11 +165,12 @@
     (pcase column
       ('needs-input
        (propertize (or (harness-ui-tasks--request session)
-                       (if (equal (plist-get task :outcome) "merge-failed")
-                           (format "could not merge into %s: %s" (harness-ui-tasks--base task)
-                                   (or (plist-get task :error) "?"))
-                         (format "stopped: %s%s" (or (plist-get task :outcome) "?")
-                                 (if (plist-get task :error) (concat " — " (plist-get task :error)) ""))))
+                       (pcase (plist-get task :outcome)
+                         ("merge-failed" (format "could not merge into %s: %s" (harness-ui-tasks--base task)
+                                                 (or (plist-get task :error) "?")))
+                         ("adopted" "waiting for your next message")
+                         (outcome (format "stopped: %s%s" (or outcome "?")
+                                          (if (plist-get task :error) (concat " — " (plist-get task :error)) "")))))
                    'face 'harness-task-attention-face))
       ((guard (and (equal (plist-get task :state) "merging") (not (equal (plist-get session :status) "running"))))
        (propertize (pcase (plist-get task :merge-status)
@@ -510,6 +511,9 @@ TEXT replaces the compose contents; without it they are kept."
      "   "
      (harness-ui-tasks--segment "[New task]" #'harness-ui-tasks-compose "Describe a new task (a)")
      " "
+     (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
+                                "Make an ongoing session of this project a task (I)")
+     " "
      (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Show archived]")
                                 #'harness-ui-tasks-toggle-archived "Show or hide archived tasks (A)")
      " "
@@ -645,6 +649,7 @@ anything that moves a task without one, so a board never drifts.")
   (define-key map (kbd "X") #'harness-ui-tasks-archive-done)
   (define-key map (kbd "D") #'harness-ui-tasks-delete)
   (define-key map (kbd "A") #'harness-ui-tasks-toggle-archived)
+  (define-key map (kbd "I") #'harness-ui-tasks-adopt)
   (define-key map (kbd "g") #'harness-ui-tasks-refresh)
   (define-key map (kbd "q") #'quit-window)
   (define-key map (kbd "?") #'harness-menu))
@@ -967,6 +972,25 @@ By default it takes the board's own position, replacing the board."
        (list :id (plist-get task :id)
              :delete-session (and (plist-get task :session) (y-or-n-p "Delete its session too? ")))
        "Deleting the task"))))
+
+(defun harness-ui-tasks-adopt ()
+  "Make an ongoing session of this project a task, chosen with completion."
+  (interactive)
+  (let ((buffer (current-buffer)))
+    (harness-ui-call
+     "_harness/task/adoptable" (list :cwd harness-ui-tasks--dir)
+     (lambda (sessions)
+       (if (null sessions)
+           (message "Every ongoing session of this project is already a task")
+         (dolist (s sessions) (harness-ui-cache-session s))
+         (let* ((ids (mapcar (lambda (s) (plist-get s :id)) sessions))
+                (session (harness-ui-read-session "Make a task of: "
+                                                  (lambda (s) (member (plist-get s :id) ids)))))
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (harness-ui-tasks--request-then "_harness/task/adopt" (list :session-id (plist-get session :id))
+                                               "Adding the session"))))))
+     (lambda (e) (harness-ui-tasks--fail buffer "Listing sessions" e)))))
 
 (defun harness-ui-tasks-toggle-archived ()
   "Show or hide archived tasks."
