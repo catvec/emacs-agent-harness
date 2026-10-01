@@ -52,10 +52,11 @@ current settings; its log is in `M-x harness-show-log`.  `M-x harness-menu` (`C-
 | `C-c a c` | connect the UI to a remote harness |
 | `C-c a R` | reload the harness in place |
 
-In a chat buffer: `RET` sends (steering the agent if it is mid-turn),
-`S-RET` newline, `C-c C-q` queues for the next turn, `@` completes
-project files as attachments, `/` completes skills, `C-c C-a` attaches a
-file, `C-c C-v` pastes a clipboard image, `TAB` folds a block.
+In a chat buffer: `C-c C-c` sends (steering the agent if it is mid-turn),
+`RET` inserts a newline, `C-c C-k` cancels the turn, `C-c C-q` queues
+for the next turn, `@` completes project files as attachments, `/`
+completes skills, `C-c C-a` attaches a file, `C-c C-v` pastes a
+clipboard image, `TAB` folds a block.
 Permission and question panels appear inline above the compose box; the
 mode line shows how many sessions need you from any buffer.
 

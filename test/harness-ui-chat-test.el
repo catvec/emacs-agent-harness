@@ -545,6 +545,12 @@
         (should (harness-chat--skill-reference-p "please /review this"))
         (should-not (harness-chat--skill-reference-p "a/review"))))))
 
+(ert-deftest harness-ui-chat-test-compose-keys ()
+  "C-c C-c sends, RET adds a newline, C-c C-k cancels."
+  (should (eq (lookup-key harness-chat-mode-map (kbd "C-c C-c")) #'harness-chat-send))
+  (should (eq (lookup-key harness-chat-mode-map (kbd "RET")) #'harness-chat-newline))
+  (should (eq (lookup-key harness-chat-mode-map (kbd "C-c C-k")) #'harness-chat-cancel)))
+
 (ert-deftest harness-ui-chat-segment-icons-not-highlighted ()
   ;; An SVG icon keeps its own background, so the hover highlight skips it.
   (let* ((icon (propertize " " 'display '(image :type svg :file "thinking.svg")))

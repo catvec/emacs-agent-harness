@@ -9,7 +9,7 @@
 ;;   pending panel permission requests and questions waiting for the user
 ;;   queue         messages queued for the next turn
 ;;   attachments   chips for files attached to the next message
-;;   compose       an editable region; RET sends
+;;   compose       an editable region; C-c C-c sends, RET adds a newline
 ;;   mode line     status, turn duration, window position
 ;;
 ;; The transcript is never re-rendered on a delta: every node owns a
@@ -1325,7 +1325,7 @@ The panel answers through RESPOND."
                                     (lambda () (harness-chat--answer-question pid option))
                                     :help "Answer with this option")
               "  "))
-    (insert (propertize "or type an answer below and press RET" 'face 'harness-dim-face) "\n")
+    (insert (propertize "or type an answer below and press C-c C-c" 'face 'harness-dim-face) "\n")
     (add-text-properties start (point) (list 'harness-chat-pending pid))
     (add-face-text-property start (point) 'harness-chat-panel-face t)))
 
@@ -1422,7 +1422,7 @@ The panel answers through RESPOND."
         (let ((label-start (point)))
           (insert (propertize (concat " " (harness-ui-icon 'harness-icon-send) " ")
                               'face '(harness-dim-face harness-compose-face)
-                              'help-echo "RET sends, S-RET newline, C-c C-q queues, C-c C-a attaches"))
+                              'help-echo "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, C-c C-a attaches"))
           (put-text-property start (point) 'read-only t)
           (put-text-property (1- (point)) (point) 'rear-nonsticky t)
           (setq harness-chat--compose-start (copy-marker (point)))
@@ -1455,7 +1455,7 @@ The panel answers through RESPOND."
     (overlay-put harness-chat--placeholder-overlay 'before-string
                  (if (= harness-chat--compose-start harness-chat--compose-end)
                      (propertize (cond (harness-chat--dead "session deleted")
-                                       ((harness-chat--active-question) "type an answer and press RET")
+                                       ((harness-chat--active-question) "type an answer and press C-c C-c")
                                        (t "Message…"))
                                  'face 'harness-dim-face 'cursor t)
                    nil))))
@@ -1830,10 +1830,11 @@ While the agent is running the message steers the current turn."
   (harness-cancel-turn harness-ui-session-id))
 
 (defun harness-chat-newline ()
-  "Insert a newline in the compose box."
+  "Insert a newline in the compose box, or jump there from elsewhere."
   (interactive)
-  (unless (harness-chat--in-compose-p) (goto-char harness-chat--compose-end))
-  (insert "\n"))
+  (if (harness-chat--in-compose-p)
+      (insert "\n")
+    (goto-char harness-chat--compose-end)))
 
 ;;;; Attachments
 
@@ -2122,12 +2123,13 @@ the background it was rendered on, so it would show as a dark box."
 (defvar harness-chat-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map (make-sparse-keymap))
-    (define-key map (kbd "RET") #'harness-chat-send)
+    (define-key map (kbd "RET") #'harness-chat-newline)
     (define-key map (kbd "S-<return>") #'harness-chat-newline)
     (define-key map (kbd "C-j") #'harness-chat-newline)
     (define-key map (kbd "TAB") #'harness-chat-tab)
     (define-key map (kbd "C-c C-q") #'harness-chat-queue)
-    (define-key map (kbd "C-c C-c") #'harness-chat-cancel)
+    (define-key map (kbd "C-c C-c") #'harness-chat-send)
+    (define-key map (kbd "C-c C-k") #'harness-chat-cancel)
     (define-key map (kbd "C-c C-a") #'harness-chat-add-attachment)
     (define-key map (kbd "C-c C-v") #'harness-chat-attach-clipboard)
     (define-key map (kbd "C-c C-s") #'harness-chat-search)
