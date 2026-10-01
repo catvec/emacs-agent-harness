@@ -876,5 +876,67 @@ commits from call `harness-tasks-test--commit-on-call' on."
         (should (plist-get task :merged)))
       (should (equal "two\n" (harness-tasks-test--main-text root))))))
 
+;;;; BTW: side conversations about the board
+
+(defvar harness-tasks-btw-prompt)
+
+(defun harness-tasks-test--ids (sessions)
+  "Return the ids of SESSIONS."
+  (mapcar (lambda (s) (plist-get s :id)) sessions))
+
+(ert-deftest harness-tasks-btw-is-about-the-board ()
+  "Only the board's BTWs, BTWs without a parent, are told to answer about the tasks."
+  (harness-tasks-test-with
+    (let* ((btw (harness-call 'task/btw default-directory "btw: how goes"))
+           (id (harness-tasks-test-submit "fix the parser"))
+           (task-session (harness-call 'session/get (plist-get (harness-tasks-test-task id) :session)))
+           (plain (harness-call 'session/create :cwd default-directory :model "demo:scripted"))
+           (fork (harness-test-await (harness-call 'session/fork (plist-get plain :id) :kind 'btw))))
+      (should (eq 'btw (plist-get btw :kind)))
+      (should-not (plist-get btw :parent-id))
+      (should (equal "btw: how goes" (plist-get btw :name)))
+      (should (equal (concat "Base.\n\n" harness-tasks-btw-prompt "\n")
+                     (harness-run-filter 'agent/system-prompt "Base." btw)))
+      ;; Task sessions, other sessions and a BTW about a session are left alone.
+      (dolist (s (list task-session plain fork))
+        (should (equal "Base." (harness-run-filter 'agent/system-prompt "Base." s))))
+      (let ((harness-tasks-btw-prompt nil))
+        (should (equal "Base." (harness-run-filter 'agent/system-prompt "Base." btw))))
+      ;; A conversation about the board is no task to onboard.
+      (should (member (plist-get plain :id) (harness-tasks-test--ids (harness-call 'task/adoptable default-directory))))
+      (should-not (member (plist-get btw :id) (harness-tasks-test--ids (harness-call 'task/adoptable default-directory))))
+      (should-error (harness-call 'task/adopt (plist-get btw :id)))
+      (harness-tasks-test-wait-state id 'done))))
+
+(ert-deftest harness-tasks-btw-turn-sees-the-board-prompt ()
+  "A question asked in a board's BTW reaches the model with the board's instructions."
+  (harness-tasks-test-with
+    ;; Not a task: it talks to the project's usual model, not the task model.
+    (let ((systems nil) (harness-model "demo:scripted"))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push (plist-get req :system) systems) (funcall orig req))))
+        (let* ((conn (harness-acp-connect))
+               (btw (harness-test-await (harness-acp-request conn "_harness/task/btw"
+                                                             (list :cwd default-directory :name "btw: status?"))))
+               (sid (plist-get btw :id)))
+          ;; Over the wire too: a new btw session at the root.
+          (should (equal "btw" (plist-get btw :kind)))
+          (should (equal default-directory (plist-get btw :cwd)))
+          (should (eq 'end-turn (plist-get (harness-test-await (harness-call-async 'agent/prompt sid "how are the tasks?"))
+                                           :stop-reason)))
+          (should (cl-some (lambda (s) (string-match-p (regexp-quote harness-tasks-btw-prompt) s)) systems)))))))
+
+(ert-deftest harness-tasks-btw-starts-at-the-project-root ()
+  "From anywhere in a repository, or one of its task worktrees, the BTW sits at the main checkout."
+  (harness-tasks-test-with
+    (let* ((root (harness-tasks-test--make-repo))
+           (sub (file-name-as-directory (expand-file-name "lib" root))))
+      (make-directory sub)
+      (should (equal root (plist-get (harness-call 'task/btw sub) :cwd)))
+      (let ((wt (expand-file-name ".worktrees/side" root)))
+        (harness-tasks-test--git root "worktree" "add" "-q" "-b" "side" wt)
+        (should (equal root (plist-get (harness-call 'task/btw wt) :cwd)))))))
+
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

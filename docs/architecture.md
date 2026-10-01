@@ -820,7 +820,9 @@ Submit / Refine toggle beside that label (`C-c C-t`) picks what a new
 task does: start, or go to the backlog, written up by an agent and
 waiting in pending until you start it (`s`); `r` refines a queued task,
 retries a stopped write-up or sends feedback on a backlog task's.  `I` or
-[Add session] makes an ongoing session a task.  Boards reload after any
+[Add session] makes an ongoing session a task.  `b` or [BTW] (or the
+usual BTW command) opens a BTW side conversation over the board about
+its tasks (`task/btw`).  Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at
 the top of in progress (latest started first) and completed lists the
 latest finished first; pending is the queue, in the order its tasks
@@ -834,6 +836,10 @@ resolved to its main checkout once with `harness-files-main-checkout`),
 conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
 svg charts via svg.el), worktrees (`harness-ui-worktree`), notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle
-counts, clickable), BTW side window (`harness-ui-btw`), media
+counts, clickable), BTW side window (`harness-ui-btw`: a fork of the
+session it is opened over, or, over a view that sets
+`harness-ui-btw-start-function`, a conversation the view starts; closing
+it returns there and closes an idle BTW, keeping it makes it a normal
+session window in that place), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video thumbnails/open).

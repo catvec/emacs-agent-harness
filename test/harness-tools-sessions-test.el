@@ -246,6 +246,10 @@
       (should-not (plist-get submitted :is-error))
       (should (string-prefix-p "t-" id))
       (should (string-match-p "Fix the lexer" (harness-tools-sessions-test-ok me "task_list" nil)))
+      ;; Once its session is named, the title on the board leads the line.
+      (harness-call 'session/update (plist-get (harness-call 'task/get id) :session) :name "Lexer fix" :silent t)
+      (should (string-match-p (concat (regexp-quote id) " +[a-z-]+ +\"Lexer fix\": Fix the lexer")
+                              (harness-tools-sessions-test-ok me "task_list" nil)))
       (let ((text (harness-tools-sessions-test-ok me "task_wait" (list :task_id (substring id 0 4)))))
         (should (string-match-p "Done waiting" text))
         (should (string-match-p "done" text))

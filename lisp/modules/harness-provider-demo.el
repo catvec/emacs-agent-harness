@@ -12,6 +12,7 @@
 ;;   "work"        a todo list worked through with tool calls (task mode);
 ;;                 in a worktree it also writes and commits notes/ID.md
 ;;   "ask"         calls ask_user
+;;   "status"      looks at the task board with task_list (a BTW over it)
 ;;   anything else echo the prompt back as markdown
 ;;
 ;; A session writing a backlog task up (the system prompt has the task
@@ -94,6 +95,12 @@
         (:type tool-call :id "demo-q" :name "ask_user" :input (:question "Which colour?" :options ("red" "green" "blue")))
         (:type text :delta "Thanks, noted.")
         (:type usage :input 500 :output 40 :cost 0.001 :context 600)
+        (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bstatus\\b" text)
+      `((:type text :delta "Let me look at the board.\n")
+        (:type tool-call :id "demo-s1" :name "task_list" :input nil)
+        (:type text :delta "Those are the tasks on the board, each with its column and state. Ask about one and I will read its session.")
+        (:type usage :input 700 :output 45 :cost 0.0012 :context 900)
         (:type done :stop-reason end-turn)))
      (t
       `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools` or `ask`." text))

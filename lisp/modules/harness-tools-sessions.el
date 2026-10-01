@@ -645,12 +645,16 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
           (_ (signal 'harness-error (list (format "%s matches %d tasks; give more of the id" ref (length hits)))))))))
 
 (defun harness-tools-sessions--task-line (task)
-  "Return the listing of TASK."
+  "Return the listing of TASK.
+Its title on the board, the name of its session once it has one, comes
+before its prompt."
   (let* ((sid (plist-get task :session))
          (session (and sid (harness-call 'session/exists-p sid) (harness-call 'session/get sid)))
+         (title (plist-get session :name))
          (pending (and session (harness-tools-sessions--pending-text session))))
     (concat
-     (format "%s  %-11s %s" (plist-get task :id) (plist-get task :column)
+     (format "%s  %-11s %s%s" (plist-get task :id) (plist-get task :column)
+             (if (harness-string-blank-p title) "" (format "%S: " title))
              (harness-truncate-end (harness-first-line (or (plist-get task :prompt) "")) 100))
      (format "\n    state %s%s%s%s%s"
              (plist-get task :state)
@@ -679,7 +683,7 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
        "No tasks match."))))
 
 (harness-define-tool "task_list"
-  :description "List the task board: tasks (one session each, usually in its own worktree, done once merged) with their column (pending, needs-input, active, done), state, session, branch and merge status. Defaults to this project's unarchived tasks. Inspect a task's work with session_read on its session."
+  :description "List the task board: tasks (one session each, usually in its own worktree, done once merged) with their title (their session's name, once it has one), prompt, column (pending, needs-input, active, done), state, session, branch and merge status. Defaults to this project's unarchived tasks. Inspect a task's work with session_read on its session."
   :schema '(:type "object"
             :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "done"))
                          :include_archived (:type "boolean" :description "Include archived tasks (default false).")
