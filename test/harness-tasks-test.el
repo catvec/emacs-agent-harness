@@ -205,6 +205,22 @@
         (should (eq 'pending (harness-tasks-test-state b)))
         (should (equal "here" (plist-get (harness-tasks-test-task a) :prompt)))))))
 
+(ert-deftest harness-tasks-listed-from-a-worktree ()
+  "A board opened from a task's worktree shows the main checkout's tasks."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-max-running 0)
+           (base (harness-test-temp-dir))
+           (root (file-name-as-directory (expand-file-name "repo" base)))
+           (wt (expand-file-name "wt" base)))
+      (make-directory root t)
+      (dolist (args '(("init" "-q" "-b" "main") ("config" "user.name" "T")
+                      ("config" "user.email" "t@example.invalid") ("config" "commit.gpgsign" "false")
+                      ("commit" "-q" "--allow-empty" "-m" "init") ("worktree" "add" "-q" "-b" "task" "../wt")))
+        (let ((default-directory root)) (should (zerop (apply #'call-process "git" nil nil nil args)))))
+      (let ((id (harness-tasks-test-submit "in the main checkout" root)))
+        (should (equal (list id) (mapcar (lambda (task) (plist-get task :id))
+                                         (harness-call 'task/list wt))))))))
+
 (ert-deftest harness-tasks-over-acp ()
   (harness-tasks-test-with
     (let* ((events nil)

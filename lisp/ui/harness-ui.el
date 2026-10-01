@@ -401,27 +401,23 @@ Sessions persist; running turns are interrupted."
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
+(defun harness-ui--leave-pending (params respond what)
+  "Leave WHAT (a permission or question request PARAMS) pending on its session.
+No buffer shows the session, so nothing prompts: declining through
+RESPOND keeps the request pending server side, where the session reads
+as needing input and its chat panel or task card answers it later."
+  (harness-acp-respond-error respond -32000 (format "no buffer shows this session; the %s stays pending" what))
+  (let ((session (harness-ui-session (plist-get params :sessionId))))
+    (message "Harness: %s needs your input" (if session (harness-ui-session-label session) "a session")))
+  t)
+
 (defun harness-ui--default-permission (params respond)
-  "Fallback permission prompt in the minibuffer when no UI module claimed it."
-  (let* ((tc (plist-get params :toolCall))
-         (choice (read-multiple-choice
-                  (format "Allow %s?" (or (plist-get tc :title) "tool"))
-                  '((?y "allow once") (?s "allow for session") (?a "always allow")
-                    (?n "deny") (?N "always deny")))))
-    (funcall respond
-             (list :outcome (list :outcome "selected"
-                                  :optionId (pcase (car choice)
-                                              (?y "allow-once") (?s "allow-session") (?a "allow-always")
-                                              (?N "deny-always") (_ "deny-once")))))
-    t))
+  "Fallback when no UI module claimed permission request PARAMS: leave it pending."
+  (harness-ui--leave-pending params respond "permission request"))
 
 (defun harness-ui--default-question (params respond)
-  (let* ((options (plist-get params :options))
-         (answer (if options
-                     (completing-read (concat (plist-get params :question) " ") options nil nil)
-                   (read-string (concat (plist-get params :question) " ")))))
-    (funcall respond (list :answer answer))
-    t))
+  "Fallback when no UI module claimed question PARAMS: leave it pending."
+  (harness-ui--leave-pending params respond "question"))
 
 ;;;###autoload
 (defun harness-connect-remote (address)
