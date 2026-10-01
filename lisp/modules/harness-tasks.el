@@ -477,15 +477,15 @@ OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
     (harness-tasks--start task)
     (harness-call 'task/get id)))
 
-(harness-defmethod task/update (id prompt)
-  "Replace the prompt of pending task ID with PROMPT."
+(harness-defmethod task/update (id prompt &optional attachments)
+  "Replace the prompt of pending task ID with PROMPT and its ATTACHMENTS."
   (let ((task (harness-tasks--get id)))
     (unless (eq (plist-get task :state) 'pending) (error "Only pending tasks can be edited"))
     (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
-    (harness-tasks--set id :prompt (string-trim prompt))))
+    (harness-tasks--set id :prompt (string-trim prompt) :attachments attachments)))
 
-(harness-defmethod task/prompt (id text)
-  "Send TEXT to the session of task ID: a follow-up, or steering mid-turn."
+(harness-defmethod task/prompt (id text &optional attachments)
+  "Send TEXT and ATTACHMENTS to the session of task ID: a follow-up, or steering."
   (let ((task (harness-tasks--get id)))
     (unless (harness-tasks--session task) (error "Task %s has no session yet" id))
     (when (plist-get task :worktree-removed)
@@ -495,7 +495,8 @@ OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode'."
         (harness-call 'session/resume sid))
       (when (plist-get task :archived) (harness-tasks--set id :archived nil))
       (harness-tasks--set id :merge-attempts 0)
-      (harness-catch (harness-call-async 'agent/prompt sid text)
+      (harness-catch (harness-call-async 'agent/prompt sid
+                                         (harness-tasks--blocks (list :prompt text :attachments attachments)))
                      (lambda (e) (harness-tasks--fail id e)))
       t)))
 

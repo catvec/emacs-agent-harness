@@ -30,6 +30,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-ui-compose)
 
 (defgroup harness-ui-tasks nil
   "Task mode." :group 'harness-ui)
@@ -88,9 +89,6 @@
 (defvar-local harness-ui-tasks--target nil
   "What the compose box does: nil (new task), (edit . ID) or (reply . ID).")
 (defvar-local harness-ui-tasks--list-end nil "Marker: end of the board, start of the tail.")
-(defvar-local harness-ui-tasks--compose-start nil)
-(defvar-local harness-ui-tasks--compose-end nil)
-(defvar-local harness-ui-tasks--placeholder nil "Overlay showing the compose hint.")
 
 (defun harness-ui-tasks--buffers ()
   "Return every live board buffer."
@@ -433,21 +431,19 @@ Point and every window showing the board stay on the same task."
                    ""))))))
 
 (defun harness-ui-tasks--render-tail (&optional text)
-  "Draw the error line, the compose label and the compose box.
+  "Draw the error line, the compose label, the attachments and the compose box.
 TEXT replaces the compose contents; without it they are kept."
+  (harness-compose-capture)
   (let* ((inhibit-read-only t)
          (buffer-undo-list t)
-         (text (or text (harness-ui-tasks--compose-text)))
-         (in-compose (harness-ui-tasks--in-compose-p))
-         (offset (and in-compose (- (point) harness-ui-tasks--compose-start)))
+         (offset (and (harness-compose-in-p) (- (point) harness-compose-start)))
          (list-end (marker-position harness-ui-tasks--list-end))
          ;; Windows whose point is in the tail go back to the same spot of the box.
          (windows (mapcar (lambda (w)
                             (let ((p (window-point w)))
-                              (cons w (and harness-ui-tasks--compose-start (>= p list-end)
-                                           (max 0 (- p harness-ui-tasks--compose-start))))))
+                              (cons w (and (harness-compose-live-p) (>= p list-end)
+                                           (max 0 (- p harness-compose-start))))))
                           (get-buffer-window-list nil nil t))))
-    (when harness-ui-tasks--placeholder (delete-overlay harness-ui-tasks--placeholder))
     (save-excursion
       (delete-region list-end (point-max))
       (goto-char list-end)
@@ -462,54 +458,29 @@ TEXT replaces the compose contents; without it they are kept."
           (insert "  " (harness-ui-tasks--button "[cancel]" #'harness-ui-tasks-compose-reset
                                                  "Back to a new task (C-c C-k)")))
         (insert "\n")
-        (let ((label (point)))
-          (insert (propertize "❯ "
-                              'face '(harness-dim-face harness-compose-face)
-                              'help-echo "C-c C-c submits · RET newline · C-c C-k resets"))
-          (put-text-property start (point) 'read-only t)
-          (put-text-property (1- (point)) (point) 'rear-nonsticky t)
-          (setq harness-ui-tasks--compose-start (copy-marker (point)))
-          (insert text)
-          (let ((end (point)))
-            (insert (propertize "\n" 'read-only t))
-            (setq harness-ui-tasks--compose-end (copy-marker end t)))
-          (let ((ov (make-overlay label (point) nil t t)))
-            (overlay-put ov 'face 'harness-compose-face)
-            (overlay-put ov 'harness-ui-tasks t)))
-        (setq harness-ui-tasks--placeholder (make-overlay (1- (point)) (point)))
-        (harness-ui-tasks--update-placeholder)))
+        (harness-compose-insert-attachments)
+        (put-text-property start (point) 'read-only t)
+        (harness-compose-insert text "C-c C-c submits · RET newline · @file · /skill · C-c C-a attaches · C-c C-k resets")))
     (set-marker harness-ui-tasks--list-end list-end)
     (pcase-dolist (`(,w . ,off) windows)
       (when (and off (window-live-p w))
-        (set-window-point w (min (+ harness-ui-tasks--compose-start off) harness-ui-tasks--compose-end))))
+        (set-window-point w (min (+ harness-compose-start off) harness-compose-end))))
     (set-buffer-modified-p nil)
-    (when offset (goto-char (min (+ harness-ui-tasks--compose-start offset) harness-ui-tasks--compose-end)))))
+    (when offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))))
 
-(defun harness-ui-tasks--update-placeholder ()
-  (when (and harness-ui-tasks--placeholder (overlay-buffer harness-ui-tasks--placeholder))
-    (overlay-put harness-ui-tasks--placeholder 'before-string
-                 (and (= harness-ui-tasks--compose-start harness-ui-tasks--compose-end)
-                      (propertize (pcase harness-ui-tasks--target
-                                    (`(edit . ,_) "the new prompt…  C-c C-c saves")
-                                    (`(reply . ,_) "a message for this task's session…  C-c C-c sends")
-                                    (`(answer . ,_) "your answer…  C-c C-c answers")
-                                    (_ "Describe a task…  C-c C-c submits · RET newline"))
-                                  'face 'harness-dim-face 'cursor t)))))
-
-(defun harness-ui-tasks--compose-text ()
-  (if (and harness-ui-tasks--compose-start (marker-buffer harness-ui-tasks--compose-start))
-      (buffer-substring-no-properties harness-ui-tasks--compose-start harness-ui-tasks--compose-end)
-    ""))
-
-(defun harness-ui-tasks--in-compose-p ()
-  (and harness-ui-tasks--compose-start (marker-buffer harness-ui-tasks--compose-start)
-       (>= (point) harness-ui-tasks--compose-start) (<= (point) harness-ui-tasks--compose-end)))
+(defun harness-ui-tasks--placeholder ()
+  "Return the hint for the empty compose box."
+  (pcase harness-ui-tasks--target
+    (`(edit . ,_) "the new prompt…  C-c C-c saves")
+    (`(reply . ,_) "a message for this task's session…  C-c C-c sends")
+    (`(answer . ,_) "your answer…  C-c C-c answers")
+    (_ "Describe a task…  C-c C-c submits · RET newline · @file · /skill")))
 
 (defun harness-ui-tasks--set-compose (text target)
   "Put TEXT in the compose box for TARGET and move there."
   (setq harness-ui-tasks--target target)
   (harness-ui-tasks--render-tail text)
-  (goto-char harness-ui-tasks--compose-end)
+  (goto-char harness-compose-end)
   (dolist (w (get-buffer-window-list nil nil t)) (set-window-point w (point))))
 
 ;;;; Header line
@@ -555,16 +526,17 @@ TEXT replaces the compose contents; without it they are kept."
       (harness-ui-tasks--render)
       (harness-ui-tasks--render-tail))))
 
-(defun harness-ui-tasks--fetch (buffer)
-  "Load BUFFER's project root, tasks and settings from the harness."
+(defun harness-ui-tasks--fetch (buffer &optional quiet)
+  "Load BUFFER's project root, tasks and settings from the harness.
+QUIET refreshes in the background, without the loading indicator."
   (with-current-buffer buffer
-    (setq harness-ui-tasks--loading t)
+    (unless quiet (setq harness-ui-tasks--loading t))
     (let ((dir harness-ui-tasks--dir))
       (harness-ui-call "_harness/task/settings" (list :cwd dir)
                        (lambda (s) (when (buffer-live-p buffer)
                                      (with-current-buffer buffer
                                        (setq harness-ui-tasks--settings s)
-                                       (when (and harness-ui-tasks--compose-start (null harness-ui-tasks--target))
+                                       (when (and (harness-compose-live-p) (null harness-ui-tasks--target))
                                          (harness-ui-tasks--render-tail)))))
                        #'ignore)
       (harness-ui-call
@@ -588,8 +560,28 @@ TEXT replaces the compose contents; without it they are kept."
                     (lambda () (when (buffer-live-p buffer)
                                  (with-current-buffer buffer (harness-ui-tasks--render))))))
 
+(defconst harness-ui-tasks--refresh-events
+  '("merge/queued" "merge/started" "merge/conflict" "merge/finished"
+    "agent/turn-started" "agent/turn-ended" "session/status" "session/pending-changed"
+    "session/created" "session/deleted" "worktree/created" "worktree/removed"
+    "harness/reloaded" "config/changed")
+  "Events after which every board quietly reloads its tasks.
+`task/changed' and `task/deleted' update a board directly; these catch
+anything that moves a task without one, so a board never drifts.")
+
+(defun harness-ui-tasks--refresh-soon (buffer)
+  "Reload BUFFER's tasks in the background, once a burst of events settles."
+  (harness-debounce (list 'harness-ui-tasks-refresh buffer) 0.3
+                    (lambda () (when (buffer-live-p buffer) (harness-ui-tasks--fetch buffer t)))))
+
+(defun harness-ui-tasks--on-window-change (window)
+  "Reload the board shown in WINDOW, which may have missed events while hidden."
+  (harness-ui-tasks--refresh-soon (window-buffer window)))
+
 (defun harness-ui-tasks--on-event (event args)
-  "Follow `task/changed' and `task/deleted' on every board."
+  "Follow task events on every board; reload them after related events."
+  (when (member event harness-ui-tasks--refresh-events)
+    (mapc #'harness-ui-tasks--refresh-soon (harness-ui-tasks--buffers)))
   (pcase event
     ("task/changed"
      (let ((task (car args)))
@@ -663,6 +655,8 @@ TEXT replaces the compose contents; without it they are kept."
   "Keymap of `harness-ui-tasks-mode'.")
 
 (let ((map harness-ui-tasks-mode-map))
+  ;; The compose box's keys (RET newline, C-c C-a, C-c C-v).
+  (set-keymap-parent map harness-compose-map)
   (define-key map (kbd "C-c C-c") #'harness-ui-tasks-submit)
   (define-key map (kbd "C-c C-k") #'harness-ui-tasks-compose-reset)
   (define-key map (kbd "C-c C-n") #'harness-ui-tasks-next)
@@ -674,7 +668,10 @@ TEXT replaces the compose contents; without it they are kept."
   (setq buffer-read-only nil)
   (setq-local truncate-lines t
               header-line-format '(:eval (harness-ui-tasks--header)))
-  (add-hook 'post-command-hook #'harness-ui-tasks--update-placeholder nil t))
+  (add-hook 'window-buffer-change-functions #'harness-ui-tasks--on-window-change nil t)
+  (harness-compose-setup :project (lambda () harness-ui-tasks--dir)
+                         :placeholder #'harness-ui-tasks--placeholder
+                         :redraw #'harness-ui-tasks--render-tail))
 
 (defun harness-ui-tasks--buffer-name (dir)
   (format "*harness tasks: %s*" (file-name-nondirectory (directory-file-name dir))))
@@ -708,7 +705,8 @@ argument it is read."
               harness-ui-tasks--dir root)
         (harness-ui-tasks--render)
         (harness-ui-tasks--render-tail "")
-        (goto-char harness-ui-tasks--compose-end))
+        (goto-char harness-compose-end)
+        (harness-compose-fetch-completions))
       (harness-ui-tasks--fetch buf))
     (harness-ui-refresh-sessions)
     (harness-ui-display-view buf position)))
@@ -805,34 +803,53 @@ By default it takes the board's own position, replacing the board."
   (interactive)
   (if harness-ui-tasks--target
       (harness-ui-tasks--set-compose "" nil)
-    (goto-char harness-ui-tasks--compose-end)))
+    (goto-char harness-compose-end)))
 
 (defun harness-ui-tasks-compose-reset ()
   "Empty the compose box and make it describe a new task again."
   (interactive)
+  (setq harness-compose-attachments nil)
   (harness-ui-tasks--set-compose "" nil))
 
 (defun harness-ui-tasks-submit ()
-  "Submit the compose box: a new task, an edited prompt or a message."
+  "Submit the compose box: a new task, an edited prompt, a message or an answer.
+/skill references are expanded and attachments go along, as in a chat."
   (interactive)
-  (let ((text (string-trim (harness-ui-tasks--compose-text)))
-        (target harness-ui-tasks--target)
-        (buffer (current-buffer)))
-    (when (string-empty-p text) (user-error "Describe the task first"))
-    (setq harness-ui-tasks--error nil)
+  (pcase-let* ((`(,text . ,atts) (harness-compose-take))
+               (target harness-ui-tasks--target)
+               (buffer (current-buffer)))
+    (when (and (eq (car target) 'answer) atts)
+      (user-error "Answers cannot carry attachments"))
+    (setq harness-ui-tasks--error nil
+          harness-compose-attachments nil)
+    (harness-ui-tasks--set-compose "" nil)
+    (if (eq (car target) 'answer)
+        (harness-ui-tasks--answer (harness-ui-tasks--find (cdr target)) text)
+      (unless target
+        (push text harness-ui-tasks--submitting)
+        (harness-ui-tasks--render))
+      (harness-compose-with-expanded-text
+       text
+       (lambda (expanded)
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (harness-ui-tasks--send target text expanded atts))))))))
+
+(defun harness-ui-tasks--send (target text expanded atts)
+  "Send EXPANDED (typed as TEXT) with attachments ATTS for compose TARGET."
+  (let ((buffer (current-buffer)))
     (pcase target
       (`(edit . ,id)
-       (harness-ui-tasks--request-then "_harness/task/update" (list :id id :prompt text) "Editing the task")
+       (harness-ui-tasks--request-then "_harness/task/update" (list :id id :prompt expanded :attachments atts)
+                                       "Editing the task")
        (message "Task updated"))
       (`(reply . ,id)
-       (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text text) "Sending the message")
+       (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
+                                       "Sending the message")
        (message "Sent to the task's session"))
-      (`(answer . ,id) (harness-ui-tasks--answer (harness-ui-tasks--find id) text))
       (_
-       (push text harness-ui-tasks--submitting)
-       (harness-ui-tasks--render)
        (harness-ui-call
-        "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt text)
+        "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt expanded :opts (list :attachments atts))
         (lambda (task)
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
@@ -845,10 +862,11 @@ By default it takes the board's own position, replacing the board."
             (with-current-buffer buffer
               (setq harness-ui-tasks--submitting (delete text harness-ui-tasks--submitting))
               (harness-ui-tasks--render)
-              (when (string-empty-p (string-trim (harness-ui-tasks--compose-text)))
+              ;; Give the text back unless something new was typed meanwhile.
+              (when (and (string-empty-p (string-trim (harness-compose-text))) (null harness-compose-attachments))
+                (setq harness-compose-attachments atts)
                 (harness-ui-tasks--render-tail text))
-              (harness-ui-tasks--fail buffer "Submitting the task" e)))))))
-    (harness-ui-tasks--set-compose "" nil)))
+              (harness-ui-tasks--fail buffer "Submitting the task" e)))))))))
 
 (defun harness-ui-tasks-start ()
   "Start the pending task at point now, even when every slot is busy."
@@ -861,6 +879,7 @@ By default it takes the board's own position, replacing the board."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (equal (plist-get task :state) "pending") (user-error "Only pending tasks can be edited"))
+    (setq harness-compose-attachments (plist-get task :attachments))
     (harness-ui-tasks--set-compose (plist-get task :prompt) (cons 'edit (plist-get task :id)))))
 
 (defun harness-ui-tasks-reply ()

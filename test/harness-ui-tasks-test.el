@@ -30,8 +30,8 @@
 (defvar harness-ui--sessions)
 (defvar harness-ui-tasks--loading)
 (defvar harness-ui-tasks--tasks)
-(defvar harness-ui-tasks--compose-start)
-(defvar harness-ui-tasks--compose-end)
+(defvar harness-compose-start)
+(defvar harness-compose-end)
 (defvar harness-ui-tasks--target)
 (defvar harness-ui-tasks--list-end)
 (declare-function harness-tasks "harness-ui-tasks")
@@ -82,7 +82,7 @@
 (defun harness-ui-tasks-test--type-and-submit (board text)
   "Type TEXT into BOARD's compose box and submit it."
   (with-current-buffer board
-    (goto-char harness-ui-tasks--compose-end)
+    (goto-char harness-compose-end)
     (insert text)
     (harness-ui-tasks-submit)))
 
@@ -102,7 +102,7 @@
   (harness-ui-tasks-test-with
     (should (string-match-p "No tasks yet" (harness-ui-tasks-test--board-text board)))
     (with-current-buffer board
-      (should (= harness-ui-tasks--compose-start harness-ui-tasks--compose-end))
+      (should (= harness-compose-start harness-compose-end))
       (should (string-match-p "Tasks" (harness-ui-tasks--header)))
       (should-not (buffer-modified-p)))))
 
@@ -110,22 +110,22 @@
   (harness-ui-tasks-test-with
     (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
     (with-current-buffer board
-      (should (string-empty-p (buffer-substring-no-properties harness-ui-tasks--compose-start
-                                                              harness-ui-tasks--compose-end))))
+      (should (string-empty-p (buffer-substring-no-properties harness-compose-start
+                                                              harness-compose-end))))
     (harness-ui-tasks-test--wait-text board "Completed  1\\(.\\|\n\\)*Fix the flaky test")
     (should (string-match-p "1 done" (with-current-buffer board (harness-ui-tasks--header))))))
 
 (ert-deftest harness-ui-tasks-compose-survives-redraws ()
   (harness-ui-tasks-test-with
     (with-current-buffer board
-      (goto-char harness-ui-tasks--compose-end)
+      (goto-char harness-compose-end)
       (insert "half typed")
-      (let ((offset (- (point) harness-ui-tasks--compose-start)))
+      (let ((offset (- (point) harness-compose-start)))
         (harness-ui-tasks--render)
         (harness-ui-tasks--render)
-        (should (equal "half typed" (buffer-substring-no-properties harness-ui-tasks--compose-start
-                                                                   harness-ui-tasks--compose-end)))
-        (should (= offset (- (point) harness-ui-tasks--compose-start)))))))
+        (should (equal "half typed" (buffer-substring-no-properties harness-compose-start
+                                                                   harness-compose-end)))
+        (should (= offset (- (point) harness-compose-start)))))))
 
 (ert-deftest harness-ui-tasks-edit-pending ()
   (harness-ui-tasks-test-with
@@ -137,10 +137,10 @@
         (search-forward "First draft")
         (harness-ui-tasks-edit)
         (should (eq 'edit (car harness-ui-tasks--target)))
-        (should (equal "First draft" (buffer-substring-no-properties harness-ui-tasks--compose-start
-                                                                     harness-ui-tasks--compose-end)))
-        (delete-region harness-ui-tasks--compose-start harness-ui-tasks--compose-end)
-        (goto-char harness-ui-tasks--compose-start)
+        (should (equal "First draft" (buffer-substring-no-properties harness-compose-start
+                                                                     harness-compose-end)))
+        (delete-region harness-compose-start harness-compose-end)
+        (goto-char harness-compose-start)
         (insert "Second draft")
         (harness-ui-tasks-submit)
         (should-not harness-ui-tasks--target))
@@ -168,7 +168,7 @@
         (should (eq 'harness-ui-tasks-open (key-binding (kbd "RET"))))
         (should (eq 'harness-ui-tasks-merge (key-binding (kbd "M"))))
         ;; The compose box types letters instead.
-        (goto-char harness-ui-tasks--compose-end)
+        (goto-char harness-compose-end)
         (should (eq 'self-insert-command (key-binding (kbd "s"))))
         (should (eq 'harness-ui-tasks-submit (key-binding (kbd "C-c C-c"))))))))
 
@@ -203,6 +203,52 @@
             (harness-test-wait (lambda () (eq session-buf (window-buffer window))) 5 "the session to replace the board")
             (should-not (get-buffer-window board)))
         (kill-buffer session-buf)))))
+
+(defvar harness-compose-attachments)
+(defvar harness-compose--files)
+(declare-function harness-compose-completion-at-point "harness-ui-compose")
+(declare-function harness-compose-add-attachment "harness-ui-compose")
+(declare-function harness-compose-fetch-completions "harness-ui-compose")
+
+(ert-deftest harness-ui-tasks-compose-is-the-chat-box ()
+  "The board's compose box completes @files, newlines on RET and attaches."
+  (harness-ui-tasks-test-with
+    ;; Only projects are listed for @ completion, so this board is for a repository.
+    (let* ((repo (harness-test-temp-dir))
+           (file (expand-file-name "notes.txt" repo))
+           (default-directory repo))
+      (call-process "git" nil nil nil "init" "-q")
+      (with-temp-file file (insert "notes\n"))
+      (setq board (harness-tasks repo))
+      (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-tasks--loading board))) 5 "the board")
+      (with-current-buffer board
+        (goto-char harness-compose-end)
+        (should (eq 'harness-compose-newline (key-binding (kbd "RET"))))
+        (should (eq 'harness-compose-add-attachment (key-binding (kbd "C-c C-a"))))
+        ;; @file completion offers the project's files.
+        (setq harness-compose--files nil)
+        (harness-compose-fetch-completions)
+        (harness-test-wait (lambda () harness-compose--files) 5 "files fetched")
+        (insert "Summarise @no")
+        (let ((capf (harness-compose-completion-at-point)))
+          (should capf)
+          (should (member "notes.txt" (all-completions "no" (nth 2 capf)))))
+        (delete-region harness-compose-start harness-compose-end)
+        ;; An attachment travels with the submitted task.
+        (insert "Summarise the notes")
+        (harness-compose-add-attachment file)
+        (should (= 1 (length harness-compose-attachments)))
+        (harness-ui-tasks-submit)
+        (should-not harness-compose-attachments))
+      (harness-test-wait (lambda () (let ((task (car (harness-call 'task/list default-directory))))
+                                      (and task (plist-get task :session)
+                                           (eq 'done (plist-get task :state)))))
+                         5 "the task to finish")
+      (let* ((task (car (harness-call 'task/list default-directory)))
+             (user (cl-find 'user (harness-call 'session/nodes (plist-get task :session))
+                            :key (lambda (n) (plist-get n :kind)))))
+        (should (equal file (plist-get (car (plist-get task :attachments)) :path)))
+        (should (cl-some (lambda (b) (equal (plist-get b :path) file)) (plist-get user :blocks)))))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here
