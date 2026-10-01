@@ -585,21 +585,22 @@ SELECTED highlights it."
   (interactive)
   (harness-ui-usage-set-group (harness-ui-usage--cycle harness-ui-usage--group harness-ui-usage--groups)))
 
+(defun harness-ui-usage--open-session (sid)
+  "Open session SID where the dashboard is, as it is (an inactive one stays so).
+Usage outlives deleted sessions, so the session is looked up first."
+  (let ((open (harness-ui-session-opener)))
+    (harness-ui-call "_harness/session/get" (list :id sid)
+                     (lambda (_) (funcall open sid)))))
+
 (defun harness-ui-usage-open ()
   "Open the session of the table row at point, or press the button at point."
   (interactive)
   (cond
    ((get-text-property (point) 'harness-ui-usage-session)
-    (let ((sid (get-text-property (point) 'harness-ui-usage-session))
-          (open (harness-ui-session-opener)))
-      (harness-ui-call "_harness/session/resume" (list :id sid)
-                       (lambda (_) (funcall open sid)))))
+    (harness-ui-usage--open-session (get-text-property (point) 'harness-ui-usage-session)))
    ((button-at (point)) (push-button))
    ((and (eq harness-ui-usage--group 'session) (get-text-property (point) 'harness-ui-usage-row))
-    (let ((sid (plist-get (get-text-property (point) 'harness-ui-usage-row) :key))
-          (open (harness-ui-session-opener)))
-      (harness-ui-call "_harness/session/resume" (list :id sid)
-                       (lambda (_) (funcall open sid)))))
+    (harness-ui-usage--open-session (plist-get (get-text-property (point) 'harness-ui-usage-row) :key)))
    (t (user-error "Nothing to open here"))))
 
 (defun harness-ui-usage-mouse-open (event)

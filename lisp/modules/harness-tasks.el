@@ -389,12 +389,13 @@ so a board opened from a task's session shows the project's tasks."
 
 (defun harness-tasks--on-turn-started (session-id)
   "Move SESSION-ID's task to active when a turn starts.
-A turn during a merge (resolving a conflict) keeps the task merging."
+A turn during a merge (resolving a conflict) keeps the task merging.  A
+message sent to an archived task's session brings the task back too."
   (when-let* ((task (harness-tasks--by-session session-id)))
     (remhash (plist-get task :id) harness-tasks--starting)
     (unless (and (eq (plist-get task :state) 'merging) (plist-get task :merge-status))
       (harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
-                          :merged nil))))
+                          :merged nil :archived nil))))
 
 (defun harness-tasks--on-turn-ended (session-id reason)
   "Advance SESSION-ID's task when its turn ended with REASON.

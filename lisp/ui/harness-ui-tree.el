@@ -576,11 +576,9 @@ Every window showing the buffer keeps its own row too."
   (let* ((node (harness-ui-tree-node-at-point))
          (sid (plist-get node :session))
          (open (harness-ui-session-opener)))
-    (harness-ui-call "_harness/session/resume" (list :id sid)
-                     (lambda (_)
-                       (funcall open sid)
-                       (when (fboundp 'harness-ui-chat-goto-node)
-                         (harness-ui-chat-goto-node (plist-get node :id)))))))
+    (funcall open sid)
+    (when (fboundp 'harness-ui-chat-goto-node)
+      (harness-ui-chat-goto-node (plist-get node :id)))))
 
 (defun harness-ui-tree-mouse-open (event)
   "Open the session of the row clicked in EVENT."

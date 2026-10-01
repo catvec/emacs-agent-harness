@@ -174,6 +174,23 @@
           (harness-call 'task/complete b)
           (should (eq 'done (harness-tasks-test-state b))))))))
 
+(ert-deftest harness-tasks-message-revives-archived-task ()
+  ;; Sending in an archived task's chat buffer (`agent/prompt', not
+  ;; `task/prompt') resumes its session and puts the task back on the board.
+  (harness-tasks-test-with
+    (let* ((id (harness-tasks-test-submit "a"))
+           (sid (plist-get (harness-tasks-test-task id) :session))
+           (states nil))
+      (harness-tasks-test-wait-state id 'done)
+      (harness-call 'task/archive id)
+      (should (eq 'inactive (plist-get (harness-call 'session/get sid) :status)))
+      (harness-on 'task/changed (lambda (task) (push (plist-get task :state) states)))
+      (harness-await (harness-call 'agent/prompt sid "one more thing"))
+      (should (memq 'active states))
+      (should-not (plist-get (harness-tasks-test-task id) :archived))
+      (harness-tasks-test-wait-state id 'done)
+      (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
+
 (ert-deftest harness-tasks-delete ()
   (harness-tasks-test-with
     (let ((a (harness-tasks-test-submit "a"))

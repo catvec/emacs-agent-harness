@@ -706,8 +706,7 @@ window selected now even when another frame is selected by then."
   (harness-ui-refresh-sessions
    (lambda (_)
      (let ((s (harness-ui-read-session "Switch to session: ")))
-       (harness-ui-call "_harness/session/resume" (list :id (plist-get s :id))
-                        (lambda (_) (harness-ui-display-session (plist-get s :id) position)))))))
+       (harness-ui-display-session (plist-get s :id) position)))))
 
 ;;;; Session settings
 

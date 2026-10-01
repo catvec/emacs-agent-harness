@@ -593,6 +593,50 @@
         (harness-ui-chat-test-type buf "anyone there?")
         (should-error (harness-chat-send) :type 'user-error)))))
 
+(ert-deftest harness-ui-chat-inactive-session-reanimates-on-send ()
+  ;; An inactive session opens as it is, with a notice and its compose box;
+  ;; the first message sent from it resumes it and the notice goes away.
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/deactivate sid)
+      (harness-open-session sid)
+      (let ((buf (harness-chat--buffer-for sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf
+                                        (and (not harness-chat--loading) harness-compose-end harness-chat--inactive)))
+                           5 "inactive session shown")
+        (should (eq 'inactive (plist-get (harness-call 'session/get sid) :status)))
+        (with-current-buffer buf
+          (should (harness-compose-live-p))
+          (should (harness-ui-chat-test-find buf "This session is inactive"))
+          (should (string-match-p "resumes this session"
+                                  (format "%s" (overlay-get harness-compose--placeholder 'before-string))))
+          (should (string-match-p "inactive" (harness-chat--mode-line))))
+        (harness-ui-chat-test-prompt buf "are you there?")
+        (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+        (with-current-buffer buf
+          (should-not harness-chat--inactive)
+          (should-not (harness-ui-chat-test-find buf "This session is inactive"))
+          (should (harness-ui-chat-test-find buf "are you there?")))))))
+
+(ert-deftest harness-ui-chat-render-failure-keeps-compose ()
+  ;; A block whose renderer signals shows unformatted; the blocks after it
+  ;; and the compose box still draw (a Markdown bug once left none).
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid (list :kind 'user :content "hi"))
+      (harness-call 'session/append sid (list :kind 'assistant :content "**bad** markdown"))
+      (harness-call 'session/hint sid "after the bad block")
+      (cl-letf (((symbol-function 'harness-ui-markdown-render)
+                 (lambda (_text) (signal 'wrong-type-argument '(stringp nil)))))
+        (let ((buf (harness-ui-chat-test-open sid)))
+          (with-current-buffer buf
+            (should (harness-compose-live-p))
+            (should (harness-ui-chat-test-find buf "**bad** markdown"))
+            (should (harness-ui-chat-test-find buf "shown unformatted"))
+            (should (harness-ui-chat-test-find buf "after the bad block"))
+            (harness-ui-chat-test-type buf "still works")
+            (should (equal "still works" (harness-compose-text)))))))))
+
 (ert-deftest harness-ui-chat-completion-sources ()
   (harness-ui-chat-test-with
     ;; Only projects are listed, so the session runs in a repository.

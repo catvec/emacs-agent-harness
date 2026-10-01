@@ -9,6 +9,7 @@
 ;;   pending panel permission requests and questions waiting for the user
 ;;   queue         messages queued for the next turn
 ;;   attachments   chips for files attached to the next message
+;;   notice        the session was deleted, or is inactive (sending resumes it)
 ;;   compose       an editable region; C-c C-c sends, RET adds a newline
 ;;   mode line     status, turn duration
 ;;
@@ -159,6 +160,7 @@ Once two pages of nodes lie above every window, all but one are dropped."
 (defvar-local harness-chat--generation 0 "Bumped on every reload to drop stale responses.")
 (defvar-local harness-chat--session nil "Last session plist seen, for after deletion.")
 (defvar-local harness-chat--unfinished nil "Ids of tool-call blocks without a result yet.")
+(defvar-local harness-chat--inactive nil "Non-nil while the session is inactive; sending resumes it.")
 
 ;;;; Small helpers
 
@@ -684,6 +686,18 @@ of an ask_user) are left out."
                        (or (plist-get (harness-chat-block-node block) :content) "") "\n")
                'face 'error)))
 
+(defun harness-chat--render-failed (block err)
+  "Return the body of BLOCK, whose renderer signalled ERR, as plain text.
+A block that cannot be rendered must not take the rest of the buffer
+down with it: the transcript below it and the compose box still draw."
+  (let ((node (harness-chat-block-node block)))
+    (harness-chat--margin
+     (concat (harness-chat--plain (or (harness-chat-block-content block)
+                                      (plist-get node :content) (plist-get node :title)
+                                      (format "[%s]" (harness-chat-block-kind block))))
+             (propertize (format "(shown unformatted: rendering failed with %s)\n" (error-message-string err))
+                         'face 'harness-dim-face)))))
+
 (defun harness-chat--render-group (group)
   "Return the body of the summary block of GROUP."
   (let* ((gid (harness-chat-group-id group))
@@ -719,18 +733,20 @@ of an ask_user) are left out."
   "Return the full text of BLOCK: its body, then the separator newline."
   (let* ((kind (harness-chat-block-kind block))
          (body (harness-chat--with-display
-                (pcase kind
-                 ("user" (harness-chat--render-user block))
-                 ("assistant" (harness-chat--render-assistant block))
-                 ("thinking" (harness-chat--render-thinking block))
-                 ((or "tool-call" "tool-result") (harness-chat--render-tool block))
-                 ("hint" (harness-chat--render-hint block))
-                 ("compaction" (harness-chat--render-compaction block))
-                 ("plan" (harness-chat--render-plan block))
-                 ("error" (harness-chat--render-error block))
-                 (_ (harness-chat--margin
-                     (harness-chat--plain (or (plist-get (harness-chat-block-node block) :content)
-                                              (format "[%s]" kind))))))))
+                (condition-case err
+                    (pcase kind
+                      ("user" (harness-chat--render-user block))
+                      ("assistant" (harness-chat--render-assistant block))
+                      ("thinking" (harness-chat--render-thinking block))
+                      ((or "tool-call" "tool-result") (harness-chat--render-tool block))
+                      ("hint" (harness-chat--render-hint block))
+                      ("compaction" (harness-chat--render-compaction block))
+                      ("plan" (harness-chat--render-plan block))
+                      ("error" (harness-chat--render-error block))
+                      (_ (harness-chat--margin
+                          (harness-chat--plain (or (plist-get (harness-chat-block-node block) :content)
+                                                   (format "[%s]" kind))))))
+                  (error (harness-chat--render-failed block err)))))
          (text (concat (if (and (harness-chat-block-head block) (not (harness-chat-block-group block)))
                            (harness-chat--agent-header)
                          "")
@@ -1109,6 +1125,9 @@ of an ask_user) are left out."
              (when-let* ((b (gethash id harness-chat--blocks))) (harness-chat--rerender b)))
            (setq harness-chat--unfinished nil)))
     (setq changed (harness-chat--sync-pending (plist-get session :pending)))
+    ;; Entering or leaving `inactive' shows or hides the notice above the box.
+    (unless (eq (equal status "inactive") harness-chat--inactive)
+      (setq harness-chat--inactive (equal status "inactive") changed t))
     (unless (equal (plist-get session :queue) harness-chat--queue)
       (setq harness-chat--queue (plist-get session :queue) changed t))
     (when changed (harness-chat--render-tail))
@@ -1392,6 +1411,8 @@ The panel answers through RESPOND."
         (harness-compose-insert-attachments)
         (when harness-chat--dead
           (insert (propertize " This session was deleted; the transcript stays readable.\n" 'face 'harness-hint-face)))
+        (when (and harness-chat--inactive (not harness-chat--dead))
+          (insert (propertize " This session is inactive. Sending a message resumes it.\n" 'face 'harness-hint-face)))
         (put-text-property start (point) 'read-only t)
         (harness-compose-insert nil "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, C-c C-a attaches")))
     (cond (offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
@@ -1411,6 +1432,7 @@ The panel answers through RESPOND."
   "Return the hint for the empty compose box."
   (cond (harness-chat--dead "session deleted")
         ((harness-chat--active-question) "type an answer and press C-c C-c")
+        (harness-chat--inactive "Message\N{U+2026} (sending resumes this session)")
         (t "Message…")))
 
 ;;;; Bottom anchoring
@@ -1448,12 +1470,14 @@ The panel answers through RESPOND."
   "Render NODES (oldest first) as the whole transcript."
   (harness-compose-capture)
   (harness-chat--reset-buffer)
-  (let ((harness-chat--batch t))
-    (dolist (node nodes)
-      (harness-chat--on-node node))
-    (harness-chat--regroup))
-  (harness-chat--render-top)
-  (harness-chat--render-tail))
+  (unwind-protect
+      (let ((harness-chat--batch t))
+        (dolist (node nodes)
+          (harness-chat--on-node node))
+        (harness-chat--regroup))
+    ;; Whatever happened above, the buffer keeps its panel and compose box.
+    (harness-chat--render-top)
+    (harness-chat--render-tail)))
 
 (defun harness-chat--oldest-id ()
   "Return the id of the oldest rendered node."
@@ -1911,12 +1935,12 @@ the background it was rendered on, so it would show as a dark box."
 
 ;;;###autoload
 (defun harness-open-session (id &optional position)
-  "Open session ID in POSITION (resuming it when inactive)."
+  "Open session ID in POSITION.
+An inactive session opens as it is, compose box included; the first
+message sent from it resumes it."
   (interactive (list (plist-get (harness-ui-read-session "Open session: ") :id)
                      (and current-prefix-arg (harness-ui-read-position))))
-  (harness-ui-call "_harness/session/resume" (list :id id)
-                   (lambda (_) (harness-ui-display-session id position))
-                   (lambda (_) (harness-ui-display-session id position))))
+  (harness-ui-display-session id position))
 
 ;;;###autoload
 (defun harness-open-latest-session (&optional position)

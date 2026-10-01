@@ -823,8 +823,7 @@ By default it takes the board's own position, replacing the board."
          (sid (plist-get task :session))
          (open (harness-ui-session-opener position)))
     (unless sid (user-error "This task has not started yet; s starts it now"))
-    (harness-ui-call "_harness/session/resume" (list :id sid)
-                     (lambda (_) (funcall open sid)))))
+    (funcall open sid)))
 
 (defun harness-ui-tasks-open-other ()
   "Open the session of the task at point in a position read from the user."

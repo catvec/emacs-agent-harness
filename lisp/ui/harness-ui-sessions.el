@@ -172,10 +172,7 @@
 (defun harness-ui-sessions-open (&optional position)
   "Open the session at point in POSITION, by default replacing the list."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
-  (let ((id (harness-ui-sessions--id))
-        (open (harness-ui-session-opener position)))
-    (harness-ui-call "_harness/session/resume" (list :id id)
-                     (lambda (_) (funcall open id)))))
+  (funcall (harness-ui-session-opener position) (harness-ui-sessions--id)))
 
 (defun harness-ui-sessions-open-other ()
   "Open the session at point in the other position preset."
