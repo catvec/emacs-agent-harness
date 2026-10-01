@@ -145,7 +145,7 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-thinking "thinking" "…" "think" "Thinking.")
 (harness-ui-define-icon harness-icon-collapsed "collapsed" "▸" "+" "Collapsed block.")
 (harness-ui-define-icon harness-icon-expanded "expanded" "▾" "-" "Expanded block.")
-(harness-ui-define-icon harness-icon-send "send" "→" "send" "Send.")
+(harness-ui-define-icon harness-icon-send "send" "➤" "send" "Send.")
 (harness-ui-define-icon harness-icon-attach "attach" "+" "attach" "Attachment.")
 (harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
 
