@@ -43,6 +43,7 @@
 (require 'harness-util)
 (require 'harness-acp)
 (require 'harness-ui)
+(require 'harness-ui-compose)
 (require 'harness-files)
 (require 'harness-ui-markdown)
 
@@ -139,23 +140,13 @@
 (defvar-local harness-chat--group-seq 0)
 (defvar-local harness-chat--transcript-start nil "Marker: first block.")
 (defvar-local harness-chat--transcript-end nil "Marker: after the last block.")
-(defvar-local harness-chat--compose-start nil "Marker: first compose character.")
-(defvar-local harness-chat--compose-end nil "Marker: after the last compose character.")
-(defvar-local harness-chat--compose-overlay nil)
-(defvar-local harness-chat--placeholder-overlay nil)
-(defvar-local harness-chat--compose-text "" "Compose text kept across redraws.")
-(defvar-local harness-chat--attachments nil "Attachments for the next message.")
 (defvar-local harness-chat--queue nil "Queued items as last rendered.")
 (defvar-local harness-chat--pending nil "Pending request records: (:id :kind :respond :created …).")
 (defvar-local harness-chat--editing nil "Queue item id loaded into the compose box.")
-(defvar-local harness-chat--pads nil "Window -> overlay padding the top so the compose box sits at the bottom.")
 (defvar-local harness-chat--has-more nil "Non-nil when older nodes exist.")
 (defvar-local harness-chat--loading nil "Non-nil while the transcript is being fetched.")
 (defvar-local harness-chat--deferred nil "Updates that arrived while loading, newest first.")
 (defvar-local harness-chat--coalescable nil "Names of coalescable tools.")
-(defvar-local harness-chat--files nil "Project files for @ completion.")
-(defvar-local harness-chat--skills nil "Skill names for / completion.")
-(defvar-local harness-chat--files-at nil "Start of the @ token whose completion last refreshed the files.")
 (defvar-local harness-chat--turn-start nil "Float time the running turn started.")
 (defvar-local harness-chat--unseen nil "Non-nil when content arrived while scrolled up.")
 (defvar-local harness-chat--dead nil "Non-nil once the session was deleted.")
@@ -364,10 +355,8 @@ A transcript shorter than the window stays at the top."
   (when (window-live-p window)
     ;; `recenter' would count the top padding as lines to keep in view and
     ;; scroll a short transcript off the top: drop it, and let
-    ;; `harness-chat--pad-window' size it again for the new start.
-    (when-let* ((pad (alist-get window harness-chat--pads)))
-      (overlay-put pad 'before-string nil)
-      (overlay-put pad 'harness-chat-key nil))
+    ;; `harness-compose-pad-window' size it again for the new start.
+    (harness-compose-repad window)
     (with-selected-window window
       (save-excursion (goto-char (point-max)) (recenter -1)))))
 
@@ -379,7 +368,7 @@ A transcript shorter than the window stays at the top."
           (progn
             (harness-chat--pin w)
             (when (< (window-point w) harness-chat--transcript-end)
-              (set-window-point w (or harness-chat--compose-end (point-max)))))
+              (set-window-point w (or harness-compose-end (point-max)))))
         (unless harness-chat--unseen
           (setq harness-chat--unseen t)
           (force-mode-line-update))))))
@@ -388,7 +377,7 @@ A transcript shorter than the window stays at the top."
   "Show the newest messages and put point in the compose box."
   (interactive)
   (setq harness-chat--unseen nil)
-  (goto-char (or harness-chat--compose-end (point-max)))
+  (goto-char (or harness-compose-end (point-max)))
   (dolist (w (harness-chat--windows))
     (set-window-point w (point))
     (harness-chat--pin w))
@@ -421,7 +410,7 @@ found again after the transcript is rebuilt."
   (pcase-dolist (`(,w ,bottom ,node ,offset ,start) anchors)
     (when (window-live-p w)
       (if bottom
-          (progn (set-window-point w (or harness-chat--compose-end (point-max)))
+          (progn (set-window-point w (or harness-compose-end (point-max)))
                  (harness-chat--pin w))
         (let ((block (and node (gethash node harness-chat--blocks))))
           (set-window-start w (if block
@@ -1357,60 +1346,19 @@ The panel answers through RESPOND."
                   "\n")))
       (add-face-text-property start (point) 'harness-queue-face t))))
 
-(defun harness-chat--insert-attachments ()
-  "Insert the attachment chips."
-  (when harness-chat--attachments
-    (insert " " (propertize (harness-ui-icon 'harness-icon-attach) 'face 'harness-dim-face) " ")
-    (dolist (att harness-chat--attachments)
-      (let* ((path (plist-get att :path))
-             (label (format "%s (%s)"
-                            (harness-truncate-middle (harness-relative-path (harness-chat--project) path) 40)
-                            (harness-format-bytes (plist-get att :size)))))
-        (insert (harness-chat--button label (lambda () (find-file-other-window path))
-                                      :help (concat path "\nmouse-1: open") :face 'link)
-                (harness-chat--button "×" (lambda () (harness-chat-remove-attachment path))
-                                      :help "Remove this attachment" :face 'harness-dim-face)
-                "  ")))
-    (insert "\n")))
-
-(defun harness-chat--compose-live-p ()
-  "Non-nil when the compose markers point into this buffer."
-  (and harness-chat--compose-start harness-chat--compose-end
-       (eq (marker-buffer harness-chat--compose-start) (current-buffer))
-       (<= harness-chat--compose-start harness-chat--compose-end)))
-
-(defun harness-chat--capture-compose ()
-  "Store the compose text from the buffer into `harness-chat--compose-text'."
-  (when (harness-chat--compose-live-p)
-    (setq harness-chat--compose-text
-          (buffer-substring-no-properties harness-chat--compose-start harness-chat--compose-end))))
-
-(defun harness-chat--compose-text ()
-  "Return the current compose text."
-  (harness-chat--capture-compose)
-  harness-chat--compose-text)
-
-(defun harness-chat--in-compose-p (&optional pos)
-  "Non-nil when POS (default point) is inside the compose region."
-  (let ((p (or pos (point))))
-    (and (harness-chat--compose-live-p)
-         (>= p harness-chat--compose-start) (<= p harness-chat--compose-end))))
-
 (defun harness-chat--render-tail ()
   "Render everything below the transcript, keeping the compose text."
   (harness-chat--with-display (harness-chat--render-tail-1)))
 
 (defun harness-chat--render-tail-1 ()
   "Do the work of `harness-chat--render-tail'."
-  (harness-chat--capture-compose)
-  (let* ((offset (and (harness-chat--in-compose-p) (- (point) harness-chat--compose-start)))
+  (harness-compose-capture)
+  (let* ((offset (and (harness-compose-in-p) (- (point) harness-compose-start)))
          (in-tail (>= (point) harness-chat--transcript-end))
          (inhibit-read-only t)
          (buffer-undo-list t)
          (bottom (harness-chat--bottom-windows))
          (windows (mapcar (lambda (w) (cons w (window-start w))) (harness-chat--windows))))
-    (dolist (ov (list harness-chat--compose-overlay harness-chat--placeholder-overlay))
-      (when ov (delete-overlay ov)))
     (save-excursion
       (delete-region harness-chat--transcript-end (point-max))
       (goto-char harness-chat--transcript-end)
@@ -1420,90 +1368,31 @@ The panel answers through RESPOND."
               (harness-chat--insert-question-panel r)
             (harness-chat--insert-permission-panel r)))
         (harness-chat--insert-queue)
-        (harness-chat--insert-attachments)
+        (harness-compose-insert-attachments)
         (when harness-chat--dead
           (insert (propertize " This session was deleted; the transcript stays readable.\n" 'face 'harness-hint-face)))
-        ;; Compose box.
-        (let ((label-start (point)))
-          (insert (propertize "❯ "
-                              'face '(harness-dim-face harness-compose-face)
-                              'help-echo "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, C-c C-a attaches"))
-          (put-text-property start (point) 'read-only t)
-          (put-text-property (1- (point)) (point) 'rear-nonsticky t)
-          (setq harness-chat--compose-start (copy-marker (point)))
-          (insert harness-chat--compose-text)
-          (let ((end (point)))
-            (insert (propertize "\n" 'read-only t))
-            (setq harness-chat--compose-end (copy-marker end t)))
-          ;; FRONT-ADVANCE: blocks appended at the transcript end stay outside.
-          (setq harness-chat--compose-overlay (make-overlay label-start (point) nil t t))
-          (overlay-put harness-chat--compose-overlay 'face 'harness-compose-face)
-          (setq harness-chat--placeholder-overlay (make-overlay (1- (point)) (point)))
-          (harness-chat--update-placeholder))))
-    (cond (offset (goto-char (min (+ harness-chat--compose-start offset) harness-chat--compose-end)))
-          (in-tail (goto-char harness-chat--compose-end)))
+        (put-text-property start (point) 'read-only t)
+        (harness-compose-insert nil "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, C-c C-a attaches")))
+    (cond (offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
+          (in-tail (goto-char harness-compose-end)))
     (dolist (w windows)
       (cond ((not (window-live-p (car w))))
             ;; A window following the conversation keeps showing the newest
             ;; lines, so a new panel or queue entry never lands off screen.
             ((memq (car w) bottom)
              (unless (eq (car w) (selected-window))
-               (set-window-point (car w) harness-chat--compose-end))
+               (set-window-point (car w) harness-compose-end))
              (harness-chat--pin (car w)))
             ((< (cdr w) harness-chat--transcript-end)
              (set-window-start (car w) (cdr w) t))))))
 
-(defun harness-chat--hl-line-range ()
-  "Return the `hl-line-mode' range, empty inside the compose box.
-The line highlight would cover the compose background, and outranking it
-would hide the region too.  Never nil: `global-hl-line-mode' needs a range."
-  (if (and harness-chat--compose-overlay (overlay-buffer harness-chat--compose-overlay)
-           (>= (point) (overlay-start harness-chat--compose-overlay)))
-      (cons (point) (point))
-    (cons (line-beginning-position) (line-beginning-position 2))))
-
-(defun harness-chat--update-placeholder ()
-  "Show a hint in the empty compose box."
-  (when (and harness-chat--placeholder-overlay (overlay-buffer harness-chat--placeholder-overlay)
-             (harness-chat--compose-live-p))
-    (overlay-put harness-chat--placeholder-overlay 'before-string
-                 (if (= harness-chat--compose-start harness-chat--compose-end)
-                     (propertize (cond (harness-chat--dead "session deleted")
-                                       ((harness-chat--active-question) "type an answer and press C-c C-c")
-                                       (t "Message…"))
-                                 ;; Overlay strings miss the compose overlay's face.
-                                 'face '(harness-dim-face harness-compose-face) 'cursor t)
-                   nil))))
+(defun harness-chat--placeholder ()
+  "Return the hint for the empty compose box."
+  (cond (harness-chat--dead "session deleted")
+        ((harness-chat--active-question) "type an answer and press C-c C-c")
+        (t "Message…")))
 
 ;;;; Bottom anchoring
-
-(defun harness-chat--pad-window (window)
-  "Pad the top of WINDOW so a short transcript ends at its bottom.
-Runs from `pre-redisplay-functions'; each window gets its own overlay."
-  (when (and (window-live-p window) (eq (window-buffer window) (current-buffer))
-             (harness-chat--compose-live-p))
-    (setq harness-chat--pads
-          (cl-remove-if-not (lambda (p) (and (window-live-p (car p)) (overlay-buffer (cdr p))
-                                             (eq (window-buffer (car p)) (current-buffer))))
-                            harness-chat--pads))
-    (let* ((ov (or (alist-get window harness-chat--pads)
-                   (let ((o (make-overlay (point-min) (point-min) nil t)))
-                     (overlay-put o 'window window)
-                     (push (cons window o) harness-chat--pads)
-                     o)))
-           (body (window-body-height window t))
-           (key (list (buffer-modified-tick) body (window-body-width window t) (window-start window))))
-      (unless (equal key (overlay-get ov 'harness-chat-key))
-        (overlay-put ov 'harness-chat-key key)
-        (move-overlay ov (point-min) (point-min))
-        (overlay-put ov 'before-string nil)
-        ;; Leave a line for the empty one after the compose box, where
-        ;; `harness-chat--follow' puts the bottom of the window.
-        (let* ((line (frame-char-height (window-frame window)))
-               (used (cdr (window-text-pixel-size window (point-min) harness-chat--compose-end nil body)))
-               (lines (/ (- body used line) line)))
-          (when (and (= (window-start window) (point-min)) (> lines 0))
-            (overlay-put ov 'before-string (make-string lines ?\n))))))))
 
 ;;;; Top region and history
 
@@ -1531,14 +1420,14 @@ Runs from `pre-redisplay-functions'; each window gets its own overlay."
         harness-chat--render-timers (make-hash-table :test 'equal)
         harness-chat--order nil
         harness-chat--unfinished nil
-        harness-chat--compose-start nil
-        harness-chat--compose-end nil
+        harness-compose-start nil
+        harness-compose-end nil
         harness-chat--transcript-start (copy-marker (point-max))
         harness-chat--transcript-end (copy-marker (point-max))))
 
 (defun harness-chat--render-nodes (nodes)
   "Render NODES (oldest first) as the whole transcript."
-  (harness-chat--capture-compose)
+  (harness-compose-capture)
   (harness-chat--reset-buffer)
   (let ((harness-chat--batch t))
     (dolist (node nodes)
@@ -1613,15 +1502,15 @@ end afterwards."
   (let* ((buf (current-buffer))
          (sid harness-ui-session-id)
          (gen (cl-incf harness-chat--generation)))
-    (harness-chat--capture-compose)
+    (harness-compose-capture)
     (setq harness-chat--loading t harness-chat--deferred nil)
     ;; Only an empty buffer shows "loading…": blanking a full one would
     ;; flash the top of the buffer before the windows find their place again.
     (unless harness-chat--order (harness-chat--render-nodes nil))
     (if (harness-chat--session)
-        (progn (harness-chat--fetch-session) (harness-chat--fetch-completions))
+        (progn (harness-chat--fetch-session) (harness-compose-fetch-completions))
       ;; Completion sources need the project root: fetch them once the session is known.
-      (harness-chat--fetch-session #'harness-chat--fetch-completions))
+      (harness-chat--fetch-session #'harness-compose-fetch-completions))
     (harness-then
      (harness-all (list (harness-ui-request "_harness/tools/list" (list :session-id sid))
                         (harness-ui-request "_harness/session/nodes"
@@ -1636,12 +1525,12 @@ end afterwards."
                                      (car results))))
              (let ((nodes (cadr results))
                    (anchors (harness-chat--window-anchors))
-                   (offset (and (harness-chat--in-compose-p) (- (point) harness-chat--compose-start))))
+                   (offset (and (harness-compose-in-p) (- (point) harness-compose-start))))
                (setq harness-chat--has-more (>= (length nodes) harness-chat-history-limit)
                      harness-chat--loading nil)
                (harness-chat--render-nodes nodes)
                (when offset
-                 (goto-char (min (+ harness-chat--compose-start offset) harness-chat--compose-end)))
+                 (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
                (harness-chat--restore-anchors anchors)
                (dolist (u (nreverse harness-chat--deferred))
                  (when (and (equal (plist-get u :sessionUpdate) "_harness/node")
@@ -1681,27 +1570,6 @@ fetched: older nodes outside the fetched window are skipped."
                            (when then (funcall then)))))
                      #'ignore)))
 
-(defun harness-chat--fetch-files ()
-  "Refresh `harness-chat--files' from the project's file list.
-Listed here, not by the harness process, so it is this Emacs's
-projectile cache (cleared by `projectile-invalidate-cache') that answers;
-a miss lists asynchronously.  On failure the previous list is kept."
-  (let ((buf (current-buffer)))
-    (harness-then (harness-files-list-limited (harness-chat--project) nil 20000)
-                  (lambda (files) (when (buffer-live-p buf) (with-current-buffer buf (setq harness-chat--files files))))
-                  (lambda (err) (harness-log 'warn "chat: listing project files failed: %s" (harness-error-message err))))))
-
-(defun harness-chat--fetch-completions ()
-  "Prefetch project files and skill names for completion."
-  (let ((buf (current-buffer)))
-    (harness-chat--fetch-files)
-    (harness-ui-call "_harness/skills/list" (list :cwd (harness-chat--project))
-                     (lambda (skills)
-                       (when (buffer-live-p buf)
-                         (with-current-buffer buf
-                           (setq harness-chat--skills (mapcar (lambda (s) (plist-get s :name)) skills)))))
-                     #'ignore)))
-
 (defun harness-chat--redraw-all ()
   "Rebuild every chat buffer from scratch, keeping compose text and scroll state."
   (maphash (lambda (_ buf)
@@ -1712,60 +1580,15 @@ a miss lists asynchronously.  On failure the previous list is kept."
 
 ;;;; Sending
 
-(defun harness-chat--attachment-block (att)
-  "Return the ACP prompt block for attachment ATT."
-  (let* ((path (plist-get att :path))
-         (mime (or (plist-get att :mime) "application/octet-stream")))
-    (if (and (string-prefix-p "image/" mime) (file-readable-p path))
-        (list :type "image" :mimeType mime
-              :data (with-temp-buffer
-                      (set-buffer-multibyte nil)
-                      (insert-file-contents-literally path)
-                      (base64-encode-string (buffer-string) t)))
-      (list :type "resource_link" :uri (concat "file://" path)
-            :name (or (plist-get att :name) (file-name-nondirectory path))
-            :size (plist-get att :size) :mimeType mime))))
-
-(defun harness-chat--skill-reference-p (text)
-  "Non-nil when TEXT references a skill by /name or @skill:name."
-  (or (string-match-p "\\(?:\\`\\|[ \t\n]\\)@skill:[A-Za-z0-9_.-]+" text)
-      (let ((case-fold-search nil) (found nil))
-        (dolist (name harness-chat--skills found)
-          (when (string-match-p (concat "\\(?:\\`\\|[ \t\n]\\)/" (regexp-quote name) "\\_>") text)
-            (setq found t))))))
-
-(defun harness-chat--with-expanded-text (text callback)
-  "Call CALLBACK with TEXT after expanding skill references in it."
-  (if (harness-chat--skill-reference-p text)
-      (harness-ui-call "_harness/skills/expand" (list :text text :cwd (harness-chat--project))
-                       (lambda (r) (funcall callback (or (plist-get r :text) text)))
-                       (lambda (_) (funcall callback text)))
-    (funcall callback text)))
-
-(defun harness-chat--set-compose (text)
-  "Replace the compose box contents with TEXT."
-  (setq harness-chat--compose-text text)
-  (when (harness-chat--compose-live-p)
-    (let ((inhibit-read-only t))
-      (delete-region harness-chat--compose-start harness-chat--compose-end)
-      (save-excursion
-        (goto-char harness-chat--compose-start)
-        (insert text)))
-    (harness-chat--update-placeholder)))
-
 (defun harness-chat--clear-compose ()
   "Empty the compose box and the attachments."
-  (harness-chat--set-compose "")
-  (setq harness-chat--attachments nil harness-chat--editing nil)
-  (harness-chat--render-tail))
+  (setq harness-chat--editing nil)
+  (harness-compose-clear))
 
 (defun harness-chat--take-message ()
   "Return (TEXT . ATTACHMENTS) from the compose box, or signal when empty."
-  (let ((text (string-trim (harness-chat--compose-text)))
-        (atts harness-chat--attachments))
-    (when harness-chat--dead (user-error "This session was deleted"))
-    (when (and (string-empty-p text) (null atts)) (user-error "Nothing to send"))
-    (cons text atts)))
+  (when harness-chat--dead (user-error "This session was deleted"))
+  (harness-compose-take))
 
 (defun harness-chat--drop-edited-queue-item ()
   "Remove the queue item being edited, if any."
@@ -1784,7 +1607,7 @@ a miss lists asynchronously.  On failure the previous list is kept."
 While the agent is running the message steers the current turn."
   (interactive)
   (let ((question (harness-chat--active-question))
-        (typed (string-trim (harness-chat--compose-text))))
+        (typed (string-trim (harness-compose-text))))
     (if (and question (not (string-empty-p typed)))
         (progn (harness-chat--answer-question (plist-get question :id) typed)
                (harness-chat--clear-compose))
@@ -1793,11 +1616,11 @@ While the agent is running the message steers the current turn."
                   (sid harness-ui-session-id))
         (harness-chat--drop-edited-queue-item)
         (harness-chat--clear-compose)
-        (harness-chat--with-expanded-text
+        (harness-compose-with-expanded-text
          text
          (lambda (expanded)
            (let ((blocks (append (and (not (string-empty-p expanded)) (list (list :type "text" :text expanded)))
-                                 (mapcar #'harness-chat--attachment-block atts))))
+                                 (mapcar #'harness-compose-attachment-block atts))))
              (harness-ui-call "session/prompt" (list :sessionId sid :prompt blocks)
                               #'ignore
                               (lambda (err) (harness-chat--report-error buf "send" err))))))))))
@@ -1810,7 +1633,7 @@ While the agent is running the message steers the current turn."
               (sid harness-ui-session-id))
     (harness-chat--drop-edited-queue-item)
     (harness-chat--clear-compose)
-    (harness-chat--with-expanded-text
+    (harness-compose-with-expanded-text
      text
      (lambda (expanded)
        (harness-ui-call "_harness/agent/prompt"
@@ -1828,11 +1651,11 @@ While the agent is running the message steers the current turn."
   "Load queued item QID into the compose box; sending removes it from the queue."
   (interactive (list (plist-get (car harness-chat--queue) :id)))
   (when-let* ((item (cl-find qid harness-chat--queue :key (lambda (i) (plist-get i :id)) :test #'equal)))
-    (harness-chat--set-compose (or (plist-get item :text) ""))
-    (setq harness-chat--attachments (plist-get item :attachments)
+    (harness-compose-set (or (plist-get item :text) ""))
+    (setq harness-compose-attachments (plist-get item :attachments)
           harness-chat--editing qid)
     (harness-chat--render-tail)
-    (goto-char harness-chat--compose-end)))
+    (goto-char harness-compose-end)))
 
 (defun harness-chat-remove-queued (qid)
   "Remove queued item QID."
@@ -1843,136 +1666,6 @@ While the agent is running the message steers the current turn."
   "Cancel the running turn."
   (interactive)
   (harness-cancel-turn harness-ui-session-id))
-
-(defun harness-chat-newline ()
-  "Insert a newline in the compose box, or jump there from elsewhere."
-  (interactive)
-  (if (harness-chat--in-compose-p)
-      (insert "\n")
-    (goto-char harness-chat--compose-end)))
-
-;;;; Attachments
-
-(defun harness-chat--mime-of (path)
-  "Return the MIME type of PATH."
-  (or (mailcap-extension-to-mime (file-name-extension path t)) "application/octet-stream"))
-
-(defun harness-chat-add-attachment (path &optional mime)
-  "Attach the file PATH (with MIME) to the next message."
-  (interactive (list (read-file-name "Attach file: " (harness-chat--project) nil t)))
-  (let ((path (expand-file-name path)))
-    (unless (cl-find path harness-chat--attachments :key (lambda (a) (plist-get a :path)) :test #'equal)
-      (setq harness-chat--attachments
-            (append harness-chat--attachments
-                    (list (list :path path :size (or (harness-file-size path) 0)
-                                :mime (or mime (harness-chat--mime-of path))
-                                :name (file-name-nondirectory path))))))
-    (harness-chat--render-tail)
-    (message "Attached %s" (abbreviate-file-name path))))
-
-(defun harness-chat-remove-attachment (path)
-  "Remove the attachment PATH."
-  (interactive (list (completing-read "Remove attachment: "
-                                      (mapcar (lambda (a) (plist-get a :path)) harness-chat--attachments) nil t)))
-  (setq harness-chat--attachments
-        (cl-remove path harness-chat--attachments :key (lambda (a) (plist-get a :path)) :test #'equal))
-  (harness-chat--render-tail))
-
-(defun harness-chat--clips-directory ()
-  "Return the directory where clipboard captures are saved."
-  (harness-ensure-directory
-   (expand-file-name "clips/" (if (boundp 'harness-state-directory) harness-state-directory
-                                (locate-user-emacs-file "harness/")))))
-
-(defun harness-chat--save-clip (data extension)
-  "Write DATA (a unibyte string) to a new file with EXTENSION; return its path."
-  (let ((path (expand-file-name (format "clip-%s.%s" (format-time-string "%Y%m%d-%H%M%S") extension)
-                                (harness-chat--clips-directory)))
-        (coding-system-for-write 'binary))
-    (with-temp-file path (set-buffer-multibyte nil) (insert data))
-    path))
-
-(defun harness-chat-attach-clipboard ()
-  "Attach the clipboard: an image when it holds one, else a chosen MIME target.
-Plain text is inserted into the compose box."
-  (interactive)
-  (unless (display-graphic-p) (user-error "The clipboard needs a graphical display"))
-  (let ((png (ignore-errors (gui-get-selection 'CLIPBOARD 'image/png))))
-    (if (and png (> (length png) 0))
-        (harness-chat-add-attachment (harness-chat--save-clip png "png") "image/png")
-      (let* ((targets (ignore-errors (append (gui-get-selection 'CLIPBOARD 'TARGETS) nil)))
-             (mimes (cl-remove-if-not (lambda (s) (string-match-p "\\`[a-z]+/" (symbol-name s))) targets)))
-        (if (null mimes)
-            (let ((text (ignore-errors (gui-get-selection 'CLIPBOARD 'UTF8_STRING))))
-              (if (and text (not (string-empty-p text)))
-                  (progn (unless (harness-chat--in-compose-p) (goto-char harness-chat--compose-end))
-                         (insert text))
-                (user-error "Nothing usable in the clipboard")))
-          (let* ((choice (intern (completing-read "Clipboard type: " (mapcar #'symbol-name mimes) nil t)))
-                 (data (gui-get-selection 'CLIPBOARD choice))
-                 (mime (symbol-name choice))
-                 (ext (string-remove-prefix
-                       "." (or (car (rassoc mime mailcap-mime-extensions))
-                               (cadr (split-string mime "/"))))))
-            (harness-chat-add-attachment
-             (harness-chat--save-clip (if (multibyte-string-p data) (encode-coding-string data 'utf-8) data) ext)
-             mime)))))))
-
-(defun harness-chat--dnd-open (uri action)
-  "Attach the file dropped as URI; ACTION is returned unchanged."
-  (when-let* ((path (dnd-get-local-file-name uri t)))
-    (harness-chat-add-attachment path))
-  action)
-
-;;;; Completion
-
-(defun harness-chat--capf-bounds (char)
-  "Return (START . END) of the token after CHAR before point in the compose box."
-  (when (harness-chat--in-compose-p)
-    (save-excursion
-      (let ((end (point)))
-        (skip-chars-backward "^ \t\n" harness-chat--compose-start)
-        (when (and (< (point) end) (eq (char-after) char)
-                   (or (= (point) harness-chat--compose-start)
-                       (memq (char-before) '(?\s ?\t ?\n))))
-          (cons (1+ (point)) end))))))
-
-(defun harness-chat--table (candidates category)
-  "Return a completion table over CANDIDATES with CATEGORY metadata."
-  (lambda (string pred action)
-    (if (eq action 'metadata)
-        (list 'metadata (cons 'category category))
-      (complete-with-action action candidates string pred))))
-
-(defun harness-chat-completion-at-point ()
-  "Complete @files and /skills in the compose box."
-  (let ((file (harness-chat--capf-bounds ?@))
-        (skill (harness-chat--capf-bounds ?/))
-        (root (harness-chat--project)))
-    (cond
-     (file
-      ;; A new @ token refreshes the list, so files created since the
-      ;; buffer opened show up from the next keystroke on.
-      (unless (eql (car file) harness-chat--files-at)
-        (setq harness-chat--files-at (car file))
-        (harness-chat--fetch-files))
-      (list (car file) (cdr file)
-            (harness-chat--table harness-chat--files 'harness-chat-file)
-            :exclusive 'no
-            :exit-function
-            (lambda (str status)
-              (when (memq status '(finished sole))
-                (let ((end (point)))
-                  (delete-region (- end (length str) 1) end)
-                  (harness-chat-add-attachment (expand-file-name str root)))))))
-     ((and skill (= (1- (car skill)) harness-chat--compose-start))
-      (list (car skill) (cdr skill)
-            (harness-chat--table harness-chat--skills 'harness-chat-skill)
-            :exclusive 'no
-            :exit-function (lambda (_str status) (when (memq status '(finished sole)) (insert " "))))))))
-
-(add-to-list 'completion-category-defaults '(harness-chat-file (styles flex)))
-(add-to-list 'completion-category-defaults '(harness-chat-skill (styles basic flex)))
 
 ;;;; Header and mode lines
 
@@ -2027,7 +1720,7 @@ the background it was rendered on, so it would show as a dark box."
      (harness-chat--segment (or (plist-get s :permission-mode) "ask") #'harness-set-permission-mode
                             "Permission mode (mouse-1: change)")
      "  "
-     (harness-chat--segment (format "%s %s" (harness-ui-icon 'harness-icon-thinking) (or (plist-get s :thinking) "default"))
+     (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
                             #'harness-set-thinking "Thinking level (mouse-1: change)" 'harness-dim-face)
      "  "
      (harness-ui-format-context s)
@@ -2097,13 +1790,13 @@ the background it was rendered on, so it would show as a dark box."
 (defun harness-chat-tab ()
   "Complete in the compose box; elsewhere expand or collapse the block at point."
   (interactive)
-  (cond ((harness-chat--in-compose-p) (completion-at-point))
+  (cond ((harness-compose-in-p) (completion-at-point))
         ((get-text-property (point) 'harness-chat-group) (harness-chat-toggle-group))
         ((get-text-property (point) 'harness-chat-node)
          (let ((b (gethash (get-text-property (point) 'harness-chat-node) harness-chat--blocks)))
            (if (and b (harness-chat-block-fold b)) (harness-chat-toggle-block)
-             (goto-char harness-chat--compose-end))))
-        (t (goto-char harness-chat--compose-end))))
+             (goto-char harness-compose-end))))
+        (t (goto-char harness-compose-end))))
 
 (defun harness-chat-redraw ()
   "Render this buffer again from the harness."
@@ -2131,18 +1824,21 @@ the background it was rendered on, so it would show as a dark box."
 
 ;;;; Mode
 
+(define-obsolete-function-alias 'harness-chat-add-attachment #'harness-compose-add-attachment "3.1")
+(define-obsolete-function-alias 'harness-chat-remove-attachment #'harness-compose-remove-attachment "3.1")
+(define-obsolete-function-alias 'harness-chat-attach-clipboard #'harness-compose-attach-clipboard "3.1")
+(define-obsolete-function-alias 'harness-chat-newline #'harness-compose-newline "3.1")
+(define-obsolete-function-alias 'harness-chat-completion-at-point #'harness-compose-completion-at-point "3.1")
+
 (defvar harness-chat-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map (make-sparse-keymap))
-    (define-key map (kbd "RET") #'harness-chat-newline)
-    (define-key map (kbd "S-<return>") #'harness-chat-newline)
-    (define-key map (kbd "C-j") #'harness-chat-newline)
+    ;; The compose box's keys; not `special-mode-map', whose letters would
+    ;; eat typing in the box.
+    (set-keymap-parent map harness-compose-map)
     (define-key map (kbd "TAB") #'harness-chat-tab)
     (define-key map (kbd "C-c C-q") #'harness-chat-queue)
     (define-key map (kbd "C-c C-c") #'harness-chat-send)
     (define-key map (kbd "C-c C-k") #'harness-chat-cancel)
-    (define-key map (kbd "C-c C-a") #'harness-chat-add-attachment)
-    (define-key map (kbd "C-c C-v") #'harness-chat-attach-clipboard)
     (define-key map (kbd "C-c C-s") #'harness-chat-search)
     (define-key map (kbd "C-c C-y") #'harness-chat-allow-newest)
     (define-key map (kbd "C-c C-n") #'harness-chat-deny-newest)
@@ -2161,27 +1857,18 @@ The transcript is read-only; the compose box at the bottom is editable."
               word-wrap t
               search-invisible 'open
               header-line-format '(:eval (harness-chat--header))
-              mode-line-format '(" " (:eval (harness-chat--mode-line)) "  " mode-line-misc-info)
-              hl-line-range-function #'harness-chat--hl-line-range)
+              mode-line-format '(" " (:eval (harness-chat--mode-line)) "  " mode-line-misc-info))
   (add-to-invisibility-spec 'harness-chat-fold)
-  (add-hook 'completion-at-point-functions #'harness-chat-completion-at-point nil t)
-  (add-hook 'pre-command-hook #'harness-chat--pre-command nil t)
+  (harness-compose-setup :project #'harness-chat--project
+                         :placeholder #'harness-chat--placeholder
+                         :redraw #'harness-chat--render-tail
+                         :bottom t)
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
-  (add-hook 'pre-redisplay-functions #'harness-chat--pad-window nil t)
-  (setq-local dnd-protocol-alist (cons '("^file:" . harness-chat--dnd-open) dnd-protocol-alist))
   (add-hook 'kill-buffer-hook #'harness-chat--on-kill nil t))
 
-(defun harness-chat--pre-command ()
-  "Send typing that lands in the transcript to the compose box."
-  (when (and (memq this-command '(self-insert-command yank))
-             (harness-chat--compose-live-p)
-             (not (harness-chat--in-compose-p)))
-    (goto-char harness-chat--compose-end)))
-
 (defun harness-chat--post-command ()
-  "Keep the placeholder and the new-messages indicator current."
-  (harness-chat--update-placeholder)
+  "Keep the new-messages indicator current."
   (when (and harness-chat--unseen (harness-chat--at-bottom-p (selected-window)))
     (setq harness-chat--unseen nil)
     (force-mode-line-update)))
