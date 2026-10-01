@@ -29,6 +29,7 @@
 (require 'text-property-search)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-files)
 (require 'harness-ui)
 (require 'harness-ui-compose)
 
@@ -772,9 +773,10 @@ anything that moves a task without one, so a board never drifts.")
   (format "*harness tasks: %s*" (file-name-nondirectory (directory-file-name dir))))
 
 (defun harness-ui-tasks--local-root (dir)
-  "Guess DIR's project root in this Emacs, for naming the buffer only."
-  (or (ignore-errors (when-let* ((pr (project-current nil dir))) (project-root pr)))
-      dir))
+  "Guess DIR's project root in this Emacs, for naming the buffer only.
+From a task's worktree it is the main checkout, so opening the board from
+a task's session comes back to the same board."
+  (harness-files-main-root dir))
 
 (declare-function project-root "project")
 

@@ -48,6 +48,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-files)
 
 (defcustom harness-tasks-max-running 3
   "Tasks that may work at the same time; the rest wait as pending.
@@ -162,10 +163,13 @@ They hold a slot so a burst of submissions never overshoots the limit.")
         (puthash (plist-get task :id) (harness-tasks--intern task) harness-tasks--table)))))
 
 (defun harness-tasks--project (cwd)
-  "Return the project root of CWD."
-  (if (harness-method-exists-p 'project/root)
-      (harness-call 'project/root cwd)
-    (file-name-as-directory (expand-file-name cwd))))
+  "Return the project root of CWD.
+Inside a task's worktree that is the main checkout the task merges into,
+so a board opened from a task's session shows the project's tasks."
+  (let ((root (if (harness-method-exists-p 'project/root)
+                  (harness-call 'project/root cwd)
+                (file-name-as-directory (expand-file-name cwd)))))
+    (harness-files-main-root root)))
 
 (defun harness-tasks--session (task)
   "Return the session plist of TASK, or nil when it has none."
@@ -477,8 +481,12 @@ It must be open, not a task already and not a merge target."
   "Return the open sessions of CWD's project (every project without CWD) that
 are not tasks yet, newest first."
   (harness-tasks--load)
-  (cl-remove-if-not #'harness-tasks--adoptable-p
-                    (harness-call 'session/list (and cwd (list :project (harness-tasks--project cwd))))))
+  (let ((project (and cwd (harness-tasks--project cwd))))
+    ;; By the main checkout, so sessions in the project's worktrees count too.
+    (cl-remove-if-not (lambda (s) (and (harness-tasks--adoptable-p s)
+                                       (or (null project)
+                                           (equal project (harness-tasks--project (plist-get s :cwd))))))
+                      (harness-call 'session/list))))
 
 (harness-defmethod task/adopt (session-id)
   "Make the ongoing session SESSION-ID a task and return the task.
@@ -495,7 +503,7 @@ or blocked session is in progress; an idle one waits for the user."
                        (plist-get session :name) "Adopted session"))
            (worktree (plist-get session :worktree))
            (task (list :id (concat "t-" (harness-short-id 8))
-                       :project (plist-get session :project) :cwd (plist-get session :cwd)
+                       :project (harness-tasks--project (plist-get session :cwd)) :cwd (plist-get session :cwd)
                        :prompt (string-trim prompt) :session session-id :adopted t
                        :worktree worktree
                        :state 'active

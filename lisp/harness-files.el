@@ -32,6 +32,31 @@
         (file-name-as-directory (expand-file-name (project-root pr)))
       dir)))
 
+(defun harness-files-main-root (dir)
+  "Return DIR's project root, or its main checkout when that is a linked
+git worktree.  Reads the worktree's .git file and the commondir it points
+to, so it runs no process; remote directories get their plain root."
+  (let ((root (harness-files-project-root dir)))
+    (or (and (not (file-remote-p root))
+             (ignore-errors
+               (let ((dotgit (expand-file-name ".git" root)))
+                 (when (file-regular-p dotgit)
+                   (with-temp-buffer
+                     (insert-file-contents dotgit)
+                     (when (re-search-forward "^gitdir: *\\(.+?\\) *$" nil t)
+                       (let* ((gitdir (expand-file-name (match-string 1) root))
+                              (commondir (expand-file-name "commondir" gitdir))
+                              (common (directory-file-name
+                                       (if (file-readable-p commondir)
+                                           (progn (erase-buffer)
+                                                  (insert-file-contents commondir)
+                                                  (expand-file-name (string-trim (buffer-string)) gitdir))
+                                         gitdir))))
+                         ;; A submodule's gitdir has no commondir and is not a .git.
+                         (and (equal (file-name-nondirectory common) ".git")
+                              (file-name-as-directory (file-name-directory common))))))))))
+        root)))
+
 (declare-function projectile-project-root "projectile")
 (declare-function projectile-project-vcs "projectile")
 (declare-function projectile-get-ext-command "projectile")
