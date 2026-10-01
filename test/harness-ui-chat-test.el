@@ -559,5 +559,15 @@
     (should (get-text-property 0 'local-map seg))
     (should (eq 'mode-line-highlight (get-text-property 2 'mouse-face seg)))))
 
+(ert-deftest harness-ui-chat-hl-line-skips-compose ()
+  ;; hl-line would paint over the compose background, so it stops short of it.
+  (harness-ui-chat-test-with
+    (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session))))
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (should (harness-chat--hl-line-range))
+        (goto-char harness-chat--compose-end)
+        (should-not (harness-chat--hl-line-range))))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
