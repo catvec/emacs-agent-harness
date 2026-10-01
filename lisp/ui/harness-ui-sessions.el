@@ -81,7 +81,7 @@
            (harness-ui-format-context s)
            (harness-format-cost (plist-get usage :cost))
            (harness-relative-time (or (plist-get s :updated) 0))
-           (propertize (abbreviate-file-name (or (plist-get s :project) "")) 'face 'harness-dim-face)))))
+           (propertize (file-name-nondirectory (directory-file-name (or (plist-get s :project) ""))) 'face 'harness-dim-face)))))
 
 (defun harness-ui-sessions--refresh ()
   (setq tabulated-list-entries
