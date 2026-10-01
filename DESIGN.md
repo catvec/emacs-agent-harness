@@ -223,3 +223,6 @@ For users who want to get very serious with it use a real Linux jail. Isolation 
 - Network: allowed by default (hosted providers need their API); `--unshare-net` is opt-in and only correct for local models.
 - `:permission-mode` is a prompt-level hint, never a security boundary.
 - Scope: only processes the harness spawns. Users launching `claude`/`codex` directly get those CLIs' native sandboxes.
+
+## Task Mode 
+Manage sessions by the task they are trying to complete. One session per task. Light touch with the management of the actual session. This mode is ideal when doing full auto mode and you trust the agent to complete tasks. In task mode you see a list of your sessions with status information (idle, ect) as well as what each task a session is completing. There is also a chat interface to submit new tasks. This acts as mini kanban board showing tasks which are pending, in progress, and completed. You can select a session to fully view it. Tasks are scoped to the current project. 
