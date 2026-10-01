@@ -90,6 +90,6 @@ loop (`scripts/dev.sh`, `scripts/test.sh`, `scripts/lint.sh`).
 
 Modules: `config project store session agent provider provider-claude
 provider-openai provider-demo tools tools-fs tools-shell tools-emacs
-tools-web tools-agent perms sandbox usage compaction naming skills
+tools-web tools-agent tools-sessions perms sandbox usage compaction naming skills
 worktree merge tasks acp` and, in the presentation layer, `ui ui-chat
 ui-sessions ui-tasks ui-tree ui-notify ui-usage ui-worktree ui-btw ui-media`.
