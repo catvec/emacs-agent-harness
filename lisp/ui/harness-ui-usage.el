@@ -672,6 +672,20 @@ prices; rows sort by, and Share divides, their value at API prices."
         buffer-read-only t)
   (add-hook 'window-configuration-change-hook #'harness-ui-usage--on-resize nil t))
 
+;; The dashboard's keys in the harness menu, behind `.'.
+(put 'harness-ui-usage-mode 'harness-menu-group
+     '("Usage & cost"
+       ["View"
+        (". t" "Next period" harness-ui-usage-cycle-period)
+        (". b" "Group by next" harness-ui-usage-cycle-group)
+        (". RET" "Open at point" harness-ui-usage-open)
+        (". g" "Refresh" harness-ui-usage-refresh)]
+       ["Budgets and plan"
+        (". a" "Add budget" harness-ui-usage-add-budget)
+        (". d" "Remove budget" harness-ui-usage-remove-budget)
+        (". P" "Plan a budget" harness-ui-usage-plan)
+        (". r" "Refresh plan quota" harness-ui-usage-refresh-plan)]))
+
 (defun harness-ui-usage--on-resize ()
   "Redraw so the chart fits the new window width."
   (when harness-ui-usage--data

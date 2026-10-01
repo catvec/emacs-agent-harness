@@ -38,6 +38,11 @@ background.  It gets every `harness-` variable you set; list other
 variables it needs in `harness-server-forward-variables`, or put code in
 `harness-server-init-file`.  `M-x harness-restart` restarts it with your
 current settings; its log is in `M-x harness-show-log`.  `M-x harness-menu` (`C-c a ?`) shows everything.
+Opened from a harness buffer (a chat, the task board, the session list,
+the tree, worktrees, usage, directory access) it also lists that
+buffer's own commands under the keys they have there: chords such as
+`C-c C-c` as they are, a board's letters behind `.` (`. s` runs what `s`
+does on the task board).
 
 ## Use
 

@@ -852,7 +852,9 @@ buffers show, as a harness that just started has them all closed), the face set
 session cache updated from `_harness/session` updates, window
 positions (`harness-ui-display-session SID &optional POSITION`; presets
 `right`, `bottom`, `full`, `other`; one session per position, replacing),
-the global keymap and the transient menu `harness-menu`, and icons via
+the global keymap and the transient menu `harness-menu` (with a group for
+the commands of the buffer it is opened from, which each mode lists in
+its `harness-menu-group` property), and icons via
 `icons.el` (`define-icon`) with text fallbacks.  Every command has a
 mouse target: buttons, header-line segments, or mode-line segments.
 

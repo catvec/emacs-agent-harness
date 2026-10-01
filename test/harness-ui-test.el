@@ -43,6 +43,224 @@ The side window is selected and not dedicated, as Doom leaves it."
       (should-not (window-parameter window 'window-side))
       (should (eq window (window-in-direction 'below (get-buffer-window other)))))))
 
+;;;; The menu lists the commands of the buffer it is opened from
+
+(require 'harness-ui-chat)
+(require 'harness-ui-tasks)
+(require 'harness-ui-sessions)
+(require 'harness-ui-tree)
+(require 'harness-ui-worktree)
+(require 'harness-ui-usage)
+(require 'harness-ui-dirs)
+(require 'harness-ui-btw)
+(require 'harness-ui-media)
+
+(defvar harness-ui-test-ran nil "Commands the menu ran, newest first: (COMMAND BUFFER POINT).")
+
+(define-derived-mode harness-ui-test-board-mode special-mode "Test board"
+  "A board for the menu tests.")
+
+(define-minor-mode harness-ui-test-minor-mode
+  "A minor mode for the menu tests."
+  :lighter nil)
+
+(defun harness-ui-test-start ()
+  "Record that the menu ran this here."
+  (interactive)
+  (push (list 'start (current-buffer) (point)) harness-ui-test-ran))
+
+(defun harness-ui-test-submit ()
+  "Record that the menu ran this here."
+  (interactive)
+  (push (list 'submit (current-buffer) (point)) harness-ui-test-ran))
+
+(defun harness-ui-test-close ()
+  "Record that the menu ran this here."
+  (interactive)
+  (push (list 'close (current-buffer) (point)) harness-ui-test-ran))
+
+(defconst harness-ui-test-menu-modes
+  '(harness-ui-test-board-mode harness-ui-test-minor-mode fundamental-mode)
+  "Modes whose `harness-menu-group' the menu tests set.")
+
+(defmacro harness-ui-test-with-menu-groups (&rest body)
+  "Run BODY, then put back the `harness-menu-group' of the test modes."
+  (declare (indent 0))
+  `(let ((harness-ui-test--saved-groups
+          (mapcar (lambda (mode) (cons mode (get mode 'harness-menu-group))) harness-ui-test-menu-modes)))
+     (unwind-protect (progn ,@body)
+       (pcase-dolist (`(,mode . ,group) harness-ui-test--saved-groups)
+         (put mode 'harness-menu-group group)))))
+
+(defmacro harness-ui-test-with-menu-buffer (mode &rest body)
+  "Run BODY in a new buffer in MODE (a function) shown in the selected window.
+The menu groups BODY gives the test modes are taken back afterwards."
+  (declare (indent 1))
+  `(harness-ui-test-with-menu-groups
+     (let ((buffer (generate-new-buffer "*harness menu test*"))
+           (harness-ui-test-ran nil))
+       (unwind-protect
+           (progn (delete-other-windows)
+                  (switch-to-buffer buffer)
+                  (funcall ,mode)
+                  ,@body)
+         (kill-buffer buffer)))))
+
+(defun harness-ui-test-menu-groups ()
+  "Return every (MODE TITLE . COLUMNS) the UI modules give `harness-menu'."
+  (let (groups)
+    (mapatoms (lambda (mode)
+                (when-let* ((group (get mode 'harness-menu-group)))
+                  (push (cons mode group) groups))))
+    groups))
+
+(defun harness-ui-test-menu (&optional keys)
+  "Open `harness-menu' here and return its text, then type KEYS in it.
+KEYS default to C-g, which closes the menu."
+  (call-interactively #'harness-menu)
+  (prog1 (with-current-buffer transient--buffer-name
+           (buffer-substring-no-properties (point-min) (point-max)))
+    (execute-kbd-macro (kbd (or keys "C-g")))))
+
+(ert-deftest harness-ui-menu-elsewhere-shows-only-its-own-groups ()
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "Sessions" text))
+      (should (string-match-p "Session settings" text))
+      (should (string-match-p "Tools" text))
+      (should-not (string-match-p "^ *\\. \\|C-c C-" text))
+      (pcase-dolist (`(,_mode ,title . ,_columns) (harness-ui-test-menu-groups))
+        (should-not (string-match-p (concat "^" (regexp-quote title) "$") text))))
+    (should-not transient--prefix)))
+
+(ert-deftest harness-ui-menu-shows-the-chat-commands-in-a-chat ()
+  (harness-ui-test-with-menu-buffer #'harness-chat-mode
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "^Chat$" text))
+      (should (string-match-p "C-c C-c +Send" text))
+      (should (string-match-p "C-c C-q +Queue for next turn" text))
+      (should (string-match-p "C-c C-k +Cancel turn" text))
+      (should (string-match-p "C-c C-a +Attach file" text))
+      (should-not (string-match-p "Task board" text)))))
+
+(ert-deftest harness-ui-menu-in-a-btw-shows-its-keys-over-the-chats ()
+  "In a BTW, C-c C-k closes it, in the buffer and so in the menu."
+  (harness-ui-test-with-menu-buffer (lambda () (harness-chat-mode) (harness-ui-btw-minor-mode 1))
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "^Chat .* BTW$" text))
+      (should (string-match-p "C-c C-k +Close" text))
+      (should-not (string-match-p "C-c C-k +Cancel turn" text))
+      (should (string-match-p "C-c C-c +Send" text)))))
+
+(ert-deftest harness-ui-menu-shows-the-board-commands-on-the-task-board ()
+  (harness-ui-test-with-menu-buffer #'harness-ui-tasks-mode
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "^Task board$" text))
+      (should (string-match-p "\\. s +Start now" text))
+      (should (string-match-p "\\. RET +Open its session" text))
+      (should (string-match-p "C-c C-c +Submit" text))
+      (should-not (string-match-p "^Chat$" text)))))
+
+(ert-deftest harness-ui-menu-runs-buffer-commands-in-the-buffer ()
+  "A buffer command chosen in the menu runs there, with point where it was."
+  (harness-ui-test-with-menu-buffer #'harness-ui-test-board-mode
+    (put 'harness-ui-test-board-mode 'harness-menu-group
+         '("Test board"
+           ["At point" (". s" "Start" harness-ui-test-start)]
+           ["Box" ("C-c C-c" "Submit" harness-ui-test-submit)]))
+    (let ((inhibit-read-only t)) (insert "one\ntwo\nthree\n"))
+    (goto-char 6)
+    (let ((text (harness-ui-test-menu ". s")))
+      (should (string-match-p "^Test board$" text))
+      (should (string-match-p "^At point +Box *$" text)))
+    (harness-ui-test-menu "C-c C-c")
+    (should (equal (list (list 'start buffer 6) (list 'submit buffer 6)) (reverse harness-ui-test-ran)))
+    (should-not transient--prefix)))
+
+(ert-deftest harness-ui-menu-leaves-out-buffer-commands-it-cannot-offer ()
+  "Keys of the menu's own groups, undefined commands and keys shadowed
+by a minor mode are left out; a mode left with nothing is not named."
+  (harness-ui-test-with-menu-buffer (lambda () (harness-ui-test-board-mode) (harness-ui-test-minor-mode 1))
+    (put 'harness-ui-test-board-mode 'harness-menu-group
+         '("Test board"
+           ["At point"
+            (". s" "Start" harness-ui-test-start)
+            ("s" "Taken by Switch session" harness-ui-test-start)
+            ("C-c C-k" "Shadowed by the minor mode" harness-ui-test-submit)
+            (". u" "Undefined" harness-ui-test-no-such-command)]))
+    (put 'harness-ui-test-minor-mode 'harness-menu-group
+         '("Test minor" ["Minor" ("C-c C-k" "Close" harness-ui-test-close)]))
+    (put 'fundamental-mode 'harness-menu-group
+         '("Not this buffer" ["Elsewhere" ("C-c C-e" "Elsewhere" harness-ui-test-start)]))
+    (let ((text (harness-ui-test-menu "C-c C-k")))
+      (should (string-match-p "^Test board .* Test minor$" text))
+      (should (string-match-p "\\. s +Start" text))
+      (should (string-match-p "C-c C-k +Close" text))
+      (should-not (string-match-p "Taken by\\|Shadowed\\|Undefined\\|Elsewhere\\|Not this buffer" text)))
+    (should (equal (list (list 'close buffer (point))) harness-ui-test-ran))
+    ;; With every command left out, the mode is not named either.
+    (harness-ui-test-minor-mode -1)
+    (put 'harness-ui-test-board-mode 'harness-menu-group
+         '("Test board" ["At point" ("s" "Taken by Switch session" harness-ui-test-start)]))
+    (should-not (string-match-p "Test board\\|At point" (harness-ui-test-menu)))))
+
+(ert-deftest harness-ui-menu-registrations-teach-the-buffers-keys ()
+  "Every registered command is offered under the key it has in its buffer:
+a chord as it is, a plain key behind `.', which the menu's own groups
+leave free.  None is left out by the menu."
+  (should-not (harness-ui--menu-key-taken-p "."))
+  (pcase-dolist (`(,mode ,_title . ,columns) (harness-ui-test-menu-groups))
+    (let ((maps (delq nil (list (let ((map (intern (format "%s-map" mode)))) (and (boundp map) (symbol-value map)))
+                                (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map))))
+          (keys nil))
+      (dolist (column columns)
+        (dolist (item (append column nil))
+          (when (and (consp item) (stringp (car item)))
+            (let* ((key (key-description (kbd (car item))))
+                   (command (nth 2 item))
+                   (events (kbd key))
+                   (dotted (equal "." (key-description (substring events 0 1))))
+                   (own (if dotted (substring events 1) events)))
+              (ert-info ((format "%s: %s %s" mode key command))
+                (should (commandp command))
+                (should-not (member key keys))
+                (push key keys)
+                (should-not (harness-ui--menu-key-taken-p key))
+                ;; Behind `.' one plain key; otherwise a chord, never a plain key.
+                (if dotted
+                    (should (= 2 (length events)))
+                  (should (memq 'control (event-modifiers (aref events 0)))))
+                (should (cl-some (lambda (map) (eq command (lookup-key map own))) maps)))))))))
+  ;; What every harness buffer offers is checked above; here, that each mode is there.
+  (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-sessions-mode harness-ui-tree-mode
+                  harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode
+                  harness-ui-btw-minor-mode harness-ui-media-recording-mode))
+    (should (get mode 'harness-menu-group))))
+
+(ert-deftest harness-ui-menu-with-buffer-commands-from-a-side-window ()
+  "From a session's side window the menu, buffer commands included, gets a
+bottom side window and leaves the other windows alone."
+  (harness-ui-test-with-layout
+    (harness-ui-test-with-menu-groups
+      (with-current-buffer chat
+        (harness-ui-test-board-mode)
+        (put 'harness-ui-test-board-mode 'harness-menu-group
+             '("Test board" ["At point" (". s" "Start" harness-ui-test-start)])))
+      (let* ((other-window (get-buffer-window other))
+             (width (window-total-width other-window)))
+        (call-interactively #'harness-menu)
+        (unwind-protect
+            (let ((window (get-buffer-window transient--buffer-name)))
+              (should (eq 'bottom (window-parameter window 'window-side)))
+              (should (eq other (window-buffer other-window)))
+              (should (= width (window-total-width other-window)))
+              (with-current-buffer transient--buffer-name
+                (should (string-match-p "^Test board$" (buffer-string)))
+                (should (string-match-p "\\. s +Start" (buffer-string)))))
+          (execute-kbd-macro (kbd "C-g")))
+        (should (eq other (window-buffer other-window)))
+        (should-not (get-buffer-window transient--buffer-name))))))
+
 ;;;; Views share positions with sessions
 
 (defvar harness-ui--position-buffers)

@@ -2100,6 +2100,25 @@ on \\[harness-menu] here, or the [menu] button in the header line.
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)
   (add-hook 'kill-buffer-hook #'harness-chat--on-kill nil t))
 
+;; The chat's keys in the harness menu, as the buffer binds them.
+(put 'harness-chat-mode 'harness-menu-group
+     '("Chat"
+       ["Message"
+        ("C-c C-c" "Send" harness-chat-send)
+        ("C-c C-q" "Queue for next turn" harness-chat-queue)
+        ("C-c C-a" "Attach file" harness-compose-add-attachment)
+        ("C-c C-v" "Attach clipboard" harness-compose-attach-clipboard)]
+       ["Agent"
+        ("C-c C-y" "Allow request" harness-chat-allow-newest)
+        ("C-c C-n" "Deny request" harness-chat-deny-newest)
+        ("C-c C-k" "Cancel turn" harness-chat-cancel)]
+       ["Transcript"
+        (". TAB" "Fold block" harness-chat-tab)
+        ("C-c C-s" "Search" harness-chat-search)
+        ("C-c C-w" "Copy last reply" harness-chat-copy-last-response)
+        ("C-c C-e" "Jump to bottom" harness-chat-scroll-to-bottom)
+        ("C-c C-r" "Redraw" harness-chat-redraw)]))
+
 (defun harness-chat--post-command ()
   "Keep the new-messages indicator current."
   (when (and harness-chat--unseen (harness-chat--at-bottom-p (selected-window)))
