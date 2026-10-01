@@ -62,6 +62,8 @@ compose box, `?` included, so the menu is `C-c a ?` there (or the
 `[menu]` button in the header line).
 Permission and question panels appear inline above the compose box; the
 mode line shows how many sessions need you from any buffer.
+Opening a closed (inactive) session shows it without waking it; it keeps
+its compose box, and the first message you send resumes it.
 
 Settings persist through `.dir-locals.el` (project, then directory) and
 customize (global): `harness-model`, `harness-permission-mode`,

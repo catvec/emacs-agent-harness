@@ -135,14 +135,25 @@ Work carefully and verify what you do. Prefer the provided tools over guessing; 
 
 ;;;; Turn start
 
+(defun harness-agent--reanimate (session-id)
+  "Resume SESSION-ID when it is inactive, so a message sent to it revives it.
+A turn still running in it (it was closed mid-turn) keeps it running."
+  (when (eq (plist-get (harness-call 'session/get session-id) :status) 'inactive)
+    (harness-call 'session/resume session-id)
+    (when (gethash session-id harness-agent--turns)
+      (harness-call 'session/set-status session-id 'running))))
+
 (harness-defmethod agent/prompt (session-id blocks &optional opts)
   "Send BLOCKS (content blocks, or a string) to SESSION-ID.
 Idle session: start a turn and return a promise of (:stop-reason …).
 Running session: steer — the message is recorded now and delivered at
 the next step boundary; the running turn's promise is returned.  OPTS
-`:queue' non-nil only queues the message for the next turn."
+`:queue' non-nil only queues the message for the next turn.
+An inactive session is resumed first: sending to it brings it back."
   (let* ((blocks (if (stringp blocks) (list (list :type "text" :text blocks)) blocks))
          (turn (gethash session-id harness-agent--turns)))
+    (unless (plist-get opts :queue)
+      (harness-agent--reanimate session-id))
     (cond
      ((plist-get opts :queue)
       (harness-call 'session/queue session-id (harness-agent--blocks-text blocks)

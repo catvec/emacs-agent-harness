@@ -239,7 +239,8 @@ Owns session records, nodes, status, queue, pending requests, persistence
   node ("model → …") and persists the setting through `config/set` when
   `:persist t`.  Event `session/updated ID CHANGES`.
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
-- `session/resume ID` (loads nodes, status idle), `session/deactivate ID`.
+- `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
+  (closed: still listed and readable; the next message sent to it resumes it).
 - `session/fork ID &rest PLIST` — copies ancestor chain; `:kind fork|btw|subagent`,
   `:name`, `:cwd` (defaults to parent's).  Asks the provider to fork its
   state via `provider/fork` when supported.  → new session.
@@ -420,7 +421,9 @@ and resolves when answered).
   `(:stop-reason …)`.  Idle session: starts a turn.  Running session:
   steering — the text is queued and injected at the next step boundary
   (appended to the next tool result, or sent as the next user turn if
-  the model stops first).  OPTS `:queue t` only queues.
+  the model stops first).  OPTS `:queue t` only queues.  An inactive
+  session is resumed first (`session/resume`), so a message sent to a
+  closed session brings it back; queueing leaves it closed.
 - `agent/cancel SESSION-ID`.
 - `agent/send-queue SESSION-ID` — sends every queued item as one turn.
 - Sync filter `agent/system-prompt` (value string, args session); sync
@@ -545,6 +548,9 @@ blocked on a request or the task stopped part way.
   Failures the agent can fix (uncommitted work) are steered by the merge
   queue; others, or more than `harness-tasks-merge-attempts`, set
   `:outcome merge-failed`.  Outside git `end-turn` makes it `done`.
+- A turn starting in a task's session makes the task active again, so a
+  message sent from a done task's chat buffer reopens it; an archived task
+  comes back to the board.
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
   `task/start ID` (ignores the limit), `task/update ID PROMPT` (pending
   only), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
@@ -696,7 +702,12 @@ stays snappy.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
 the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
-Auto-scroll follows unless the user scrolled up.
+Auto-scroll follows unless the user scrolled up.  A block whose renderer
+signals is shown unformatted with a note, so one bad node never costs the
+buffer the rest of its transcript or its compose box.  Opening a session
+from any view never resumes it: an inactive session shows its transcript,
+a notice and the compose box, and the first message sent from it resumes
+it (through `agent/prompt`).
 
 Compose box (`harness-ui-compose`): the editable box shared by chat
 buffers and the task board.  A host calls `harness-compose-setup`

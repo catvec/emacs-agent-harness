@@ -140,5 +140,30 @@
       (should (string-match-p "Working directory" seen-system))
       (should (equal '("list_dir") seen-tools)))))
 
+(ert-deftest harness-agent-prompt-resumes-inactive-session ()
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (resumed nil))
+      (harness-on 'session/resumed (lambda (sid) (push sid resumed)))
+      (harness-call 'session/deactivate id)
+      ;; Queueing only queues: the session stays closed.
+      (harness-await (harness-call 'agent/prompt id "later" '(:queue t)))
+      (should (eq 'inactive (plist-get (harness-call 'session/get id) :status)))
+      (should-not resumed)
+      (harness-call 'session/queue-take id)
+      ;; Sending brings it back: resumed, a turn, then idle like any session.
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello again")) :stop-reason)))
+      (should (equal (list id) resumed))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
+      (should (equal '(user assistant) (harness-agent-test-kinds id)))
+      ;; Closed mid-turn, a steering message revives it as running.
+      (let ((p (harness-call 'agent/prompt id "tour")))
+        (harness-test-wait (lambda () (harness-agent-running-p id)))
+        (harness-call 'session/deactivate id)
+        (harness-call 'agent/prompt id "and the tests")
+        (should (eq 'running (plist-get (harness-call 'session/get id) :status)))
+        (harness-await p))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status))))))
+
 (provide 'harness-agent-test)
 ;;; harness-agent-test.el ends here

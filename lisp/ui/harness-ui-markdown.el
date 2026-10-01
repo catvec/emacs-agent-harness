@@ -112,9 +112,10 @@
          ((match-beginning 4)
           (setq piece (harness-ui-markdown--add-face (substring text (+ start 2) (- end 2)) 'harness-md-strike)))
          ((match-beginning 5)
-          (let ((m (substring text start end)))
-            (string-match "\\`\\[\\(.*?\\)\\](\\(.*?\\))\\'" m)
-            (setq piece (harness-ui-markdown--link (match-string 1 m) (match-string 2 m)))))
+          ;; "[LABEL](URL)": LABEL holds no "]", so the first "](" splits it.
+          (let* ((m (substring text start end))
+                 (sep (string-search "](" m)))
+            (setq piece (harness-ui-markdown--link (substring m 1 sep) (substring m (+ sep 2) -1)))))
          ((or (match-beginning 6) (match-beginning 7))
           ;; The group may include a leading delimiter character; keep it plain.
           (let* ((m (substring text start end))
@@ -200,8 +201,12 @@
         (para nil))
     (cl-labels
         ((flush-para ()
+           ;; Every block branch calls this between matching its line and
+           ;; reading the groups, so the inline rendering must leave the
+           ;; match data alone.
            (when para
-             (push (concat (harness-ui-markdown-inline (string-join (nreverse para) " ")) "\n") out)
+             (save-match-data
+               (push (concat (harness-ui-markdown-inline (string-join (nreverse para) " ")) "\n") out))
              (setq para nil)))
          (emit (s) (push s out)))
       (while lines

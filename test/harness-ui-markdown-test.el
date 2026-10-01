@@ -42,5 +42,37 @@
   (should (string-match-p "still code" (substring-no-properties (harness-ui-markdown-render "```\nstill code"))))
   (should (equal "plain" (substring-no-properties (harness-ui-markdown-render "plain")))))
 
+;; Regression tests for agent answers follow.
+
+(ert-deftest harness-md-list-with-icon-glyphs ()
+  ;; A nested list item starting with a nerd-font glyph once signalled
+  ;; (wrong-type-argument stringp nil) and left a chat buffer without
+  ;; its compose box.
+  (let ((plain (substring-no-properties
+                (harness-ui-markdown-render
+                 "- a pin icon:\n  - \U000F0931 (`nf-md-pin_outline`): weak.\n  - \U000F0403 (`nf-md-pin`): strong."))))
+    (should (string-match-p "\U000F0931 (nf-md-pin_outline): weak" plain))
+    (should (string-match-p "\U000F0403 (nf-md-pin): strong" plain))))
+
+(ert-deftest harness-md-list-right-after-styled-paragraph ()
+  ;; Rendering the paragraph before a block must keep the block's match
+  ;; data: "**Title**" then "- item" signalled (stringp nil).
+  (let ((plain (substring-no-properties
+                (harness-ui-markdown-render "**What it is**\n- It's the `window-state` segment.\n  - nested `code`"))))
+    (should (equal "What it is\n\N{U+2022} It's the window-state segment.\n  \N{U+2022} nested code" plain))))
+
+(ert-deftest harness-md-blocks-right-after-styled-paragraph ()
+  (should (equal "see x here\nHeading two"
+                 (substring-no-properties (harness-ui-markdown-render "see `x` here\n## Heading two"))))
+  (should (string-match-p "\\`run ls:\nsh\nls -la"
+                          (substring-no-properties (harness-ui-markdown-render "run `ls`:\n```sh\nls -la\n```"))))
+  (should (string-match-p "quoted q\\'"
+                          (substring-no-properties (harness-ui-markdown-render "a **b** c\n> quoted `q`")))))
+
+(ert-deftest harness-md-link-label-and-url ()
+  (let ((s (harness-ui-markdown-inline "see [the docs](https://x.org/a_(b)) now")))
+    (should (string-prefix-p "see the docs" (substring-no-properties s)))
+    (should (equal "https://x.org/a_(b" (get-text-property 5 'harness-url s)))))
+
 (provide 'harness-ui-markdown-test)
 ;;; harness-ui-markdown-test.el ends here
