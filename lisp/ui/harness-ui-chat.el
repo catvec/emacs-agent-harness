@@ -10,7 +10,7 @@
 ;;   queue         messages queued for the next turn
 ;;   attachments   chips for files attached to the next message
 ;;   compose       an editable region; RET sends
-;;   mode line     status, turn duration, window position
+;;   mode line     status, turn duration
 ;;
 ;; The transcript is never re-rendered on a delta: every node owns a
 ;; region delimited by two markers, streaming text is appended at the
@@ -1868,10 +1868,6 @@ COMMAND runs with the clicked window selected."
      (if (and harness-chat--turn-start (member status '("running" "blocked")))
          (propertize (format " %s" (harness-format-duration (- (float-time) harness-chat--turn-start)))
                      'face 'harness-dim-face 'help-echo "Turn duration")
-       "")
-     (if harness-ui-position
-         (harness-chat--segment (format "  %s" harness-ui-position) #'harness-chat-reposition
-                                "Window position (mouse-1: move)" 'harness-dim-face)
        ""))))
 
 (defun harness-chat-reposition (position)
