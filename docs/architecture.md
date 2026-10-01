@@ -735,7 +735,10 @@ buffers and the task board.  A host calls `harness-compose-setup`
 (`:project`, `:placeholder`, `:redraw` functions; `:bottom` keeps the box at
 the bottom of the window) from its mode and
 `harness-compose-insert` where it draws the box; it gets multi-line
-editing, the placeholder, @file and /skill completion, attachments
+editing whose lines wrap under the text and never scroll sideways (the
+whole host buffer wraps, so a host fits the lines it wants kept on one;
+with `:bottom` the growing box keeps its last line on the window's last
+line), the placeholder, @file and /skill completion, attachments
 (`C-c C-a`, clipboard `C-c C-v`, drag and drop), skill expansion
 (`harness-compose-with-expanded-text`) and ACP attachment blocks.
 

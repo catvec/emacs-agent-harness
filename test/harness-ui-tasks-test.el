@@ -412,5 +412,147 @@
               (should (= 1 escapes)))
           (define-key global-map [remap keyboard-quit] old))))))
 
+;;;; The box wraps and never scrolls sideways
+
+(defvar harness-compose-overlay)
+(defvar harness-compose--pads)
+(declare-function harness-compose-unscroll "harness-ui-compose")
+(declare-function harness-compose-pad-window "harness-ui-compose")
+(declare-function harness-ui-tasks--refit-tail "harness-ui-tasks")
+(declare-function harness-ui-tasks--render-tail "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--words (n)
+  "N words of text, one long line."
+  (mapconcat #'identity (make-list n "word") " "))
+
+(ert-deftest harness-ui-tasks-compose-wraps ()
+  "The board's box wraps long lines, in a side window too, and never scrolls sideways."
+  (harness-ui-tasks-test-with
+    (let ((window (get-buffer-window board)))
+      (with-current-buffer board
+        (should-not truncate-lines)
+        (should word-wrap)
+        ;; A window narrower than the frame would truncate otherwise.
+        (should (local-variable-p 'truncate-partial-width-windows))
+        (should-not truncate-partial-width-windows)
+        (goto-char harness-compose-end)
+        (insert (harness-ui-tasks-test--words 40))
+        (should (> (count-screen-lines harness-compose-start harness-compose-end t window) 1))
+        (let ((side (split-window window 40 'right)))
+          (unwind-protect
+              (progn
+                (set-window-buffer side board)
+                (should (< (window-total-width side) (default-value 'truncate-partial-width-windows)))
+                (should (> (count-screen-lines harness-compose-start harness-compose-end t side) 3)))
+            (delete-window side)))
+        ;; A window scrolled sideways by hand comes back before it is drawn.
+        (should (memq #'harness-compose-unscroll pre-redisplay-functions))
+        (set-window-hscroll window 7)
+        (harness-compose-unscroll window)
+        (should (= 0 (window-hscroll window)))
+        ;; Unless the user truncated the lines again: then it follows point.
+        (setq truncate-lines t)
+        (set-window-hscroll window 7)
+        (harness-compose-unscroll window)
+        (should (= 7 (window-hscroll window)))))))
+
+(ert-deftest harness-ui-tasks-compose-lines-up-after-the-prompt ()
+  "Wrapped lines and lines after a newline start under the text, not under the prompt."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (goto-char harness-compose-end)
+      (insert "first line\nsecond line")
+      (let ((prompt (save-excursion (goto-char harness-compose-start) (line-beginning-position))))
+        (should-not (get-char-property prompt 'line-prefix))
+        ;; The box's lines, down to an empty last one.
+        (dolist (pos (list harness-compose-start (1- harness-compose-end) harness-compose-end))
+          (should (equal "  " (get-char-property pos 'line-prefix)))
+          (should (equal "  " (get-char-property pos 'wrap-prefix)))))
+      ;; Text typed at the start of the box, and a redraw, keep it lined up.
+      (goto-char harness-compose-start)
+      (insert "x")
+      (should (equal "  " (get-char-property harness-compose-start 'wrap-prefix)))
+      (harness-ui-tasks--render-tail)
+      (should (equal "xfirst line\nsecond line" (harness-compose-text)))
+      (should (equal "  " (get-char-property (1- harness-compose-end) 'line-prefix))))))
+
+(ert-deftest harness-ui-tasks-tail-fits-the-window ()
+  "The lines above the box fit the window, also after it narrows, leaving the box alone."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (window (get-buffer-window board)))
+      (harness-ui-tasks-test--type-and-submit board (concat "A pending task " (harness-ui-tasks-test--words 30)))
+      (harness-ui-tasks-test--wait-text board "Pending  1")
+      (with-current-buffer board
+        (goto-char (point-min))
+        (search-forward "A pending task")
+        (harness-ui-tasks-edit)
+        (let ((fits (lambda (width)
+                      ;; Every line between the board and the box, [cancel] included.
+                      (save-excursion
+                        (goto-char harness-ui-tasks--list-end)
+                        (should (search-forward "[cancel]" (overlay-start harness-compose-overlay) t))
+                        (goto-char harness-ui-tasks--list-end)
+                        (while (< (point) (overlay-start harness-compose-overlay))
+                          (should (< (string-width (buffer-substring (point) (line-end-position))) width))
+                          (forward-line 1))))))
+          (funcall fits (window-body-width window))
+          (let ((side (split-window window 40 'right))
+                (text (harness-compose-text))
+                (offset (- (point) harness-compose-start)))
+            (unwind-protect
+                (progn
+                  (set-window-buffer side board)
+                  (set-window-buffer window (get-buffer-create "*scratch*"))
+                  (harness-ui-tasks--refit-tail)
+                  (funcall fits (window-body-width side))
+                  (should (equal text (harness-compose-text)))
+                  (should (= offset (- (point) harness-compose-start))))
+              (delete-window side)
+              (set-window-buffer window board))))))))
+
+(ert-deftest harness-ui-tasks-box-stays-at-the-bottom ()
+  "A box grown past the window keeps its last line on the window's last line."
+  (harness-ui-tasks-test-with
+    (let ((window (get-buffer-window board)))
+      (with-current-buffer board
+        (goto-char harness-compose-end)
+        (insert (mapconcat #'identity (make-list 40 "a line") "\n"))
+        (set-window-point window (point))
+        (harness-compose-pad-window window)
+        (should (> (window-start window) (point-min)))
+        (should (= (window-body-height window t)
+                   (cdr (window-text-pixel-size window (window-start window) harness-compose-end))))
+        ;; Scrolling is the user's: without a change the window stays put.
+        (set-window-start window (point-min))
+        (harness-compose-pad-window window)
+        (should (= (point-min) (window-start window)))
+        ;; Back to one line, the board shows from its top, padded.
+        (delete-region harness-compose-start harness-compose-end)
+        (insert "short")
+        (set-window-start window 10)
+        (harness-compose-pad-window window)
+        (should (= (point-min) (window-start window)))))))
+
+(ert-deftest harness-ui-tasks-padding-leaves-with-its-window ()
+  "A window that stops showing the board takes its padding along."
+  (harness-ui-tasks-test-with
+    (let* ((window (get-buffer-window board))
+           (side (split-window window nil 'right)))
+      (unwind-protect
+          (with-current-buffer board
+            (set-window-buffer side board)
+            (harness-compose-pad-window window)
+            (harness-compose-pad-window side)
+            (let ((pad (alist-get window harness-compose--pads)))
+              (should pad)
+              (set-window-buffer window (get-buffer-create "*scratch*"))
+              (harness-compose-pad-window side)
+              (should-not (alist-get window harness-compose--pads))
+              ;; Left behind it would pad the window twice once it shows the board again.
+              (should-not (overlay-buffer pad))))
+        (delete-window side)
+        (set-window-buffer window board)))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

@@ -796,5 +796,42 @@
           (should (consp range))
           (should (= (car range) (cdr range))))))))
 
+(declare-function harness-compose-unscroll "harness-ui-compose")
+(declare-function harness-compose-pad-window "harness-ui-compose")
+
+(ert-deftest harness-ui-chat-compose-wraps ()
+  "The box wraps long lines, also in a side window, and never scrolls sideways."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (window (selected-window))
+           (side (split-window window 40 'right)))
+      (unwind-protect
+          (with-current-buffer buf
+            (set-window-buffer side buf)
+            ;; Narrower than `truncate-partial-width-windows', which would truncate.
+            (should (< (window-total-width side) (default-value 'truncate-partial-width-windows)))
+            (should-not truncate-partial-width-windows)
+            (harness-ui-chat-test-type buf (mapconcat #'identity (make-list 40 "word") " "))
+            (should (> (count-screen-lines harness-compose-start harness-compose-end t side) 3))
+            (should (equal "  " (get-char-property (1- harness-compose-end) 'wrap-prefix)))
+            (set-window-hscroll side 5)
+            (harness-compose-unscroll side)
+            (should (= 0 (window-hscroll side))))
+        (delete-window side)))))
+
+(ert-deftest harness-ui-chat-box-stays-at-the-bottom ()
+  "A box grown past the window keeps its last line above the window's spare last line."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (window (selected-window)))
+      (set-window-buffer window buf)
+      (with-current-buffer buf
+        (harness-ui-chat-test-type buf (mapconcat #'identity (make-list 40 "a line") "\n"))
+        (set-window-point window (point))
+        (harness-compose-pad-window window)
+        (should (> (window-start window) (point-min)))
+        (should (= (- (window-body-height window t) (frame-char-height))
+                   (cdr (window-text-pixel-size window (window-start window) harness-compose-end))))))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

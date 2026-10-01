@@ -14,6 +14,7 @@
 ;;   - attachments: C-c C-a picks a file, C-c C-v pastes the clipboard
 ;;     (images and other MIME types), files dropped on the window attach;
 ;;   - the text and attachments, kept across redraws of the host;
+;;   - long lines that wrap under the text, never scrolling sideways;
 ;;   - optionally, the box at the bottom of the window: a buffer shorter
 ;;     than its window is padded at the top so it ends on the last line.
 ;;
@@ -39,6 +40,7 @@
 (defvar-local harness-compose-overlay nil "Overlay over the prompt and the box.")
 (defvar-local harness-compose-attachments nil "Attachments for the next message.")
 (defvar-local harness-compose--placeholder nil "Overlay showing the placeholder.")
+(defvar-local harness-compose--indent nil "Overlay lining the box's lines up after the prompt.")
 (defvar-local harness-compose--text "" "The box's text, kept across redraws.")
 (defvar-local harness-compose--files nil "Project files for @ completion.")
 (defvar-local harness-compose--skills nil "Skill names for / completion.")
@@ -76,13 +78,23 @@ box, REDRAW redraws the box (it must call `harness-compose-insert').
 With BOTTOM the box sits at the bottom of every window showing the
 buffer, the way a chat app keeps its input there: t pads the top of a
 short buffer, a function returning a position pads there instead (a
-board above the box stays at the top, the gap opens below it)."
+board above the box stays at the top, the gap opens below it).
+
+The box wraps long lines and never scrolls sideways.  Emacs wraps whole
+buffers, not regions, so the host's own lines wrap too: it fits to the
+window the ones that must stay on one line."
   (when bottom
     (setq harness-compose--pad-at (and (functionp bottom) bottom))
     (add-hook 'pre-redisplay-functions #'harness-compose-pad-window nil t))
   (when project (setq harness-compose-project-function project))
   (when placeholder (setq harness-compose-placeholder-function placeholder))
   (when redraw (setq harness-compose-redraw-function redraw))
+  ;; The last one keeps windows narrower than the frame (side windows)
+  ;; from truncating anyway.
+  (setq-local truncate-lines nil
+              word-wrap t
+              truncate-partial-width-windows nil)
+  (add-hook 'pre-redisplay-functions #'harness-compose-unscroll nil t)
   (setq-local hl-line-range-function #'harness-compose-hl-line-range)
   (setq-local dnd-protocol-alist (cons '("^file:" . harness-compose-dnd-open) dnd-protocol-alist))
   (add-hook 'completion-at-point-functions #'harness-compose-completion-at-point nil t)
@@ -131,7 +143,7 @@ board above the box stays at the top, the gap opens below it)."
 (defun harness-compose-insert (&optional text help)
   "Insert the prompt and the box at point, holding TEXT or the kept text.
 HELP is the prompt's tooltip.  Point ends after the box's final newline."
-  (dolist (ov (list harness-compose-overlay harness-compose--placeholder))
+  (dolist (ov (list harness-compose-overlay harness-compose--placeholder harness-compose--indent))
     (when ov (delete-overlay ov)))
   (when text (setq harness-compose--text text))
   (let ((label-start (point)))
@@ -145,6 +157,16 @@ HELP is the prompt's tooltip.  Point ends after the box's final newline."
     ;; FRONT-ADVANCE: text the host inserts just before the box stays outside.
     (setq harness-compose-overlay (make-overlay label-start (point) nil t t))
     (overlay-put harness-compose-overlay 'face 'harness-compose-face)
+    ;; Wrapped lines, and lines after a newline, start under the text
+    ;; rather than under the prompt.  The overlay starts after the prompt,
+    ;; so the prompt's line gets no prefix, and ends after the final
+    ;; newline, so an empty last line already has one.  A prefix is drawn
+    ;; in the default face unless it brings its own.
+    (let ((indent (propertize (make-string (string-width (buffer-substring label-start harness-compose-start)) ?\s)
+                              'face 'harness-compose-face)))
+      (setq harness-compose--indent (make-overlay harness-compose-start (point)))
+      (overlay-put harness-compose--indent 'line-prefix indent)
+      (overlay-put harness-compose--indent 'wrap-prefix indent))
     (setq harness-compose--placeholder (make-overlay (1- (point)) (point)))
     (harness-compose-update-placeholder)))
 
@@ -175,14 +197,21 @@ would hide the region too.  Never nil: `global-hl-line-mode' needs a range."
     (goto-char harness-compose-end)))
 
 (defun harness-compose-pad-window (window)
-  "Pad WINDOW so a buffer shorter than it ends at its bottom.
-Runs from `pre-redisplay-functions'; each window gets its own overlay."
+  "Keep the box at the bottom of WINDOW.
+A buffer shorter than WINDOW is padded so it ends at its bottom, each
+window with its own overlay; a taller one scrolls to keep the box there
+while the window's point is in it (`harness-compose--follow').  Runs
+from `pre-redisplay-functions'."
   (when (and (window-live-p window) (eq (window-buffer window) (current-buffer))
              (harness-compose-live-p))
+    ;; A dropped overlay is deleted too: kept, it would pad its window
+    ;; again, twice over, once the window shows the buffer again.
     (setq harness-compose--pads
-          (cl-remove-if-not (lambda (p) (and (window-live-p (car p)) (overlay-buffer (cdr p))
-                                             (eq (window-buffer (car p)) (current-buffer))))
+          (cl-remove-if-not (lambda (p) (or (and (window-live-p (car p)) (overlay-buffer (cdr p))
+                                                 (eq (window-buffer (car p)) (current-buffer)))
+                                            (progn (delete-overlay (cdr p)) nil)))
                             harness-compose--pads))
+    (harness-compose--follow window)
     (let* ((ov (or (alist-get window harness-compose--pads)
                    (let ((o (make-overlay (point-min) (point-min) nil t)))
                      (overlay-put o 'window window)
@@ -213,6 +242,62 @@ the padding as lines to keep in view."
   (when-let* ((pad (alist-get window harness-compose--pads)))
     (overlay-put pad 'before-string nil)
     (overlay-put pad 'harness-compose-key nil)))
+
+(defun harness-compose-unscroll (window)
+  "Scroll WINDOW back to its left edge.
+The box wraps rather than scrolling sideways, yet \\[scroll-left] or a
+shifted mouse wheel would still scroll the window, and a window scrolled
+sideways truncates every line, the box's too.  Runs from
+`pre-redisplay-functions'.  A buffer whose lines were made to truncate
+again by hand is left to `auto-hscroll-mode'."
+  (when (and (window-live-p window) (eq (window-buffer window) (current-buffer))
+             (not truncate-lines) (/= (window-hscroll window) 0))
+    (set-window-hscroll window 0)))
+
+(defun harness-compose--follow (window)
+  "Keep the box on WINDOW's last line while the window's point is in it.
+The box's lines wrap, so it grows and shrinks as it is typed in, and
+the host redraws around it.  Emacs would recenter once the box falls
+off the bottom and leave a gap under it once it shrinks; instead WINDOW
+scrolls just enough to keep the box's last line on its last line (above
+the spare line of a host padding its top), the way a chat app's input
+grows upwards.  A buffer that fits shows from its start, for the
+padding.  Only after the text or the window's size changed: scrolling
+is left to the user."
+  (let ((key (list (current-buffer) (buffer-chars-modified-tick)
+                   (window-body-width window t) (window-body-height window t))))
+    (unless (equal key (window-parameter window 'harness-compose-follow))
+      (set-window-parameter window 'harness-compose-follow key)
+      (when (harness-compose-in-p (window-point window))
+        ;; Measured without the padding, which is sized again after this.
+        (harness-compose-repad window)
+        (let* ((body (window-body-height window t))
+               (line (frame-char-height (window-frame window)))
+               (room (- body (if harness-compose--pad-at 0 line)))
+               (height (lambda (from)
+                         (cdr (window-text-pixel-size window from harness-compose-end nil (1+ body)))))
+               (start (window-start window))
+               (pt (window-point window))
+               (anchor (if harness-compose--pad-at harness-compose-end (point-max))))
+          (cond
+           ((<= (funcall height (point-min)) room)
+            (unless (= start (point-min)) (set-window-start window (point-min))))
+           ;; Grown past the bottom.  Point's line goes there instead when
+           ;; the box from point on is taller than the window.
+           ((not (pos-visible-in-window-p pt window))
+            (harness-compose--bottom-at
+             window (if (<= (funcall height (save-excursion (goto-char pt) (vertical-motion 0 window) (point)))
+                            room)
+                        anchor
+                      pt)))
+           ;; Shrunk, leaving a gap under the box.
+           ((and (> start (point-min)) (<= line (- room (funcall height start))))
+            (harness-compose--bottom-at window anchor))))))))
+
+(defun harness-compose--bottom-at (window pos)
+  "Scroll WINDOW so the screen line of POS is its last."
+  (with-selected-window window
+    (save-excursion (goto-char pos) (recenter -1))))
 
 ;;;; Editing and reading
 
