@@ -125,10 +125,12 @@
     (let* ((wt (harness-test-await (harness-call 'worktree/create root)))
            (branch (plist-get wt :branch))
            (expected (expand-file-name (replace-regexp-in-string "/" "-" branch)
-                                       (expand-file-name "repo-worktrees" base))))
+                                       (expand-file-name ".worktrees" root))))
       (should (string-prefix-p "harness/" branch))
       (should (equal (harness-worktree-test--dir expected) (harness-worktree-test--dir (plist-get wt :path))))
-      (should (file-directory-p expected)))
+      (should (file-directory-p expected))
+      ;; The container ignores itself, so the main checkout stays clean.
+      (should (equal "" (harness-worktree-test--git root "status" "--porcelain"))))
     ;; A custom directory function and an explicit base commit.
     (let* ((harness-worktree-directory-function
             (lambda (r b) (expand-file-name (concat "custom-" (file-name-nondirectory b))
