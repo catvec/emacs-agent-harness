@@ -373,9 +373,9 @@ Signal unless NOERROR when none can be found."
                 'help-echo "Context tokens in use / context window")))
 
 (defun harness-ui-model-label (model-id)
-  "Return a short label for MODEL-ID, keeping the provider as a prefix."
+  "Return a short \"model (provider)\" label for MODEL-ID."
   (if (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id))
-      (format "%s · %s" (match-string 1 model-id) (match-string 2 model-id))
+      (format "%s (%s)" (match-string 2 model-id) (match-string 1 model-id))
     (or model-id "?")))
 
 (defun harness-ui-button (label action &rest props)
