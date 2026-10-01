@@ -569,6 +569,21 @@
   (with-current-buffer board
     (buffer-substring-no-properties harness-ui-tasks--list-end (point-max))))
 
+(defun harness-ui-tasks-test--modes-shown (board)
+  "Which of Submit and Refine BOARD shows above its compose box."
+  (with-current-buffer board
+    (let ((head (buffer-substring-no-properties harness-ui-tasks--list-end
+                                                (overlay-start harness-compose-overlay))))
+      (seq-filter (lambda (mode) (string-search mode head)) '("Submit" "Refine")))))
+
+(defun harness-ui-tasks-test--toggle (board)
+  "Where BOARD's Submit / Refine toggle is: the start of its label."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (re-search-forward "Submit\\|Refine" (overlay-start harness-compose-overlay))
+      (match-beginning 0))))
+
 (defun harness-ui-tasks-test--goto-card (board text)
   "Move point in BOARD to the card showing TEXT."
   (with-current-buffer board
@@ -584,11 +599,14 @@
       (with-current-buffer board
         (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
         (should-not harness-ui-tasks--refine)
-        (should (string-match-p "New task +. Submit +. Refine" (harness-ui-tasks-test--tail-text board)))
+        ;; The toggle shows only the current mode.
+        (should (string-match-p "New task +. Submit\n" (harness-ui-tasks-test--tail-text board)))
+        (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board)))
         (goto-char harness-compose-end)
         (should (eq 'harness-ui-tasks-toggle-refine (key-binding (kbd "C-c C-t"))))
         (harness-ui-tasks-toggle-refine)
         (should harness-ui-tasks--refine)
+        (should (equal '("Refine") (harness-ui-tasks-test--modes-shown board)))
         (should (string-match-p "an agent writes it up" (harness-ui-tasks-test--tail-text board)))
         (insert "the parser chokes on nested quotes")
         (harness-ui-tasks-submit)
@@ -609,8 +627,11 @@
         (should (eq 'harness-ui-tasks-refine (key-binding (kbd "r"))))
         (harness-ui-tasks-start))
       (harness-ui-tasks-test--wait-text board "Completed  1")
-      ;; Back to Submit, a task starts at once again.
-      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      ;; Back to Submit with a click on the toggle, a task starts at once again.
+      (with-current-buffer board
+        (push-button (harness-ui-tasks-test--toggle board))
+        (should-not harness-ui-tasks--refine)
+        (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board))))
       (harness-ui-tasks-test--type-and-submit board "Straight to work")
       (harness-ui-tasks-test--wait-text board "Completed  2"))))
 
@@ -653,6 +674,27 @@
         (harness-ui-tasks-submit))
       (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Make the shaky idea solid\\(.\\|\n\\)*on hold"))))
 
+(ert-deftest harness-ui-tasks-toggle-shows-the-current-mode ()
+  "The toggle is one button naming the current mode; a click switches to the other."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+      (pcase-dolist (`(,refine ,mode ,does ,other)
+                     '((nil "Submit" "starts at once" "Refine")
+                       (t "Refine" "an agent writes the task up" "Submit")))
+        (should (eq refine harness-ui-tasks--refine))
+        (should (equal (list mode) (harness-ui-tasks-test--modes-shown board)))
+        (let* ((pos (harness-ui-tasks-test--toggle board))
+               (help (get-text-property pos 'help-echo)))
+          ;; One face: there is no unselected side to dim any more.
+          (should (eq 'harness-task-choice-face (get-text-property pos 'face)))
+          ;; Its tooltip says what the mode does and how to switch.
+          (should (string-search does help))
+          (should (string-search (concat "click or C-c C-t to switch to " other) help))
+          (push-button pos))
+        (should (equal (list other) (harness-ui-tasks-test--modes-shown board))))
+      (should-not harness-ui-tasks--refine))))
+
 (ert-deftest harness-ui-tasks-toggle-fits-the-window ()
   "The New task line, toggle included, fits a narrow window like the rest of the tail."
   (harness-ui-tasks-test-with
@@ -663,18 +705,21 @@
             (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
             (set-window-buffer side board)
             (set-window-buffer window (get-buffer-create "*scratch*"))
-            (dolist (refine '(nil t))
-              (setq harness-ui-tasks--refine refine)
+            (should-not harness-ui-tasks--refine)
+            (dolist (mode '("Submit" "Refine"))
               (harness-ui-tasks--refit-tail)
+              ;; Only the current mode shows, whole.
+              (should (equal (list mode) (harness-ui-tasks-test--modes-shown board)))
               (save-excursion
-                (goto-char harness-ui-tasks--list-end)
-                (should (search-forward "Submit" (overlay-start harness-compose-overlay) t))
-                (should (search-forward "Refine" (overlay-start harness-compose-overlay) t))
                 (goto-char harness-ui-tasks--list-end)
                 (while (< (point) (overlay-start harness-compose-overlay))
                   (should (< (string-width (buffer-substring (point) (line-end-position)))
                              (window-body-width side)))
-                  (forward-line 1)))))
+                  (forward-line 1)))
+              ;; Toggling switches it to the other mode.
+              (harness-ui-tasks-toggle-refine))
+            (should-not harness-ui-tasks--refine)
+            (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board))))
         (delete-window side)
         (set-window-buffer window board)))))
 

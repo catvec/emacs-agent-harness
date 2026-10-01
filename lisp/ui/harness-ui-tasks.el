@@ -65,7 +65,7 @@ Either way the toggle above the compose box switches it per board."
 (defface harness-task-done-face '((t :inherit success))
   "The completed mark." :group 'harness-ui-tasks)
 (defface harness-task-choice-face '((t :inherit bold))
-  "The chosen side of the Submit / Refine toggle." :group 'harness-ui-tasks)
+  "The Submit / Refine toggle, which shows the current mode." :group 'harness-ui-tasks)
 
 (define-icon harness-icon-task-pending nil
   '((symbol "◌") (text "wait"))
@@ -659,19 +659,23 @@ The box itself is left alone, so typing or completing in it carries on."
       (set-buffer-modified-p nil))))
 
 (defun harness-ui-tasks--mode-toggle ()
-  "The Submit / Refine toggle above the compose box, a button per side."
+  "The Submit / Refine toggle above the compose box: the current mode.
+One button, showing only the mode new tasks get, with the icon their
+cards get: running for Submit, the agent's for Refine.  A click switches
+to the other mode, as `harness-ui-tasks-toggle-refine' does."
   (let ((keys (substitute-command-keys "\\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-toggle-refine]")))
-    (cl-flet ((side (label refine help)
-                (let ((chosen (eq refine (and harness-ui-tasks--refine t))))
-                  (propertize
-                   (harness-ui-tasks--button
-                    (concat (harness-ui-icon (if chosen 'harness-icon-idle 'harness-icon-inactive)) " " label)
-                    (lambda () (harness-ui-tasks--set-refine refine))
-                    (format "%s (%s switches)" help keys))
-                   'face (if chosen 'harness-task-choice-face 'harness-dim-face)))))
-      (concat (side "Submit" nil "Submit: the task starts at once")
-              "  "
-              (side "Refine" t "Refine: an agent writes the task up, then it waits in Pending until you start it")))))
+    (pcase-let ((`(,icon ,label ,help ,other)
+                 (if harness-ui-tasks--refine
+                     '(harness-icon-agent "Refine"
+                       "Refine: an agent writes the task up, then it waits in Pending until you start it"
+                       "Submit")
+                   '(harness-icon-running "Submit" "Submit: the task starts at once" "Refine"))))
+      (propertize
+       (harness-ui-tasks--button
+        (concat (harness-ui-icon icon) " " label)
+        (lambda () (harness-ui-tasks--set-refine (not harness-ui-tasks--refine)))
+        (format "%s (click or %s to switch to %s)" help keys other))
+       'face 'harness-task-choice-face))))
 
 (defun harness-ui-tasks--set-refine (refine)
   "Refine new tasks from the compose box when REFINE, else submit them."
