@@ -363,6 +363,52 @@
         (should (equal "allow-session" (plist-get (plist-get (car answers) :outcome) :optionId)))
         (should (null harness-chat--pending))))))
 
+(ert-deftest harness-ui-chat-directory-request-panel ()
+  "An agent's own directory request offers no \"Allow once\"."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (recorded nil)
+           (labels (lambda (r) (mapcar #'car (harness-chat--permission-buttons r)))))
+      ;; Without options every button of the kind is offered.
+      (should (equal '("Allow" "Allow for session" "Always allow" "Deny" "Always deny")
+                     (funcall labels '(:kind "permission"))))
+      (should (equal '("Allow once" "Allow directory for session" "Always allow directory" "Deny")
+                     (funcall labels '(:dir "/d/"))))
+      ;; Option ids as symbols (in process), strings or a vector (from the
+      ;; wire), or ACP option plists all narrow the buttons.
+      (dolist (options (list '(allow-session allow-always deny-once)
+                             '("allow-session" "allow-always" "deny-once")
+                             (vector "allow-session" "allow-always" "deny-once")
+                             (harness-acp--offered-options '(:dir "/d/" :options (allow-session allow-always deny-once)))))
+        (should (equal '("Allow directory for session" "Always allow directory" "Deny")
+                       (funcall labels (list :dir "/d/" :options options)))))
+      ;; A pending request on the session renders with those buttons.
+      (harness-register-method 'permission/answer
+                               (lambda (session-id pending-id answer)
+                                 (push (list session-id pending-id answer) recorded)
+                                 (harness-call 'session/pending-resolve session-id pending-id answer)
+                                 answer))
+      (harness-call 'session/pending-add sid
+                    (list :id "req" :kind 'permission
+                          :payload (list :tool "request_directory_access" :kind 'meta
+                                         :input '(:path "~/src/other") :dir "/home/u/src/other/"
+                                         :title "Access ~/src/other/"
+                                         :reason "The agent asks for access: read the API types"
+                                         :options '(allow-session allow-always deny-once))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-find buf "Access ~/src/other/"))
+          (should (harness-ui-chat-test-find buf "The agent asks for access: read the API types"))
+          (should (harness-ui-chat-test-find buf "[Allow directory for session]"))
+          (should (harness-ui-chat-test-find buf "[Always allow directory]"))
+          (should (harness-ui-chat-test-find buf "[Deny]"))
+          (should-not (harness-ui-chat-test-find buf "[Allow once]"))
+          (goto-char (1- (harness-ui-chat-test-find buf "[Always allow directory]")))
+          (harness-chat-push))
+        (harness-test-wait (lambda () recorded) 5 "answered through the method")
+        (should (equal (list sid "req" "allow-always") (car recorded)))))))
+
 (ert-deftest harness-ui-chat-existing-pending-item-offers-buttons ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))

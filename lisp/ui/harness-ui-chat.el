@@ -1207,7 +1207,8 @@ Return non-nil when something changed."
                                       :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
                                       :tool (plist-get payload :tool) :tool-kind (harness-chat--str (plist-get payload :kind))
                                       :input (plist-get payload :input) :paths (plist-get payload :paths)
-                                      :dir (plist-get payload :dir) :reason (plist-get payload :reason))))))
+                                      :dir (plist-get payload :dir) :reason (plist-get payload :reason)
+                                      :options (plist-get payload :options))))))
           (setq changed t))))
     (dolist (r harness-chat--pending)
       (when (and (not (cl-find (plist-get r :id) items :key (lambda (i) (plist-get i :id)) :test #'equal))
@@ -1317,6 +1318,29 @@ The panel answers through RESPOND."
         (put-text-property pos next 'keymap (if existing (make-composed-keymap (list existing map)) map))
         (setq pos next)))))
 
+(defun harness-chat--offered-options (r)
+  "Return the option ids offered with permission record R, or nil if unknown.
+R's `:options' come from the session's pending item (ids as symbols or
+strings) or from an ACP request (plists with `:optionId')."
+  (delq nil (mapcar (lambda (o)
+                      (cond ((and (consp o) (plist-get o :optionId)) (format "%s" (plist-get o :optionId)))
+                            ((or (stringp o) (and o (symbolp o))) (format "%s" o))))
+                    (append (plist-get r :options) nil))))
+
+(defun harness-chat--permission-buttons (r)
+  "Return the (LABEL KEY OPTION) buttons for permission record R.
+A directory prompt is worded for directories; only the options R
+offers are shown, so an agent's own directory request has no
+\"Allow once\"."
+  (let ((all (if (plist-get r :dir)
+                 '(("Allow once" "y" "allow-once") ("Allow directory for session" "s" "allow-session")
+                   ("Always allow directory" "a" "allow-always") ("Deny" "n" "deny-once"))
+               '(("Allow" "y" "allow-once") ("Allow for session" "s" "allow-session")
+                 ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always"))))
+        (offered (harness-chat--offered-options r)))
+    (or (and offered (cl-remove-if-not (lambda (o) (member (nth 2 o) offered)) all))
+        all)))
+
 (defun harness-chat--insert-permission-panel (r)
   "Insert the panel for permission record R."
   (let ((pid (plist-get r :id))
@@ -1333,11 +1357,7 @@ The panel answers through RESPOND."
     (when-let* ((reason (plist-get r :reason)))
       (insert (propertize (format "   %s\n" reason) 'face 'harness-hint-face)))
     (insert "   ")
-    (dolist (o (if (plist-get r :dir)
-                   '(("Allow once" "y" "allow-once") ("Allow directory for session" "s" "allow-session")
-                     ("Always allow directory" "a" "allow-always") ("Deny" "n" "deny-once"))
-                 '(("Allow" "y" "allow-once") ("Allow for session" "s" "allow-session")
-                   ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always"))))
+    (dolist (o (harness-chat--permission-buttons r))
       (let ((option (nth 2 o)))
         (insert (harness-chat--button (format "[%s]" (nth 0 o))
                                       (lambda () (harness-chat--answer-permission pid option))

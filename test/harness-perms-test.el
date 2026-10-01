@@ -489,6 +489,225 @@
         ;; The cwd is not a grant.
         (should-error (harness-call 'permission/revoke-dir "s1" (plist-get harness-perms-test--session :cwd)))))))
 
+;;;; Directory requests from the agent
+
+(defvar harness-sessions)
+
+(defun harness-perms-test--real (dir)
+  "Return DIR with symbolic links resolved, as a directory name."
+  (file-name-as-directory (file-truename dir)))
+
+(defun harness-perms-test--dir-request (path &optional reason)
+  "Build a permission request for the request tool asking for PATH with REASON."
+  (list :session harness-perms-test--session :tool harness-perms-dir-tool :kind 'meta
+        :input (append (list :path path) (and reason (list :reason reason)))
+        :call-id (harness-short-id)))
+
+(defun harness-perms-test--start-request (path &optional reason)
+  "Start deciding a request for PATH with REASON; return (PROMISE . PENDING)."
+  (let ((n (length harness-perms-test--pending))
+        (p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (harness-perms-test--dir-request path reason))))
+    (harness-test-wait (lambda () (> (length harness-perms-test--pending) n)) 2 "pending")
+    (cons p (car harness-perms-test--pending))))
+
+(ert-deftest harness-perms-dir-request-tool-is-registered ()
+  (harness-perms-test--setup)
+  (let ((spec (harness-call 'tools/get "request_directory_access")))
+    (should spec)
+    (should (eq 'meta (plist-get spec :kind)))
+    (should (equal '("path" "reason") (plist-get (plist-get spec :schema) :required)))
+    (should (string-match-p "always asked" (plist-get spec :description)))))
+
+(ert-deftest harness-perms-dir-request-asks-and-grants-for-session ()
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((outside (harness-test-temp-dir))
+         (started (harness-perms-test--start-request outside "Read the shared API types"))
+         (p (car started))
+         (pending (cdr started))
+         (payload (plist-get pending :payload)))
+    (should-not (harness-promise-settled-p p))
+    (should (eq 'permission (plist-get pending :kind)))
+    (should (equal "request_directory_access" (plist-get payload :tool)))
+    (should (equal (harness-perms-test--real outside) (plist-get payload :dir)))
+    (should (string-prefix-p "Access " (plist-get payload :title)))
+    ;; No "allow once": there is no single call to allow.
+    (should (equal harness-perms-dir-request-options (plist-get payload :options)))
+    (should (string-match-p "The agent asks for access: Read the shared API types" (plist-get payload :reason)))
+    ;; The reason is shown once: the input keeps only the path.
+    (should (equal (list :path outside) (plist-get payload :input)))
+    (should-not (member (harness-perms-test--real outside) (harness-call 'permission/allowed-dirs "s1")))
+    (let ((d (harness-call 'permission/answer "s1" (plist-get pending :id) "allow-session")))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (plist-get d :final)))
+    (let ((d (harness-test-await p)))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (string-match-p "to this session" (plist-get d :reason))))
+    (should (equal (plist-get pending :id) (caar harness-perms-test--resolved)))
+    (should (member (harness-perms-test--real outside) (harness-call 'permission/allowed-dirs "s1")))
+    (should (null (hash-table-keys harness-perms--waiting)))
+    ;; The jail lets files there through now, and asking again needs no answer.
+    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "x" outside))))
+    (let ((d (harness-perms-test--decide (harness-perms-test--dir-request outside))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (string-match-p "already allowed" (plist-get d :reason))))
+    (should (null harness-perms-test--pending))))
+
+(ert-deftest harness-perms-dir-request-only-the-user-decides ()
+  "No mode, standing rule, auto-allow entry or auto-mode judge grants a directory."
+  (dolist (mode '(ask accept-edits auto yolo))
+    (harness-perms-test--setup :permission-mode mode)
+    (harness-perms-test--install-pending)
+    (let* ((probe (harness-perms-test--judge-provider
+                   '((:type text :delta "{\"decision\":\"allow\",\"reason\":\"fine\"}")
+                     (:type done :stop-reason end-turn))))
+           (harness-perms-auto-model "judge:x")
+           (harness-perms-rules '((:behavior allow)))
+           (harness-perms-auto-allow-tools (cons harness-perms-dir-tool harness-perms-auto-allow-tools))
+           (outside (harness-test-temp-dir))
+           (started (harness-perms-test--start-request outside "need it")))
+      ;; The call waits for the user, whatever the mode says.
+      (accept-process-output nil 0.1)
+      (should-not (harness-promise-settled-p (car started)))
+      (should-not (member (harness-perms-test--real outside) (harness-call 'permission/allowed-dirs "s1")))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+      (let ((d (harness-test-await (car started))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (plist-get d :final))
+        (should (string-match-p "denied access" (plist-get d :reason)))
+        (should (string-match-p "Do not ask for it again" (plist-get d :hint))))
+      (should-not (member (harness-perms-test--real outside) (harness-call 'permission/allowed-dirs "s1")))
+      ;; The judge never saw the request.
+      (should (null (funcall probe 'requests))))))
+
+(ert-deftest harness-perms-dir-request-always-and-once ()
+  (let ((saved nil)
+        (harness-allowed-directories nil)
+        (a (harness-test-temp-dir))
+        (b (harness-test-temp-dir)))
+    (harness-perms-test--setup :permission-mode 'auto)
+    (harness-perms-test--install-pending)
+    (cl-letf (((symbol-function 'harness-save-user-option)
+               (lambda (sym value) (set sym value) (push (cons sym value) saved))))
+      ;; Always: the directory joins `harness-allowed-directories'.
+      (let ((s (harness-perms-test--start-request a "every session needs it")))
+        (should (eq 'allow (plist-get (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "allow-always")
+                                      :behavior)))
+        (should (string-match-p "every session" (plist-get (harness-test-await (car s)) :reason))))
+      (should (equal (list (harness-perms-test--real a)) harness-allowed-directories))
+      (should (eq 'harness-allowed-directories (caar saved)))
+      ;; A generic "Allow" (once) grants the directory to the session.
+      (let ((s (harness-perms-test--start-request b)))
+        (should (string-match-p "The agent asks for access to this directory\\."
+                                (plist-get (plist-get (cdr s) :payload) :reason)))
+        (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) '(:behavior allow :scope once))
+        (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+      (should (member (harness-perms-test--real b) (gethash "s1" harness-perms--allowed-dirs)))
+      (should (equal (list (harness-perms-test--real a)) harness-allowed-directories)))))
+
+(ert-deftest harness-perms-dir-request-without-a-user ()
+  (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)
+  (harness-perms-test--install-pending)
+  (let ((outside (harness-test-temp-dir)))
+    ;; Non-interactive: denied at once with a hint, nothing pending.
+    (let ((d (harness-perms-test--decide (harness-perms-test--dir-request outside "need it"))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (plist-get d :final))
+      (should (string-match-p "non-interactive" (plist-get d :reason)))
+      (should (string-match-p "harness-directories" (plist-get d :hint))))
+    (should (null harness-perms-test--pending))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive nil))
+    ;; A path is required.
+    (should (string-match-p "needs the path" (plist-get (harness-perms-test--decide (harness-perms-test--dir-request " "))
+                                                        :reason)))
+    ;; A directory it can already reach is allowed without asking; nothing is granted.
+    (let ((d (harness-perms-test--decide (harness-perms-test--dir-request "sub/dir"))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (string-match-p "already allowed" (plist-get d :reason))))
+    (should (null harness-perms-test--pending))
+    (should (null (gethash "s1" harness-perms--allowed-dirs)))
+    ;; Without a session module nobody can answer.
+    (harness-unregister-method 'session/pending-add)
+    (let ((d (harness-perms-test--decide (harness-perms-test--dir-request outside))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (string-match-p "no user" (plist-get d :reason))))))
+
+(ert-deftest harness-perms-dir-prompts-name-the-real-directory ()
+  "A symbolic link cannot disguise the directory a grant opens."
+  (let* ((s (harness-perms-test--setup :permission-mode 'ask))
+         (cwd (plist-get s :cwd))
+         (target (harness-test-temp-dir))
+         (link (expand-file-name "docs" cwd)))
+    (make-symbolic-link (directory-file-name target) link)
+    (harness-perms-test--install-pending)
+    ;; The agent's own request for the link names the target.
+    (let ((started (harness-perms-test--start-request "docs" "read the docs")))
+      (should (equal (harness-perms-test--real target) (plist-get (plist-get (cdr started) :payload) :dir)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+      (harness-test-await (car started)))
+    ;; So does the jail's prompt for a call through the link.
+    (let ((started (harness-perms-test--start "read_file" 'read (expand-file-name "x.txt" link))))
+      (should (equal (harness-perms-test--real target) (plist-get (plist-get (cdr started) :payload) :dir)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+      (harness-test-await (car started)))
+    ;; A request for a parent of the working directory says how broad it is.
+    (let ((started (harness-perms-test--start-request ".." "look around")))
+      (should (string-match-p "contains the working directory"
+                              (plist-get (plist-get (cdr started) :payload) :reason)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+      (harness-test-await (car started)))
+    (should (null (gethash "s1" harness-perms--allowed-dirs)))))
+
+(defun harness-perms-test--end-to-end ()
+  "Body of `harness-perms-dir-request-end-to-end', with real sessions loaded."
+  (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode 'auto) :id))
+         (outside (harness-test-temp-dir))
+         (run (lambda (id path)
+                (harness-call 'tools/execute sid (list :id id :name "request_directory_access"
+                                                       :input (list :path path :reason "Read the other repository")))))
+         (p (funcall run "c1" outside)))
+    (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "directory prompt")
+    (let ((item (car (harness-call 'session/pending sid))))
+      (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+      ;; A permission, never a question another agent could answer.
+      (should (eq 'permission (plist-get item :kind)))
+      (should-not (harness-promise-settled-p p))
+      (harness-call 'permission/answer sid (plist-get item :id) "allow-session"))
+    (let ((r (harness-test-await p)))
+      (should-not (plist-get r :is-error))
+      (should (string-match-p "now an allowed directory of this session" (plist-get r :content))))
+    (should (equal (list (harness-perms-test--real outside)) (plist-get (harness-call 'session/get sid) :allowed-dirs)))
+    (should (null (harness-call 'session/pending sid)))
+    (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+    ;; A directory it can reach is reported at once.
+    (let ((r (harness-test-await (funcall run "c2" (expand-file-name "sub" outside)))))
+      (should-not (plist-get r :is-error))
+      (should (string-match-p "already accessible: it lies inside .* (granted to this session)" (plist-get r :content))))
+    ;; A denial reaches the agent as a denied call with a hint.
+    (let ((p (funcall run "c3" (harness-test-temp-dir))))
+      (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "second prompt")
+      (harness-call 'permission/answer sid (plist-get (car (harness-call 'session/pending sid)) :id) "deny-once")
+      (let ((r (harness-test-await p)))
+        (should (plist-get r :is-error))
+        (should (plist-get r :denied))
+        (should (string-match-p "\\`Denied: the user denied access to .* Do not ask for it again" (plist-get r :content)))))
+    (should (= 1 (length (plist-get (harness-call 'session/get sid) :allowed-dirs))))))
+
+(ert-deftest harness-perms-dir-request-end-to-end ()
+  "In auto mode the tool blocks the session on the user, then reports the grant."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (dolist (m '(store project config provider session tools perms))
+      (harness-test-load-module m))
+    (clrhash harness-sessions)
+    (clrhash harness-perms--waiting)
+    (clrhash harness-perms--allowed-dirs)
+    (unwind-protect
+        (harness-perms-test--end-to-end)
+      ;; Debounced saves of these sessions must not outlive the store.
+      (clrhash harness-sessions))))
+
 (ert-deftest harness-perms-describe-and-reload ()
   (harness-perms-test--setup)
   (harness-define-tool "t_titled" :kind 'exec :title (lambda (in) (format "run %s" (plist-get in :cmd))) :handler #'ignore)
@@ -496,8 +715,15 @@
   (should (equal "bash echo hi" (harness-perms-describe-request '(:tool "bash" :input (:command "echo hi\nmore")))))
   ;; Re-running init keeps exactly one handler per stage.
   (harness-perms--init)
-  (should (= 5 (length (gethash 'permission/decide harness--filters))))
-  (should (memq 'permission/requested (mapcar #'car (harness-events)))))
+  (should (= 6 (length (gethash 'permission/decide harness--filters))))
+  (should (memq 'permission/requested (mapcar #'car (harness-events))))
+  ;; A hot reload does not run `:init' again for a ready module; loading
+  ;; the file still installs the stage that decides directory requests.
+  (harness-remove-filter 'permission/decide #'harness-perms--dir-request)
+  (harness-test-load-module 'perms)
+  (should (harness-module-ready-p 'perms))
+  (should (rassq #'harness-perms--dir-request (gethash 'permission/decide harness--filters)))
+  (should (= 6 (length (gethash 'permission/decide harness--filters)))))
 
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here
