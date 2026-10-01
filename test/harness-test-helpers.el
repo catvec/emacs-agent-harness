@@ -22,6 +22,19 @@
 (require 'harness-core)
 (require 'harness-util)
 
+(defvar harness-test-state-root (file-name-as-directory (make-temp-file "harness-test-state-" t))
+  "State directory of the whole test run.
+Nothing a run writes outside `harness-test-with-temp-state' -- compiled
+files, or what the sessions and tasks modules flush when Emacs exits --
+may reach the user's real `harness-state-directory'.")
+
+(setq harness-state-directory harness-test-state-root)
+
+(add-hook 'kill-emacs-hook
+          (lambda () (ignore-errors (delete-directory harness-test-state-root t)))
+          ;; Appended, so the modules' exit flushes write here first.
+          t)
+
 (defun harness-test-integration-p ()
   "Non-nil when integration tests that use real models should run."
   (and (getenv "HARNESS_INTEGRATION") t))

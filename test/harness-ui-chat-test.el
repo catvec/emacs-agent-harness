@@ -784,6 +784,20 @@
     (should-not (harness-chat--input-summary (list :path long) (concat "glob *.el in " long "/"))))
   (should (equal (harness-chat--input-summary '(:path "a.el")) "path: a.el")))
 
+(ert-deftest harness-ui-chat-reopens-shown-sessions-on-connect ()
+  "A harness that starts again has every session closed; chat buffers reopen theirs."
+  (harness-ui-chat-test-with
+    (let ((shown (harness-ui-chat-test-session "shown"))
+          (hidden (harness-ui-chat-test-session "hidden")))
+      (harness-ui-chat-test-open shown)
+      ;; How a restarted harness loads them.
+      (harness-call 'session/deactivate shown)
+      (harness-call 'session/deactivate hidden)
+      (harness-ui-connect nil)
+      (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get shown) :status)))
+                         5 "the shown session to reopen")
+      (should (eq 'inactive (plist-get (harness-call 'session/get hidden) :status))))))
+
 (ert-deftest harness-ui-chat-hl-line-skips-compose ()
   ;; hl-line would paint over the compose background, so it stops short of it.
   (harness-ui-chat-test-with

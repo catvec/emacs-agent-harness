@@ -113,6 +113,35 @@
       (should-not (harness-agent-running-p id))
       (should (eq 'idle (plist-get (harness-call 'session/get id) :status))))))
 
+(defvar harness-provider-demo-script-override)
+
+(ert-deftest harness-agent-streamed-text-saved-on-exit ()
+  "Text a running turn has streamed is written when the harness exits."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-delay 0.3)
+           (harness-provider-demo-script-override
+            '((:type text :delta "Hello") (:type text :delta ", world")
+              (:type text :delta "!") (:type done :stop-reason end-turn)))
+           (log (format "sessions/%s.nodes.jsonl" id)))
+      (should (memq #'harness-agent--save-live kill-emacs-hook))
+      (harness-call 'agent/prompt id "hi")
+      (harness-test-wait (lambda () (equal "Hello, world" (plist-get (car (last (harness-call 'session/nodes id))) :content)))
+                         5 "two chunks")
+      ;; Streamed chunks stay in memory: only the first one is on disk.
+      (should-not (cl-find "Hello, world" (harness-call 'store/read-all log)
+                           :key (lambda (r) (plist-get r :content)) :test #'equal))
+      ;; What the exit hooks do, then a fresh start.
+      (harness-agent--save-live)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal "Hello, world"
+                     (plist-get (cl-find 'assistant (harness-call 'session/nodes id) :key (lambda (n) (plist-get n :kind)))
+                                :content)))
+      (harness-call 'agent/cancel id)
+      (harness-test-wait (lambda () (not (harness-agent-running-p id))) 5 "the turn to stop"))))
+
 (ert-deftest harness-agent-before-turn-gate ()
   (harness-agent-test-with
     (let ((id (harness-agent-test-session)))

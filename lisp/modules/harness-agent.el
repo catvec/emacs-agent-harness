@@ -425,9 +425,28 @@ An inactive session is resumed first: sending to it brings it back."
               (agent/steered . "(SESSION-ID)") (agent/quota . "(SESSION-ID WINDOWS)")))
   (harness-declare-event (car ev) (cdr ev)))
 
+;;;; Exit
+
+(defun harness-agent--save-live ()
+  "Write the text that running turns have streamed so far.
+Streaming updates are not written one by one, so a harness exiting
+mid-turn would otherwise keep only the first chunk of the message it
+was receiving."
+  (maphash (lambda (_ turn)
+             (condition-case err
+                 (harness-agent--finalize-live turn)
+               (error (harness-log 'warn "agent: saving a streamed message failed: %S" err))))
+           harness-agent--turns))
+
+(defun harness-agent--init ()
+  "Save streamed text when Emacs exits (idempotent)."
+  (add-hook 'kill-emacs-hook #'harness-agent--save-live))
+
 (harness-define-module 'agent
   :doc "The turn loop: prompt, stream, run tools, steer, queue."
-  :requires '(session provider tools))
+  :requires '(session provider tools)
+  :init #'harness-agent--init
+  :shutdown #'harness-agent--save-live)
 
 (provide 'harness-agent)
 ;;; harness-agent.el ends here

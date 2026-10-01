@@ -298,6 +298,138 @@
         (harness-tasks-test-wait-state id 'done)
         (should (eq 'done (plist-get (harness-tasks-test-task id) :column)))))))
 
+;;;; Restarts: nothing is lost, interrupted work carries on
+
+(defvar harness-provider-demo--continuations)
+(defvar harness-tasks--dirty)
+(defvar harness-tasks-resume-interrupted)
+(defvar harness-tasks-resume-prompt)
+(declare-function harness-agent-turn-handle "harness-agent")
+(declare-function harness-session-flush "harness-session")
+(declare-function harness-session--load-all "harness-session")
+(declare-function harness-tasks--load "harness-tasks")
+(declare-function harness-tasks--recover "harness-tasks")
+(declare-function harness-tasks--schedule "harness-tasks")
+(declare-function harness-tasks--set "harness-tasks")
+(declare-function harness-tasks-flush "harness-tasks")
+
+(defun harness-tasks-test--die ()
+  "Stop like a killed harness: running turns vanish and nobody is told."
+  (dolist (sid (hash-table-keys harness-agent--turns))
+    (let ((turn (gethash sid harness-agent--turns)))
+      (remhash sid harness-agent--turns)
+      (ignore-errors (funcall (plist-get (harness-agent-turn-handle turn) :cancel))))))
+
+(defun harness-tasks-test--restart ()
+  "Run the exit hooks, forget everything in memory and start again."
+  (harness-tasks-flush)
+  (harness-session-flush)
+  (clrhash harness-sessions)
+  (clrhash harness-tasks--table)
+  (clrhash harness-tasks--starting)
+  (clrhash harness-provider-demo--continuations)
+  (setq harness-tasks--loaded nil)
+  (when (boundp 'harness-merge--queues)
+    (clrhash harness-merge--queues)
+    (clrhash harness-merge--locks)
+    (clrhash harness-merge--holds))
+  (harness-session--load-all)
+  (harness-tasks--load)
+  ;; What the module's init schedules, in order.
+  (harness-tasks--recover)
+  (harness-tasks--schedule))
+
+(defun harness-tasks-test--hang-tool ()
+  "Define the tool `hang', whose first call never returns."
+  (let ((calls 0))
+    (harness-define-tool "hang" :description "never returns the first time" :kind 'read
+                         :handler (lambda (_input _ctx)
+                                    (if (= 1 (cl-incf calls)) (harness-make-promise) "ok")))))
+
+(defun harness-tasks-test--node (sid pred)
+  "Return the first node of SID matching PRED."
+  (cl-find-if pred (harness-call 'session/nodes sid)))
+
+(ert-deftest harness-tasks-flushed-on-exit ()
+  "A change waiting for its save is written when Emacs exits."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (should (memq #'harness-tasks-flush kill-emacs-hook))
+      (let ((id (harness-tasks-test-submit "submitted just before quitting")))
+        (should-not (harness-call 'store/load "tasks.json"))
+        (harness-tasks-flush)
+        (should-not harness-tasks--dirty)
+        (should (equal (list id) (mapcar (lambda (task) (plist-get task :id))
+                                         (harness-call 'store/load "tasks.json"))))))))
+
+(ert-deftest harness-tasks-interrupted-task-resumes-after-restart ()
+  (harness-tasks-test-with
+    (harness-tasks-test--hang-tool)
+    (let* ((harness-provider-demo-script-override
+            '((:type tool-call :id "h1" :name "hang" :input (:path "x"))
+              (:type text :delta "Done.") (:type done :stop-reason end-turn)))
+           (id (harness-tasks-test-submit "slow work"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-test-wait (lambda () (harness-tasks-test--node sid (lambda (n) (eq (plist-get n :kind) 'tool-call))))
+                         5 "the hanging tool call")
+      (harness-tasks-test--die)
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Carrying on.") (:type done :stop-reason end-turn))))
+        (harness-tasks-test--restart)
+        (harness-tasks-test-wait-state id 'done))
+      (should (eq 'end-turn (plist-get (harness-tasks-test-task id) :outcome)))
+      ;; The call the restart cut short has a result; then the task was told to carry on.
+      (should (harness-tasks-test--node sid (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
+                                                             (plist-get (plist-get n :meta) :interrupted)))))
+      (should (harness-tasks-test--node sid (lambda (n) (and (eq (plist-get n :kind) 'user)
+                                                             (equal harness-tasks-resume-prompt (plist-get n :content))))))
+      (should (= 2 (cl-count 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))))
+
+(ert-deftest harness-tasks-interrupted-task-waits-when-resume-is-off ()
+  (harness-tasks-test-with
+    (harness-tasks-test--hang-tool)
+    (let* ((harness-tasks-resume-interrupted nil)
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "h1" :name "hang" :input (:path "x")) (:type done :stop-reason end-turn)))
+           (id (harness-tasks-test-submit "slow work"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-test-wait (lambda () (harness-tasks-test--node sid (lambda (n) (eq (plist-get n :kind) 'tool-call))))
+                         5 "the hanging tool call")
+      (harness-tasks-test--die)
+      (harness-tasks-test--restart)
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'active (plist-get task :state)))
+        (should (eq 'interrupted (plist-get task :outcome)))
+        (should (eq 'needs-input (plist-get task :column))))
+      (should (= 1 (cl-count 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
+      ;; A reply carries it on like any stopped task.
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "On it.") (:type done :stop-reason end-turn))))
+        (harness-call 'task/prompt id "carry on")
+        (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-interrupted-while-starting-starts-over ()
+  "A task stopped before its session existed starts again from scratch."
+  (harness-tasks-test-with
+    (let ((id (let ((harness-tasks-max-running 0)) (harness-tasks-test-submit "barely begun"))))
+      ;; Where `harness-tasks--start' leaves a task until its session exists.
+      (harness-tasks--set id :state 'active :started (float-time))
+      (harness-tasks-test--restart)
+      (harness-tasks-test-wait-state id 'done)
+      (should (plist-get (harness-tasks-test-task id) :session)))))
+
+(ert-deftest harness-tasks-recover-leaves-working-tasks-alone ()
+  "Tasks this process works on are not interrupted, whatever their state says."
+  (harness-tasks-test-with
+    (let* ((harness-provider-demo-delay 0.2)
+           (id (harness-tasks-test-submit "busy"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-tasks--recover)
+      (harness-test-wait (lambda () (eq 'running (plist-get (harness-call 'session/get sid) :status))) 5 "running")
+      (harness-tasks--recover)
+      (harness-tasks-test-wait-state id 'done)
+      (should (= 1 (cl-count 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))))
+
 ;;;; Naming: task sessions are titled like tickets
 
 (defvar harness-tasks-naming-prompt)
@@ -437,6 +569,26 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (harness-tasks-test--git root "checkout" "--" "shared.txt")
       (harness-call 'task/merge id)
       (harness-tasks-test-wait-state id 'done)
+      (should (equal "two\n" (harness-tasks-test--main-text root))))))
+
+(ert-deftest harness-tasks-git-interrupted-task-resumes-and-merges ()
+  "A task a restart interrupted in its worktree carries on and merges."
+  (harness-tasks-test-with-git
+    (harness-tasks-test--hang-tool)
+    (let* ((harness-provider-demo-script-override
+            '((:type tool-call :id "h1" :name "hang" :input (:path "x")) (:type done :stop-reason end-turn)))
+           (id (harness-tasks-test-submit "Change the shared file"))
+           (sid nil))
+      (harness-test-wait (lambda () (setq sid (plist-get (harness-tasks-test-task id) :session))) 5 "a session")
+      (harness-test-wait (lambda () (harness-tasks-test--node sid (lambda (n) (eq (plist-get n :kind) 'tool-call))))
+                         5 "the hanging tool call")
+      (harness-tasks-test--die)
+      (let ((harness-provider-demo-script-override
+             '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
+               (:type text :delta "Changed it.") (:type done :stop-reason end-turn))))
+        (harness-tasks-test--restart)
+        (harness-tasks-test-wait-state id 'done))
+      (should (plist-get (harness-tasks-test-task id) :merged))
       (should (equal "two\n" (harness-tasks-test--main-text root))))))
 
 (ert-deftest harness-tasks-git-uncommitted-work-is-steered ()

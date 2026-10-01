@@ -57,8 +57,9 @@ default) the layers above are split across two Emacs processes:
   `*harness-log*`.  Its stdin is closed, so a stray prompt fails rather
   than hangs; it exits when its parent dies.  The parent restarts it
   with backoff when it crashes and stops it with SIGTERM (which runs
-  `kill-emacs-hook`, flushing sessions).  `M-x harness-restart` restarts
-  it with fresh configuration; `harness-reload` reloads both sides.
+  `kill-emacs-hook`, flushing sessions, tasks and streamed text).
+  `M-x harness-restart` restarts it with fresh configuration;
+  `harness-reload` reloads both sides.
 - Work about the user's Emacs runs there, asked for by the harness with
   `client/request` (below): the `emacs_*` and `elisp` tools
   (lisp/harness-client-tools.el), saving user options to `custom-file`
@@ -229,6 +230,16 @@ Persistence under `harness-state-directory`:
 
 Owns session records, nodes, status, queue, pending requests, persistence
 (sessions/ID.json + sessions/ID.nodes.jsonl).
+
+Restarts: records are written shortly after a change, at once when the
+status changes, and all of them on exit; nodes are appended as they
+come.  Every session loads `inactive` (closed until something resumes
+it).  One saved `running` or `blocked` was interrupted mid-turn by a
+harness that stopped, so loading settles it: each tool call without a
+result gets one (`:is-error t`, `:meta (:interrupted t)`) and a hint
+says what it was doing or which question it waited on.  Pending
+requests are not restored: the turn that would read their answers is
+gone.
 
 - `session/create &rest PLIST` — `:cwd` required; `:name :model
   :permission-mode :thinking :kind :parent-id :host :worktree`.  Fills
@@ -461,6 +472,8 @@ request and resolves when answered).
   provider until `end-turn`; hosted loops respond through `:respond`.
   Steering text is drained at every boundary.  `max-turns`
   (`harness-agent-max-steps`, 200) ends runaway loops.
+- Streaming updates of the live node are not persisted one by one; on
+  exit (`kill-emacs-hook`) and shutdown the text streamed so far is.
 
 ### usage
 
@@ -580,7 +593,16 @@ blocked on a request or the task stopped part way.
   branch), `task/archive-done &optional CWD`, `task/cancel ID`,
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree).
 - Events `task/changed TASK`, `task/deleted ID`.  Records persist in
-  `tasks.json`; merges in flight are queued again after a restart.
+  `tasks.json`, written shortly after a change and on exit
+  (`harness-tasks-flush`).
+- Restarts: when the module starts, an active task without an outcome
+  that nothing in this process works on was interrupted.  Without a
+  session it starts over (as pending, or in its worktree when it has
+  one); otherwise, with `harness-tasks-resume-interrupted` (default t),
+  its session is resumed and sent `harness-tasks-resume-prompt` (the task
+  itself when it never got it), past the concurrency limit since it held
+  a slot before; with nil it waits in needs-input with `:outcome
+  interrupted`.  Merges in flight are queued again.
 
 ### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions
 
@@ -705,7 +727,9 @@ re-entered.
 ## Presentation contracts
 
 `harness-ui` owns the connection (`harness-ui-connection`, local by
-default; `harness-connect-remote` swaps it), the face set
+default; `harness-connect-remote` swaps it; `harness-ui-connected-hook`
+runs after every connect, where the chat reopens the closed sessions its
+buffers show, as a harness that just started has them all closed), the face set
 (`harness-user-face`, `harness-agent-face`, `harness-tool-face`,
 `harness-thinking-face`, `harness-hint-face`, warning ramps), the
 session cache updated from `_harness/session` updates, window

@@ -40,8 +40,14 @@
 ;;   active        in progress, merging included
 ;;   done          completed
 ;;
-;; Records persist in tasks.json; the sessions persist as usual.
-;; Events `task/changed' (TASK) and `task/deleted' (ID) let a UI follow.
+;; Records persist in tasks.json, written shortly after every change and
+;; on exit; the sessions persist as usual.  A harness that stops (Emacs
+;; quit, `harness-restart', a crash) interrupts the tasks it was working
+;; on, so a start picks them up again: one stopped before its session
+;; existed starts over, the others are told to carry on
+;; (`harness-tasks-resume-interrupted'), and merges in flight are queued
+;; again.  Events `task/changed' (TASK) and `task/deleted' (ID) let a UI
+;; follow.
 
 ;;; Code:
 
@@ -105,6 +111,19 @@ complete only when the merge queue has merged that branch."
   "Git executable used to delete merged task branches."
   :type 'string :group 'harness)
 
+(defcustom harness-tasks-resume-interrupted t
+  "When non-nil, tasks a stopped harness interrupted carry on by themselves.
+A task that was working when the harness stopped (Emacs quit,
+`harness-restart', a crash) is sent `harness-tasks-resume-prompt' when the
+harness starts again.  With nil it waits in needs-input instead, with
+the outcome `interrupted', until you reply."
+  :type 'boolean :group 'harness)
+
+(defcustom harness-tasks-resume-prompt
+  "The harness restarted while you were working on this task, so your last turn was cut short: tool calls that were still running did not finish. Check where you left off, then carry on with the task."
+  "Message that resumes a task's session after a restart interrupted it."
+  :type 'string :group 'harness)
+
 (defconst harness-tasks--store-name "tasks.json" "Store file of the task records.")
 
 (defconst harness-tasks--symbol-keys '(:state :outcome :merge-status)
@@ -114,6 +133,8 @@ complete only when the merge queue has merged that branch."
   "Task id -> task plist.")
 
 (defvar harness-tasks--loaded nil "Non-nil once the records were read from the store.")
+
+(defvar harness-tasks--dirty nil "Non-nil while a change waits to be written to the store.")
 
 (defvar harness-tasks--starting (make-hash-table :test 'equal)
   "Task ids that are starting: worktree or session made, first turn not begun.
@@ -141,12 +162,25 @@ They hold a slot so a burst of submissions never overshoots the limit.")
 
 (defun harness-tasks--save ()
   "Write every task record now."
-  (harness-call 'store/save harness-tasks--store-name (harness-tasks--sorted)))
+  (harness-call 'store/save harness-tasks--store-name (harness-tasks--sorted))
+  (setq harness-tasks--dirty nil))
+
+(defun harness-tasks--save-soon ()
+  "Write the task records once changes stop coming for a moment."
+  (setq harness-tasks--dirty t)
+  (harness-debounce 'harness-tasks-save 0.3 #'harness-tasks--save))
+
+(defun harness-tasks-flush ()
+  "Write the task records now if a change is waiting (on exit and shutdown)."
+  (when harness-tasks--dirty
+    (condition-case err
+        (harness-tasks--save)
+      (error (harness-log 'error "tasks: could not save %s: %S" harness-tasks--store-name err)))))
 
 (defun harness-tasks--put (task)
   "Store TASK, schedule a save and emit `task/changed'.  Return its view."
   (puthash (plist-get task :id) task harness-tasks--table)
-  (harness-debounce 'harness-tasks-save 0.3 #'harness-tasks--save)
+  (harness-tasks--save-soon)
   (let ((view (harness-tasks--view task)))
     (harness-emit 'task/changed view)
     view))
@@ -443,9 +477,11 @@ message sent to an archived task's session brings the task back too."
   "Drop task ID and emit `task/deleted'."
   (remhash id harness-tasks--table)
   (remhash id harness-tasks--starting)
-  (harness-debounce 'harness-tasks-save 0.3 #'harness-tasks--save)
+  (harness-tasks--save-soon)
   (harness-emit 'task/deleted id)
   (harness-run-soon #'harness-tasks--schedule))
+
+;;;; Restarts
 
 (defun harness-tasks--resume-merges ()
   "Queue the merges of tasks left merging by a restart again.
@@ -458,6 +494,60 @@ The merge queue lives in memory, so a restart forgets it."
         (harness-tasks--set id :merge-status nil
                             :merge-attempts (max 0 (1- (or (plist-get task :merge-attempts) 1))))
         (harness-tasks--enqueue-merge id)))))
+
+(defun harness-tasks--interrupted-p (task)
+  "Non-nil when TASK was working when the harness last stopped.
+An active task without an outcome is working on something; when nothing
+in this process works on it, the process that did has stopped."
+  (let ((sid (plist-get task :session)))
+    (and (eq (plist-get task :state) 'active)
+         (null (plist-get task :outcome))
+         (not (plist-get task :archived))
+         (not (gethash (plist-get task :id) harness-tasks--starting))
+         (not (and sid (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid))))))
+
+(defun harness-tasks--resume (id)
+  "Prompt the session of task ID to carry on after a restart interrupted it.
+A session that never received the task gets the task itself."
+  (let* ((task (harness-tasks--get id))
+         (sid (plist-get task :session))
+         (begun (progn (harness-call 'session/resume sid)
+                       (cl-find 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))
+    (harness-log 'info "task %s: resuming session %s after a restart" id sid)
+    (puthash id t harness-tasks--starting)
+    (harness-catch (harness-call-async 'agent/prompt sid
+                                       (if begun
+                                           (list (list :type "text" :text harness-tasks-resume-prompt))
+                                         (harness-tasks--blocks task)))
+                   (lambda (e) (harness-tasks--fail id e)))))
+
+(defun harness-tasks--recover ()
+  "Pick up the tasks a stopped harness was working on.
+Runs once the modules are up, before the scheduler.  A task stopped
+before it had a session starts over, in its worktree when it got that
+far; a task whose session was at work carries on with
+`harness-tasks-resume-prompt', or waits for the user with the outcome
+`interrupted' when `harness-tasks-resume-interrupted' is nil.  Working
+past the concurrency limit is fine here: these tasks held their slots
+before the restart."
+  (dolist (task (harness-tasks--sorted #'harness-tasks--interrupted-p))
+    (let ((id (plist-get task :id)))
+      (condition-case err
+          (cond
+           ((plist-get task :session)
+            (cond ((not (harness-tasks--session task))
+                   (harness-tasks--set id :outcome 'error :error "its session no longer exists"))
+                  (harness-tasks-resume-interrupted (harness-tasks--resume id))
+                  (t (harness-tasks--set id :outcome 'interrupted
+                                         :error "the harness stopped while it was working"))))
+           ((plist-get task :worktree)
+            (harness-log 'info "task %s: opening its session again after a restart" id)
+            (puthash id t harness-tasks--starting)
+            (harness-tasks--open-session id (plist-get task :worktree) (plist-get task :worktree)))
+           (t
+            (harness-log 'info "task %s: queued again after a restart" id)
+            (harness-tasks--set id :state 'pending :started nil)))
+        (error (harness-tasks--fail id err))))))
 
 ;;;; Methods
 
@@ -658,8 +748,11 @@ Its worktree, if any, is kept: it may hold work nobody merged."
 ;;;; Module
 
 (defun harness-tasks--init ()
-  "Load the records, follow sessions and merges, start waiting tasks."
+  "Load the records, follow sessions and merges, then get work going.
+Once every module is up, work a stopped harness interrupted is picked
+up again, merges in flight are queued again and waiting tasks start."
   (harness-tasks--load)
+  (add-hook 'kill-emacs-hook #'harness-tasks-flush)
   (harness-on 'agent/turn-started #'harness-tasks--on-turn-started)
   (harness-on 'agent/turn-ended #'harness-tasks--on-turn-ended)
   (harness-on 'session/deleted #'harness-tasks--on-session-deleted)
@@ -669,6 +762,7 @@ Its worktree, if any, is kept: it may hold work nobody merged."
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
+  (harness-run-soon #'harness-tasks--recover)
   (harness-run-soon #'harness-tasks--resume-merges)
   (harness-run-soon #'harness-tasks--schedule))
 
@@ -678,7 +772,8 @@ Its worktree, if any, is kept: it may hold work nobody merged."
 (harness-define-module 'tasks
   :doc "Task mode: one session per task, from worktree to merged, with a concurrency limit."
   :requires '(store project session agent)
-  :init #'harness-tasks--init)
+  :init #'harness-tasks--init
+  :shutdown #'harness-tasks-flush)
 
 (provide 'harness-tasks)
 ;;; harness-tasks.el ends here
