@@ -80,9 +80,24 @@ when available, `off' never sandboxes."
   "Tokens kept free below the context window before compaction."
   :type 'integer :safe #'integerp :group 'harness)
 
+(defcustom harness-tasks-directory "docs/tasks"
+  "Folder of a git project's task files, relative to its main checkout.
+Every task on the project's board is also a markdown file there: YAML
+frontmatter with the fields the harness reads, then the task's prompt,
+the request it was written from and its plan.  The harness writes the
+files when tasks change and reads back the ones people (or other tools)
+edit or add, which then show on the board.  See the tasks module.
+
+nil keeps no task files.  A project's .dir-locals.el can pick another
+folder for that project, or nil to keep none there."
+  :type '(choice (const :tag "No task files" nil) (string :tag "Folder"))
+  :safe (lambda (v) (or (null v) (stringp v)))
+  :group 'harness)
+
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-allowed-directories
-    harness-budget harness-sandbox-policy harness-non-interactive harness-context-reserve)
+    harness-budget harness-sandbox-policy harness-non-interactive harness-context-reserve
+    harness-tasks-directory)
   "Settings that take part in layering.")
 
 (defconst harness-config-hidden-options

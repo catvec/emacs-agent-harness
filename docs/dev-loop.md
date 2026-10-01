@@ -20,7 +20,8 @@ results are reproducible.  State lives in `scripts/.dev/state-SOCKET`
 so several daemons can run side by side.  Its tasks stay there too
 (`harness-tasks-store-in-repository` is nil in the daemon): it never
 writes into a repository's `.git`, where the real harness keeps a git
-project's task board.  The tests do the same.
+project's task board, nor task files into its `docs/tasks/`.  The
+tests do the same, except those that make repositories of their own.
 
 The harness always runs byte-compiled code: `harness-start` and
 `harness-reload` compile every source file into

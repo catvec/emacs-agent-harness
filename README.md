@@ -86,8 +86,9 @@ edits them like a customize buffer, with a Global / Project toggle at
 the top, and shows where each value in effect comes from.  These layer:
 `harness-context-reserve`, `harness-model`, `harness-permission-mode`,
 `harness-thinking`, `harness-allowed-directories`, `harness-budget`,
-`harness-sandbox-policy`, `harness-non-interactive`.  The page lists
-the other harness options too; they have a global value only.
+`harness-sandbox-policy`, `harness-non-interactive`,
+`harness-tasks-directory`.  The page lists the other harness options
+too; they have a global value only.
 
 Sessions and tasks live in `harness-state-directory` (`harness/` in your
 Emacs directory by default) and survive restarts of Emacs and of the
@@ -104,6 +105,21 @@ After a restart sessions are closed until you open one again (`C-c a s`,
 marked in it.  The task board comes back as it was, and tasks that were
 working carry on by themselves (`harness-tasks-resume-interrupted` nil
 makes them wait for you instead).
+
+A git project's board is also a folder of markdown files, one per task,
+in `docs/tasks/` of the main checkout (`harness-tasks-directory`; a
+project's `.dir-locals.el` may name another folder, or nil for none).
+Each file has YAML frontmatter (`id`, `title`, `state`, `column`,
+`session`, `branch`, `merge`, `model`, `created` and so on), then the
+task's prompt, the request it was written up from and its plan.  The
+harness writes a file when its task changes and reads back edits to the
+prompt, the request, the title, the model and thinking, and `state:
+done`.  A file you add becomes a backlog task, deleting a file (or
+moving it into `docs/tasks/archive/`) archives its task, archiving a
+task on the board moves its file there, and frontmatter keys the
+harness does not know are kept.  Files are written only in the main
+checkout, never in a task's worktree, and the harness does not commit
+them.  See the tasks section of `docs/architecture.md` for the format.
 
 | | |
 |---|---|
