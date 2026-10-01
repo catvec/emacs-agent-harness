@@ -551,7 +551,8 @@ request and resolves when answered).
 
 Task mode: one session per task.  TASK =
 `(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…)
-:state pending|active|merging|done :column pending|needs-input|active|done
+:state pending|refining|active|merging|done :column pending|needs-input|active|done
+:backlog BOOL :note "the words a backlog task was written up from" :refined F
 :session SID :outcome nil|end-turn|error|cancelled|merge-failed|merged|…
 :error "…" :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F)`.
@@ -563,6 +564,28 @@ blocked on a request or the task stopped part way.
   `harness-tasks-max-running` slots is free.  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
   `-non-interactive` (on); an explicit false turns non-interactive off.
+  With `:refine` the task goes to the backlog instead (below).
+- Backlog refinement (once called grooming): a `:refine` task is
+  `refining` while a session at its directory -- `ask` and
+  non-interactive, so read-only, `harness-tasks-refine-model` and
+  `-refine-thinking` (low) -- writes it up as told by
+  `harness-tasks-refine-prompt` (brief, no changes, no questions, a
+  self-contained ticket: title line, what and why, what to change, how to
+  tell it is done, open questions); after `harness-tasks-refine-tool-calls`
+  (8) tool calls it is steered once to write up with what it has, which
+  keeps it brief.  Its final reply becomes `:prompt`
+  (the original stays in `:note`) and the task waits in `pending` with
+  `:backlog t`: the scheduler never starts it, only `task/start`, so the
+  backlog survives restarts.  A turn of a backlog task's session before
+  it starts is feedback (`task/prompt`) and rewrites the write-up; a
+  write-up that stops needs input (restarts: below).
+  `task/refine ID &optional TEXT` refines a queued task or
+  writes one up again.  Starting continues the same session: in git it
+  moves into the task's new worktree (`session/update :cwd :worktree`),
+  its provider conversation is dropped (the Claude CLI keeps
+  conversations per directory) and it is prompted with
+  `harness-tasks-start-text`, the write-up and the quoted note, under the
+  task's own settings.  Dropping a backlog task deletes its session.
 - `task/adoptable &optional CWD` lists the project's open sessions that
   are not tasks; `task/adopt SESSION-ID` makes one a task (its first
   message is the prompt; a worktree session keeps its worktree and merges
@@ -585,12 +608,14 @@ blocked on a request or the task stopped part way.
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
-  `task/start ID` (ignores the limit), `task/update ID PROMPT` (pending
-  only), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
-  steering; reopens),
+  `task/start ID` (ignores the limit; not while a write-up runs),
+  `task/update ID PROMPT` (not started only; writes a stopped write-up by
+  hand), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
+  steering; reopens), `task/refine ID &optional TEXT`,
   `task/merge ID` (retry), `task/complete ID`, `task/archive ID &optional
   RESTORE` (deactivates the session; removes a merged task's worktree and
-  branch), `task/archive-done &optional CWD`, `task/cancel ID`,
+  branch), `task/archive-done &optional CWD`, `task/cancel ID` (drops a
+  task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree).
 - Events `task/changed TASK`, `task/deleted ID`.  Records persist in
   `tasks.json`, written shortly after a change and on exit
@@ -602,7 +627,10 @@ blocked on a request or the task stopped part way.
   its session is resumed and sent `harness-tasks-resume-prompt` (the task
   itself when it never got it), past the concurrency limit since it held
   a slot before; with nil it waits in needs-input with `:outcome
-  interrupted`.  Merges in flight are queued again.
+  interrupted`.  A backlog task cut short before its session got the
+  work starts again (with nil: back to the backlog), keeping a worktree
+  it got; a write-up cut short is written again by its session (with
+  nil: `:outcome interrupted`).  Merges in flight are queued again.
 
 ### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions
 
@@ -639,7 +667,7 @@ prefixes come from the session host):
 | `session_control` | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
 | `session_wait` | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
 | `task_list` | column, include_archived, all_projects | read |
-| `task_submit` | prompt, cwd, model, thinking | meta |
+| `task_submit` | prompt, cwd, model, thinking, refine (for the backlog) | meta |
 | `task_control` | task_id, action (start/message/cancel/merge/complete/archive/restore/delete), message | meta |
 | `task_wait` | task_id / task_ids, until (settled/done/needs-input/active/changed), mode, timeout_seconds | read |
 
@@ -787,12 +815,17 @@ task's session or answers its question (`C-g` leaves an edit, message
 or answer for a new task again: a question stays waiting, never
 cancelled).  RET opens the session.  The session setting commands
 change the task at point, or from the compose box the settings the next
-task starts with (shown as buttons under the New task label).  `I` or
+task starts with (shown as buttons under the New task label).  A
+Submit / Refine toggle beside that label (`C-c C-t`) picks what a new
+task does: start, or go to the backlog, written up by an agent and
+waiting in pending until you start it (`s`); `r` refines a queued task,
+retries a stopped write-up or sends feedback on a backlog task's.  `I` or
 [Add session] makes an ongoing session a task.  Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at
 the top of in progress (latest started first) and completed lists the
 latest finished first; pending is the queue, in the order its tasks
-start.
+start, with the backlog among it (oldest first; only queued tasks have a
+place in line).
 
 Other buffers: sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; scoped to the current project, its

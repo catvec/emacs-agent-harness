@@ -274,5 +274,25 @@
       (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "cancel"))
       (should-not (harness-call 'task/list)))))
 
+(ert-deftest harness-tools-sessions-task-for-the-backlog ()
+  "task_submit with refine writes a task up; task_wait settles once it waits to be started."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running nil)
+           (harness-provider-demo-script-override
+            '((:type text :delta "Fix the lexer\n\nIt drops the last token.") (:type done :stop-reason end-turn)))
+           (me (harness-tools-sessions-test-session))
+           (submitted (harness-tools-sessions-test-run me "task_submit" '(:prompt "lexer eats a token" :refine t)))
+           (id (plist-get (plist-get submitted :meta) :task-id)))
+      (should (string-match-p "backlog" (plist-get submitted :content)))
+      (let ((text (harness-tools-sessions-test-ok me "task_wait" (list :task_id id))))
+        (should (string-match-p "Done waiting" text))
+        (should (string-match-p "It drops the last token" text)))
+      (let ((task (harness-call 'task/get id)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (equal "Fix the lexer\n\nIt drops the last token." (plist-get task :prompt))))
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "start"))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
+
 (provide 'harness-tools-sessions-test)
 ;;; harness-tools-sessions-test.el ends here

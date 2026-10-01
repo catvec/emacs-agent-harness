@@ -21,10 +21,25 @@
 ;; merge queue; any other failure puts the task in front of the user.
 ;; Archiving a merged task removes its worktree and its merged branch.
 ;;
+;; Backlog refinement (once called grooming): a task submitted with
+;; `:refine' is jotted down for later, not started.  An agent writes it
+;; up first -- briefly, read-only, at the project's root, told so by
+;; `harness-tasks-refine-prompt' -- and its final reply becomes the
+;; task's prompt; the original words stay in `:note'.  The task then
+;; waits in pending as a backlog task (`:backlog'): the scheduler never
+;; starts it, only `task/start' does, so the backlog survives restarts
+;; until someone picks a task.  Its session is the one that refined it:
+;; starting moves that session into the task's worktree and tells it to
+;; do the work.  A message to a backlog task's session is feedback on
+;; the write-up, which the agent rewrites.
+;;
 ;; States:
 ;;
 ;;   pending   submitted, waiting for a free slot (only when
-;;             `harness-tasks-max-running' limits how many run at once)
+;;             `harness-tasks-max-running' limits how many run at once),
+;;             or a backlog task waiting for someone to start it
+;;   refining  an agent is writing a backlog task up, or stopped part
+;;             way (`:outcome' says why)
 ;;   active    its session is working on it, or stopped part way
 ;;             (`:outcome' says why: error, cancelled, merge-failed…)
 ;;   merging   the agent finished; its branch is queued or merging
@@ -34,9 +49,10 @@
 ;; Every task a method returns or an event carries also has a derived
 ;; `:column', the kanban column it belongs in:
 ;;
-;;   pending       waiting for a slot
+;;   pending       waiting for a slot, being refined, or in the backlog
 ;;   needs-input   requires user input: its session is blocked on a
-;;                 permission or a question, or it stopped part way
+;;                 permission or a question, or it (or its refinement)
+;;                 stopped part way
 ;;   active        in progress, merging included
 ;;   done          completed
 ;;
@@ -45,9 +61,9 @@
 ;; quit, `harness-restart', a crash) interrupts the tasks it was working
 ;; on, so a start picks them up again: one stopped before its session
 ;; existed starts over, the others are told to carry on
-;; (`harness-tasks-resume-interrupted'), and merges in flight are queued
-;; again.  Events `task/changed' (TASK) and `task/deleted' (ID) let a UI
-;; follow.
+;; (`harness-tasks-resume-interrupted'), a write-up cut short is written
+;; again, and merges in flight are queued again.  Events `task/changed'
+;; (TASK) and `task/deleted' (ID) let a UI follow.
 
 ;;; Code:
 
@@ -89,6 +105,38 @@ A task's session name is its title on the board, so by default the
 model titles task sessions like tickets."
   :type '(choice (const :tag "Name tasks like other sessions" nil) string) :group 'harness)
 
+(defcustom harness-tasks-refine-prompt
+  "## Task refinement
+This session refines a task for the backlog: the engineer jotted it down to be done later, maybe by another agent that will not see this conversation.  Do not do the task: write it up.
+- Be brief.  Look at the project only as far as you need to name the right files and functions: a handful of reads or searches at most.  This is a write-up, not the work, so do not plan, edit files, run commands or ask the user questions; put open questions in the write-up instead.
+- End your turn with the complete write-up as your final message and nothing else.  Its first line is a short imperative title, plain text, no heading markup.  Then, after a blank line, in concise markdown: what is wanted and why, what to change (files, functions, behaviour), how to tell it is done, and open questions or assumptions if there are any.
+- When the user replies, take it as feedback on the task and answer with the complete updated write-up."
+  "System prompt section of a session that writes a backlog task up.
+Its final reply becomes the task's prompt, so it asks for one complete,
+self-contained write-up."
+  :type 'string :group 'harness)
+
+(defcustom harness-tasks-refine-model nil
+  "Model that writes backlog tasks up, or nil for the task's own model."
+  :type '(choice (const :tag "The task's model" nil) string) :group 'harness)
+
+(defcustom harness-tasks-refine-thinking "low"
+  "Thinking level of refining a backlog task, or nil for the task's own.
+A write-up should be quick, so the default thinks little."
+  :type '(choice (const :tag "The task's thinking level" nil) string) :group 'harness)
+
+(defcustom harness-tasks-refine-tool-calls 8
+  "Tool calls a write-up may make before the agent is told to finish it.
+The agent is steered once, to write the task up with what it knows; nil
+never tells it.  It keeps a backlog write-up brief."
+  :type '(choice (const :tag "Never" nil) integer) :group 'harness)
+
+(defcustom harness-tasks-start-text
+  "Start working on this task now.  It was written up earlier without doing any of it; that is over, so change files, run commands and so on as the task requires."
+  "Opening of the message that starts a backlog task's work.
+The task's write-up follows it, then the request it was written from."
+  :type 'string :group 'harness)
+
 (defcustom harness-tasks-worktrees t
   "When non-nil, tasks in a git project work in a worktree and merge back.
 Each task gets a branch named after `harness-tasks-branch-prefix' and is
@@ -116,7 +164,8 @@ complete only when the merge queue has merged that branch."
 A task that was working when the harness stopped (Emacs quit,
 `harness-restart', a crash) is sent `harness-tasks-resume-prompt' when the
 harness starts again.  With nil it waits in needs-input instead, with
-the outcome `interrupted', until you reply."
+the outcome `interrupted', until you reply.  The same goes for a backlog
+task's write-up: it is written again, or with nil waits for a retry."
   :type 'boolean :group 'harness)
 
 (defcustom harness-tasks-resume-prompt
@@ -218,13 +267,36 @@ so a board opened from a task's session shows the project's tasks."
   (let ((sid (plist-get task :session)))
     (and sid (harness-call 'session/exists-p sid) (harness-call 'session/get sid))))
 
+(defun harness-tasks--backlog-p (task)
+  "Non-nil when TASK is a backlog task: only `task/start' starts it."
+  (harness-json-true-p (plist-get task :backlog)))
+
+(defun harness-tasks--refinement-p (task)
+  "Non-nil when a turn of TASK's session refines it rather than doing it.
+That is while it is refining, and while it waits in the backlog with
+the session that wrote it up."
+  (or (eq (plist-get task :state) 'refining)
+      (and (eq (plist-get task :state) 'pending) (plist-get task :session) t)))
+
+(defun harness-tasks--turn-p (task)
+  "Non-nil while a turn of TASK's session runs (from the moment it is prompted)."
+  (let ((sid (plist-get task :session)))
+    (and sid (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid) t)))
+
 ;;;; Columns
 
 (defun harness-tasks--column (task)
-  "Return the kanban column of TASK: pending, needs-input, active or done."
+  "Return the kanban column of TASK: pending, needs-input, active or done.
+A task being refined shows in pending, where it ends up, unless the
+refinement needs the user."
   (pcase (plist-get task :state)
     ('pending 'pending)
     ('done 'done)
+    ('refining (let ((session (harness-tasks--session task)))
+                 (cond ((plist-get session :pending) 'needs-input)
+                       ((harness-tasks--turn-p task) 'pending)
+                       ((plist-get task :outcome) 'needs-input)
+                       (t 'pending))))
     (_ (let ((session (harness-tasks--session task)))
          (cond ((gethash (plist-get task :id) harness-tasks--starting) 'active)
                ((plist-get session :pending) 'needs-input)
@@ -337,10 +409,16 @@ so a board opened from a task's session shows the project's tasks."
 ;;;; The task prompts
 
 (defun harness-tasks--system-prompt (prompt session)
-  "Tell a task's SESSION how its work reaches the main branch (PROMPT filter)."
+  "Tell a task's SESSION what its turns are for (PROMPT filter).
+Before the task starts they write it up (`harness-tasks-refine-prompt');
+afterwards, in a worktree, they learn how the work reaches the main branch."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
-    (if (not (and task (plist-get task :worktree)))
-        prompt
+    (cond
+     ((and task (harness-tasks--refinement-p task)
+           (not (harness-string-blank-p harness-tasks-refine-prompt)))
+      (concat prompt "\n\n" harness-tasks-refine-prompt "\n"))
+     ((not (and task (plist-get task :worktree))) prompt)
+     (t
       (concat prompt "\n\n## Task mode\n"
               (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
                       (plist-get task :worktree) (plist-get task :branch))
@@ -348,7 +426,7 @@ so a board opened from a task's session shows the project's tasks."
               "(git add -A, then git commit with a message saying what the change does). "
               (format "Do not merge, rebase onto or push %s yourself: when your turn ends the harness merges "
                       (or (plist-get task :base) "the main branch"))
-              "your branch through the merge queue, and it will come back to you if the merge needs anything.\n"))))
+              "your branch through the merge queue, and it will come back to you if the merge needs anything.\n")))))
 
 (defun harness-tasks--naming-prompt (prompt session)
   "Ask for a ticket title when naming a task's SESSION (PROMPT filter)."
@@ -372,10 +450,15 @@ so a board opened from a task's session shows the project's tasks."
     (- harness-tasks-max-running
        (cl-count-if #'harness-tasks--working-p (harness-tasks--sorted)))))
 
+(defun harness-tasks--queued-p (task)
+  "Non-nil when TASK waits for a slot: pending and not in the backlog."
+  (and (eq (plist-get task :state) 'pending) (not (harness-tasks--backlog-p task))))
+
 (defun harness-tasks--schedule ()
-  "Start the oldest pending tasks while slots are free."
+  "Start the oldest queued tasks while slots are free.
+Backlog tasks wait for `task/start' instead."
   (let ((free (harness-tasks--free-slots)))
-    (dolist (task (harness-tasks--sorted (lambda (task) (eq (plist-get task :state) 'pending))))
+    (dolist (task (harness-tasks--sorted #'harness-tasks--queued-p))
       (when (> free 0)
         (cl-decf free)
         (harness-tasks--start task)))))
@@ -397,62 +480,262 @@ so a board opened from a task's session shows the project's tasks."
   (harness-run-soon #'harness-tasks--schedule))
 
 (defun harness-tasks--start (task)
-  "Start TASK: make its worktree in a git project, then its session."
-  (let ((id (plist-get task :id)))
+  "Start TASK: make its worktree in a git project, then its session.
+A backlog task already has the session that wrote it up; that session
+moves into the worktree and does the work.  A task started again after a
+restart cut its start short keeps the worktree it got."
+  (let ((id (plist-get task :id))
+        (worktree (plist-get task :worktree))
+        (launch (if (harness-tasks--session task)
+                    #'harness-tasks--continue-session
+                  #'harness-tasks--open-session)))
     (puthash id t harness-tasks--starting)
     (harness-tasks--set id :state 'active :outcome nil :error nil :started (float-time) :finished nil)
-    (if (not (harness-tasks--git-p (plist-get task :project)))
-        (harness-tasks--open-session id (plist-get task :cwd) nil)
+    (cond
+     ((not (harness-tasks--git-p (plist-get task :project)))
+      (funcall launch id (plist-get task :cwd) nil))
+     ((and worktree (not (plist-get task :worktree-removed)) (file-directory-p worktree))
+      (funcall launch id worktree worktree))
+     (t
       (harness-then (harness-tasks--make-worktree task)
                     (lambda (wt)
                       (let ((path (file-name-as-directory (plist-get wt :path))))
                         (harness-tasks--set id :worktree path :branch (plist-get wt :branch)
                                             :base (plist-get wt :base))
-                        (harness-tasks--open-session id path path)))
-                    (lambda (err) (harness-tasks--fail id err))))))
+                        (funcall launch id path path)))
+                    (lambda (err) (harness-tasks--fail id err)))))))
+
+(defun harness-tasks--work-settings (task)
+  "Return the settings TASK's work runs with, as `session/create' keys.
+The task's own, else the `harness-tasks-' defaults; unset ones are left
+out, so the session gets what its directory configures."
+  (let ((mode (or (plist-get task :permission-mode) harness-tasks-permission-mode))
+        (model (or (plist-get task :model) harness-tasks-model))
+        (thinking (or (plist-get task :thinking) harness-tasks-thinking))
+        (non-interactive (if (plist-member task :non-interactive)
+                             (harness-json-true-p (plist-get task :non-interactive))
+                           harness-tasks-non-interactive)))
+    (append (and mode (list :permission-mode mode))
+            (and model (list :model model))
+            (and thinking (list :thinking thinking))
+            (and non-interactive (list :non-interactive t)))))
 
 (defun harness-tasks--open-session (id cwd worktree)
   "Create task ID's session in CWD (in WORKTREE, when non-nil) and prompt it."
   (condition-case err
       (let* ((task (harness-tasks--get id))
-             (mode (or (plist-get task :permission-mode) harness-tasks-permission-mode))
-             (model (or (plist-get task :model) harness-tasks-model))
-             (thinking (or (plist-get task :thinking) harness-tasks-thinking))
-             (non-interactive (if (plist-member task :non-interactive)
-                                  (harness-json-true-p (plist-get task :non-interactive))
-                                harness-tasks-non-interactive))
              (session (apply #'harness-call 'session/create
                              :cwd cwd
                              (append (and worktree (list :worktree worktree))
-                                     (and mode (list :permission-mode mode))
-                                     (and model (list :model model))
-                                     (and thinking (list :thinking thinking))
-                                     (and non-interactive (list :non-interactive t)))))
+                                     (harness-tasks--work-settings task))))
              (sid (plist-get session :id)))
         (harness-tasks--set id :session sid)
         (harness-catch (harness-call-async 'agent/prompt sid (harness-tasks--blocks task))
                        (lambda (e) (harness-tasks--fail id e))))
     (error (harness-tasks--fail id err))))
 
+(defun harness-tasks--quote (text)
+  "Return TEXT as a markdown quote."
+  (mapconcat (lambda (line) (if (string-empty-p line) ">" (concat "> " line)))
+             (split-string (string-trim text) "\n") "\n"))
+
+(defun harness-tasks--start-text (task)
+  "Return the message that starts the work of backlog TASK.
+It carries the write-up in full, as edited since, so the work never
+depends on the provider remembering the refinement (after moving into a
+worktree it does not), and the request it was written from, quoted."
+  (let ((prompt (plist-get task :prompt))
+        (note (plist-get task :note)))
+    (concat harness-tasks-start-text "\n\n" prompt
+            (if (and note (not (equal (string-trim note) (string-trim prompt))))
+                (concat "\n\n---\nIt was written up from this request (the write-up above takes precedence):\n\n"
+                        (harness-tasks--quote note))
+              ""))))
+
+(defun harness-tasks--continue-session (id cwd worktree)
+  "Start task ID's work in the session that wrote it up, moved to CWD.
+WORKTREE, when non-nil, is the task's worktree.  The session takes the
+task's settings instead of the refinement's read-only ones.  When the
+directory changes, the provider's conversation is dropped: the Claude
+CLI keeps conversations per directory, and the start message carries
+everything the work needs, while the transcript keeps the refinement."
+  (condition-case err
+      (let* ((task (harness-tasks--get id))
+             (sid (plist-get task :session))
+             (session (harness-call 'session/get sid))
+             (cwd (file-name-as-directory (expand-file-name cwd)))
+             (settings (harness-tasks--work-settings task)))
+        (unless (equal cwd (plist-get session :cwd))
+          ;; Deactivating closes the provider's process, so the next turn
+          ;; starts a new conversation in the new directory.
+          (unless (eq (plist-get session :status) 'inactive)
+            (harness-call 'session/deactivate sid))
+          (harness-call 'session/set-provider-state sid nil))
+        (apply #'harness-call 'session/update sid :silent t :cwd cwd
+               (append
+                (and worktree (list :worktree worktree))
+                (list :permission-mode (or (plist-get settings :permission-mode)
+                                           (harness-tasks--config 'harness-permission-mode cwd) 'ask)
+                      :thinking (or (plist-get settings :thinking) (harness-tasks--config 'harness-thinking cwd))
+                      :non-interactive (or (plist-get settings :non-interactive)
+                                           (and (not (plist-member task :non-interactive))
+                                                (harness-tasks--config 'harness-non-interactive cwd) t)))
+                (when-let* ((model (or (plist-get settings :model) (harness-tasks--config 'harness-model cwd))))
+                  (list :model model))))
+        (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
+          (harness-call 'session/resume sid))
+        (harness-call 'session/hint sid
+                      (if worktree
+                          (format "Task started in %s on branch %s"
+                                  (abbreviate-file-name worktree) (plist-get task :branch))
+                        "Task started"))
+        (harness-catch (harness-call-async 'agent/prompt sid
+                                           (harness-tasks--blocks
+                                            (list :prompt (harness-tasks--start-text task)
+                                                  :attachments (plist-get task :attachments))))
+                       (lambda (e) (harness-tasks--fail id e))))
+    (error (harness-tasks--fail id err))))
+
+;;;; Refinement
+
+(defconst harness-tasks--refine-again-text
+  "Write the task up now: your final message is the complete write-up."
+  "Message that asks a backlog task's session for its write-up again.")
+
+(defconst harness-tasks--refine-enough-text
+  "That is enough looking around: write the task up now with what you know, as your final message."
+  "Steering message for a write-up that looked around long enough.
+That is once it made `harness-tasks-refine-tool-calls' tool calls.")
+
+(defvar harness-tasks--refine-calls (make-hash-table :test 'equal)
+  "Session id -> tool calls of the write-up turn running in it.")
+
+(defun harness-tasks--on-tool-call (session-id &rest _)
+  "Count the tool calls of a write-up in SESSION-ID; tell it to finish in time.
+At `harness-tasks-refine-tool-calls' calls it is steered to write up now."
+  (when-let* ((limit harness-tasks-refine-tool-calls)
+              (task (harness-tasks--by-session session-id))
+              ((eq (plist-get task :state) 'refining)))
+    (let ((n (1+ (gethash session-id harness-tasks--refine-calls 0))))
+      (puthash session-id n harness-tasks--refine-calls)
+      (when (= n limit)
+        (harness-catch (harness-call-async 'agent/prompt session-id harness-tasks--refine-enough-text)
+                       #'ignore)))))
+
+(defun harness-tasks--refine-settings (task)
+  "Return the `session/create' settings of the session refining TASK.
+Asking with nobody to ask makes it read-only: reads are allowed, and
+anything else is denied with a hint, which keeps a write-up a write-up."
+  (let ((model (or harness-tasks-refine-model (plist-get task :model) harness-tasks-model))
+        (thinking (or harness-tasks-refine-thinking (plist-get task :thinking) harness-tasks-thinking)))
+    (append (list :permission-mode 'ask :non-interactive t)
+            (and model (list :model model))
+            (and thinking (list :thinking thinking)))))
+
+(defun harness-tasks--refine-failed (id err)
+  "Record ERR as the reason task ID's refinement stopped."
+  (harness-log 'warn "refining task %s failed: %s" id (harness-error-message err))
+  (when (gethash id harness-tasks--table)
+    (harness-tasks--set id :state 'refining :outcome 'error :error (harness-error-message err))))
+
+(defun harness-tasks--refine-turn (id sid blocks)
+  "Prompt task ID's session SID with BLOCKS for a write-up.
+The turn's end finishes the refinement (`harness-tasks--on-turn-ended');
+this only adds the error a failed turn reports."
+  (harness-then (harness-call-async 'agent/prompt sid blocks)
+                (lambda (result)
+                  (let ((task (gethash id harness-tasks--table)))
+                    (when (and task (eq (plist-get task :state) 'refining)
+                               (plist-get task :outcome) (not (plist-get task :error))
+                               (plist-get result :error))
+                      (harness-tasks--set id :error (format "%s" (plist-get result :error))))))
+                (lambda (e) (harness-tasks--refine-failed id e))))
+
+(defun harness-tasks--refine-blocks (task text)
+  "Return the message that gives TASK to its write-up: the task, then TEXT."
+  (harness-tasks--blocks (list :prompt (if (harness-string-blank-p text)
+                                           (plist-get task :prompt)
+                                         (concat (plist-get task :prompt) "\n\n" text))
+                               :attachments (plist-get task :attachments))))
+
+(defun harness-tasks--refine (id &optional text)
+  "Have an agent write task ID up for the backlog.
+The first time a session is made for it at the task's directory and
+given the task; afterwards TEXT, feedback on the write-up, goes to that
+session (or a request to write it up again).  A session that never
+received the task, cut short by a restart, gets the task itself."
+  (condition-case err
+      (let* ((task (harness-tasks--get id))
+             (session (harness-tasks--session task)))
+        (harness-tasks--set id :state 'refining :backlog t :outcome nil :error nil
+                            :note (or (plist-get task :note) (plist-get task :prompt)))
+        (if session
+            (let* ((sid (plist-get session :id))
+                   (begun (cl-find 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
+              (when (eq (plist-get session :status) 'inactive) (harness-call 'session/resume sid))
+              (harness-tasks--refine-turn id sid (cond ((not begun) (harness-tasks--refine-blocks task text))
+                                                       ((harness-string-blank-p text)
+                                                        harness-tasks--refine-again-text)
+                                                       (t text))))
+          (let* ((sid (plist-get (apply #'harness-call 'session/create :cwd (plist-get task :cwd)
+                                        (harness-tasks--refine-settings task))
+                                 :id)))
+            (harness-tasks--set id :session sid)
+            (harness-tasks--refine-turn id sid (harness-tasks--refine-blocks task text)))))
+    (error (harness-tasks--refine-failed id err))))
+
+(defun harness-tasks--last-reply (session-id)
+  "Return the text SESSION-ID's last turn ended on, or nil.
+That is its last assistant message after the last message the user
+sent; steering messages within the turn do not end the search."
+  (catch 'found
+    (dolist (node (reverse (harness-call 'session/nodes session-id)))
+      (pcase (plist-get node :kind)
+        ('assistant (throw 'found (plist-get node :content)))
+        ('user (unless (plist-get (plist-get node :meta) :steering) (throw 'found nil)))))
+    nil))
+
+(defun harness-tasks--finish-refinement (id reason)
+  "Make the reply that ended task ID's refinement turn (with REASON) its prompt.
+A complete turn puts the task in the backlog; any other end leaves it
+refining with REASON as its outcome, in front of the user."
+  (let* ((task (harness-tasks--get id))
+         (reply (and (eq reason 'end-turn) (plist-get task :session)
+                     (harness-tasks--last-reply (plist-get task :session)))))
+    (if (harness-string-blank-p reply)
+        (harness-tasks--set id :state 'refining
+                            :outcome (if (eq reason 'end-turn) 'error reason)
+                            :error (and (eq reason 'end-turn) "the agent wrote no task description"))
+      (harness-tasks--set id :state 'pending :backlog t :prompt (string-trim reply)
+                          :refined (float-time) :outcome nil :error nil))))
+
 ;;;; Following the sessions
 
 (defun harness-tasks--on-turn-started (session-id)
   "Move SESSION-ID's task to active when a turn starts.
-A turn during a merge (resolving a conflict) keeps the task merging.  A
-message sent to an archived task's session brings the task back too."
+A turn during a merge (resolving a conflict) keeps the task merging; a
+turn before the task started (a backlog task's) refines it.  A message
+sent to an archived task's session brings the task back too."
+  (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (remhash (plist-get task :id) harness-tasks--starting)
-    (unless (and (eq (plist-get task :state) 'merging) (plist-get task :merge-status))
-      (harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
-                          :merged nil :archived nil))))
+    (cond
+     ((harness-tasks--refinement-p task)
+      (harness-tasks--set (plist-get task :id) :state 'refining :outcome nil :error nil :archived nil))
+     ((and (eq (plist-get task :state) 'merging) (plist-get task :merge-status)) nil)
+     (t (harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
+                            :merged nil :archived nil)))))
 
 (defun harness-tasks--on-turn-ended (session-id reason)
   "Advance SESSION-ID's task when its turn ended with REASON.
-`end-turn' completes the task outside git and queues its merge inside."
+`end-turn' completes the task outside git and queues its merge inside;
+a refinement turn puts its write-up in the backlog."
+  (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (let ((id (plist-get task :id)))
       (remhash id harness-tasks--starting)
       (cond
+       ((harness-tasks--refinement-p task) (harness-tasks--finish-refinement id reason))
        ((not (eq reason 'end-turn))
         (unless (plist-get task :merge-status)
           (harness-tasks--set id :state 'active :outcome reason)))
@@ -521,15 +804,38 @@ A session that never received the task gets the task itself."
                                          (harness-tasks--blocks task)))
                    (lambda (e) (harness-tasks--fail id e)))))
 
+(defun harness-tasks--work-begun-p (task)
+  "Non-nil when TASK's session got its work: a user message since it started.
+A backlog task's session holds its write-up from before that, so any
+message will not do."
+  (let ((started (or (plist-get task :started) 0)))
+    (cl-some (lambda (n) (and (eq (plist-get n :kind) 'user) (>= (or (plist-get n :ts) 0) started)))
+             (harness-call 'session/nodes (plist-get task :session)))))
+
+(defun harness-tasks--recover-refinements ()
+  "Pick up the write-ups a stopped harness was working on.
+A backlog task being written up is written up again by its session, or,
+when `harness-tasks-resume-interrupted' is nil or the task is archived,
+waits for the user with the outcome `interrupted'."
+  (dolist (task (harness-tasks--sorted (lambda (task) (eq (plist-get task :state) 'refining))))
+    (unless (or (plist-get task :outcome) (harness-tasks--turn-p task))
+      (let ((id (plist-get task :id)))
+        (if (and harness-tasks-resume-interrupted (not (plist-get task :archived)))
+            (progn (harness-log 'info "task %s: writing it up again after a restart" id)
+                   (harness-tasks--refine id))
+          (harness-tasks--set id :outcome 'interrupted))))))
+
 (defun harness-tasks--recover ()
   "Pick up the tasks a stopped harness was working on.
 Runs once the modules are up, before the scheduler.  A task stopped
 before it had a session starts over, in its worktree when it got that
 far; a task whose session was at work carries on with
 `harness-tasks-resume-prompt', or waits for the user with the outcome
-`interrupted' when `harness-tasks-resume-interrupted' is nil.  Working
-past the concurrency limit is fine here: these tasks held their slots
-before the restart."
+`interrupted' when `harness-tasks-resume-interrupted' is nil.  A
+backlog task stopped while its session was being handed the work starts
+again, or with nil goes back to the backlog.  Working past the
+concurrency limit is fine here: these tasks held their slots before the
+restart."
   (dolist (task (harness-tasks--sorted #'harness-tasks--interrupted-p))
     (let ((id (plist-get task :id)))
       (condition-case err
@@ -537,6 +843,11 @@ before the restart."
            ((plist-get task :session)
             (cond ((not (harness-tasks--session task))
                    (harness-tasks--set id :outcome 'error :error "its session no longer exists"))
+                  ((and (harness-tasks--backlog-p task) (not (harness-tasks--work-begun-p task)))
+                   (if harness-tasks-resume-interrupted
+                       (progn (harness-log 'info "task %s: starting it again after a restart" id)
+                              (harness-tasks--start task))
+                     (harness-tasks--set id :state 'pending :started nil)))
                   (harness-tasks-resume-interrupted (harness-tasks--resume id))
                   (t (harness-tasks--set id :outcome 'interrupted
                                          :error "the harness stopped while it was working"))))
@@ -556,10 +867,13 @@ before the restart."
 It starts at once when a slot is free, otherwise it waits as pending.
 OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
 `:thinking' and `:non-interactive' (an explicit false turns it off);
-missing ones come from the `harness-tasks-' defaults."
+missing ones come from the `harness-tasks-' defaults.  With `:refine'
+the task goes to the backlog instead: an agent writes it up (state
+refining), then it waits in pending until `task/start'."
   (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
   (harness-tasks--load)
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
+         (refine (harness-json-true-p (plist-get opts :refine)))
          (task (list :id (concat "t-" (harness-short-id 8))
                      :project (harness-tasks--project cwd) :cwd cwd
                      :prompt (string-trim prompt)
@@ -572,9 +886,26 @@ missing ones come from the `harness-tasks-' defaults."
     (when (plist-member opts :non-interactive)
       (setq task (plist-put task :non-interactive
                             (if (harness-json-true-p (plist-get opts :non-interactive)) t :false))))
+    (when refine
+      (setq task (append task (list :backlog t :note (string-trim prompt)))))
     (harness-tasks--put task)
-    (harness-tasks--schedule)
+    (if refine
+        (harness-tasks--refine (plist-get task :id))
+      (harness-tasks--schedule))
     (harness-tasks--view (gethash (plist-get task :id) harness-tasks--table))))
+
+(harness-defmethod task/refine (id &optional text)
+  "Have an agent write task ID up for the backlog; return the task.
+A task waiting for a slot becomes a backlog task.  One written up
+already, or whose write-up stopped, is written up again by the same
+session, TEXT being feedback for it.  Either way it then waits in
+pending until `task/start'."
+  (let ((task (harness-tasks--get id)))
+    (unless (memq (plist-get task :state) '(pending refining))
+      (error "Task %s has started; only a task that has not can be refined" id))
+    (when (harness-tasks--turn-p task) (error "Task %s is being refined already" id))
+    (harness-tasks--refine id text)
+    (harness-call 'task/get id)))
 
 (defun harness-tasks--adoptable-p (session)
   "Non-nil when SESSION may become a task.
@@ -655,33 +986,46 @@ defaults, else what the project configures."
           :worktrees (and root (harness-tasks--git-p root) t))))
 
 (harness-defmethod task/start (id)
-  "Start pending task ID now, even when every slot is taken."
+  "Start pending task ID now, even when every slot is taken.
+A backlog task starts too, and so does one whose write-up stopped (with
+the prompt it has), but not one an agent is writing up right now."
   (let ((task (harness-tasks--get id)))
-    (unless (eq (plist-get task :state) 'pending) (error "Task %s already started" id))
+    (unless (memq (plist-get task :state) '(pending refining)) (error "Task %s already started" id))
+    (when (harness-tasks--turn-p task)
+      (error "Task %s is still being written up; wait for it or stop it" id))
     (harness-tasks--start task)
     (harness-call 'task/get id)))
 
 (harness-defmethod task/update (id prompt &optional attachments)
-  "Replace the prompt of pending task ID with PROMPT and its ATTACHMENTS."
+  "Replace the prompt of pending task ID with PROMPT and its ATTACHMENTS.
+A task whose write-up stopped can be written by hand this way; it then
+waits in the backlog like a refined one."
   (let ((task (harness-tasks--get id)))
-    (unless (eq (plist-get task :state) 'pending) (error "Only pending tasks can be edited"))
+    (unless (memq (plist-get task :state) '(pending refining))
+      (error "Only tasks that have not started can be edited"))
+    (when (harness-tasks--turn-p task)
+      (error "Task %s is being written up; wait for it or stop it" id))
     (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
-    (harness-tasks--set id :prompt (string-trim prompt) :attachments attachments)))
+    (harness-tasks--set id :prompt (string-trim prompt) :attachments attachments
+                        :state 'pending :outcome nil :error nil)))
 
 (harness-defmethod task/prompt (id text &optional attachments)
-  "Send TEXT and ATTACHMENTS to the session of task ID: a follow-up, or steering."
+  "Send TEXT and ATTACHMENTS to the session of task ID: a follow-up, or steering.
+Before a backlog task starts, TEXT is feedback on its write-up."
   (let ((task (harness-tasks--get id)))
     (unless (harness-tasks--session task) (error "Task %s has no session yet" id))
     (when (plist-get task :worktree-removed)
       (error "Task %s was archived and its worktree removed; submit a new task" id))
-    (let ((sid (plist-get task :session)))
+    (let ((sid (plist-get task :session))
+          (blocks (harness-tasks--blocks (list :prompt text :attachments attachments))))
       (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
         (harness-call 'session/resume sid))
       (when (plist-get task :archived) (harness-tasks--set id :archived nil))
       (harness-tasks--set id :merge-attempts 0)
-      (harness-catch (harness-call-async 'agent/prompt sid
-                                         (harness-tasks--blocks (list :prompt text :attachments attachments)))
-                     (lambda (e) (harness-tasks--fail id e)))
+      (if (harness-tasks--refinement-p task)
+          (harness-tasks--refine-turn id sid blocks)
+        (harness-catch (harness-call-async 'agent/prompt sid blocks)
+                       (lambda (e) (harness-tasks--fail id e))))
       t)))
 
 (harness-defmethod task/merge (id)
@@ -725,10 +1069,18 @@ Return how many were archived."
         (cl-incf n)))))
 
 (harness-defmethod task/cancel (id)
-  "Cancel task ID: a pending task is dropped, a working one stops its turn."
-  (let ((task (harness-tasks--get id)))
-    (if (eq (plist-get task :state) 'pending)
-        (progn (harness-tasks--remove id) nil)
+  "Cancel task ID: a pending task is dropped, a working one stops its turn.
+A task being written up stops; once it has stopped, cancelling drops it.
+Dropping a backlog task deletes the session that wrote it up, too: its
+transcript is only the write-up, which goes with the task."
+  (let* ((task (harness-tasks--get id))
+         (state (plist-get task :state)))
+    (if (or (eq state 'pending) (and (eq state 'refining) (not (harness-tasks--turn-p task))))
+        (let ((sid (plist-get task :session)))
+          (harness-tasks--remove id)
+          (when (and sid (harness-call 'session/exists-p sid))
+            (harness-call 'session/delete sid))
+          nil)
       (when (and (plist-get task :session) (harness-method-exists-p 'agent/cancel))
         (harness-call 'agent/cancel (plist-get task :session)))
       t)))
@@ -755,6 +1107,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (add-hook 'kill-emacs-hook #'harness-tasks-flush)
   (harness-on 'agent/turn-started #'harness-tasks--on-turn-started)
   (harness-on 'agent/turn-ended #'harness-tasks--on-turn-ended)
+  (harness-on 'agent/tool-call #'harness-tasks--on-tool-call)
   (harness-on 'session/deleted #'harness-tasks--on-session-deleted)
   (harness-on 'session/pending-changed #'harness-tasks--on-pending-changed)
   (harness-on 'merge/started #'harness-tasks--on-merge-started)
@@ -764,13 +1117,14 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
   (harness-run-soon #'harness-tasks--recover)
   (harness-run-soon #'harness-tasks--resume-merges)
+  (harness-run-soon #'harness-tasks--recover-refinements)
   (harness-run-soon #'harness-tasks--schedule))
 
 (harness-declare-event 'task/changed "(TASK) after a task is submitted or changes state or column.")
 (harness-declare-event 'task/deleted "(ID) after a task is removed.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task, from worktree to merged, with a concurrency limit."
+  :doc "Task mode: one session per task, from backlog write-up or worktree to merged, with a concurrency limit."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks-flush)
