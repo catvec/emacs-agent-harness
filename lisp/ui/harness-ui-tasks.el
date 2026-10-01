@@ -344,7 +344,11 @@ Only the kind: the request itself is read in the session."
         (dolist (text (reverse harness-ui-tasks--submitting))
           (insert (propertize (format "  %s %s  submitting…\n"
                                       (harness-ui-icon 'harness-icon-task-pending)
-                                      (harness-first-line text 60))
+                                      ;; Fitted, like the cards: the buffer wraps.
+                                      (harness-ui-tasks--fit
+                                       (harness-first-line text 60)
+                                       (- (harness-ui-tasks--width) 17
+                                          (string-width (harness-ui-icon 'harness-icon-task-pending)))))
                               'face 'harness-dim-face))))
       (if (and (null tasks) (not (and (eq column 'pending) harness-ui-tasks--submitting)))
           (insert (propertize (pcase column
@@ -366,7 +370,7 @@ Only the kind: the request itself is read in the session."
     (let ((groups (harness-ui-tasks--visible)))
       (if (and (null harness-ui-tasks--tasks) (null harness-ui-tasks--submitting))
           (insert (propertize "  No tasks yet.  Describe one below: it gets a session of its own\n  and works on it while you do something else.\n\n"
-                              'face 'harness-dim-face))
+                              'face 'harness-dim-face 'wrap-prefix "  "))
         (dolist (c harness-ui-tasks--columns)
           (harness-ui-tasks--insert-section (car c) (cadr c) (cdr (assq (car c) groups)))))))))
 
@@ -488,6 +492,47 @@ The session of the started task at point, else the new-task settings."
         (plist-get task :session)
       (cons harness-ui-tasks--new #'harness-ui-tasks--set-new))))
 
+(defun harness-ui-tasks--insert-tail-head ()
+  "Insert the error line, the compose label, the settings and the attachments.
+Each line is fitted to the window, like the board's: the buffer wraps
+for the compose box, so a longer line would take two."
+  (let ((room (1- (harness-ui-tasks--width))))
+    (when harness-ui-tasks--error
+      (insert (harness-ui-tasks--fit (propertize (concat "  " harness-ui-tasks--error)
+                                                 'face 'harness-tool-error-face)
+                                     room)
+              "\n"))
+    (let* ((cancel (if harness-ui-tasks--target
+                       (concat "  " (harness-ui-tasks--button "[cancel]" #'harness-ui-tasks-compose-reset
+                                                              "Back to a new task"))
+                     ""))
+           (label (harness-ui-tasks--fit (concat " " (harness-ui-tasks--compose-label))
+                                         (- room (string-width cancel)))))
+      ;; Appended, so the dim settings note keeps its own face.
+      (add-face-text-property 0 (length label) 'harness-label-face t label)
+      (insert label cancel "\n"))
+    (unless harness-ui-tasks--target
+      (let ((line (harness-ui-tasks--new-settings-line)))
+        (unless (string-empty-p line)
+          (insert (harness-ui-tasks--fit line room) "\n"))))
+    (harness-compose-insert-attachments)))
+
+(defun harness-ui-tasks--refit-tail ()
+  "Fit the lines between the board and the compose box to the window again.
+The box itself is left alone, so typing or completing in it carries on."
+  (when (and (harness-ui-tasks--board-p (current-buffer)) harness-ui-tasks--list-end
+             harness-compose-overlay (eq (overlay-buffer harness-compose-overlay) (current-buffer)))
+    (let ((inhibit-read-only t)
+          (buffer-undo-list t)
+          (list-end (marker-position harness-ui-tasks--list-end)))
+      (save-excursion
+        (delete-region list-end (overlay-start harness-compose-overlay))
+        (goto-char list-end)
+        (harness-ui-tasks--insert-tail-head)
+        (put-text-property list-end (point) 'read-only t))
+      (set-marker harness-ui-tasks--list-end list-end)
+      (set-buffer-modified-p nil))))
+
 (defun harness-ui-tasks--render-tail (&optional text)
   "Draw the error line, the compose label, the attachments and the compose box.
 TEXT replaces the compose contents; without it they are kept."
@@ -506,29 +551,9 @@ TEXT replaces the compose contents; without it they are kept."
       (save-excursion
         (delete-region list-end (point-max))
         (goto-char list-end)
-        (let ((start (point)))
-          (when harness-ui-tasks--error
-            (insert (harness-ui-tasks--fit (propertize (concat "  " harness-ui-tasks--error)
-                                                       'face 'harness-tool-error-face)
-                                           (- (harness-ui-tasks--width) 1))
-                    "\n"))
-          (let ((label (concat " " (harness-ui-tasks--compose-label))))
-            ;; Appended, so the dim settings note keeps its own face.
-            (add-face-text-property 0 (length label) 'harness-label-face t label)
-            (insert label))
-          (when harness-ui-tasks--target
-            (insert "  " (harness-ui-tasks--button "[cancel]" #'harness-ui-tasks-compose-reset
-                                                   "Back to a new task")))
-          (insert "\n")
-          (unless harness-ui-tasks--target
-            ;; Fitted to the window: a wider line is drawn truncated but
-            ;; measured wrapped, which would lift the box off the bottom.
-            (let ((line (harness-ui-tasks--new-settings-line)))
-              (unless (string-empty-p line)
-                (insert (harness-ui-tasks--fit line (- (harness-ui-tasks--width) 1)) "\n"))))
-          (harness-compose-insert-attachments)
-          (put-text-property start (point) 'read-only t)
-          (harness-compose-insert text)))
+        (harness-ui-tasks--insert-tail-head)
+        (put-text-property list-end (point) 'read-only t)
+        (harness-compose-insert text))
       (set-marker harness-ui-tasks--list-end list-end)
       (pcase-dolist (`(,w . ,off) windows)
         (when (and off (window-live-p w))
@@ -657,9 +682,13 @@ anything that moves a task without one, so a board never drifts.")
     (harness-ui-tasks--refresh-soon (window-buffer window))))
 
 (defun harness-ui-tasks--on-resize (window)
-  "Redraw the board in WINDOW so its cards fit the new width."
-  (when (harness-ui-tasks--board-p (window-buffer window))
-    (harness-ui-tasks--schedule-render (window-buffer window))))
+  "Redraw the board in WINDOW so its cards and tail fit the new width."
+  (let ((buffer (window-buffer window)))
+    (when (harness-ui-tasks--board-p buffer)
+      (harness-ui-tasks--schedule-render buffer)
+      (harness-debounce (list 'harness-ui-tasks-refit buffer) 0.1
+                        (lambda () (when (harness-ui-tasks--board-p buffer)
+                                     (with-current-buffer buffer (harness-ui-tasks--refit-tail))))))))
 
 (defun harness-ui-tasks--on-event (event args)
   "Follow task events on every board; reload them after related events."
@@ -750,8 +779,9 @@ anything that moves a task without one, so a board never drifts.")
   "Major mode of the task board: a kanban of tasks above a compose box.
 \\{harness-ui-tasks-board-map}"
   (setq buffer-read-only nil)
-  (setq-local truncate-lines t
-              header-line-format '(:eval (harness-ui-tasks--header)))
+  ;; Lines wrap, for the compose box (`harness-compose-setup'): the board
+  ;; fits its lines to the window instead of relying on truncation.
+  (setq-local header-line-format '(:eval (harness-ui-tasks--header)))
   (add-hook 'window-buffer-change-functions #'harness-ui-tasks--on-window-change nil t)
   (add-hook 'window-size-change-functions #'harness-ui-tasks--on-resize nil t)
   (setq harness-ui-setting-target-function #'harness-ui-tasks--setting-target)
