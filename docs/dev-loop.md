@@ -17,7 +17,10 @@ scripts/lint.sh [--checkdoc]         # byte-compile everything out of tree
 The daemon runs `emacs -Q` and loads only `scripts/harness-dev.el`, so
 results are reproducible.  State lives in `scripts/.dev/state-SOCKET`
 (`HARNESS_DEV_SOCKET` picks the socket, `HARNESS_DEV_STATE` the directory),
-so several daemons can run side by side.
+so several daemons can run side by side.  Its tasks stay there too
+(`harness-tasks-store-in-repository` is nil in the daemon): it never
+writes into a repository's `.git`, where the real harness keeps a git
+project's task board.  The tests do the same.
 
 The harness always runs byte-compiled code: `harness-start` and
 `harness-reload` compile every source file into

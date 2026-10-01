@@ -32,6 +32,27 @@
         (file-name-as-directory (expand-file-name (project-root pr)))
       dir)))
 
+(defun harness-files--linked-git-dir (dotgit)
+  "Return the common git directory the .git file DOTGIT points to, or nil.
+That file names the gitdir of a linked worktree, a submodule or a
+separated repository.  A linked worktree's gitdir has a commondir file
+naming the directory its repository shares; the others are their own.
+The result has no trailing slash and may not exist."
+  ;; Git writes these as UTF-8.  Naming the coding system skips
+  ;; detection, nearly all of a read's time.
+  (let ((coding-system-for-read 'utf-8))
+    (with-temp-buffer
+      (insert-file-contents dotgit)
+      (when (re-search-forward "^gitdir: *\\(.+?\\) *$" nil t)
+        (let* ((gitdir (expand-file-name (match-string 1) (file-name-directory dotgit)))
+               (commondir (expand-file-name "commondir" gitdir)))
+          (directory-file-name
+           (if (file-readable-p commondir)
+               (progn (erase-buffer)
+                      (insert-file-contents commondir)
+                      (expand-file-name (string-trim (buffer-string)) gitdir))
+             gitdir)))))))
+
 (defun harness-files-main-checkout (root)
   "Return the main checkout of project ROOT, or ROOT itself.
 A linked git worktree belongs to the checkout that owns its repository.
@@ -41,26 +62,30 @@ walk up the tree, and remote roots are returned untouched."
       root
     (let ((root (file-name-as-directory (expand-file-name root))))
       (or (ignore-errors
-            (let ((dotgit (expand-file-name ".git" root))
-                  ;; Git writes these as UTF-8.  Naming the coding system
-                  ;; skips detection, nearly all of a read's time.
-                  (coding-system-for-read 'utf-8))
+            (let ((dotgit (expand-file-name ".git" root)))
               (when (file-regular-p dotgit)
-                (with-temp-buffer
-                  (insert-file-contents dotgit)
-                  (when (re-search-forward "^gitdir: *\\(.+?\\) *$" nil t)
-                    (let* ((gitdir (expand-file-name (match-string 1) root))
-                           (commondir (expand-file-name "commondir" gitdir))
-                           (common (directory-file-name
-                                    (if (file-readable-p commondir)
-                                        (progn (erase-buffer)
-                                               (insert-file-contents commondir)
-                                               (expand-file-name (string-trim (buffer-string)) gitdir))
-                                      gitdir))))
-                      ;; A submodule's gitdir has no commondir and is not a .git.
-                      (and (equal (file-name-nondirectory common) ".git")
-                           (file-name-as-directory (file-name-directory common)))))))))
+                (when-let* ((common (harness-files--linked-git-dir dotgit)))
+                  ;; A submodule's gitdir has no commondir and is not a .git.
+                  (and (equal (file-name-nondirectory common) ".git")
+                       (file-name-as-directory (file-name-directory common)))))))
           root))))
+
+(defun harness-files-git-common-dir (dir)
+  "Return the git directory every worktree of DIR's repository shares, or nil.
+That is the main checkout's .git directory, also for a directory in a
+linked worktree or below the top of the repository; a submodule's lies
+in its superproject's .git.  It is out of every working tree, so what is
+kept there never shows in git status, a commit or a merge.  Like
+`harness-files-main-checkout' this reads .git files instead of running
+git.  Remote directories, directories outside a repository and a .git
+file pointing nowhere give nil."
+  (unless (file-remote-p dir)
+    (when-let* ((top (locate-dominating-file (expand-file-name dir) ".git")))
+      (let* ((dotgit (expand-file-name ".git" top))
+             (common (if (file-directory-p dotgit)
+                         dotgit
+                       (ignore-errors (harness-files--linked-git-dir dotgit)))))
+        (and common (file-directory-p common) (file-name-as-directory common))))))
 
 (defun harness-files-main-root (dir)
   "Return the main checkout of DIR's project.

@@ -24,6 +24,8 @@
 
 (defvar harness-dev-frame nil)
 
+(defvar harness-tasks-store-in-repository)
+
 (defun harness-dev-load ()
   "Load the checkout and start the harness."
   (add-to-list 'load-path harness-dev-root)
@@ -31,6 +33,10 @@
         (file-name-as-directory
          (or (getenv "HARNESS_DEV_STATE")
              (expand-file-name "scripts/.dev/state/" harness-dev-root))))
+  ;; Its tasks stay in that state directory too: the daemon never writes
+  ;; into a repository's .git, where the real harness keeps its task
+  ;; boards.  Set it to t to try repository stores, in a scratch repository.
+  (setq harness-tasks-store-in-repository nil)
   (require 'harness)
   (harness-start)
   (harness-auto-reload-mode 1))

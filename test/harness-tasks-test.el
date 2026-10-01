@@ -12,6 +12,7 @@
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--loaded)
+(defvar harness-tasks--dirty)
 (defvar harness-tasks-max-running)
 (defvar harness-tasks-permission-mode)
 (defvar harness-tasks-non-interactive)
@@ -20,6 +21,7 @@
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (declare-function harness-tasks--save "harness-tasks")
+(declare-function harness-tasks--forget-stores "harness-tasks")
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")
 (declare-function harness-acp-request "harness-acp")
@@ -41,7 +43,10 @@
      (clrhash harness-agent--turns)
      (clrhash harness-tasks--table)
      (clrhash harness-tasks--starting)
+     (harness-tasks--forget-stores)
+     ;; Nothing of an earlier test waits to be written over this one's files.
      (setq harness-tasks--loaded t
+           harness-tasks--dirty nil
            harness-acp--clients nil)
      (let ((harness-provider-demo-delay 0.005)
            (harness-provider-demo-script-override harness-tasks-test-script)
@@ -301,7 +306,6 @@
 ;;;; Restarts: nothing is lost, interrupted work carries on
 
 (defvar harness-provider-demo--continuations)
-(defvar harness-tasks--dirty)
 (defvar harness-tasks-resume-interrupted)
 (defvar harness-tasks-resume-prompt)
 (declare-function harness-agent-turn-handle "harness-agent")
@@ -753,6 +757,8 @@ commits from call `harness-tasks-test--commit-on-call' on."
      (let* ((root (harness-tasks-test--make-repo))
             (default-directory root)
             (harness-tasks-worktrees t)
+            ;; As it is outside tests: the tasks live in the repository.
+            (harness-tasks-store-in-repository t)
             (harness-tasks-test--commit-on-call 1)
             (harness-provider-demo-script-override
              '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
@@ -772,6 +778,20 @@ commits from call `harness-tasks-test--commit-on-call' on."
 (defun harness-tasks-test--main-text (root)
   "Return shared.txt as checked out at ROOT."
   (with-temp-buffer (insert-file-contents (expand-file-name "shared.txt" root)) (buffer-string)))
+
+(defun harness-tasks-test--store (root)
+  "Return the task store of the repository at ROOT."
+  (expand-file-name ".git/harness/tasks.json" root))
+
+(defun harness-tasks-test--read (path)
+  "Return the JSON file PATH parsed, nil when there is none."
+  (harness-json-parse (harness-read-file path)))
+
+(defun harness-tasks-test--stored-ids (path)
+  "Return the ids of the task records in the store PATH, in order."
+  (let ((data (harness-tasks-test--read path)))
+    (mapcar (lambda (record) (plist-get record :id))
+            (if (keywordp (car-safe data)) (plist-get data :tasks) data))))
 
 (ert-deftest harness-tasks-git-lifecycle ()
   (harness-tasks-test-with-git
@@ -793,6 +813,14 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (should (string-match-p "Merge branch" (harness-tasks-test--git root "log" "-1" "--format=%s")))
       (should (cl-find harness-tasks-merge-session-name (harness-call 'session/list)
                        :key (lambda (s) (plist-get s :name)) :test #'equal))
+      ;; Its record is in the main repository's git directory, out of every
+      ;; working tree: the checkout the merge went into is still clean.
+      (harness-tasks-flush)
+      (should (equal (list id) (harness-tasks-test--stored-ids (harness-tasks-test--store root))))
+      (should-not (harness-tasks-test--stored-ids (expand-file-name "tasks.json" harness-state-directory)))
+      (should (string-empty-p (harness-tasks-test--git root "status" "--porcelain")))
+      (should-not (string-match-p "tasks\\.json" (harness-tasks-test--git root "status" "--porcelain" "--ignored"
+                                                                          "--untracked-files=all")))
       ;; Archiving removes the worktree and the merged branch.
       (harness-call 'task/archive id)
       (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 10 "worktree removal")
@@ -875,6 +903,167 @@ commits from call `harness-tasks-test--commit-on-call' on."
         (should-not (plist-get session :provider-state))
         (should (plist-get task :merged)))
       (should (equal "two\n" (harness-tasks-test--main-text root))))))
+
+;;;; Where tasks are kept
+
+(declare-function harness-tasks--repository-store "harness-tasks")
+(declare-function harness-tasks--state-directory "harness-tasks")
+
+(defun harness-tasks-test--settle ()
+  "Let the timers due now run, such as picking up records read late."
+  (accept-process-output nil 0.05))
+
+(defun harness-tasks-test--global ()
+  "Return the global task store of the test's state directory."
+  (expand-file-name "tasks.json" harness-state-directory))
+
+(ert-deftest harness-tasks-kept-in-the-main-repository ()
+  "A git project's tasks live in its main repository's .git, from any worktree."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-store-in-repository t)
+           (harness-tasks-max-running 0)
+           (root (harness-tasks-test--make-repo))
+           (wt (file-name-as-directory (expand-file-name "../side" root)))
+           (store (harness-tasks-test--store root))
+           (registry (expand-file-name "task-stores.json" harness-state-directory)))
+      (harness-tasks-test--git root "worktree" "add" "-q" "-b" "side" wt)
+      (should (equal (file-truename store) (file-truename (harness-tasks--repository-store wt))))
+      (let ((a (harness-tasks-test-submit "from the main checkout" root))
+            (b (harness-tasks-test-submit "from a worktree" wt))
+            (c (harness-tasks-test-submit "outside git" (harness-test-temp-dir))))
+        (harness-tasks-flush)
+        (should (equal (list a b) (harness-tasks-test--stored-ids store)))
+        (should (equal (harness-tasks--state-directory)
+                       (plist-get (harness-tasks-test--read store) :state-directory)))
+        (should (equal (list c) (harness-tasks-test--stored-ids (harness-tasks-test--global))))
+        (should (equal (list store) (harness-tasks-test--read registry)))
+        ;; No working tree sees it, so neither does the merge queue.
+        (should (string-empty-p (harness-tasks-test--git root "status" "--porcelain")))
+        (should (string-empty-p (harness-tasks-test--git wt "status" "--porcelain")))
+        ;; A restart reads it back through the registry.
+        (harness-tasks-test--restart)
+        (should (equal (list a b) (harness-tasks-test--ids (harness-call 'task/list root))))
+        ;; Without the registry, opening the board reads it all the same.
+        (harness-tasks-flush)
+        (delete-file registry)
+        (harness-tasks-test--restart)
+        (should-not (gethash a harness-tasks--table))
+        (should (equal (list a b) (harness-tasks-test--ids (harness-call 'task/list wt))))
+        (harness-tasks-test--settle)
+        (harness-tasks-flush)
+        (should (equal (list store) (harness-tasks-test--read registry)))
+        ;; A store left without tasks goes, and its directory with it.
+        (harness-call 'task/delete a)
+        (harness-call 'task/delete b)
+        (harness-tasks-flush)
+        (should-not (file-exists-p (file-name-directory store)))
+        (should-not (file-exists-p registry))
+        (should (equal (list c) (harness-tasks-test--ids (harness-call 'task/list))))))))
+
+(ert-deftest harness-tasks-move-into-their-repositories ()
+  "Tasks from before repository stores move into their repositories, a copy kept."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-store-in-repository t)
+           (harness-tasks-max-running 0)
+           (root (harness-tasks-test--make-repo))
+           (plain (harness-test-temp-dir))
+           (store (harness-tasks-test--store root))
+           (global (harness-tasks-test--global))
+           (legacy (harness-json-encode
+                    (list (list :id "t-gitone" :project root :cwd root :prompt "in git"
+                                :state "pending" :created 1.0)
+                          (list :id "t-plain" :project plain :cwd plain :prompt "outside git"
+                                :state "pending" :created 2.0)
+                          (list :id "t-gittwo" :project root :cwd root :prompt "done in git"
+                                :state "done" :outcome "end-turn" :created 3.0))))
+           (all '("t-gitone" "t-plain" "t-gittwo")))
+      (harness-write-file-atomically global legacy)
+      (harness-tasks-test--restart)
+      (harness-tasks-flush)
+      (should (equal '("t-gitone" "t-gittwo") (harness-tasks-test--stored-ids store)))
+      (should (equal '("t-plain") (harness-tasks-test--stored-ids global)))
+      (should (equal legacy (harness-read-file (concat global ".bak"))))
+      (should (equal all (harness-tasks-test--ids (harness-call 'task/list))))
+      (should (eq 'done (harness-tasks-test-state "t-gittwo")))
+      (should (eq 'end-turn (plist-get (harness-tasks-test-task "t-gittwo") :outcome)))
+      ;; From then on each is read where it is, once, and the copy stays.
+      (harness-tasks-test--restart)
+      (should (equal all (harness-tasks-test--ids (harness-call 'task/list))))
+      (harness-tasks-flush)
+      (should (equal legacy (harness-read-file (concat global ".bak")))))))
+
+(ert-deftest harness-tasks-move-after-an-in-place-reload ()
+  "Reloaded under a running harness, the first save moves the tasks it holds."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-max-running 0)
+           (root (harness-tasks-test--make-repo))
+           (store (harness-tasks-test--store root))
+           (global (harness-tasks-test--global))
+           (id (let ((harness-tasks-store-in-repository nil))
+                 (prog1 (harness-tasks-test-submit "kept in the state directory at first" root)
+                   (harness-tasks-flush)))))
+      (should (equal (list id) (harness-tasks-test--stored-ids global)))
+      (should-not (file-exists-p store))
+      ;; New definitions arrive with nothing read or written by them yet.
+      (harness-tasks--forget-stores)
+      (let ((harness-tasks-store-in-repository t))
+        (harness-tasks--set id :prompt "changed after the reload")
+        (harness-tasks-flush))
+      (should (equal (list id) (harness-tasks-test--stored-ids store)))
+      (should-not (harness-tasks-test--stored-ids global))
+      (should (equal (list id) (harness-tasks-test--stored-ids (concat global ".bak"))))
+      ;; Turned off, they come back to the state directory and the store goes.
+      (harness-tasks--set id :prompt "changed with the option off")
+      (harness-tasks-flush)
+      (should (equal (list id) (harness-tasks-test--stored-ids global)))
+      (should-not (file-exists-p (file-name-directory store))))))
+
+(ert-deftest harness-tasks-leave-another-harness-store-alone ()
+  "Another live harness's repository store is left alone; a gone one's taken over."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-store-in-repository t)
+           (harness-tasks-max-running 0)
+           (root (harness-tasks-test--make-repo))
+           (other (harness-test-temp-dir))
+           (store (harness-tasks-test--store root))
+           (global (harness-tasks-test--global))
+           (theirs (harness-json-encode
+                    (list :state-directory other
+                          :tasks (list (list :id "t-theirs" :project root :cwd root
+                                             :prompt "another harness's" :state "pending" :created 1.0))))))
+      (harness-write-file-atomically store theirs)
+      (let ((id (harness-tasks-test-submit "this harness's" root)))
+        (harness-tasks-flush)
+        (should (equal theirs (harness-read-file store)))
+        (should (equal (list id) (harness-tasks-test--ids (harness-call 'task/list root))))
+        (should (equal (list id) (harness-tasks-test--stored-ids global)))
+        ;; With its harness gone, the store is this one's, records and all.
+        (delete-directory other t)
+        (harness-tasks-test--restart)
+        (harness-tasks-flush)
+        (harness-tasks-test--settle)
+        (should (equal (list "t-theirs" id) (harness-tasks-test--ids (harness-call 'task/list root))))
+        (should (equal (list "t-theirs" id) (harness-tasks-test--stored-ids store)))
+        (should (equal (harness-tasks--state-directory)
+                       (plist-get (harness-tasks-test--read store) :state-directory)))
+        (should-not (harness-tasks-test--stored-ids global))))))
+
+(ert-deftest harness-tasks-unwritable-repository-store-falls-back ()
+  "The tasks of a repository whose store cannot be written stay in the state directory."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-store-in-repository t)
+           (harness-tasks-max-running 0)
+           (root (harness-tasks-test--make-repo))
+           (global (harness-tasks-test--global)))
+      ;; A file where the store's directory would go.
+      (with-temp-file (expand-file-name ".git/harness" root) (insert "in the way\n"))
+      (let ((id (harness-tasks-test-submit "kept all the same" root)))
+        (harness-tasks-flush)
+        (should (equal (list id) (harness-tasks-test--stored-ids global)))
+        (should-not (file-exists-p (expand-file-name "task-stores.json" harness-state-directory)))
+        (harness-tasks--set id :prompt "changed")
+        (harness-tasks-flush)
+        (should (equal "changed" (plist-get (car (harness-tasks-test--read global)) :prompt)))))))
 
 ;;;; BTW: side conversations about the board
 

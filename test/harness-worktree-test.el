@@ -195,6 +195,29 @@
         (cl-letf (((symbol-function 'file-regular-p) (lambda (&rest _) (error "Looked at"))))
           (should (equal remote (harness-files-main-checkout remote))))))))
 
+(ert-deftest harness-files-git-common-dir-is-the-main-repository ()
+  "Every directory of a repository, linked worktrees included, shares the main .git."
+  (harness-worktree-test-with-repo
+    (let ((git (harness-worktree-test--dir (expand-file-name ".git" root)))
+          (path (file-name-as-directory (expand-file-name "wt-common" base))))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "common" path)
+      (make-directory (expand-file-name "sub/dir" path) t)
+      (make-directory (expand-file-name "lib" root) t)
+      (dolist (dir (list root (expand-file-name "lib" root) path (expand-file-name "sub/dir" path)))
+        (should (equal git (harness-worktree-test--dir (harness-files-git-common-dir dir)))))
+      ;; Not a worktree's own gitdir, which lies in the main .git too.
+      (should-not (string-match-p "/worktrees/" (harness-files-git-common-dir path)))
+      ;; Outside a repository, behind a .git file pointing nowhere, or remote: none.
+      (should-not (harness-files-git-common-dir (harness-test-temp-dir)))
+      (let ((stale (harness-test-temp-dir)))
+        (with-temp-file (expand-file-name ".git" stale)
+          (insert "gitdir: /nonexistent/repo/.git/worktrees/gone\n"))
+        (should-not (harness-files-git-common-dir stale)))
+      (let ((remote "/ssh:nobody@example.invalid:/srv/x/"))
+        (should (file-remote-p remote)) ; loads TRAMP before file access is watched
+        (cl-letf (((symbol-function 'locate-dominating-file) (lambda (&rest _) (error "Looked at"))))
+          (should-not (harness-files-git-common-dir remote)))))))
+
 (ert-deftest harness-files-main-checkout-non-ascii-path ()
   "The .git file and commondir are read as UTF-8, as git writes them."
   (skip-unless (eq 'utf-8 (coding-system-base

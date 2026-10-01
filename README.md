@@ -81,7 +81,14 @@ customize (global): `harness-model`, `harness-permission-mode`,
 
 Sessions and tasks live in `harness-state-directory` (`harness/` in your
 Emacs directory by default) and survive restarts of Emacs and of the
-harness process.
+harness process.  A git project's tasks live inside its repository
+instead, in `.git/harness/tasks.json` of the main checkout: the git
+directory all of its worktrees share and no working tree contains, so
+the records never show in `git status`, never get committed and never
+get in the way of a merge (`harness-tasks-store-in-repository` nil keeps
+them in the state directory too).  Tasks from before that move into
+their repositories by themselves; `tasks.json.bak` in the state
+directory keeps a copy of the file they came from.
 After a restart sessions are closed until you open one again (`C-c a s`,
 `C-c a l`), with its whole transcript; a turn the restart cut short is
 marked in it.  The task board comes back as it was, and tasks that were

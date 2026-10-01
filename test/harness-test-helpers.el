@@ -30,6 +30,12 @@ may reach the user's real `harness-state-directory'.")
 
 (setq harness-state-directory harness-test-state-root)
 
+(defvar harness-tasks-store-in-repository)
+;; Tasks stay in the throwaway state directory whatever directory a test
+;; submits them in, so no test writes into a real repository's .git.
+;; Tests of repository stores bind it in repositories of their own.
+(setq harness-tasks-store-in-repository nil)
+
 (add-hook 'kill-emacs-hook
           (lambda () (ignore-errors (delete-directory harness-test-state-root t)))
           ;; Appended, so the modules' exit flushes write here first.
