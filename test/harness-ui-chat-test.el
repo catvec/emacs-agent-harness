@@ -411,6 +411,15 @@
           (should (= 5 (length (harness-chat-group-members group))))
           (should (invisible-p (harness-chat-block-start first)))
           (should (invisible-p (harness-ui-chat-test-find buf "read_file c.el")))
+          ;; The hidden stretch starts on a plain newline: one starting on
+          ;; the first member's fold icon would still draw that icon.
+          (let ((ov (harness-chat-group-overlay group)))
+            (should (eq (char-after (overlay-start ov)) ?\n))
+            (should-not (get-text-property (overlay-start ov) 'display))
+            (should (= (overlay-end ov)
+                       (1- (harness-chat-block-end
+                            (gethash (car (last (harness-chat-group-members group))) harness-chat--blocks)))))
+            (should-not (invisible-p (overlay-end ov))))
           ;; Expanding shows the individual, still collapsed, blocks.
           (harness-chat-toggle-group (harness-chat-group-id group))
           (should-not (invisible-p (harness-chat-block-start first)))

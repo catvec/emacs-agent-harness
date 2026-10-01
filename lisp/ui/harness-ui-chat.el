@@ -922,7 +922,12 @@ opening the file is returned instead."
     (setf (harness-chat-group-start group) (copy-marker pos)
           (harness-chat-group-end group) (copy-marker (+ pos (length text))))
     (set-marker (harness-chat-block-start first) (+ pos (length text)))
-    (let ((ov (make-overlay (harness-chat-block-start first) (harness-chat-block-end last) nil nil nil)))
+    ;; Hide "\n<members>" rather than "<members>\n": a hidden stretch that
+    ;; starts on the first member's fold icon still draws that icon's
+    ;; `display' image, at the start of the next visible block's line.
+    ;; FRONT-ADVANCE keeps a re-rendered summary out of the overlay and
+    ;; REAR-ADVANCE keeps a re-rendered last member in it.
+    (let ((ov (make-overlay (1- (harness-chat-block-start first)) (1- (harness-chat-block-end last)) nil t t)))
       (overlay-put ov 'invisible 'harness-chat-fold)
       (overlay-put ov 'harness-chat-group gid)
       (overlay-put ov 'isearch-open-invisible #'harness-chat--isearch-open)
@@ -946,7 +951,7 @@ opening the file is returned instead."
         (ov (harness-chat-group-overlay group)))
     (setf (harness-chat-group-members group) (append (harness-chat-group-members group) (list id)))
     (setf (harness-chat-block-group block) (harness-chat-group-id group))
-    (move-overlay ov (overlay-start ov) (marker-position (harness-chat-block-end block)))
+    (move-overlay ov (overlay-start ov) (1- (marker-position (harness-chat-block-end block))))
     (harness-chat--update-group-summary group)))
 
 (defun harness-chat--maybe-coalesce (id)
