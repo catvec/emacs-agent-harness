@@ -501,14 +501,26 @@ opening the file is returned instead."
         ((numberp value) (number-to-string value))
         (t (format "%S" value))))
 
-(defun harness-chat--input-summary (input)
-  "Return a one-line summary of tool INPUT."
+(defun harness-chat--summary-value (value)
+  "Return VALUE on one line for a tool input summary.
+A list of strings reads as a comma-separated list, not a Lisp form."
+  (harness-first-line
+   (if (and (or (consp value) (vectorp value)) (cl-every #'stringp value))
+       (mapconcat #'identity value ", ")
+     (harness-chat--format-value value))
+   60))
+
+(defun harness-chat--input-summary (input &optional title)
+  "Return a one-line summary of tool INPUT, or nil when it adds nothing.
+Values TITLE already shows (the command of a bash call, the question
+of an ask_user) are left out."
   (let (parts)
     (cl-loop for (k v) on input by #'cddr
-             do (push (format "%s: %s" (substring (symbol-name k) 1)
-                              (harness-first-line (harness-chat--format-value v) 60))
-                      parts))
-    (harness-truncate-end (string-join (nreverse parts) "  ") 110)))
+             do (let ((text (harness-chat--summary-value v)))
+                  (unless (and title (not (string-empty-p text))
+                               (string-search (substring text 0 (min 40 (length text))) title))
+                    (push (format "%s: %s" (substring (symbol-name k) 1) text) parts))))
+    (and parts (harness-truncate-end (string-join (nreverse parts) "  ") 110))))
 
 (defun harness-chat--input-listing (input)
   "Return tool INPUT pretty printed, one key per line."
@@ -591,7 +603,7 @@ opening the file is returned instead."
          (result (if call-only (harness-chat-block-result block) node))
          (title (if call-only
                     (or (plist-get node :title) (plist-get node :tool) "tool")
-                  (format "result %s" (or (plist-get node :call-id) ""))))
+                  "result of an earlier tool call"))
          (input (and call-only (plist-get node :input)))
          (output (or (plist-get result :output) ""))
          (error-p (and result (harness-json-true-p (plist-get result :is-error))))
@@ -605,9 +617,8 @@ opening the file is returned instead."
                          " " (harness-ui-icon 'harness-icon-tool) " "
                          (propertize (harness-first-line title 120) 'face 'harness-tool-title-face)
                          "  " (harness-chat--tool-status result) "\n"))
-         (summary (if input
-                      (concat (propertize (concat "  " (harness-chat--input-summary input)) 'face 'harness-dim-face) "\n")
-                    ""))
+         (line (and input (harness-chat--input-summary input title)))
+         (summary (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") ""))
          (details
           (concat
            (if input (concat (propertize "  input\n" 'face 'harness-label-face)
@@ -1717,7 +1728,8 @@ the background it was rendered on, so it would show as a dark box."
      (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
                             "Model (mouse-1: change)" 'harness-dim-face)
      "  "
-     (harness-chat--segment (or (plist-get s :permission-mode) "ask") #'harness-set-permission-mode
+     (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
+                            #'harness-set-permission-mode
                             "Permission mode (mouse-1: change)")
      "  "
      (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))

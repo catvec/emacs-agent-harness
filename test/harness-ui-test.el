@@ -113,5 +113,23 @@ The side window is selected and not dedicated, as Doom leaves it."
     (should-not (cl-some (lambda (r) (plist-get r :answer)) responses))
     (should-not (cl-some (lambda (r) (plist-get r :outcome)) responses))))
 
+(ert-deftest harness-ui-permission-mode-labels-and-picker-order ()
+  (should (equal "Ask" (harness-ui-permission-mode-label nil)))
+  (should (equal "Accept Edits" (harness-ui-permission-mode-label 'accept-edits)))
+  (should (equal "YOLO" (harness-ui-permission-mode-label "yolo")))
+  (let (offered sent)
+    (cl-letf (((symbol-function 'harness-ui-current-session-id) (lambda () "s1"))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (setq offered (list (all-completions "" table)
+                                     (completion-metadata-get (completion-metadata "" table nil)
+                                                              'display-sort-function)))
+                 "Accept Edits"))
+              ((symbol-function 'harness-ui-call) (lambda (_method params &rest _) (setq sent params))))
+      (harness-set-permission-mode))
+    (should (equal '("Ask" "Accept Edits" "Auto" "YOLO") (car offered)))
+    (should (eq 'identity (cadr offered)))
+    (should (equal "accept-edits" (plist-get sent :modeId)))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

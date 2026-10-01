@@ -568,6 +568,25 @@
     (should (get-text-property 0 'local-map seg))
     (should (eq 'mode-line-highlight (get-text-property 2 'mouse-face seg)))))
 
+;; Doom's solaire-mode bakes the buffer's base colour into every image,
+;; which drew the icons of a tool block as dark boxes.
+(ert-deftest harness-ui-chat-icons-show-face-background ()
+  (cl-letf (((symbol-function 'icon-string)
+             (lambda (_) (propertize " " 'display '(image :type svg :file "tool.svg" :background "#12111E" :scale 1)))))
+    (let ((spec (get-text-property 0 'display (harness-ui-icon 'harness-icon-tool))))
+      (should (equal spec '(image :type svg :file "tool.svg" :scale 1))))))
+
+(ert-deftest harness-ui-chat-summary-skips-title-values ()
+  ;; The summary line leaves out what the title already shows.
+  (should-not (harness-chat--input-summary '(:command "ls -la") "bash ls -la"))
+  (should (equal (harness-chat--input-summary '(:pattern "defun" :glob "*.el") "grep defun in .")
+                 "glob: *.el"))
+  (should (equal (harness-chat--input-summary '(:question "Which?" :options ("A" "B")) "ask_user Which?")
+                 "options: A, B"))
+  (let ((long "/home/someone/projects/a-rather-long-directory-name/sub"))
+    (should-not (harness-chat--input-summary (list :path long) (concat "glob *.el in " long "/"))))
+  (should (equal (harness-chat--input-summary '(:path "a.el")) "path: a.el")))
+
 (ert-deftest harness-ui-chat-hl-line-skips-compose ()
   ;; hl-line would paint over the compose background, so it stops short of it.
   (harness-ui-chat-test-with
