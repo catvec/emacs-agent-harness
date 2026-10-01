@@ -28,6 +28,8 @@
 (require 'harness-client-tools)
 (require 'harness-files)
 
+(defvar harness-directory)
+
 (declare-function harness-reload "harness")
 
 (defgroup harness-ui nil
@@ -41,8 +43,17 @@
     (((background dark)) :background "#2c313c" :extend t))
   "Background of messages written by the user." :group 'harness-ui)
 
+(defface harness-user-label-face '((t :inherit (bold font-lock-keyword-face)))
+  "Sender name above the user's messages." :group 'harness-ui)
+
+(defface harness-user-bar-face '((t :inherit font-lock-keyword-face))
+  "Bar down the left edge of the user's messages (foreground only)." :group 'harness-ui)
+
 (defface harness-agent-face '((t :inherit default))
   "Face of the agent's text." :group 'harness-ui)
+
+(defface harness-agent-label-face '((t :inherit (bold font-lock-type-face)))
+  "Sender name at the start of each agent turn." :group 'harness-ui)
 
 (defface harness-tool-face
   '((((background light)) :background "#eaf3ea" :extend t)
@@ -105,42 +116,38 @@
 
 ;;;; Icons
 
-(define-icon harness-icon-idle nil
-  '((emoji "●") (symbol "●") (text "idle"))
-  "Idle session." :version "29.1")
-(define-icon harness-icon-running nil
-  '((emoji "▶") (symbol "▶") (text "run"))
-  "Running session." :version "29.1")
-(define-icon harness-icon-blocked nil
-  '((emoji "⏸") (symbol "⏸") (text "wait"))
-  "Blocked session." :version "29.1")
-(define-icon harness-icon-inactive nil
-  '((emoji "○") (symbol "○") (text "off"))
-  "Inactive session." :version "29.1")
-(define-icon harness-icon-user nil
-  '((emoji "👤") (symbol "◆") (text "you"))
-  "The user." :version "29.1")
-(define-icon harness-icon-agent nil
-  '((emoji "🤖") (symbol "◇") (text "agent"))
-  "The agent." :version "29.1")
-(define-icon harness-icon-tool nil
-  '((emoji "🔧") (symbol "⚙") (text "tool"))
-  "A tool call." :version "29.1")
-(define-icon harness-icon-thinking nil
-  '((emoji "💭") (symbol "…") (text "think"))
-  "Thinking." :version "29.1")
-(define-icon harness-icon-collapsed nil
-  '((symbol "▸") (text "+"))
-  "Collapsed block." :version "29.1")
-(define-icon harness-icon-expanded nil
-  '((symbol "▾") (text "-"))
-  "Expanded block." :version "29.1")
-(define-icon harness-icon-send nil
-  '((emoji "➤") (symbol "➤") (text "send"))
-  "Send." :version "29.1")
-(define-icon harness-icon-attach nil
-  '((emoji "📎") (symbol "@") (text "attach"))
-  "Attachment." :version "29.1")
+;; Icons are monochrome SVGs drawn in `currentColor', so they take the
+;; colour of the face around them; terminals fall back to plain symbols.
+;; No emoji: they ignore the theme and vary wildly between fonts.
+
+(defun harness-ui-icon-file (name)
+  "Return the path of the SVG icon NAME shipped in the icons directory."
+  (expand-file-name (concat "icons/" name ".svg")
+                    (if (boundp 'harness-directory) harness-directory
+                      (file-name-directory (or (locate-library "harness") default-directory)))))
+
+(defmacro harness-ui-define-icon (name file symbol text doc)
+  "Define icon NAME from SVG FILE, falling back to SYMBOL then TEXT.
+DOC is its documentation."
+  `(define-icon ,name nil
+     (list (list 'image (harness-ui-icon-file ,file) :height '(1.1 . em))
+           (list 'symbol ,symbol)
+           (list 'text ,text))
+     ,doc :version "29.1"))
+
+(harness-ui-define-icon harness-icon-idle "idle" "●" "idle" "Idle session.")
+(harness-ui-define-icon harness-icon-running "running" "►" "run" "Running session.")
+(harness-ui-define-icon harness-icon-blocked "blocked" "‖" "wait" "Blocked session.")
+(harness-ui-define-icon harness-icon-inactive "inactive" "○" "off" "Inactive session.")
+(harness-ui-define-icon harness-icon-user "user" "◆" "you" "The user.")
+(harness-ui-define-icon harness-icon-agent "agent" "◇" "agent" "The agent.")
+(harness-ui-define-icon harness-icon-tool "tool" "◈" "tool" "A tool call.")
+(harness-ui-define-icon harness-icon-thinking "thinking" "…" "think" "Thinking.")
+(harness-ui-define-icon harness-icon-collapsed "collapsed" "▸" "+" "Collapsed block.")
+(harness-ui-define-icon harness-icon-expanded "expanded" "▾" "-" "Expanded block.")
+(harness-ui-define-icon harness-icon-send "send" "→" "send" "Send.")
+(harness-ui-define-icon harness-icon-attach "attach" "+" "attach" "Attachment.")
+(harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
 
 (defun harness-ui-icon (name)
   "Return the string for icon NAME (a symbol such as `harness-icon-idle')."
@@ -499,9 +506,9 @@ Signal unless NOERROR when none can be found."
                 'help-echo "Context tokens in use / context window")))
 
 (defun harness-ui-model-label (model-id)
-  "Return a short label for MODEL-ID, keeping the provider as a prefix."
+  "Return a short \"model (provider)\" label for MODEL-ID."
   (if (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id))
-      (format "%s · %s" (match-string 1 model-id) (match-string 2 model-id))
+      (format "%s (%s)" (match-string 2 model-id) (match-string 1 model-id))
     (or model-id "?")))
 
 (defun harness-ui-button (label action &rest props)
@@ -753,8 +760,22 @@ Set by the chat module.")
 (defun harness-ui--command-available-p (symbol)
   (fboundp symbol))
 
+(defun harness-ui--display-menu (buffer alist)
+  "Display the menu BUFFER, keeping it out of the windows around a side window.
+Sessions usually live in side windows, which cannot be split.  Actions
+such as `display-buffer-below-selected' then fall back to reusing
+another window, which transient fits horizontally to the menu and
+cannot delete afterwards, wrecking the layout.  So from a side window
+the menu gets a bottom side window of its own; elsewhere it follows
+`transient-display-buffer-action'.  ALIST is the action alist."
+  (if (window-parameter (selected-window) 'window-side)
+      (display-buffer-in-side-window
+       buffer (append '((side . bottom) (slot . 1) (dedicated . t)) alist))
+    (display-buffer buffer transient-display-buffer-action)))
+
 (transient-define-prefix harness-menu ()
   "The harness menu."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [["Sessions"
     ("n" "New session" harness-new-session)
     ("s" "Switch session" harness-switch-session)

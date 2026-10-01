@@ -23,11 +23,11 @@ web search.
 
 ```elisp
 ;; straight / Doom
-(package! harness :recipe (:host github :repo "Noah-Huppert/emacs-agent-harness" :branch "v3"
+(package! harness :recipe (:host sourcehut :repo "catvec/emacs-agent-harness"
                            :files ("harness.el" "lisp" "scripts")))
 
 ;; or a plain checkout
-(add-to-list 'load-path "~/src/emacs-agent-harness-v3")
+(add-to-list 'load-path "~/src/emacs-agent-harness")
 (require 'harness)
 (harness-start)          ; loads the UI and starts the harness process
 ```

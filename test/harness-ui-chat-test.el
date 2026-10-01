@@ -133,7 +133,12 @@
         (let ((pos (harness-ui-chat-test-find buf "give me the tour")))
           (should pos)
           (should (harness-ui-chat-test-face-at (1- pos) 'harness-user-face))
-          (should (harness-ui-chat-test-find buf "you")))
+          ;; Sender names, not icons, tell the two sides apart.
+          (should (harness-ui-chat-test-face-at (- (harness-ui-chat-test-find buf "You") 1)
+                                                'harness-user-label-face))
+          (let ((agent (harness-ui-chat-test-find buf "Agent")))
+            (should (< pos agent))
+            (should (harness-ui-chat-test-face-at (1- agent) 'harness-agent-label-face))))
         ;; Thinking is collapsed under an overlay and expands.
         (let* ((think (car (harness-ui-chat-test-blocks buf "thinking")))
                (text-pos (harness-ui-chat-test-find buf "wants a tour")))
@@ -209,8 +214,11 @@
                                           :_harness (list :nodeId "n-live")))
         (let ((b (gethash "n-live" harness-chat--blocks)))
           (should (equal "Hello world" (harness-chat-block-content b)))
+          ;; Appended blocks stay outside the compose box and its background.
+          (should-not (memq harness-chat--compose-overlay (overlays-at (harness-chat-block-start b))))
           (should (= 1 (hash-table-count harness-chat--render-timers)))
-          (should (equal "Hello world"
+          ;; The first agent block of the turn opens with the sender line.
+          (should (equal "Agent\nHello world"
                          (string-trim (buffer-substring-no-properties (harness-chat-block-start b)
                                                                       (harness-chat-block-end b)))))
           ;; The final node replaces the text with the Markdown rendering.
@@ -407,7 +415,7 @@
           (harness-chat-toggle-group (harness-chat-group-id group))
           (should-not (invisible-p (harness-chat-block-start first)))
           (should (harness-chat-block-collapsed first))
-          (should (invisible-p (harness-ui-chat-test-find buf "read_file of a.el")))
+          (should (invisible-p (1- (harness-ui-chat-test-find buf "read_file of a.el"))))
           (should (harness-ui-chat-test-find buf "[collapse]"))
           (harness-chat-toggle-group (harness-chat-group-id group))
           (should (invisible-p (harness-chat-block-start first))))
