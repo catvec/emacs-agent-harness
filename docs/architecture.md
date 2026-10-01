@@ -468,6 +468,9 @@ and resolves when answered).
 - `naming/name SESSION-ID` → promise of name.  Auto after the first
   turn ends when the session has no name: forks provider state when
   possible so the cached prefix is reused; hints "naming…" then the result.
+- Sync filter `naming/system-prompt` (value string, args session) lets
+  modules add to `harness-naming-system-prompt` per session (tasks ask
+  for ticket titles).
 
 ### skills
 
@@ -529,6 +532,9 @@ blocked on a request or the task stopped part way.
   that worktree (`harness-tasks-permission-mode`, non-interactive by
   default) prompted with the task; a system-prompt section tells it to
   commit on its branch and not merge.  Outside git the session runs in CWD.
+- The session's name is the task's title: `naming/system-prompt` adds
+  `harness-tasks-naming-prompt` (nil for none) so the model titles task
+  sessions like tickets.
 - A turn ending `end-turn` queues `merge/enqueue SID TARGET`, TARGET being
   the project's root session named `harness-tasks-merge-session-name`
   (created on demand); `merge/finished … merged` makes the task `done`.

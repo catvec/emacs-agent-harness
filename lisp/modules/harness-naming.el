@@ -13,6 +13,11 @@
 ;; The result is sanitised (first line, no quotes or markdown, at most
 ;; `harness-naming-max-length' characters) and stored with
 ;; `session/update', which adds the "renamed to" hint.
+;;
+;; The request's system prompt goes through the sync filter
+;; `naming/system-prompt' (value the prompt, args the session), as a
+;; turn's goes through `agent/system-prompt', so other modules can say
+;; how their sessions are titled: task mode asks for ticket titles.
 
 ;;; Code:
 
@@ -31,7 +36,8 @@
 
 (defcustom harness-naming-system-prompt
   "You write short titles for conversations between a software engineer and a coding agent.  A good title says what the conversation is about in 3 to 6 words, like a commit subject or a ticket title."
-  "System prompt for the naming request."
+  "System prompt for the naming request.
+Modules add to it per session through the `naming/system-prompt' filter."
   :type 'string :group 'harness)
 
 (defcustom harness-naming-request-text
@@ -62,6 +68,10 @@ trailing period, collapses whitespace and truncates to
 
 ;;;; Naming
 
+(defun harness-naming--system-prompt (session)
+  "Return the naming system prompt for SESSION after `naming/system-prompt'."
+  (harness-run-filter 'naming/system-prompt harness-naming-system-prompt session))
+
 (defun harness-naming--messages (session-id)
   "Return the naming messages for SESSION-ID: the transcript plus the question."
   (let* ((messages (harness-call 'session/messages session-id))
@@ -90,7 +100,7 @@ trailing period, collapses whitespace and truncates to
     (harness-call
      'provider/complete
      (list :model (plist-get session :model) :session session
-           :system harness-naming-system-prompt
+           :system (harness-naming--system-prompt session)
            :messages (harness-naming--messages sid)
            :tools nil :provider-state state :max-tokens 40
            :on-event
