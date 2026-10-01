@@ -149,8 +149,21 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
 
 (defun harness-ui-icon (name)
-  "Return the string for icon NAME (a symbol such as `harness-icon-idle')."
-  (condition-case nil (icon-string name) (error "")))
+  "Return the string for icon NAME (a symbol such as `harness-icon-idle').
+An image icon carries no `:background', so its transparent parts show
+the face behind it (a tool block's colour, say).  Some packages, such as
+solaire-mode, bake the buffer's base colour into every image."
+  (condition-case nil
+      (let* ((s (icon-string name))
+             (spec (and (> (length s) 0) (get-text-property 0 'display s))))
+        (if (and (eq (car-safe spec) 'image) (plist-member (cdr spec) :background))
+            (propertize s 'display (cons 'image (harness-ui--plist-without (cdr spec) :background)))
+          s))
+    (error "")))
+
+(defun harness-ui--plist-without (plist key)
+  "Return a copy of PLIST without KEY."
+  (cl-loop for (k v) on plist by #'cddr unless (eq k key) nconc (list k v)))
 
 (defun harness-ui-status-icon (status)
   "Return the icon string for session STATUS (symbol or string), with face."
