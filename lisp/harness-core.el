@@ -1,6 +1,6 @@
 ;;; harness-core.el --- Module bus for the Emacs agent harness  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
+;; Copyright (C) 2026 catvec
 
 ;; This file is part of the Emacs agent harness (v3).
 
