@@ -1,2 +1,3 @@
 *.elc
 scripts/.dev/
+.claude/worktrees
