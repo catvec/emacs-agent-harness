@@ -7,6 +7,7 @@
 ;; module installs the chain that turns the initial `ask' into a
 ;; decision:
 ;;
+;;    5 dir-request      request_directory_access: the user's answer decides
 ;;   10 jail             every path must lie inside an allowed root;
 ;;                       otherwise the user is asked for the directory
 ;;   20 mode             ask / accept-edits / auto / yolo, plus standing rules
@@ -19,6 +20,12 @@
 ;; `:reason' and, when there is something the model can do about it, a
 ;; `:hint', because a denial the model can act on is the difference
 ;; between an autonomous session and one that stalls.
+;;
+;; An agent asks for another directory with the request_directory_access
+;; tool.  The first stage owns that tool's decision and always makes it
+;; final, so the call never reaches the mode, the standing rules or the
+;; auto-mode judge: in every mode, yolo and auto included, a directory is
+;; granted only by a person answering the prompt.
 ;;
 ;; The module works without the session and agent modules: methods it
 ;; needs from them are looked up with `harness-method-exists-p'.
@@ -82,6 +89,14 @@ When nil the session's own model is used."
   "Answer options offered when a tool call reaches outside the allowed directories.
 `allow-session' grants the directory to the session, `allow-always'
 adds it to `harness-allowed-directories'.")
+
+(defconst harness-perms-dir-tool "request_directory_access"
+  "Tool through which an agent asks the user for access to a directory.")
+
+(defconst harness-perms-dir-request-options '(allow-session allow-always deny-once)
+  "Answer options offered when an agent asks for a directory itself.
+There is no single call to allow once, so an `allow-once' answer (a
+generic \"Allow\" button) grants the directory to the session.")
 
 ;;;; Small helpers
 
@@ -186,12 +201,17 @@ directories granted at runtime and the tool output directory."
               paths))
 
 (defun harness-perms--dir-of (path)
-  "Return the directory to grant so that PATH becomes reachable."
+  "Return the directory to grant so that PATH becomes reachable.
+Symbolic links are resolved first: the jail compares resolved paths,
+so the prompt has to name the directory a grant really opens."
   ;; Never touch the file system for a remote path: that would open
   ;; a TRAMP connection from inside the permission chain.
-  (if (and (not (file-remote-p path)) (file-directory-p path))
-      (file-name-as-directory path)
-    (or (file-name-directory path) path)))
+  (if (file-remote-p path)
+      (or (file-name-directory path) path)
+    (let ((path (harness-path-normalize path)))
+      (if (file-directory-p path)
+          (file-name-as-directory path)
+        (or (file-name-directory path) path)))))
 
 (defun harness-perms--jail (decision next request)
   "Pass REQUEST on when its paths lie inside the session's roots.
@@ -218,11 +238,12 @@ for this call only."
                                        (mapconcat #'abbreviate-file-name roots ", ")
                                        (abbreviate-file-name (harness-perms--dir-of bad)))))))))))
 
-(defun harness-perms--ask-dir (decision next request bad)
-  "Ask the user to grant the directory holding BAD to REQUEST's session.
-DECISION and NEXT continue the chain once `permission/answer' arrives."
+(defun harness-perms--pend-dir (request next dir reason options &rest waiting)
+  "Ask the user of REQUEST's session for access to DIR.
+REASON says why and OPTIONS lists the answers offered.  NEXT continues
+the chain once `permission/answer' arrives; WAITING adds properties to
+the entry kept until then."
   (let* ((sid (plist-get (plist-get request :session) :id))
-         (dir (harness-perms--dir-of bad))
          (pending (list :kind 'permission
                         :payload (list :tool (plist-get request :tool)
                                        :input (plist-get request :input)
@@ -231,27 +252,45 @@ DECISION and NEXT continue the chain once `permission/answer' arrives."
                                        :call-id (plist-get request :call-id)
                                        :dir dir
                                        :title (format "Access %s" (abbreviate-file-name dir))
-                                       :reason (format "%s wants %s, which is outside the allowed directories"
-                                                       (plist-get request :tool) (abbreviate-file-name bad))
-                                       :options harness-perms-dir-options)))
+                                       :reason reason
+                                       :options options)))
          (pid (harness-call 'session/pending-add sid pending)))
-    (puthash pid (list :session-id sid :request request :next next :dir dir :decision decision)
+    (puthash pid (append (list :session-id sid :request request :next next :dir dir) waiting)
              harness-perms--waiting)
     (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid))))
 
+(defun harness-perms--ask-dir (decision next request bad)
+  "Ask the user to grant the directory holding BAD to REQUEST's session.
+DECISION and NEXT continue the chain once `permission/answer' arrives."
+  (harness-perms--pend-dir request next (harness-perms--dir-of bad)
+                           (format "%s wants %s, which is outside the allowed directories"
+                                   (plist-get request :tool) (abbreviate-file-name bad))
+                           harness-perms-dir-options
+                           :decision decision))
+
 (defun harness-perms--answer-dir (session-id waiting answer)
-  "Continue the jail for WAITING of SESSION-ID after the user's ANSWER.
-Return the denial, or `continue' when the chain goes on."
+  "Continue the chain for WAITING of SESSION-ID after the user's ANSWER.
+A jail prompt goes on through the jail; an agent's own request (see
+`harness-perms--dir-request') ends with the answer.  Return the final
+decision, or `continue' when the chain goes on."
   (let ((request (plist-get waiting :request))
         (dir (plist-get waiting :dir))
         (next (plist-get waiting :next)))
-    (if (not (eq (plist-get answer :behavior) 'allow))
-        (let ((d (list :behavior 'deny :final t
-                       :reason (or (plist-get answer :reason)
-                                   (format "the user denied access to %s" (abbreviate-file-name dir)))
-                       :hint "Do not retry; work inside the allowed directories.")))
-          (funcall next d)
-          d)
+    (cond
+     ((not (eq (plist-get answer :behavior) 'allow))
+      (let ((d (list :behavior 'deny :final t
+                     :reason (or (plist-get answer :reason)
+                                 (format "the user denied access to %s" (abbreviate-file-name dir)))
+                     :hint (if (plist-get waiting :explicit)
+                               "Do not ask for it again; work inside the allowed directories."
+                             "Do not retry; work inside the allowed directories."))))
+        (funcall next d)
+        d))
+     ((plist-get waiting :explicit)
+      (let ((d (harness-perms--grant-requested session-id dir (plist-get answer :scope))))
+        (funcall next d)
+        d))
+     (t
       (pcase (plist-get answer :scope)
         ('session (harness-call 'permission/allow-dir session-id dir))
         ('always (harness-call 'permission/allow-dir session-id dir 'always))
@@ -260,7 +299,143 @@ Return the denial, or `continue' when the chain goes on."
       ;; Check again with the fresh session: other paths may lie elsewhere.
       (harness-perms--jail (plist-get waiting :decision) next
                            (plist-put (copy-sequence request) :session (harness-perms--session session-id)))
-      'continue)))
+      'continue))))
+
+;;;; Directory requests from the agent
+
+(defun harness-perms--requested-dir (session path)
+  "Return the directory PATH names for SESSION: absolute, with its host.
+PATH is relative to SESSION's cwd.  Symbolic links are resolved, so
+the user is asked about the directory a grant really opens.  A path
+naming a file stands for the directory holding it; anything else is a
+directory, so one that does not exist yet is not widened to its
+parent."
+  (let ((abs (harness-perms--with-host (expand-file-name path (or (plist-get session :cwd) default-directory))
+                                       (plist-get session :host))))
+    ;; Never touch the file system for a remote path (see `harness-perms--dir-of').
+    (if (file-remote-p abs)
+        (file-name-as-directory abs)
+      (let ((real (harness-path-normalize abs)))
+        (if (file-regular-p real)
+            (file-name-directory real)
+          (file-name-as-directory real))))))
+
+(defun harness-perms--request-reason (session dir why)
+  "Return the prompt text for an agent's request of DIR in SESSION.
+WHY is the reason the agent gave, or nil."
+  (concat (if (or (not (stringp why)) (harness-string-blank-p why))
+              "The agent asks for access to this directory."
+            (format "The agent asks for access: %s" (string-trim why)))
+          (if (harness-perms--within-p dir (or (plist-get session :cwd) default-directory))
+              "  Careful: it contains the working directory and everything around it."
+            "")))
+
+(defun harness-perms--dir-request (decision next request)
+  "Decide a call to `harness-perms-dir-tool' from the user's answer alone.
+Other calls go on with DECISION.  For the request tool the decision
+handed to NEXT is always final, so the mode, the standing rules and
+the auto-mode judge never see it: the call is allowed at once only
+when REQUEST's directory is already reachable (nothing is granted
+then), denied when nobody can answer, and otherwise waits for the
+user, who grants the directory or not."
+  (if (not (equal (plist-get request :tool) harness-perms-dir-tool))
+      (funcall next decision)
+    (let* ((session (plist-get request :session))
+           (input (plist-get request :input))
+           (path (plist-get input :path))
+           (dir (and (stringp path) (not (harness-string-blank-p path))
+                     (harness-perms--requested-dir session path)))
+           (roots (harness-perms-roots session)))
+      (cond
+       ((null dir)
+        (funcall next (list :behavior 'deny :final t
+                            :reason (format "%s needs the path of a directory" harness-perms-dir-tool)
+                            :hint "Call it again with path set to the directory you need.")))
+       ((not (harness-perms--outside (list dir) roots))
+        (funcall next (list :behavior 'allow :final t
+                            :reason (format "%s is already allowed; nothing to grant" (abbreviate-file-name dir)))))
+       ((or (harness-perms--non-interactive-p session)
+            (not (harness-method-exists-p 'session/pending-add)))
+        (funcall next (list :behavior 'deny :final t
+                            :reason (format "nobody can grant %s: %s" (abbreviate-file-name dir)
+                                            (if (harness-perms--non-interactive-p session)
+                                                "the session is non-interactive and the user is away"
+                                              "no user is available"))
+                            :hint (format "Work inside the allowed directories (%s). If the task cannot be done without %s, finish what you can and say so in your answer; the user can grant it with M-x harness-directories."
+                                          (mapconcat #'abbreviate-file-name roots ", ")
+                                          (abbreviate-file-name dir)))))
+       (t
+        ;; The prompt shows the directory and the agent's reason; the
+        ;; input keeps only the path so the reason is not shown twice.
+        (harness-perms--pend-dir (plist-put (copy-sequence request) :input (list :path path))
+                                 next dir
+                                 (harness-perms--request-reason session dir (plist-get input :reason))
+                                 harness-perms-dir-request-options
+                                 :explicit t))))))
+
+(defun harness-perms--grant-requested (session-id dir scope)
+  "Grant DIR to SESSION-ID as the user allowed it; return the decision.
+This is the answer to an agent's own request.  SCOPE `always' adds
+DIR to `harness-allowed-directories'; any other scope, `once'
+included, grants it to the session."
+  (let ((always (eq scope 'always)))
+    (condition-case err
+        (progn
+          (harness-call 'permission/allow-dir session-id dir (and always 'always))
+          (list :behavior 'allow :final t
+                :reason (format "the user granted %s to %s" (abbreviate-file-name dir)
+                                (if always "every session" "this session"))))
+      (error
+       (harness-log 'error "perms: granting %s to %s failed: %S" dir session-id err)
+       (list :behavior 'deny :final t
+             :reason (format "granting %s failed: %s" (abbreviate-file-name dir) (harness-error-message err)))))))
+
+(defun harness-perms--source-label (source)
+  "Return how the request tool describes directory SOURCE to the agent."
+  (pcase source
+    ('cwd "the working directory")
+    ('worktree "the worktree")
+    ('config "allowed for every session")
+    ('session "granted to this session")
+    ('outputs "the tool output directory")
+    (_ (format "%s" source))))
+
+(defun harness-perms--dir-request-result (input ctx)
+  "Handler of `harness-perms-dir-tool': tell the agent what it may reach now.
+It runs only once the permission chain allowed the call, that is when
+the user granted the directory in INPUT or it was already allowed;
+the grant itself happens in `permission/answer'.  CTX names the session."
+  (let* ((session (harness-perms--session (plist-get ctx :session-id)))
+         (path (plist-get input :path))
+         (dir (and (stringp path) (not (harness-string-blank-p path))
+                   (harness-perms--requested-dir session path)))
+         (entry (and dir (cl-find-if (lambda (e) (harness-perms--within-p (plist-get e :dir) dir))
+                                     (harness-perms-dirs session))))
+         (shown (and dir (abbreviate-file-name dir))))
+    (cond
+     ((null dir) (harness-tool-error "Give path, the directory you need."))
+     ((null entry)
+      (harness-tool-error (format "%s is still outside the allowed directories." shown)))
+     (t
+      (harness-tool-ok
+       (concat
+        (pcase (list (plist-get entry :source) (equal (plist-get entry :dir) dir))
+          ('(session t) (format "%s is now an allowed directory of this session." shown))
+          ('(config t) (format "%s is now an allowed directory of every session." shown))
+          (`(,source ,_) (format "%s is already accessible: it lies inside %s (%s)." shown
+                                 (abbreviate-file-name (plist-get entry :dir))
+                                 (harness-perms--source-label source))))
+        " Tools that take paths can use it; to run bash there, set its cwd inside it."))))))
+
+(harness-define-tool harness-perms-dir-tool
+  :description "Ask the user for access to a directory outside the allowed directories (the working directory and the directories granted so far), for instance another repository you need to read or change. The user is always asked, in every permission mode, and either grants it to this session, grants it to every session, or denies it; the call waits for the answer. Ask for the narrowest directory that does the job and say why. If the user denies it, do not ask again. A non-interactive session cannot ask and is denied at once."
+  :schema '(:type "object"
+            :properties (:path (:type "string" :description "The directory, absolute or relative to the working directory.")
+                         :reason (:type "string" :description "Why you need it; shown to the user."))
+            :required ("path" "reason"))
+  :kind 'meta
+  :title (lambda (input) (format "%s %s" harness-perms-dir-tool (or (plist-get input :path) "")))
+  :handler #'harness-perms--dir-request-result)
 
 ;;;; Mode and standing rules
 
@@ -333,7 +508,12 @@ user's evident intent.  Allow ordinary development work inside the allowed
 directories.  Deny anything destructive or irreversible outside the project
 (deleting or overwriting unrelated files, force pushes, changing system
 configuration, exfiltrating secrets, network calls to unexpected hosts, or
-installing software system-wide).  When unsure, deny with a reason the agent
+installing software system-wide).  Also deny anything that would widen the
+agent's own permissions or weaken the harness's safeguards: granting itself
+directories (harness-allowed-directories, including in .dir-locals.el files),
+changing the permission mode or the non-interactive setting, or turning the
+sandbox off.  Only the user grants directories; the agent asks for one with
+the request_directory_access tool.  When unsure, deny with a reason the agent
 can act on.  Reply with exactly one line of JSON and nothing else:
 {\"decision\":\"allow\"|\"deny\",\"reason\":\"one short sentence\"}"
   "System prompt for the auto-mode judge.")
@@ -494,8 +674,11 @@ under `:option'."
 (harness-defmethod permission/answer (session-id pending-id answer)
   "Answer the permission request PENDING-ID of SESSION-ID with ANSWER.
 ANSWER is (:behavior allow|deny :scope once|session|always :reason).
-Resolves the pending request, records session or standing rules and
-lets the tool call continue.  Return the final decision."
+Resolves the pending request, records session or standing rules (for
+a directory prompt: grants the directory to the session or, with
+`always', to every session) and lets the tool call continue.  This is
+the only way a directory prompt is granted.  Return the final
+decision, or `continue' when a jail prompt hands the call on."
   (let ((waiting (gethash pending-id harness-perms--waiting)))
     (unless waiting
       (signal 'harness-error (list (format "no pending permission %s" pending-id))))
@@ -649,6 +832,7 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
 
 (defun harness-perms--init ()
   "Install the `permission/decide' chain.  Safe to call again."
+  (harness-add-filter 'permission/decide #'harness-perms--dir-request 5)
   (harness-add-filter 'permission/decide #'harness-perms--jail 10)
   (harness-add-filter 'permission/decide #'harness-perms--mode 20)
   (harness-add-filter 'permission/decide #'harness-perms--auto 30)
@@ -657,12 +841,18 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
 
 (defun harness-perms--shutdown ()
   "Remove the `permission/decide' chain."
-  (dolist (fn '(harness-perms--jail harness-perms--mode harness-perms--auto
+  (dolist (fn '(harness-perms--dir-request harness-perms--jail harness-perms--mode harness-perms--auto
                 harness-perms--non-interactive harness-perms--ask))
     (harness-remove-filter 'permission/decide fn)))
 
+;; A reload does not run `:init' again for a ready module, and the tools
+;; above are registered at load time, so the chain is installed here too:
+;; a reloaded harness never offers request_directory_access without the
+;; stage that decides it.
+(harness-perms--init)
+
 (harness-define-module 'perms
-  :doc "Directory jail, permission modes, auto judge and user prompts."
+  :doc "Directory jail, directory requests, permission modes, auto judge and user prompts."
   :requires '(config tools)
   :init #'harness-perms--init
   :shutdown #'harness-perms--shutdown)

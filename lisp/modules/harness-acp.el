@@ -767,6 +767,17 @@ during a replay the full content is sent as one chunk."
          (scope (intern (or (cadr parts) "once"))))
     (list :behavior behavior :scope (if (memq scope '(once session always)) scope 'once))))
 
+(defun harness-acp--offered-options (payload)
+  "Return the ACP options for a permission request with PAYLOAD.
+A directory prompt is worded for directories; when PAYLOAD lists its
+`:options' (ids such as `allow-session'), only those are offered, so
+an agent's own directory request has no \"Allow once\"."
+  (let* ((all (if (plist-get payload :dir) harness-acp--dir-permission-options
+                harness-acp--permission-options))
+         (ids (mapcar (lambda (o) (format "%s" o)) (append (plist-get payload :options) nil))))
+    (or (and ids (cl-remove-if-not (lambda (o) (member (plist-get o :optionId) ids)) all))
+        all)))
+
 (defun harness-acp--on-permission-requested (sid pending)
   "Ask the connected clients to decide PENDING permission request of SID."
   (let* ((payload (or (plist-get pending :payload) pending))
@@ -778,8 +789,7 @@ during a replay the full content is sent as one chunk."
                            :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
                            :kind (harness-acp--acp-tool-kind (plist-get payload :kind))
                            :rawInput (plist-get payload :input))
-           :options (if (plist-get payload :dir) harness-acp--dir-permission-options
-                      harness-acp--permission-options)
+           :options (harness-acp--offered-options payload)
            :_harness (list :pendingId pid
                            :tool (plist-get payload :tool)
                            :paths (plist-get payload :paths)

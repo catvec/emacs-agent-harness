@@ -358,9 +358,9 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
 Async filter `permission/decide`: value is a DECISION
 `(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
-:paths (…))`.  Chain (priority): 10 jail, 20 mode, 30 auto (LLM judge),
-40 non-interactive, 90 ask-user (turns `ask` into a pending request
-and resolves when answered).
+:paths (…))`.  Chain (priority): 5 dir-request, 10 jail, 20 mode, 30 auto
+(LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a pending
+request and resolves when answered).
 
 - `permission/answer SESSION-ID PENDING-ID ANSWER` — ANSWER
   `(:behavior allow|deny :scope once|session|always :reason)`, or an
@@ -371,7 +371,25 @@ and resolves when answered).
   directory to the session) / allow-always (add it to
   `harness-allowed-directories`) / deny-once.  After a grant the rest
   of the chain still decides the call itself.  Non-interactive sessions
-  are denied with a hint as before.
+  are denied with a hint as before.  The prompt names the directory
+  with symbolic links resolved, since that is what the jail compares
+  and what a grant opens.
+- Agents ask for a directory themselves with the `request_directory_access`
+  tool (`path`, `reason`).  The dir-request stage owns that tool's
+  decision and always makes it final, so the mode, standing rules,
+  `harness-perms-auto-allow-tools` and the auto judge never see it.
+  In every mode, auto and yolo included, a directory is granted only
+  by a person answering the prompt.  A directory that is already
+  reachable is allowed at once and nothing is granted.  Non-interactive
+  sessions are denied with a hint.  Otherwise the session blocks on a
+  `permission` prompt (`:dir`, the agent's reason, options
+  allow-session / allow-always / deny-once; a generic allow-once
+  answer grants to the session).  The handler then tells the agent
+  what it can reach.  Being a permission and not a question, the
+  prompt cannot be answered by another agent through `session_control`.
+  The auto judge is also told to deny calls that widen the agent's own
+  permissions some other way (for example `harness-allowed-directories`
+  in `.dir-locals.el`, the permission mode, or the sandbox).
 - `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
   grants every session), `permission/revoke-dir SESSION-ID DIR`,
   `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|config|session|outputs
@@ -384,7 +402,9 @@ and resolves when answered).
 - Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :behavior allow|deny)`;
   session rules live in memory, always-rules in `harness-perms-rules`.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
-  :payload (:tool :input :kind :paths :call-id :title :options))`),
+  :payload (:tool :input :kind :paths :call-id :title :options))`, plus
+  `:dir` and `:reason` for a directory prompt; UIs offer only the
+  listed `:options`),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
@@ -568,6 +588,7 @@ prefixes come from the session host):
 | `web_fetch` | url, max_chars | net |
 | `emacs_messages` | count | read |
 | `ask_user` | question, options, allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
+| `request_directory_access` | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
 | `session_info` | — | read |
 | `plan` | plan | meta |
 | `todo_write` | todos | meta |
