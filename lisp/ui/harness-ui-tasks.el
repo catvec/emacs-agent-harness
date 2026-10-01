@@ -467,10 +467,13 @@ Point and every window showing the board stay on the same task."
                (if (harness-json-true-p (plist-get new :non-interactive)) "non-interactive" "interactive")
                #'harness-toggle-non-interactive "Non-interactive mode of new tasks"))
         (propertize " · " 'face 'harness-dim-face))
-       (propertize (format "   %s%s at a time"
-                           (if (harness-json-true-p (plist-get s :worktrees)) "own worktree, merged when done · " "")
-                           (or (plist-get s :max-running) "any number"))
-                   'face 'harness-dim-face)))))
+       (let ((notes (delq nil (list (and (harness-json-true-p (plist-get s :worktrees))
+                                         "own worktree, merged when done")
+                                    (and (plist-get s :max-running)
+                                         (format "%s at a time" (plist-get s :max-running)))))))
+         (if notes
+             (propertize (concat "   " (string-join notes " · ")) 'face 'harness-dim-face)
+           ""))))))
 
 (defun harness-ui-tasks--set-new (key value)
   "Set the new-task setting KEY to VALUE and show it."
