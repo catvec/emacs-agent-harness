@@ -43,5 +43,19 @@ The side window is selected and not dedicated, as Doom leaves it."
       (should-not (window-parameter window 'window-side))
       (should (eq window (window-in-direction 'below (get-buffer-window other)))))))
 
+(ert-deftest harness-ui-unowned-requests-stay-pending-without-prompting ()
+  "A question or permission no buffer owns is declined, never prompted for."
+  (let (responses (harness-ui-question-functions nil) (harness-ui-permission-functions nil))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (error "Prompted")))
+              ((symbol-function 'read-string) (lambda (&rest _) (error "Prompted")))
+              ((symbol-function 'read-multiple-choice) (lambda (&rest _) (error "Prompted"))))
+      (harness-ui--dispatch "_harness/ask_user" '(:sessionId "s1" :requestId "q1" :question "Which?" :options ["a" "b"])
+                            (lambda (r) (push r responses)))
+      (harness-ui--dispatch "session/request_permission" '(:sessionId "s1" :toolCall (:title "bash"))
+                            (lambda (r) (push r responses))))
+    (should (= 2 (length responses)))
+    (should-not (cl-some (lambda (r) (plist-get r :answer)) responses))
+    (should-not (cl-some (lambda (r) (plist-get r :outcome)) responses))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here
