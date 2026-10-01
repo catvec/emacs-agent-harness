@@ -150,6 +150,7 @@
 (defvar-local harness-chat--coalescable nil "Names of coalescable tools.")
 (defvar-local harness-chat--files nil "Project files for @ completion.")
 (defvar-local harness-chat--skills nil "Skill names for / completion.")
+(defvar-local harness-chat--files-at nil "Start of the @ token whose completion last refreshed the files.")
 (defvar-local harness-chat--turn-start nil "Float time the running turn started.")
 (defvar-local harness-chat--unseen nil "Non-nil when content arrived while scrolled up.")
 (defvar-local harness-chat--dead nil "Non-nil once the session was deleted.")
@@ -1505,32 +1506,25 @@ fetched: older nodes outside the fetched window are skipped."
                            (when then (funcall then)))))
                      #'ignore)))
 
+(defun harness-chat--fetch-files ()
+  "Refresh `harness-chat--files' from the project's file list.
+The harness answers from projectile's cache or an asynchronous listing,
+so this never blocks; on failure the previous list is kept."
+  (let ((buf (current-buffer)))
+    (harness-ui-call "_harness/project/files" (list :root (harness-chat--project) :limit 20000)
+                     (lambda (files) (when (buffer-live-p buf) (with-current-buffer buf (setq harness-chat--files files))))
+                     (lambda (err) (harness-log 'warn "chat: listing project files failed: %s" (harness-error-message err))))))
+
 (defun harness-chat--fetch-completions ()
   "Prefetch project files and skill names for completion."
-  (let ((buf (current-buffer))
-        (root (harness-chat--project)))
-    (harness-ui-call "_harness/project/files" (list :root root :limit 20000)
-                     (lambda (files) (when (buffer-live-p buf) (with-current-buffer buf (setq harness-chat--files files))))
-                     (lambda (_err)
-                       ;; The harness may not expose project/ over ACP; fall back.
-                       (when (buffer-live-p buf)
-                         (with-current-buffer buf
-                           (setq harness-chat--files (harness-chat--local-files root))))))
-    (harness-ui-call "_harness/skills/list" (list :cwd root)
+  (let ((buf (current-buffer)))
+    (harness-chat--fetch-files)
+    (harness-ui-call "_harness/skills/list" (list :cwd (harness-chat--project))
                      (lambda (skills)
                        (when (buffer-live-p buf)
                          (with-current-buffer buf
                            (setq harness-chat--skills (mapcar (lambda (s) (plist-get s :name)) skills)))))
                      #'ignore)))
-
-(defun harness-chat--local-files (root)
-  "Return the files under ROOT relative to it, without leaving the client.
-Uses the bus when the harness is in-process, else the file system."
-  (cond
-   ((and (null harness-ui-connection-address) (harness-method-exists-p 'project/files))
-    (ignore-errors (harness-call 'project/files root nil 20000)))
-   ((and (not (file-remote-p root)) (file-directory-p root))
-    (harness-list-files root 20000))))
 
 (defun harness-chat--redraw-all ()
   "Rebuild every chat buffer from scratch, keeping compose text and scroll state."
@@ -1780,6 +1774,11 @@ Plain text is inserted into the compose box."
         (root (harness-chat--project)))
     (cond
      (file
+      ;; A new @ token refreshes the list, so files created since the
+      ;; buffer opened show up from the next keystroke on.
+      (unless (eql (car file) harness-chat--files-at)
+        (setq harness-chat--files-at (car file))
+        (harness-chat--fetch-files))
       (list (car file) (cdr file)
             (harness-chat--table harness-chat--files 'harness-chat-file)
             :exclusive 'no
