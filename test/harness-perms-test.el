@@ -345,6 +345,93 @@
   (should (eq 'deny (harness-perms-test--behavior "elisp" 'exec)))
   (should (null harness-perms-test--pending)))
 
+;;;; Asking for a directory
+
+(defun harness-perms-test--start (tool kind path)
+  "Start deciding a call to TOOL of KIND on PATH; return (PROMISE . PENDING)."
+  (let ((n (length harness-perms-test--pending))
+        (p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (harness-perms-test--request tool kind path))))
+    (harness-test-wait (lambda () (> (length harness-perms-test--pending) n)) 2 "pending")
+    (cons p (car harness-perms-test--pending))))
+
+(ert-deftest harness-perms-jail-asks-and-grants-for-session ()
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((outside (harness-test-temp-dir))
+         (file (expand-file-name "x.txt" outside))
+         (started (harness-perms-test--start "read_file" 'read file))
+         (p (car started))
+         (payload (plist-get (cdr started) :payload)))
+    (should-not (harness-promise-settled-p p))
+    (should (equal outside (plist-get payload :dir)))
+    (should (equal harness-perms-dir-options (plist-get payload :options)))
+    (should (string-match-p "outside the allowed directories" (plist-get payload :reason)))
+    (should (string-prefix-p "Access " (plist-get payload :title)))
+    (should (eq 'continue (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-session")))
+    ;; The rest of the chain decides the call: a read inside the jail is allowed.
+    (should (eq 'allow (plist-get (harness-test-await p) :behavior)))
+    (should (member outside (harness-call 'permission/allowed-dirs "s1")))
+    ;; The grant sticks: no new question for the next call.
+    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "y" outside))))
+    (should (null harness-perms-test--pending))
+    ;; A write still goes through the mode and asks about the tool itself.
+    (let ((s (harness-perms-test--start "write_file" 'write file)))
+      (should-not (plist-get (plist-get (cdr s) :payload) :dir))
+      (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "deny-once")
+      (should (eq 'deny (plist-get (harness-test-await (car s)) :behavior))))))
+
+(ert-deftest harness-perms-jail-ask-once-deny-and-non-interactive ()
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((outside (harness-test-temp-dir))
+         (file (expand-file-name "x.txt" outside)))
+    ;; Allow once: this call passes, the next one asks again.
+    (let ((s (harness-perms-test--start "read_file" 'read file)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "allow-once")
+      (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+    (should-not (member outside (harness-call 'permission/allowed-dirs "s1")))
+    (let ((s (harness-perms-test--start "read_file" 'read file)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "deny-once")
+      (let ((d (harness-test-await (car s))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (plist-get d :final))
+        (should (string-match-p "denied access" (plist-get d :reason)))))
+    ;; Nobody to ask: denied with the hint as before.
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive t))
+    (let ((d (harness-perms-test--decide (harness-perms-test--request "read_file" 'read file))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (string-match-p "allow-dir" (plist-get d :hint))))
+    (should (null harness-perms-test--pending))))
+
+(ert-deftest harness-perms-dirs-always-and-revoke ()
+  (let ((saved nil)
+        (harness-allowed-directories nil)
+        (a (harness-test-temp-dir))
+        (b (harness-test-temp-dir)))
+    (harness-test-with-temp-state
+      (harness-perms-test--setup :permission-mode 'yolo)
+      (cl-letf (((symbol-function 'harness-save-user-option)
+                 (lambda (sym value) (set sym value) (push (cons sym value) saved))))
+        ;; An always answer lands in the global option.
+        (harness-perms-test--install-pending)
+        (let ((s (harness-perms-test--start "read_file" 'read (expand-file-name "f" a))))
+          (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "allow-always")
+          (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+        (should (equal (list a) harness-allowed-directories))
+        (should (eq 'harness-allowed-directories (caar saved)))
+        (harness-call 'permission/allow-dir "s1" b)
+        (let ((dirs (harness-call 'permission/dirs "s1")))
+          (should (equal '(cwd config session outputs) (mapcar (lambda (e) (plist-get e :source)) dirs)))
+          (should (equal '(nil t t nil) (mapcar (lambda (e) (plist-get e :revocable)) dirs))))
+        ;; Revoking removes the session grant, then the global entry.
+        (harness-call 'permission/revoke-dir "s1" b)
+        (should-not (member b (harness-call 'permission/allowed-dirs "s1")))
+        (harness-call 'permission/revoke-dir "s1" a)
+        (should (null harness-allowed-directories))
+        ;; The cwd is not a grant.
+        (should-error (harness-call 'permission/revoke-dir "s1" (plist-get harness-perms-test--session :cwd)))))))
+
 (ert-deftest harness-perms-describe-and-reload ()
   (harness-perms-test--setup)
   (harness-define-tool "t_titled" :kind 'exec :title (lambda (in) (format "run %s" (plist-get in :cmd))) :handler #'ignore)

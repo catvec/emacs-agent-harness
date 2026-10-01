@@ -44,10 +44,20 @@
         (let ((b (run "bash" '(:command "pwd; ls"))))
           (should-not (plist-get b :is-error))
           (should (string-match-p "hello.txt" (plist-get b :content))))
-        ;; The jail applies to remote paths too.
-        (let ((d (run "read_file" '(:path "/etc/hostname"))))
-          (should (plist-get d :is-error))
-          (should (string-match-p "outside the allowed directories" (plist-get d :content))))))))
+        ;; The jail applies to remote paths too: it asks for the remote
+        ;; directory, and a denial reaches the agent.
+        (let* ((p (harness-call 'tools/execute id (list :id "outside" :name "read_file"
+                                                        :input '(:path "/etc/hostname"))))
+               (pending (progn (harness-test-wait (lambda () (harness-call 'permission/pending id)) 10
+                                                  "directory prompt")
+                               (car (harness-call 'permission/pending id)))))
+          (let ((dir (plist-get (plist-get pending :payload) :dir)))
+            (should (file-remote-p dir))
+            (should (equal "/etc/" (file-remote-p dir 'localname))))
+          (harness-call 'permission/answer id (plist-get pending :id) "deny-once")
+          (let ((d (harness-await p 60)))
+            (should (plist-get d :is-error))
+            (should (string-match-p "denied access" (plist-get d :content)))))))))
 
 (provide 'harness-tramp-test)
 ;;; harness-tramp-test.el ends here

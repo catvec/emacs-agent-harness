@@ -340,6 +340,29 @@
         (should (equal "deny-once" (plist-get (plist-get (car answers) :outcome) :optionId)))
         (should (null harness-chat--pending))))))
 
+(ert-deftest harness-ui-chat-directory-permission-panel ()
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (answers nil)
+           (params (list :sessionId sid
+                         :toolCall (list :toolCallId "c1" :title "Access ~/notes/" :kind "read"
+                                         :rawInput '(:path "~/notes/todo.org"))
+                         :options harness-acp--dir-permission-options
+                         :_harness (list :pendingId "d1" :tool "read_file" :dir "/home/u/notes/"
+                                         :reason "read_file wants ~/notes/todo.org, which is outside the allowed directories"))))
+      (should (harness-chat--on-permission params (lambda (r) (push r answers))))
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "Access ~/notes/"))
+        (should (harness-ui-chat-test-find buf "outside the allowed directories"))
+        (should (harness-ui-chat-test-find buf "[Allow directory for session]"))
+        (should (harness-ui-chat-test-find buf "[Always allow directory]"))
+        (should-not (harness-ui-chat-test-find buf "[Always deny]"))
+        (goto-char (1- (harness-ui-chat-test-find buf "[Allow directory for session]")))
+        (harness-chat-push)
+        (should (equal "allow-session" (plist-get (plist-get (car answers) :outcome) :optionId)))
+        (should (null harness-chat--pending))))))
+
 (ert-deftest harness-ui-chat-existing-pending-item-offers-buttons ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))

@@ -391,10 +391,15 @@ Sessions persist; running turns are interrupted."
 (defun harness-ui--default-permission (params respond)
   "Fallback permission prompt in the minibuffer when no UI module claimed it."
   (let* ((tc (plist-get params :toolCall))
+         (dir (plist-get (plist-get params :_harness) :dir))
          (choice (read-multiple-choice
-                  (format "Allow %s?" (or (plist-get tc :title) "tool"))
-                  '((?y "allow once") (?s "allow for session") (?a "always allow")
-                    (?n "deny") (?N "always deny")))))
+                  (if dir (format "Allow access to %s?" (abbreviate-file-name dir))
+                    (format "Allow %s?" (or (plist-get tc :title) "tool")))
+                  (if dir
+                      '((?y "allow once") (?s "allow directory for session")
+                        (?a "always allow directory") (?n "deny"))
+                    '((?y "allow once") (?s "allow for session") (?a "always allow")
+                      (?n "deny") (?N "always deny"))))))
     (funcall respond
              (list :outcome (list :outcome "selected"
                                   :optionId (pcase (car choice)
@@ -836,6 +841,7 @@ the menu gets a bottom side window of its own; elsewhere it follows
     ("m" "Model" harness-set-model)
     ("T" "Thinking" harness-set-thinking)
     ("p" "Permission mode" harness-set-permission-mode)
+    ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" "Non-interactive" harness-toggle-non-interactive)
     ("r" "Rename" harness-rename-session)]
    ["Tools"
