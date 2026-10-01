@@ -1,11 +1,11 @@
 ;;; harness.el --- Emacs native agent harness  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Noah Huppert
-;; Author: Noah Huppert
+;; Copyright (C) 2026 catvec
+;; Author: catvec
 ;; Version: 3.0.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
-;; URL: https://github.com/Noah-Huppert/emacs-agent-harness
+;; URL: https://git.sr.ht/~catvec/emacs-agent-harness
 
 ;;; Commentary:
 
