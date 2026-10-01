@@ -16,6 +16,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-files)
 
 (defgroup harness-ui-sessions nil
   "The session list." :group 'harness-ui)
@@ -154,9 +155,7 @@
   "Show the session list, scoped to the current project unless ALL-PROJECTS."
   (interactive "P")
   (let ((project (unless all-projects
-                   (if (harness-method-exists-p 'project/root)
-                       (harness-call 'project/root default-directory)
-                     (file-name-as-directory (expand-file-name default-directory)))))
+                   (harness-files-project-root default-directory)))
         (buf (get-buffer-create harness-ui-sessions-buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-sessions-mode) (harness-ui-sessions-mode))
@@ -223,9 +222,7 @@
   (interactive)
   (setq harness-ui-sessions--project
         (if harness-ui-sessions--project nil
-          (if (harness-method-exists-p 'project/root)
-              (harness-call 'project/root default-directory)
-            (file-name-as-directory (expand-file-name default-directory)))))
+          (harness-files-project-root default-directory)))
   (harness-ui-sessions--redraw))
 
 (defun harness-ui-sessions-toggle-inactive ()

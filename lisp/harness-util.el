@@ -332,6 +332,27 @@ After TIMEOUT seconds the process is killed and :exit is `timeout'."
       (when stdin (process-send-string proc stdin))
       (when (process-live-p proc) (process-send-eof proc)))))
 
+;;;; User options
+
+(defun harness-save-user-option (symbol value)
+  "Set SYMBOL to VALUE here and persist it in the user's custom file.
+The custom file belongs to the Emacs showing the UI, which may not be
+this one (see harness-server.el), so the save is asked of the UI over
+`client/request'; without a UI it is done here when a custom file is
+in use.  Returns nothing useful; failures are logged."
+  (customize-set-variable symbol value)
+  (if (and (fboundp 'harness-method-exists-p) (harness-method-exists-p 'client/request))
+      (harness-catch (harness-call-async 'client/request "_harness/client/customize-save"
+                                         (list :symbol (symbol-name symbol)
+                                               :value (let ((print-length nil) (print-level nil))
+                                                        (prin1-to-string value))))
+                     (lambda (e) (harness-log 'warn "could not save %s: %s" symbol (harness-error-message e))))
+    (when (and custom-file (not noninteractive))
+      (condition-case err
+          (customize-save-variable symbol value)
+        (error (harness-log 'warn "could not save %s: %S" symbol err)))))
+  nil)
+
 ;;;; Errors
 
 (defun harness-error-message (err)

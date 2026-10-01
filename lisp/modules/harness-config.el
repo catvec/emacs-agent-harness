@@ -154,7 +154,7 @@ directory file is used.  Return (SCOPE . FILE-OR-NIL)."
                           (t 'directory))))
          (result
           (pcase scope
-            ('global (customize-save-variable key value) (cons 'global custom-file))
+            ('global (harness-save-user-option key value) (cons 'global nil))
             ('project (cons 'project (harness-config--write-dir-local root key value)))
             ('directory (cons 'directory (harness-config--write-dir-local cwd key value)))
             (_ (error "Unknown scope %s" scope)))))

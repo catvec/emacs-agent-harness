@@ -25,6 +25,8 @@
 (require 'harness-util)
 (require 'harness-acp)
 (require 'harness-server)
+(require 'harness-client-tools)
+(require 'harness-files)
 
 (declare-function harness-reload "harness")
 
@@ -361,8 +363,16 @@ Sessions persist; running turns are interrupted."
     ("_harness/ask_user"
      (unless (run-hook-with-args-until-success 'harness-ui-question-functions params respond)
        (harness-ui--default-question params respond)))
+    ("_harness/client/customize-save"
+     (condition-case err
+         (funcall respond (harness-client-tools-customize-save (plist-get params :symbol) (plist-get params :value)))
+       (error (harness-acp-respond-error respond -32000 (error-message-string err)))))
+    ("_harness/client/tool"
+     (funcall respond (harness-client-tools-run (plist-get params :name) (plist-get params :input))))
     ("_harness/event"
      (let ((event (plist-get params :event)) (args (plist-get params :args)))
+       (when (equal event "tools/file-written")
+         (harness-client-tools-revert-visiting (car args)))
        (when (member event '("session/created" "session/deleted"))
          (harness-ui-refresh-sessions))
        (when (equal event "harness/reloaded")
@@ -578,16 +588,16 @@ Set by the chat module.")
 ;;;; Commands
 
 (defun harness-ui--default-directory ()
-  (if (harness-method-exists-p 'project/root)
-      (harness-call 'project/root default-directory)
-    default-directory))
+  (harness-files-project-root default-directory))
 
 ;;;###autoload
 (defun harness-new-session (directory &optional position)
   "Start a new session in DIRECTORY and show it in POSITION."
   (interactive (list (read-directory-name "Session directory: " (harness-ui--default-directory) nil t)
                      (and current-prefix-arg (harness-ui-read-position))))
-  (harness-ui-call "session/new" (list :cwd (expand-file-name directory))
+  (harness-ui-call "session/new" (list :cwd (expand-file-name directory)
+                                       ;; Rooted here, where the user's project setup lives.
+                                       :_harness (list :project (harness-files-project-root directory)))
                    (lambda (result)
                      (harness-ui-refresh-sessions
                       (lambda (_) (harness-ui-display-session (plist-get result :sessionId) position))))))

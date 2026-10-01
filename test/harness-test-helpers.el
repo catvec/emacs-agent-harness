@@ -78,5 +78,34 @@ Signal an error mentioning MESSAGE on timeout.  Return PRED's value."
   "Create and return a fresh temporary directory."
   (file-name-as-directory (make-temp-file "harness-tmp-" t)))
 
+(defvar harness-acp-server-enabled)
+(declare-function harness-acp-connect "harness-acp")
+(declare-function harness-acp-set-handler "harness-acp")
+(declare-function harness-client-tools-run "harness-client-tools")
+(declare-function harness-client-tools-revert-visiting "harness-client-tools")
+(declare-function harness-client-tools-customize-save "harness-client-tools")
+
+(defun harness-test-connect-ui-client ()
+  "Load the acp module and connect an in-process client acting as the UI.
+It answers `_harness/client/tool' and `_harness/client/customize-save',
+and reverts buffers on
+`tools/file-written', like lisp/ui does.  Return the connection."
+  (let ((harness-acp-server-enabled nil))
+    (harness-test-load-module 'acp))
+  (require 'harness-client-tools)
+  (let ((conn (harness-acp-connect nil)))
+    (harness-acp-set-handler
+     conn
+     (lambda (method params respond)
+       (pcase method
+         ("_harness/client/tool"
+          (funcall respond (harness-client-tools-run (plist-get params :name) (plist-get params :input))))
+         ("_harness/client/customize-save"
+          (funcall respond (harness-client-tools-customize-save (plist-get params :symbol) (plist-get params :value))))
+         ("_harness/event"
+          (when (equal (plist-get params :event) "tools/file-written")
+            (harness-client-tools-revert-visiting (car (plist-get params :args))))))))
+    conn))
+
 (provide 'harness-test-helpers)
 ;;; harness-test-helpers.el ends here

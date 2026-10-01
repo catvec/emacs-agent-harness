@@ -43,6 +43,7 @@
 (require 'harness-util)
 (require 'harness-acp)
 (require 'harness-ui)
+(require 'harness-files)
 (require 'harness-ui-markdown)
 
 (declare-function harness-ui-media-render-attachment "harness-ui-media" (attachment))
@@ -190,10 +191,8 @@ use whatever frame happens to be selected."
     (or (plist-get s :project) (plist-get s :cwd) default-directory)))
 
 (defun harness-chat--project-root (dir)
-  "Return the project root of DIR as the harness sees it."
-  (if (harness-method-exists-p 'project/root)
-      (harness-call 'project/root dir)
-    (file-name-as-directory (expand-file-name dir))))
+  "Return the project root of DIR."
+  (harness-files-project-root dir))
 
 (defun harness-chat--str (kind)
   "Return KIND (symbol or string) as a string."
@@ -1508,12 +1507,13 @@ fetched: older nodes outside the fetched window are skipped."
 
 (defun harness-chat--fetch-files ()
   "Refresh `harness-chat--files' from the project's file list.
-The harness answers from projectile's cache or an asynchronous listing,
-so this never blocks; on failure the previous list is kept."
+Listed here, not by the harness process, so it is this Emacs's
+projectile cache (cleared by `projectile-invalidate-cache') that answers;
+a miss lists asynchronously.  On failure the previous list is kept."
   (let ((buf (current-buffer)))
-    (harness-ui-call "_harness/project/files" (list :root (harness-chat--project) :limit 20000)
-                     (lambda (files) (when (buffer-live-p buf) (with-current-buffer buf (setq harness-chat--files files))))
-                     (lambda (err) (harness-log 'warn "chat: listing project files failed: %s" (harness-error-message err))))))
+    (harness-then (harness-files-list-limited (harness-chat--project) nil 20000)
+                  (lambda (files) (when (buffer-live-p buf) (with-current-buffer buf (setq harness-chat--files files))))
+                  (lambda (err) (harness-log 'warn "chat: listing project files failed: %s" (harness-error-message err))))))
 
 (defun harness-chat--fetch-completions ()
   "Prefetch project files and skill names for completion."

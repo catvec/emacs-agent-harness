@@ -56,7 +56,7 @@
            (b (harness-call 'project/files root nil 1)))
       (should (= 3 (length (harness-test-await a))))
       (should (= 1 (length (harness-test-await b))))
-      (should (= 0 (hash-table-count harness-project--listings))))))
+      (should (= 0 (hash-table-count harness-files--listings))))))
 
 (ert-deftest harness-project-files-query-filters ()
   (skip-unless (executable-find "git"))

@@ -117,7 +117,7 @@ Local in-process connections never need it."
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed session/forked session/head-moved
     question/answered
-    config/changed harness/reloaded)
+    config/changed harness/reloaded tools/file-written)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 
 ;;;; Structures
@@ -363,6 +363,29 @@ request is logged and stays pending on the session."
                (condition-case err
                    (funcall on-answer result)
                  (error (harness-log 'error "acp: handling the answer to %s failed: %S" method err)))))))))))
+
+(harness-defmethod client/request (method params)
+  "Send request METHOD with PARAMS to the connected clients (the UI).
+Return a promise of the first successful answer.  It rejects at once
+when no client is connected and when every client declines, so a tool
+waiting on the UI never hangs on a missing one.  Not callable over ACP."
+  (harness-with-promise (resolve reject)
+    (let ((clients (copy-sequence harness-acp--clients)))
+      (if (null clients)
+          (funcall reject (list 'harness-error (format "%s: no UI client is connected" method)))
+        (let ((left (length clients)) (answered nil))
+          (dolist (client clients)
+            (harness-acp--client-request
+             client method params
+             (lambda (result error)
+               (cl-decf left)
+               (unless answered
+                 (cond ((null error) (setq answered t) (funcall resolve result))
+                       ((zerop left)
+                        (funcall reject (list 'harness-error
+                                              (format "%s: %s" method
+                                                      (or (and (listp error) (plist-get error :message))
+                                                          error)))))))))))))))
 
 (defun harness-acp--drop-client (client)
   "Forget CLIENT and fail whatever it still owed."
@@ -869,12 +892,20 @@ Return (:host :port).  Already running: return the current address."
   (expand-file-name "acp-address" harness-state-directory))
 
 (defun harness-acp--write-address-file (address)
-  "Write ADDRESS (or delete the file when nil) for `scripts/harness-acp-stdio'."
+  "Write ADDRESS (or delete the file when nil) for `scripts/harness-acp-stdio'.
+With `harness-acp-token' set, also write it to acp-token, readable only
+by the user, so the bridge can authenticate for the editor it serves."
   (condition-case err
-      (let ((file (harness-acp--address-file)))
+      (let ((file (harness-acp--address-file))
+            (token-file (expand-file-name "acp-token" harness-state-directory)))
         (if address
-            (harness-write-file-atomically file (concat address "\n"))
-          (when (file-exists-p file) (delete-file file))))
+            (progn
+              (harness-write-file-atomically file (concat address "\n"))
+              (when harness-acp-token
+                (with-file-modes #o600
+                  (harness-write-file-atomically token-file (concat harness-acp-token "\n")))))
+          (when (file-exists-p file) (delete-file file))
+          (when (file-exists-p token-file) (delete-file token-file))))
     (error (harness-log 'warn "acp: cannot write address file: %S" err))))
 
 (harness-defmethod acp/stop ()

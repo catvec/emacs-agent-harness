@@ -54,7 +54,7 @@
   "Emacs executable that runs the harness process."
   :type 'file :group 'harness)
 
-(defcustom harness-server-forward-variables '(auth-sources)
+(defcustom harness-server-forward-variables '(auth-sources exec-path)
   "Variables copied into the harness process besides the `harness-' ones.
 Every `harness-' variable you set is copied anyway.  The harness
 process starts from `emacs -Q', so anything else its modules read from
@@ -195,7 +195,7 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
   "Start the harness process; return it without waiting for anything.
 ON-ADDRESS is called with (ADDRESS TOKEN) once the child listens.
 ON-EXIT is called with the exit status when the child ends."
-  (let* ((token (harness-server--token))
+  (let* ((token (or (bound-and-true-p harness-acp-token) (harness-server--token)))
          (config (expand-file-name "server-config.el" harness-state-directory))
          (announced nil)
          (process-environment (append (list (concat "HARNESS_SERVER_CONFIG=" config)

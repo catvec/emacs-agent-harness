@@ -8,7 +8,10 @@ module needs something more, add it here first.
 
 ```
  Presentation   lisp/ui/*        Emacs buffers, faces, keymaps, mouse.  Talks ACP only.
- ------------------------------- ACP (JSON-RPC; in-process lisp objects locally, TCP remotely)
+                                 Runs in the user's Emacs; everything below runs in
+                                 the harness process (see Processes).
+ ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
+                                 when `harness-process' is nil)
  State          session, agent, config, project, store, usage, naming, compaction,
                 worktree, merge, skills, perms, sandbox
  Completion     provider, provider-openai, provider-claude
@@ -24,6 +27,52 @@ an ACP connection (local by default) and render what arrives.  State
 modules never `require` a UI module.  That is the litmus test from
 DESIGN.md: every module is testable alone, with a fake connection or a
 fake provider, and without mocks of the rest.
+
+## Processes
+
+Emacs runs Lisp on one thread, so harness work done in the user's Emacs
+competes with typing and redisplay no matter how asynchronous the
+protocol around it is: an ACP request to an in-process harness still
+runs its handler on the UI's thread.  With `harness-process` on (the
+default) the layers above are split across two Emacs processes:
+
+```
+ user's Emacs                         harness process (emacs --batch -Q)
+ harness.el, core, lisp/ui,     ACP   harness.el, core, lisp/modules
+ harness-acp (client only),  <------> (acp serves 127.0.0.1:ephemeral,
+ harness-files, client-tools  TCP     token per spawn)
+```
+
+- `harness-start` in the user's Emacs loads only the UI and the ACP client,
+  then `harness-server-spawn` (lisp/harness-server.el) starts the child
+  once init has finished, so settings made later in the init file reach
+  it.  Requests made before the child listens are queued by `harness-ui`.
+- The child is configured from a generated file: every `harness-`
+  variable the user set (minus UI ones) plus
+  `harness-server-forward-variables`; `harness-server-init-file` covers
+  anything else (hooks, bus filters).
+- The child announces `HARNESS-ACP-ADDRESS host:port` and its log lines on
+  stderr (batch Emacs buffers stdout); the parent copies the log into
+  `*harness-log*`.  Its stdin is closed, so a stray prompt fails rather
+  than hangs; it exits when its parent dies.  The parent restarts it
+  with backoff when it crashes and stops it with SIGTERM (which runs
+  `kill-emacs-hook`, flushing sessions).  `M-x harness-restart` restarts
+  it with fresh configuration; `harness-reload` reloads both sides.
+- Work about the user's Emacs runs there, asked for by the harness with
+  `client/request` (below): the `emacs_*` and `elisp` tools
+  (lisp/harness-client-tools.el), saving user options to `custom-file`
+  (`harness-save-user-option`), and reverting buffers after a tool
+  writes a file (event `tools/file-written`).
+- Project roots and file lists (lisp/harness-files.el) are computed on
+  both sides with the same code; the UI lists files itself so `@`
+  completion uses the user's projectile cache.
+
+The harness process cannot prompt: TRAMP connections it opens need
+non-interactive authentication (ssh agent), and auth-source secrets
+must decrypt without a minibuffer (gpg-agent pinentry, not loopback).
+
+`harness-process` nil keeps everything in one Emacs (tests, debugging);
+the same `client/request` path then runs over the local connection.
 
 ## The bus
 
@@ -151,7 +200,8 @@ project-root `.dir-locals.el` → customize default.  Variables are
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol).
 - `config/set KEY VALUE &key scope cwd` — scope `directory|project|global`;
   default: project if a project is found, else directory.  Persists with
-  `add-dir-local-variable`/`customize-save-variable`.
+  `add-dir-local-variable`, or for `global` with `harness-save-user-option`,
+  which asks the UI's Emacs to `customize-save-variable` (its custom file).
 - `config/layers CWD` → `((global . V) (project . V) (directory . V))` for display.
 - Event `config/changed KEY VALUE SCOPE CWD`.
 
@@ -159,7 +209,11 @@ project-root `.dir-locals.el` → customize default.  Variables are
 
 - `project/root CWD` → root directory (project.el, falling back to CWD).
 - `project/name ROOT` → display name.
-- `project/files ROOT &optional QUERY LIMIT` → relative paths, fuzzy filtered.
+- `project/files ROOT &optional QUERY LIMIT` → promise of relative paths,
+  fuzzy filtered; nil outside a project.  Never blocks: projectile's
+  cache when it has the project, else an asynchronous listing
+  (projectile's command, or `git ls-files`) stored back into projectile's
+  cache.  No cache of its own.  Implemented by lisp/harness-files.el.
 
 ### store
 
@@ -464,6 +518,12 @@ Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
 asynchronous process started with `start-file-process` so TRAMP works.
 
+`elisp` and the `emacs_*` tools are about the user's Emacs, so their
+handlers (`harness-tools-in-client NAME`) forward the call to the UI as
+`_harness/client/tool {name, input}`; `harness-client-tools-run` answers
+it there.  `write_file`/`edit_file` emit `tools/file-written PATH`; the UI
+reverts unmodified buffers visiting PATH.
+
 ### acp
 
 Server: `acp/start &key host port` (default 127.0.0.1, port from
@@ -499,10 +559,22 @@ and `_harness/ask_user {sessionId, requestId, question, options}` → `{answer}`
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`,
-`sandbox/status`, `harness/api` is callable as `_harness/NAME` with a
+`sandbox/status`, `harness/api`, `harness/version`, `harness/reload` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
+
+Harness → UI requests for work in the user's Emacs go through the bus
+method `client/request METHOD PARAMS` → promise of the first client's
+answer; it rejects at once when no client is connected or all decline
+(never callable over ACP).  Methods: `_harness/client/tool {name, input}`
+→ tool result, `_harness/client/customize-save {symbol, value}` (value
+printed; only `harness-` options).
+
+The server writes its address to `<state>/acp-address` and, when
+`harness-acp-token` is set (always, for the harness process), the token
+to `<state>/acp-token` (mode 600); `scripts/harness-acp-stdio`
+authenticates with it on behalf of the editor it bridges.
 
 The local transport dispatches lisp objects directly, no JSON, and
 delivers notifications through `harness-run-soon` so callers are never
