@@ -195,13 +195,16 @@ Runs from `pre-redisplay-functions'; each window gets its own overlay."
         (overlay-put ov 'harness-compose-key key)
         (move-overlay ov at at)
         (overlay-put ov 'before-string nil)
-        ;; Leave a line for the empty one after the box, where a host
-        ;; following the end puts the bottom of the window.
+        ;; Padding at the top leaves a line for the empty one after the
+        ;; box, where a host following the end (chat) puts the bottom of
+        ;; the window; padding inside the buffer puts the box on the last line.
         (let* ((line (frame-char-height (window-frame window)))
                (used (cdr (window-text-pixel-size window (point-min) harness-compose-end nil body)))
-               (lines (/ (- body used line) line)))
+               (lines (/ (- body used (if harness-compose--pad-at 0 line)) line)))
           (when (and (= (window-start window) (point-min)) (> lines 0))
-            (overlay-put ov 'before-string (make-string lines ?\n))))))))
+            ;; An explicit face: bare newlines would take the height of the
+            ;; text they precede (a smaller label face) and fall short.
+            (overlay-put ov 'before-string (propertize (make-string lines ?\n) 'face 'default))))))))
 
 (defun harness-compose-repad (window)
   "Drop WINDOW's padding so the next redisplay sizes it again.
