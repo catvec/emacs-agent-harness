@@ -138,6 +138,7 @@
 (defvar-local harness-chat--queue nil "Queued items as last rendered.")
 (defvar-local harness-chat--pending nil "Pending request records: (:id :kind :respond :created …).")
 (defvar-local harness-chat--editing nil "Queue item id loaded into the compose box.")
+(defvar-local harness-chat--pads nil "Window -> overlay padding the top so the compose box sits at the bottom.")
 (defvar-local harness-chat--has-more nil "Non-nil when older nodes exist.")
 (defvar-local harness-chat--loading nil "Non-nil while the transcript is being fetched.")
 (defvar-local harness-chat--deferred nil "Updates that arrived while loading, newest first.")
@@ -1340,9 +1341,39 @@ The panel answers through RESPOND."
                  (if (= harness-chat--compose-start harness-chat--compose-end)
                      (propertize (cond (harness-chat--dead "session deleted")
                                        ((harness-chat--active-question) "type an answer and press RET")
-                                       (t "Message…  RET send · S-RET newline · @file · /skill"))
+                                       (t "Message…"))
                                  'face 'harness-dim-face 'cursor t)
                    nil))))
+
+;;;; Bottom anchoring
+
+(defun harness-chat--pad-window (window)
+  "Pad the top of WINDOW so a short transcript ends at its bottom.
+Runs from `pre-redisplay-functions'; each window gets its own overlay."
+  (when (and (window-live-p window) (eq (window-buffer window) (current-buffer))
+             (harness-chat--compose-live-p))
+    (setq harness-chat--pads
+          (cl-remove-if-not (lambda (p) (and (window-live-p (car p)) (overlay-buffer (cdr p))
+                                             (eq (window-buffer (car p)) (current-buffer))))
+                            harness-chat--pads))
+    (let* ((ov (or (alist-get window harness-chat--pads)
+                   (let ((o (make-overlay (point-min) (point-min) nil t)))
+                     (overlay-put o 'window window)
+                     (push (cons window o) harness-chat--pads)
+                     o)))
+           (body (window-body-height window t))
+           (key (list (buffer-modified-tick) body (window-body-width window t) (window-start window))))
+      (unless (equal key (overlay-get ov 'harness-chat-key))
+        (overlay-put ov 'harness-chat-key key)
+        (move-overlay ov (point-min) (point-min))
+        (overlay-put ov 'before-string nil)
+        ;; Leave a line for the empty one after the compose box, where
+        ;; `harness-chat--follow' puts the bottom of the window.
+        (let* ((line (frame-char-height (window-frame window)))
+               (used (cdr (window-text-pixel-size window (point-min) harness-chat--compose-end nil body)))
+               (lines (/ (- body used line) line)))
+          (when (and (= (window-start window) (point-min)) (> lines 0))
+            (overlay-put ov 'before-string (make-string lines ?\n))))))))
 
 ;;;; Top region and history
 
@@ -1983,6 +2014,7 @@ The transcript is read-only; the compose box at the bottom is editable."
   (add-hook 'completion-at-point-functions #'harness-chat-completion-at-point nil t)
   (add-hook 'pre-command-hook #'harness-chat--pre-command nil t)
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
+  (add-hook 'pre-redisplay-functions #'harness-chat--pad-window nil t)
   (setq-local dnd-protocol-alist (cons '("^file:" . harness-chat--dnd-open) dnd-protocol-alist))
   (add-hook 'kill-buffer-hook #'harness-chat--on-kill nil t))
 
