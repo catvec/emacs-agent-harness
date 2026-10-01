@@ -218,7 +218,8 @@ project-root `.dir-locals.el` → customize default.  Variables are
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`,
 `harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
-`harness-non-interactive`, `harness-context-reserve`.
+`harness-non-interactive`, `harness-context-reserve`,
+`harness-tasks-directory` (the tasks module's folder of task files).
 
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol).
 - `config/set KEY VALUE &key scope cwd` — scope `directory|project|global`;
@@ -621,9 +622,14 @@ Task mode: one session per task.  TASK =
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
 :session SID :outcome nil|end-turn|error|cancelled|merge-failed|merged|…
 :error "…" :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
-:conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F)`.
+:conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
+:file "docs/tasks/ID-SLUG.md" :updated F :extra (RAW-ENTRY ...))`.
 `:column` is derived on every read: `needs-input` when the session is
-blocked on a request or the task stopped part way.
+blocked on a request or the task stopped part way.  `:file` (relative
+to `:project`), `:updated` (when the harness last wrote the file) and
+`:extra` (the raw frontmatter entries the harness does not know) belong
+to the task's file (below); the record also keeps `:file-base` and
+`:file-synced` for it, which methods and events leave out.
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
   :thinking :non-interactive)` → task; it starts when one of
@@ -709,6 +715,109 @@ blocked on a request or the task stopped part way.
   first, and turning the option off brings them back.  A repository
   store left without records is deleted; one that cannot be written
   leaves its records in `tasks.json`.
+- Task files: a git project whose tasks this harness keeps in its own
+  repository store also has a markdown file per unarchived task in
+  `harness-tasks-directory` (default `docs/tasks`, relative to the main
+  checkout; a layered config key, so a project's `.dir-locals.el` can
+  name another folder, or nil for none).  Other projects, a repository
+  another harness owns, and `harness-tasks-store-in-repository` nil (the
+  tests and the dev daemon) get none.  Files go only into the main
+  checkout, never into a task's worktree, and the harness never commits
+  them.  The store keeps the whole record; the files show what people
+  read, and take their edits.  A file:
+
+  ```markdown
+  ---
+  id: t-k3j9x2ab
+  title: Add CSV export to reports
+  state: pending
+  column: pending
+  backlog: true
+  session: 5b3e8a0c-6d1f-4a7e-9c2b-0f1e2d3c4b5a
+  model: claude:claude-fable-5-1
+  created: 2026-10-01T13:20:01Z
+  refined: 2026-10-01T13:22:40Z
+  updated: 2026-10-01T13:22:40Z
+  labels: [reports]
+  ---
+
+  # Add CSV export to reports
+
+  Reports should be exportable as CSV ...
+
+  <!-- harness:request -->
+  ## Request
+
+  > csv export for the reports page
+
+  <!-- harness:plan -->
+  ## Plan
+
+  1. ...
+  ```
+
+  - Frontmatter, in this order and only when set: `id`, `title` (the
+    session's name, else the prompt's first line), `state`, `column`,
+    `backlog`, `outcome`, `error` (300 characters at most), `session`,
+    `branch`, `base`, `merge` (the merge status, or `merged`), `model`,
+    `thinking`, `created`, `started`, `refined`, `finished`, `updated`
+    (times in ISO 8601 UTC, to the second).  Keys the harness does not
+    know follow, as written.  It is a YAML subset the module reads and
+    writes itself: `key: value` lines whose values are plain, single- or
+    double-quoted or `|` / `>` block scalars, or lists (`[a, b]`, `- a`
+    lines).  Strings are written plain when that reads back the same,
+    else double-quoted.
+  - Body: the prompt, its first line a level-1 heading when it reads as
+    a title (short, and no markdown of its own); then, each behind a
+    `<!-- harness:NAME -->` marker line, the sections the harness keeps:
+    `request` (`:note` quoted, once a write-up replaced it) and `plan`
+    (the session's plan, never read back).  Reading takes the text
+    before the first marker outside a code fence as the prompt, a
+    leading `# Title` (or a setext `===` title) becoming its plain first
+    line.
+  - Names: `ID-SLUG.md` (a slug of the title) for the files the harness
+    makes.  A file keeps its name, and `:file` follows a file renamed by
+    hand.  `README.md`, `index.md`, `template.md` and names starting
+    with `.`, `_`, `#` or `~` are no tasks
+    (`harness-tasks-directory-ignore`); subfolders are not read.
+  - Writing: each save first reads what changed in the folder, then
+    writes the file of every task whose rendering (without `updated`)
+    changed since its file was last in step (`:file-synced`), before the
+    stores.  Archiving a task moves its file into the folder's
+    `harness-tasks-directory-archive` subfolder (`archive`; nil deletes
+    it instead) and restoring the task moves it back; deleting or
+    cancelling a task deletes its file; a project that picks another
+    folder gets its files moved there.
+  - Reading: the files whose mtime or size changed are read on load (the
+    folders of the loaded tasks' projects), by `task/list` (its
+    project's folder; every known one without CWD), before each save,
+    and every `harness-tasks-directory-poll` seconds (default 2; nil for
+    none, as file notifications never reach the batch harness process).
+    An edit is what differs from what the file said last (`:file-base`),
+    so a file the harness has yet to write again is no edit.  Taken are
+    the prompt and the request; `title`, which renames the task's
+    session; `model` and `thinking` of a task that has not started; and
+    `state: done`, which completes the task (`task/complete`).  The
+    other known fields are the harness's: a file that contradicts them
+    is written again, and one that contradicts nothing is left as
+    written until its task changes.
+  - A file no task has becomes one, with its `id` when that is free,
+    else a fresh one: `pending` in the backlog (only `task/start` starts
+    it, and no permission mode is read from a file), or `done`.  Without
+    a heading, a frontmatter `title` becomes the prompt's first line.
+    Its `session`, when that still exists, works in the project and is
+    no other task's, makes it the task it was (state, outcome, worktree
+    from the session), except that nothing carries on by itself: a task
+    that was at work waits with `:outcome interrupted`, and `merging`
+    comes back `active`.  So a lost store comes back from the files, at
+    load or when the board is opened.  A file without frontmatter is a
+    task all the same; an empty one, or one whose `---` frontmatter
+    never closes, is not (yet).
+  - A file deleted by hand, or moved out of the folder (into `archive/`,
+    say), archives its task when the task is `pending` or `done` and
+    nothing works on it; a task in progress gets its file back.  A file
+    that comes back to the folder (found by its `id`) brings its
+    archived task back.
 - Restarts: when the module starts, an active task without an outcome
   that nothing in this process works on was interrupted.  Without a
   session it starts over (as pending, or in its worktree when it has
