@@ -281,6 +281,39 @@
         (harness-tasks-test-wait-state id 'done)
         (should (eq 'done (plist-get (harness-tasks-test-task id) :column)))))))
 
+;;;; Naming: task sessions are titled like tickets
+
+(defvar harness-tasks-naming-prompt)
+(defvar harness-naming-system-prompt)
+
+(ert-deftest harness-tasks-naming-prompt-for-task-sessions-only ()
+  (harness-tasks-test-with
+    (let* ((id (harness-tasks-test-submit "fix the parser"))
+           (task-session (harness-call 'session/get (plist-get (harness-tasks-test-task id) :session)))
+           (plain (harness-call 'session/create :cwd default-directory :model "demo:scripted")))
+      (should (equal (concat "Name it.\n\n" harness-tasks-naming-prompt)
+                     (harness-run-filter 'naming/system-prompt "Name it." task-session)))
+      (should (equal "Name it." (harness-run-filter 'naming/system-prompt "Name it." plain)))
+      (let ((harness-tasks-naming-prompt nil))
+        (should (equal "Name it." (harness-run-filter 'naming/system-prompt "Name it." task-session))))
+      (harness-tasks-test-wait-state id 'done))))
+
+(ert-deftest harness-tasks-auto-named-like-tickets ()
+  "Naming a task's session after its first turn asks for a ticket title."
+  (harness-tasks-test-with
+    (harness-test-load-module 'naming)
+    (let ((harness-naming-auto t)
+          (systems nil))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push (plist-get req :system) systems) (funcall orig req))))
+        (let* ((id (harness-tasks-test-submit "fix the parser"))
+               (sid (plist-get (harness-tasks-test-task id) :session)))
+          (harness-test-wait (lambda () (plist-get (harness-call 'session/get sid) :name)) 5 "the task's name")
+          (should (equal "Working on it" (plist-get (harness-call 'session/get sid) :name)))
+          (harness-tasks-test-wait-state id 'done)))
+      (should (member (concat harness-naming-system-prompt "\n\n" harness-tasks-naming-prompt) systems)))))
+
 ;;;; Git: worktree, merge queue, done only when merged
 
 (defvar harness-merge--queues)

@@ -468,6 +468,9 @@ and resolves when answered).
 - `naming/name SESSION-ID` → promise of name.  Auto after the first
   turn ends when the session has no name: forks provider state when
   possible so the cached prefix is reused; hints "naming…" then the result.
+- Sync filter `naming/system-prompt` (value string, args session) lets
+  modules add to `harness-naming-system-prompt` per session (tasks ask
+  for ticket titles).
 
 ### skills
 
@@ -529,6 +532,9 @@ blocked on a request or the task stopped part way.
   that worktree (`harness-tasks-permission-mode`, non-interactive by
   default) prompted with the task; a system-prompt section tells it to
   commit on its branch and not merge.  Outside git the session runs in CWD.
+- The session's name is the task's title: `naming/system-prompt` adds
+  `harness-tasks-naming-prompt` (nil for none) so the model titles task
+  sessions like tickets.
 - A turn ending `end-turn` queues `merge/enqueue SID TARGET`, TARGET being
   the project's root session named `harness-tasks-merge-session-name`
   (created on demand); `merge/finished … merged` makes the task `done`.
@@ -713,12 +719,17 @@ Task board (`harness-ui-tasks`, `C-c a a`): the project's tasks in four
 sections -- requires your input, in progress, pending, completed -- with
 each card's current todo, progress, elapsed time, cost and merge state,
 one-click answers to a blocked task's question or permission, and a
-compose box that submits a task, edits a pending one or messages a
-task's session.  RET opens the session.  The session setting commands
+compose box that submits a task, edits a pending one, messages a
+task's session or answers its question (`C-g` leaves an edit, message
+or answer for a new task again: a question stays waiting, never
+cancelled).  RET opens the session.  The session setting commands
 change the task at point, or from the compose box the settings the next
 task starts with (shown as buttons under the New task label).  `I` or
 [Add session] makes an ongoing session a task.  Boards reload after any
-task, merge, turn, status, worktree or reload event.
+task, merge, turn, status, worktree or reload event.  New tasks show at
+the top of in progress (latest started first) and completed lists the
+latest finished first; pending is the queue, in the order its tasks
+start.
 
 Other buffers: sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column), conversation tree

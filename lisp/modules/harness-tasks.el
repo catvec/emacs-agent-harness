@@ -6,7 +6,8 @@
 ;; is a prompt submitted for a project; it gets a session of its own
 ;; when it starts and the session does the work, usually in auto
 ;; permission mode and non-interactive so it is not held up waiting for
-;; the user.
+;; the user.  The session's name is the task's title, so when the model
+;; names it, `harness-tasks-naming-prompt' asks for a ticket title.
 ;;
 ;; In a git project a task owns the whole life of its change: it starts
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
@@ -74,6 +75,13 @@ task keeps working while nobody watches it."
 (defcustom harness-tasks-thinking nil
   "Thinking level of task sessions, or nil for the configured default."
   :type '(choice (const :tag "Configured default" nil) string) :group 'harness)
+
+(defcustom harness-tasks-naming-prompt
+  "This conversation is a task the engineer handed to the agent to do unattended, tracked on a task board.  Title it like a ticket on that board: an imperative summary of the work to be done, such as \"Fix login redirect loop\" or \"Add CSV export to reports\"."
+  "Text added to the naming system prompt of task sessions, or nil for none.
+A task's session name is its title on the board, so by default the
+model titles task sessions like tickets."
+  :type '(choice (const :tag "Name tasks like other sessions" nil) string) :group 'harness)
 
 (defcustom harness-tasks-worktrees t
   "When non-nil, tasks in a git project work in a worktree and merge back.
@@ -292,7 +300,7 @@ so a board opened from a task's session shows the project's tasks."
        (harness-log 'warn "task %s: keeping its worktree: %s" (plist-get task :id) (harness-error-message err))
        nil))))
 
-;;;; The task prompt
+;;;; The task prompts
 
 (defun harness-tasks--system-prompt (prompt session)
   "Tell a task's SESSION how its work reaches the main branch (PROMPT filter)."
@@ -307,6 +315,13 @@ so a board opened from a task's session shows the project's tasks."
               (format "Do not merge, rebase onto or push %s yourself: when your turn ends the harness merges "
                       (or (plist-get task :base) "the main branch"))
               "your branch through the merge queue, and it will come back to you if the merge needs anything.\n"))))
+
+(defun harness-tasks--naming-prompt (prompt session)
+  "Ask for a ticket title when naming a task's SESSION (PROMPT filter)."
+  (if (and (not (harness-string-blank-p harness-tasks-naming-prompt))
+           (harness-tasks--by-session (plist-get session :id)))
+      (concat prompt "\n\n" harness-tasks-naming-prompt)
+    prompt))
 
 ;;;; Scheduling
 
@@ -652,6 +667,7 @@ Its worktree, if any, is kept: it may hold work nobody merged."
   (harness-on 'merge/conflict #'harness-tasks--on-merge-conflict)
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
+  (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
   (harness-run-soon #'harness-tasks--resume-merges)
   (harness-run-soon #'harness-tasks--schedule))
 
