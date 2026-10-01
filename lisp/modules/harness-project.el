@@ -31,7 +31,9 @@
   "Return a display name for the project at ROOT."
   (file-name-nondirectory (directory-file-name root)))
 
-(defun harness-project--files (root)
+(defun harness-project--files (root &optional limit)
+  "Return files under ROOT, from project.el or a bounded walk outside a project.
+The walk stops at LIMIT files; its result is cached like a full listing."
   (let* ((root (file-name-as-directory (expand-file-name root)))
          (cached (gethash root harness-project--file-cache)))
     (if (and cached (< (- (float-time) (car cached)) harness-project-files-cache-seconds))
@@ -39,15 +41,13 @@
       (let* ((pr (ignore-errors (project-current nil root)))
              (files (if pr
                         (mapcar (lambda (f) (file-relative-name f root)) (project-files pr))
-                      (mapcar (lambda (f) (file-relative-name f root))
-                              (directory-files-recursively root "" nil
-                                                           (lambda (d) (not (string-match-p "/\\.\\(git\\|hg\\)\\'" d))))))))
+                      (harness-list-files root limit))))
         (puthash root (cons (float-time) files) harness-project--file-cache)
         files))))
 
 (harness-defmethod project/files (root &optional query limit)
   "Return files under ROOT relative to it, fuzzy filtered by QUERY, at most LIMIT."
-  (let ((files (harness-project--files root)))
+  (let ((files (harness-project--files root (and (harness-string-blank-p query) limit))))
     (cond ((harness-string-blank-p query) (if limit (seq-take files limit) files))
           (t (harness-fuzzy-filter query files nil limit)))))
 

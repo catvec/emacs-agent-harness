@@ -1530,10 +1530,7 @@ Uses the bus when the harness is in-process, else the file system."
    ((and (null harness-ui-connection-address) (harness-method-exists-p 'project/files))
     (ignore-errors (harness-call 'project/files root nil 20000)))
    ((and (not (file-remote-p root)) (file-directory-p root))
-    (let ((files (ignore-errors
-                   (directory-files-recursively
-                    root "" nil (lambda (d) (not (member (file-name-nondirectory d) '(".git" "node_modules" ".cache"))))))))
-      (mapcar (lambda (f) (file-relative-name f root)) (seq-take files 20000))))))
+    (harness-list-files root 20000))))
 
 (defun harness-chat--redraw-all ()
   "Rebuild every chat buffer from scratch, keeping compose text and scroll state."

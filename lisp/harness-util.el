@@ -227,6 +227,39 @@
   (let ((attrs (file-attributes path)))
     (and attrs (file-attribute-size attrs))))
 
+(defcustom harness-list-files-skip '(".git" ".hg" ".svn" "node_modules" ".cache")
+  "Directory names `harness-list-files' never descends into."
+  :type '(repeat string) :group 'harness)
+
+(defcustom harness-list-files-seconds 0.25
+  "Wall-clock budget of one `harness-list-files' walk."
+  :type 'number :group 'harness)
+
+(defun harness-list-files (root &optional limit seconds)
+  "Return files under ROOT relative to it, shallowest first.
+Stops after LIMIT files or SECONDS (default `harness-list-files-seconds'),
+skips hidden directories and `harness-list-files-skip', and ignores
+directories it cannot read.  Bounded because ROOT may be a home
+directory, and callers run on the UI thread."
+  (let* ((root (file-name-as-directory (expand-file-name root)))
+         (deadline (+ (float-time) (or seconds harness-list-files-seconds)))
+         (queue (list root))
+         (count 0)
+         files)
+    (while (and queue (or (null limit) (< count limit)) (< (float-time) deadline))
+      (let ((dir (pop queue)) subdirs)
+        (dolist (entry (ignore-errors (directory-files-and-attributes dir nil nil)))
+          (let ((name (car entry)) (type (file-attribute-type (cdr entry))))
+            (cond ((member name '("." "..")))
+                  ((eq type t)
+                   (unless (or (string-prefix-p "." name) (member name harness-list-files-skip))
+                     (push (concat dir name "/") subdirs)))
+                  ((or (null limit) (< count limit))
+                   (push (substring (concat dir name) (length root)) files)
+                   (cl-incf count)))))
+        (setq queue (nconc queue (sort subdirs #'string<)))))
+    (nreverse files)))
+
 (defun harness-ensure-directory (dir)
   "Create DIR if needed and return it."
   (unless (file-directory-p dir) (make-directory dir t))
