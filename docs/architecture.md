@@ -683,9 +683,32 @@ blocked on a request or the task stopped part way.
   branch), `task/archive-done &optional CWD`, `task/cancel ID` (drops a
   task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree).
-- Events `task/changed TASK`, `task/deleted ID`.  Records persist in
-  `tasks.json`, written shortly after a change and on exit
-  (`harness-tasks-flush`).
+- Events `task/changed TASK`, `task/deleted ID`.  Records are written
+  shortly after a change and on exit (`harness-tasks-flush`), each into
+  its project's store; a store whose text would not change is skipped.
+- Stores: a git project's records go to `harness/tasks.json` in the
+  repository's common git directory (`harness-files-git-common-dir`,
+  read from `.git` and `commondir` files, no git process):
+  `.git/harness/tasks.json` of the main checkout, the same file from
+  every worktree and out of every working tree, so `git status`, commits,
+  merges and the merge queue never see it.  It is
+  `{"state-directory": DIR, "tasks": [...]}`, DIR being the state
+  directory of the harness it belongs to, which holds the tasks'
+  sessions: a harness with another state directory that still exists
+  leaves it alone and keeps its tasks of that repository in its own
+  state directory; one whose owner is gone takes it over.  Other
+  projects' records, and every record with
+  `harness-tasks-store-in-repository` nil, are a JSON array in
+  `tasks.json` in the state directory.  `task-stores.json` there lists
+  the repository stores, which a start reads before `tasks.json` (a
+  repository copy wins), and `task/list CWD` reads its project's store if
+  the list missed it.  Each save puts every record where its project
+  keeps it, so records move by themselves: the first save after an
+  upgrade (or after an in-place reload) moves git projects' tasks out of
+  `tasks.json` into their repositories, copying it to `tasks.json.bak`
+  first, and turning the option off brings them back.  A repository
+  store left without records is deleted; one that cannot be written
+  leaves its records in `tasks.json`.
 - Restarts: when the module starts, an active task without an outcome
   that nothing in this process works on was interrupted.  Without a
   session it starts over (as pending, or in its worktree when it has

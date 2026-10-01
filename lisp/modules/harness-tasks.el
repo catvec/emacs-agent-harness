@@ -56,14 +56,21 @@
 ;;   active        in progress, merging included
 ;;   done          completed
 ;;
-;; Records persist in tasks.json, written shortly after every change and
-;; on exit; the sessions persist as usual.  A harness that stops (Emacs
-;; quit, `harness-restart', a crash) interrupts the tasks it was working
-;; on, so a start picks them up again: one stopped before its session
-;; existed starts over, the others are told to carry on
-;; (`harness-tasks-resume-interrupted'), a write-up cut short is written
-;; again, and merges in flight are queued again.  Events `task/changed'
-;; (TASK) and `task/deleted' (ID) let a UI follow.
+;; Records are written shortly after every change and on exit; the
+;; sessions persist as usual.  A git project keeps its tasks inside its
+;; repository, in .git/harness/tasks.json of the main checkout: the git
+;; directory every worktree shares, out of every working tree, so the
+;; records never reach git status, a commit or the merge queue (see
+;; Stores below and `harness-tasks-store-in-repository').  The tasks of
+;; other projects are in tasks.json in the state directory, where git
+;; projects' were before; they move by themselves.
+;;
+;; A harness that stops (Emacs quit, `harness-restart', a crash)
+;; interrupts the tasks it was working on, so a start picks them up
+;; again: one stopped before its session existed starts over, the others
+;; are told to carry on (`harness-tasks-resume-interrupted'), a write-up
+;; cut short is written again, and merges in flight are queued again.
+;; Events `task/changed' (TASK) and `task/deleted' (ID) let a UI follow.
 ;;
 ;; A board can also host BTW side conversations (`task/btw'), where the
 ;; user asks how the tasks are going.  The board has no session to fork,
@@ -187,7 +194,39 @@ task's write-up: it is written again, or with nil waits for a retry."
   "Message that resumes a task's session after a restart interrupted it."
   :type 'string :group 'harness)
 
-(defconst harness-tasks--store-name "tasks.json" "Store file of the task records.")
+(defcustom harness-tasks-store-in-repository t
+  "When non-nil, a git project keeps its tasks inside its repository.
+Their records go to harness/tasks.json in the git directory every
+worktree of the repository shares -- .git/harness/tasks.json in the main
+checkout, whichever worktree a task works in.  That is out of every
+working tree, so the records never show in git status, never get
+committed and never meet the merge queue.  The tasks of other projects,
+and with nil every task, are kept in `harness-state-directory'.  Records
+move to where they belong by themselves, at the next save.
+
+A repository's store belongs to the harness whose state directory it
+names, which holds the tasks' sessions.  Another harness (one with a
+state directory of its own, like a test run) keeps its tasks of that
+repository in its state directory instead."
+  :type 'boolean :group 'harness)
+
+(defvar harness-state-directory)
+
+(defconst harness-tasks--store-name "tasks.json"
+  "Store file in the state directory: the global store.
+It keeps the tasks of projects outside git, and of every project when
+`harness-tasks-store-in-repository' is nil.")
+
+(defconst harness-tasks--repository-store-name "harness/tasks.json"
+  "Store file of a repository's tasks, relative to its common git directory.")
+
+(defconst harness-tasks--registry-name "task-stores.json"
+  "File in the state directory listing the repository stores this harness keeps.
+A start reads them all, so every board comes back and the work a stop
+interrupted carries on.")
+
+(defconst harness-tasks--backup-suffix ".bak"
+  "Suffix of the copy of the global store from before records moved out of it.")
 
 (defconst harness-tasks--symbol-keys '(:state :outcome :merge-status)
   "Keys whose values are symbols in memory and strings on disk.")
@@ -195,9 +234,24 @@ task's write-up: it is written again, or with nil waits for a retry."
 (defvar harness-tasks--table (make-hash-table :test 'equal)
   "Task id -> task plist.")
 
-(defvar harness-tasks--loaded nil "Non-nil once the records were read from the store.")
+(defvar harness-tasks--loaded nil "Non-nil once the records were read from the stores.")
 
-(defvar harness-tasks--dirty nil "Non-nil while a change waits to be written to the store.")
+(defvar harness-tasks--dirty nil "Non-nil while a change waits to be written to the stores.")
+
+(defvar harness-tasks--stores (make-hash-table :test 'equal)
+  "Repository store path -> `mine' once read, or `foreign'.
+A foreign store is not this harness's to write: another harness owns
+it, or it could not be written.")
+
+(defvar harness-tasks--written (make-hash-table :test 'equal)
+  "Store path -> the JSON text it holds, as last read or written.
+A save skips the stores whose text would not change.")
+
+(defvar harness-tasks--backup-checked nil
+  "Non-nil once this process checked whether the global store needs its copy.")
+
+(defvar harness-tasks--loading nil
+  "Non-nil while `harness-tasks--load' reads the stores.")
 
 (defvar harness-tasks--starting (make-hash-table :test 'equal)
   "Task ids that are starting: worktree or session made, first turn not begun.
@@ -216,29 +270,16 @@ They hold a slot so a burst of submissions never overshoots the limit.")
        (cl-loop for task being the hash-values of harness-tasks--table
                 when (equal (plist-get task :session) session-id) return task)))
 
+(defun harness-tasks--oldest-first (tasks)
+  "Return TASKS sorted oldest first (destructively)."
+  (sort tasks (lambda (a b) (< (plist-get a :created) (plist-get b :created)))))
+
 (defun harness-tasks--sorted (&optional pred)
   "Return the tasks matching PRED, oldest first."
   (let (out)
     (maphash (lambda (_ task) (when (or (null pred) (funcall pred task)) (push task out)))
              harness-tasks--table)
-    (sort out (lambda (a b) (< (plist-get a :created) (plist-get b :created))))))
-
-(defun harness-tasks--save ()
-  "Write every task record now."
-  (harness-call 'store/save harness-tasks--store-name (harness-tasks--sorted))
-  (setq harness-tasks--dirty nil))
-
-(defun harness-tasks--save-soon ()
-  "Write the task records once changes stop coming for a moment."
-  (setq harness-tasks--dirty t)
-  (harness-debounce 'harness-tasks-save 0.3 #'harness-tasks--save))
-
-(defun harness-tasks-flush ()
-  "Write the task records now if a change is waiting (on exit and shutdown)."
-  (when harness-tasks--dirty
-    (condition-case err
-        (harness-tasks--save)
-      (error (harness-log 'error "tasks: could not save %s: %S" harness-tasks--store-name err)))))
+    (harness-tasks--oldest-first out)))
 
 (defun harness-tasks--put (task)
   "Store TASK, schedule a save and emit `task/changed'.  Return its view."
@@ -258,14 +299,6 @@ They hold a slot so a burst of submissions never overshoots the limit.")
     (dolist (k harness-tasks--symbol-keys task)
       (let ((v (plist-get task k)))
         (when (stringp v) (setq task (plist-put task k (intern v))))))))
-
-(defun harness-tasks--load ()
-  "Read the task records from the store once."
-  (unless harness-tasks--loaded
-    (setq harness-tasks--loaded t)
-    (dolist (task (ignore-errors (harness-call 'store/load harness-tasks--store-name)))
-      (when (plist-get task :id)
-        (puthash (plist-get task :id) (harness-tasks--intern task) harness-tasks--table)))))
 
 (defun harness-tasks--project (cwd)
   "Return the project root of CWD.
@@ -296,6 +329,243 @@ the session that wrote it up."
   "Non-nil while a turn of TASK's session runs (from the moment it is prompted)."
   (let ((sid (plist-get task :session)))
     (and sid (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid) t)))
+
+;;;; Stores
+;;
+;; Every record is kept in one store, picked by its project.  A git
+;; project's is its repository store: `harness-tasks--repository-store-name'
+;; in the git directory all worktrees of the repository share.  The main
+;; checkout and every task worktree resolve it to the same file, in the
+;; main repository and out of every working tree, so git status, commits,
+;; merges and the merge queue never see it.  The tasks of other projects,
+;; and all of them when `harness-tasks-store-in-repository' is nil, are
+;; in the global store in the state directory.  A repository store names
+;; the state directory of the harness it belongs to, where the tasks'
+;; sessions are, and another harness leaves it alone.  The registry lists
+;; the repository stores, so a start reads them all.
+;;
+;; A save resolves the store of every record and writes the stores whose
+;; text changes.  So a record kept where its project does not keep it
+;; moves by itself: the first save after an upgrade takes git projects'
+;; tasks out of the global store (copied aside first) into their
+;; repositories, and turning the option off brings them back.
+
+(defun harness-tasks--state-directory ()
+  "Return the state directory, absolute: the owner repository stores name."
+  (file-name-as-directory (expand-file-name harness-state-directory)))
+
+(defun harness-tasks--global-store ()
+  "Return the path of the global store."
+  (expand-file-name harness-tasks--store-name (harness-tasks--state-directory)))
+
+(defun harness-tasks--registry ()
+  "Return the path of the registry of repository stores."
+  (expand-file-name harness-tasks--registry-name (harness-tasks--state-directory)))
+
+(defun harness-tasks--repository-store (project)
+  "Return the path of the store in PROJECT's git repository, or nil outside git."
+  (when-let* ((git (and project (harness-files-git-common-dir project))))
+    (expand-file-name harness-tasks--repository-store-name git)))
+
+(defun harness-tasks--read-json (path)
+  "Return the JSON file PATH parsed, or nil when it does not exist.
+Its text is remembered as what PATH holds, so writing the same is skipped."
+  (when-let* ((text (harness-read-file path)))
+    (puthash path text harness-tasks--written)
+    (condition-case err
+        (harness-json-parse text)
+      (error (harness-log 'error "tasks: cannot parse %s: %S" path err) nil))))
+
+(defun harness-tasks--write-json (path obj)
+  "Write OBJ as JSON to PATH atomically, unless PATH holds that already."
+  (let ((json (harness-json-encode obj)))
+    (unless (equal json (gethash path harness-tasks--written))
+      (harness-write-file-atomically path json)
+      (puthash path json harness-tasks--written))))
+
+(defun harness-tasks--delete-json (path)
+  "Delete the file PATH if it exists."
+  (remhash path harness-tasks--written)
+  (when (file-exists-p path) (delete-file path)))
+
+(defun harness-tasks--own-store-p (owner)
+  "Non-nil when OWNER, the state directory a store names, is this harness's."
+  (let ((mine (harness-tasks--state-directory)))
+    (or (equal (file-name-as-directory (expand-file-name owner)) mine)
+        (ignore-errors (file-equal-p owner mine)))))
+
+(defun harness-tasks--add-records (records)
+  "Add the stored RECORDS whose ids are not known yet; return the tasks added."
+  (let (added)
+    (dolist (record (and (listp records) records))
+      (let ((id (and (consp record) (plist-get record :id))))
+        (when (and id (not (gethash id harness-tasks--table)))
+          (let ((task (harness-tasks--intern record)))
+            (puthash id task harness-tasks--table)
+            (push task added)))))
+    (nreverse added)))
+
+(defun harness-tasks--open-store (path)
+  "Return non-nil when this harness keeps tasks in the repository store PATH.
+The first time, read PATH and add its records.  A store naming another
+state directory, one that still exists, is another harness's: it is
+left alone and nil returned.  One whose owner is gone is taken over,
+records and all.  Records found after a start are announced and picked
+up like those of a start."
+  (pcase (gethash path harness-tasks--stores)
+    ('mine t)
+    ('foreign nil)
+    (_
+     (let* ((data (harness-tasks--read-json path))
+            ;; A bare array of records, like the global store's, names no owner.
+            (store (cond ((keywordp (car-safe data)) data)
+                         ((listp data) (list :tasks data))))
+            (owner (plist-get store :state-directory)))
+       (if (and (stringp owner) (not (harness-tasks--own-store-p owner)) (file-directory-p owner))
+           (progn
+             (harness-log 'warn "tasks: %s belongs to the harness of %s; this one keeps its tasks of that repository in %s"
+                          path owner (harness-tasks--global-store))
+             (puthash path 'foreign harness-tasks--stores)
+             nil)
+         (puthash path 'mine harness-tasks--stores)
+         (let ((added (harness-tasks--add-records (plist-get store :tasks))))
+           (when (and added (not harness-tasks--loading))
+             (dolist (task added) (harness-emit 'task/changed (harness-tasks--view task)))
+             (harness-tasks--save-soon)
+             (harness-tasks--pick-up)))
+         t)))))
+
+(defun harness-tasks--drop-store (path)
+  "Delete the repository store PATH, left without records.
+Its directory goes too when nothing else is in it."
+  (harness-tasks--delete-json path)
+  (ignore-errors (delete-directory (file-name-directory path)))
+  (remhash path harness-tasks--stores))
+
+(defun harness-tasks--store-of (project)
+  "Return the path of the store PROJECT's tasks are kept in."
+  (or (and harness-tasks-store-in-repository
+           (when-let* ((path (harness-tasks--repository-store project)))
+             (and (harness-tasks--open-store path) path)))
+      (harness-tasks--global-store)))
+
+(defun harness-tasks--open-project (project)
+  "Read the repository store of PROJECT unless this process has.
+So a board shows its repository's tasks even when the registry missed them."
+  (when-let* ((path (and harness-tasks-store-in-repository
+                         (harness-tasks--repository-store project))))
+    (harness-tasks--open-store path)))
+
+(defun harness-tasks--backup-global (homes)
+  "Copy the global store aside before a save first moves records out of it.
+Before repository stores it held every task; the first save that moves
+some into their repositories copies it to tasks.json.bak, once.  HOMES
+maps projects to the stores they keep their tasks in."
+  (unless harness-tasks--backup-checked
+    (setq harness-tasks--backup-checked t)
+    (let* ((global (harness-tasks--global-store))
+           (backup (concat global harness-tasks--backup-suffix))
+           (text (and (not (file-exists-p backup))
+                      (or (gethash global harness-tasks--written) (harness-read-file global)))))
+      (when (and text
+                 (cl-some (lambda (record)
+                            (when-let* ((task (and (consp record)
+                                                   (gethash (plist-get record :id) harness-tasks--table))))
+                              (not (equal (gethash (plist-get task :project) homes) global))))
+                          (ignore-errors (harness-json-parse text))))
+        (harness-write-file-atomically backup text)
+        (harness-log 'info "tasks: git projects keep their tasks in their repositories now; %s is %s from before"
+                     backup global)))))
+
+(defun harness-tasks--save-repository (path groups global)
+  "Write the repository store PATH with its records in GROUPS.
+GROUPS maps store paths to their records, GLOBAL is the global store's.
+A store without records is deleted.  One that cannot be written is not
+this harness's to write any more: its records go to the global store."
+  (let ((tasks (gethash path groups)))
+    (condition-case err
+        (if tasks
+            (harness-tasks--write-json path (list :state-directory (harness-tasks--state-directory)
+                                                  :tasks (harness-json-array tasks)))
+          (harness-tasks--drop-store path))
+      (error
+       (harness-log 'error "tasks: cannot write %s; keeping its tasks in %s: %S" path global err)
+       (puthash path 'foreign harness-tasks--stores)
+       (remhash path groups)
+       (puthash global (harness-tasks--oldest-first (append tasks (gethash global groups))) groups)))))
+
+(defun harness-tasks--save ()
+  "Write every task record now, each into the store of its project.
+Stores whose text would not change are skipped, and a repository store
+left without records is deleted.  Repository stores go first, so a
+record moving out of the global store stays there until its repository
+has it; one that cannot be written leaves its records there."
+  (let ((homes (make-hash-table :test 'equal))
+        (groups (make-hash-table :test 'equal))
+        (global (harness-tasks--global-store))
+        (more t)
+        (repositories nil))
+    ;; Opening a store the first time adds its records, maybe of projects
+    ;; not seen yet: resolve until every project has its store.
+    (while more
+      (setq more nil)
+      (dolist (task (harness-tasks--sorted))
+        (let ((project (plist-get task :project)))
+          (unless (gethash project homes)
+            (puthash project (harness-tasks--store-of project) homes)
+            (setq more t)))))
+    (dolist (task (reverse (harness-tasks--sorted)))
+      (push task (gethash (gethash (plist-get task :project) homes) groups)))
+    (harness-tasks--backup-global homes)
+    (maphash (lambda (path state) (when (eq state 'mine) (push path repositories)))
+             harness-tasks--stores)
+    (setq repositories (sort repositories #'string<))
+    (dolist (path repositories)
+      (harness-tasks--save-repository path groups global))
+    (let ((registered (cl-remove-if-not (lambda (path) (gethash path groups)) repositories)))
+      (if registered
+          (harness-tasks--write-json (harness-tasks--registry) (harness-json-array registered))
+        (harness-tasks--delete-json (harness-tasks--registry))))
+    (harness-tasks--write-json global (harness-json-array (gethash global groups)))
+    (setq harness-tasks--dirty nil)))
+
+(defun harness-tasks--save-soon ()
+  "Write the task records once changes stop coming for a moment."
+  (setq harness-tasks--dirty t)
+  (harness-debounce 'harness-tasks-save 0.3 #'harness-tasks-flush))
+
+(defun harness-tasks-flush ()
+  "Write the task records now if a change is waiting (on exit and shutdown)."
+  (when harness-tasks--dirty
+    (condition-case err
+        (harness-tasks--save)
+      (error (harness-log 'error "tasks: could not save the task records: %S" err)))))
+
+(defun harness-tasks--forget-stores ()
+  "Forget what this process read and wrote of the stores."
+  (clrhash harness-tasks--stores)
+  (clrhash harness-tasks--written)
+  (setq harness-tasks--backup-checked nil))
+
+(defun harness-tasks--load ()
+  "Read the task records from their stores once.
+The repository stores of the registry come first, then the global
+store, so a record in both (a move a crash cut short) keeps its
+repository copy.  A save follows, which moves the records kept where
+their project does not keep them, like git projects' tasks from before
+repository stores."
+  (unless harness-tasks--loaded
+    (setq harness-tasks--loaded t)
+    (harness-tasks--forget-stores)
+    (let ((harness-tasks--loading t)
+          (registry (harness-tasks--read-json (harness-tasks--registry))))
+      (dolist (path (and (listp registry) registry))
+        (when (stringp path)
+          (condition-case err
+              (harness-tasks--open-store path)
+            (error (harness-log 'error "tasks: cannot read %s: %S" path err)))))
+      (harness-tasks--add-records (harness-tasks--read-json (harness-tasks--global-store))))
+    (harness-tasks--save-soon)))
 
 ;;;; Columns
 
@@ -889,6 +1159,15 @@ restart."
             (harness-tasks--set id :state 'pending :started nil)))
         (error (harness-tasks--fail id err))))))
 
+(defun harness-tasks--pick-up ()
+  "Soon pick up the work a stopped harness left, then start waiting tasks.
+Runs once the modules are up, and again when a store read later adds
+records.  Each step leaves alone the tasks something already works on."
+  (harness-run-soon #'harness-tasks--recover)
+  (harness-run-soon #'harness-tasks--resume-merges)
+  (harness-run-soon #'harness-tasks--recover-refinements)
+  (harness-run-soon #'harness-tasks--schedule))
+
 ;;;; Methods
 
 (harness-defmethod task/submit (cwd prompt &optional opts)
@@ -999,6 +1278,7 @@ tools.  The caller sends the first question."
   "Return the tasks of CWD's project, oldest first; every task without CWD."
   (harness-tasks--load)
   (let ((project (and cwd (harness-tasks--project cwd))))
+    (when project (harness-tasks--open-project project))
     (mapcar #'harness-tasks--view
             (harness-tasks--sorted (lambda (task) (or (null project) (equal project (plist-get task :project))))))))
 
@@ -1156,10 +1436,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
-  (harness-run-soon #'harness-tasks--recover)
-  (harness-run-soon #'harness-tasks--resume-merges)
-  (harness-run-soon #'harness-tasks--recover-refinements)
-  (harness-run-soon #'harness-tasks--schedule))
+  (harness-tasks--pick-up))
 
 (harness-declare-event 'task/changed "(TASK) after a task is submitted or changes state or column.")
 (harness-declare-event 'task/deleted "(ID) after a task is removed.")
