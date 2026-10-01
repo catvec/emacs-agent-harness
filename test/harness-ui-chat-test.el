@@ -545,5 +545,13 @@
         (should (harness-chat--skill-reference-p "please /review this"))
         (should-not (harness-chat--skill-reference-p "a/review"))))))
 
+(ert-deftest harness-ui-chat-segment-icons-not-highlighted ()
+  ;; An SVG icon keeps its own background, so the hover highlight skips it.
+  (let* ((icon (propertize " " 'display '(image :type svg :file "thinking.svg")))
+         (seg (harness-chat--segment (concat icon " max") #'ignore "help")))
+    (should-not (get-text-property 0 'mouse-face seg))
+    (should (get-text-property 0 'local-map seg))
+    (should (eq 'mode-line-highlight (get-text-property 2 'mouse-face seg)))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
