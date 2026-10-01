@@ -1975,9 +1975,18 @@ COMMAND runs with the clicked window selected."
         (puthash command map harness-chat--segment-maps))))
 
 (defun harness-chat--segment (text command help &optional face)
-  "Return TEXT as a clickable segment running COMMAND, with HELP and FACE."
-  (propertize text 'face face 'help-echo help 'mouse-face 'mode-line-highlight
-              'local-map (harness-chat--segment-map command)))
+  "Return TEXT as a clickable segment running COMMAND, with HELP and FACE.
+Icons in TEXT stay clickable but are not hover-highlighted: an SVG keeps
+the background it was rendered on, so it would show as a dark box."
+  (let ((text (propertize text 'face face 'help-echo help 'mouse-face 'mode-line-highlight
+                          'local-map (harness-chat--segment-map command)))
+        (pos 0))
+    (while (< pos (length text))
+      (let ((next (next-single-property-change pos 'display text (length text))))
+        (when (eq (car-safe (get-text-property pos 'display text)) 'image)
+          (remove-text-properties pos next '(mouse-face nil) text))
+        (setq pos next)))
+    text))
 
 (defun harness-chat--header ()
   "Return the header line."
