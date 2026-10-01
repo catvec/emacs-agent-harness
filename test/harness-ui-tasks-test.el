@@ -151,6 +151,20 @@
                                            (plist-get (car (harness-call 'task/list default-directory)) :prompt)))
                          5 "the prompt to change"))))
 
+(ert-deftest harness-ui-tasks-in-progress-newest-first ()
+  "A task that starts shows at the top of In progress, above older ones."
+  (harness-ui-tasks-test-with
+    ;; A turn that never ends keeps both tasks in progress.
+    (let ((harness-provider-demo-script-override '((:type text :delta "Working on it."))))
+      (unwind-protect
+          (progn
+            (harness-ui-tasks-test--type-and-submit board "Older task")
+            (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Older task")
+            (harness-ui-tasks-test--type-and-submit board "Newer task")
+            (harness-ui-tasks-test--wait-text board "In progress  2\n.*Newer task\\(.\\|\n\\)*Older task"))
+        (dolist (task (harness-call 'task/list default-directory))
+          (harness-call 'task/cancel (plist-get task :id)))))))
+
 (ert-deftest harness-ui-tasks-stopped-task-needs-input ()
   (harness-ui-tasks-test-with
     (let ((harness-provider-demo-script-override

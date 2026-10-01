@@ -118,17 +118,25 @@ into the board's drawing and loading checks this first."
 (defun harness-ui-tasks--archived-p (task)
   (harness-json-true-p (plist-get task :archived)))
 
+(defun harness-ui-tasks--started (task)
+  "When TASK started, else when it was submitted, else 0."
+  (or (plist-get task :started) (plist-get task :created) 0))
+
 (defun harness-ui-tasks--visible ()
-  "Return the tasks shown, as an alist COLUMN -> tasks in display order."
+  "Return the tasks shown, as an alist COLUMN -> tasks in display order.
+In progress is newest first by when each task started and completed by
+when it finished, so a task arriving in either shows at the top; the
+other columns are oldest first, pending in the order its tasks start."
   (let ((groups (mapcar (lambda (c) (list (car c))) harness-ui-tasks--columns)))
     (dolist (task harness-ui-tasks--tasks)
       (unless (and (harness-ui-tasks--archived-p task) (not harness-ui-tasks--show-archived))
         (push task (cdr (assq (harness-ui-tasks--column task) groups)))))
     (dolist (g groups groups)
       (setcdr g (sort (cdr g)
-                      (if (eq (car g) 'done)
-                          (lambda (a b) (> (or (plist-get a :finished) 0) (or (plist-get b :finished) 0)))
-                        (lambda (a b) (< (or (plist-get a :created) 0) (or (plist-get b :created) 0)))))))))
+                      (pcase (car g)
+                        ('active (lambda (a b) (> (harness-ui-tasks--started a) (harness-ui-tasks--started b))))
+                        ('done (lambda (a b) (> (or (plist-get a :finished) 0) (or (plist-get b :finished) 0))))
+                        (_ (lambda (a b) (< (or (plist-get a :created) 0) (or (plist-get b :created) 0))))))))))
 
 ;;;; What a card says
 
