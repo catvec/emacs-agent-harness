@@ -383,7 +383,7 @@ Sessions persist; running turns are interrupted."
          (harness-ui-refresh-sessions))
        (when (equal event "harness/reloaded")
          (run-hooks 'harness-ui-redraw-hook))
-       (when (equal event "provider/models-updated")
+       (when (member event '("provider/models-updated" "harness/reloaded"))
          (harness-ui-refresh-models))
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
@@ -532,7 +532,8 @@ Signal unless NOERROR when none can be found."
 (defun harness-ui-model-label (model-id)
   "Return a readable \"model (provider)\" label for MODEL-ID.
 The model part is the catalogue's label, else a prettified slug, else
-the raw name; the provider part is the provider's label, else its id."
+the raw name; the provider part is the provider's label, else its
+capitalized id."
   (if (not (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id)))
       (or model-id "?")
     (let* ((pid (match-string 1 model-id))
@@ -543,7 +544,7 @@ the raw name; the provider part is the provider's label, else its id."
               (or (and label (not (equal label name)) label)
                   (harness-ui--prettify-model-name name)
                   name)
-              (or (plist-get m :provider-label) pid)))))
+              (or (plist-get m :provider-label) (capitalize pid))))))
 
 (defun harness-ui-button (label action &rest props)
   "Insert a clickable LABEL running ACTION (a command or a function of the button).
