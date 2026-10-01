@@ -172,5 +172,37 @@
         (should (eq 'self-insert-command (key-binding (kbd "s"))))
         (should (eq 'harness-ui-tasks-submit (key-binding (kbd "C-c C-c"))))))))
 
+(defvar harness-ui-open-session-function)
+(defvar harness-ui-default-position)
+(declare-function harness-ui-display-buffer "harness-ui")
+(declare-function harness-ui-tasks-open "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-shares-session-positions ()
+  "The board and sessions replace each other in the same position."
+  (harness-ui-tasks-test-with
+    (let* ((session-buf (get-buffer-create " *fake session*"))
+           (harness-ui-open-session-function (lambda (_id) session-buf)))
+      (unwind-protect
+          (let ((window (get-buffer-window board)))
+            (should (eq harness-ui-default-position (buffer-local-value 'harness-ui-position board)))
+            (should window)
+            ;; A session shown in the board's position takes its window.
+            (harness-ui-display-buffer session-buf harness-ui-default-position)
+            (should (eq session-buf (window-buffer window)))
+            (should-not (get-buffer-window board))
+            ;; Opening the board again puts it back in that window.
+            (harness-tasks default-directory)
+            (should (eq board (window-buffer window)))
+            ;; Opening a task's session from the board replaces the board.
+            (harness-ui-tasks-test--type-and-submit board "Open me")
+            (harness-ui-tasks-test--wait-text board "Completed  1")
+            (with-selected-window window
+              (goto-char (point-min))
+              (search-forward "Open me")
+              (harness-ui-tasks-open))
+            (harness-test-wait (lambda () (eq session-buf (window-buffer window))) 5 "the session to replace the board")
+            (should-not (get-buffer-window board)))
+        (kill-buffer session-buf)))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

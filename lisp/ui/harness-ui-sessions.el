@@ -163,17 +163,18 @@
       (harness-ui-sessions--refresh)
       (tabulated-list-print t))
     (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw)))
-    (pop-to-buffer buf)))
+    (harness-ui-display-view buf)))
 
 (defun harness-ui-sessions--id ()
   (or (tabulated-list-get-id) (user-error "No session on this line")))
 
 (defun harness-ui-sessions-open (&optional position)
-  "Open the session at point in POSITION."
+  "Open the session at point in POSITION, by default replacing the list."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
-  (let ((id (harness-ui-sessions--id)))
+  (let ((id (harness-ui-sessions--id))
+        (open (harness-ui-session-opener position)))
     (harness-ui-call "_harness/session/resume" (list :id id)
-                     (lambda (_) (harness-ui-display-session id position)))))
+                     (lambda (_) (funcall open id)))))
 
 (defun harness-ui-sessions-open-other ()
   "Open the session at point in the other position preset."

@@ -562,7 +562,7 @@ Every window showing the buffer keeps its own row too."
   (interactive)
   (let* ((sid (or session-id (harness-ui-current-session-id)))
          (buf (harness-ui-tree--buffer-for sid)))
-    (pop-to-buffer buf)
+    (harness-ui-display-view buf)
     (harness-ui-tree--load buf)))
 
 (defun harness-ui-tree-refresh ()
@@ -574,10 +574,11 @@ Every window showing the buffer keeps its own row too."
   "Open the session of the node at point, at that node when the chat supports it."
   (interactive)
   (let* ((node (harness-ui-tree-node-at-point))
-         (sid (plist-get node :session)))
+         (sid (plist-get node :session))
+         (open (harness-ui-session-opener)))
     (harness-ui-call "_harness/session/resume" (list :id sid)
                      (lambda (_)
-                       (harness-ui-display-session sid)
+                       (funcall open sid)
                        (when (fboundp 'harness-ui-chat-goto-node)
                          (harness-ui-chat-goto-node (plist-get node :id)))))))
 
@@ -631,18 +632,19 @@ once FN's request settles.  FN receives (SID DONE) and must call DONE."
 (defun harness-ui-tree-fork ()
   "Fork the node's session at the node at point and open the fork."
   (interactive)
-  (harness-ui-tree--at-node
-   (harness-ui-tree-node-at-point)
-   (lambda (sid done)
-     (harness-ui-call "_harness/session/fork" (list :id sid :kind "fork")
-                      (lambda (child)
-                        (funcall done)
-                        (harness-ui-refresh-sessions
-                         (lambda (_)
-                           (message "Forked %s" (substring (plist-get child :id) 0 8))
-                           (when harness-ui-open-session-function
-                             (harness-ui-display-session (plist-get child :id))))))
-                      (lambda (e) (funcall done) (message "Fork failed: %s" (harness-error-message e)))))))
+  (let ((open (harness-ui-session-opener)))
+    (harness-ui-tree--at-node
+     (harness-ui-tree-node-at-point)
+     (lambda (sid done)
+       (harness-ui-call "_harness/session/fork" (list :id sid :kind "fork")
+                        (lambda (child)
+                          (funcall done)
+                          (harness-ui-refresh-sessions
+                           (lambda (_)
+                             (message "Forked %s" (substring (plist-get child :id) 0 8))
+                             (when harness-ui-open-session-function
+                               (funcall open (plist-get child :id))))))
+                        (lambda (e) (funcall done) (message "Fork failed: %s" (harness-error-message e))))))))
 
 (defun harness-ui-tree-btw (question)
   "Start a BTW side conversation asking QUESTION from the node at point."

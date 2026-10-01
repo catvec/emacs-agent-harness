@@ -630,6 +630,29 @@ Set by the chat module.")
     (user-error "No chat module loaded"))
   (harness-ui-display-buffer (funcall harness-ui-open-session-function id) position))
 
+(defun harness-ui-display-view (buffer &optional position)
+  "Show BUFFER, a harness view such as the session list, in POSITION.
+Views share positions with sessions: a view replaces the session shown
+in its position and a session opened there replaces the view.  Without
+POSITION the view returns to the position it had last, else
+`harness-ui-default-position'.  Small transient windows (menus, help,
+the BTW overlay) do not go through here."
+  (harness-ui-display-buffer buffer (or position
+                                        (buffer-local-value 'harness-ui-position buffer)
+                                        harness-ui-default-position)))
+
+(defun harness-ui-session-opener (&optional position)
+  "Return a function of a session id that shows it where this view is.
+Call this when the command runs and the returned function later, from
+an asynchronous callback: the session takes POSITION, by default the
+current buffer's position (replacing the view), and opens from the
+window selected now even when another frame is selected by then."
+  (let ((position (or position harness-ui-position harness-ui-default-position))
+        (window (selected-window)))
+    (lambda (id)
+      (when (window-live-p window) (select-window window))
+      (harness-ui-display-session id position))))
+
 (defun harness-ui-read-position ()
   "Read a position name with completion."
   (intern (completing-read "Position: " (mapcar (lambda (p) (symbol-name (car p))) harness-ui-positions) nil t)))
@@ -769,7 +792,7 @@ Set by the chat module.")
 (defun harness-show-log ()
   "Show the harness log buffer."
   (interactive)
-  (pop-to-buffer harness-log-buffer-name))
+  (harness-ui-display-view (get-buffer-create harness-log-buffer-name)))
 
 ;;;; Keymap, menu, global mode
 

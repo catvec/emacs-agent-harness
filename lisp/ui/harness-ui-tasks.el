@@ -34,9 +34,6 @@
 (defgroup harness-ui-tasks nil
   "Task mode." :group 'harness-ui)
 
-(defcustom harness-ui-tasks-session-position 'right
-  "Position a task's session opens in from the board."
-  :type 'symbol :group 'harness-ui-tasks)
 
 (defcustom harness-ui-tasks-tick 15
   "Seconds between refreshes of the elapsed times on visible boards."
@@ -690,11 +687,17 @@ TEXT replaces the compose contents; without it they are kept."
 (declare-function project-root "project")
 
 ;;;###autoload
-(defun harness-tasks (&optional directory)
+(defun harness-tasks (&optional directory position)
   "Show the task board of DIRECTORY's project (the current one by default).
 Task mode runs one session per task: submit tasks from the compose box
-at the bottom and follow them from pending to completed."
-  (interactive (list (if current-prefix-arg (read-directory-name "Project: ") default-directory)))
+at the bottom and follow them from pending to completed.
+
+The board takes a position like a session does (`harness-ui-positions')
+and replaces whatever is shown there; opening a task's session from it
+puts the session in the same position.  POSITION defaults to the one the
+board had last, then to `harness-ui-default-position'; with a prefix
+argument it is read."
+  (interactive (list default-directory (and current-prefix-arg (harness-ui-read-position))))
   (let* ((dir (file-name-as-directory (expand-file-name (or directory default-directory))))
          (root (file-name-as-directory (expand-file-name (harness-ui-tasks--local-root dir))))
          (buf (get-buffer-create (harness-ui-tasks--buffer-name root))))
@@ -708,8 +711,7 @@ at the bottom and follow them from pending to completed."
         (goto-char harness-ui-tasks--compose-end))
       (harness-ui-tasks--fetch buf))
     (harness-ui-refresh-sessions)
-    (pop-to-buffer-same-window buf)
-    buf))
+    (harness-ui-display-view buf position)))
 
 ;;;; Commands
 
@@ -727,20 +729,15 @@ at the bottom and follow them from pending to completed."
                      (lambda (e) (harness-ui-tasks--fail buffer what e)))))
 
 (defun harness-ui-tasks-open (&optional position)
-  "Open the session of the task at point (in POSITION)."
+  "Open the session of the task at point in POSITION.
+By default it takes the board's own position, replacing the board."
   (interactive)
   (let* ((task (harness-ui-tasks--task))
-         (sid (plist-get task :session)))
+         (sid (plist-get task :session))
+         (open (harness-ui-session-opener position)))
     (unless sid (user-error "This task has not started yet; s starts it now"))
-    ;; The reply arrives later, when another frame may be selected: open
-    ;; the session next to the board it was asked from.
-    (let ((window (selected-window)))
-      (harness-ui-call "_harness/session/resume" (list :id sid)
-                       (lambda (_)
-                         (if (window-live-p window)
-                             (with-selected-window window
-                               (harness-ui-display-session sid (or position harness-ui-tasks-session-position)))
-                           (harness-ui-display-session sid (or position harness-ui-tasks-session-position))))))))
+    (harness-ui-call "_harness/session/resume" (list :id sid)
+                     (lambda (_) (funcall open sid)))))
 
 (defun harness-ui-tasks-open-other ()
   "Open the session of the task at point in a position read from the user."
