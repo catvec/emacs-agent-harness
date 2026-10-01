@@ -166,6 +166,24 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
   (add-hook 'tabulated-list-revert-hook #'harness-ui-sessions--refresh nil t)
   (tabulated-list-init-header))
 
+;; The list's keys in the harness menu, behind `.'.
+(put 'harness-ui-sessions-mode 'harness-menu-group
+     '("Session list"
+       ["Session at point"
+        (". RET" "Open" harness-ui-sessions-open)
+        (". o" "Open in position" harness-ui-sessions-open-other)
+        (". f" "Fork" harness-ui-sessions-fork)
+        (". r" "Rename" harness-ui-sessions-rename)
+        (". k" "Cancel turn" harness-ui-sessions-cancel)
+        (". x" "Deactivate" harness-ui-sessions-deactivate)
+        (". T" "Make it a task" harness-ui-sessions-make-task)
+        (". d" "Delete" harness-ui-sessions-delete)]
+       ["List"
+        (". /" "Filter" harness-ui-sessions-filter)
+        (". a" "This project or all" harness-ui-sessions-toggle-scope)
+        (". i" "Show or hide inactive" harness-ui-sessions-toggle-inactive)
+        (". g" "Reload" harness-ui-sessions-reload)]))
+
 (defun harness-ui-sessions--redraw ()
   "Redraw the list buffer if it exists, keeping point on the same session."
   (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))

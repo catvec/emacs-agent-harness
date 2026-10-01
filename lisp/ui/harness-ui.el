@@ -17,7 +17,9 @@
 ;;   and quota when a subscription pays for it;
 ;; - faces and icons;
 ;; - window positions: one session per preset position, replacing;
-;; - the prefix keymap, the global minor mode and the transient menu.
+;; - the prefix keymap, the global minor mode and the transient menu,
+;;   which also lists the commands of the buffer it is opened from, as
+;;   that buffer's modes list them in their `harness-menu-group'.
 
 ;;; Code:
 
@@ -1107,6 +1109,128 @@ the menu gets a bottom side window of its own; elsewhere it follows
        buffer (append '((side . bottom) (slot . 1) (dedicated . t)) alist))
     (display-buffer buffer transient-display-buffer-action)))
 
+;;;;; The commands of the buffer the menu is opened from
+
+;; A mode lists its own commands for `harness-menu' in its
+;; `harness-menu-group' property, (TITLE COLUMN...):
+;;
+;;   (put 'harness-chat-mode 'harness-menu-group
+;;        '("Chat"
+;;          ["Message"
+;;           ("C-c C-c" "Send" harness-chat-send)
+;;           ...]
+;;          ...))
+;;
+;; The menu shows them under TITLE when it is opened from a buffer in
+;; that major mode, or in a mode derived from it, or with that minor
+;; mode on.  Each COLUMN is a group vector as in
+;; `transient-define-prefix': a heading, then suffixes (KEY DESCRIPTION
+;; COMMAND . PROPERTIES), which run in the buffer with point where it
+;; was.  The menu's own groups take the plain keys, so list a command
+;; the buffer binds to a plain key behind `.', followed by that key
+;; (". s" for a board's `s'), and one bound to a key with a modifier,
+;; such as the chat's chords, under that key: the menu then teaches the
+;; buffer's own keys.  The menu leaves out a suffix whose command is not
+;; defined, one whose key its own groups use, and one whose key a mode
+;; with precedence in the buffer shows already: minor modes before the
+;; major mode, as in the buffer's keymaps.
+;;
+;; A property set with `put' at the top level of the module, not a call
+;; to a function of this file: `harness-reload' loads the other UI
+;; files before this one, and a property needs nothing loaded.  Setting
+;; it again replaces the commands, so a reload updates them.
+
+(defun harness-ui--major-mode-lineage ()
+  "Return the current major mode and the modes it derives from, nearest first."
+  (let ((mode major-mode) lineage)
+    (while (and mode (symbolp mode) (not (memq mode lineage)))
+      (push mode lineage)
+      (setq mode (get mode 'derived-mode-parent)))
+    (nreverse lineage)))
+
+(defun harness-ui--menu-modes ()
+  "Return the modes whose `harness-menu-group' this buffer gets.
+The minor modes on in it come first, then its major mode and the modes
+that one derives from: the order in which their keymaps take
+precedence in the buffer."
+  (append (cl-remove-if-not (lambda (mode)
+                              (and (get mode 'harness-menu-group) (boundp mode) (symbol-value mode)))
+                            minor-mode-list)
+          (cl-remove-if-not (lambda (mode) (get mode 'harness-menu-group))
+                            (harness-ui--major-mode-lineage))))
+
+(defun harness-ui--menu-key-taken-p (key)
+  "Non-nil when the groups of `harness-menu' use KEY or a prefix of it.
+KEY is a key description such as \". s\"."
+  (let ((events (kbd key)))
+    (cl-loop for i from 1 to (length events)
+             thereis (ignore-errors
+                       (transient-get-suffix 'harness-menu (key-description (substring events 0 i)))))))
+
+(defun harness-ui--menu-column (column taken)
+  "Return COLUMN without the suffixes `harness-menu' cannot offer, or nil.
+Those run an undefined command, or have a key the menu's own groups
+use or one in TAKEN, a hash table of the keys offered already.  The
+keys kept are added to TAKEN.  Where transient can, the keys are padded
+to line up."
+  (let ((items (append column nil)) kept head offered)
+    (when (integerp (car items)) (push (pop items) head))
+    (when (stringp (car items)) (push (pop items) head))
+    (while items
+      (let ((item (pop items)))
+        (if (keywordp item)
+            (progn (push item kept) (when items (push (pop items) kept)))
+          (let ((key (and (consp item) (stringp (car item))
+                          (ignore-errors (key-description (kbd (car item))))))
+                (command (and (consp item) (nth 2 item))))
+            (when (and key command
+                       (or (not (symbolp command)) (fboundp command))
+                       (not (gethash key taken))
+                       (not (harness-ui--menu-key-taken-p key)))
+              (puthash key t taken)
+              (push item kept)
+              (setq offered t))))))
+    (when offered
+      (vconcat (nreverse head)
+               (and (slot-exists-p 'transient-column 'pad-keys) '(:pad-keys t))
+               (nreverse kept)))))
+
+(defvar harness-ui--menu-heading nil
+  "Heading of the buffer's commands in `harness-menu', set as it opens.")
+
+(defun harness-ui--menu-buffer-columns ()
+  "Return the parsed columns of commands of this buffer, setting the heading.
+They are nil when none of the buffer's modes has a `harness-menu-group'.
+A column that fails to parse is logged and left out."
+  (let ((taken (make-hash-table :test 'equal))
+        shown)
+    (dolist (mode (harness-ui--menu-modes))
+      (pcase-let ((`(,title . ,columns) (get mode 'harness-menu-group)))
+        (when-let* ((parsed
+                     (cl-mapcan
+                      (lambda (column)
+                        (when-let* ((column (harness-ui--menu-column column taken)))
+                          (condition-case err
+                              (transient-parse-suffixes 'harness-menu (list column))
+                            (error (harness-log 'error "harness-menu: %s commands: %s"
+                                                mode (error-message-string err))
+                                   nil))))
+                      columns)))
+          (push (cons title parsed) shown))))
+    ;; Shown the other way round: the major mode's commands, then the minor modes'.
+    (setq harness-ui--menu-heading (mapconcat #'car shown " · "))
+    (cl-mapcan #'cdr shown)))
+
+(defun harness-ui--menu-buffer-children (_children)
+  "Return the columns of commands `harness-menu' shows for this buffer.
+The menu calls this as it opens (`:setup-children'), in the buffer it
+is opened from; with nil the group is left out.  An error is logged and
+leaves the buffer's commands out, never the whole menu."
+  (condition-case err
+      (harness-ui--menu-buffer-columns)
+    (error (harness-log 'error "harness-menu: the buffer's commands: %s" (error-message-string err))
+           nil)))
+
 (transient-define-prefix harness-menu ()
   "The harness menu."
   :display-action '(harness-ui--display-menu (inhibit-same-window . t))
@@ -1132,7 +1256,12 @@ the menu gets a bottom side window of its own; elsewhere it follows
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("c" "Connect remote" harness-connect-remote)
     ("R" "Reload harness" harness-reload)
-    ("L" "Log" harness-show-log)]])
+    ("L" "Log" harness-show-log)]]
+  ;; The commands of the buffer the menu is opened from, when its modes
+  ;; list some in their `harness-menu-group'.
+  [:class transient-columns
+   :description (lambda () harness-ui--menu-heading)
+   :setup-children harness-ui--menu-buffer-children])
 
 ;;;; Module
 

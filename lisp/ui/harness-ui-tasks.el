@@ -968,6 +968,38 @@ anything that moves a task without one, so a board never drifts.")
                          ;; The board stays at the top; the gap opens between it and the box.
                          :bottom (lambda () (marker-position harness-ui-tasks--list-end))))
 
+;; The board's keys in the harness menu: its letters behind `.', the
+;; compose box's chords as they are.
+(put 'harness-ui-tasks-mode 'harness-menu-group
+     '("Task board"
+       ["Task at point"
+        (". RET" "Open its session" harness-ui-tasks-open)
+        (". o" "Open in position" harness-ui-tasks-open-other)
+        (". s" "Start now" harness-ui-tasks-start)
+        (". e" "Edit prompt" harness-ui-tasks-edit)
+        (". m" "Message session" harness-ui-tasks-reply)
+        (". r" "Refine" harness-ui-tasks-refine)
+        (". y" "Allow tool call" harness-ui-tasks-allow)
+        (". n" "Deny tool call" harness-ui-tasks-deny)]
+       ["Finish"
+        (". k" "Stop or drop" harness-ui-tasks-cancel)
+        (". d" "Mark completed" harness-ui-tasks-complete)
+        (". M" "Merge again" harness-ui-tasks-merge)
+        (". x" "Archive or restore" harness-ui-tasks-archive)
+        (". D" "Delete" harness-ui-tasks-delete)]
+       ["Board"
+        (". a" "New task" harness-ui-tasks-compose)
+        (". I" "Adopt a session" harness-ui-tasks-adopt)
+        (". X" "Archive completed" harness-ui-tasks-archive-done)
+        (". A" "Show archived" harness-ui-tasks-toggle-archived)
+        (". g" "Refresh" harness-ui-tasks-refresh)]
+       ["Compose box"
+        ("C-c C-c" "Submit" harness-ui-tasks-submit)
+        ("C-c C-t" "Submit or Refine" harness-ui-tasks-toggle-refine)
+        ("C-c C-k" "Clear" harness-ui-tasks-compose-reset)
+        ("C-c C-a" "Attach file" harness-compose-add-attachment)
+        ("C-c C-v" "Attach clipboard" harness-compose-attach-clipboard)]))
+
 (defun harness-ui-tasks--buffer-name (dir)
   (format "*harness tasks: %s*" (file-name-nondirectory (directory-file-name dir))))
 

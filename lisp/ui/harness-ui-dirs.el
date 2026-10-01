@@ -84,6 +84,15 @@ BUFFER defaults to the current buffer."
   (setq tabulated-list-padding 1)
   (tabulated-list-init-header))
 
+;; The list's keys in the harness menu, behind `.'.
+(put 'harness-ui-dirs-mode 'harness-menu-group
+     '("Directory access"
+       ["Directories"
+        (". a" "Allow a directory" harness-ui-dirs-add)
+        (". k" "Revoke at point" harness-ui-dirs-revoke)
+        (". RET" "Open in Dired" harness-ui-dirs-visit)
+        (". g" "Reload" harness-ui-dirs-reload)]))
+
 ;;;###autoload
 (defun harness-directories (&optional session-id)
   "Show and manage the directories SESSION-ID may access."

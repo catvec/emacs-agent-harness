@@ -504,6 +504,13 @@ The RMS is mapped from -60 dBFS..0 dBFS onto 0..1."
     (setq harness-ui-media--rec-string "")
     (force-mode-line-update t)))
 
+;; While a recording runs its key works in every buffer, so the harness
+;; menu offers it wherever it is opened.
+(put 'harness-ui-media-recording-mode 'harness-menu-group
+     '("Audio"
+       ["Recording"
+        ("C-c C-r" "Stop recording" harness-record-audio)]))
+
 (defun harness-ui-media--recording-finished (proc event)
   "Sentinel of the recorder PROC: hand the file over when it exits with EVENT."
   (unless (process-live-p proc)

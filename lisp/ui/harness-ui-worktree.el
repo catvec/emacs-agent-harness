@@ -254,6 +254,20 @@
   (add-hook 'tabulated-list-revert-hook #'harness-ui-worktree--refresh-entries nil t)
   (tabulated-list-init-header))
 
+;; The list's keys in the harness menu, behind `.'.
+(put 'harness-ui-worktree-mode 'harness-menu-group
+     '("Worktrees"
+       ["Worktree at point"
+        (". RET" "Open in Dired" harness-ui-worktree-dired)
+        (". s" "New session in it" harness-ui-worktree-new-session)
+        (". m" "Merge its session" harness-ui-worktree-merge)
+        (". d" "Remove" harness-ui-worktree-remove)]
+       ["Repository"
+        (". n" "New worktree" harness-ui-worktree-create)
+        (". f" "Fork a session into one" harness-ui-worktree-fork-session)
+        (". p" "Prune stale records" harness-ui-worktree-prune)
+        (". g" "Refresh" harness-ui-worktree-refresh)]))
+
 ;;;; Commands
 
 ;;;###autoload

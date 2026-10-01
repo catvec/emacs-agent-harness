@@ -240,6 +240,14 @@ It takes the position of the buffer it was opened over."
     (kill-local-variable 'harness-chat-placeholder))
   (harness-compose-update-placeholder))
 
+;; Its keys in the harness menu.  They beat the chat's own `C-c C-k'
+;; there, in the menu as in the buffer.
+(put 'harness-ui-btw-minor-mode 'harness-menu-group
+     '("BTW"
+       ["Side conversation"
+        ("C-c C-k" "Close" harness-ui-btw-close)
+        ("C-c C-o" "Keep as session" harness-ui-btw-promote)]))
+
 (defun harness-ui-btw--init ()
   "Bind `harness-btw' in `harness-ui-map'."
   (define-key harness-ui-map (kbd "b") #'harness-btw))
