@@ -13,11 +13,12 @@ module needs something more, add it here first.
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, naming, compaction,
-                worktree, merge, tasks, skills, perms, sandbox
+                worktree, merge, tasks, tasks-notify, skills, perms, sandbox,
+                notifications
  Completion     provider, provider-openai, provider-claude, provider-bedrock,
                 provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
-                tools-sessions
+                tools-sessions, tools-notify
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -65,8 +66,10 @@ default) the layers above are split across two Emacs processes:
 - Work about the user's Emacs runs there, asked for by the harness with
   `client/request` (below): the `emacs_*` and `elisp` tools
   (lisp/harness-client-tools.el), saving user options to `custom-file`
-  (`harness-save-user-option`), and reverting buffers after a tool
-  writes a file (event `tools/file-written`).
+  (`harness-save-user-option`), reverting buffers after a tool
+  writes a file (event `tools/file-written`), and desktop notifications
+  (lisp/harness-notifications-desktop.el, see notifications), so they
+  show where the user is and a click on one opens what it is about.
 - Project roots and file lists (lisp/harness-files.el) are computed on
   both sides with the same code; the UI lists files itself so `@`
   completion uses the user's projectile cache.
@@ -714,8 +717,10 @@ into a pending request and resolves when answered).
   `harness-perms-auto-model`, decides the rest with a reason; falls back
   to ask), `yolo` (allow everything; the jail still applies).  Tools in
   `harness-perms-auto-allow-tools` are allowed in every mode: the meta
-  tools, skill and Emacs lookups, and `web_search`, which only sends its
-  query to the configured search provider, so task sessions can search.
+  tools, skill and Emacs lookups, `web_search`, which only sends its
+  query to the configured search provider, so task sessions can search,
+  and `notify`, which only reaches the user through the notification
+  providers they set up, so unattended sessions can say they need them.
   The model provider's own search, standing in for `web_search` (see
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
@@ -1065,7 +1070,12 @@ to the task's file (below); the record also keeps `:file-base` and
   task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree).
 - Events `task/changed TASK`, `task/deleted ID`, `task/review TASK` (its
-  work waits for the user's review).  Records are written
+  work waits for the user's review), `task/done TASK HOW` (it became
+  done; HOW is `merged` when the merge queue merged its branch,
+  `finished` when its turn ended with nothing to merge or review,
+  `verified` when the user verified it with nothing left to merge, or
+  `completed` when it was marked done by hand, `task/complete`; a task
+  already done emits nothing).  Records are written
   shortly after a change and on exit (`harness-tasks-flush`), each into
   its project's store; a store whose text would not change is skipped.
 - Stores: a git project's records go to `harness/tasks.json` in the
@@ -1211,7 +1221,100 @@ to the task's file (below); the record also keeps `:file-base` and
   nil: `:outcome interrupted`).  Merges in flight are queued again, and
   tasks in review wait on for the user.
 
-### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions
+### notifications
+
+Any module tells the user something with `notification/send`, and
+providers deliver it.  NOTIFICATION = `(:title :body :urgency
+low|normal|critical :source :kind :session :task :project :url)`: a
+title or a body is required, urgency defaults to normal, `:source` and
+`:kind` say who sends it and why, `:session`, `:task` and `:project` say
+what it is about (a click on a desktop notification opens it), and
+`:url` is a link for providers that can open one.  `notification/send`
+fills in `:id` and `:ts`.
+
+- `notification/send NOTIFICATION &optional PROVIDERS` -> promise of
+  `(:id ID :results ((:provider NAME :status sent|failed|skipped :detail
+  TEXT :error TEXT) ...))`, a result per provider, in order.  PROVIDERS
+  (names; strings accepted) overrides `harness-notifications-providers`
+  (default `(system gotify)`).  The sync filter
+  `notification/before-send` (value NOTIFICATION, no args) sees it first
+  and may change it, or drop it by returning nil (the result is then
+  `(:id ID :dropped t :results nil)`).  Every provider that is set up
+  gets it at once; one that signals, rejects or takes longer than
+  `harness-notifications-timeout` (30 s) is `failed`, one not set up, or
+  unknown, is `skipped`, and neither holds up the others.  It never
+  rejects for a provider, and signals when the notification has neither
+  a title nor a body.  Event `notification/sent NOTIFICATION RESULTS`.
+- `notification/providers` -> `(:name :label :doc :ready :enabled)` for
+  every provider, in definition order.
+- `(harness-notifications-define-provider 'NAME :label :doc :send FN
+  :ready FN)` adds or replaces a provider.  SEND gets the NOTIFICATION
+  and returns anything or a promise (a plist's `:detail` says how it
+  went); it signals or rejects when it cannot deliver.  READY (no
+  arguments, quick: it runs before every notification) says whether it
+  is set up; without it, it always is.
+- `system`: a desktop notification.  With a client connected
+  (`acp/status`), the harness asks it to show one with `client/request
+  "_harness/client/notify"` (params `:id :title :body :urgency`, plus
+  `:source :kind :session :task :project :url` when set; the URL ends
+  the body, and without a title the body's first line is the title), so
+  it shows on the user's desktop even for a remote harness, and a click
+  on it opens what it is about (see Presentation contracts).  When no
+  client answers within 10 s, or every client declines, the harness
+  process shows it itself.  Ready while a client is connected or this
+  process has a desktop backend.
+- Desktop backends (lisp/harness-notifications-desktop.el, loaded on
+  both sides): `harness-notifications-desktop-notify &rest (:title :body
+  :urgency :on-action)` -> promise of `(:backend NAME :id ID)`.
+  `harness-notifications-desktop-backend` is `auto` (the first that
+  works of `notify-send`, `dbus`, `osascript`, `w32`), one of those, or
+  a function of that plist.  notify-send runs as an asynchronous process
+  with `--print-id` (an id says the server took it) and, with
+  `:on-action`, `--action=default=Open`: the process then waits and
+  prints `default` when the notification is clicked (at most
+  `harness-notifications-desktop-max-waiting` processes wait; an old
+  notify-send without these options shows a plain notification).  D-Bus
+  calls org.freedesktop.Notifications asynchronously and hears
+  ActionInvoked in an interactive Emacs; a batch Emacs, which reads no
+  D-Bus events, calls it synchronously with a 2 s timeout and hears no
+  clicks.  The body is escaped for markup (`&`, `<`, `>`); the title is
+  never markup.
+- `gotify`: `POST URL/message` through harness-http, the application
+  token in `X-Gotify-Key` (so never on a command line), with `title`,
+  `message` (the title when there is no body), `priority` (from
+  `harness-gotify-priorities`: low 2, normal 5, critical 8) and `extras`
+  (`client::display` `text/plain`; `client::notification` `click.url`
+  for `:url`).  Ready once an address and a token are found:
+  `harness-gotify-url` and `harness-gotify-token` (a secret), else the
+  GOTIFY_URL and GOTIFY_TOKEN environment variables, else for the token
+  auth-source (the URL's host, login `harness`; its answer is trusted
+  for 5 minutes).  Failures read `Gotify: HTTP 401 Unauthorized: ...`.
+
+### tasks-notify
+
+Notifies the user about tasks through `notification/send` (`:source
+"tasks"`, `:task :session :project` set, urgency normal) for the events
+in `harness-tasks-notify-events` (default `(review done)`), sent to
+`harness-tasks-notify-providers` (nil: the default providers):
+
+- `review` (`task/review`): "Ready for review: TITLE", body "PROJECT: "
+  and the start of the agent's last reply (200 characters on one line),
+  or "waits for you to verify it or send it back".  Kind `task-review`.
+- `done` (`task/done` with HOW `merged` or `finished`; `verified` and
+  `completed` are the user's own doing): "Task done: TITLE", body
+  "PROJECT: merged into BASE" (or "merged"), or "PROJECT: finished".
+  Kind `task-done`.
+- `needs-input` (opt-in, from `task/changed`): a task whose `:column`
+  turns `needs-input` from another column it was seen in, unless its
+  outcome is `cancelled`: "Task needs you: TITLE", body "PROJECT: has a
+  question for you", "needs your permission" or "stopped: OUTCOME" and
+  its error.  Kind `task-needs-input`.
+
+TITLE is the session's name, else the prompt's first line without its
+leading `#`, at most 80 characters; PROJECT is `project/name` of the
+task's project.
+
+### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify
 
 Tool names and inputs (all paths relative to cwd or absolute; TRAMP
 prefixes come from the session host):
@@ -1249,6 +1352,8 @@ prefixes come from the session host):
 | `task_submit` | prompt, cwd, model, thinking, refine (for the backlog) | meta |
 | `task_control` | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
 | `task_wait` | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
+| `notify` | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms-auto-allow-tools`) |
+| `notification_providers` | (none) | read |
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
@@ -1282,6 +1387,17 @@ condition, their timeout (`harness-tools-sessions-wait-default`, at most
 an error.  Nothing here grants permissions: permission requests and
 permission modes stay with the user, and `task_submit` uses the task
 defaults.  The task tools need the `tasks` module.
+
+`notify` (`tools-notify`) sends a notification through
+`notification/send` with `:source "agent"`, `:kind "agent"` and the
+calling session's `:session` and `:project`, so a click opens the
+session; its title defaults to the session's name.  The result names
+the providers that delivered it, failed (and why) or were skipped as
+not set up; it is an error only when none delivered it, and then says
+how providers are set up.  A session sends at most
+`harness-tools-notify-rate-limit` notifications (default 10 in 600 s);
+past that it is told when it can send again.  `notification_providers`
+lists `notification/providers`: set up or not, used by default or not.
 
 `elisp` and the `emacs_*` tools are about the user's Emacs, so their
 handlers (`harness-tools-in-client NAME`) forward the call to the UI as
@@ -1332,7 +1448,7 @@ and `_harness/ask_user {sessionId, requestId, question, options}` → `{answer}`
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
-`sandbox/status`, `harness/api`, `harness/version`, `harness/reload` is callable as `_harness/NAME` with a
+`notification/`, `sandbox/status`, `harness/api`, `harness/version`, `harness/reload` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
@@ -1342,7 +1458,9 @@ method `client/request METHOD PARAMS` → promise of the first client's
 answer; it rejects at once when no client is connected or all decline
 (never callable over ACP).  Methods: `_harness/client/tool {name, input}`
 → tool result, `_harness/client/customize-save {symbol, value}` (value
-printed; only `harness-` options).
+printed; only `harness-` options), `_harness/client/notify {id, title,
+body, urgency, source, kind, session, task, project, url}` -> `{backend}`
+once a desktop notification shows (see notifications), or an error.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token
@@ -1467,6 +1585,20 @@ id, or a settings plist with its setter -- and otherwise the current
 session.  The menu's `i` entry says whether that is non-interactive
 ("Non-interactive: on"), and has no state where the command would
 ask for a session.
+
+Desktop notifications: `harness-ui` answers `_harness/client/notify` by
+showing the notification on this Emacs's desktop
+(`harness-notifications-desktop-notify`), with `{backend}` once it
+shows or an error when it cannot.  One about a session or a task can be
+clicked; the click, out of the process filter or D-Bus handler, brings
+a graphical frame of this Emacs to the front and runs
+`harness-ui-notification-functions` (the wire plist; the first that
+returns non-nil has shown what it is about), else opens its session.
+The task board's function opens the board of the notification's
+`:project` with point on the task's card, once the board shows it
+(within 10 s).  `harness-test-notifications` (menu `N`) sends a test
+notification through `_harness/notification/send` and says in the
+echo area what each provider did with it.
 
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in five
 sections -- requires your input, ready for review, in progress, pending,

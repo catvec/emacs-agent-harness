@@ -752,8 +752,46 @@ same line of the same task, on the same button (`harness-ui-tasks--anchor')."
         (put-text-property (point-min) (point) 'keymap harness-ui-tasks-board-map)
         (harness-ui-tasks--compose-buttons-keymap (point-min) (point)))
       (harness-ui-tasks--restore places)
+      (harness-ui-tasks--focus-card)
       (set-buffer-modified-p nil)
       (force-mode-line-update))))
+
+(defvar-local harness-ui-tasks--focus nil
+  "(ID . TIME): the task whose card point goes to once the board shows it.
+A clicked notification asks for it, maybe before the board has loaded;
+the request lapses after `harness-ui-tasks--focus-timeout' seconds.")
+
+(defconst harness-ui-tasks--focus-timeout 10
+  "Seconds a board waits to show the card a notification asked for.")
+
+(defun harness-ui-tasks--focus-card ()
+  "Put point on the card `harness-ui-tasks--focus' asks for, once it shows."
+  (when harness-ui-tasks--focus
+    (if (> (- (float-time) (cdr harness-ui-tasks--focus)) harness-ui-tasks--focus-timeout)
+        (setq harness-ui-tasks--focus nil)
+      (when-let* ((match (save-excursion
+                           (goto-char (point-min))
+                           (text-property-search-forward 'harness-task-id (car harness-ui-tasks--focus)
+                                                         #'equal))))
+        (setq harness-ui-tasks--focus nil)
+        (goto-char (prop-match-beginning match))
+        (dolist (w (get-buffer-window-list (current-buffer) nil t))
+          (set-window-point w (point)))))))
+
+(defun harness-ui-tasks--on-notification (notification)
+  "Open the board on the task NOTIFICATION, a clicked notification, is about.
+On `harness-ui-notification-functions': non-nil when it was a task's."
+  (let ((id (plist-get notification :task))
+        (project (plist-get notification :project)))
+    (when (and (stringp id) (stringp project) (not (string-empty-p project)))
+      (let ((board (harness-tasks project)))
+        (when (buffer-live-p board)
+          (with-current-buffer board
+            (setq harness-ui-tasks--focus (cons id (float-time)))
+            (harness-ui-tasks--focus-card))))
+      t)))
+
+(add-hook 'harness-ui-notification-functions #'harness-ui-tasks--on-notification)
 
 (defun harness-ui-tasks--compose-buttons-keymap (start end)
   "Let buttons between START and END keep their own keymap over the board's."

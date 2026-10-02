@@ -183,6 +183,32 @@ turn `harness-tasks-require-verification' on themselves."
           (harness-call 'task/complete b)
           (should (eq 'done (harness-tasks-test-state b))))))))
 
+(ert-deftest harness-tasks-done-event-says-how ()
+  "`task/done' fires once a task becomes done, saying what completed it."
+  (harness-tasks-test-with
+    (let ((done nil))
+      (harness-on 'task/done (lambda (task how) (push (cons (plist-get task :id) how) done)))
+      ;; Its turn ended, with nothing to merge or review.
+      (let ((id (harness-tasks-test-submit "finish it")))
+        (harness-tasks-test-wait-state id 'done)
+        (should (equal (list (cons id 'finished)) done))
+        (should (eq 'done (plist-get (harness-tasks-test-task id) :column))))
+      ;; Marked done by hand, once: completing a done task again says nothing.
+      (setq done nil)
+      (let ((harness-tasks-max-running 0))
+        (let ((id (harness-tasks-test-submit "never mind")))
+          (harness-call 'task/complete id)
+          (harness-call 'task/complete id)
+          (should (equal (list (cons id 'completed)) done))))
+      ;; Verified, with nothing to merge.
+      (setq done nil)
+      (let ((harness-tasks-require-verification t))
+        (let ((id (harness-tasks-test-submit "check it")))
+          (harness-tasks-test-wait-state id 'review)
+          (should (null done))
+          (harness-call 'task/verify id)
+          (should (equal (list (cons id 'verified)) done)))))))
+
 (ert-deftest harness-tasks-message-revives-archived-task ()
   ;; Sending in an archived task's chat buffer (`agent/prompt', not
   ;; `task/prompt') resumes its session and puts the task back on the board.
@@ -1884,6 +1910,15 @@ Each is a new session, never an earlier one."
           (should (plist-get task :verified))
           (should (eq 'merged (plist-get task :outcome))))
         (should (equal "two\n" (harness-tasks-test--main-text root)))))))
+
+(ert-deftest harness-tasks-git-done-event-when-merged ()
+  "A task the merge queue completes is done `merged', once."
+  (harness-tasks-test-with-git
+    (let ((done nil))
+      (harness-on 'task/done (lambda (task how) (push (list (plist-get task :id) how (plist-get task :merged)) done)))
+      (let ((id (harness-tasks-test-submit "Change the shared file")))
+        (harness-tasks-test-wait-state id 'done)
+        (should (equal (list (list id 'merged t)) done))))))
 
 (defun harness-tasks-test--lock-line (root path)
   "Return the `locked' line `git worktree list --porcelain' gives PATH of ROOT, or nil."

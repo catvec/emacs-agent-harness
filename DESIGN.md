@@ -239,3 +239,10 @@ Finished work waits for the user's review before it is merged (this can be turne
 Sessions which are ongoing but were not started as tasks can be onboarded into task mode, after which they are managed like any other task. The session controls (permission mode, thinking level, model, non-interactive mode, ect) should be controllable from task mode, both for a task's existing session and for the new tasks you submit, reusing the existing session controls instead of assuming a fixed configuration. New tasks should still default to the settings suited to full auto mode (ex., auto permission mode and non-interactive mode). The task mode UI must automatically refresh itself by subscribing to all the relevant events, the user should never have to manually reload it to see the current state of their tasks.
 
 A BTW side conversation can be run from task mode, shown over the board like a BTW over a session. Its agent uses the task and session tools to answer your questions about the status of the tasks (what a task is doing, how far along it is, what it changed, why it is stuck), so you can check on them without opening each session.
+
+## Notifications
+Notify the user outside of Emacs when they are needed, so they can step away while tasks work. A generic notification API lets any part of the harness send a notification; drop in providers deliver it, and several can be configured at once. Built in are system (desktop) notifications, shown by the user's Emacs so they appear where the user is even for a remote harness, and Gotify push notifications, used only once a Gotify server is set up. A provider that fails or hangs never holds up the others.
+
+- Task mode notifies when a task's work waits for verification and when a task is done (not when the user completed it themselves); notifying when a task needs input can be turned on
+- Clicking a desktop notification brings Emacs forward on what it is about: the task on its board, or the session
+- Agents get tools to send notifications and to list the providers, for advanced workflows (tell me on my phone when this long job finishes)

@@ -88,7 +88,8 @@ Local in-process connections never need it."
 (defconst harness-acp-extension-prefixes
   '("session/" "agent/" "provider/" "tools/list" "usage/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "naming/" "sandbox/status"
-    "harness/api" "harness/version" "harness/reload" "question/" "project/" "task/")
+    "harness/api" "harness/version" "harness/reload" "question/" "project/" "task/"
+    "notification/")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
 (defconst harness-acp--enum-keys
@@ -123,7 +124,7 @@ Local in-process connections never need it."
     provider/models-updated provider/quota-updated usage/budget-warning usage/budgets-changed
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
-    question/answered task/changed task/deleted task/review permission/dir-allowed permission/dir-revoked
+    question/answered task/changed task/deleted task/review task/done permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 
