@@ -18,7 +18,9 @@ does can freeze yours; your Emacs keeps only the UI.
 Requires Emacs 29.1 or newer (31.1 is what it is developed on), `curl`,
 and the `claude` CLI logged in for the default provider.  Optional:
 `bwrap` for the kernel sandbox, `rg` for fast search, `OPENROUTER_API_KEY`
-or `OPENAI_API_KEY` for OpenAI-compatible providers, `BRAVE_API_KEY` for
+or `OPENAI_API_KEY` for OpenAI-compatible providers, an AWS profile or
+a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) for models on AWS Bedrock
+(`bedrock:` models, see `harness-bedrock-endpoints`), `BRAVE_API_KEY` for
 web search.
 
 ```elisp
@@ -152,7 +154,7 @@ layer and [docs/dev-loop.md](docs/dev-loop.md) for the live development
 loop (`scripts/dev.sh`, `scripts/test.sh`, `scripts/lint.sh`).
 
 Modules: `config project store session agent provider provider-claude
-provider-openai provider-demo tools tools-fs tools-shell tools-emacs
+provider-openai provider-bedrock provider-demo tools tools-fs tools-shell tools-emacs
 tools-web tools-agent tools-sessions perms sandbox usage compaction naming skills
 worktree merge tasks acp` and, in the presentation layer, `ui ui-chat
 ui-sessions ui-tasks ui-tree ui-notify ui-usage ui-worktree ui-btw ui-media

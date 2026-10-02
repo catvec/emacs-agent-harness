@@ -14,12 +14,13 @@ module needs something more, add it here first.
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, naming, compaction,
                 worktree, merge, tasks, skills, perms, sandbox
- Completion     provider, provider-openai, provider-claude
+ Completion     provider, provider-openai, provider-claude, provider-bedrock
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
                 tools-sessions
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
-                promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE)
+                promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
+                binary bodies)
 ```
 
 The core never shows UI and never calls a model.  UI modules never
@@ -450,6 +451,20 @@ permission prompts to the harness instead, as `can_use_tool` control
 requests; the harness allows its own tools and refuses any other.  A
 tool call the CLI refuses on its own (`system/permission_denied`)
 becomes a `hint` that names the setting.
+
+The Bedrock provider (`provider-bedrock`) is a native loop over the
+Converse API: one ConverseStream request per call, its binary event
+stream decoded into `text`, `thinking`, `usage` and `tool-call` events.
+Each entry of `harness-bedrock-endpoints` is a provider (default
+`bedrock`); model ids are `ID:MODEL-ID`.  Its catalogue comes from
+ListFoundationModels and ListInferenceProfiles; context windows and
+prices, which Bedrock does not report, come from
+`harness-bedrock-model-defaults`.  Usage events carry tokens and
+`:billing api` but no cost, so `session/usage-add` prices them from the
+catalogue.  Claude and Nova requests carry prompt cache points; Claude
+reasoning returned with tool calls is kept and sent back with them while
+the tool loop lasts.  `harness-http-request` takes `:binary t` for such
+framings: the response then reaches `:on-chunk` as unibyte strings.
 
 ### tools
 

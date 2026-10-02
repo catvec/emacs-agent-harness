@@ -11,6 +11,10 @@
 ;; through a mode 600 curl config file that is deleted when the
 ;; request finishes, and the body goes through stdin.
 ;;
+;; Text is exchanged as UTF-8.  A request made with `:binary' instead
+;; sends and receives raw bytes, for binary framings such as AWS event
+;; streams: the response reaches the callbacks as unibyte strings.
+;;
 ;; Entry points:
 ;;   `harness-http-request'   -- start a request, returns a handle
 ;;   `harness-http-cancel'    -- abort it
@@ -120,6 +124,10 @@
              (t (list 'curl (format "curl exited %d (%s): %s" code (string-trim event)
                                     (string-trim (or stderr ""))))))))))
 
+(defun harness-http--unibyte (data)
+  "Return process output DATA as a unibyte string of the bytes received."
+  (if (multibyte-string-p data) (encode-coding-string data 'binary t) data))
+
 (defun harness-http--write-config (url method headers)
   "Write a curl config file for URL, METHOD and HEADERS; return its path."
   (let ((file (make-temp-file "harness-http-" nil ".curlrc")))
@@ -131,7 +139,7 @@
         (insert (format "header = %S\n" (format "%s: %s" (car h) (cdr h))))))
     file))
 
-(cl-defun harness-http-request (url &key (method "GET") headers body json
+(cl-defun harness-http-request (url &key (method "GET") headers body json binary
                                     callback on-chunk on-headers timeout)
   "Start an asynchronous HTTP request to URL.
 METHOD, HEADERS (alist) and BODY (string) describe it; JSON, when
@@ -139,13 +147,18 @@ given, is encoded with `harness-json-encode' and sent as the body
 with the right content type.  CALLBACK is called once with (STATUS
 HEADERS BODY ERROR); when ON-CHUNK is given the body is streamed to it
 instead of accumulated.  ON-HEADERS is called with (STATUS HEADERS) as
-soon as they arrive.  Return a handle usable with `harness-http-cancel'."
+soon as they arrive.  BINARY non-nil exchanges raw bytes: a multibyte
+BODY is sent encoded as UTF-8, and the response body reaches ON-CHUNK
+and CALLBACK as unibyte strings, undecoded.  Return a handle usable
+with `harness-http-cancel'."
   (unless harness-http-curl-program
     (error "harness-http: curl is not available"))
   (when json
     (setq body (harness-json-encode json))
     (unless (assoc "Content-Type" headers)
       (push (cons "Content-Type" "application/json") headers)))
+  (when (and binary body (multibyte-string-p body))
+    (setq body (encode-coding-string body 'utf-8 t)))
   (when body
     (push (cons "Content-Length" (number-to-string (string-bytes body))) headers))
   (let* ((config (harness-http--write-config url method headers))
@@ -159,11 +172,14 @@ soon as they arrive.  Return a handle usable with `harness-http-cancel'."
                        (when body (list "--data-binary" "@-"))))
          (process (make-process :name "harness-http"
                                 :command (cons harness-http-curl-program args)
-                                :coding '(utf-8 . utf-8)
+                                :coding (if binary 'binary '(utf-8 . utf-8))
                                 :connection-type 'pipe
                                 :noquery t
                                 :stderr stderr
-                                :filter (lambda (_p data) (harness-http--filter handle data))
+                                :filter (if binary
+                                            (lambda (_p data)
+                                              (harness-http--filter handle (harness-http--unibyte data)))
+                                          (lambda (_p data) (harness-http--filter handle data)))
                                 :sentinel (lambda (p e) (harness-http--sentinel handle p e)))))
     (process-put process 'harness-stderr stderr)
     (set-process-query-on-exit-flag (get-buffer-process stderr) nil)

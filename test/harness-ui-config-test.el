@@ -283,11 +283,13 @@ state directory, as they would the user's."
                   ("harness-tasks-btw-prompt" "tasks" "BTW prompt")
                   ("harness-brave-api-key" "tools-web" "Brave API key")
                   ("harness-openai-models-ttl" "provider-openai" "Models TTL")
+                  ("harness-bedrock-aws-program" "provider-bedrock" "AWS program")
                   ("harness-provider-claude-program" "provider-claude" "Program")
                   ("harness-log-level" "core" "Log level")))
     (should (equal (nth 2 case)
                    (harness-ui-config--label (list :key (nth 0 case) :module (nth 1 case))))))
   (should (equal "Task mode" (harness-ui-config--module-title "tasks")))
+  (should (equal "AWS Bedrock" (harness-ui-config--module-title "provider-bedrock")))
   (should (equal "Some module" (harness-ui-config--module-title "some-module"))))
 
 (ert-deftest harness-ui-config-entry-points ()
