@@ -35,6 +35,7 @@
 (defvar harness-compose-end)
 (defvar harness-ui-tasks--target)
 (defvar harness-ui-tasks--list-end)
+(defvar harness-ui-tasks--error)
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks-edit "harness-ui-tasks")
@@ -722,6 +723,220 @@
             (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board))))
         (delete-window side)
         (set-window-buffer window board)))))
+
+;;;; Point stays where it was put
+
+;; The board is drawn again on every change of a task or a session and
+;; on every tick of the clock, the lines above the box on every reload:
+;; point moved there with the usual keys must stay, or the key pressed
+;; next acts somewhere else.
+
+(defun harness-ui-tasks-test--change (board id &rest props)
+  "Set PROPS (KEY VALUE...) on task ID of BOARD, as the harness would."
+  (with-current-buffer board
+    (setq harness-ui-tasks--tasks
+          (mapcar (lambda (task)
+                    (if (not (equal id (plist-get task :id)))
+                        task
+                      (let ((task (copy-sequence task)))
+                        (cl-loop for (key value) on props by #'cddr
+                                 do (setq task (plist-put task key value)))
+                        task)))
+                  harness-ui-tasks--tasks))))
+
+(defun harness-ui-tasks-test--card-id (board text)
+  "The id of the task whose card in BOARD shows TEXT."
+  (harness-ui-tasks-test--goto-card board text)
+  (with-current-buffer board (plist-get (harness-ui-tasks--task) :id)))
+
+(defun harness-ui-tasks-test--line (&optional pos)
+  "The text of the line at POS (default point)."
+  (save-excursion
+    (when pos (goto-char pos))
+    (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+
+(defun harness-ui-tasks-test--on-second-line-p (id)
+  "Non-nil when point is on the second line of task ID's card."
+  (and (equal id (get-text-property (point) 'harness-task-id))
+       (> (line-beginning-position) (point-min))
+       (equal id (get-text-property (1- (line-beginning-position)) 'harness-task-id))))
+
+(ert-deftest harness-ui-tasks-redraw-keeps-point-on-the-buttons ()
+  "Point moved to a card's buttons stays on the same button through redraws.
+The card's first line is where a redraw used to put it back."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "First waiting task")
+      (harness-ui-tasks-test--type-and-submit board "Second waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  2")
+      (let ((id (harness-ui-tasks-test--card-id board "First waiting task")))
+        (with-current-buffer board
+          ;; Down to the second line, three characters into [Start now].
+          (search-forward "[Start now]")
+          (goto-char (+ (match-beginning 0) 3))
+          (should (harness-ui-tasks-test--on-second-line-p id))
+          (harness-ui-tasks--render)
+          (should (harness-ui-tasks-test--on-second-line-p id))
+          (should (looking-at-p (regexp-quote "art now]")))
+          ;; The text on its left grows: point stays on the button.
+          (harness-ui-tasks-test--change board id :prompt "First waiting task\nNow with a body line under it")
+          (harness-ui-tasks--render)
+          (should (string-search "with a body line" (harness-ui-tasks-test--line)))
+          (should (harness-ui-tasks-test--on-second-line-p id))
+          (should (looking-at-p (regexp-quote "art now]")))
+          ;; The keys pressed there push the button, and act on its card.
+          (should (eq 'push-button (key-binding (kbd "RET"))))
+          (should (eq 'harness-ui-tasks-start (key-binding (kbd "s"))))
+          (should (equal id (plist-get (harness-ui-tasks--task) :id)))
+          ;; The text on the left of the line stays put the same way.
+          (beginning-of-line)
+          (forward-char 6)
+          (harness-ui-tasks-test--change board id :prompt "First waiting task")
+          (harness-ui-tasks--render)
+          (should (harness-ui-tasks-test--on-second-line-p id))
+          (should (= 6 (current-column))))))))
+
+(ert-deftest harness-ui-tasks-redraw-never-puts-point-on-another-button ()
+  "A card whose buttons change leaves point on its line, off the new buttons.
+RET there would push a button point was never on."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "Waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  1")
+      (let ((id (harness-ui-tasks-test--card-id board "Waiting task")))
+        (with-current-buffer board
+          (search-forward "[Edit]")
+          (goto-char (match-beginning 0))
+          ;; Completed, the card offers [Archive] [Reply], [Reply] where [Edit] was.
+          (harness-ui-tasks-test--change board id :state "done" :column "done")
+          (harness-ui-tasks--render)
+          (should (string-search "[Archive] [Reply]" (harness-ui-tasks-test--line)))
+          (should (harness-ui-tasks-test--on-second-line-p id))
+          (should-not (get-text-property (point) 'button))
+          (should (eq 'harness-ui-tasks-open (key-binding (kbd "RET")))))))))
+
+(ert-deftest harness-ui-tasks-redraw-keeps-point-between-the-cards ()
+  "Point on a line of no card, the blank one after a column, stays on it."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "First waiting task")
+      (harness-ui-tasks-test--type-and-submit board "Second waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  2")
+      (let ((first (harness-ui-tasks-test--card-id board "First waiting task"))
+            (second (harness-ui-tasks-test--card-id board "Second waiting task")))
+        (with-current-buffer board
+          (forward-line 2)
+          (should (and (bolp) (eolp)))
+          (should (equal second (get-text-property (1- (point)) 'harness-task-id)))
+          ;; The cards above it change length.
+          (harness-ui-tasks-test--change board first :prompt "First waiting task, now under a much longer title")
+          (harness-ui-tasks--render)
+          (should (and (bolp) (eolp)))
+          (should (equal second (get-text-property (1- (point)) 'harness-task-id))))))))
+
+(ert-deftest harness-ui-tasks-redraw-keeps-every-window-in-place ()
+  "Every window showing the board keeps its point and its start, not just the selected one."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (window (get-buffer-window board)))
+      (harness-ui-tasks-test--type-and-submit board "First waiting task")
+      (harness-ui-tasks-test--type-and-submit board "Second waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  2")
+      (let ((first (harness-ui-tasks-test--card-id board "First waiting task"))
+            (second (harness-ui-tasks-test--card-id board "Second waiting task"))
+            (side (split-window window nil 'below)))
+        (unwind-protect
+            (with-current-buffer board
+              (set-window-buffer side board)
+              (goto-char harness-compose-end)
+              ;; The other window starts at the second card, its point on the card's [Edit].
+              (let ((start (save-excursion (harness-ui-tasks-test--goto-card board "Second waiting task")
+                                           (line-beginning-position)))
+                    (edit (save-excursion (harness-ui-tasks-test--goto-card board "Second waiting task")
+                                          (search-forward "[Edit]")
+                                          (1+ (match-beginning 0)))))
+                (set-window-start side start)
+                (set-window-point side edit))
+              (harness-ui-tasks-test--change board first :prompt "First waiting task, now under a much longer title")
+              (harness-ui-tasks--render)
+              (should (= (point) harness-compose-end))
+              (save-excursion
+                (goto-char (window-point side))
+                (should (harness-ui-tasks-test--on-second-line-p second))
+                (should (looking-at-p (regexp-quote "Edit]"))))
+              (save-excursion
+                (goto-char (window-start side))
+                (should (bolp))
+                (should (string-search "Second waiting task" (harness-ui-tasks-test--line)))))
+          (delete-window side))))))
+
+(ert-deftest harness-ui-tasks-redraw-keeps-point-above-the-box ()
+  "Point on a setting above the box stays on it: reloads, resizes, its own change."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+      (let ((setting (lambda ()
+                       (save-excursion
+                         (goto-char harness-ui-tasks--list-end)
+                         (prop-match-beginning
+                          (text-property-search-forward 'harness-task-button 'harness-toggle-non-interactive #'eq))))))
+        (goto-char (1+ (funcall setting)))
+        (let ((label (button-label (button-at (point)))))
+          ;; Every reload draws these lines again, a resize too.
+          (harness-ui-tasks--render-tail)
+          (should (= (point) (1+ (funcall setting))))
+          (harness-ui-tasks--refit-tail)
+          (should (= (point) (1+ (funcall setting))))
+          (harness-ui-tasks--render)
+          (should (= (point) (1+ (funcall setting))))
+          ;; Pushed, the button names the other setting, and point stays on it.
+          (push-button (point))
+          (should-not (equal label (button-label (button-at (point)))))
+          (should (= (point) (1+ (funcall setting))))))
+      ;; Under the box too.
+      (goto-char (point-max))
+      (harness-ui-tasks--render-tail)
+      (should (= (point) (point-max)))
+      ;; On a line that goes away, the error's: the first line above the box.
+      (setq harness-ui-tasks--error "Starting the task failed: boom")
+      (harness-ui-tasks--render-tail)
+      (goto-char harness-ui-tasks--list-end)
+      (should (string-search "boom" (harness-ui-tasks-test--line)))
+      (forward-char 4)
+      (setq harness-ui-tasks--error nil)
+      (harness-ui-tasks--render-tail)
+      (should (= (point) harness-ui-tasks--list-end))
+      (should (string-search "New task" (harness-ui-tasks-test--line))))))
+
+(ert-deftest harness-ui-tasks-click-pushes-the-button ()
+  "Any click on a button pushes it once, and leaves point there.
+A slow click, or a double click's second, used to reach the board's own
+click and open the session instead."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "Waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  1")
+      (harness-ui-tasks-test--goto-card board "Waiting task")
+      (with-current-buffer board
+        ;; The title opens the session, however long the click.
+        (should (eq 'harness-ui-tasks-mouse-open (key-binding [mouse-1] nil nil (point))))
+        (search-forward "[Start now]")
+        (let ((pos (match-beginning 0)))
+          (should (eq 'push-button (key-binding [mouse-1] nil nil pos)))
+          (should (eq 'push-button (key-binding [mouse-2] nil nil pos)))
+          (should (eq 'ignore (key-binding [double-mouse-1] nil nil pos)))
+          (should (eq 'ignore (key-binding [triple-mouse-1] nil nil pos)))
+          ;; The buttons above the box take a click the same way.
+          (let ((toggle (harness-ui-tasks-test--toggle board)))
+            (should (eq 'push-button (key-binding [mouse-1] nil nil toggle)))
+            (should (eq 'ignore (key-binding [double-mouse-1] nil nil toggle))))
+          ;; Pushed, it starts its task, point staying on the button.
+          (goto-char (1+ pos))
+          (push-button pos)
+          (should (= (point) (1+ pos))))
+        (harness-test-wait (lambda () (not (eq 'pending (plist-get (car (harness-call 'task/list default-directory))
+                                                                    :state))))
+                           5 "the task to start")))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

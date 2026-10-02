@@ -30,6 +30,9 @@
 ;; so the board works against a remote harness too.  The list region is
 ;; redrawn as a whole when anything changes -- a board holds tens of
 ;; tasks, not a transcript -- while the compose box is never touched.
+;; Point and every window showing the board stay where they were through
+;; it all: on the same line of the same card, on the same button.  A
+;; click on a button pushes it, however long the click takes.
 
 ;;; Code:
 
@@ -90,12 +93,17 @@ Either way the toggle above the compose box switches it per board."
 (declare-function harness-btw "harness-ui-btw")
 
 (defmacro harness-ui-tasks--with-task (id &rest body)
-  "Run BODY with point on task ID's card."
+  "Run BODY with point on task ID's card.
+Point already on the card stays where it is: on the button pushed, say,
+rather than going up to the card's first line."
   (declare (indent 1))
-  `(let ((match (save-excursion (goto-char (point-min))
-                                (text-property-search-forward 'harness-task-id ,id #'equal))))
-     (when match (goto-char (prop-match-beginning match)))
-     ,@body))
+  (let ((key (make-symbol "id")))
+    `(let ((,key ,id))
+       (unless (equal (get-text-property (point) 'harness-task-id) ,key)
+         (let ((match (save-excursion (goto-char (point-min))
+                                      (text-property-search-forward 'harness-task-id ,key #'equal))))
+           (when match (goto-char (prop-match-beginning match)))))
+       ,@body)))
 
 
 (defvar-local harness-ui-tasks--dir nil "Directory the board was opened for.")
@@ -379,9 +387,31 @@ POSITION is its place in line among queued tasks; TODOS its session's."
          ("Thinking…" harness-set-thinking) ("Non-interactive" harness-toggle-non-interactive)))
      '(("Delete…" harness-ui-tasks-delete)))))
 
-(defun harness-ui-tasks--button (label action help)
-  "Return a button string LABEL running ACTION (no arguments)."
-  (buttonize label (lambda (_) (funcall action)) nil help))
+(defvar harness-ui-tasks-button-map (make-sparse-keymap)
+  "Keys on the buttons of a task board.")
+
+;; Filled at top level, not in the `defvar', so a reload updates the map.
+(let ((map harness-ui-tasks-button-map))
+  (set-keymap-parent map button-map)
+  ;; Any click pushes a button.  A quick one would anyway: with
+  ;; `mouse-1-click-follows-link', `mouse-1' turns into `mouse-2' when
+  ;; Emacs reads the release soon enough after the press -- by the clock,
+  ;; so a busy Emacs makes a quick click slow.  On the board a slow one
+  ;; would reach the board's own `mouse-1' and open the task's session.
+  (define-key map [mouse-1] #'push-button)
+  ;; A double click pushes it once.  The second click would otherwise
+  ;; run as a single one, a `mouse-1' on the board: open the session.
+  (define-key map [double-mouse-1] #'ignore)
+  (define-key map [triple-mouse-1] #'ignore))
+
+(defun harness-ui-tasks--button (label action help &optional id)
+  "Return a button string LABEL running ACTION (no arguments).
+HELP is its tooltip.  ID names it for redraws, which keep point on the
+same button (see `harness-ui-tasks--anchor'); it defaults to LABEL, so
+a button whose label changes, a setting's value say, needs one."
+  (propertize (buttonize label (lambda (_) (funcall action)) nil help)
+              'keymap harness-ui-tasks-button-map
+              'harness-task-button (or id label)))
 
 (defun harness-ui-tasks--pending (task)
   "Return the first pending request of TASK's session, or nil."
@@ -394,7 +424,7 @@ POSITION is its place in line among queued tasks; TODOS its session's."
                  (harness-ui-tasks--button
                   (format "[%s]" (car a))
                   (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
-                  (car a)))
+                  (car a) (nth 1 a)))
                (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))
                " ")))
 
@@ -443,7 +473,7 @@ POSITION is its place in line among queued tasks; TODOS its session's."
             (propertize (format "  %d" (length tasks)) 'face 'harness-dim-face))
     (when (and (eq column 'done) tasks (not folded))
       (let ((b (harness-ui-tasks--button "[Archive all]" #'harness-ui-tasks-archive-done
-                                         "Archive every completed task")))
+                                         "Archive every completed task" 'harness-ui-tasks-archive-done)))
         (insert (propertize " " 'display `(space :align-to (- right ,(1+ (string-width b))))) b)))
     (insert "\n")
     (put-text-property start (point) 'harness-task-section column)
@@ -486,37 +516,175 @@ POSITION is its place in line among queued tasks; TODOS its session's."
         (dolist (c harness-ui-tasks--columns)
           (harness-ui-tasks--insert-section (car c) (cadr c) (cdr (assq (car c) groups)))))))))
 
+;;;; Point across redraws
+
+;; The board is drawn again whenever a task or a session changes and on
+;; every tick of the clock, the lines above the box on every reload.
+;; Point and the windows showing the board stay where they were all the
+;; same: on the same line of the same card -- its buttons are on the
+;; second -- and on the same button, or a key pressed there would land
+;; somewhere else.
+
+(defconst harness-ui-tasks--line-keys '(harness-task-id harness-task-section harness-task-tail)
+  "Text properties naming what the lines of a board belong to.
+A task's card, a column's heading, or one of the lines above the box.")
+
+(defun harness-ui-tasks--line-key (pos)
+  "Return (PROPERTY . VALUE) naming what the text at POS belongs to, or nil."
+  (cl-loop for prop in harness-ui-tasks--line-keys
+           for value = (get-text-property pos prop)
+           when value return (cons prop value)))
+
+(defun harness-ui-tasks--key-start (key)
+  "Return where the text KEY names starts, or nil when there is none.
+KEY is a (PROPERTY . VALUE) from `harness-ui-tasks--line-key'."
+  (save-excursion
+    (goto-char (point-min))
+    (when-let* ((match (text-property-search-forward (car key) (cdr key) #'equal)))
+      (prop-match-beginning match))))
+
+(defun harness-ui-tasks--box-start ()
+  "Where the compose box's line starts, prompt included; nil before it is drawn."
+  (and (harness-compose-live-p) harness-compose-overlay
+       (eq (overlay-buffer harness-compose-overlay) (current-buffer))
+       (overlay-start harness-compose-overlay)))
+
+(defun harness-ui-tasks--button-at (pos)
+  "Return (ID START END) of the button at POS, or nil.
+ID is what `harness-ui-tasks--button' named it, else its label."
+  (when (get-text-property pos 'button)
+    (let* ((id (get-text-property pos 'harness-task-button))
+           (prop (if id 'harness-task-button 'button))
+           (start (or (previous-single-property-change (1+ pos) prop) (point-min)))
+           (end (or (next-single-property-change pos prop) (point-max))))
+      (list (or id (buffer-substring-no-properties start end)) start end))))
+
+(defun harness-ui-tasks--find-button (id from to)
+  "Return (ID START END) of the button named ID between FROM and TO, or nil."
+  (let ((pos from) found)
+    (while (and (not found) (< pos to))
+      (let ((button (harness-ui-tasks--button-at pos)))
+        (if (and button (equal (car button) id))
+            (setq found button)
+          (setq pos (if button (nth 2 button) (or (next-single-property-change pos 'button nil to) to))))))
+    found))
+
+(defun harness-ui-tasks--aligned-p (pos)
+  "Non-nil when POS is right of an :align-to space on its line.
+What is there is aligned to the window's right edge: a card's facts or
+buttons."
+  (let ((bol (save-excursion (goto-char pos) (line-beginning-position))))
+    (cl-loop for p from (1- pos) downto bol
+             thereis (eq (car-safe (get-text-property p 'display)) 'space))))
+
 (defun harness-ui-tasks--anchor (pos)
-  "Return what POS is on in the board as (KEY COLUMN POS), or nil in the tail.
-KEY is a task id or a section symbol; it survives a redraw, POS does not."
-  (when (and harness-ui-tasks--list-end (< pos harness-ui-tasks--list-end))
-    (let ((key (or (get-text-property pos 'harness-task-id)
-                   (get-text-property pos 'harness-task-section))))
-      (list key (save-excursion (goto-char pos) (- pos (line-beginning-position))) pos))))
+  "Return where POS is on the board in terms a redraw keeps; nil before one.
+In the compose box, its prompt included, that is (box . OFFSET) from the
+box's start, and after the box (eob).  Anywhere else it is
+\(KEY LINE COLUMN BUTTON POS):
+
+KEY names the card, heading or line above the box POS is on, else the
+nearest one above it (nil above them all), as `harness-ui-tasks--line-key'
+does, and LINE counts the lines from KEY's first one down to POS's: a
+card has two, its buttons on the second.
+
+COLUMN is POS's place on its line: (start . N) characters in, or
+\(end . N) from the end right of an :align-to space, where the text
+aligned to the right edge stays when the text on its left changes length.
+
+BUTTON is (ID . OFFSET) when POS is on a button: ID as
+`harness-ui-tasks--button-at' returns it, OFFSET into the button.
+
+POS itself places what KEY no longer finds: a task gone."
+  (when harness-ui-tasks--list-end
+    (let ((box (harness-ui-tasks--box-start)))
+      (cond
+       ((and box (> pos harness-compose-end)) (list 'eob))
+       ((and box (>= pos box)) (cons 'box (- pos harness-compose-start)))
+       (t
+        (save-excursion
+          (goto-char pos)
+          (let* ((bol (line-beginning-position))
+                 (column (if (harness-ui-tasks--aligned-p pos)
+                             (cons 'end (- (line-end-position) pos))
+                           (cons 'start (- pos bol))))
+                 (button (when-let* ((b (harness-ui-tasks--button-at pos)))
+                           (cons (car b) (- pos (nth 1 b)))))
+                 (line 0)
+                 key)
+            (goto-char bol)
+            ;; Up to the nearest line that belongs to something...
+            (while (and (null (setq key (harness-ui-tasks--line-key (point)))) (not (bobp)))
+              (forward-line -1)
+              (cl-incf line))
+            ;; ...and up to its first line.
+            (while (and key (not (bobp)) (equal key (harness-ui-tasks--line-key (1- (point)))))
+              (forward-line -1)
+              (cl-incf line))
+            (list key line column button pos))))))))
 
 (defun harness-ui-tasks--anchor-position (anchor)
-  "Return the position ANCHOR points at after a redraw."
-  (let ((match (and (car anchor)
-                    (save-excursion
-                      (goto-char (point-min))
-                      (text-property-search-forward
-                       (if (symbolp (car anchor)) 'harness-task-section 'harness-task-id)
-                       (car anchor) #'equal)))))
-    (if match
-        (save-excursion
-          (goto-char (prop-match-beginning match))
-          (min (+ (point) (nth 1 anchor)) (line-end-position)))
-      (min (nth 2 anchor) (max (point-min) (1- harness-ui-tasks--list-end))))))
+  "Return the position ANCHOR, from `harness-ui-tasks--anchor', is at now.
+On the line ANCHOR names, at its column, or on its button wherever that
+moved on the line; never on another button, where a key would do
+something else, but at the start of the line instead."
+  (let ((board-end (max (point-min) (1- harness-ui-tasks--list-end)))
+        (box (harness-ui-tasks--box-start)))
+    (pcase anchor
+      ('(eob) (point-max))
+      (`(box . ,offset)
+       (if box (max box (min (+ harness-compose-start offset) harness-compose-end)) (point-max)))
+      (`(,key ,line ,column ,button ,pos)
+       (let ((start (if key (harness-ui-tasks--key-start key) (point-min))))
+         (cond
+          ;; A line above the box gone, the error say: the first one left.
+          ((and (null start) (eq (car key) 'harness-task-tail))
+           (marker-position harness-ui-tasks--list-end))
+          ;; A task gone: about where it was, on the board.
+          ((null start) (min pos board-end))
+          (t
+           (save-excursion
+             (goto-char start)
+             (forward-line line)
+             ;; A line counted from the board stays on the board.
+             (when (and (< start harness-ui-tasks--list-end) (>= (point) harness-ui-tasks--list-end))
+               (goto-char board-end)
+               (forward-line 0))
+             (let* ((bol (point))
+                    (eol (line-end-position))
+                    (at (pcase column
+                          (`(end . ,n) (max bol (- eol n)))
+                          (`(,_ . ,n) (min eol (+ bol n)))))
+                    (same (and button (harness-ui-tasks--find-button (car button) bol eol))))
+               (cond
+                (same (min (+ (nth 1 same) (cdr button)) (1- (nth 2 same))))
+                ((harness-ui-tasks--button-at at) bol)
+                (t at)))))))))))
+
+(defun harness-ui-tasks--places ()
+  "Return where point and each window showing the board are, as anchors.
+`harness-ui-tasks--restore' puts them back there after a redraw."
+  (cons (harness-ui-tasks--anchor (point))
+        (mapcar (lambda (w) (list w (harness-ui-tasks--anchor (window-start w))
+                                  (harness-ui-tasks--anchor (window-point w))))
+                (get-buffer-window-list nil nil t))))
+
+(defun harness-ui-tasks--restore (places)
+  "Put point and the windows back at PLACES, from `harness-ui-tasks--places'."
+  (when (car places) (goto-char (harness-ui-tasks--anchor-position (car places))))
+  (pcase-dolist (`(,w ,start ,pt) (cdr places))
+    (when (and (window-live-p w) (eq (window-buffer w) (current-buffer)))
+      (when pt (set-window-point w (harness-ui-tasks--anchor-position pt)))
+      (when start (set-window-start w (harness-ui-tasks--anchor-position start) t)))))
 
 (defun harness-ui-tasks--render ()
   "Redraw the board region, leaving the compose box alone.
-Point and every window showing the board stay on the same task."
+Point and every window showing the board stay where they were: on the
+same line of the same task, on the same button (`harness-ui-tasks--anchor')."
   (when (harness-ui-tasks--board-p (current-buffer))
     (let* ((inhibit-read-only t)
            (buffer-undo-list t)
-           (own (harness-ui-tasks--anchor (point)))
-           (windows (mapcar (lambda (w) (list w (window-start w) (harness-ui-tasks--anchor (window-point w))))
-                            (get-buffer-window-list nil nil t))))
+           (places (harness-ui-tasks--places)))
       (unless harness-ui-tasks--list-end
         (setq harness-ui-tasks--list-end (copy-marker (point-min) t)))
       (save-excursion
@@ -526,11 +694,7 @@ Point and every window showing the board stay on the same task."
         (put-text-property (point-min) (point) 'read-only t)
         (put-text-property (point-min) (point) 'keymap harness-ui-tasks-board-map)
         (harness-ui-tasks--compose-buttons-keymap (point-min) (point)))
-      (when own (goto-char (harness-ui-tasks--anchor-position own)))
-      (pcase-dolist (`(,w ,start ,anchor) windows)
-        (when (window-live-p w)
-          (when anchor (set-window-point w (harness-ui-tasks--anchor-position anchor)))
-          (set-window-start w (min start (point-max)) t)))
+      (harness-ui-tasks--restore places)
       (set-buffer-modified-p nil)
       (force-mode-line-update))))
 
@@ -540,7 +704,8 @@ Point and every window showing the board stay on the same task."
     (while (< pos end)
       (let ((next (or (next-single-property-change pos 'button nil end) end)))
         (when (get-text-property pos 'button)
-          (put-text-property pos next 'keymap (make-composed-keymap (list button-map harness-ui-tasks-board-map))))
+          (put-text-property pos next 'keymap (make-composed-keymap (list harness-ui-tasks-button-map
+                                                                          harness-ui-tasks-board-map))))
         (setq pos next)))))
 
 (defun harness-ui-tasks--compose-label ()
@@ -560,7 +725,7 @@ Point and every window showing the board stay on the same task."
 
 (defun harness-ui-tasks--setting-button (label command help)
   "A button LABEL running the session setting COMMAND on the new-task settings."
-  (propertize (harness-ui-tasks--button label (lambda () (call-interactively command)) help)
+  (propertize (harness-ui-tasks--button label (lambda () (call-interactively command)) help command)
               'face 'harness-dim-face))
 
 (defun harness-ui-tasks--new-settings-line ()
@@ -618,16 +783,17 @@ for the compose box, so a longer line would take two.  A new task's
 label carries the Submit / Refine toggle, which the label makes room for."
   (let ((room (1- (harness-ui-tasks--width))))
     (when harness-ui-tasks--error
-      (insert (harness-ui-tasks--fit (propertize (concat "  " harness-ui-tasks--error)
+      (harness-ui-tasks--insert-tail-line
+       'error (harness-ui-tasks--fit (propertize (concat "  " harness-ui-tasks--error)
                                                  'face 'harness-tool-error-face)
-                                     room)
-              "\n"))
+                                     room)))
     (let* ((cancel (if harness-ui-tasks--target
                        (concat "  " (harness-ui-tasks--button
                                      "[cancel]" #'harness-ui-tasks-compose-reset
                                      (if (eq (car harness-ui-tasks--target) 'answer)
                                          "Back to a new task (C-g); the question stays waiting"
-                                       "Back to a new task (C-g)")))
+                                       "Back to a new task (C-g)")
+                                     'harness-ui-tasks-compose-reset))
                      ""))
            (toggle (if harness-ui-tasks--target "" (concat "   " (harness-ui-tasks--mode-toggle))))
            (label (harness-ui-tasks--fit (concat " " (harness-ui-tasks--compose-label))
@@ -635,27 +801,39 @@ label carries the Submit / Refine toggle, which the label makes room for."
       ;; Appended, so the dim settings note keeps its own face.
       (add-face-text-property 0 (length label) 'harness-label-face t label)
       ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
-      (insert (harness-ui-tasks--fit (concat label toggle cancel) room) "\n"))
+      (harness-ui-tasks--insert-tail-line 'label (harness-ui-tasks--fit (concat label toggle cancel) room)))
     (unless harness-ui-tasks--target
       (let ((line (harness-ui-tasks--new-settings-line)))
         (unless (string-empty-p line)
-          (insert (harness-ui-tasks--fit line room) "\n"))))
-    (harness-compose-insert-attachments)))
+          (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
+    (let ((start (point)))
+      (harness-compose-insert-attachments)
+      (put-text-property start (point) 'harness-task-tail 'attachments))))
+
+(defun harness-ui-tasks--insert-tail-line (key text)
+  "Insert TEXT as a line above the compose box, named KEY for redraws.
+A redraw keeps point on the line of the same KEY (`harness-ui-tasks--anchor')."
+  (let ((start (point)))
+    (insert text "\n")
+    (put-text-property start (point) 'harness-task-tail key)))
 
 (defun harness-ui-tasks--refit-tail ()
   "Fit the lines between the board and the compose box to the window again.
-The box itself is left alone, so typing or completing in it carries on."
+The box itself is left alone, so typing or completing in it carries on,
+and point on those lines stays there."
   (when (and (harness-ui-tasks--board-p (current-buffer)) harness-ui-tasks--list-end
              harness-compose-overlay (eq (overlay-buffer harness-compose-overlay) (current-buffer)))
     (let ((inhibit-read-only t)
           (buffer-undo-list t)
-          (list-end (marker-position harness-ui-tasks--list-end)))
+          (list-end (marker-position harness-ui-tasks--list-end))
+          (places (harness-ui-tasks--places)))
       (save-excursion
         (delete-region list-end (overlay-start harness-compose-overlay))
         (goto-char list-end)
         (harness-ui-tasks--insert-tail-head)
         (put-text-property list-end (point) 'read-only t))
       (set-marker harness-ui-tasks--list-end list-end)
+      (harness-ui-tasks--restore places)
       (set-buffer-modified-p nil))))
 
 (defun harness-ui-tasks--mode-toggle ()
@@ -674,7 +852,8 @@ to the other mode, as `harness-ui-tasks-toggle-refine' does."
        (harness-ui-tasks--button
         (concat (harness-ui-icon icon) " " label)
         (lambda () (harness-ui-tasks--set-refine (not harness-ui-tasks--refine)))
-        (format "%s (click or %s to switch to %s)" help keys other))
+        (format "%s (click or %s to switch to %s)" help keys other)
+        'harness-ui-tasks-toggle-refine)
        'face 'harness-task-choice-face))))
 
 (defun harness-ui-tasks--set-refine (refine)
@@ -697,19 +876,15 @@ when it is positive and submit otherwise."
 
 (defun harness-ui-tasks--render-tail (&optional text)
   "Draw the error line, the compose label, the attachments and the compose box.
-TEXT replaces the compose contents; without it they are kept."
+TEXT replaces the compose contents; without it they are kept.  Point and
+the windows showing the board stay where they were: at the same spot of
+the box, or on the same line above it (`harness-ui-tasks--anchor')."
   (when (harness-ui-tasks--board-p (current-buffer))
     (harness-compose-capture)
     (let* ((inhibit-read-only t)
            (buffer-undo-list t)
-           (offset (and (harness-compose-in-p) (- (point) harness-compose-start)))
            (list-end (marker-position harness-ui-tasks--list-end))
-           ;; Windows whose point is in the tail go back to the same spot of the box.
-           (windows (mapcar (lambda (w)
-                              (let ((p (window-point w)))
-                                (cons w (and (harness-compose-live-p) (>= p list-end)
-                                             (max 0 (- p harness-compose-start))))))
-                            (get-buffer-window-list nil nil t))))
+           (places (harness-ui-tasks--places)))
       (save-excursion
         (delete-region list-end (point-max))
         (goto-char list-end)
@@ -717,11 +892,8 @@ TEXT replaces the compose contents; without it they are kept."
         (put-text-property list-end (point) 'read-only t)
         (harness-compose-insert text))
       (set-marker harness-ui-tasks--list-end list-end)
-      (pcase-dolist (`(,w . ,off) windows)
-        (when (and off (window-live-p w))
-          (set-window-point w (min (+ harness-compose-start off) harness-compose-end))))
-      (set-buffer-modified-p nil)
-      (when offset (goto-char (min (+ harness-compose-start offset) harness-compose-end))))))
+      (harness-ui-tasks--restore places)
+      (set-buffer-modified-p nil))))
 
 (defun harness-ui-tasks--placeholder ()
   "Return the hint for the empty compose box."

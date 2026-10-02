@@ -1063,8 +1063,14 @@ one-click answers to a blocked task's question or permission, and a
 compose box that submits a task, edits a pending one, messages a
 task's session or answers its question (`C-g` leaves an edit, message
 or answer for a new task again: a question stays waiting, never
-cancelled).  RET opens the session.  The session setting commands
-change the task at point, or from the compose box the settings the next
+cancelled).  RET opens the session.  Redraws, after every change and
+on every tick of the clock, leave point and each window where they
+were: on the same line of the same card (its buttons are on the
+second), on the same button, on the same line above the box; never on
+another button.  Any click on a button pushes it, a slow one too, rather
+than reaching the board's own click, which opens the session.  The
+session setting commands change the task at point, or from the compose
+box the settings the next
 task starts with (shown as buttons under the New task label).  A
 Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
