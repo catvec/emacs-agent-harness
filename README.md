@@ -61,11 +61,12 @@ does on the task board).
 
 In a chat buffer: `C-c C-c` sends (steering the agent if it is mid-turn),
 `RET` inserts a newline, `C-c C-k` cancels the turn, `C-c C-q` queues
-for the next turn, `@` completes project files as attachments, `/`
-completes skills, `C-c C-a` attaches a file, `C-c C-v` pastes a
-clipboard image, `TAB` folds a block.  Typing anywhere goes to the
-compose box, `?` included, so the menu is `C-c a ?` there (or the
-`[menu]` button in the header line).
+for the next turn, `@` completes project files as attachments (part of
+a name finds a file in any subdirectory), `/` completes skills,
+`C-c C-a` attaches a project file found the same way (`C-u C-c C-a`:
+any file), `C-c C-v` pastes a clipboard image, `TAB` folds a block.
+Typing anywhere goes to the compose box, `?` included, so the menu is
+`C-c a ?` there (or the `[menu]` button in the header line).
 Permission and question panels appear inline above the compose box; the
 mode line shows how many sessions need you from any buffer.
 Opening a closed (inactive) session shows it without waking it; it keeps

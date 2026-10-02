@@ -798,6 +798,8 @@
           (should (= (nth 1 capf) (point)))
           (should (equal "not" (buffer-substring (nth 0 capf) (nth 1 capf))))
           (should (member "notes.txt" (all-completions "not" (nth 2 capf))))
+          ;; The @ starts completion: popups needing a few characters show at once.
+          (should (eq t (plist-get (nthcdr 3 capf) :company-prefix-length)))
           ;; Choosing a file turns the token into an attachment chip.
           (delete-region (nth 0 capf) (nth 1 capf))
           (insert "notes.txt")
@@ -816,6 +818,151 @@
         (should-not (harness-compose-completion-at-point))
         (should (harness-compose-skill-reference-p "please /review this"))
         (should-not (harness-compose-skill-reference-p "a/review"))))))
+
+(defun harness-ui-chat-test-matches (input table)
+  "Return the candidates of TABLE that INPUT completes to, without properties."
+  (let ((all (completion-all-completions input table nil (length input))))
+    (when (consp all) (setcdr (last all) nil))
+    (mapcar #'substring-no-properties all)))
+
+(ert-deftest harness-ui-chat-completion-files-arrive-late ()
+  ;; An @ token typed before the project's files are listed is offered
+  ;; them once they are, by the table it already has, and the completion
+  ;; UI is asked again: it found nothing the first time.
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (listing (harness-make-promise))
+           (asked nil))
+      (set-window-buffer (selected-window) buf)
+      (with-current-buffer buf
+        (setq harness-compose--files nil)
+        (cl-letf (((symbol-function 'harness-files-list-limited) (lambda (&rest _) listing))
+                  ((symbol-function 'harness-compose--corfu-delay) (lambda () 0.01))
+                  ((symbol-function 'harness-compose--popup) (lambda () (push (harness-compose--token) asked))))
+          (harness-ui-chat-test-type buf "see @harn")
+          (let ((table (nth 2 (harness-compose-completion-at-point))))
+            (should-not (harness-ui-chat-test-matches "" table))
+            (harness-resolve listing '("notes.txt" "harness.el" "lisp/ui/harness-ui-compose.el"))
+            ;; Part of a name finds files in subdirectories too.
+            (should (equal '("harness.el" "lisp/ui/harness-ui-compose.el")
+                           (sort (harness-ui-chat-test-matches "harn" table) #'string<)))
+            (harness-test-wait (lambda () asked) 5 "the completion UI asked again")
+            (should (equal '((9 . "@harn")) asked))))))))
+
+(ert-deftest harness-ui-chat-completion-survives-redraws ()
+  ;; Popups that show as you type (corfu, company) give up when the
+  ;; buffer changed after the key, and a chat changes whenever its
+  ;; session streams.  Once the token stops changing the box asks them
+  ;; again, whatever changed outside it; a command that leaves the token
+  ;; as it was, or leaves it, asks nothing.
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (asked nil))
+      (set-window-buffer (selected-window) buf)
+      (with-current-buffer buf
+        (setq harness-compose--files '("notes.txt" "src/harness-thing.el"))
+        (cl-letf (((symbol-function 'harness-compose--corfu-delay) (lambda () 0.05))
+                  ((symbol-function 'harness-compose--popup) (lambda () (push (harness-compose--token) asked))))
+          (harness-ui-chat-test-type buf "see @har")
+          (harness-compose--after-command)
+          (harness-chat--append-local-block "hint" "a reply streams in above the box")
+          (harness-test-wait (lambda () asked) 5 "the completion UI asked again")
+          (should (equal '((8 . "@har")) asked))
+          (setq asked nil)
+          (harness-compose--after-command)
+          (insert "n")
+          (harness-compose--after-command)
+          (insert " ")
+          (harness-compose--after-command)
+          (accept-process-output nil 0.3)
+          (should-not asked))))))
+
+(ert-deftest harness-ui-chat-completion-popup-asks-idle-uis ()
+  ;; The box asks corfu and company, each when it pops up as you type
+  ;; and is not showing already, after the longest of their delays.
+  (let ((calls nil))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'corfu-auto--complete-deferred) (lambda (&rest _) (push 'corfu calls)))
+                ((symbol-function 'company-idle-begin)
+                 (lambda (buf win tick pos)
+                   (should (equal (list buf win tick pos)
+                                  (list (current-buffer) (selected-window) (buffer-chars-modified-tick) (point))))
+                   (push 'company calls))))
+        (should-not (harness-compose--corfu-delay))
+        (should-not (harness-compose--company-delay))
+        (harness-compose--popup)
+        (should-not calls)
+        (setq-local corfu-mode t corfu-auto t corfu-auto-delay 0.2
+                    company-mode t company-idle-delay (lambda () 0.3) company-candidates nil)
+        (should (= 0.2 (harness-compose--corfu-delay)))
+        (should (= 0.3 (harness-compose--company-delay)))
+        (harness-compose--popup)
+        (should (equal '(company corfu) calls))
+        (setq calls nil)
+        (let ((completion-in-region-mode t))
+          (setq-local company-candidates '("notes.txt"))
+          (harness-compose--popup))
+        (should-not calls)
+        ;; Company without an idle delay pops up only when asked to.
+        (setq-local company-idle-delay nil company-candidates nil)
+        (harness-compose--popup)
+        (should (equal '(corfu) calls))))))
+
+(ert-deftest harness-ui-chat-attach-command-finds-project-files ()
+  ;; C-c C-a reads a project file by part of its name, from any
+  ;; subdirectory, over the files @ completes; a listing still running
+  ;; fills the candidates in.  With a prefix argument, or when the
+  ;; project lists no files, any file is read instead.
+  (harness-ui-chat-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (deep (expand-file-name "lisp/ui/harness-ui-compose.el" cwd))
+           (_ (progn (let ((default-directory cwd)) (call-process "git" nil nil nil "init" "-q"))
+                     (make-directory (file-name-directory deep) t)
+                     (with-temp-file deep (insert ";; x"))
+                     (with-temp-file (expand-file-name "notes.txt" cwd) (insert "x"))))
+           (sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))
+           (buf (harness-ui-chat-test-open sid))
+           (other (make-temp-file "harness-attach-"))
+           (seen nil))
+      (unwind-protect
+          (with-current-buffer buf
+            (harness-test-wait (lambda () (member "lisp/ui/harness-ui-compose.el" harness-compose--files))
+                               5 "files listed")
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt table &rest _)
+                         (setq seen (list :category (completion-metadata-get (completion-metadata "" table nil) 'category)
+                                          :matches (harness-ui-chat-test-matches "compose" table)))
+                         (car (plist-get seen :matches))))
+                      ((symbol-function 'read-file-name) (lambda (&rest _) (error "Browsed"))))
+              (call-interactively #'harness-compose-add-attachment))
+            (should (eq 'harness-compose-file (plist-get seen :category)))
+            (should (equal '("lisp/ui/harness-ui-compose.el") (plist-get seen :matches)))
+            (should (equal (list deep) (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments)))
+            ;; The list is still being made: the candidates come once it is.
+            (setq harness-compose--files nil harness-compose-attachments nil)
+            (let ((listing (harness-make-promise)))
+              (cl-letf (((symbol-function 'harness-files-list-limited) (lambda (&rest _) listing))
+                        ((symbol-function 'completing-read)
+                         (lambda (_prompt table &rest _)
+                           (should-not (harness-ui-chat-test-matches "" table))
+                           (harness-resolve listing '("notes.txt" "lisp/ui/harness-ui-compose.el"))
+                           (car (harness-ui-chat-test-matches "notes" table))))
+                        ((symbol-function 'read-file-name) (lambda (&rest _) (error "Browsed"))))
+                (call-interactively #'harness-compose-add-attachment)))
+            (should (equal (list (expand-file-name "notes.txt" cwd))
+                           (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments)))
+            ;; Any file: with a prefix argument, or outside a project.
+            (setq harness-compose-attachments nil)
+            (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) other))
+                      ((symbol-function 'completing-read) (lambda (&rest _) (error "Completed"))))
+              (let ((current-prefix-arg '(4)))
+                (call-interactively #'harness-compose-add-attachment))
+              (should (equal (list other) (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments)))
+              (setq harness-compose-attachments nil)
+              (cl-letf (((symbol-function 'harness-files-list-limited) (lambda (&rest _) (harness-resolved nil))))
+                (call-interactively #'harness-compose-add-attachment))
+              (should (equal (list other) (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments)))))
+        (delete-file other)))))
 
 (ert-deftest harness-ui-chat-test-compose-keys ()
   "C-c C-c sends, RET adds a newline, C-c C-k cancels."
