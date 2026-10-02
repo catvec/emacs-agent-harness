@@ -11,6 +11,9 @@
 ;;   notifications and agent→client requests to hooks other UI modules
 ;;   join;
 ;; - a cache of session plists kept fresh from `_harness/session' updates;
+;; - a cache of the harness's tools, so views name each tool by its
+;;   label (Read file) rather than the name the model calls it by
+;;   (read_file);
 ;; - a cache of each provider's billing and plan quota kept fresh from
 ;;   `provider/quota-updated' events, and the helpers that show what a
 ;;   session cost: a price when it is billed per token, the plan's name
@@ -80,7 +83,13 @@ The tool ran and reported an error." :group 'harness-ui)
 The permission system refused the call, so it never ran." :group 'harness-ui)
 
 (defface harness-tool-title-face '((t :inherit (font-lock-function-name-face bold)))
-  "Face of a tool call's title." :group 'harness-ui)
+  "Face of a tool call's title: the tool's label, such as \"Read file\"." :group 'harness-ui)
+
+(defface harness-tool-subject-face '((t))
+  "Face of what a tool call is about, after the tool's label in its title.
+The path a call reads, the command it runs.  It sets nothing by
+default, so the text keeps the face of what it is drawn on."
+  :group 'harness-ui)
 
 (defface harness-thinking-face '((t :inherit shadow :slant italic))
   "Face of thinking text." :group 'harness-ui)
@@ -280,6 +289,8 @@ initialize: one it let go of for another closes on purpose."
   (let ((conn (let ((harness-acp-token (or token harness-acp-token)))
                 (harness-acp-connect address))))
     (setq harness-ui-connection conn)
+    ;; Another harness, or the same one started again, may have other tools.
+    (harness-ui--forget-tools)
     (harness-acp-set-handler conn #'harness-ui--dispatch)
     (harness-acp-on-close conn (lambda ()
                                  (when (eq conn harness-ui-connection)
@@ -450,6 +461,8 @@ tasks among them carry on once the process is back (see
        (when (member event '("session/created" "session/deleted"))
          (harness-ui-refresh-sessions))
        (when (equal event "harness/reloaded")
+         ;; Reloaded code may label its tools anew: views fetch them again.
+         (harness-ui--forget-tools)
          (run-hooks 'harness-ui-redraw-hook))
        (when (member event '("provider/models-updated" "harness/reloaded"))
          (harness-ui-refresh-models))
@@ -620,6 +633,117 @@ has no port, the UI stays connected where it was."
                      (run-hooks 'harness-ui-redraw-hook)
                      (when callback (funcall callback models)))
                    (unless callback #'ignore)))
+
+;;;; Tool catalogue cache
+;;
+;; A tool has a name the model calls it by (read_file) and a label
+;; people read (Read file).  Views show the label, looked up here in the
+;; specs of every tool of the connected harness (`tools/list' without a
+;; session, so the tools of any transcript are there), fetched once per
+;; connection and again after a reload.
+
+(defvar harness-ui--tools nil
+  "Tool name -> spec plist (`tools/list' wire shape) of the connected harness.
+Nil until fetched; see `harness-ui-fetch-tools'.")
+
+(defvar harness-ui--tools-fetch nil
+  "The promise of the tool specs being fetched, or nil.")
+
+(defvar harness-ui--tools-generation 0
+  "Counter bumped when the cached tool specs go stale; drops late answers.")
+
+(defun harness-ui--forget-tools ()
+  "Drop the cached tool specs; the next `harness-ui-fetch-tools' fetches them."
+  (setq harness-ui--tools nil harness-ui--tools-fetch nil)
+  (cl-incf harness-ui--tools-generation))
+
+(defun harness-ui-fetch-tools ()
+  "Return a promise of the table of tool specs, fetched unless cached.
+The table maps tool names to spec plists.  A failed fetch resolves to
+an empty table, which is not cached: views then show tool names until
+a later fetch succeeds."
+  (cond
+   (harness-ui--tools (harness-resolved harness-ui--tools))
+   (harness-ui--tools-fetch)
+   (t
+    (let ((gen harness-ui--tools-generation)
+          (fetch (harness-make-promise)))
+      ;; Recorded before the handlers can run: a request that settles at
+      ;; once runs them right away, and they let go of it.
+      (setq harness-ui--tools-fetch fetch)
+      (harness-then
+       (harness-ui-request "_harness/tools/list" nil)
+       (lambda (specs)
+         (let ((table (make-hash-table :test 'equal)))
+           (dolist (spec specs)
+             (when (plist-get spec :name)
+               (puthash (format "%s" (plist-get spec :name)) spec table)))
+           (when (= gen harness-ui--tools-generation)
+             (setq harness-ui--tools table))
+           (when (eq harness-ui--tools-fetch fetch)
+             (setq harness-ui--tools-fetch nil))
+           (harness-resolve fetch table)))
+       (lambda (err)
+         (when (eq harness-ui--tools-fetch fetch)
+           (setq harness-ui--tools-fetch nil))
+         (harness-log 'warn "ui: fetching the tools failed: %s" (harness-error-message err))
+         (harness-resolve fetch (make-hash-table :test 'equal))))
+      fetch))))
+
+(defun harness-ui-tool (name)
+  "Return the cached spec of tool NAME, or nil."
+  (and harness-ui--tools name (gethash (format "%s" name) harness-ui--tools)))
+
+(defun harness-ui-tool-label (name)
+  "Return the name people read for tool NAME: its label, such as \"Read file\".
+A tool the cache does not know (not fetched yet, or one a model made
+up) reads as NAME itself."
+  (let ((label (plist-get (harness-ui-tool name) :label)))
+    (if (and (stringp label) (not (string-empty-p label)))
+        label
+      (format "%s" (or name "tool")))))
+
+(defun harness-ui-tool-title-parts (name title)
+  "Split TITLE, the title of a call to tool NAME, into (LABEL . SUBJECT).
+A title is the tool's label, then \": \" and what the call is about
+\(\"Read file: x.el\"), or the label alone, when SUBJECT is nil.  One
+recorded before tools had labels starts with NAME instead (\"read_file
+x.el\"), which gives way to the label.  A title of another shape is
+all SUBJECT, with a nil LABEL; without a title the call is its label."
+  (let ((label (harness-ui-tool-label name))
+        (name (and name (format "%s" name))))
+    (cond
+     ((or (not (stringp title)) (string-empty-p title)) (cons label nil))
+     ((equal title label) (cons label nil))
+     ((string-prefix-p (concat label ": ") title)
+      (cons label (substring title (+ (length label) 2))))
+     ((and name (equal title name)) (cons label nil))
+     ((and name (string-prefix-p (concat name " ") title))
+      (cons label (string-trim-left (substring title (length name)))))
+     (t (cons nil title)))))
+
+(defun harness-ui-tool-title (name title)
+  "Return TITLE, the title of a call to tool NAME, as people should read it.
+That is the tool's label and what the call is about, \"Read file:
+x.el\", whatever NAME's label was when TITLE was recorded (see
+`harness-ui-tool-title-parts')."
+  (pcase-let ((`(,label . ,subject) (harness-ui-tool-title-parts name title)))
+    (cond ((null subject) label)
+          ((null label) subject)
+          (t (concat label ": " subject)))))
+
+(defun harness-ui-tool-title-string (name title &optional max)
+  "Return the title of a call to tool NAME, TITLE, styled for a header.
+The tool's label is in `harness-tool-title-face' and what the call is
+about follows in `harness-tool-subject-face', which tells them apart
+instead of the colon; a title of another shape is all in the title
+face.  The first line only, cut to MAX characters when MAX is given."
+  (pcase-let ((`(,label . ,subject) (harness-ui-tool-title-parts name title)))
+    (let ((text (harness-first-line (if (and label subject) (concat label " " subject) (or label subject)) max)))
+      (if (and label subject (> (length text) (length label)))
+          (concat (propertize (substring text 0 (length label)) 'face 'harness-tool-title-face)
+                  (propertize (substring text (length label)) 'face 'harness-tool-subject-face))
+        (propertize text 'face 'harness-tool-title-face)))))
 
 ;;;; Billing and plan quota cache
 

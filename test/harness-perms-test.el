@@ -121,7 +121,7 @@
 (ert-deftest harness-perms-jail-through-tools-execute ()
   (let ((ran nil))
     (harness-perms-test--setup :permission-mode 'yolo)
-    (harness-define-tool "t_read" :kind 'read :paths (lambda (in) (list (plist-get in :path)))
+    (harness-define-tool "t_read" :label "Read" :kind 'read :paths (lambda (in) (list (plist-get in :path)))
                          :handler (lambda (in _ctx) (setq ran t) (format "read %s" (plist-get in :path))))
     (let ((r (harness-test-await (harness-call 'tools/execute "s1" (list :id "c1" :name "t_read" :input (list :path "/etc/hostname"))))))
       (should (plist-get r :is-error))
@@ -247,7 +247,7 @@
 
 (ert-deftest harness-perms-auto-mode-uses-the-judge ()
   (harness-perms-test--setup :permission-mode 'auto :model "judge:big")
-  (harness-define-tool "t_exec" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
   (let* ((probe (harness-perms-test--judge-provider
                  '((:type start)
                    (:type text :delta "Thinking... {\"decision\":")
@@ -763,9 +763,11 @@ for a request without a session record."
 
 (ert-deftest harness-perms-describe-and-reload ()
   (harness-perms-test--setup)
-  (harness-define-tool "t_titled" :kind 'exec :title (lambda (in) (format "run %s" (plist-get in :cmd))) :handler #'ignore)
-  (should (equal "run ls" (harness-perms-describe-request '(:tool "t_titled" :input (:cmd "ls")))))
-  (should (equal "bash echo hi" (harness-perms-describe-request '(:tool "bash" :input (:command "echo hi\nmore")))))
+  (harness-define-tool "t_titled" :label "Run" :kind 'exec :subject (lambda (in) (plist-get in :cmd)) :handler #'ignore)
+  ;; The tool's label, then what the call is about.
+  (should (equal "Run: ls" (harness-perms-describe-request '(:tool "t_titled" :input (:cmd "ls")))))
+  ;; A tool nobody registered goes by its name, about the first line of its first string.
+  (should (equal "t_unknown: echo hi" (harness-perms-describe-request '(:tool "t_unknown" :input (:command "echo hi\nmore")))))
   ;; Re-running init keeps exactly one handler per stage.
   (harness-perms--init)
   (should (= 7 (length (gethash 'permission/decide harness--filters))))

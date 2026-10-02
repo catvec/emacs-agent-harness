@@ -382,7 +382,7 @@ turn `harness-tasks-require-verification' on themselves."
 (defun harness-tasks-test--hang-tool ()
   "Define the tool `hang', whose first call never returns."
   (let ((calls 0))
-    (harness-define-tool "hang" :description "never returns the first time" :kind 'read
+    (harness-define-tool "hang" :label "Hang" :description "never returns the first time" :kind 'read
                          :handler (lambda (_input _ctx)
                                     (if (= 1 (cl-incf calls)) (harness-make-promise) "ok")))))
 
@@ -798,7 +798,7 @@ commits from call `harness-tasks-test--commit-on-call' on."
              '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
                (:type text :delta "Changed it.")
                (:type done :stop-reason end-turn))))
-       (harness-define-tool "change_shared" :description "edit shared.txt" :kind 'write
+       (harness-define-tool "change_shared" :label "Change shared file" :description "edit shared.txt" :kind 'write
                             :handler (lambda (input ctx)
                                        (let ((cwd (plist-get ctx :cwd)))
                                          (cl-incf harness-tasks-test--calls)

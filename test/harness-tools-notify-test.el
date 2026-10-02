@@ -143,8 +143,11 @@ received, oldest first."
       (should (equal '("message") (plist-get (plist-get notify :schema) :required)))
       (should (eq 'read (plist-get listing :kind)))
       (should (plist-get listing :coalescable))
-      (should (equal "notify Deploy done" (harness-tool-title "notify" '(:title "Deploy done" :message "m"))))
-      (should (equal "notify Tests pass" (harness-tool-title "notify" '(:message "Tests pass\nand more")))))))
+      (should (equal "Notification" (plist-get notify :label)))
+      (should (equal "Notification providers" (plist-get listing :label)))
+      (should (equal "Notification: Deploy done" (harness-tool-title "notify" '(:title "Deploy done" :message "m"))))
+      (should (equal "Notification: Tests pass" (harness-tool-title "notify" '(:message "Tests pass\nand more"))))
+      (should (equal "Notification providers" (harness-tool-title "notification_providers" nil))))))
 
 (provide 'harness-tools-notify-test)
 ;;; harness-tools-notify-test.el ends here

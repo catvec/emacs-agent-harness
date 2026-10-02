@@ -9,6 +9,12 @@
 ;; module is installed every call is denied, so a misconfigured harness
 ;; fails safe.
 ;;
+;; A tool has two names: NAME, the identifier the model calls it by
+;; (read_file), and its `:label', the name people read (Read file),
+;; which every UI shows in its place.  A call's title is the label,
+;; then what the call is about, from the tool's `:subject' function:
+;; "Read file: src/x.el".
+;;
 ;; Some providers have tools of their own that can stand in for a
 ;; harness tool: Claude Code's web search for web_search, say.  A
 ;; provider names the harness tools it has such a counterpart of in its
@@ -20,6 +26,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
 
@@ -34,19 +41,29 @@
   :type 'number :group 'harness)
 
 (cl-defstruct (harness-tool (:copier nil))
-  name description schema handler kind paths-fn coalescable title-fn module timeout)
+  ;; New slots go last, so a tool registered before a reload still reads
+  ;; right should its module fail to load again (see `harness-tools--label').
+  name description schema handler kind paths-fn coalescable subject-fn module timeout label)
 
 (defvar harness-tools (make-hash-table :test 'equal)
   "Tool name -> `harness-tool'.")
 
-(cl-defun harness-define-tool (name &key description schema handler (kind 'meta)
-                                    paths coalescable title timeout)
-  "Register tool NAME.  See docs/architecture.md for the keyword arguments."
+(cl-defun harness-define-tool (name &key label description schema handler (kind 'meta)
+                                    paths coalescable subject timeout)
+  "Register tool NAME.  See docs/architecture.md for the keyword arguments.
+LABEL is required: the name people read, such as \"Read file\" for
+read_file, which the UI shows wherever it names the tool.  SUBJECT is
+a function of a call's input returning what the call is about (the
+path it reads, the command it runs) or nil; it follows the label in
+the call's title (see `harness-tool-title')."
   (unless (functionp handler) (error "Tool %s needs a handler" name))
-  (puthash name (make-harness-tool :name name :description (or description "")
+  (unless (and (stringp label) (not (harness-string-blank-p label)))
+    (error "Tool %s needs a :label, the name people read (such as \"Read file\")" name))
+  (puthash name (make-harness-tool :name name :label (string-trim label)
+                                   :description (or description "")
                                    :schema (or schema '(:type "object" :properties :empty))
                                    :handler handler :kind kind :paths-fn paths
-                                   :coalescable coalescable :title-fn title
+                                   :coalescable coalescable :subject-fn subject
                                    :timeout timeout
                                    :module (and (boundp 'harness--defining-module)
                                                 harness--defining-module))
@@ -57,24 +74,56 @@
   "Return the tool struct for NAME or nil."
   (gethash name harness-tools))
 
+(defun harness-tools--label (tool)
+  "Return the label of TOOL, a `harness-tool', or its name when it has none.
+A tool registered by code from before tools had labels has none: its
+record is a slot short."
+  (or (ignore-errors (harness-tool-label tool))
+      (harness-tool-name tool)))
+
+(defun harness-tools-label (name)
+  "Return the name people read for tool NAME: its label, else NAME itself.
+A tool nobody registered, one a model made up say, has no label."
+  (let ((tool (and name (harness-tool-get name))))
+    (if tool (harness-tools--label tool) (format "%s" (or name "tool")))))
+
 (defun harness-tool-spec (tool)
   "Return the public spec plist of TOOL."
   (list :name (harness-tool-name tool)
+        :label (harness-tools--label tool)
         :description (harness-tool-description tool)
         :schema (harness-tool-schema tool)
         :kind (harness-tool-kind tool)
         :coalescable (and (harness-tool-coalescable tool) t)))
 
+(defun harness-tools--subject (tool input)
+  "Return what a call of TOOL (a struct or nil) with INPUT is about, or nil.
+That is what TOOL's subject function says, nil included; without one,
+or when it fails, the first string in INPUT."
+  (let* ((fn (and tool (harness-tool-subject-fn tool)))
+         (said (and fn
+                    (condition-case err
+                        (list (funcall fn input))
+                      (error (harness-log 'debug "tool %s: subject failed: %S" (harness-tool-name tool) err)
+                             nil))))
+         (subject (if said
+                      (car said)
+                    (cl-loop for (_k v) on input by #'cddr
+                             when (and (stringp v) (not (harness-string-blank-p v)))
+                             return (harness-truncate-end (harness-first-line v) 60)))))
+    (and (stringp subject) (not (harness-string-blank-p subject))
+         (harness-first-line subject))))
+
 (defun harness-tool-title (name input)
-  "Return a short label for a call to NAME with INPUT."
-  (let ((tool (harness-tool-get name)))
-    (or (and tool (harness-tool-title-fn tool)
-             (ignore-errors (funcall (harness-tool-title-fn tool) input)))
-        (let ((first (cl-loop for (_k v) on input by #'cddr
-                              when (stringp v) return v)))
-          (if first
-              (format "%s %s" name (harness-truncate-end (harness-first-line first) 60))
-            name)))))
+  "Return the title of a call to tool NAME with INPUT, for people to read.
+It is the tool's label, then a colon and what the call is about, as
+\"Read file: x.el\" for read_file on x.el; or the label alone when the
+call is about nothing in particular."
+  (let* ((tool (harness-tool-get name))
+         (subject (harness-tools--subject tool input)))
+    (if subject
+        (format "%s: %s" (harness-tools-label name) subject)
+      (harness-tools-label name))))
 
 ;;;; Results
 

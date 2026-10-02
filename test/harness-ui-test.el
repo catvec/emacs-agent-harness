@@ -478,5 +478,76 @@ agenda or Embark for instance."
     (harness-connect-remote " 127.0.0.1:9000 ")
     (should (equal '(process nil nil "127.0.0.1:9000") connected))))
 
+;;;; Tools by their labels
+
+(defmacro harness-ui-test-with-tools (specs &rest body)
+  "Run BODY with the tool cache holding SPECS, as `tools/list' returns them."
+  (declare (indent 1))
+  `(let ((harness-ui--tools (make-hash-table :test 'equal))
+         (harness-ui--tools-fetch nil)
+         (harness-ui--tools-generation 0))
+     (dolist (spec ,specs) (puthash (plist-get spec :name) spec harness-ui--tools))
+     ,@body))
+
+(ert-deftest harness-ui-tools-go-by-their-labels ()
+  "Views name a tool by its label, the name the model calls it by when it has none."
+  (harness-ui-test-with-tools '((:name "read_file" :label "Read file") (:name "bash" :label "Bash"))
+    (should (equal "Read file" (harness-ui-tool-label "read_file")))
+    (should (equal "t_unknown" (harness-ui-tool-label "t_unknown")))
+    ;; A title is the label, then what the call is about.
+    (should (equal '("Read file" . "a.el") (harness-ui-tool-title-parts "read_file" "Read file: a.el")))
+    (should (equal '("Bash" . nil) (harness-ui-tool-title-parts "bash" "Bash")))
+    (should (equal '("Bash" . nil) (harness-ui-tool-title-parts "bash" nil)))
+    ;; One recorded before tools had labels starts with the tool's name.
+    (should (equal '("Read file" . "a.el:1-9") (harness-ui-tool-title-parts "read_file" "read_file a.el:1-9")))
+    (should (equal '("Bash" . nil) (harness-ui-tool-title-parts "bash" "bash")))
+    (should (equal "Read file: a.el" (harness-ui-tool-title "read_file" "read_file a.el")))
+    (should (equal "Read file: a.el" (harness-ui-tool-title "read_file" "Read file: a.el")))
+    ;; A title of another shape, such as a directory prompt's, stays as it is.
+    (should (equal '(nil . "Access ~/notes/") (harness-ui-tool-title-parts "read_file" "Access ~/notes/")))
+    (should (equal "Access ~/notes/" (harness-ui-tool-title "read_file" "Access ~/notes/")))
+    ;; In a header the label's face sets it apart from the rest, in place of the colon.
+    (let ((s (harness-ui-tool-title-string "read_file" "Read file: a.el")))
+      (should (equal "Read file a.el" s))
+      (should (eq 'harness-tool-title-face (get-text-property 0 'face s)))
+      (should (eq 'harness-tool-title-face (get-text-property 8 'face s)))
+      (should (eq 'harness-tool-subject-face (get-text-property 10 'face s))))
+    (let ((s (harness-ui-tool-title-string "read_file" "Read file: a-rather-long-file-name.el" 14)))
+      (should (= 14 (length s))))
+    (let ((s (harness-ui-tool-title-string "read_file" "Access ~/notes/")))
+      (should (equal "Access ~/notes/" s))
+      (should (eq 'harness-tool-title-face (get-text-property 0 'face s))))))
+
+(ert-deftest harness-ui-tools-are-fetched-once-per-connection ()
+  "Every tool's spec is fetched once, again after a reload or reconnect."
+  (harness-ui-test-with-tools nil
+    (setq harness-ui--tools nil)
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (method params)
+                   (push (list method params) asked)
+                   (harness-resolved (list (list :name "bash" :label "Bash"))))))
+        (should (equal "bash" (harness-ui-tool-label "bash")))
+        (let ((table (harness-test-await (harness-ui-fetch-tools))))
+          (should (equal "Bash" (plist-get (gethash "bash" table) :label))))
+        ;; Every tool, not one session's.
+        (should (equal '(("_harness/tools/list" nil)) asked))
+        (should (equal "Bash" (harness-ui-tool-label "bash")))
+        (harness-test-await (harness-ui-fetch-tools))
+        (should (= 1 (length asked)))
+        (harness-ui--forget-tools)
+        (should (equal "bash" (harness-ui-tool-label "bash")))
+        (harness-test-await (harness-ui-fetch-tools))
+        (should (= 2 (length asked)))
+        (should (equal "Bash" (harness-ui-tool-label "bash"))))
+      ;; A failed fetch leaves names in place and is tried again next time.
+      (harness-ui--forget-tools)
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) (harness-rejected '(error "down")))))
+        (let ((table (harness-test-await (harness-ui-fetch-tools))))
+          (should (hash-table-p table))
+          (should (zerop (hash-table-count table))))
+        (should-not harness-ui--tools)
+        (should-not harness-ui--tools-fetch)))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

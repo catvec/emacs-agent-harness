@@ -173,8 +173,8 @@ catalogue changes, the sessions whose window moved get `session/changed`.
  :kind user|assistant|thinking|tool-call|tool-result|hint|compaction|plan
  ;; user / assistant / thinking / hint / compaction / plan:
  :content "text"  :blocks (BLOCK…)          ; blocks only when non-text content exists
- ;; tool-call:
- :tool "read_file" :call-id "toolu_…" :input PLIST :title "read_file src/x.el"
+ ;; tool-call (:title from `harness-tool-title': the tool's label, then what the call is about):
+ :tool "read_file" :call-id "toolu_…" :input PLIST :title "Read file: src/x.el"
  ;; tool-result:
  :call-id "toolu_…" :output "text" :is-error BOOL :attachments (ATTACHMENT…)
  :usage PLIST        ; assistant nodes: this response's usage
@@ -610,21 +610,39 @@ no session process runs.
 
 ```elisp
 (harness-define-tool "read_file"
+  :label "Read file"                      ; required: the name people read
   :description "…"                       ; what the model sees
   :schema '(:type "object" :properties (:path (:type "string" :description "…")) :required ("path"))
   :kind read|write|exec|net|meta          ; permission class
   :paths (lambda (input) (list …))        ; paths touched, for the jail
   :coalescable t                          ; may be folded into a summary block in the UI
-  :title (lambda (input) "read_file x.el") ; short label
+  :subject (lambda (input) "x.el")        ; what a call is about, or nil
   :handler (lambda (input ctx) …))        ; → RESULT | string | promise
 ```
+
+A tool has two names: NAME, the identifier the model calls it by, and
+its `:label`, a short name in sentence case for people ("Read file",
+"Bash", "Web search").  The label is required (`harness-define-tool`
+signals without one) and every UI shows it wherever it names a tool;
+the identifier stays for the model, for configuration (permission
+rules, `harness-perms-auto-allow-tools`) and in the text agents read
+about other sessions (`session_read`).  `harness-tools-label NAME`
+returns the label, or NAME for a tool nobody registered.
+`harness-tool-title NAME INPUT` titles a call: the label, then a colon
+and the `:subject` of INPUT ("Read file: x.el"), or the label alone
+when the subject is nil.  Without a `:subject` function, or when it
+fails, the subject is the first line of the first string in INPUT.
+Tool-call nodes, permission prompts, the activity of a running turn and
+ACP `tool_call` titles all carry this title.
 
 CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
 `:report` accepts a string for progress.  RESULT = `(:content "…"
 :is-error BOOL :attachments (…) :meta PLIST)`.
 
-- `tools/list &optional SESSION-ID` → TOOL-SPECs, filtered through sync
-  filter `agent/tools` (value: list of names; args: session).
+- `tools/list &optional SESSION-ID` → TOOL-SPECs `(:name :label
+  :description :schema :kind :coalescable)`, filtered through sync
+  filter `agent/tools` (value: list of names; args: session).  Without
+  SESSION-ID every registered tool: how UIs learn the labels.
 - `tools/execute SESSION-ID CALL` (CALL = `(:id :name :input)`) → promise of
   RESULT.  Pipeline: lookup → `permission/decide` (async filter) →
   handler (with `harness-tools-timeout`) → context-bomb guard → sync
@@ -1319,44 +1337,45 @@ task's project.
 
 ### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify
 
-Tool names and inputs (all paths relative to cwd or absolute; TRAMP
-prefixes come from the session host):
+Tool names, labels and inputs (all paths relative to cwd or absolute;
+TRAMP prefixes come from the session host):
 
-| tool | input | kind |
-|---|---|---|
-| `read_file` | path, offset, limit | read |
-| `write_file` | path, content | write |
-| `edit_file` | path, old_string, new_string, replace_all | write |
-| `list_dir` | path, depth | read |
-| `glob` | pattern, path | read |
-| `grep` | pattern, path, glob, case_sensitive, max_results | read |
-| `bash` | command, timeout, cwd | exec |
-| `elisp` | code | exec |
-| `emacs_buffers` | filter, all | read |
-| `emacs_buffer` | name, offset, limit | read |
-| `emacs_describe` | symbol | read |
-| `web_search` | query, count | net |
-| `web_fetch` | url, max_chars | net |
-| `emacs_messages` | count | read |
-| `ask_user` | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
-| `request_directory_access` | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
-| `session_info` | — | read |
-| `plan` | plan | meta |
-| `todo_write` | todos | meta |
-| `spawn_agent` | prompt, fork, model, name | meta |
-| `skill_search` / `skill_load` | query / name | read |
-| `session_list` | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
-| `session_search` | query, regexp, all_projects, max_sessions, max_matches | read |
-| `session_read` | session_id, limit, before, kinds, max_chars | read |
-| `session_send` | session_id, message, mode (send/queue), wait | meta |
-| `session_control` | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
-| `session_wait` | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | column (pending/needs-input/active/review/done), include_archived, all_projects | read |
-| `task_submit` | prompt, cwd, model, thinking, refine (for the backlog) | meta |
-| `task_control` | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
-| `task_wait` | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
-| `notify` | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms-auto-allow-tools`) |
-| `notification_providers` | (none) | read |
+| tool | label | input | kind |
+|---|---|---|---|
+| `read_file` | Read file | path, offset, limit | read |
+| `write_file` | Write file | path, content | write |
+| `edit_file` | Edit file | path, old_string, new_string, replace_all | write |
+| `list_dir` | List directory | path, depth | read |
+| `glob` | Find files | pattern, path | read |
+| `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
+| `bash` | Bash | command, timeout, cwd | exec |
+| `elisp` | Emacs Lisp | code | exec |
+| `emacs_buffers` | List buffers | filter, all | read |
+| `emacs_buffer` | Read buffer | name, offset, limit | read |
+| `emacs_describe` | Describe symbol | symbol | read |
+| `web_search` | Web search | query, count | net |
+| `web_fetch` | Fetch page | url, max_chars | net |
+| `emacs_messages` | Emacs messages | count | read |
+| `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
+| `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
+| `session_info` | Session info | — | read |
+| `plan` | Plan | plan | meta |
+| `todo_write` | Todo list | todos | meta |
+| `spawn_agent` | Sub-agent | prompt, fork, model, name | meta |
+| `skill_search` / `skill_load` | Search skills / Load skill | query / name | read |
+| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
+| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read |
+| `session_read` | Read session | session_id, limit, before, kinds, max_chars | read |
+| `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
+| `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
+| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
+| `task_list` | List tasks | column (pending/needs-input/active/review/done), include_archived, all_projects | read |
+| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog) | meta |
+| `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
+| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
+| `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms-auto-allow-tools`) |
+| `notification_providers` | Notification providers | (none) | read |
+| `merge_done` | Finish merge | none | meta (merge module) |
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
@@ -1487,7 +1506,11 @@ runs after every connect, where the chat reopens the closed sessions its
 buffers show, as a harness that just started has them all closed), the face set
 (`harness-user-face`, `harness-agent-face`, `harness-tool-face`,
 `harness-thinking-face`, `harness-hint-face`, warning ramps), the
-session cache updated from `_harness/session` updates, window
+session cache updated from `_harness/session` updates, the tool cache
+(every tool's spec from `_harness/tools/list` without a session,
+fetched once per connection and again after `harness/reloaded`;
+`harness-ui-fetch-tools`), through which views name every tool by its
+label (`harness-ui-tool-label`, `harness-ui-tool-title`), window
 positions (`harness-ui-display-session SID &optional POSITION`; presets
 `right`, `bottom`, `full`, `other`; one session per position, replacing),
 the global keymap and the transient menu `harness-menu` (with a group for
@@ -1519,6 +1542,14 @@ at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
 it.  Switching redraws the options and that area alone, in place, so
 point, the windows and the compose box stay put.
+Tools go by their labels everywhere: a tool block's header shows the
+label in `harness-tool-title-face` and what the call is about after it
+in `harness-tool-subject-face` (the faces stand in for the colon of the
+title), a summary block counts the calls by label ("5 tool calls: Read
+file ×3, Search files, Find files"), and so do the permission panel,
+the activity line and the mode line.  A title recorded before tools had
+labels starts with the tool's name ("read_file x.el"), which the label
+replaces, so old transcripts read the same.
 Auto-scroll follows unless the user scrolled up.  While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a

@@ -132,6 +132,7 @@ sent `harness-tools-notify-rate-limit' notifications already."
              (harness-tool-error (format "Could not send the notification: %s" (harness-error-message err)))))))))))
 
 (harness-define-tool "notify"
+  :label "Notification"
   :description "Send the user a notification: a desktop notification and, where they set one up, a push to their phone (Gotify). Use it to reach the user while they are away from this session: long work finished, or something needs their decision. Keep it short and self-contained; not for routine progress, and never include secrets. Clicking it opens this session. Returns which providers delivered it."
   :schema '(:type "object"
             :properties (:message (:type "string" :description "What the user should know, in a sentence or two.")
@@ -143,11 +144,10 @@ sent `harness-tools-notify-rate-limit' notifications already."
                          :url (:type "string" :description "A link to open when the notification is clicked, where a provider can (Gotify on phones)."))
             :required ("message"))
   :kind 'meta
-  :title (lambda (input)
-           (format "notify %s" (harness-truncate-end
-                                (harness-first-line (or (harness-tools-notify--text (plist-get input :title))
-                                                        (plist-get input :message) ""))
-                                60)))
+  :subject (lambda (input)
+             (harness-first-line (or (harness-tools-notify--text (plist-get input :title))
+                                     (plist-get input :message))
+                                 60))
   :handler #'harness-tools-notify--notify)
 
 ;;;; Providers
@@ -176,15 +176,16 @@ sent `harness-tools-notify-rate-limit' notifications already."
                  "\n\nnotify sends to the providers used by default that are set up; its providers parameter names others."))))))
 
 (harness-define-tool "notification_providers"
+  :label "Notification providers"
   :description "List the notification providers notify can send through: which are set up, which are used by default, and what each does."
   :schema '(:type "object" :properties :empty)
   :kind 'read
   :coalescable t
-  :title (lambda (_input) "notification_providers")
+  :subject #'ignore
   :handler #'harness-tools-notify--providers)
 
 (harness-define-module 'tools-notify
-  :doc "notify and notification_providers: agents reach the user through the notifications module."
+  :doc "Notification and Notification providers: agents reach the user through the notifications module."
   :requires '(tools notifications))
 
 (provide 'harness-tools-notify)

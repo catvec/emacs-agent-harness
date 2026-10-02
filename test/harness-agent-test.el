@@ -19,9 +19,9 @@
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       (harness-define-tool "list_dir" :description "list" :kind 'read
+       (harness-define-tool "list_dir" :label "List directory" :description "list" :kind 'read
                             :handler (lambda (input _ctx) (format "listing of %s" (plist-get input :path))))
-       (harness-define-tool "ask_user" :description "ask" :kind 'meta
+       (harness-define-tool "ask_user" :label "Question" :description "ask" :kind 'meta
                             :handler (lambda (input _ctx) (format "answer to %s: red" (plist-get input :question))))
        ,@body)))
 
@@ -348,7 +348,7 @@ user message after that answer: \"No user message to send\"."
   "Steering sent while a tool runs goes out with that tool's result, and only there."
   (harness-agent-test-with
     (let ((id (harness-agent-test-hosted-session)))
-      (harness-define-tool "slow" :description "slow" :kind 'read
+      (harness-define-tool "slow" :label "Slow" :description "slow" :kind 'read
                            :handler (lambda (_input _ctx)
                                       (harness-call 'agent/prompt id "change of plan")
                                       "slow output"))
@@ -475,8 +475,8 @@ user message after that answer: \"No user message to send\"."
               (:type done :stop-reason end-turn))))
       (harness-add-filter 'permission/decide
                           (lambda (_d next &rest _) (setq decide (lambda () (funcall next '(:behavior allow))))) 5)
-      (harness-define-tool "slow" :description "slow" :kind 'exec
-                           :title (lambda (input) (format "slow %s" (plist-get input :what)))
+      (harness-define-tool "slow" :label "Slow job" :description "slow" :kind 'exec
+                           :subject (lambda (input) (plist-get input :what))
                            :handler (lambda (_input ctx)
                                       (let ((report (plist-get ctx :report)))
                                         (funcall report "compiling\n")
@@ -489,7 +489,8 @@ user message after that answer: \"No user message to send\"."
         (harness-test-wait (lambda () decide) 5 "the permission check")
         (let ((a (harness-call 'agent/activity id)))
           (should (eq 'tool (plist-get a :phase)))
-          (should (equal "slow tests" (plist-get a :title)))
+          ;; Titled with the tool's label, then what the call is about.
+          (should (equal "Slow job: tests" (plist-get a :title)))
           (should (plist-get a :checking)))
         (let ((asked (plist-get (harness-call 'agent/activity id) :since)))
           (sleep-for 0.05)
@@ -583,8 +584,8 @@ The harness has a web_search tool that must never run; a filter on
 `agent/builtin-tools' picks the provider's search whenever it offers one."
   (declare (indent 0))
   `(harness-agent-test-with
-     (harness-define-tool "web_search" :description "search" :kind 'net
-                          :title (lambda (input) (format "web_search %s" (plist-get input :query)))
+     (harness-define-tool "web_search" :label "Web search" :description "search" :kind 'net
+                          :subject (lambda (input) (plist-get input :query))
                           :handler (lambda (&rest _) (error "The harness ran web_search")))
      (harness-add-filter 'agent/builtin-tools
                          (lambda (names _session offered)
@@ -624,14 +625,14 @@ The harness has a web_search tool that must never run; a filter on
       (should (eq 'allow (plist-get (car harness-agent-test-decisions) :behavior)))
       ;; While it ran the turn said so.
       (should (eq 'tool (plist-get activity :phase)))
-      (should (equal "web_search emacs" (plist-get activity :title)))
+      (should (equal "Web search: emacs" (plist-get activity :title)))
       ;; The call and its result, in order, as web_search's.
       (should (equal '(user tool-call tool-result assistant) (harness-agent-test-kinds id)))
       (let ((call (harness-agent-test--node id 'tool-call))
             (result (harness-agent-test--node id 'tool-result)))
         (should (equal "web_search" (plist-get call :tool)))
         (should (equal "ws1" (plist-get call :call-id)))
-        (should (equal "web_search emacs" (plist-get call :title)))
+        (should (equal "Web search: emacs" (plist-get call :title)))
         (should (plist-get (plist-get call :meta) :builtin))
         (should (equal "ws1" (plist-get result :call-id)))
         (should (equal "1. GNU Emacs" (plist-get result :output)))

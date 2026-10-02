@@ -1045,7 +1045,7 @@ Folded header lines continue the header above them."
               (harness-bedrock-clear-models-cache)
               (harness-add-filter 'permission/decide
                                   (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-              (harness-define-tool "list_dir" :description "List a directory." :kind 'read
+              (harness-define-tool "list_dir" :label "List directory" :description "List a directory." :kind 'read
                                    :schema '(:type "object" :properties (:path (:type "string")) :required ("path"))
                                    :handler (lambda (input _ctx) (format "listing of %s: a.txt" (plist-get input :path))))
               ;; The catalogue lists the Bedrock models with their context windows.

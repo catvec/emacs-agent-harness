@@ -59,7 +59,7 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
      (clrhash harness-merge--queues)
      (clrhash harness-merge--locks)
      (clrhash harness-merge--holds)
-     (harness-define-tool "list_dir" :description "list" :kind 'read
+     (harness-define-tool "list_dir" :label "List directory" :description "list" :kind 'read
                           :handler (lambda (input _ctx) (format "listing of %s" (plist-get input :path))))
      (harness-add-filter 'permission/decide
                          (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)

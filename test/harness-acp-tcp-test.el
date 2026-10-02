@@ -35,7 +35,7 @@
        (ignore port)
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       (harness-define-tool "list_dir" :description "list" :kind 'read
+       (harness-define-tool "list_dir" :label "List directory" :description "list" :kind 'read
                             :handler (lambda (input _ctx) (format "listing of %s" (plist-get input :path))))
        (unwind-protect
            (progn ,@body)
@@ -156,7 +156,7 @@
                                   :sessionId)))
            (p (progn
                 ;; The turn waits in this tool until the test lets it go.
-                (harness-define-tool "hold" :description "hold" :kind 'read
+                (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
                                      :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
                 (harness-acp-request conn "session/prompt"
                                      (list :sessionId sid :prompt (list (list :type "text" :text "tour")))))))

@@ -711,7 +711,7 @@ is back and the CLI searches no more."
                (call (cl-find 'tool-call nodes :key (lambda (n) (plist-get n :kind))))
                (result (car (funcall results))))
           (should (equal "web_search" (plist-get call :tool)))
-          (should (equal "web_search emacs" (plist-get call :title)))
+          (should (equal "Web search: emacs" (plist-get call :title)))
           (should (plist-get (plist-get call :meta) :builtin))
           (should (equal (plist-get call :call-id) (plist-get result :call-id)))
           (should-not (plist-get result :is-error))

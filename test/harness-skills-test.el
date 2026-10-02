@@ -154,7 +154,7 @@ BODY receives the global directory, the project directory and the cwd."
         (let ((r (harness-test-await (harness-call 'tools/execute nil '(:id "c5" :name "skill_load" :input (:name "revew"))))))
           (should (plist-get r :is-error))
           (should (string-match-p "Did you mean: code-review" (plist-get r :content))))
-        (should (equal "skill_load x" (harness-tool-title "skill_load" '(:name "x"))))))))
+        (should (equal "Load skill: x" (harness-tool-title "skill_load" '(:name "x"))))))))
 
 (ert-deftest harness-skills-system-prompt-filter ()
   (harness-skills-test-with-skills
