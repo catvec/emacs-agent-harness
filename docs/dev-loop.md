@@ -6,7 +6,7 @@ verified in a running Emacs before the next one is started.
 ```sh
 scripts/dev.sh start                 # emacs -Q daemon "harness-v3" + a GUI frame that never takes focus
 scripts/dev.sh eval '(harness-call (quote session/list))'
-scripts/dev.sh keys 'C-c a n'        # real key sequence in the frame
+scripts/dev.sh keys 'C-c h n'        # real key sequence in the frame
 scripts/dev.sh shot                  # PNG of the frame via x-export-frames → scripts/.dev/shot.png
 scripts/dev.sh errors                # recent *Messages* + harness log warnings
 scripts/dev.sh reload                # harness-reload (auto-reload also runs on save)

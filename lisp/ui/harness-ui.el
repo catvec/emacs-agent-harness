@@ -1113,14 +1113,35 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
     map)
   "Prefix keymap of the harness UI.  Other UI modules add their commands.")
 
-(defcustom harness-ui-prefix-key "C-c a"
-  "Prefix key for `harness-ui-map' in `harness-global-mode'."
-  :type 'key-sequence :group 'harness-ui)
+(defvar harness-global-mode-map (make-sparse-keymap)
+  "Keymap of `harness-global-mode': `harness-ui-map' under `harness-ui-prefix-key'.")
 
-(defvar harness-global-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd harness-ui-prefix-key) harness-ui-map)
-    map))
+(defun harness-ui--prefix-keys (prefix)
+  "Return the keys of PREFIX, a key description, or nil.
+A vector of events is taken as it is: `setq' may give one, and
+Customize stored one before the option took key descriptions."
+  (cond ((stringp prefix) (kbd prefix))
+        ((vectorp prefix) prefix)))
+
+(defun harness-ui--set-prefix-key (symbol prefix)
+  "Set SYMBOL, `harness-ui-prefix-key', to PREFIX and move the keys there.
+`harness-ui-map' leaves the previous prefix in `harness-global-mode-map'
+for PREFIX, so the option takes effect as soon as `setopt' or Customize
+sets it, and again each time this file loads."
+  (when-let* ((old (and (default-boundp symbol)
+                        (harness-ui--prefix-keys (default-toplevel-value symbol)))))
+    (define-key harness-global-mode-map old nil t))
+  (when-let* ((new (harness-ui--prefix-keys prefix)))
+    (define-key harness-global-mode-map new harness-ui-map))
+  (set-default-toplevel-value symbol prefix))
+
+(defcustom harness-ui-prefix-key "C-c h"
+  "Prefix key of `harness-ui-map' in `harness-global-mode'.
+A key description, as `key-valid-p' accepts.  Set with `setopt' or
+Customize, it moves the keys at once; `setq' takes effect only before
+the harness UI loads, that is before `harness-start'."
+  :type 'key :group 'harness-ui
+  :set #'harness-ui--set-prefix-key)
 
 ;;;###autoload
 (define-minor-mode harness-global-mode

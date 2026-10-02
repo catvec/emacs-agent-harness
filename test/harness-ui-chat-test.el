@@ -1168,10 +1168,11 @@ It is never added to the running turn."
 
 (ert-deftest harness-ui-chat-menu-button-names-the-real-keys ()
   ;; `?' types into the compose box, so the [menu] tooltip tells the menu's
-  ;; keys, and they follow a prefix moved off the default C-c a.
+  ;; keys, and they follow a prefix moved off the default C-c h.
   (harness-ui-chat-test-with
     (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
-          (w (selected-window)))
+          (w (selected-window))
+          (prefix harness-ui-prefix-key))
       (set-window-buffer w buf)
       (with-current-buffer buf
         (goto-char harness-compose-end)
@@ -1180,13 +1181,13 @@ It is never added to the running turn."
                (pos (string-search "[menu]" header))
                (help (get-text-property pos 'help-echo header)))
           (should (functionp help))
-          (should (equal "The harness menu (C-c a ?)" (funcall help w header pos)))
-          ;; What `harness-ui-prefix-key' set to C-c h amounts to.
-          (let ((map (make-sparse-keymap)))
-            (define-key map (kbd "C-c h") harness-ui-map)
-            (setq-local minor-mode-overriding-map-alist (list (cons 'harness-global-mode map)))
-            (should (eq 'harness-menu (key-binding (kbd "C-c h ?"))))
-            (should (equal "The harness menu (C-c h ?)" (funcall help w header pos)))))))))
+          (should (equal "The harness menu (C-c h ?)" (funcall help w header pos)))
+          (unwind-protect
+              (progn
+                (setopt harness-ui-prefix-key "C-c x")
+                (should (eq 'harness-menu (key-binding (kbd "C-c x ?"))))
+                (should (equal "The harness menu (C-c x ?)" (funcall help w header pos))))
+            (setopt harness-ui-prefix-key prefix)))))))
 
 ;; Doom's solaire-mode bakes the buffer's base colour into every image,
 ;; which drew the icons of a tool block as dark boxes.

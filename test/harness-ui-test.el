@@ -373,6 +373,31 @@ bottom side window and leaves the other windows alone."
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
 
+;;;; The prefix key
+
+(ert-deftest harness-ui-prefix-key-moves-the-keys ()
+  "The keys are under C-c h, and setting `harness-ui-prefix-key' moves them.
+C-c a, the old prefix, stays free: users bind it themselves, to Org's
+agenda or Embark for instance."
+  (cl-flet ((prefix-p (keys) (eq harness-ui-map (lookup-key harness-global-mode-map keys))))
+    (should (equal "C-c h" (eval (car (get 'harness-ui-prefix-key 'standard-value)) t)))
+    (should (prefix-p (kbd "C-c h")))
+    (should-not (prefix-p (kbd "C-c a")))
+    (let ((before harness-ui-prefix-key))
+      (unwind-protect
+          (progn
+            (setopt harness-ui-prefix-key "C-c x")
+            (should (prefix-p (kbd "C-c x")))
+            (should-not (prefix-p (kbd "C-c h")))
+            ;; A vector of events, which Customize stored before the option
+            ;; took key descriptions.
+            (customize-set-variable 'harness-ui-prefix-key [f12])
+            (should (prefix-p [f12]))
+            (should-not (prefix-p (kbd "C-c x"))))
+        (setopt harness-ui-prefix-key before))
+      (should (prefix-p (kbd "C-c h")))
+      (should-not (prefix-p [f12])))))
+
 ;;;; Connecting to another harness
 
 (defmacro harness-ui-test-with-connect-stub (var &rest body)
