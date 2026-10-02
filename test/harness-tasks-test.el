@@ -68,6 +68,11 @@ turn `harness-tasks-require-verification' on themselves."
            (harness-acp--drop-client c))))))
 
 (defun harness-tasks-test-task (id) (harness-call 'task/get id))
+(defun harness-tasks-test-session (id)
+  (harness-call 'session/get (plist-get (harness-tasks-test-task id) :session)))
+(defun harness-tasks-test-default (option)
+  "Return the default value of OPTION, which the tests' setup may have bound."
+  (eval (car (get option 'standard-value)) t))
 (defun harness-tasks-test-state (id) (plist-get (harness-tasks-test-task id) :state))
 
 (defun harness-tasks-test-wait-state (id state)
@@ -319,6 +324,42 @@ turn `harness-tasks-require-verification' on themselves."
       (should (equal "high" (plist-get session :thinking)))
       (should-not (plist-get session :non-interactive)))))
 
+(ert-deftest harness-tasks-start-interactive-by-default ()
+  "Unless the configuration says otherwise, a new task's session is interactive.
+It asks the user for what needs a permission instead of being denied."
+  (harness-tasks-test-with
+    (let ((harness-tasks-non-interactive (harness-tasks-test-default 'harness-tasks-non-interactive)))
+      (should-not harness-tasks-non-interactive)
+      (should-not (plist-get (harness-call 'task/settings default-directory) :non-interactive))
+      (let* ((id (harness-tasks-test-submit "ask me when you must"))
+             (session (harness-tasks-test-session id)))
+        (should (eq 'auto (plist-get session :permission-mode)))
+        (should-not (plist-get session :non-interactive))
+        (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-non-interactive-when-configured ()
+  "A directory configured non-interactive starts its tasks non-interactive.
+`task/settings', from which the board sets up the next task, says so
+too; so does `harness-tasks-non-interactive', wherever the task is."
+  (harness-tasks-test-with
+    (let ((harness-tasks-non-interactive nil)
+          (elsewhere (harness-test-temp-dir)))
+      (with-temp-file (expand-file-name ".dir-locals.el" default-directory)
+        (insert "((nil . ((harness-non-interactive . t))))\n"))
+      (should (eq t (plist-get (harness-call 'task/settings default-directory) :non-interactive)))
+      (should-not (plist-get (harness-call 'task/settings elsewhere) :non-interactive))
+      (let* ((here (harness-tasks-test-submit "nobody watches this one"))
+             (there (harness-tasks-test-submit "ask me about that one" elsewhere)))
+        (should (plist-get (harness-tasks-test-session here) :non-interactive))
+        (should-not (plist-get (harness-tasks-test-session there) :non-interactive))
+        (harness-tasks-test-wait-state here 'done)
+        (harness-tasks-test-wait-state there 'done))
+      (let ((harness-tasks-non-interactive t))
+        (should (eq t (plist-get (harness-call 'task/settings elsewhere) :non-interactive)))
+        (let ((id (harness-tasks-test-submit "and this one too" elsewhere)))
+          (should (plist-get (harness-tasks-test-session id) :non-interactive))
+          (harness-tasks-test-wait-state id 'done))))))
+
 (ert-deftest harness-tasks-adopt-ongoing-session ()
   (harness-tasks-test-with
     (let ((sid (plist-get (harness-call 'session/create :cwd default-directory :model "demo:scripted") :id)))
@@ -536,6 +577,20 @@ turn `harness-tasks-require-verification' on themselves."
           (should (equal "the parser chokes on nested quotes" (car texts)))
           (should (string-match-p (regexp-quote harness-tasks-test-write-up) (cadr texts)))
           (should (string-match-p "^> the parser chokes on nested quotes$" (cadr texts))))))))
+
+(ert-deftest harness-tasks-backlog-work-is-interactive-by-default ()
+  "A write-up is non-interactive, to keep it read-only; the work it leads to is not."
+  (harness-tasks-test-with
+    (let ((harness-tasks-non-interactive (harness-tasks-test-default 'harness-tasks-non-interactive))
+          (harness-tasks-max-running nil)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-refine "the parser chokes on nested quotes")))
+        (should (plist-get (harness-tasks-test-session id) :non-interactive))
+        (harness-tasks-test-wait-state id 'pending)
+        (harness-call 'task/start id)
+        (should-not (plist-get (harness-tasks-test-session id) :non-interactive))
+        (harness-tasks-test-wait-state id 'done)))))
 
 (ert-deftest harness-tasks-refine-failure-needs-input-then-retries ()
   (harness-tasks-test-with

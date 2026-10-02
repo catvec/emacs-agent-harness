@@ -5,9 +5,12 @@
 ;; Task mode manages sessions by the task they are completing.  A task
 ;; is a prompt submitted for a project; it gets a session of its own
 ;; when it starts and the session does the work, usually in auto
-;; permission mode and non-interactive so it is not held up waiting for
-;; the user.  The session's name is the task's title, so when the model
-;; names it, `harness-tasks-naming-prompt' asks for a ticket title.
+;; permission mode so it is seldom held up waiting for the user.  It is
+;; interactive, asking when it needs a permission, unless the
+;; configuration makes it non-interactive (`harness-tasks-non-interactive',
+;; or `harness-non-interactive' for its directory).  The session's name is
+;; the task's title, so when the model names it,
+;; `harness-tasks-naming-prompt' asks for a ticket title.
 ;;
 ;; In a git project a task owns the whole life of its change: it starts
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
@@ -139,11 +142,15 @@ task is done once its branch merges, or outside git once its turn ends."
                  (const ask) (const accept-edits) (const auto) (const yolo))
   :group 'harness)
 
-(defcustom harness-tasks-non-interactive t
+(defcustom harness-tasks-non-interactive nil
   "When non-nil, task sessions run non-interactive.
 They never wait for the user: the auto-mode judge decides what would
 ask them, and after a denial the agent is told to find another way, so
-a task keeps working while nobody watches it."
+a task keeps working while nobody watches it.  With nil (the default) a
+task's session starts like any other session, interactive unless
+`harness-non-interactive' is on for its directory: what needs your
+permission waits for you, and the task needs input meanwhile.  A task's
+own setting, from the board or `task/submit', wins over both."
   :type 'boolean :group 'harness)
 
 (defcustom harness-tasks-model nil
@@ -2377,7 +2384,10 @@ records.  Each step leaves alone the tasks something already works on."
 It starts at once when a slot is free, otherwise it waits as pending.
 OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
 `:thinking' and `:non-interactive' (an explicit false turns it off);
-missing ones come from the `harness-tasks-' defaults.  With `:refine'
+missing ones come from the `harness-tasks-' defaults, else from what the
+directory configures: a task is interactive unless
+`harness-tasks-non-interactive' or the directory's
+`harness-non-interactive' is on.  With `:refine'
 the task goes to the backlog instead: an agent writes it up (state
 refining), then it waits in pending until `task/start'."
   (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
@@ -2500,12 +2510,16 @@ CWD) is read first, so tasks written by hand show."
 
 (harness-defmethod task/settings (&optional cwd)
   "Return the settings task sessions start with (for CWD's project).
-Model and thinking are the values a new task would really get: the task
-defaults, else what the project configures."
+Model, thinking and non-interactive are the values a new task would
+really get: the task defaults, else what the project configures.  So
+non-interactive is on only when `harness-tasks-non-interactive' is, or
+`harness-non-interactive' for the project."
   (let ((root (and cwd (harness-tasks--project cwd))))
     (list :max-running harness-tasks-max-running
           :permission-mode harness-tasks-permission-mode
-          :non-interactive harness-tasks-non-interactive
+          :non-interactive (and (or harness-tasks-non-interactive
+                                    (harness-json-true-p (harness-tasks--config 'harness-non-interactive root)))
+                                t)
           :model (or harness-tasks-model (harness-tasks--config 'harness-model root)
                      (and (boundp 'harness-default-model) harness-default-model))
           :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
