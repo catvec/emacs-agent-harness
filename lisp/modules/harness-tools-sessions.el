@@ -104,6 +104,13 @@ A tool call reads as the tool's name, as the model knows it, and its input."
     ('tool-result (or (plist-get node :output) ""))
     (_ (or (plist-get node :content) ""))))
 
+(defun harness-tools-sessions--tag (node)
+  "Return the tag that opens the line of transcript NODE: its kind and id.
+A user message the user did not write says who sent it."
+  (let ((from (and (eq (plist-get node :kind) 'user) (harness-node-sender node))))
+    (format "[%s %s%s]" (plist-get node :kind) (plist-get node :id)
+            (if from (concat ", from " (harness-sender-description from)) ""))))
+
 (defun harness-tools-sessions--last-reply (session-id)
   "Return the last assistant text of SESSION-ID, or nil."
   (let ((node (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'assistant)
@@ -338,7 +345,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
                     (let ((nodes (gethash sid grouped)))
                       (concat (harness-tools-sessions--line (gethash sid by-id))
                               (mapconcat (lambda (n)
-                                           (format "\n    [%s %s] %s" (plist-get n :kind) (plist-get n :id)
+                                           (format "\n    %s %s" (harness-tools-sessions--tag n)
                                                    (harness-tools-sessions--snippet
                                                     (harness-tools-sessions--node-text n) query regexp)))
                                          (seq-take nodes per-session) "")
@@ -399,7 +406,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
                   (format "; earlier ones with before=%s" (plist-get (car shown) :id))
                 ""))
       (mapconcat (lambda (n)
-                   (format "[%s %s] %s" (plist-get n :kind) (plist-get n :id)
+                   (format "%s %s" (harness-tools-sessions--tag n)
                            (harness-truncate-end (harness-tools-sessions--node-text n) chars)))
                  shown "\n")))))
 
@@ -428,6 +435,11 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
     (format "[Message from session %s%s]\n\n" sid
             (if (plist-get s :name) (format " %S" (plist-get s :name)) ""))))
 
+(defun harness-tools-sessions--sender (ctx)
+  "Return the sender of a message CTX's session sends (see `agent/prompt')."
+  (let ((sid (plist-get ctx :session-id)))
+    (harness-sender-session (or (ignore-errors (harness-call 'session/get sid)) (list :id sid)))))
+
 (defun harness-tools-sessions--send (input ctx)
   "Handler of session_send."
   (let* ((sid (harness-tools-sessions--other (plist-get input :session_id) ctx "message"))
@@ -439,7 +451,9 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
     (when (harness-string-blank-p text) (signal 'harness-error (list "session_send needs a message")))
     (when (eq (plist-get s :status) 'inactive) (harness-call 'session/resume sid))
     (let* ((body (concat (harness-tools-sessions--from ctx) text))
-           (promise (harness-call 'agent/prompt sid body (and queue (list :queue t))))
+           (promise (harness-call 'agent/prompt sid body
+                                  (append (list :from (harness-tools-sessions--sender ctx))
+                                          (and queue (list :queue t)))))
            (how (cond (queue "queued for its next turn")
                       (running "delivered as steering to its running turn")
                       (t "delivered; it started a turn"))))

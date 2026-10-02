@@ -663,7 +663,11 @@ during a replay the full content is sent as one chunk."
          out)
     (pcase kind
       ('user
-       (push (list :sessionUpdate "user_message_chunk" :content (funcall text) :_harness meta) out))
+       ;; A message the user did not write says who sent it, so a client
+       ;; that reads chunks alone can tell it from the user's.
+       (push (list :sessionUpdate "user_message_chunk" :content (funcall text)
+                   :_harness (append meta (and (harness-node-sender node) (list :from (harness-node-sender node)))))
+             out))
       ((and (or 'assistant 'thinking) (guard (not live)))
        (push (list :sessionUpdate (if (eq kind 'thinking) "agent_thought_chunk" "agent_message_chunk")
                    :content (funcall text) :_harness meta)

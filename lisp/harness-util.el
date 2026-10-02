@@ -256,6 +256,60 @@ Per-token billing reads \"$1.20\"; usage a plan paid for reads
   "Cheap token estimate for STRING (about four characters per token)."
   (ceiling (length (or string "")) 4))
 
+;;;; Senders
+;;
+;; A user message the user did not write says who sent it: its node's
+;; `:meta' holds `:from', a sender plist.  Kind `system' is the harness
+;; itself, with `:source' naming the part of it that sent the message
+;; ("tasks", "merge queue"); kind `session' is the agent of another
+;; session, with its `:id' and its `:name' at the time.  No `:from'
+;; means the user wrote the message.  The kind may have travelled as a
+;; string (over the wire, or through a node log), so read it with
+;; `harness-sender-kind'.
+
+(defun harness-sender-system (source)
+  "Return the sender of a message the harness sends on its own.
+SOURCE names the part of the harness that sends it, in words people
+read, such as \"tasks\" or \"merge queue\"."
+  (list :kind 'system :source source))
+
+(defun harness-sender-session (session)
+  "Return the sender of a message the agent of SESSION (a plist) sends."
+  (list :kind 'session :id (plist-get session :id) :name (plist-get session :name)))
+
+(defun harness-sender-kind (from)
+  "Return the kind of sender FROM, `system' or `session', or nil.
+FROM is who sent a message (see `harness-node-sender'); nil, or a value
+without a kind, means the user did."
+  (let ((kind (and (consp from) (plist-get from :kind))))
+    (cond ((and (stringp kind) (not (string-empty-p kind))) (intern kind))
+          ((and kind (symbolp kind) (not (eq kind :false))) kind))))
+
+(defun harness-node-sender (node)
+  "Return who sent NODE, a user message, when it was not the user, or nil.
+That is NODE's `:meta' `:from': (:kind system :source SOURCE) for the
+harness itself, made by `harness-sender-system', or (:kind session :id
+ID :name NAME) for another session's agent, made by
+`harness-sender-session'."
+  (let ((from (plist-get (plist-get node :meta) :from)))
+    (and (harness-sender-kind from) from)))
+
+(defun harness-sender-description (from)
+  "Describe FROM, who sent a message, in a few words, as transcripts read.
+The harness reads \"the harness (SOURCE)\", another session's agent
+\"session ID \\\"NAME\\\"\", and nil, the user, \"the user\"."
+  (pcase (harness-sender-kind from)
+    ('system (let ((source (plist-get from :source)))
+               (if (and (stringp source) (not (string-blank-p source)))
+                   (format "the harness (%s)" source)
+                 "the harness")))
+    ('session (format "session %s%s" (or (plist-get from :id) "?")
+                      (if (and (stringp (plist-get from :name)) (not (string-blank-p (plist-get from :name))))
+                          (format " %S" (plist-get from :name))
+                        "")))
+    ('nil "the user")
+    (kind (format "the %s" kind))))
+
 ;;;; Paths
 
 (defun harness-path-normalize (path)

@@ -77,6 +77,7 @@ Functional requirements:
 - Text from all messages is aligned in the user's language direction (english is left to right)
 - The sender (agent or user) and type () of a message 
 - The sender of a message is identifiable at a glance: user messages open with a "You" name line and a colored bar down their left edge on a slightly lighter background; each agent turn opens with an "Agent" name line on the default background
+- A message the user did not write says who sent it instead of "You": "System · SOURCE" for messages the harness sends on its own, such as a task carrying on after a restart, a denied call in non-interactive mode or the merge queue, and "Session · NAME" for another session's agent (`session_send`, a sub-agent's parent), the name opening that session. Their text is muted on a background and bar of their own, so they never read as the user's words; the conversation tree shows a gear or agent icon for them
 - If messages are too long they wrap to the next line matching the original line's indentation
 - Messages are formatted in Markdown and rendered as such
 - A message composition box should be displayed at the bottom of the chat history view

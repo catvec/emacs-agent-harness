@@ -233,6 +233,29 @@
       (harness-acp-test-request conn "session/set_model" (list :sessionId sid :modelId "demo:other"))
       (should (equal "demo:other" (plist-get (harness-call 'session/get sid) :model))))))
 
+(ert-deftest harness-acp-local-user-chunk-says-who-sent-it ()
+  "A user message the user did not write carries its sender in its chunk's
+extension data, for a client that reads chunks rather than nodes."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (harness-acp-test-request conn "_harness/session/append"
+                                (list :id sid :node (list :kind "user" :content "carry on"
+                                                          :meta (list :from (harness-sender-system "tasks")))))
+      (let* ((chunk (cl-find "user_message_chunk" (harness-acp-test-updates)
+                             :key (lambda (u) (plist-get u :sessionUpdate)) :test #'equal))
+             (got (plist-get (plist-get chunk :_harness) :from)))
+        (should (eq 'system (harness-sender-kind got)))
+        (should (equal "tasks" (plist-get got :source))))
+      ;; The user's own message carries no sender.
+      (harness-acp-test-request conn "_harness/session/append"
+                                (list :id sid :node (list :kind "user" :content "mine")))
+      (let* ((chunks (cl-remove-if-not (lambda (u) (equal (plist-get u :sessionUpdate) "user_message_chunk"))
+                                       (harness-acp-test-updates)))
+             (mine (car (last chunks))))
+        (should (equal "mine" (plist-get (plist-get mine :content) :text)))
+        (should-not (plist-get (plist-get mine :_harness) :from))))))
+
 (ert-deftest harness-acp-local-load-replays-transcript ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))

@@ -209,6 +209,63 @@
         (should (string-match-p "idle" (harness-chat--mode-line)))
         (should (equal "" (harness-compose-text)))))))
 
+(defun harness-ui-chat-test-bar-face-at (pos face)
+  "Non-nil when the bar in the margin at POS is drawn in FACE."
+  (let* ((prefix (get-text-property pos 'line-prefix))
+         (f (and prefix (get-text-property 0 'face prefix))))
+    (or (eq f face) (and (listp f) (memq face f)))))
+
+(ert-deftest harness-ui-chat-messages-the-user-did-not-write ()
+  "A message the harness or another session sent names its sender, not \"You\",
+on a background and bar of its own; the user's own messages are as before."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session))
+          (opened nil))
+      (harness-call 'session/append sid '(:kind user :content "my own words"))
+      (harness-call 'session/append sid (list :kind 'user :content "carry on after the restart"
+                                              :meta (list :from (harness-sender-system "tasks"))))
+      (harness-call 'session/append sid (list :kind 'user :content "rebase please"
+                                              :meta (list :steering t
+                                                          :from (harness-sender-session
+                                                                 '(:id "0123456789abcdef" :name "Fix the parser")))))
+      (harness-call 'session/append sid (list :kind 'user :content "from a nameless one"
+                                              :meta (list :from (harness-sender-session '(:id "fedcba9876543210")))))
+      (let ((buf (harness-ui-chat-test-open sid))
+            (start (lambda (buf text) (- (harness-ui-chat-test-find buf text) (length text)))))
+        (with-current-buffer buf
+          (let ((case-fold-search nil))
+            ;; One "You", over the user's own message; the others name their sender.
+            (should (= 1 (how-many "^You$" (point-min) (point-max))))
+            (should (= 1 (how-many "^System · tasks$" (point-min) (point-max))))
+            (should (= 1 (how-many "^Session · Fix the parser$" (point-min) (point-max))))
+            ;; Without a name, a session goes by its short id.
+            (should (= 1 (how-many "^Session · fedcba98$" (point-min) (point-max)))))
+          (let ((mine (funcall start buf "my own words"))
+                (label (funcall start buf "System · tasks"))
+                (system (funcall start buf "carry on after the restart"))
+                (session (funcall start buf "rebase please")))
+            (should (harness-ui-chat-test-face-at mine 'harness-user-face))
+            (should (harness-ui-chat-test-bar-face-at mine 'harness-user-bar-face))
+            (should (harness-ui-chat-test-face-at label 'harness-system-label-face))
+            (dolist (pos (list label system session))
+              (should (harness-ui-chat-test-face-at pos 'harness-system-face))
+              (should-not (harness-ui-chat-test-face-at pos 'harness-user-face))
+              (should (harness-ui-chat-test-bar-face-at pos 'harness-system-bar-face))))
+          ;; The sending session's name opens it.
+          (let ((action (get-text-property (funcall start buf "Fix the parser") 'harness-chat-action)))
+            (should (functionp action))
+            (cl-letf (((symbol-function 'harness-open-session) (lambda (id &rest _) (setq opened id))))
+              (funcall action))
+            (should (equal "0123456789abcdef" opened)))))
+      ;; One that arrives while the buffer is open is shown so too.
+      (let ((buf (harness-chat--buffer-for sid)))
+        (harness-call 'session/append sid (list :kind 'user :content "resolve the conflicts"
+                                                :meta (list :from (harness-sender-system "merge queue"))))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "System · merge queue")) 5 "the live message")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "resolve the conflicts"))
+                                                'harness-system-face)))))))
+
 ;; In a graphical frame an icon is a space whose `display' draws its
 ;; image.  Toggling a block once carried the collapsed icon's `display'
 ;; over to the expanded one, so the arrow never turned.  Batch draws no

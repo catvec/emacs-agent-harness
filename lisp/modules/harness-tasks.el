@@ -1913,6 +1913,13 @@ Backlog tasks wait for `task/start' instead."
         (and (plist-get task :attachments) (fboundp 'harness-agent-attachments-to-blocks)
              (harness-agent-attachments-to-blocks (plist-get task :attachments)))))
 
+(defun harness-tasks--from-harness ()
+  "Return the `agent/prompt' options of a message task mode sends on its own.
+Such a message (carry on after a restart, start the written-up work,
+finish the write-up) is not the user's, so it says it comes from the
+harness.  The task's prompt and the user's feedback are the user's."
+  (list :from (harness-sender-system "tasks")))
+
 (declare-function harness-agent-attachments-to-blocks "harness-agent")
 
 (defun harness-tasks--fail (id err)
@@ -2046,7 +2053,8 @@ everything the work needs, while the transcript keeps the refinement."
         (harness-catch (harness-call-async 'agent/prompt sid
                                            (harness-tasks--blocks
                                             (list :prompt (harness-tasks--start-text task)
-                                                  :attachments (plist-get task :attachments))))
+                                                  :attachments (plist-get task :attachments)))
+                                           (harness-tasks--from-harness))
                        (lambda (e) (harness-tasks--fail id e))))
     (error (harness-tasks--fail id err))))
 
@@ -2073,7 +2081,8 @@ At `harness-tasks-refine-tool-calls' calls it is steered to write up now."
     (let ((n (1+ (gethash session-id harness-tasks--refine-calls 0))))
       (puthash session-id n harness-tasks--refine-calls)
       (when (= n limit)
-        (harness-catch (harness-call-async 'agent/prompt session-id harness-tasks--refine-enough-text)
+        (harness-catch (harness-call-async 'agent/prompt session-id harness-tasks--refine-enough-text
+                                           (harness-tasks--from-harness))
                        #'ignore)))))
 
 (defun harness-tasks--refine-settings (task)
@@ -2092,11 +2101,12 @@ anything else is denied with a hint, which keeps a write-up a write-up."
   (when (gethash id harness-tasks--table)
     (harness-tasks--set id :state 'refining :outcome 'error :error (harness-error-message err))))
 
-(defun harness-tasks--refine-turn (id sid blocks)
+(defun harness-tasks--refine-turn (id sid blocks &optional opts)
   "Prompt task ID's session SID with BLOCKS for a write-up.
+OPTS are the `agent/prompt' options, such as who sends the message.
 The turn's end finishes the refinement (`harness-tasks--on-turn-ended');
 this only adds the error a failed turn reports."
-  (harness-then (harness-call-async 'agent/prompt sid blocks)
+  (harness-then (harness-call-async 'agent/prompt sid blocks opts)
                 (lambda (result)
                   (let ((task (gethash id harness-tasks--table)))
                     (when (and task (eq (plist-get task :state) 'refining)
@@ -2127,10 +2137,11 @@ received the task, cut short by a restart, gets the task itself."
             (let* ((sid (plist-get session :id))
                    (begun (cl-find 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
               (when (eq (plist-get session :status) 'inactive) (harness-call 'session/resume sid))
-              (harness-tasks--refine-turn id sid (cond ((not begun) (harness-tasks--refine-blocks task text))
-                                                       ((harness-string-blank-p text)
-                                                        harness-tasks--refine-again-text)
-                                                       (t text))))
+              (cond ((not begun) (harness-tasks--refine-turn id sid (harness-tasks--refine-blocks task text)))
+                    ((harness-string-blank-p text)
+                     (harness-tasks--refine-turn id sid harness-tasks--refine-again-text
+                                                 (harness-tasks--from-harness)))
+                    (t (harness-tasks--refine-turn id sid text))))
           (let* ((sid (plist-get (apply #'harness-call 'session/create :cwd (plist-get task :cwd)
                                         (harness-tasks--refine-settings task))
                                  :id)))
@@ -2277,10 +2288,11 @@ A session that never received the task gets the task itself."
                        (cl-find 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))
     (harness-log 'info "task %s: resuming session %s after a restart" id sid)
     (puthash id t harness-tasks--starting)
-    (harness-catch (harness-call-async 'agent/prompt sid
-                                       (if begun
+    (harness-catch (if begun
+                       (harness-call-async 'agent/prompt sid
                                            (list (list :type "text" :text harness-tasks-resume-prompt))
-                                         (harness-tasks--blocks task)))
+                                           (harness-tasks--from-harness))
+                     (harness-call-async 'agent/prompt sid (harness-tasks--blocks task)))
                    (lambda (e) (harness-tasks--fail id e)))))
 
 (defun harness-tasks--work-begun-p (task)

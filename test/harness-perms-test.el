@@ -390,15 +390,20 @@ function giving the judge prompts they encoded, newest first."
 (ert-deftest harness-perms-non-interactive-denies-and-steers ()
   (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
   (let (prompts)
-    (harness-register-method 'agent/prompt (lambda (sid blocks) (push (cons sid blocks) prompts) (harness-resolved nil)))
+    (harness-register-method 'agent/prompt (lambda (sid blocks &optional opts)
+                                             (push (list sid blocks opts) prompts)
+                                             (harness-resolved nil)))
     (let ((d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
       (should (eq 'deny (plist-get d :behavior)))
       (should (equal "non-interactive mode: the user is away" (plist-get d :reason)))
       (should (string-match-p "do not wait for the user" (plist-get d :hint))))
     (should (= 1 (length prompts)))
-    (should (equal "s1" (caar prompts)))
-    (should (equal "text" (plist-get (car (cdar prompts)) :type)))
-    (should (string-match-p "bash" (plist-get (car (cdar prompts)) :text)))
+    (pcase-let ((`(,sid ,blocks ,opts) (car prompts)))
+      (should (equal "s1" sid))
+      (should (equal "text" (plist-get (car blocks) :type)))
+      (should (string-match-p "bash" (plist-get (car blocks) :text)))
+      ;; The steering is the harness's, not the user's: the chat shows it so.
+      (should (equal (harness-sender-system "non-interactive mode") (plist-get opts :from))))
     ;; The same call id does not steer twice; a new call does.
     (let ((req (harness-perms-test--request "bash" 'exec)))
       (harness-perms-test--decide req)
@@ -448,7 +453,7 @@ for a request without a session record."
          (harness-websearch-providers nil)
          (harness-websearch-provider 'fake)
          (prompts nil))
-    (harness-register-method 'agent/prompt (lambda (sid blocks) (push (cons sid blocks) prompts) (harness-resolved nil)))
+    (harness-register-method 'agent/prompt (lambda (sid blocks &rest _) (push (cons sid blocks) prompts) (harness-resolved nil)))
     (harness-websearch-register-provider
      'fake (lambda (query _count) (list (list :title (concat "About " query) :url "https://example.org/"))))
     (let ((r (harness-test-await (harness-call 'tools/execute "s1"

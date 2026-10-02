@@ -321,6 +321,11 @@ Running session: steer — the message is recorded now and delivered at
 the next step boundary, once; the running turn's promise is returned.
 OPTS `:queue' true only queues the message, with OPTS `:attachments',
 for the next turn, whatever the session is doing.
+OPTS `:from' says who sent the message when the user did not: the
+harness (`harness-sender-system') or another session's agent
+\(`harness-sender-session').  The message's node keeps it in its
+`:meta' (a queued item keeps it too), so UIs show who sent it; the
+model gets the message as a user message all the same.
 An inactive session is resumed first: sending to it brings it back.
 Blank text blocks are dropped; a message left empty signals an error,
 so no turn, steering message or queued item is ever empty."
@@ -328,6 +333,7 @@ so no turn, steering message or queued item is ever empty."
                                (if (stringp blocks) (list (list :type "text" :text blocks)) blocks)))
          (queue (harness-json-true-p (plist-get opts :queue)))
          (attachments (and queue (plist-get opts :attachments)))
+         (from (let ((f (plist-get opts :from))) (and (harness-sender-kind f) f)))
          (turn (gethash session-id harness-agent--turns)))
     (unless (or blocks attachments)
       (signal 'harness-error (list "Nothing to send: the message is empty")))
@@ -335,26 +341,29 @@ so no turn, steering message or queued item is ever empty."
       (harness-agent--reanimate session-id))
     (cond
      (queue
-      (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments)
+      (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments from)
       (harness-resolved (list :queued t)))
      (turn
       (let ((node (harness-call 'session/append session-id
                                 (list :kind 'user :content (harness-agent--blocks-text blocks)
                                       :blocks (unless (harness-agent--only-text-p blocks) blocks)
-                                      :meta (list :steering t)))))
+                                      :meta (append (list :steering t) (and from (list :from from)))))))
         (setf (harness-agent-turn-steering turn)
               (append (harness-agent-turn-steering turn)
                       (list (list :node (plist-get node :id) :text (harness-agent--blocks-text blocks))))))
       (harness-emit 'agent/steered session-id)
       (harness-agent-turn-promise turn))
-     (t (harness-agent--start session-id blocks)))))
+     (t (harness-agent--start session-id blocks from)))))
 
-(defun harness-agent--start (session-id blocks)
+(defun harness-agent--start (session-id blocks &optional from)
+  "Start a turn of SESSION-ID with the message BLOCKS; return its promise.
+FROM, when non-nil, is who sent the message (see `agent/prompt')."
   (let* ((session (harness-call 'session/get session-id))
          (promise (harness-make-promise))
          (turn (make-harness-agent-turn :session-id session-id :promise promise :started (float-time)))
-         (node (list :kind 'user :content (harness-agent--blocks-text blocks)
-                     :blocks (unless (harness-agent--only-text-p blocks) blocks))))
+         (node (append (list :kind 'user :content (harness-agent--blocks-text blocks)
+                             :blocks (unless (harness-agent--only-text-p blocks) blocks))
+                       (and from (list :meta (list :from from))))))
     (puthash session-id turn harness-agent--turns)
     ;; The gate runs first so that an automatic compaction lands before
     ;; the user's new message, never after it.
@@ -782,21 +791,32 @@ a running turn, the queued messages would steer it."
                                 (harness-agent--end turn 'cancelled))))
       t)))
 
+(defun harness-agent--queue-sender (items)
+  "Return who sent ITEMS, queued messages that go out as one, or nil.
+Nil means the user: the message is theirs when any of ITEMS is.
+Otherwise it is from the first item's sender (see `agent/prompt')."
+  (unless (cl-some (lambda (it) (null (harness-sender-kind (plist-get it :from)))) items)
+    (plist-get (car items) :from)))
+
 (harness-defmethod agent/send-queue (session-id)
   "Send every queued message of SESSION-ID as one turn; return its promise.
 Items with neither text nor attachments are dropped.  With nothing to
 send no turn starts and the promise resolves to (:stop-reason
 nothing-queued).  While a turn runs the messages steer it, like any
-message sent then."
-  (let* ((items (harness-call 'session/queue-take session-id))
+message sent then.  The message is the user's when any item is, else
+from the first item's sender."
+  (let* ((items (cl-remove-if (lambda (it) (and (harness-string-blank-p (plist-get it :text))
+                                                (null (plist-get it :attachments))))
+                              (harness-call 'session/queue-take session-id)))
          (blocks (harness-agent--join-texts
                   (cl-loop for it in items
                            append (append (unless (harness-string-blank-p (plist-get it :text))
                                             (list (list :type "text" :text (plist-get it :text))))
-                                          (harness-agent-attachments-to-blocks (plist-get it :attachments)))))))
+                                          (harness-agent-attachments-to-blocks (plist-get it :attachments))))))
+         (from (harness-agent--queue-sender items)))
     (if (null blocks)
         (harness-resolved (list :stop-reason 'nothing-queued))
-      (harness-call 'agent/prompt session-id blocks))))
+      (harness-call 'agent/prompt session-id blocks (and from (list :from from))))))
 
 (harness-defmethod agent/running (&optional session-id)
   "Return running session ids, or non-nil when SESSION-ID is running."

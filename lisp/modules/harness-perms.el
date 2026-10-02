@@ -665,7 +665,8 @@ DECISION is the current value and NEXT continues the chain."
           (harness-call 'agent/prompt sid
                         (list (list :type "text"
                                     :text (format "The call to %s was denied because the session runs in non-interactive mode and the user is away. %s"
-                                                  (plist-get request :tool) harness-perms-non-interactive-hint))))
+                                                  (plist-get request :tool) harness-perms-non-interactive-hint)))
+                        (list :from (harness-sender-system "non-interactive mode")))
         (error (harness-log 'warn "perms: steering failed: %S" err))))))
 
 (defun harness-perms--non-interactive (decision next request)

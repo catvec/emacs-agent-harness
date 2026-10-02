@@ -390,6 +390,10 @@ turn `harness-tasks-require-verification' on themselves."
   "Return the first node of SID matching PRED."
   (cl-find-if pred (harness-call 'session/nodes sid)))
 
+(defun harness-tasks-test-user-nodes (sid)
+  "The user messages of session SID, oldest first."
+  (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes sid)))
+
 (ert-deftest harness-tasks-flushed-on-exit ()
   "A change waiting for its save is written when Emacs exits."
   (harness-tasks-test-with
@@ -423,7 +427,12 @@ turn `harness-tasks-require-verification' on themselves."
                                                              (plist-get (plist-get n :meta) :interrupted)))))
       (should (harness-tasks-test--node sid (lambda (n) (and (eq (plist-get n :kind) 'user)
                                                              (equal harness-tasks-resume-prompt (plist-get n :content))))))
-      (should (= 2 (cl-count 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))))
+      (should (= 2 (cl-count 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
+      ;; The task is the user's; the message that carried it on is the harness's.
+      (pcase-let ((`(,task ,resume) (harness-tasks-test-user-nodes sid)))
+        (should-not (harness-node-sender task))
+        (should (equal harness-tasks-resume-prompt (plist-get resume :content)))
+        (should (equal (harness-sender-system "tasks") (harness-node-sender resume)))))))
 
 (ert-deftest harness-tasks-interrupted-task-waits-when-resume-is-off ()
   (harness-tasks-test-with
@@ -446,7 +455,11 @@ turn `harness-tasks-require-verification' on themselves."
       (let ((harness-provider-demo-script-override
              '((:type text :delta "On it.") (:type done :stop-reason end-turn))))
         (harness-call 'task/prompt id "carry on")
-        (harness-tasks-test-wait-state id 'done)))))
+        (harness-tasks-test-wait-state id 'done))
+      ;; That reply is the user's own.
+      (let ((reply (car (last (harness-tasks-test-user-nodes sid)))))
+        (should (equal "carry on" (plist-get reply :content)))
+        (should-not (harness-node-sender reply))))))
 
 (ert-deftest harness-tasks-interrupted-while-starting-starts-over ()
   "A task stopped before its session existed starts again from scratch."
@@ -535,7 +548,11 @@ turn `harness-tasks-require-verification' on themselves."
           (should (= 2 (length texts)))
           (should (equal "the parser chokes on nested quotes" (car texts)))
           (should (string-match-p (regexp-quote harness-tasks-test-write-up) (cadr texts)))
-          (should (string-match-p "^> the parser chokes on nested quotes$" (cadr texts))))))))
+          (should (string-match-p "^> the parser chokes on nested quotes$" (cadr texts))))
+        ;; The request is the user's; the harness composed the start message.
+        (pcase-let ((`(,request ,start) (harness-tasks-test-user-nodes sid)))
+          (should-not (harness-node-sender request))
+          (should (equal (harness-sender-system "tasks") (harness-node-sender start))))))))
 
 (ert-deftest harness-tasks-refine-failure-needs-input-then-retries ()
   (harness-tasks-test-with
@@ -559,7 +576,13 @@ turn `harness-tasks-require-verification' on themselves."
           (harness-call 'task/refine id)
           (harness-tasks-test-wait-state id 'pending)
           (should (equal "Make the flaky idea solid" (plist-get (harness-tasks-test-task id) :prompt)))
-          (should-not (plist-get (harness-tasks-test-task id) :outcome)))))))
+          (should-not (plist-get (harness-tasks-test-task id) :outcome)))
+        ;; The idea is the user's; the harness asked for the write-up again.
+        (let ((users (harness-tasks-test-user-nodes (plist-get (harness-tasks-test-task id) :session))))
+          (should (= 3 (length users)))
+          (should-not (harness-node-sender (car users)))
+          (dolist (again (cdr users))
+            (should (equal (harness-sender-system "tasks") (harness-node-sender again)))))))))
 
 (ert-deftest harness-tasks-refine-feedback-rewrites-the-task ()
   (harness-tasks-test-with
@@ -633,7 +656,8 @@ turn `harness-tasks-require-verification' on themselves."
                                                           (plist-get (plist-get n :meta) :steering)))
                                         (harness-call 'session/nodes sid))))
           (should (= 1 (length steers)))
-          (should (string-match-p "enough looking" (plist-get (car steers) :content))))))))
+          (should (string-match-p "enough looking" (plist-get (car steers) :content)))
+          (should (equal (harness-sender-system "tasks") (harness-node-sender (car steers)))))))))
 
 (ert-deftest harness-tasks-backlog-survives-a-restart ()
   "A written-up task waits in the backlog across a restart; nothing starts it."
@@ -1837,6 +1861,8 @@ Each is a new session, never an earlier one."
           (should (= 2 (length texts)))
           (should (string-prefix-p harness-tasks-reject-text (cadr texts)))
           (should (string-suffix-p "\n\nNested quotes still break." (cadr texts))))
+        ;; The feedback is the user's own words, so the message is theirs.
+        (should-not (harness-node-sender (cadr (harness-tasks-test-user-nodes sid))))
         ;; A second round adds to the first; then the work is accepted.
         (harness-call 'task/reject id "And the docs.")
         (harness-tasks-test-wait-state id 'review)

@@ -155,6 +155,28 @@
                  (sort (harness-fuzzy-filter "hel" '("readme" "harness-core.el" "harness-http.el"))
                        #'string<))))
 
+(ert-deftest harness-util-senders ()
+  "Who sent a message reads the same before and after JSON (kind a string)."
+  (let* ((system (harness-sender-system "tasks"))
+         (session (harness-sender-session '(:id "s1" :name "Fix the parser" :model "x")))
+         (parsed (harness-json-parse (harness-json-encode system))))
+    (should (equal '(:kind system :source "tasks") system))
+    (should (equal '(:kind session :id "s1" :name "Fix the parser") session))
+    (should (equal '(:kind "system" :source "tasks") parsed))
+    (should (eq 'system (harness-sender-kind parsed)))
+    (should (eq 'session (harness-sender-kind session)))
+    ;; The user: no sender, or nothing that names a kind.
+    (dolist (none '(nil (:source "x") (:kind nil) (:kind "") (:kind :false)))
+      (should-not (harness-sender-kind none)))
+    (should (equal parsed (harness-node-sender (list :kind 'user :meta (list :steering t :from parsed)))))
+    (should-not (harness-node-sender '(:kind user :meta (:steering t))))
+    (should-not (harness-node-sender '(:kind user :meta (:from (:source "x")))))
+    (should (equal "the harness (tasks)" (harness-sender-description parsed)))
+    (should (equal "the harness" (harness-sender-description '(:kind system))))
+    (should (equal "session s1 \"Fix the parser\"" (harness-sender-description session)))
+    (should (equal "session s2" (harness-sender-description '(:kind "session" :id "s2"))))
+    (should (equal "the user" (harness-sender-description nil)))))
+
 (ert-deftest harness-http-sse-parser ()
   (let (events)
     (let ((f (harness-http-sse-parser (lambda (ev data) (push (cons ev data) events)))))

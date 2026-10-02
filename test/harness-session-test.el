@@ -313,6 +313,31 @@ when it is forked to a model of a provider that cannot."
         (should (eq 'running (plist-get (harness-call 'session/get id) :status))))
       (should (equal '(running blocked running) (reverse statuses))))))
 
+(ert-deftest harness-session-sender-persists-and-reads-in-text ()
+  "A message the user did not write keeps its sender through a restart,
+and so does a queued one; the searchable transcript says who sent it."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append id '(:kind user :content "mine"))
+      (harness-call 'session/append id (list :kind 'user :content "resolve the conflicts"
+                                             :meta (list :from (harness-sender-system "merge queue"))))
+      (harness-call 'session/queue id "from elsewhere" nil (harness-sender-session '(:id "s2" :name "Other")))
+      (harness-call 'session/queue id "my own")
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (let ((nodes (harness-call 'session/nodes id)))
+        (should-not (harness-node-sender (car nodes)))
+        ;; Read back from JSON, its kind is a string; it still reads as the harness.
+        (should (eq 'system (harness-sender-kind (harness-node-sender (cadr nodes)))))
+        (should (equal "merge queue" (plist-get (harness-node-sender (cadr nodes)) :source))))
+      (let ((queue (plist-get (harness-call 'session/get id) :queue)))
+        (should (eq 'session (harness-sender-kind (plist-get (car queue) :from))))
+        (should (equal "Other" (plist-get (plist-get (car queue) :from) :name)))
+        (should-not (plist-member (cadr queue) :from)))
+      (should (equal "[user] mine\n[user, from the harness (merge queue)] resolve the conflicts"
+                     (harness-call 'session/transcript-text id))))))
+
 (ert-deftest harness-session-usage-accumulates ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
