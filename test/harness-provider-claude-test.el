@@ -12,6 +12,7 @@
 (require 'harness-provider)
 
 (defvar harness-provider-claude-program)
+(defvar harness-provider-claude-permission-args)
 (defvar harness-provider-claude-interrupt-timeout)
 (defvar harness-provider-claude--sessions)
 (defvar harness-provider-claude--status)
@@ -134,7 +135,11 @@ tool is answered with \"echo: TEXT\"."
     (should (equal '("--tools" "") (seq-subseq cmd (cl-position "--tools" cmd :test #'equal)
                                               (+ 2 (cl-position "--tools" cmd :test #'equal)))))
     (should (member "--strict-mcp-config" cmd))
-    (should (equal "bypassPermissions" (nth (1+ (cl-position "--permission-mode" cmd :test #'equal)) cmd)))
+    ;; The CLI lets the harness's tools through by rule in a fixed mode;
+    ;; it never bypasses its permission checks.
+    (should (equal "mcp__harness__*" (nth (1+ (cl-position "--allowedTools" cmd :test #'equal)) cmd)))
+    (should (equal "default" (nth (1+ (cl-position "--permission-mode" cmd :test #'equal)) cmd)))
+    (should-not (member "bypassPermissions" cmd))
     (should (equal "claude-opus-5-5" (nth (1+ (cl-position "--model" cmd :test #'equal)) cmd)))
     (should (equal "high" (nth (1+ (cl-position "--effort" cmd :test #'equal)) cmd)))
     (should (equal "sys" (nth (1+ (cl-position "--system-prompt" cmd :test #'equal)) cmd)))
@@ -147,7 +152,13 @@ tool is answered with \"echo: TEXT\"."
     (should-not (member "--effort" cmd))
     (should-not (member "--system-prompt" cmd))
     (should-not (member "--resume" cmd))
-    (should-not (member "--fork-session" cmd))))
+    (should-not (member "--fork-session" cmd)))
+  ;; The permission arguments are a setting; bypassing is an opt-in.
+  (let* ((harness-provider-claude-permission-args '("--permission-mode" "bypassPermissions"))
+         (cmd (harness-provider-claude--command "claude-sonnet-5" nil nil nil nil)))
+    (should (equal "bypassPermissions" (nth (1+ (cl-position "--permission-mode" cmd :test #'equal)) cmd)))
+    (should-not (member "--allowedTools" cmd))
+    (should (equal "claude-sonnet-5" (nth (1+ (cl-position "--model" cmd :test #'equal)) cmd)))))
 
 (ert-deftest harness-provider-claude-turn-with-hosted-tool-call ()
   (harness-provider-claude-test--setup)
@@ -170,6 +181,8 @@ tool is answered with \"echo: TEXT\"."
       (should (string-prefix-p "fake-" (plist-get state :cli-session-id)))
       (should (equal "claude-fable-5-1" (plist-get state :model))))
     ;; Tool call: prefix stripped, id from the assistant tool_use block.
+    ;; The fixture checks permissions like the CLI, so the call reaching
+    ;; the harness at all shows the default arguments let it through.
     (let ((call (harness-provider-claude-test--find events 'tool-call)))
       (should (equal "echo" (plist-get call :name)))
       (should (equal "toolu_fake_1" (plist-get call :id)))
@@ -196,6 +209,8 @@ tool is answered with \"echo: TEXT\"."
     (let* ((dump (harness-provider-claude-test--read-argv argv-file))
            (argv (plist-get dump :argv)))
       (should (member "--include-partial-messages" argv))
+      (should (equal "mcp__harness__*" (nth (1+ (cl-position "--allowedTools" argv :test #'equal)) argv)))
+      (should-not (member "bypassPermissions" argv))
       (should (equal "low" (nth (1+ (cl-position "--effort" argv :test #'equal)) argv)))
       (should (equal "You are a test agent" (nth (1+ (cl-position "--system-prompt" argv :test #'equal)) argv)))
       (should-not (member "--resume" argv))
@@ -353,6 +368,46 @@ tool is answered with \"echo: TEXT\"."
       (should (equal "QUJD" (harness-plist-get-in (nth 1 blocks) '(:source :data))))
       (should (equal (base64-encode-string "png") (harness-plist-get-in (nth 2 blocks) '(:source :data)))))
     (delete-file img)))
+
+;;;; Permissions
+
+(ert-deftest harness-provider-claude-cli-denial-becomes-a-hint ()
+  "A harness tool the CLI refuses never reaches the harness; a hint says why."
+  (harness-provider-claude-test--setup)
+  (let* ((harness-provider-claude-permission-args '("--permission-mode" "default"))
+         (events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "deny1" "please call echo with ping"))))
+         (hint (harness-provider-claude-test--find events 'hint))
+         (result (harness-provider-claude-test--find events 'tool-result)))
+    (should-not (harness-provider-claude-test--find events 'tool-call))
+    (should (string-match-p "refused to run echo" (plist-get hint :text)))
+    (should (string-match-p "harness-provider-claude-permission-args" (plist-get hint :text)))
+    ;; The CLI's error result comes through and the turn goes on.
+    (should (equal "toolu_fake_1" (plist-get result :id)))
+    (should (plist-get result :is-error))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+    (harness-provider-claude-close "deny1")))
+
+(ert-deftest harness-provider-claude-permission-prompts-come-to-the-harness ()
+  "With a permission prompt tool the CLI asks; the harness allows only its own tools."
+  (harness-provider-claude-test--setup)
+  (let* ((harness-provider-claude-permission-args
+          '("--permission-mode" "default" "--permission-prompt-tool" "stdio"))
+         (events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "ask1" "please call echo, then call bash"))))
+         (call (harness-provider-claude-test--find events 'tool-call))
+         (refusal (harness-provider-claude-test--find events 'tool-result)))
+    ;; The CLI asked about echo, the harness allowed it, and it ran.
+    (should (equal "echo" (plist-get call :name)))
+    (should (equal "ping" (plist-get (plist-get call :input) :text)))
+    (should (= 1 (cl-count 'tool-call (harness-provider-claude-test--types events))))
+    ;; Bash is no harness tool, so the harness refused it.
+    (should (equal "toolu_fake_2" (plist-get refusal :id)))
+    (should (plist-get refusal :is-error))
+    (should (string-match-p "only its own tools" (plist-get refusal :content)))
+    (should-not (harness-provider-claude-test--find events 'hint))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+    (harness-provider-claude-close "ask1")))
 
 ;;;; Billing and quota
 
@@ -584,7 +639,10 @@ tool is answered with \"echo: TEXT\"."
     (message "integration events: %S" types)
     (message "integration text: %s" (harness-provider-claude-test--text events))
     (should (eq 'start (car types)))
+    ;; The CLI ran the harness's tool without bypassing its permission
+    ;; checks, and refused nothing.
     (should (= 1 (length calls)))
+    (should-not (harness-provider-claude-test--find events 'hint))
     (should (equal "echo" (plist-get (car calls) :name)))
     (should (equal "ping" (plist-get (plist-get (car calls) :input) :text)))
     (should (string-match-p "ping" (harness-provider-claude-test--text events)))
