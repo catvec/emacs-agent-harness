@@ -88,7 +88,19 @@
                              (append (plist-get data :sessions)
                                      (list (list :id "C" :name "empty" :kind "btw" :head "a3" :parent-id "A" :fork-node "a3")))))
            (ids2 (mapcar (lambda (r) (plist-get (plist-get r :node) :id)) (harness-ui-tree--layout data2))))
-      (should (equal '("session:C" "a3" "b1" "a2" "a1") ids2)))))
+      (should (equal '("session:C" "a3" "b1" "a2" "a1") ids2)))
+    ;; One started empty, like a BTW, has no fork node: its placeholder
+    ;; sits where it was created, not below everything.
+    (let* ((data3 (plist-put (copy-sequence data) :sessions
+                             (append (plist-get data :sessions)
+                                     (list (list :id "D" :name "btw" :kind "btw" :head nil :parent-id "A"
+                                                 :fork-node nil :created 2.5)))))
+           (rows3 (harness-ui-tree--layout data3))
+           (ids3 (mapcar (lambda (r) (plist-get (plist-get r :node) :id)) rows3)))
+      (should (equal '("a3" "b1" "session:D" "a2" "a1") ids3))
+      (should (plist-get (cl-find "session:D" rows3 :key (lambda (r) (plist-get (plist-get r :node) :id))
+                                  :test #'equal)
+                         :fork-start-p)))))
 
 (ert-deftest harness-ui-tree-buffer-rows-fork-and-checkout ()
   (harness-ui-tree-test-with

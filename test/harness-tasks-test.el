@@ -1633,20 +1633,28 @@ folders: BODY reads them by listing the board."
   (mapcar (lambda (s) (plist-get s :id)) sessions))
 
 (ert-deftest harness-tasks-btw-is-about-the-board ()
-  "Only the board's BTWs, BTWs without a parent, are told to answer about the tasks."
+  "Only the board's BTWs, BTWs without a parent, are told to answer about the tasks.
+Each is a new session, never an earlier one."
   (harness-tasks-test-with
     (let* ((btw (harness-call 'task/btw default-directory "btw: how goes"))
+           (again (harness-call 'task/btw default-directory "btw: how goes"))
            (id (harness-tasks-test-submit "fix the parser"))
            (task-session (harness-call 'session/get (plist-get (harness-tasks-test-task id) :session)))
            (plain (harness-call 'session/create :cwd default-directory :model "demo:scripted"))
-           (fork (harness-test-await (harness-call 'session/fork (plist-get plain :id) :kind 'btw))))
+           (side (harness-call 'session/btw (plist-get plain :id))))
       (should (eq 'btw (plist-get btw :kind)))
       (should-not (plist-get btw :parent-id))
       (should (equal "btw: how goes" (plist-get btw :name)))
+      ;; Asked again, the board starts another conversation, blank.
+      (should-not (equal (plist-get btw :id) (plist-get again :id)))
+      (should (eq 'btw (plist-get again :kind)))
+      (should-not (harness-call 'session/nodes (plist-get again :id)))
+      (should-not (plist-get again :provider-state))
       (should (equal (concat "Base.\n\n" harness-tasks-btw-prompt "\n")
                      (harness-run-filter 'agent/system-prompt "Base." btw)))
-      ;; Task sessions, other sessions and a BTW about a session are left alone.
-      (dolist (s (list task-session plain fork))
+      ;; Task sessions, other sessions and a BTW over a session are left alone.
+      (should (equal (plist-get plain :id) (plist-get side :parent-id)))
+      (dolist (s (list task-session plain side))
         (should (equal "Base." (harness-run-filter 'agent/system-prompt "Base." s))))
       (let ((harness-tasks-btw-prompt nil))
         (should (equal "Base." (harness-run-filter 'agent/system-prompt "Base." btw))))

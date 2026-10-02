@@ -4,7 +4,7 @@
 
 ;; A git-log-like view of a session's fork family.  Every node of the
 ;; family (the session, its ancestors and every fork, BTW and sub-agent
-;; forked from them) is one row: newest at the top, the rails of the
+;; started from them) is one row: newest at the top, the rails of the
 ;; graph on the left, a short id, the kind, a one-line excerpt and the
 ;; relative time.  Each session owns a lane with its own colour; where a
 ;; fork begins its first own row carries the session name and its lane
@@ -18,7 +18,8 @@
 ;; node updates of any session in the family.
 ;;
 ;; Keys: RET open the session at that node, c check out (move the head:
-;; time travel), f fork here, b BTW here, TAB expand the node, n/p move
+;; time travel), f fork here, b BTW over the node's session (a new
+;; session that shares nothing with it), TAB expand the node, n/p move
 ;; within the lane, g refresh, q quit.  Every key has a header-line
 ;; button or a mouse target on the row.
 
@@ -89,7 +90,9 @@
     (if (eq (frame-parameter nil 'background-mode) 'dark) (cdr pair) (car pair))))
 
 (defun harness-ui-tree--nodes-with-placeholders (data)
-  "Return the nodes of DATA plus one placeholder per fork without own nodes."
+  "Return the nodes of DATA plus one placeholder per session without own nodes.
+A fork's placeholder sits just above the node it was forked from; that
+of a session started empty, like a BTW, where it was created."
   (let* ((nodes (plist-get data :nodes))
          (by-id (make-hash-table :test 'equal))
          (owned (make-hash-table :test 'equal))
@@ -103,7 +106,7 @@
           (let ((fork (gethash (plist-get s :fork-node) by-id)))
             (push (list :id (concat "session:" sid) :session sid :kind "empty"
                         :content "no messages yet"
-                        :ts (+ 0.001 (or (and fork (plist-get fork :ts)) 0)))
+                        :ts (+ 0.001 (or (and fork (plist-get fork :ts)) (plist-get s :created) 0)))
                   extra)))))
     (append nodes extra)))
 
@@ -401,7 +404,7 @@ The rails of the NLANES lanes continue as the line prefix."
           (funcall btn "[RET open]" #'harness-ui-tree-open "Open the session at this node")
           (funcall btn "[c checkout]" #'harness-ui-tree-checkout "Move the session head to this node (time travel)")
           (funcall btn "[f fork]" #'harness-ui-tree-fork "Fork the session at this node")
-          (funcall btn "[b btw]" #'harness-ui-tree-btw "Start a BTW side conversation here")
+          (funcall btn "[b btw]" #'harness-ui-tree-btw "Start a BTW side conversation over this node's session")
           (funcall btn "[TAB expand]" #'harness-ui-tree-toggle "Show the full node")
           (funcall btn "[n/p lane]" #'harness-ui-tree-next-in-lane "Move within this session's rows")
           (funcall btn "[g]" #'harness-ui-tree-refresh "Refresh")
@@ -537,7 +540,7 @@ Every window showing the buffer keeps its own row too."
         (". RET" "Open its session" harness-ui-tree-open)
         (". c" "Check out (time travel)" harness-ui-tree-checkout)
         (". f" "Fork here" harness-ui-tree-fork)
-        (". b" "BTW from here" harness-ui-tree-btw)
+        (". b" "BTW over its session" harness-ui-tree-btw)
         (". TAB" "Expand or collapse" harness-ui-tree-toggle)]
        ["Move"
         (". n" "Next in lane" harness-ui-tree-next-in-lane)
@@ -659,18 +662,14 @@ once FN's request settles.  FN receives (SID DONE) and must call DONE."
                         (lambda (e) (funcall done) (message "Fork failed: %s" (harness-error-message e))))))))
 
 (defun harness-ui-tree-btw ()
-  "Start a BTW side conversation from the node at point.
-It opens blank, for a question written in its compose box."
+  "Start a BTW side conversation over the session of the node at point.
+Like every BTW it is a new session, listed under that session but
+sharing nothing with it, so the node only says which session: its head
+stays where it is.  It opens blank, over the tree, for a question
+written in its compose box."
   (interactive)
   (unless (fboundp 'harness-btw) (user-error "The BTW module is not loaded"))
-  (let ((tree (current-buffer)))
-    (harness-ui-tree--at-node
-     (harness-ui-tree-node-at-point)
-     (lambda (sid done)
-       ;; Opened over the tree; the head moves back once the fork is made.
-       (harness-then (if (buffer-live-p tree) (with-current-buffer tree (harness-btw sid)) (harness-btw sid))
-                     (lambda (_) (funcall done))
-                     (lambda (_) (funcall done)))))))
+  (harness-btw (plist-get (harness-ui-tree-node-at-point) :session)))
 
 (defun harness-ui-tree-toggle ()
   "Expand or collapse the node at point."

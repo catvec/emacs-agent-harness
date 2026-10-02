@@ -1395,6 +1395,7 @@ along it is, what it changed, why it is stuck."
 
 (defun harness-ui-tasks--start-btw (name)
   "Start a conversation NAME about the board's tasks; return a promise of it.
+Every call starts a new session (`task/btw'), never an earlier one.
 The BTW module calls this (`harness-ui-btw-start-function') to open a
 BTW over the board; a failure shows on the board too."
   (setq harness-ui-tasks--error nil)

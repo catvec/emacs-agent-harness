@@ -14,6 +14,9 @@
 (defvar harness-provider-claude-program)
 (defvar harness-provider-claude-interrupt-timeout)
 (defvar harness-provider-claude--sessions)
+(defvar harness-sessions)
+(defvar harness-tools)
+(defvar harness-agent--turns)
 (defvar harness-provider-claude--status)
 (defvar harness-provider-claude--asked)
 (defvar harness-provider-claude--probe)
@@ -310,6 +313,104 @@ tool is answered with \"echo: TEXT\"."
       (should-not (plist-get new-state :fork-pending))
       (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason))))
     (harness-provider-claude-close "child")))
+
+;;;; Sessions on the CLI: what BTWs and forks share
+
+(defmacro harness-provider-claude-test-with-sessions (&rest body)
+  "Run BODY with sessions whose turns the agent runs on the fake CLI.
+BODY sees CWD, a directory for the sessions."
+  (declare (indent 0))
+  `(harness-test-with-temp-state
+     (harness-provider-claude-test--setup)
+     (dolist (m '(store project config provider-demo tools session agent))
+       (harness-test-load-module m))
+     (clrhash harness-sessions)
+     (clrhash harness-tools)
+     (clrhash harness-agent--turns)
+     (let ((cwd (harness-test-temp-dir))
+           (default-directory dir))
+       (unwind-protect (progn ,@body)
+         (harness-provider-claude-close-all)))))
+
+(defun harness-provider-claude-test--turn (sid text)
+  "Run a turn of session SID asking TEXT; return the argv of the CLI it spawned.
+Return nil when the turn spawned no CLI process."
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment)))
+    (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid text)) :stop-reason)))
+    (and (> (or (harness-file-size argv-file) 0) 0)
+         (plist-get (harness-json-parse (harness-read-file argv-file)) :argv))))
+
+(defun harness-provider-claude-test--cli-id (sid)
+  "Return the CLI session id in the provider state of session SID."
+  (plist-get (plist-get (harness-call 'session/get sid) :provider-state) :cli-session-id))
+
+(ert-deftest harness-provider-claude-btw-starts-a-cli-session-of-its-own ()
+  "A BTW's turns run in a CLI session of its own, not in its parent's.
+Its CLI is spawned without --resume or --fork-session, as for a new
+session, so two BTWs over one session have two CLI sessions, and the
+parent keeps its own CLI session and transcript."
+  (harness-provider-claude-test-with-sessions
+    (let ((parent (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id)))
+      (harness-provider-claude-test--turn parent "hi")
+      (let ((parent-cli (harness-provider-claude-test--cli-id parent))
+            (parent-state (plist-get (harness-call 'session/get parent) :provider-state))
+            (parent-nodes (harness-call 'session/nodes parent)))
+        (should (string-prefix-p "fake-" parent-cli))
+        (let* ((one (plist-get (harness-call 'session/btw parent "btw") :id))
+               (two (plist-get (harness-call 'session/btw parent "btw") :id))
+               (argv-one (harness-provider-claude-test--turn one "a side question"))
+               (argv-two (harness-provider-claude-test--turn two "another side question"))
+               (cli-one (harness-provider-claude-test--cli-id one))
+               (cli-two (harness-provider-claude-test--cli-id two)))
+          (dolist (argv (list argv-one argv-two))
+            (should argv)
+            (should-not (member "--resume" argv))
+            (should-not (member "--fork-session" argv)))
+          (should (string-prefix-p "fake-" cli-one))
+          (should (string-prefix-p "fake-" cli-two))
+          (should-not (equal cli-one cli-two))
+          (should-not (member parent-cli (list cli-one cli-two)))
+          ;; Each BTW's transcript is its own exchange alone.
+          (pcase-dolist (`(,sid . ,question) (list (cons one "a side question") (cons two "another side question")))
+            (let ((nodes (harness-call 'session/nodes sid)))
+              (should (equal question (plist-get (car nodes) :content)))
+              (should (cl-every (lambda (n) (equal sid (plist-get n :session))) nodes))))
+          ;; The parent is untouched and carries on in its own CLI session.
+          (should (equal parent-state (plist-get (harness-call 'session/get parent) :provider-state)))
+          (should (equal parent-nodes (harness-call 'session/nodes parent)))
+          (let ((argv (harness-provider-claude-test--turn parent "back to work")))
+            (when argv
+              (should (equal parent-cli (nth (1+ (cl-position "--resume" argv :test #'equal)) argv)))))
+          (should (equal parent-cli (harness-provider-claude-test--cli-id parent))))))))
+
+(ert-deftest harness-provider-claude-fork-never-resumes-the-parents-cli-session ()
+  "A fork's first turn forks the parent's CLI session, or starts its own.
+Forked on Claude Code, it resumes the parent's CLI session with
+--fork-session, which makes a new one.  Forked to a model whose provider
+cannot fork the state, it has none: back on Claude Code it starts a CLI
+session of its own instead of resuming, and writing into, the parent's."
+  (harness-provider-claude-test-with-sessions
+    (let ((parent (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id)))
+      (harness-provider-claude-test--turn parent "hi")
+      (let* ((parent-cli (harness-provider-claude-test--cli-id parent))
+             (fork (plist-get (harness-test-await (harness-call 'session/fork parent :kind 'fork)) :id))
+             (argv (harness-provider-claude-test--turn fork "on the fork")))
+        (should (equal parent-cli (nth (1+ (cl-position "--resume" argv :test #'equal)) argv)))
+        (should (member "--fork-session" argv))
+        (should (string-prefix-p "forked-" (harness-provider-claude-test--cli-id fork)))
+        (let ((other (plist-get (harness-test-await
+                                 (harness-call 'session/fork parent :kind 'fork :model "demo:scripted"))
+                                :id)))
+          (should-not (plist-get (harness-call 'session/get other) :provider-state))
+          (harness-call 'session/update other :model "claude:claude-fable-5-1" :silent t)
+          (let ((argv (harness-provider-claude-test--turn other "back on claude")))
+            (should argv)
+            (should-not (member "--resume" argv))
+            (should-not (member "--fork-session" argv)))
+          (should (string-prefix-p "fake-" (harness-provider-claude-test--cli-id other)))
+          (should-not (equal parent-cli (harness-provider-claude-test--cli-id other))))
+        (should (equal parent-cli (harness-provider-claude-test--cli-id parent)))))))
 
 (ert-deftest harness-provider-claude-resume-after-close ()
   (harness-provider-claude-test--setup)
