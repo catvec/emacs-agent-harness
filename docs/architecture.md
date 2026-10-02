@@ -1266,7 +1266,7 @@ returning to the position they had last); a session opened from a view
 (`harness-ui-session-opener`) replaces the view.  Menus, help and the
 BTW overlay keep their own windows.
 
-Settings page (`harness-ui-config`, `C-c a S`, `harness-settings`):
+Settings page (`harness-ui-config`, `C-c h S`, `harness-settings`):
 every harness option on one page, like a customize buffer, about the
 project of the current buffer (in a chat buffer, of the session's
 working directory).  A Global / Project toggle at the top (`s`, or the
@@ -1288,7 +1288,7 @@ and `harness-toggle-non-interactive` change what the buffer's
 `harness-ui-setting-target-function` names -- a session id, or a
 settings plist with its setter -- and otherwise the current session.
 
-Task board (`harness-ui-tasks`, `C-c a a`): the project's tasks in five
+Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in five
 sections -- requires your input, ready for review, in progress, pending,
 completed -- with each card's current todo, progress, elapsed time,
 cost and merge state, one-click answers to a blocked task's question or
@@ -1302,7 +1302,7 @@ session with the feedback written in the compose box (`C-u R` reads it
 in the minibuffer).  The header counts the tasks to review, and
 `task/review` says in the echo area that one is ready
 (`harness-ui-tasks-notify-review`).  RET opens the session, and
-`C-c a a` there leads back to the open board listing its task, whatever
+`C-c h a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  Redraws, after
 every change and on every tick of the clock, leave point and each

@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; `harness-settings' (C-c a S) shows every setting of the harness on
+;; `harness-settings' (C-c h S) shows every setting of the harness on
 ;; one page, like a customize buffer, with a scope toggle at the top:
 ;;
 ;;   Global   the customize value, used everywhere unless a project
