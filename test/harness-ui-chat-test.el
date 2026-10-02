@@ -1057,6 +1057,63 @@ buffer-local function changes only its buffer's header."
                          5 "the shown session to reopen")
       (should (eq 'inactive (plist-get (harness-call 'session/get hidden) :status))))))
 
+(ert-deftest harness-ui-chat-connect-remote-and-back ()
+  "Switching to a harness over TCP with a chat buffer open opens one
+connection: what the buffer asks while it connects waits for it.  Going
+back works too, a malformed address keeps the UI where it was, and the
+connection let go of is never reported as closed."
+  (harness-ui-chat-test-with
+    (let* ((port (plist-get (harness-call 'acp/start :port 0) :port))
+           (address (format "127.0.0.1:%d" port))
+           (buf (harness-ui-chat-test-open (harness-ui-chat-test-session "remote")))
+           (tcp-connects 0)
+           (messages nil)
+           (count-connects (lambda (connect &optional to)
+                             (prog1 (funcall connect to)
+                               (when to (cl-incf tcp-connects)))))
+           (record (lambda (format-string &rest args)
+                     (when format-string (push (apply #'format format-string args) messages))))
+           ;; Reloaded: a failed load shows an error in place of the transcript.
+           (loaded (lambda ()
+                     (with-current-buffer buf
+                       (and (not harness-chat--loading) harness-compose-end
+                            (harness-ui-chat-test-find buf "are you remote?")
+                            t)))))
+      (advice-add 'harness-acp-connect :around count-connects)
+      (advice-add 'message :before record)
+      (unwind-protect
+          (progn
+            (harness-ui-chat-test-prompt buf "are you remote?")
+            (harness-test-wait loaded 5 "the first turn shown")
+            (harness-connect-remote address)
+            (should (equal address harness-ui-connection-address))
+            ;; The chat buffer reloads over the new connection as it connects.
+            (harness-test-wait loaded 5 "the chat reloaded over TCP")
+            (should (listp (harness-test-await (harness-ui-request "_harness/session/list"))))
+            (should (eq 'tcp (harness-acp-connection-kind harness-ui-connection)))
+            (should (= 1 tcp-connects))
+            (should-not (harness-ui-chat-test-find buf "could not load the session"))
+            ;; Back to the harness in this Emacs.
+            (let ((harness-process nil)) (harness-connect-remote ""))
+            (should-not harness-ui-connection-address)
+            (should (eq 'local (harness-acp-connection-kind harness-ui-connection)))
+            (should (listp (harness-test-await (harness-ui-request "_harness/session/list"))))
+            (harness-test-wait loaded 5 "the chat reloaded in-process")
+            ;; No port: nothing to connect to, so the UI stays with this harness.
+            (should-error (harness-connect-remote "localhost") :type 'user-error)
+            (should-not harness-ui-connection-address)
+            (should (listp (harness-test-await (harness-ui-request "_harness/session/list"))))
+            (harness-test-wait loaded 5 "the chat reloaded after the failed switch")
+            (should (= 1 tcp-connects))
+            (accept-process-output nil 0.2)
+            (should-not (cl-find-if (lambda (m) (string-match-p "connection closed\\|initialize failed" m))
+                                    messages)))
+        (advice-remove 'message record)
+        (advice-remove 'harness-acp-connect count-connects)
+        (harness-call 'acp/stop)
+        ;; Whatever failed, the next test's UI connects in-process.
+        (setq harness-ui-connection-address nil)))))
+
 (ert-deftest harness-ui-chat-hl-line-skips-compose ()
   ;; hl-line would paint over the compose background, so it stops short of it.
   (harness-ui-chat-test-with

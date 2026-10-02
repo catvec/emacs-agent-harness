@@ -373,5 +373,42 @@ bottom side window and leaves the other windows alone."
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
 
+;;;; Connecting to another harness
+
+(defmacro harness-ui-test-with-connect-stub (var &rest body)
+  "Run BODY with `harness-ui-connect' recording each address into VAR, oldest first."
+  (declare (indent 1))
+  `(let ((,var nil) (harness-ui-redraw-hook nil))
+     (cl-letf (((symbol-function 'harness-ui-connect)
+                (lambda (&optional address) (setq ,var (append ,var (list address))) nil)))
+       ,@body)))
+
+(ert-deftest harness-ui-connect-remote-prompt-takes-only-an-address ()
+  "The prompt starts from the remote address in use, never from the
+`process' or nil that stand for a local harness."
+  (harness-ui-test-with-connect-stub connected
+    (dolist (case '((process . nil) (nil . nil) ("example.org:9000" . "example.org:9000")))
+      (let ((harness-ui-connection-address (car case))
+            (initial 'unset))
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_prompt &optional init &rest _)
+                     ;; What the real `read-string' accepts as INITIAL-INPUT.
+                     (unless (or (null init) (stringp init) (consp init))
+                       (signal 'wrong-type-argument (list 'stringp init)))
+                     (setq initial init)
+                     "127.0.0.1:9000")))
+          (call-interactively #'harness-connect-remote))
+        (should (equal (cdr case) initial))))
+    (should (equal '("127.0.0.1:9000" "127.0.0.1:9000" "127.0.0.1:9000") connected))))
+
+(ert-deftest harness-ui-connect-remote-empty-is-the-local-harness ()
+  "No address goes back to this Emacs's own harness, wherever it runs."
+  (harness-ui-test-with-connect-stub connected
+    (let ((harness-process t)) (harness-connect-remote ""))
+    (let ((harness-process nil)) (harness-connect-remote "  "))
+    (let ((harness-process nil)) (harness-connect-remote nil))
+    (harness-connect-remote " 127.0.0.1:9000 ")
+    (should (equal '(process nil nil "127.0.0.1:9000") connected))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

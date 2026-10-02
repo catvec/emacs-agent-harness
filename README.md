@@ -160,8 +160,9 @@ The harness process serves ACP on `127.0.0.1` (ephemeral port) with a
 token per start, written next to the address in the state directory
 (`acp-address`, `acp-token`; set `harness-acp-token` to choose it).
 From another Emacs, `M-x harness-connect-remote host:port` swaps the UI's
-connection; `scripts/harness-acp-stdio` bridges stdio for editors that
-spawn ACP agents.
+connection, and an empty address swaps it back to the local harness;
+`scripts/harness-acp-stdio` bridges stdio for editors that spawn ACP
+agents.
 
 ## Architecture
 

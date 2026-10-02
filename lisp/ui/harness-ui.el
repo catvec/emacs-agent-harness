@@ -255,25 +255,36 @@ made meanwhile are queued and sent once it listens."
     (harness-ui--open address nil)))
 
 (defun harness-ui--open (address token)
-  "Open the connection to ADDRESS (nil: in-process) authenticating with TOKEN."
-  (setq harness-ui-connection (let ((harness-acp-token (or token harness-acp-token)))
-                                (harness-acp-connect address)))
-  (harness-acp-set-handler harness-ui-connection #'harness-ui--dispatch)
-  (harness-acp-on-close harness-ui-connection #'harness-ui--on-close)
-  (harness-then (harness-acp-initialize harness-ui-connection)
-                (lambda (_)
-                  (harness-ui-refresh-sessions)
-                  (harness-ui-refresh-models)
-                  (harness-ui-refresh-quotas)
-                  (run-hooks 'harness-ui-connected-hook))
-                (lambda (e) (message "Harness: initialize failed: %s" (harness-error-message e))))
-  (harness-ui--flush-queue)
-  harness-ui-connection)
+  "Open the connection to ADDRESS (nil: in-process) authenticating with TOKEN.
+Only the UI's current connection reports closing or failing to
+initialize: one it let go of for another closes on purpose."
+  (let ((conn (let ((harness-acp-token (or token harness-acp-token)))
+                (harness-acp-connect address))))
+    (setq harness-ui-connection conn)
+    (harness-acp-set-handler conn #'harness-ui--dispatch)
+    (harness-acp-on-close conn (lambda ()
+                                 (when (eq conn harness-ui-connection)
+                                   (harness-ui--on-close))))
+    (harness-then (harness-acp-initialize conn)
+                  (lambda (_)
+                    (harness-ui-refresh-sessions)
+                    (harness-ui-refresh-models)
+                    (harness-ui-refresh-quotas)
+                    (run-hooks 'harness-ui-connected-hook))
+                  (lambda (e)
+                    (when (eq conn harness-ui-connection)
+                      (message "Harness: initialize failed: %s" (harness-error-message e)))))
+    (harness-ui--flush-queue)
+    conn))
 
 (defun harness-ui-connection ()
   "Return the live connection, connecting if needed; nil while the harness
-process is starting."
-  (if (harness-ui-connected-p) harness-ui-connection (harness-ui-connect harness-ui-connection-address)))
+process is starting.  A TCP connection still connecting is live: what is
+sent meanwhile goes out once it connects, whereas connecting again would
+drop it along with every request it carries."
+  (if (harness-acp-open-p harness-ui-connection)
+      harness-ui-connection
+    (harness-ui-connect harness-ui-connection-address)))
 
 (defun harness-ui--on-close ()
   (unless (eq harness-ui-connection-address 'process) ; the supervisor reports that
@@ -442,13 +453,36 @@ as needing input and its chat panel or task card answers it later."
   "Fallback when no UI module claimed question PARAMS: leave it pending."
   (harness-ui--leave-pending params respond "question"))
 
+(defvar harness-process)
+
+(defun harness-ui--local-address ()
+  "Return the address of this Emacs's own harness for `harness-ui-connect':
+`process' when the harness runs in its own process (`harness-process'),
+nil when it runs in this Emacs."
+  (and (bound-and-true-p harness-process) 'process))
+
 ;;;###autoload
 (defun harness-connect-remote (address)
-  "Connect the UI to a harness ACP server at ADDRESS (\"host:port\")."
-  (interactive (list (read-string "Harness server (host:port): " harness-ui-connection-address)))
-  (harness-ui-connect (unless (string-empty-p address) address))
-  (run-hooks 'harness-ui-redraw-hook)
-  (message "Harness: connected to %s" (or address "local harness")))
+  "Connect the UI to a harness ACP server at ADDRESS (\"host:port\").
+An empty or nil ADDRESS connects back to this Emacs's own harness: the
+harness process when `harness-process' is on, else the harness in this
+Emacs.  When the connection cannot be opened, for instance as ADDRESS
+has no port, the UI stays connected where it was."
+  (interactive
+   ;; Offer the remote address in use; a local harness's is `process' or nil.
+   (list (read-string "Harness server (host:port, empty for the local harness): "
+                      (and (stringp harness-ui-connection-address) harness-ui-connection-address))))
+  (let* ((remote (and address (not (string-blank-p address)) (string-trim address)))
+         (previous harness-ui-connection-address)
+         (failure (condition-case err
+                      (progn (harness-ui-connect (or remote (harness-ui--local-address))) nil)
+                    (error (ignore-errors (harness-ui-connect previous))
+                           err))))
+    (run-hooks 'harness-ui-redraw-hook)
+    (if failure
+        (user-error "Harness: cannot connect to %s: %s"
+                    (or remote "the local harness") (harness-error-message failure))
+      (message "Harness: connected to %s" (or remote "the local harness")))))
 
 ;;;; Session cache
 

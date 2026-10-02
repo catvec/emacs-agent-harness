@@ -994,6 +994,17 @@ and requests, then call `harness-acp-initialize'."
          ('tcp (let ((proc (harness-acp-connection-process conn)))
                  (and proc (process-live-p proc) (eq (process-status proc) 'open)))))))
 
+(defun harness-acp-open-p (conn)
+  "Non-nil while CONN can carry messages: connected or, for TCP, connecting.
+What is sent while a TCP socket connects waits and goes out once it is
+established, so a connection still connecting need not be replaced."
+  (and (harness-acp-connection-p conn)
+       (harness-acp-connection-open conn)
+       (pcase (harness-acp-connection-kind conn)
+         ('local t)
+         ('tcp (let ((proc (harness-acp-connection-process conn)))
+                 (and proc (process-live-p proc)))))))
+
 (defun harness-acp-set-handler (conn fn)
   "Deliver what arrives on CONN to FN, called as (METHOD PARAMS RESPOND).
 For a notification RESPOND is nil.  For a request from the agent
