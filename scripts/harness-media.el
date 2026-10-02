@@ -24,6 +24,9 @@
 ;; (docs/media by default), plus NAME.txt with the text of every window
 ;; into HARNESS_MEDIA_DUMPS when that is set, to check a picture without
 ;; looking at it.  HARNESS_MEDIA_SHOTS limits the run to some shots.
+;;
+;; docs/screenshots.md walks through it all, with recipes for adding a
+;; picture of a new view, a conversation or a task.
 
 ;;; Code:
 
