@@ -50,7 +50,7 @@ does on the task board).
 |---|---|
 | `C-c a n` | new session in a directory (opens on the right by default) |
 | `C-c a s` / `C-c a l` | switch session / session list |
-| `C-c a a` | task mode: a board of one-session tasks, each in its own worktree and done once merged; `I` adds an ongoing session, `b` asks how the tasks are going in a BTW side conversation, and `C-c a m` `T` `p` `i` set the next task up (or change the task at point); `C-c C-t` switches the box between Submit (start now) and Refine (backlog refinement: an agent writes the task up and it waits in Pending, across restarts, until `s` starts it) |
+| `C-c a a` | task mode: a board of one-session tasks, each in its own worktree; finished work waits in Ready for review until you verify it (`v`: its branch merges and the task is done) or send it back with feedback (`R`: its session works on it again), unless `harness-tasks-require-verification` is nil; `I` adds an ongoing session, `b` asks how the tasks are going in a BTW side conversation, and `C-c a m` `T` `p` `i` set the next task up (or change the task at point); `C-c C-t` switches the box between Submit (start now) and Refine (backlog refinement: an agent writes the task up and it waits in Pending, across restarts, until `s` starts it) |
 | `C-c a m` `T` `p` `i` | model, thinking level, permission mode, non-interactive |
 | `C-c a f` / `C-c a b` | fork the session / BTW side conversation: a new, empty session in a side window under the session, sharing nothing with it or with other BTWs, point in its compose box (ask with `C-c C-c` as in any session); `C-c C-k` closes it, deleting it if nothing was asked, `C-c C-o` keeps it as a normal session |
 | `C-c a t` `u` `w` | conversation tree, usage dashboard, worktrees |
@@ -108,16 +108,18 @@ their repositories by themselves; `tasks.json.bak` in the state
 directory keeps a copy of the file they came from.
 After a restart sessions are closed until you open one again (`C-c a s`,
 `C-c a l`), with its whole transcript; a turn the restart cut short is
-marked in it.  The task board comes back as it was, and tasks that were
-working carry on by themselves (`harness-tasks-resume-interrupted` nil
-makes them wait for you instead).
+marked in it.  The task board comes back as it was, tasks waiting for
+your review still wait, and tasks that were working carry on by
+themselves (`harness-tasks-resume-interrupted` nil makes them wait for
+you instead).
 
 A git project's board is also a folder of markdown files, one per task,
 in `docs/tasks/` of the main checkout (`harness-tasks-directory`; a
 project's `.dir-locals.el` may name another folder, or nil for none).
 Each file has YAML frontmatter (`id`, `title`, `state`, `column`,
-`session`, `branch`, `merge`, `model`, `created` and so on), then the
-task's prompt, the request it was written up from and its plan.  The
+`session`, `branch`, `merge`, `model`, `created`, `verified` and so
+on), then the task's prompt, the request it was written up from, the
+feedback of every time you sent it back from review, and its plan.  The
 harness writes a file when its task changes and reads back edits to the
 prompt, the request, the title, the model and thinking, and `state:
 done`.  A file you add becomes a backlog task, deleting a file (or

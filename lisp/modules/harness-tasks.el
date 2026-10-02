@@ -21,6 +21,17 @@
 ;; merge queue; any other failure puts the task in front of the user.
 ;; Archiving a merged task removes its worktree and its merged branch.
 ;;
+;; Review: finished work is not done until the user has looked at it
+;; (`harness-tasks-require-verification').  A task whose turn ends
+;; cleanly waits in review instead, its branch not merged yet in a git
+;; project.  `task/verify' accepts it: its branch goes through the merge
+;; queue and the task is done once merged (outside git, at once).
+;; `task/reject' sends it back with feedback: the feedback goes to the
+;; same session, in its own worktree, as a new prompt, and the task
+;; comes back to review when that turn ends.  Every round of feedback is
+;; kept with the task (`:feedback'), and so is the verification
+;; (`:verified', `:verified-at').
+;;
 ;; Backlog refinement (once called grooming): a task submitted with
 ;; `:refine' is jotted down for later, not started.  An agent writes it
 ;; up first -- briefly, read-only, at the project's root, told so by
@@ -42,9 +53,12 @@
 ;;             way (`:outcome' says why)
 ;;   active    its session is working on it, or stopped part way
 ;;             (`:outcome' says why: error, cancelled, merge-failed…)
-;;   merging   the agent finished; its branch is queued or merging
-;;   done      merged (or finished, outside git); a follow-up message
-;;             moves the task back to active
+;;   merging   the agent finished (and, with review, the user verified
+;;             the work); its branch is queued or merging
+;;   review    the agent finished; the work waits for the user to
+;;             verify it or send it back with feedback
+;;   done      merged (or finished, outside git), and verified with
+;;             review; a follow-up message moves the task back to active
 ;;
 ;; Every task a method returns or an event carries also has a derived
 ;; `:column', the kanban column it belongs in:
@@ -53,6 +67,7 @@
 ;;   needs-input   requires user input: its session is blocked on a
 ;;                 permission or a question, or it (or its refinement)
 ;;                 stopped part way
+;;   review        finished, waiting for the user to verify it
 ;;   active        in progress, merging included
 ;;   done          completed
 ;;
@@ -77,7 +92,9 @@
 ;; again: one stopped before its session existed starts over, the others
 ;; are told to carry on (`harness-tasks-resume-interrupted'), a write-up
 ;; cut short is written again, and merges in flight are queued again.
-;; Events `task/changed' (TASK) and `task/deleted' (ID) let a UI follow.
+;; Tasks in review simply wait on.  Events `task/changed' (TASK) and
+;; `task/deleted' (ID) let a UI follow, and `task/review' (TASK) tells
+;; it when a task's work waits for the user to review it.
 ;;
 ;; A board can also host BTW side conversations (`task/btw'), where the
 ;; user asks how the tasks are going.  Like every BTW, each is a new
@@ -99,6 +116,15 @@
   "Tasks that may work at the same time; the rest wait as pending.
 nil (the default) means no limit."
   :type '(choice (const :tag "No limit" nil) integer) :group 'harness)
+
+(defcustom harness-tasks-require-verification t
+  "When non-nil, finished work waits for the user to review it.
+A task whose turn ends cleanly goes to review instead of done, in a git
+project with its branch not merged yet.  Verifying it (`task/verify')
+merges the branch and completes the task; sending it back with
+feedback (`task/reject') has its session work on it again.  With nil a
+task is done once its branch merges, or outside git once its turn ends."
+  :type 'boolean :group 'harness)
 
 (defcustom harness-tasks-permission-mode 'auto
   "Permission mode of task sessions, or nil for the configured default."
@@ -157,6 +183,12 @@ never tells it.  It keeps a backlog write-up brief."
   "Start working on this task now.  It was written up earlier without doing any of it; that is over, so change files, run commands and so on as the task requires."
   "Opening of the message that starts a backlog task's work.
 The task's write-up follows it, then the request it was written from."
+  :type 'string :group 'harness)
+
+(defcustom harness-tasks-reject-text
+  "The user reviewed your work on this task and sent it back. Address their feedback below, then finish as before (commit your changes, if you work in a git worktree). Your work goes back to the user for review when your turn ends."
+  "Opening of the message that sends a task back to its session after review.
+The user's feedback follows it (`task/reject')."
   :type 'string :group 'harness)
 
 (defcustom harness-tasks-btw-prompt
@@ -367,6 +399,27 @@ the session that wrote it up."
   "Non-nil while a turn of TASK's session runs (from the moment it is prompted)."
   (let ((sid (plist-get task :session)))
     (and sid (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid) t)))
+
+(defun harness-tasks--verified-p (task)
+  "Non-nil when the user verified TASK's work."
+  (harness-json-true-p (plist-get task :verified)))
+
+(defun harness-tasks--needs-review-p (task)
+  "Non-nil when TASK's finished work waits for the user's review.
+That is with `harness-tasks-require-verification', until the user
+verified the work."
+  (and harness-tasks-require-verification (not (harness-tasks--verified-p task))))
+
+(defun harness-tasks--merged-p (task)
+  "Non-nil when TASK's branch is merged."
+  (harness-json-true-p (plist-get task :merged)))
+
+(defun harness-tasks--to-review (id &rest plist)
+  "Put task ID in review with PLIST merged in; emit `task/review'.
+Return the task's view."
+  (let ((view (apply #'harness-tasks--set id :state 'review :merge-status nil :conflicts nil plist)))
+    (harness-emit 'task/review view)
+    view))
 
 ;;;; Stores
 ;;
@@ -621,7 +674,8 @@ projects' tasks from before repository stores."
 ;; so the board plays along with projects that keep their tasks and plans
 ;; as files.  A task file is YAML frontmatter with the fields code reads,
 ;; as in SKILL.md files, then the task: its prompt (the first line a
-;; heading), the request it was written up from (`:note') and its
+;; heading), the request it was written up from (`:note'), the feedback
+;; of every time the user sent it back from review (`:feedback') and its
 ;; session's plan:
 ;;
 ;;   ---
@@ -643,6 +697,17 @@ projects' tasks from before repository stores."
 ;;
 ;;   > csv export for the reports page
 ;;
+;; A task sent back from review has a review section after the request,
+;; one round of feedback under each heading, and its verification in the
+;; frontmatter (`verified: TIME') once the user accepts it:
+;;
+;;   <!-- harness:review -->
+;;   ## Review
+;;
+;;   ### Sent back 2026-10-01T14:02:11Z
+;;
+;;   > Also export the totals row.
+;;
 ;; The store keeps the whole record, with what only the harness needs
 ;; (attachments, worktree, merge target); the files show the rest and
 ;; take edits.  Only the main checkout gets files, never a task's
@@ -662,17 +727,19 @@ projects' tasks from before repository stores."
 ;;   file said last (`:file-base'), so a file the harness has yet to
 ;;   write again is no edit.  Taken are the prompt, the request, the
 ;;   title (the session's name), the model and thinking of a task that
-;;   has not started, and `state: done' (completing it).  The other known
-;;   fields are the harness's: a file that contradicts them is written
+;;   has not started, and `state: done' (completing it, or verifying a
+;;   task in review).  The other known fields, and the review and plan
+;;   sections, are the harness's: a file that contradicts them is written
 ;;   again.  Keys the harness does not know are kept as written.
 ;; - A file no task has becomes one: a backlog task, which only the user
-;;   starts, or a done one.  With its session still there it is the task
-;;   it was before the store lost it, except that it waits for the user
-;;   if it was at work.  It stays as written until the task changes.
+;;   starts, or one in review or done, with its rounds of feedback.  With
+;;   its session still there it is the task it was before the store lost
+;;   it, except that it waits for the user if it was at work.  It stays
+;;   as written until the task changes.
 ;; - A file deleted by hand, or moved out of the folder (into the archive
-;;   subfolder, say), archives its task when the task waits or is done;
-;;   one in progress gets its file back.  A file that comes back brings
-;;   its archived task back.
+;;   subfolder, say), archives its task when the task waits (in pending
+;;   or review) or is done; one in progress gets its file back.  A file
+;;   that comes back brings its archived task back.
 
 ;;;;; A YAML subset
 ;;
@@ -908,11 +975,11 @@ a line that is no entry is one with KEY nil.  Comment lines are dropped."
 
 (defconst harness-tasks--file-keys
   '("id" "title" "state" "column" "backlog" "outcome" "error" "session" "branch" "base"
-    "merge" "model" "thinking" "created" "started" "refined" "finished" "updated")
+    "merge" "model" "thinking" "created" "started" "refined" "finished" "verified" "updated")
   "Frontmatter keys of a task file, in the order the harness writes them.
 Other keys are kept as written.")
 
-(defconst harness-tasks--file-time-keys '("created" "started" "refined" "finished" "updated")
+(defconst harness-tasks--file-time-keys '("created" "started" "refined" "finished" "verified" "updated")
   "Frontmatter keys whose values are times, ISO 8601 in UTC.")
 
 (defconst harness-tasks--section-re "\\`<!-- harness:\\([a-z-]+\\) -->[ \t]*\\'"
@@ -1000,6 +1067,8 @@ and so is `updated' with SANS-UPDATED."
            (cons "started" (harness-tasks--time-text (plist-get task :started)))
            (cons "refined" (harness-tasks--time-text (plist-get task :refined)))
            (cons "finished" (harness-tasks--time-text (plist-get task :finished)))
+           (cons "verified" (and (harness-tasks--verified-p task)
+                                 (harness-tasks--time-text (plist-get task :verified-at))))
            (cons "updated" (and (not sans-updated) (harness-tasks--time-text (plist-get task :updated))))))))
 
 (defun harness-tasks--title-line-p (line)
@@ -1022,10 +1091,42 @@ Its first line is a heading when it reads as a title."
         (concat "# " (string-trim-right first) (if nl (substring prompt nl) ""))
       prompt)))
 
+(defconst harness-tasks--feedback-heading-re
+  "\\`###[ \t]+Sent back\\(?:[ \t]+\\(.*?\\)\\)?[ \t]*\\'"
+  "A heading in a task file's review section: one round of feedback follows.
+Group 1 is the time the task was sent back.")
+
+(defun harness-tasks--feedback-text (task)
+  "Return TASK's rounds of feedback as its file's review section has them.
+That is a `### Sent back TIME' heading over each, quoted; nil for none."
+  (when-let* ((feedback (plist-get task :feedback)))
+    (mapconcat (lambda (round)
+                 (concat "### Sent back"
+                         (if-let* ((time (harness-tasks--time-text (plist-get round :at)))) (concat " " time) "")
+                         "\n\n" (harness-tasks--quote (or (plist-get round :text) ""))))
+               feedback "\n\n")))
+
+(defun harness-tasks--parse-feedback (text)
+  "Return the rounds of feedback in TEXT, a task file's review section.
+Each is (:text TEXT :at TIME), oldest first; text before the first
+heading, and a heading over nothing, are no round."
+  (let (rounds current)
+    (dolist (line (split-string (or text "") "\n"))
+      (if (string-match harness-tasks--feedback-heading-re line)
+          (progn (when current (push current rounds))
+                 (setq current (list (harness-tasks--parse-time (match-string 1 line)))))
+        (when current (setcdr current (cons line (cdr current))))))
+    (when current (push current rounds))
+    (delq nil (mapcar (lambda (round)
+                        (let ((text (harness-tasks--unquote (string-join (reverse (cdr round)) "\n"))))
+                          (and (not (string-empty-p text)) (list :text text :at (car round)))))
+                      (nreverse rounds)))))
+
 (defun harness-tasks--render (task &optional sans-updated)
   "Return the text of TASK's file; without its `updated' field with SANS-UPDATED."
   (let* ((session (harness-tasks--session task))
-         (plan (plist-get session :plan)))
+         (plan (plist-get session :plan))
+         (feedback (harness-tasks--feedback-text task)))
     (concat "---\n"
             (mapconcat (lambda (field) (format "%s: %s\n" (car field) (harness-tasks--yaml-scalar (cdr field))))
                        (harness-tasks--file-fields task session sans-updated) "")
@@ -1036,6 +1137,7 @@ Its first line is a heading when it reads as a title."
                 (concat "\n\n<!-- harness:request -->\n## Request\n\n"
                         (harness-tasks--quote (plist-get task :note)))
               "")
+            (if feedback (concat "\n\n<!-- harness:review -->\n## Review\n\n" feedback) "")
             (if (and (stringp plan) (not (string-blank-p plan)))
                 (concat "\n\n<!-- harness:plan -->\n## Plan\n\n" (string-trim plan))
               "")
@@ -1105,9 +1207,9 @@ is the prompt's first line, as plain text; HEADING is non-nil then."
 `:fields' maps the known frontmatter keys present (lowercase) to their
 values, the file's last of each; `:extra' lists the raw entries of the
 other keys; `:prompt' is the description with its title heading made
-plain, `:heading' non-nil when it had one; `:note' and `:plan' are the
-request and plan sections, nil when absent.  A file whose frontmatter
-never ends is just (:unterminated t)."
+plain, `:heading' non-nil when it had one; `:note', `:review' and
+`:plan' are the request, review and plan sections, nil when absent.  A
+file whose frontmatter never ends is just (:unterminated t)."
   (let* ((split (harness-tasks--split-frontmatter text))
          (yaml (car split)))
     (if (eq yaml 'unterminated)
@@ -1124,6 +1226,7 @@ never ends is just (:unterminated t)."
         (list :fields fields :extra extra
               :prompt (car desc) :heading (cdr desc)
               :note (and request (harness-tasks--unquote (cdr request)))
+              :review (cdr (assoc "review" (cdr parts)))
               :plan (cdr (assoc "plan" (cdr parts))))))))
 
 (defun harness-tasks--field (parsed key)
@@ -1176,9 +1279,11 @@ leaves out contradict nothing."
          (mine (harness-tasks--file-fields task session t))
          (plan (plist-get session :plan))
          (note (plist-get parsed :note))
+         (file-review (plist-get parsed :review))
          (file-plan (plist-get parsed :plan)))
     (and (equal prompt (plist-get task :prompt))
          (or (null note) (equal note (and (harness-tasks--note-shown-p task) (string-trim (plist-get task :note)))))
+         (or (null file-review) (equal file-review (harness-tasks--feedback-text task)))
          (or (null file-plan) (equal file-plan (and (stringp plan) (string-trim plan))))
          (cl-every (lambda (field)
                      (or (equal (car field) "updated")
@@ -1291,10 +1396,11 @@ subfolder, say) brings its archived task back."
         (condition-case err
             (harness-call 'session/update (plist-get session :id) :name title :silent t)
           (error (harness-log 'warn "tasks: %s: cannot rename the session of task %s: %S" rel id err))))
+      ;; Done by hand: the user accepts the work, so a task in review is verified.
       (when (and (equal state "done") (not (equal state (plist-get base :state)))
                  (not (eq (plist-get task :state) 'done)))
         (condition-case err
-            (harness-call 'task/complete id)
+            (harness-call (if (eq (plist-get task :state) 'review) 'task/verify 'task/complete) id)
           (error (harness-log 'warn "tasks: %s: cannot complete task %s: %S" rel id err)))))
     (let ((task (harness-tasks--get id)))
       (harness-tasks--note-file id :file rel
@@ -1315,10 +1421,11 @@ It must still exist, work in ROOT's project and be no other task's."
 (defun harness-tasks--add-from-file (root rel parsed mtime)
   "Add the task the file REL of project ROOT holds, as PARSED; return it.
 MTIME, when the file was last changed, is its creation time unless it
-says.  It is a backlog task, or a done one.  With its session still
-around it is the task it was, session and all, except that nothing
-carries on by itself: one that was at work waits for the user,
-`interrupted'.  Return nil for a file without a prompt."
+says.  It is a backlog task, one in review or a done one, with the
+rounds of feedback and the verification the file shows.  With its
+session still around it is the task it was, session and all, except
+that nothing carries on by itself: one that was at work waits for the
+user, `interrupted'.  Return nil for a file without a prompt."
   (let ((prompt (string-trim (harness-tasks--file-prompt parsed))))
     (unless (string-empty-p prompt)
       (let* ((id (let ((id (harness-tasks--field parsed "id")))
@@ -1328,8 +1435,9 @@ carries on by itself: one that was at work waits for the user,
                      (concat "t-" (harness-short-id 8)))))
              (session (harness-tasks--file-session parsed root))
              (written (intern (or (harness-tasks--field parsed "state") "pending")))
-             (state (cond ((not (memq written '(pending refining active merging done))) 'pending)
-                          ((eq written 'done) 'done)
+             (state (cond ((not (memq written '(pending refining active merging review done))) 'pending)
+                          ;; Both wait for nothing but the user.
+                          ((memq written '(review done)) written)
                           ((null session) 'pending)
                           ;; A merge starts again only when the user says so.
                           ((eq written 'merging) 'active)
@@ -1339,6 +1447,7 @@ carries on by itself: one that was at work waits for the user,
                               ((and session (memq state '(refining active))) 'interrupted))))
              (worktree (plist-get session :worktree))
              (time (lambda (key) (harness-tasks--parse-time (cdr (assoc key (plist-get parsed :fields))))))
+             (verified (funcall time "verified"))
              (task (list :id id :project root :cwd root :prompt prompt
                          :note (plist-get parsed :note) :extra (plist-get parsed :extra)
                          :state state
@@ -1359,6 +1468,9 @@ carries on by itself: one that was at work waits for the user,
                          :started (funcall time "started")
                          :refined (funcall time "refined")
                          :finished (funcall time "finished")
+                         :verified (and verified t)
+                         :verified-at verified
+                         :feedback (harness-tasks--parse-feedback (plist-get parsed :review))
                          :updated (funcall time "updated"))))
         (puthash id task harness-tasks--table)
         (harness-tasks--note-file id :file rel
@@ -1377,7 +1489,7 @@ A task that waits or is done is archived, its file moved into the
 archive subfolder remembered; one in progress gets its file back at the
 next save."
   (let ((id (plist-get task :id)))
-    (if (and (memq (plist-get task :state) '(pending done))
+    (if (and (memq (plist-get task :state) '(pending review done))
              (not (harness-tasks--turn-p task))
              (not (gethash id harness-tasks--starting)))
         (let* ((session (harness-tasks--session task))
@@ -1539,12 +1651,13 @@ Their folders are read first, so no edit is written over."
 ;;;; Columns
 
 (defun harness-tasks--column (task)
-  "Return the kanban column of TASK: pending, needs-input, active or done.
+  "Return the kanban column of TASK: pending, needs-input, review, active or done.
 A task being refined shows in pending, where it ends up, unless the
 refinement needs the user."
   (pcase (plist-get task :state)
     ('pending 'pending)
     ('done 'done)
+    ('review 'review)
     ('refining (let ((session (harness-tasks--session task)))
                  (cond ((plist-get session :pending) 'needs-input)
                        ((harness-tasks--turn-p task) 'pending)
@@ -1634,12 +1747,19 @@ The bookkeeping of its file stays out."
     (harness-tasks--set (plist-get task :id) :merge-status 'conflict :conflicts files)))
 
 (defun harness-tasks--on-merge-finished (child _parent status)
-  "Complete CHILD's task when STATUS is `merged'; otherwise let it be fixed."
+  "Complete CHILD's task when STATUS is `merged'; otherwise let it be fixed.
+A merged task is done, unless it still waits for the user's review: a
+merge that started before verification was turned on, say.  A verified
+task keeps the time its work finished."
   (when-let* ((task (harness-tasks--by-session child)))
     (let ((id (plist-get task :id)))
       (if (eq status 'merged)
-          (harness-tasks--set id :state 'done :merge-status nil :conflicts nil :merged t
-                              :outcome 'merged :finished (float-time))
+          (if (harness-tasks--needs-review-p task)
+              (harness-tasks--to-review id :merged t :outcome 'merged :finished (float-time))
+            (harness-tasks--set id :state 'done :merge-status nil :conflicts nil :merged t
+                                :outcome 'merged
+                                :finished (or (and (harness-tasks--verified-p task) (plist-get task :finished))
+                                              (float-time))))
         ;; The merge queue steers the agent when it can fix things itself
         ;; (uncommitted changes); its next clean turn merges again.
         (if (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running child))
@@ -1824,6 +1944,13 @@ worktree it does not), and the request it was written from, quoted."
                         (harness-tasks--quote note))
               ""))))
 
+(defun harness-tasks--reject-text (feedback)
+  "Return the message that sends a task back to its session with FEEDBACK.
+It opens with `harness-tasks-reject-text', unless that is blank."
+  (if (harness-string-blank-p harness-tasks-reject-text)
+      feedback
+    (concat harness-tasks-reject-text "\n\n" feedback)))
+
 (defun harness-tasks--continue-session (id cwd worktree)
   "Start task ID's work in the session that wrote it up, moved to CWD.
 WORKTREE, when non-nil, is the task's worktree.  The session takes the
@@ -1987,7 +2114,9 @@ refining with REASON as its outcome, in front of the user."
   "Move SESSION-ID's task to active when a turn starts.
 A turn during a merge (resolving a conflict) keeps the task merging; a
 turn before the task started (a backlog task's) refines it.  A message
-sent to an archived task's session brings the task back too."
+sent to an archived task's session brings the task back too.  New work
+needs a new review, so a verification goes, unless the turn is part of
+a merge: the merge queue steering the agent to commit, say."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (remhash (plist-get task :id) harness-tasks--starting)
@@ -1995,13 +2124,16 @@ sent to an archived task's session brings the task back too."
      ((harness-tasks--refinement-p task)
       (harness-tasks--set (plist-get task :id) :state 'refining :outcome nil :error nil :archived nil))
      ((and (eq (plist-get task :state) 'merging) (plist-get task :merge-status)) nil)
-     (t (harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
-                            :merged nil :archived nil)))))
+     (t (apply #'harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
+               :merged nil :archived nil
+               (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil)))))))
 
 (defun harness-tasks--on-turn-ended (session-id reason)
   "Advance SESSION-ID's task when its turn ended with REASON.
-`end-turn' completes the task outside git and queues its merge inside;
-a refinement turn puts its write-up in the backlog."
+`end-turn' puts the work in review (`harness-tasks-require-verification')
+until the user verified it; after that, or without review, it completes
+the task outside git and queues its merge inside.  A refinement turn
+puts its write-up in the backlog."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (let ((id (plist-get task :id)))
@@ -2012,7 +2144,10 @@ a refinement turn puts its write-up in the backlog."
         (unless (plist-get task :merge-status)
           (harness-tasks--set id :state 'active :outcome reason)))
        ((plist-get task :merge-status) nil) ; a conflict turn; merge/finished decides
-       ((and (eq (plist-get task :state) 'done) (plist-get task :merged)) nil) ; merged mid-turn
+       ;; Merged mid-turn: done, or in review when that merge needs one.
+       ((and (memq (plist-get task :state) '(done review)) (harness-tasks--merged-p task)) nil)
+       ((harness-tasks--needs-review-p task)
+        (harness-tasks--to-review id :outcome reason :error nil :finished (float-time)))
        ((and (plist-get task :worktree) (not (plist-get task :worktree-removed)))
         (harness-tasks--enqueue-merge id))
        (t (harness-tasks--set id :state 'done :outcome reason :finished (float-time))))
@@ -2341,21 +2476,73 @@ Before a backlog task starts, TEXT is feedback on its write-up."
       t)))
 
 (harness-defmethod task/merge (id)
-  "Queue task ID's branch for the merge queue again (after a failed merge)."
+  "Queue task ID's branch for the merge queue again (after a failed merge).
+A task in review merges when the user verifies it (`task/verify')."
   (let ((task (harness-tasks--get id)))
     (unless (plist-get task :worktree) (error "Task %s has no worktree to merge" id))
     (when (eq (plist-get task :state) 'done) (error "Task %s is already merged" id))
+    (when (eq (plist-get task :state) 'review)
+      (error "Task %s waits for your review; verifying it merges it" id))
     (harness-tasks--set id :merge-attempts 0)
     (harness-tasks--enqueue-merge id)
     (harness-call 'task/get id)))
 
 (harness-defmethod task/complete (id)
-  "Mark task ID done by hand, merged or not."
+  "Mark task ID done by hand, merged or not.
+That is the user accepting it, so it counts as verified."
   (let ((task (harness-tasks--get id)))
     (when (and (plist-get task :session) (harness-method-exists-p 'merge/cancel))
       (harness-call 'merge/cancel (plist-get task :session)))
-    (prog1 (harness-tasks--set id :state 'done :merge-status nil :finished (float-time))
+    (prog1 (harness-tasks--set id :state 'done :merge-status nil :finished (float-time)
+                               :verified t :verified-at (float-time))
       (harness-run-soon #'harness-tasks--schedule))))
+
+(harness-defmethod task/verify (id)
+  "Accept the work of task ID, which waits in review; return the task.
+Its branch, in a git project, goes through the merge queue, and the
+task is done once merged; otherwise, or when its branch is merged
+already, it is done now."
+  (let ((task (harness-tasks--get id)))
+    (unless (eq (plist-get task :state) 'review)
+      (error "Task %s is not waiting for review" id))
+    (harness-tasks--set id :verified t :verified-at (float-time))
+    (if (and (plist-get task :worktree) (not (plist-get task :worktree-removed))
+             (not (harness-tasks--merged-p task)) (harness-method-exists-p 'merge/enqueue))
+        (progn (harness-tasks--set id :merge-attempts 0)
+               (harness-tasks--enqueue-merge id))
+      (harness-tasks--set id :state 'done :outcome (or (plist-get task :outcome) 'end-turn)
+                          :finished (or (plist-get task :finished) (float-time))))
+    (harness-run-soon #'harness-tasks--schedule)
+    (harness-call 'task/get id)))
+
+(harness-defmethod task/reject (id feedback &optional attachments)
+  "Send task ID, which waits in review, back to work with FEEDBACK.
+FEEDBACK and ATTACHMENTS go to the task's own session, in its own
+worktree, as a new prompt opened by `harness-tasks-reject-text'.  The
+round of feedback is kept in the task's `:feedback'.  The task is
+active again and comes back to review when that turn ends.  Return the
+task."
+  (let ((task (harness-tasks--get id)))
+    (unless (eq (plist-get task :state) 'review)
+      (error "Task %s is not waiting for review" id))
+    (when (harness-string-blank-p feedback) (error "Sending a task back needs feedback"))
+    (unless (harness-tasks--session task) (error "Task %s has no session to send the feedback to" id))
+    (when (plist-get task :worktree-removed)
+      (error "Task %s was archived and its worktree removed; submit a new task" id))
+    (let ((sid (plist-get task :session))
+          (feedback (string-trim feedback)))
+      (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
+        (harness-call 'session/resume sid))
+      (harness-tasks--set id :state 'active :outcome nil :error nil :finished nil :archived nil
+                          :verified nil :verified-at nil :merge-attempts 0
+                          :feedback (append (plist-get task :feedback)
+                                            (list (list :text feedback :at (float-time)))))
+      (harness-catch (harness-call-async 'agent/prompt sid
+                                         (harness-tasks--blocks
+                                          (list :prompt (harness-tasks--reject-text feedback)
+                                                :attachments attachments)))
+                     (lambda (e) (harness-tasks--fail id e)))
+      (harness-call 'task/get id))))
 
 (harness-defmethod task/archive (id &optional restore)
   "Archive done task ID, hiding it and deactivating its session; RESTORE undoes it.
@@ -2441,9 +2628,10 @@ up again, merges in flight are queued again and waiting tasks start."
 
 (harness-declare-event 'task/changed "(TASK) after a task is submitted or changes state or column.")
 (harness-declare-event 'task/deleted "(ID) after a task is removed.")
+(harness-declare-event 'task/review "(TASK) when a task's finished work starts waiting for the user's review.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task, from backlog write-up or worktree to merged, with a concurrency limit."
+  :doc "Task mode: one session per task, from backlog write-up or worktree through your review to merged, with a concurrency limit."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)

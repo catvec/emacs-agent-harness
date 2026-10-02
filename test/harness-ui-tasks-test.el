@@ -22,6 +22,7 @@
 (defvar harness-tasks--starting)
 (defvar harness-tasks--loaded)
 (defvar harness-tasks-max-running)
+(defvar harness-tasks-require-verification)
 (defvar harness-tasks-model)
 (defvar harness-tasks-worktrees)
 (defvar harness-ui-default-position)
@@ -43,7 +44,9 @@
 (declare-function harness-acp--drop-client "harness-acp")
 
 (defmacro harness-ui-tasks-test-with (&rest body)
-  "Load the state layer, tasks, ACP and the board UI; run BODY with `board' open."
+  "Load the state layer, tasks, ACP and the board UI; run BODY with `board' open.
+Finished tasks are completed at once, without review, unless BODY turns
+`harness-tasks-require-verification' on."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -61,6 +64,7 @@
             '((:type text :delta "Working on it.") (:type done :stop-reason end-turn)))
            (harness-naming-auto nil)
            (harness-tasks-max-running 3)
+           (harness-tasks-require-verification nil)
            (harness-tasks-model "demo:scripted")
            (harness-tasks-worktrees nil)
            ;; Full width: the content checks below are not about narrow windows.
@@ -722,6 +726,72 @@
             (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board))))
         (delete-window side)
         (set-window-buffer window board)))))
+
+;;;; Review: finished work waits for you
+
+(declare-function harness-ui-tasks-reject "harness-ui-tasks")
+(declare-function harness-ui-tasks-verify "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--user-texts (sid)
+  "The user messages of session SID, oldest first."
+  (mapcar (lambda (n) (plist-get n :content))
+          (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes sid))))
+
+(ert-deftest harness-ui-tasks-review-verify-and-send-back ()
+  "Finished work waits in Ready for review: R sends it back with feedback, v accepts it."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (notices nil))
+      (cl-letf* ((orig (symbol-function 'message))
+                 ((symbol-function 'message)
+                  (lambda (format-string &rest args)
+                    (when format-string (push (apply #'format format-string args) notices))
+                    (apply orig format-string args))))
+        (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
+        (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Fix the flaky test")
+        ;; It says so wherever you are.
+        (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "Fix the flaky test. is ready for your review" m))
+                                               notices))
+                           5 "the review notice"))
+      (should (string-match-p "Completed  0" (harness-ui-tasks-test--board-text board)))
+      (should (string-match-p "1 to review" (with-current-buffer board (harness-ui-tasks--header))))
+      (harness-ui-tasks-test--goto-card board "Fix the flaky test")
+      (with-current-buffer board
+        (should (equal '("Verify" "Send back")
+                       (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
+        (should (eq 'harness-ui-tasks-verify (key-binding (kbd "v"))))
+        (should (eq 'harness-ui-tasks-reject (key-binding (kbd "R"))))
+        ;; R takes the feedback in the compose box.
+        (call-interactively (key-binding (kbd "R")))
+        (should (eq 'reject (car harness-ui-tasks--target)))
+        (should (harness-compose-in-p))
+        (should (string-match-p "Send back .Fix the flaky test. with feedback" (harness-ui-tasks-test--tail-text board)))
+        (insert "It still flakes on CI")
+        (harness-ui-tasks-submit)
+        (should-not harness-ui-tasks--target))
+      (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*sent back once")
+      (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
+        (should (string-suffix-p "It still flakes on CI" (car (last (harness-ui-tasks-test--user-texts sid)))))
+        ;; With a prefix argument the feedback is read in the minibuffer.
+        (harness-ui-tasks-test--goto-card board "Fix the flaky test")
+        (with-current-buffer board
+          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "And on macOS")))
+            (let ((current-prefix-arg '(4)))
+              (call-interactively #'harness-ui-tasks-reject)))
+          (should-not harness-ui-tasks--target))
+        (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*sent back twice")
+        (should (string-suffix-p "And on macOS" (car (last (harness-ui-tasks-test--user-texts sid))))))
+      ;; v accepts it.
+      (harness-ui-tasks-test--goto-card board "Fix the flaky test")
+      (with-current-buffer board (call-interactively (key-binding (kbd "v"))))
+      (harness-ui-tasks-test--wait-text board "Completed  1\\(.\\|\n\\)*Fix the flaky test")
+      (should (string-match-p "Ready for review  0" (harness-ui-tasks-test--board-text board)))
+      (should (plist-get (car (harness-call 'task/list default-directory)) :verified))
+      ;; Only work waiting for review is verified or sent back.
+      (harness-ui-tasks-test--goto-card board "Fix the flaky test")
+      (with-current-buffer board
+        (should-error (harness-ui-tasks-verify) :type 'user-error)
+        (should-error (harness-ui-tasks-reject) :type 'user-error)))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

@@ -13,6 +13,7 @@
 (defvar harness-tasks--starting)
 (defvar harness-tasks--loaded)
 (defvar harness-tasks-max-running)
+(defvar harness-tasks-require-verification)
 (defvar harness-tasks-permission-mode)
 (defvar harness-tasks-non-interactive)
 (defvar harness-tasks-model)
@@ -39,6 +40,8 @@
            (harness-provider-demo-script-override harness-tools-sessions-test-script)
            (harness-naming-auto nil)
            (harness-tasks-max-running 3)
+           ;; Finished tasks are done at once unless a test reviews them.
+           (harness-tasks-require-verification nil)
            (harness-tasks-permission-mode 'auto)
            (harness-tasks-non-interactive t)
            (harness-tasks-model "demo:scripted")
@@ -316,6 +319,31 @@
         (should (equal "Fix the lexer\n\nIt drops the last token." (plist-get task :prompt))))
       (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "start"))
       (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
+
+(ert-deftest harness-tools-sessions-task-review ()
+  "task_wait settles when finished work waits for review; task_control sends it back, then verifies it."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-require-verification t)
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Fix the lexer")) :meta)
+                          :task-id)))
+      (let ((text (harness-tools-sessions-test-ok me "task_wait" (list :task_id id))))
+        (should (string-match-p "Done waiting" text))
+        (should (string-match-p (concat (regexp-quote id) " +review +Fix the lexer") text)))
+      (should (string-match-p (regexp-quote id) (harness-tools-sessions-test-ok me "task_list" '(:column "review"))))
+      (should (string-match-p "No tasks match" (harness-tools-sessions-test-ok me "task_list" '(:column "done"))))
+      ;; Sending it back needs the feedback.
+      (should (plist-get (harness-tools-sessions-test-run me "task_control" (list :task_id id :action "reject")) :is-error))
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "reject" :message "Also the parser."))
+      (should (string-match-p "sent back 1 time\\b"
+                              (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "review"))))
+      (should (= 2 (cl-count 'user (harness-call 'session/nodes (plist-get (harness-call 'task/get id) :session))
+                             :key (lambda (n) (plist-get n :kind)))))
+      (let ((text (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "verify"))))
+        (should (string-match-p "verify done" text))
+        (should (string-match-p "state done.*, verified" text)))
+      (should (plist-get (harness-tools-sessions-test-run me "task_control" (list :task_id id :action "verify")) :is-error))
       (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
 
 (provide 'harness-tools-sessions-test)
