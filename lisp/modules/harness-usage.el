@@ -19,6 +19,11 @@
 ;; one project, or a calendar period across everything), an amount and
 ;; a hardness.  Period budgets know how much of the period is left and
 ;; split the remainder across the remaining days, business days or all.
+;; A budget may carry a baseline: what was already spent that the
+;; harness never recorded (in other tools, or before it kept usage),
+;; set by hand so a budget made mid-period does not start at $0.  A
+;; period budget's baseline counts only in the period it was set for;
+;; one without a period always counts it.
 ;; A session's own `:budget' plist is an implicit hard-or-soft budget
 ;; with scope session.  Hard budgets stop the next turn through the
 ;; `agent/before-turn' filter; every budget warns once at 80% and soft
@@ -32,8 +37,11 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'url-util)
+(require 'auth-source)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-http)
 
 (declare-function sqlite-execute "sqlite.c")
 (declare-function sqlite-select "sqlite.c")
@@ -41,6 +49,15 @@
 (defcustom harness-usage-warn-fraction 0.8
   "Fraction of a budget at which the first warning is issued."
   :type 'number :group 'harness)
+
+(defcustom harness-anthropic-admin-api-key nil
+  "Anthropic Admin API key, to fetch this month's API cost for a budget.
+Only organisations of the Claude Console that pay per token have one
+\(it starts with sk-ant-admin); Pro and Max subscriptions have no cost
+report.  When nil, the ANTHROPIC_ADMIN_KEY environment variable and
+then auth-source (host api.anthropic.com, user admin) are tried.  Its
+value never leaves the harness."
+  :type '(choice (const :tag "None" nil) (string :tag "Key")) :group 'harness)
 
 (defconst harness-usage-jsonl-name "usage/records.jsonl"
   "JSONL log of usage rows, used when SQLite is unavailable.")
@@ -52,7 +69,10 @@
   "Budgets as a list of plists, loaded from budgets.json.
 Each budget: (:id STRING :scope session|project|period :target
 SESSION-ID|ROOT|nil :amount USD :hard BOOL :period nil|day|week|month
-:days business|all :created FLOAT :label STRING-OR-NIL).")
+:days business|all :created FLOAT :label STRING-OR-NIL), plus, when
+something was spent that the harness never recorded, :baseline USD
+and, for a period budget, :baseline-period-start \"YYYY-MM-DD\": the
+start of the one period the baseline counts in.")
 
 (defvar harness-usage--warned (make-hash-table :test 'equal)
   "\"SESSION/BUDGET/PERIOD-START\" -> thresholds already warned about.")
@@ -136,6 +156,14 @@ Out-of-range days and months are normalised by date arithmetic."
   "Format DATE as YYYY-MM-DD."
   (format "%04d-%02d-%02d" (nth 0 date) (nth 1 date) (nth 2 date)))
 
+(defun harness-usage--parse-date (string)
+  "Return the (YEAR MONTH DAY) that STRING names as YYYY-MM-DD.
+Return nil when STRING is not such a date, or names none (2026-02-30)."
+  (when (and (stringp string)
+             (string-match "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)\\'" string))
+    (let ((date (mapcar (lambda (i) (string-to-number (match-string i string))) '(1 2 3))))
+      (and (equal (harness-usage--date (harness-usage--encode date 12)) date) date))))
+
 (defun harness-usage-day-key (time)
   "Return the day bucket key of TIME, YYYY-MM-DD in local time."
   (format-time-string "%Y-%m-%d" time))
@@ -169,6 +197,17 @@ PERIOD is `day', `week' (starting Monday) or `month'; END is exclusive."
       ('month (let ((start (list (nth 0 today) (nth 1 today) 1)))
                 (cons start (harness-usage--date (harness-usage--encode (list (nth 0 today) (1+ (nth 1 today)) 1) 12)))))
       (other (error "Unknown budget period %s" other)))))
+
+(defun harness-usage--period-start-key (value period)
+  "Return the start of the calendar PERIOD containing VALUE, as YYYY-MM-DD.
+VALUE is a float time or a YYYY-MM-DD date.  Any other VALUE, or a
+PERIOD other than day, week or month, is returned unchanged."
+  (let ((time (if (numberp value) value
+                (when-let* ((date (harness-usage--parse-date value)))
+                  (float-time (harness-usage--encode date 12))))))
+    (if (and time (memq period '(day week month)))
+        (harness-usage--date-key (car (harness-usage-period-bounds period time)))
+      value)))
 
 (defun harness-usage--counted-day-p (date period days)
   "Non-nil when DATE counts for planning a PERIOD budget split by DAYS.
@@ -448,18 +487,32 @@ Return nil when there are no rows and no `:since'."
 ;;;; Budgets
 
 (defun harness-usage--normalise-budget (budget)
-  "Return a fresh copy of BUDGET with symbols interned and defaults filled."
+  "Return a fresh copy of BUDGET with symbols interned and defaults filled.
+A `:baseline' of nil, false or 0 is none, so both baseline keys go; a
+budget without a period keeps no `:baseline-period-start', and a period
+budget's one becomes the start date of the period it falls in."
   (let* ((scope (harness-usage--sym (plist-get budget :scope)))
          (target (plist-get budget :target))
-         (amount (plist-get budget :amount)))
-    (harness-plist-merge
-     budget
-     (list :scope scope
-           :period (harness-usage--sym (plist-get budget :period))
-           :days (or (harness-usage--sym (plist-get budget :days)) 'all)
-           :hard (harness-json-true-p (plist-get budget :hard))
-           :target (if (and target (memq scope '(project period))) (harness-usage--root target) target)
-           :amount (float (if (numberp amount) amount 0))))))
+         (amount (plist-get budget :amount))
+         (period (harness-usage--sym (plist-get budget :period)))
+         (baseline (plist-get budget :baseline))
+         (since (plist-get budget :baseline-period-start))
+         (b (harness-plist-merge
+             budget
+             (list :scope scope
+                   :period period
+                   :days (or (harness-usage--sym (plist-get budget :days)) 'all)
+                   :hard (harness-json-true-p (plist-get budget :hard))
+                   :target (if (and target (memq scope '(project period))) (harness-usage--root target) target)
+                   :amount (float (if (numberp amount) amount 0))))))
+    (cond
+     ((or (not (harness-json-true-p baseline)) (and (numberp baseline) (zerop baseline)))
+      (harness-plist-remove b :baseline :baseline-period-start))
+     ((or (null period) (null since))
+      (harness-plist-remove (plist-put b :baseline (if (numberp baseline) (float baseline) baseline))
+                            :baseline-period-start))
+     (t (plist-put (plist-put b :baseline (if (numberp baseline) (float baseline) baseline))
+                   :baseline-period-start (harness-usage--period-start-key since period))))))
 
 (defun harness-usage--validate-budget (budget)
   "Signal an error when BUDGET is malformed."
@@ -473,7 +526,13 @@ Return nil when there are no rows and no `:since'."
   (when (and (eq (plist-get budget :scope) 'period) (null (plist-get budget :period)))
     (error "A period budget needs a :period"))
   (when (and (memq (plist-get budget :scope) '(session project)) (null (plist-get budget :target)))
-    (error "A %s budget needs a :target" (plist-get budget :scope))))
+    (error "A %s budget needs a :target" (plist-get budget :scope)))
+  (let ((baseline (plist-get budget :baseline))
+        (since (plist-get budget :baseline-period-start)))
+    (unless (or (null baseline) (and (numberp baseline) (>= baseline 0)))
+      (error "Budget :baseline must be an amount of at least 0"))
+    (unless (or (null since) (harness-usage--parse-date since))
+      (error "Budget :baseline-period-start must be a YYYY-MM-DD date"))))
 
 (defun harness-usage--save-budgets ()
   "Write `harness-usage-budgets' to budgets.json."
@@ -529,8 +588,23 @@ Return nil when there are no rows and no `:since'."
                            (if target (format " for %s" (harness-usage--project-name target)) "")))
           (_ (or (plist-get budget :id) "budget"))))))
 
+(defun harness-usage--applied-baseline (budget bounds)
+  "Return how much of BUDGET's `:baseline' counts in the period BOUNDS.
+BOUNDS is (START-DATE . END-DATE), or nil for a budget without a
+period, whose baseline always counts.  A period budget's baseline
+counts only in the period starting on its `:baseline-period-start'."
+  (let ((baseline (plist-get budget :baseline)))
+    (if (and (numberp baseline) (> baseline 0)
+             (or (null bounds)
+                 (equal (plist-get budget :baseline-period-start)
+                        (harness-usage--date-key (car bounds)))))
+        (float baseline)
+      0.0)))
+
 (defun harness-usage--budget-status (budget &optional now)
-  "Compute the status plist of BUDGET as of NOW (default: current time)."
+  "Compute the status plist of BUDGET as of NOW (default: current time).
+What was spent is the cost of the rows the budget selects plus the
+baseline that counts in the current period."
   (let* ((now (or now (float-time)))
          (period (plist-get budget :period))
          (bounds (and period (harness-usage-period-bounds period now)))
@@ -539,9 +613,11 @@ Return nil when there are no rows and no `:since'."
          (rows (apply #'harness-usage--rows
                       (append (harness-usage--budget-filter budget)
                               (and bounds (list :since start :until end)))))
-         (spent (plist-get (or (car (harness-usage--aggregate rows nil))
-                               (harness-usage--empty-aggregate nil))
-                           :cost))
+         (baseline (harness-usage--applied-baseline budget bounds))
+         (spent (+ baseline
+                   (plist-get (or (car (harness-usage--aggregate rows nil))
+                                  (harness-usage--empty-aggregate nil))
+                              :cost)))
          (amount (float (or (plist-get budget :amount) 0)))
          (remaining (max 0.0 (- amount spent)))
          (days-left (and bounds
@@ -551,7 +627,8 @@ Return nil when there are no rows and no `:since'."
           :fraction (if (> amount 0) (/ spent amount) 1.0)
           :hard (harness-json-true-p (plist-get budget :hard))
           :per-day (and days-left (if (> days-left 0) (/ remaining days-left) 0.0))
-          :days-left days-left :period-start start :period-end end)))
+          :days-left days-left :period-start start :period-end end
+          :baseline baseline)))
 
 (harness-defmethod usage/budgets ()
   "Return every explicit budget plist."
@@ -561,13 +638,21 @@ Return nil when there are no rows and no `:since'."
   "Add BUDGET, or replace the budget with the same `:id'.  Return it.
 BUDGET: (:id :scope session|project|period :target SESSION-ID|ROOT|nil
 :amount USD :hard BOOL :period day|week|month :days business|all
-:label).  A missing `:id' and `:created' are generated.  Event
-`usage/budgets-changed' BUDGETS."
+:label :baseline USD :baseline-period-start DATE).  A missing `:id' and
+`:created' are generated.  `:baseline' is what was spent that the
+harness did not record; nil or 0 clears it.  A period budget's baseline
+counts only in the period starting on `:baseline-period-start' (a
+YYYY-MM-DD date or a float time, moved to the start of its period),
+which defaults to the period containing now; without a period it
+always counts.  Event `usage/budgets-changed' BUDGETS."
   (let* ((b (harness-usage--normalise-budget budget))
          (id (or (plist-get b :id) (harness-short-id))))
     (harness-usage--validate-budget b)
     (setq b (plist-put b :id id))
     (setq b (plist-put b :created (or (plist-get b :created) (float-time))))
+    (when (and (plist-get b :baseline) (plist-get b :period) (null (plist-get b :baseline-period-start)))
+      (setq b (plist-put b :baseline-period-start
+                         (harness-usage--period-start-key (float-time) (plist-get b :period)))))
     (setq harness-usage-budgets
           (append (cl-remove id harness-usage-budgets :key (lambda (x) (plist-get x :id)) :test #'equal)
                   (list b)))
@@ -590,11 +675,13 @@ BUDGET: (:id :scope session|project|period :target SESSION-ID|ROOT|nil
 \"session:SID\" names the implicit budget of session SID.  OPTS `:now'
 fixes the reference time.  Result: (:budget B :spent F :amount F
 :remaining F :fraction F :hard BOOL :per-day F :days-left N
-:period-start FLOAT :period-end FLOAT); the period fields are nil for
-budgets without a `:period'.  Period budgets count spending inside
-the current calendar day, week (from Monday) or month and split the
-remainder over the remaining days (Monday to Friday when `:days' is
-`business')."
+:period-start FLOAT :period-end FLOAT :baseline F); the period fields
+are nil for budgets without a `:period'.  Period budgets count spending
+inside the current calendar day, week (from Monday) or month and split
+the remainder over the remaining days (Monday to Friday when `:days' is
+`business').  `:spent' includes `:baseline', the part of the budget's
+baseline that counts now: all of it in the period it was set for, or
+always for a budget without a period; 0 otherwise."
   (let ((budget (harness-usage--find-budget id)))
     (unless budget (error "No budget %s" id))
     (harness-usage--budget-status budget (plist-get opts :now))))
@@ -613,6 +700,138 @@ period; when DAYS is `business' weekends get an allowance of 0."
               (list :date (harness-usage--date-key d)
                     :allowance (if (harness-usage--counted-day-p d period days) each 0.0)))
             dates)))
+
+;;;; This month's API cost, from Anthropic's Admin API
+
+;; Anthropic's Admin API reports what an organisation was billed, per
+;; UTC day (GET /v1/organizations/cost_report).  It needs an Admin API
+;; key and covers billing per token only: a Pro or Max subscription has
+;; no cost report.  The cost is fetched when asked for, never polled,
+;; and offered as the baseline of a month budget, less what the harness
+;; recorded itself for Claude calls billed per token, which the report
+;; counts too.
+
+(defconst harness-usage-anthropic-api-host "api.anthropic.com"
+  "Host of the Anthropic API; also the auth-source host of the admin key.")
+
+(defconst harness-usage--cost-report-max-pages 10
+  "Most pages of one cost report that are fetched.")
+
+(defun harness-usage--admin-key ()
+  "Return the Anthropic Admin API key, or nil when none is configured.
+`harness-anthropic-admin-api-key' comes first, then the
+ANTHROPIC_ADMIN_KEY environment variable, then auth-source."
+  (let ((env (getenv "ANTHROPIC_ADMIN_KEY"))
+        (usable (lambda (s) (and (stringp s) (not (string-blank-p s)) (string-trim s)))))
+    (or (funcall usable harness-anthropic-admin-api-key)
+        (funcall usable env)
+        (condition-case nil
+            (let* ((found (car (auth-source-search :host harness-usage-anthropic-api-host :user "admin"
+                                                   :max 1 :require '(:secret))))
+                   (secret (plist-get found :secret)))
+              (funcall usable (if (functionp secret) (funcall secret) secret)))
+          (error nil)))))
+
+(defun harness-usage--cost-report-url (since until page)
+  "Return the URL of the cost report from SINCE until UNTIL (RFC 3339) at PAGE."
+  (format "https://%s/v1/organizations/cost_report?%s" harness-usage-anthropic-api-host
+          (url-build-query-string
+           (append (list (list "starting_at" since) (list "ending_at" until)
+                         (list "bucket_width" "1d") (list "limit" "31"))
+                   (and page (list (list "page" page)))))))
+
+(defun harness-usage--cost-report-usd (page)
+  "Return the US dollars that one PAGE of a cost report adds up to.
+Its amounts are decimal strings in cents; other currencies are left out."
+  (let ((cents 0.0))
+    (dolist (bucket (plist-get page :data))
+      (dolist (item (plist-get bucket :results))
+        (let ((amount (plist-get item :amount)))
+          (when (member (or (plist-get item :currency) "USD") '("USD" "usd"))
+            (setq cents (+ cents (cond ((numberp amount) amount)
+                                       ((stringp amount) (string-to-number amount))
+                                       (t 0))))))))
+    (/ cents 100.0)))
+
+(defun harness-usage--cost-report-error (err)
+  "Return the error to reject with when a cost report request failed with ERR."
+  (list 'harness-error
+        (pcase err
+          (`(http-error ,status ,body)
+           (format "Anthropic cost report failed%s: %s%s"
+                   (if status (format " (HTTP %s)" status) "")
+                   (cond ((and (stringp body)
+                               (ignore-errors (harness-plist-get-in (harness-json-parse body) '(:error :message)))))
+                         ((stringp body) (harness-truncate-end (string-trim body) 200))
+                         ((and (consp body) (stringp (cadr body))) (cadr body))
+                         (t (format "%S" body)))
+                   (if (memq status '(401 403)) "; it takes an Admin API key (sk-ant-admin...)" "")))
+          (_ (format "Anthropic cost report failed: %s" (harness-error-message err))))))
+
+(defun harness-usage--cost-report (key since until &optional page total pages)
+  "Return a promise of the US dollars Anthropic billed from SINCE until UNTIL.
+KEY is the Admin API key.  PAGE continues the report from a next_page
+token, adding to the TOTAL of the PAGES fetched before."
+  (harness-then
+   (harness-catch (harness-http-request-json (harness-usage--cost-report-url since until page)
+                                             :headers (list (cons "x-api-key" key)
+                                                            (cons "anthropic-version" "2023-06-01")
+                                                            (cons "User-Agent" "emacs-agent-harness"))
+                                             :timeout 30)
+                  (lambda (err) (harness-rejected (harness-usage--cost-report-error err))))
+   (lambda (json)
+     (let ((total (+ (or total 0.0) (harness-usage--cost-report-usd json)))
+           (pages (1+ (or pages 0)))
+           (next (plist-get json :next_page)))
+       (cond
+        ((not (and (harness-json-true-p (plist-get json :has_more)) (stringp next))) total)
+        ((< pages harness-usage--cost-report-max-pages)
+         (harness-usage--cost-report key since until next total pages))
+        (t (harness-log 'warn "usage: cost report cut short after %d pages" pages)
+           total))))))
+
+(defun harness-usage--recorded-api-cost (since until)
+  "Return the cost recorded from SINCE until UNTIL for Claude billed per token.
+SINCE and UNTIL are float times.  Anthropic's cost report counts these
+calls too, so they are what the harness knows of it already."
+  (let ((total 0.0))
+    (dolist (row (harness-usage--rows :since since :until until) total)
+      (when (and (string-prefix-p "claude:" (or (plist-get row :model) ""))
+                 (memq (harness-billing-of row) '(nil api)))
+        (setq total (+ total (or (plist-get row :cost) 0)))))))
+
+(harness-defmethod usage/fetch-api-cost (&rest opts)
+  "Fetch what Anthropic billed the organisation this month, without blocking.
+The key is `harness-anthropic-admin-api-key', the ANTHROPIC_ADMIN_KEY
+environment variable or auth-source (host api.anthropic.com, user
+admin).  Return a promise of (:available t :amount USD :recorded USD
+:outside USD :period-start \"YYYY-MM-DD\" :since FLOAT :until FLOAT).
+AMOUNT is the cost report's total over the calendar month containing
+OPTS `:now' (default: now), in UTC days as Anthropic bills them;
+RECORDED is what the harness recorded in that time for Claude models
+billed per token, which the report includes; OUTSIDE is the rest, the
+baseline to offer a month budget whose period starts on PERIOD-START.
+Without a key nothing is fetched and the promise gives (:available nil
+:reason TEXT)."
+  (let ((key (harness-usage--admin-key)))
+    (if (null key)
+        (harness-resolved
+         (list :available nil
+               :reason (concat "No Anthropic Admin API key: set harness-anthropic-admin-api-key or "
+                               "ANTHROPIC_ADMIN_KEY, or add an auth-source entry for "
+                               harness-usage-anthropic-api-host " with user admin")))
+      (let* ((start (car (harness-usage-period-bounds 'month (or (plist-get opts :now) (float-time)))))
+             (next (harness-usage--date (harness-usage--encode (list (nth 0 start) (1+ (nth 1 start)) 1) 12)))
+             (utc (lambda (date) (float-time (encode-time (list 0 0 0 1 (nth 1 date) (nth 0 date) nil nil t)))))
+             (since (funcall utc start))
+             (until (funcall utc next)))
+        (harness-then (harness-usage--cost-report key (harness-iso-time since) (harness-iso-time until))
+                      (lambda (amount)
+                        (let ((recorded (harness-usage--recorded-api-cost since until)))
+                          (list :available t :amount amount :recorded recorded
+                                :outside (max 0.0 (- amount recorded))
+                                :period-start (harness-usage--date-key start)
+                                :since since :until until))))))))
 
 ;;;; Enforcement
 
@@ -659,7 +878,10 @@ Return the reason a hard budget blocks the next turn, or nil."
       (let* ((st (harness-usage--budget-status b now))
              (fraction (plist-get st :fraction))
              (label (harness-usage-budget-label b))
-             (spent (harness-format-cost (plist-get st :spent)))
+             (spent (concat (harness-format-cost (plist-get st :spent))
+                            (if (> (plist-get st :baseline) 0)
+                                (format " (incl. %s baseline)" (harness-format-cost (plist-get st :baseline)))
+                              "")))
              (amount (harness-format-cost (plist-get st :amount))))
         (cond
          ((and (plist-get st :hard) (>= fraction 1.0))

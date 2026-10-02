@@ -61,6 +61,15 @@
         (setq pos (next-single-property-change pos 'display)))
       found)))
 
+(defun harness-ui-usage-test-line-help (regexp)
+  "Non-nil when a tooltip on the current line matches REGEXP."
+  (let ((pos (line-beginning-position)) (end (line-end-position)) found)
+    (while (and (not found) (< pos end))
+      (let ((help (get-text-property pos 'help-echo)))
+        (when (and (stringp help) (string-match-p regexp help)) (setq found t)))
+      (setq pos (1+ pos)))
+    found))
+
 (ert-deftest harness-ui-usage-empty-state ()
   (harness-ui-usage-test-with
     (let ((text (harness-ui-usage-test-open)))
@@ -140,7 +149,8 @@
                  (cond ((string-match-p "scope" prompt) (assq ?t choices))
                        ((string-match-p "Period" prompt) (assq ?w choices))
                        (t (car choices)))))
-              ((symbol-function 'read-number) (lambda (&rest _) 42))
+              ((symbol-function 'read-number)
+               (lambda (prompt &rest _) (if (string-match-p "Already spent this week" prompt) 12 42)))
               ((symbol-function 'y-or-n-p) (lambda (prompt) (string-match-p "business" prompt)))
               ((symbol-function 'read-string) (lambda (&rest _) "weekly cap")))
       (harness-ui-usage-add-budget))
@@ -151,10 +161,15 @@
       (should (eq 'business (plist-get b :days)))
       (should (= 42.0 (plist-get b :amount)))
       (should-not (plist-get b :hard))
-      (should (equal "weekly cap" (plist-get b :label))))
+      (should (equal "weekly cap" (plist-get b :label)))
+      ;; What was already spent this week counts from now on, this week only.
+      (should (= 12.0 (plist-get b :baseline)))
+      (should (equal (harness-usage--date-key (car (harness-usage-period-bounds 'week)))
+                     (plist-get b :baseline-period-start))))
     (with-current-buffer harness-ui-usage-buffer-name
       (harness-test-wait (lambda () (string-match-p "weekly cap" (harness-ui-usage-test-text))) 5 "budget shown")
       (should (string-match-p "/day" (harness-ui-usage-test-text)))
+      (should (string-match-p "\\$12\\.00 / \\$42\\.00  incl\\. \\$12\\.00 baseline" (harness-ui-usage-test-text)))
       (goto-char (point-min))
       (search-forward "weekly cap")
       ;; The plan uses the budget at point for its defaults.
@@ -169,6 +184,112 @@
         (should (string-match-p "Allowance" text))
         (should (string-match-p (format-time-string "%Y-%m-%d") text))
         (should (= 7 (cl-count-if (lambda (l) (string-match-p "\\` [0-9]\\{4\\}-" l)) (split-string text "\n"))))))))
+
+(ert-deftest harness-ui-usage-baseline-shows-in-the-meter ()
+  "What was spent outside the harness is set on a budget's line and counted in its meter."
+  (harness-ui-usage-test-with
+    (let ((asked nil))
+      (harness-ui-usage-test-record (float-time) (file-name-as-directory dir) "demo:scripted" 5.0)
+      (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                     (list :budget (list :scope "period" :period "month" :amount 100 :label "monthly cap")))
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage-buffer-name
+        (should (string-match-p "\\$5\\.00 / \\$100\\.00" (harness-ui-usage-test-text)))
+        (should-not (string-match-p "incl\\." (harness-ui-usage-test-text)))
+        (goto-char (point-min))
+        (search-forward "monthly cap")
+        (cl-letf (((symbol-function 'read-number)
+                   (lambda (prompt &optional default) (setq asked (list prompt default)) 20)))
+          (harness-ui-usage-set-baseline))
+        (should (string-match-p "Already spent this month outside the harness" (car asked)))
+        (should (= 0 (cadr asked)))
+        (harness-test-wait (lambda () (string-match-p "incl\\. \\$20\\.00 baseline" (harness-ui-usage-test-text)))
+                           5 "baseline in the meter")
+        (let ((text (harness-ui-usage-test-text)))
+          (should (string-match-p "monthly cap .* 25%  \\$25\\.00 / \\$100\\.00  incl\\. \\$20\\.00 baseline  \\$75\\.00 left" text)))
+        ;; Set through usage/set-budget, for this month.
+        (let ((b (car (harness-call 'usage/budgets))))
+          (should (= 20.0 (plist-get b :baseline)))
+          (should (equal (harness-usage--date-key (car (harness-usage-period-bounds 'month)))
+                         (plist-get b :baseline-period-start)))
+          (should (equal "monthly cap" (plist-get b :label))))
+        (goto-char (point-min))
+        (search-forward "monthly cap")
+        (should (= 20.0 (plist-get (harness-ui-usage--budget-at-point) :baseline)))
+        (should (harness-ui-usage-test-line-help "\\$25\\.00 of \\$100\\.00 spent, incl\\. \\$20\\.00 baseline"))
+        ;; The current baseline is the default; 0 clears it.
+        (cl-letf (((symbol-function 'read-number)
+                   (lambda (prompt &optional default) (setq asked (list prompt default)) 0)))
+          (harness-ui-usage-set-baseline))
+        (should (= 20.0 (cadr asked)))
+        (harness-test-wait (lambda () (not (string-match-p "incl\\." (harness-ui-usage-test-text)))) 5 "baseline cleared")
+        (should (string-match-p "\\$5\\.00 / \\$100\\.00" (harness-ui-usage-test-text)))
+        (should-not (plist-member (car (harness-call 'usage/budgets)) :baseline))
+        ;; Negative amounts are refused before anything is sent.
+        (goto-char (point-min))
+        (search-forward "monthly cap")
+        (cl-letf (((symbol-function 'read-number) (lambda (&rest _) -3)))
+          (should-error (harness-ui-usage-set-baseline) :type 'user-error))))))
+
+(ert-deftest harness-ui-usage-import-api-cost-offers-a-baseline ()
+  "With an Admin API key, the month's Anthropic cost is offered as a month budget's baseline."
+  (harness-ui-usage-test-with
+    (let ((harness-anthropic-admin-api-key nil)
+          (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment))
+          (messages nil)
+          (requests 0))
+      (cl-letf (((symbol-function 'auth-source-search) (lambda (&rest _) nil))
+                ((symbol-function 'harness-http-request-json)
+                 (lambda (&rest _)
+                   (cl-incf requests)
+                   (harness-resolved '(:data ((:results ((:amount "1234" :currency "USD")))) :has_more :false))))
+                ((symbol-function 'message)
+                 (lambda (format &rest args) (when format (push (apply #'format-message format args) messages)))))
+        (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                       (list :budget (list :scope "period" :period "month" :amount 100 :label "monthly cap")))
+        (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                       (list :budget (list :scope "period" :period "week" :amount 30 :label "weekly cap")))
+        (harness-ui-usage-test-open)
+        (with-current-buffer harness-ui-usage-buffer-name
+          ;; Only a month budget can take a month's cost.
+          (goto-char (point-min))
+          (search-forward "weekly cap")
+          (should-error (harness-ui-usage-import-api-cost) :type 'user-error)
+          ;; Without a key the step is skipped and says why.
+          (goto-char (point-min))
+          (search-forward "monthly cap")
+          (harness-ui-usage-import-api-cost)
+          (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "No Anthropic Admin API key" m)) messages))
+                             5 "no key")
+          (should (= 0 requests))
+          (should-not harness-ui-usage--api-cost)
+          ;; With one, the cost shows under the budget with a button.
+          (setq harness-anthropic-admin-api-key "sk-ant-admin01-test")
+          (goto-char (point-min))
+          (search-forward "monthly cap")
+          (harness-ui-usage-import-api-cost)
+          (harness-test-wait (lambda () (string-match-p "Anthropic billed \\$12\\.34 this month" (harness-ui-usage-test-text)))
+                             5 "offer shown")
+          (should (= 1 requests))
+          (should (string-match-p "monthly cap.*\n +Anthropic billed \\$12\\.34 this month  \\[use \\$12\\.34 as baseline\\] \\[dismiss\\]"
+                                  (harness-ui-usage-test-text)))
+          (goto-char (point-min))
+          (search-forward "[use $12.34")
+          (push-button)
+          (harness-test-wait (lambda () (string-match-p "incl\\. \\$12\\.34 baseline" (harness-ui-usage-test-text)))
+                             5 "baseline from the API cost")
+          (should-not (string-match-p "Anthropic billed" (harness-ui-usage-test-text)))
+          (let ((b (cl-find "monthly cap" (harness-call 'usage/budgets) :key (lambda (b) (plist-get b :label)) :test #'equal)))
+            (should (< (abs (- 12.34 (or (plist-get b :baseline) 0))) 1e-9))
+            (should (equal (harness-usage--date-key (car (harness-usage-period-bounds 'month)))
+                           (plist-get b :baseline-period-start))))
+          ;; An offer can be dismissed.
+          (goto-char (point-min))
+          (search-forward "monthly cap")
+          (harness-ui-usage-import-api-cost)
+          (harness-test-wait (lambda () (string-match-p "\\[dismiss\\]" (harness-ui-usage-test-text))) 5 "offer again")
+          (harness-ui-usage-dismiss-api-cost)
+          (should-not (string-match-p "Anthropic billed" (harness-ui-usage-test-text))))))))
 
 (defun harness-ui-usage-test-max-quota (now)
   "Return a Claude Max quota plist as the provider reports it at NOW."
