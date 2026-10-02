@@ -13,6 +13,15 @@
 ;; first.  Queued messages wait for the turn to end and then go out
 ;; together as a turn of their own.
 ;;
+;; A provider may run a tool of its own in place of a harness tool (see
+;; `tools/builtin'): Claude Code's web search for web_search, say.  It
+;; reports such a call (a `tool-call' event marked `:builtin'), asks the
+;; harness whether it may run (`tool-permission', decided by
+;; `tools/authorize') and reports its result (`tool-result').  The turn
+;; records them as it records the calls it runs, and gives every such
+;; call still open a result once the provider is done, since a call
+;; without a result breaks the transcript for providers that pair them.
+;;
 ;; The loop is entirely event driven: nothing here waits.
 
 ;;; Code:
@@ -150,6 +159,13 @@ It counts as having its permission checked until that is decided."
   "Record that SID's tool call CALL-ID is over."
   (let ((calls (cl-remove call-id (gethash sid harness-agent--calls) :key #'car :test #'equal)))
     (if calls (puthash sid calls harness-agent--calls) (remhash sid harness-agent--calls))))
+
+(defun harness-agent--set-call (sid call-id &rest props)
+  "Set PROPS on SID's running tool call CALL-ID; return the call, or nil."
+  (when-let* ((call (assoc call-id (gethash sid harness-agent--calls))))
+    (cl-loop for (k v) on props by #'cddr
+             do (setcdr call (plist-put (cdr call) k v)))
+    call))
 
 (defun harness-agent--on-permission-decided (sid request _decision)
   "The call in REQUEST of session SID runs, or is refused, from now on."
@@ -383,6 +399,9 @@ so no turn, steering message or queued item is ever empty."
                             :system (harness-agent--system-prompt session)
                             :messages (harness-agent--prepare-messages session (harness-call 'session/messages sid))
                             :tools (if (harness-method-exists-p 'tools/list) (harness-call 'tools/list sid) nil)
+                            ;; Tools the provider runs itself, in place of these.
+                            :builtin-tools (and (harness-method-exists-p 'tools/builtin)
+                                                (harness-call 'tools/builtin sid))
                             :thinking (plist-get session :thinking)
                             :provider-state (plist-get session :provider-state)
                             :on-event (lambda (ev) (harness-agent--on-event turn ev)))))
@@ -430,8 +449,13 @@ a node already after it keeps its place and is left untouched."
                                           :chars (plist-get ev :chars)))))
       ('text (harness-agent--stream turn 'assistant (plist-get ev :delta)))
       ('thinking (harness-agent--stream turn 'thinking (plist-get ev :delta)))
-      ('tool-call (harness-agent--tool-call turn ev))
-      ('tool-result nil)
+      ('tool-call (if (plist-get ev :builtin)
+                      (harness-agent--builtin-call turn ev)
+                    (harness-agent--tool-call turn ev)))
+      ('tool-permission (harness-agent--tool-permission turn ev))
+      ;; Hosted loops echo the results of every call; the turn records
+      ;; those of the provider's own tools only, having recorded the rest.
+      ('tool-result (harness-agent--builtin-result turn ev))
       ('usage
        (setf (harness-agent-turn-last-usage turn) ev)
        (harness-call 'session/usage-add sid
@@ -446,6 +470,8 @@ a node already after it keeps its place and is left untouched."
       ('hint (harness-call 'session/hint sid (plist-get ev :text)))
       ('done
        (harness-agent--finalize-live turn)
+       ;; The provider's request is over: its own tools report no more.
+       (harness-agent--close-builtins turn (plist-get ev :stop-reason))
        (setf (harness-agent-turn-stop-reason turn) (plist-get ev :stop-reason)
              (harness-agent-turn-error turn) (plist-get ev :error)
              (harness-agent-turn-waiting-done turn) t)
@@ -569,6 +595,118 @@ loop reads it in the content, a native one with its next request."
            (cl-decf (harness-agent-turn-pending turn))
            (harness-agent--maybe-continue turn)))))))
 
+;;;; Tools the provider runs itself
+
+(defun harness-agent--current-p (turn)
+  "Non-nil while TURN is its session's running turn."
+  (eq (gethash (harness-agent-turn-session-id turn) harness-agent--turns) turn))
+
+(defun harness-agent--builtin-call (turn ev)
+  "Record the call EV of a tool that TURN's provider runs itself.
+EV names the harness tool the provider's tool stands in for.  The call
+runs, as far as the turn shows, until the provider reports its result
+or is done."
+  (let ((sid (harness-agent-turn-session-id turn))
+        (name (plist-get ev :name))
+        (input (plist-get ev :input))
+        (call-id (or (plist-get ev :id) (harness-short-id))))
+    (when (and (harness-agent--current-p turn)
+               (not (assoc call-id (gethash sid harness-agent--calls))))
+      (harness-agent--finalize-live turn)
+      (let ((node (harness-call 'session/append sid
+                                (list :kind 'tool-call :tool name :call-id call-id :input input
+                                      :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name)
+                                      :meta (list :builtin t)))))
+        (harness-emit 'agent/tool-call sid node)
+        (harness-agent--add-call sid call-id name (plist-get node :title))
+        ;; Nothing checks its permission until the provider asks.
+        (harness-agent--set-call sid call-id :checking nil :builtin t :started (float-time))
+        (harness-agent--update-activity sid)))))
+
+(defun harness-agent--tool-permission (turn ev)
+  "Decide whether the call EV of a tool TURN's provider runs itself may run.
+The harness's permission chain decides it as a call of the harness tool
+it stands in for (`tools/authorize'), and EV's `:respond' gets the
+DECISION: (:behavior allow ...), or (:behavior deny :message TEXT ...)
+where TEXT is what the model is told.  A call EV the turn has not
+recorded yet is recorded first."
+  (let* ((sid (harness-agent-turn-session-id turn))
+         (call-id (plist-get ev :id))
+         (respond (plist-get ev :respond))
+         (answer (lambda (decision)
+                   (when respond
+                     (condition-case err
+                         (funcall respond decision)
+                       (error (harness-log 'error "agent: answering the permission of %s failed: %S"
+                                           call-id err))))))
+         (refuse (lambda (reason)
+                   (funcall answer (list :behavior 'deny :reason reason :message (concat "Denied: " reason))))))
+    (cond
+     ((not (harness-agent--current-p turn)) (funcall refuse "the turn is over"))
+     ((not (harness-method-exists-p 'tools/authorize)) (funcall refuse "no permission handler answered"))
+     (t
+      (unless (assoc call-id (gethash sid harness-agent--calls))
+        (harness-agent--builtin-call turn ev))
+      (harness-agent--set-call sid call-id :checking t)
+      (harness-agent--update-activity sid)
+      (harness-then
+       (harness-call-async 'tools/authorize sid
+                           (list :id call-id :name (plist-get ev :name) :input (plist-get ev :input)
+                                 :kind (plist-get ev :kind)))
+       (lambda (decision)
+         (harness-agent--set-call sid call-id :checking nil
+                                  :denied (not (eq (plist-get decision :behavior) 'allow)))
+         (harness-agent--update-activity sid)
+         (funcall answer decision))
+       (lambda (err)
+         (harness-agent--set-call sid call-id :checking nil :denied t)
+         (harness-agent--update-activity sid)
+         (funcall refuse (format "the permission check failed: %s" (harness-error-message err)))))))))
+
+(defun harness-agent--record-builtin-result (sid call output is-error &optional meta)
+  "Record OUTPUT as the result of SID's running built-in CALL and end it.
+IS-ERROR marks a failed call; META is added to the node's meta."
+  (harness-agent--remove-call sid (car call))
+  (let ((node (harness-call 'session/append sid
+                            (list :kind 'tool-result :call-id (car call)
+                                  :output (if (stringp output) output (format "%s" (or output "")))
+                                  :is-error (and is-error t)
+                                  :meta (append (list :builtin t
+                                                      :duration (- (float-time)
+                                                                   (or (plist-get (cdr call) :started) (float-time))))
+                                                (and (plist-get (cdr call) :denied) (list :denied t))
+                                                meta)))))
+    (harness-emit 'agent/tool-result sid node)
+    (harness-agent--update-activity sid)
+    node))
+
+(defun harness-agent--builtin-result (turn ev)
+  "Record the result EV of a call that TURN's provider ran itself.
+Results of the calls the harness ran, which the turn recorded when it
+ran them, and of calls it never heard of are left alone."
+  (let* ((sid (harness-agent-turn-session-id turn))
+         (call (and (harness-agent--current-p turn)
+                    (assoc (plist-get ev :id) (gethash sid harness-agent--calls)))))
+    (when (and call (plist-get (cdr call) :builtin))
+      (harness-agent--record-builtin-result sid call (plist-get ev :content) (plist-get ev :is-error)))))
+
+(defun harness-agent--close-builtins (turn reason)
+  "Give each built-in call of TURN still running a result: it got none.
+REASON is why the provider stopped (`cancelled', say)."
+  (let ((sid (harness-agent-turn-session-id turn)))
+    (when (harness-agent--current-p turn)
+      (dolist (call (gethash sid harness-agent--calls))
+        (when (plist-get (cdr call) :builtin)
+          (condition-case err
+              (harness-agent--record-builtin-result
+               sid call
+               (if (eq reason 'cancelled)
+                   "Cancelled before this call returned a result."
+                 "The provider stopped before this call returned a result.")
+               t (list :interrupted t))
+            (error (harness-log 'warn "agent: closing built-in call %s failed: %S" (car call) err)
+                   (harness-agent--remove-call sid (car call)))))))))
+
 (defun harness-agent--maybe-continue (turn)
   "Decide what happens once the provider is done and no tools are running."
   (when (and (harness-agent-turn-waiting-done turn)
@@ -599,6 +737,9 @@ loop reads it in the content, a native one with its next request."
 (defun harness-agent--end (turn reason &optional error)
   (let ((sid (harness-agent-turn-session-id turn)))
     (when (eq (gethash sid harness-agent--turns) turn)
+      ;; A turn cancelled before its provider was done.
+      (when (harness-call 'session/exists-p sid)
+        (harness-agent--close-builtins turn reason))
       (remhash sid harness-agent--turns)
       (harness-agent--clear-activity sid)
       (when (harness-call 'session/exists-p sid)

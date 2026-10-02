@@ -58,7 +58,7 @@ Optional dependencies:
 | GitHub Copilot CLI 1.0 or later (`copilot`) | Models of a GitHub Copilot plan |
 | `OPENROUTER_API_KEY` or `OPENAI_API_KEY` | OpenRouter and OpenAI models |
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
-| `BRAVE_API_KEY` | Web search |
+| `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
 | `ffmpeg`, `mpv` | Audio recording and playback, video thumbnails |
 
 ## Installation

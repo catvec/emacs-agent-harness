@@ -14,6 +14,14 @@ holds any number of sessions and stays alive between turns.
 Behaviour is chosen by the prompt text:
   "call echo"   -> asks for the external tool `echo' with {"text": "ping"}
                    and answers after the harness has sent the result
+  "search the web"
+                -> searches for "emacs": with Copilot's own web_search
+                   when `availableTools' lists it and no external tool
+                   has that name, asking permission for the call first
+                   (a request of kind "url" that names the call by its
+                   toolCallId: how the real CLI words it for web_search
+                   is not known here); else with the external tool
+                   web_search when the session has one; else not at all
   "permission"  -> asks permission for the custom tool first, then
                    streams the decision it got
   "hang"        -> streams "wait" and waits for session.abort (forever
@@ -358,6 +366,8 @@ class Fake:
             decision = self.permissions["perm-1"].get("result", {}).get("kind", "?")
             self.event(sid, "assistant.message_delta", {"messageId": "mp", "deltaContent": decision + " "},
                        ephemeral=True)
+        if "search the web" in text and not self.web_search(sid):
+            return
         if "call echo" in text:
             self.event(sid, "assistant.message",
                        {"messageId": "m1", "content": "",
@@ -392,6 +402,61 @@ class Fake:
         self.event(sid, "session.usage_info", {"tokenLimit": 400000, "currentTokens": 2119,
                                                "messagesLength": 4}, ephemeral=True)
         self.idle(sid)
+
+    def web_search(self, sid):
+        """Have the model search the web, as the prompt "search the web" asks.
+
+        Return False when an abort ended the turn meanwhile."""
+        config = self.sessions.get(sid, {})
+        external = any(t.get("name") == "web_search" for t in config.get("tools") or [])
+        builtin = not external and "web_search" in (config.get("availableTools") or [])
+        if not (builtin or external):
+            return True
+        call_id, args = "call_fake_ws", {"query": "emacs"}
+        self.event(sid, "assistant.message",
+                   {"messageId": "mw", "content": "",
+                    "toolRequests": [{"toolCallId": call_id, "name": "web_search",
+                                      "arguments": args, "type": "function"}]})
+        self.usage(sid, "tool_calls")
+        self.event(sid, "tool.execution_start", {"toolCallId": call_id, "toolName": "web_search",
+                                                 "arguments": args})
+        if builtin:
+            self.event(sid, "permission.requested",
+                       {"requestId": "perm-ws",
+                        "permissionRequest": {"kind": "url", "toolCallId": call_id,
+                                              "url": "https://www.bing.com/search?q=emacs",
+                                              "intention": "Search the web for emacs"}})
+            self.wait(lambda: "perm-ws" in self.permissions or sid in self.aborted)
+            if sid in self.aborted:
+                self.event(sid, "abort", {"reason": "user initiated"})
+                self.idle(sid, aborted=True)
+                return False
+            decision = self.permissions.pop("perm-ws").get("result", {})
+            if decision.get("kind") == "approve-once":
+                self.event(sid, "tool.execution_complete",
+                           {"toolCallId": call_id, "success": True,
+                            "result": {"content": "1. GNU Emacs\n   https://www.gnu.org/software/emacs/"}})
+            else:
+                self.event(sid, "tool.execution_complete",
+                           {"toolCallId": call_id, "success": False,
+                            "error": {"message": decision.get("feedback") or "Permission denied"}})
+            return True
+        self.event(sid, "external_tool.requested",
+                   {"requestId": "req-ws", "sessionId": sid, "toolCallId": call_id,
+                    "toolName": "web_search", "arguments": args})
+        self.wait(lambda: "req-ws" in self.tool_results or sid in self.aborted)
+        if sid in self.aborted:
+            self.event(sid, "external_tool.completed", {"requestId": "req-ws"})
+            self.event(sid, "abort", {"reason": "user initiated"})
+            self.idle(sid, aborted=True)
+            return False
+        result = self.tool_results.pop("req-ws")
+        self.event(sid, "external_tool.completed", {"requestId": "req-ws"})
+        self.event(sid, "tool.execution_complete",
+                   {"toolCallId": call_id,
+                    "success": result.get("result", {}).get("resultType") == "success",
+                    "result": {"content": result.get("result", {}).get("textResultForLlm", "")}})
+        return True
 
     # -- main loop ----------------------------------------------------------
 

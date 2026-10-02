@@ -213,6 +213,8 @@ Track todo items and allow the agent to update todo statuses.
 ## Websearch Tool
 Allow the agent to search the web for content. This is a generic tool which should be implemented by a drop in provider. To start provide a built in implementation of the brave websearch API.
 
+When the model's provider has a web search of its own (the Claude Code CLI's WebSearch, the Copilot CLI's web_search) and no search provider is configured yet, the session uses the provider's search in place of the tool, so searching works out of the box. The harness's permission rules for the tool still decide each search, and each one shows in the transcript as a call of the tool.
+
 ## Context Bomb Protection
 If a tool output, file read, ect any type would cause an output of too large of a size which would screw up your context do not output it and instead require the use of range parameters to get the output. 
 

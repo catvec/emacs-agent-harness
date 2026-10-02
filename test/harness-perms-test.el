@@ -372,6 +372,28 @@ for a request without a session record."
       (should (equal "network calls are out of scope" (plist-get d :reason))))
     (should (= 1 (length (funcall probe 'requests))))))
 
+(ert-deftest harness-perms-provider-search-is-web-search ()
+  ;; A model provider's own search stands in for web_search, so the
+  ;; rules for web_search decide it: no approval, even unattended, unless
+  ;; a standing rule says otherwise.
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-test-load-module 'tools-web)
+  (let ((probe (harness-perms-test--judge-provider
+                '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"no\"}")
+                  (:type done :stop-reason end-turn))))
+        (harness-perms-auto-model "judge:small"))
+    (harness-register-method 'agent/prompt (lambda (&rest _) (harness-resolved nil)))
+    (let ((d (harness-test-await (harness-call 'tools/authorize "s1"
+                                               '(:id "c1" :name "web_search" :input (:query "emacs"))))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (string-match-p "never needs approval" (plist-get d :reason))))
+    (should (null (funcall probe 'requests)))
+    (let* ((harness-perms-rules '((:tool "web_search" :behavior deny)))
+           (d (harness-test-await (harness-call 'tools/authorize "s1"
+                                                '(:id "c2" :name "web_search" :input (:query "emacs"))))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (string-match-p "\\`Denied: denied by a standing rule for web_search" (plist-get d :message))))))
+
 ;;;; Asking the user
 
 (ert-deftest harness-perms-ask-path-pending-and-answer ()

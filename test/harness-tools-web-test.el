@@ -4,6 +4,14 @@
 (require 'harness-test-helpers)
 (require 'harness-http)
 
+(defvar harness-brave-api-key)
+(defvar harness-websearch-provider)
+(defvar harness-websearch-providers)
+(defvar harness-websearch-ready-functions)
+(defvar harness-websearch-builtin)
+(defvar harness-tools-web--auth-source-seen)
+(defvar harness-tools-web--auth-source-ttl)
+
 (defun harness-tools-web-test--allow (_decision next &rest _)
   "Permissive permission filter for tests."
   (funcall next (list :behavior 'allow)))
@@ -112,6 +120,175 @@
     (should (plist-get (harness-tools-web-test--call "web_search" :query " ") :is-error))
     (should (eq 'net (harness-tool-kind (harness-tool-get "web_search"))))
     (should (eq 'net (harness-tool-kind (harness-tool-get "web_fetch"))))))
+
+;;;; Whether web_search can search, and the model provider's own search
+
+(defmacro harness-tools-web-test--without-key (&rest body)
+  "Run BODY with Brave selected, no Brave key anywhere and no auth-source answer kept."
+  (declare (indent 0))
+  `(let ((process-environment (cons "BRAVE_API_KEY" process-environment))
+         (auth-sources nil)
+         (harness-brave-api-key nil)
+         (harness-websearch-provider 'brave)
+         (harness-websearch-builtin 'fallback)
+         (harness-tools-web--auth-source-seen nil))
+     ,@body))
+
+(ert-deftest harness-tools-web-search-readiness ()
+  "web_search can search once its provider has what it needs."
+  (harness-tools-web-test--setup)
+  (harness-tools-web-test--without-key
+    (should-not (harness-websearch-ready-p))
+    (let ((harness-brave-api-key "custom-key"))
+      (should (harness-websearch-ready-p)))
+    (let ((process-environment (cons "BRAVE_API_KEY=env-key" process-environment)))
+      (should (harness-websearch-ready-p)))
+    ;; An unknown provider cannot search; one without a check always can.
+    (should-not (harness-websearch-ready-p 'missing))
+    (let ((harness-websearch-providers harness-websearch-providers)
+          (harness-websearch-ready-functions harness-websearch-ready-functions))
+      (harness-websearch-register-provider 'plain (lambda (_q _c) nil))
+      (should (harness-websearch-ready-p 'plain))
+      (harness-websearch-register-provider 'keyless (lambda (_q _c) nil) #'ignore)
+      (should-not (harness-websearch-ready-p 'keyless))
+      (harness-websearch-register-provider 'broken (lambda (_q _c) nil) (lambda () (error "Boom")))
+      (should-not (harness-websearch-ready-p 'broken))
+      ;; Registered again without a check, it is ready.
+      (harness-websearch-register-provider 'keyless (lambda (_q _c) nil))
+      (should (harness-websearch-ready-p 'keyless))
+      (let ((harness-websearch-provider 'plain))
+        (should (harness-websearch-ready-p))))))
+
+(ert-deftest harness-tools-web-search-readiness-asks-auth-source-seldom ()
+  "auth-source may decrypt a file, so the check made before turns asks it seldom."
+  (harness-tools-web-test--setup)
+  (harness-tools-web-test--without-key
+    (let ((asked 0) (stored nil))
+      (cl-letf (((symbol-function 'harness-tools-web--auth-source-key)
+                 (lambda (_host) (cl-incf asked) stored)))
+        (should-not (harness-websearch-ready-p))
+        (should-not (harness-websearch-ready-p))
+        (should (= 1 asked))
+        ;; A key stored meanwhile counts once the last answer is old.
+        (setq stored "stored-key")
+        (should-not (harness-websearch-ready-p))
+        (setcar harness-tools-web--auth-source-seen
+                (- (float-time) harness-tools-web--auth-source-ttl 1))
+        (should (harness-websearch-ready-p))
+        (should (= 2 asked))
+        ;; A search that looks the key up refreshes the answer.
+        (setq stored nil)
+        (should-not (harness-tools-web--brave-key))
+        (should (= 3 asked))
+        (should-not (harness-websearch-ready-p))
+        ;; The customization and the environment never wait.
+        (let ((harness-brave-api-key "custom-key"))
+          (should (harness-websearch-ready-p)))
+        (should (= 3 asked))))))
+
+(ert-deftest harness-tools-web-builtin-search-policy ()
+  "A model provider's own search stands in for web_search while that cannot search."
+  (harness-tools-web-test--setup)
+  (harness-tools-web-test--without-key
+    (let ((offered '("web_search")))
+      (should (equal '("web_search") (harness-tools-web--builtin-tools nil nil offered)))
+      (should (equal '("web_search" "other") (harness-tools-web--builtin-tools '("other") nil offered)))
+      (should-not (harness-tools-web--builtin-tools nil nil '("something_else")))
+      (let ((harness-brave-api-key "custom-key"))
+        (should-not (harness-tools-web--builtin-tools nil nil offered))
+        (let ((harness-websearch-builtin 'always))
+          (should (equal '("web_search") (harness-tools-web--builtin-tools nil nil offered)))))
+      (let ((harness-websearch-builtin 'never))
+        (should-not (harness-tools-web--builtin-tools nil nil offered))))))
+
+(defmacro harness-tools-web-test--with-session (model &rest body)
+  "Run BODY with a session \"s1\" on MODEL, a variable BODY may set.
+Models whose name starts with \"searching\" have their own web search."
+  (declare (indent 1))
+  `(let ((dir (harness-test-temp-dir)))
+     (harness-register-method 'session/get (lambda (id) (list :id id :cwd dir :model ,model)))
+     (harness-register-method 'provider/capabilities
+                              (lambda (m) (and (string-prefix-p "fake:searching" m)
+                                               '(:hosted-loop t :builtin-tools ("web_search")))))
+     (unwind-protect (progn ,@body)
+       (harness-unregister-method 'session/get)
+       (harness-unregister-method 'provider/capabilities))))
+
+(ert-deftest harness-tools-web-builtin-search-replaces-web-search ()
+  "A session whose provider searches itself has no web_search of the harness's."
+  (harness-tools-web-test--setup)
+  (let ((model "fake:searching"))
+    (harness-tools-web-test--with-session model
+      (harness-tools-web-test--without-key
+        (cl-flet ((names (sid) (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list sid))))
+          (should (equal '("web_search") (harness-call 'tools/builtin "s1")))
+          (should-not (member "web_search" (names "s1")))
+          (should (member "web_fetch" (names "s1")))
+          ;; Listed without a session, every tool is there.
+          (should (member "web_search" (names nil)))
+          ;; Once Brave has a key, web_search is the harness's again.
+          (let ((harness-brave-api-key "custom-key"))
+            (should-not (harness-call 'tools/builtin "s1"))
+            (should (member "web_search" (names "s1"))))
+          ;; A session that may not search the web gets neither.
+          (let ((filter (lambda (names _s) (remove "web_search" names))))
+            (harness-add-filter 'agent/tools filter)
+            (unwind-protect
+                (progn (should-not (harness-call 'tools/builtin "s1"))
+                       (should-not (member "web_search" (names "s1"))))
+              (harness-remove-filter 'agent/tools filter)))
+          ;; A provider without a search of its own keeps web_search.
+          (setq model "fake:plain")
+          (should-not (harness-call 'tools/builtin "s1"))
+          (should (member "web_search" (names "s1"))))))))
+
+(ert-deftest harness-tools-authorize-decides-without-running ()
+  "A call the provider runs is decided by the permission chain, as the harness tool's."
+  (harness-tools-web-test--setup)
+  (let* ((seen nil) (decided nil)
+         (spy (lambda (decision next request) (push request seen) (funcall next decision)))
+         (on-decided (lambda (_sid request decision) (push (cons request decision) decided))))
+    (harness-add-filter 'permission/decide spy 5)
+    (harness-on 'permission/decided on-decided)
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness-http-request-json)
+                   (lambda (&rest _) (error "Nothing may run"))))
+          (let ((d (harness-test-await
+                    (harness-call 'tools/authorize "s1" '(:id "c7" :name "web_search" :input (:query "emacs"))))))
+            (should (eq 'allow (plist-get d :behavior)))
+            (let ((request (car seen)))
+              (should (equal "web_search" (plist-get request :tool)))
+              (should (eq 'net (plist-get request :kind)))
+              (should (equal "c7" (plist-get request :call-id)))
+              (should (plist-get request :builtin))
+              (should (equal "emacs" (plist-get (plist-get request :input) :query))))
+            (should (equal "c7" (plist-get (caar decided) :call-id))))
+          ;; A tool the harness lacks is judged by the kind the call names, else as exec.
+          (harness-test-await (harness-call 'tools/authorize "s1" '(:id "c8" :name "mystery")))
+          (should (eq 'exec (plist-get (car seen) :kind)))
+          (harness-test-await (harness-call 'tools/authorize "s1" '(:id "c9" :name "mystery" :kind "read")))
+          (should (eq 'read (plist-get (car seen) :kind)))
+          ;; A refusal says what to tell the model.
+          (let ((deny (lambda (_d next _r)
+                        (funcall next '(:behavior deny :reason "not today" :hint "Try later." :final t)))))
+            (harness-add-filter 'permission/decide deny 1)
+            (unwind-protect
+                (let ((d (harness-test-await
+                          (harness-call 'tools/authorize "s1" '(:id "c10" :name "web_search" :input (:query "x"))))))
+                  (should (eq 'deny (plist-get d :behavior)))
+                  (should (equal "not today" (plist-get d :reason)))
+                  (should (equal "Denied: not today Try later." (plist-get d :message))))
+              (harness-remove-filter 'permission/decide deny)))
+          ;; Nobody decides: refused.
+          (harness-remove-filter 'permission/decide #'harness-tools-web-test--allow)
+          (harness-remove-filter 'permission/decide spy)
+          (let ((d (harness-test-await
+                    (harness-call 'tools/authorize "s1" '(:id "c11" :name "web_search" :input (:query "x"))))))
+            (should (eq 'deny (plist-get d :behavior)))
+            (should (equal "Denied: no permission handler answered" (plist-get d :message)))))
+      (harness-remove-filter 'permission/decide spy)
+      (harness-add-filter 'permission/decide #'harness-tools-web-test--allow 10)
+      (harness-off (cons 'permission/decided on-decided)))))
 
 (defun harness-tools-web-test--stub-http (status headers body &optional err)
   "Return a `harness-http-request' replacement answering STATUS HEADERS BODY ERR."

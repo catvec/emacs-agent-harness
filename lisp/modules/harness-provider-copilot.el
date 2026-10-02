@@ -23,6 +23,14 @@
 ;;   the harness system prompt in place of Copilot's (`systemMessage'
 ;;   mode replace), the model and the reasoning effort.  Resuming an
 ;;   open session again applies changed settings in place.
+;; - One built-in tool can stand in for a harness tool: Copilot's
+;;   web_search for the harness's (`harness-provider-copilot-builtin-tools').
+;;   A request whose `:builtin-tools' names it lists it in
+;;   `availableTools' instead of sending the external tool.  Its
+;;   `tool.execution_start' becomes a `tool-call' marked `:builtin', a
+;;   `permission.requested' about it (by `toolCallId' or `toolName') a
+;;   `tool-permission' that the harness's permission chain answers, and
+;;   its `tool.execution_complete' a `tool-result'.
 ;; - `session.send' starts a turn; `session.event' notifications carry
 ;;   it: `assistant.message_delta' and `assistant.reasoning_delta'
 ;;   stream text and thinking, `external_tool.requested' asks the
@@ -120,10 +128,20 @@ report makes no model call.  nil fetches it only when nothing is known."
   "Oldest SDK protocol version of the CLI that this provider speaks.
 Newer CLIs are used too; the log says when one reports a newer version.")
 
+(defconst harness-provider-copilot-builtin-tools
+  '(("web_search" . "web_search"))
+  "Harness tools that a tool of Copilot's own can stand in for.
+Each entry is (HARNESS-NAME . CLI-NAME).  Copilot's web_search searches
+the web on GitHub's side.  A request's `:builtin-tools' (see
+`tools/builtin') names the harness tools whose stand-ins to turn on.")
+
 (defconst harness-provider-copilot-capabilities
   '(:hosted-loop t :fork t :resume t :vision t :thinking t :quota t
-    :compaction hosted :cost-reported t :billing t)
-  "Capabilities of every Copilot model; the catalogue refines `:vision'.")
+    :compaction hosted :cost-reported t :billing t
+    :builtin-tools ("web_search"))
+  "Capabilities of every Copilot model; the catalogue refines `:vision'.
+`:builtin-tools' names the harness tools of
+`harness-provider-copilot-builtin-tools'.")
 
 (defconst harness-provider-copilot--usd-per-nano-aiu 1e-11
   "Dollars per nano AI unit: an AI credit is 1e9 of them and costs $0.01.")
@@ -207,6 +225,12 @@ Newer CLIs are used too; the log says when one reports a newer version.")
 
 (defvar harness-provider-copilot--newer-protocol-noted nil
   "Non-nil once the log has said that the CLI speaks a newer protocol.")
+
+(defvar harness-provider-copilot--builtin-calls (make-hash-table :test 'eq :weakness 'key)
+  "Turn record -> the calls of Copilot's own tools it reported.
+Each is a plist (:id TOOL-CALL-ID :name HARNESS-NAME :input INPUT :asked
+BOOL), `:asked' once Copilot asked whether it may run.  Kept beside the
+records, whose layout a reload must keep.")
 
 (defun harness-provider-copilot--drop-stale-value (value depth)
   "Stop what VALUE, found in a slot of a stale record, holds.
@@ -779,7 +803,26 @@ AGENT is the sub-agent the event comes from, nil for the main agent."
                                (harness-provider-copilot-turn-streamed turn)))
        (let ((text (plist-get data :content)))
          (unless (harness-string-blank-p text)
-           (harness-provider-copilot--emit turn (list :type 'text :delta text))))))
+           (harness-provider-copilot--emit turn (list :type 'text :delta text)))))
+     ;; The model's calls of Copilot's own tools, with their whole input.
+     (unless agent
+       (dolist (call (plist-get data :toolRequests))
+         (when-let* ((name (harness-provider-copilot--builtin-name turn (plist-get call :name))))
+           (harness-provider-copilot--announce-builtin
+            turn (plist-get call :toolCallId) name (plist-get call :arguments))))))
+    ("tool.execution_start"
+     (unless agent
+       (when-let* ((name (harness-provider-copilot--builtin-name turn (plist-get data :toolName))))
+         (harness-provider-copilot--announce-builtin
+          turn (plist-get data :toolCallId) name (plist-get data :arguments)))))
+    ("tool.execution_complete"
+     (unless agent
+       (when-let* ((call (harness-provider-copilot--builtin-call turn (plist-get data :toolCallId))))
+         (let ((ok (harness-json-true-p (plist-get data :success))))
+           (harness-provider-copilot--emit
+            turn (list :type 'tool-result :id (plist-get call :id)
+                       :content (harness-provider-copilot--execution-text data)
+                       :is-error (not ok)))))))
     ("assistant.usage" (harness-provider-copilot--add-usage turn data agent))
     ("session.usage_info"
      ;; A sub-agent's context is not the size of the conversation.
@@ -883,21 +926,124 @@ answers the CLI."
 (defun harness-provider-copilot--permission-request (entry sid data)
   "Answer the permission request DATA of Copilot session SID on ENTRY.
 The harness checks permissions when it runs a tool, so its own tools are
-approved here; anything else is refused, since it would not be the
-harness's to run."
+approved here.  A call of Copilot's own tools that stands in for a
+harness tool goes to the turn, whose permission chain decides it (see
+`harness-provider-copilot--ask-builtin'); anything else is refused,
+since it would not be the harness's to run."
   (unless (harness-json-true-p (plist-get data :resolvedByHook))
     (let* ((request (plist-get data :permissionRequest))
            (kind (plist-get request :kind))
-           (ours (equal kind "custom-tool")))
-      (harness-log (if ours 'debug 'info) "provider-copilot: %s a %s permission request for %s"
-                   (if ours "approving" "refusing") kind (or (plist-get request :toolName) "?"))
-      (harness-provider-copilot--rpc
-       entry "session.permissions.handlePendingPermissionRequest"
-       (list :sessionId sid :requestId (plist-get data :requestId)
-             :result (if ours
-                         '(:kind "approve-once")
-                       '(:kind "reject" :feedback "Only the harness's own tools may be used here.")))
-       #'ignore))))
+           (ours (equal kind "custom-tool"))
+           (turn (and (not ours) (harness-provider-copilot--turn-for entry sid)))
+           (call (and turn (not (harness-provider-copilot-turn-cancelled turn))
+                      (harness-provider-copilot--builtin-asked turn request))))
+      (if call
+          (harness-provider-copilot--ask-builtin entry sid data turn call)
+        (harness-log (if ours 'debug 'info) "provider-copilot: %s a %s permission request for %s"
+                     (if ours "approving" "refusing") kind (or (plist-get request :toolName) "?"))
+        (harness-provider-copilot--rpc
+         entry "session.permissions.handlePendingPermissionRequest"
+         (list :sessionId sid :requestId (plist-get data :requestId)
+               :result (if ours
+                           '(:kind "approve-once")
+                         '(:kind "reject" :feedback "Only the harness's own tools may be used here.")))
+         #'ignore)))))
+
+;;;; Copilot's own tools
+
+(defun harness-provider-copilot--cli-tools (request)
+  "Return Copilot's own tools that REQUEST turns on, by their Copilot names.
+They stand in for the harness tools its `:builtin-tools' names."
+  (let ((wanted (plist-get request :builtin-tools)))
+    (delq nil (mapcar (lambda (cell) (and (member (car cell) wanted) (cdr cell)))
+                      harness-provider-copilot-builtin-tools))))
+
+(defun harness-provider-copilot--builtin-name (turn name)
+  "Return the harness tool that Copilot's tool NAME stands in for in TURN, or nil.
+Only the tools TURN's request turned on count."
+  (and (stringp name)
+       (member name (harness-provider-copilot--cli-tools (harness-provider-copilot-turn-request turn)))
+       (car (rassoc name harness-provider-copilot-builtin-tools))))
+
+(defun harness-provider-copilot--builtin-call (turn id)
+  "Return the record of TURN's call ID of one of Copilot's own tools, or nil."
+  (and id (cl-find id (gethash turn harness-provider-copilot--builtin-calls)
+                   :key (lambda (c) (plist-get c :id)) :test #'equal)))
+
+(defun harness-provider-copilot--announce-builtin (turn id name input)
+  "Report TURN's call ID of Copilot's tool that stands in for harness tool NAME.
+INPUT is its input.  The turn hears of each call once, as a `tool-call'
+marked `:builtin'.  Return the call's record."
+  (let ((id (or id (concat "call_" (harness-short-id 12)))))
+    (or (harness-provider-copilot--builtin-call turn id)
+        (let ((call (list :id id :name name :input input :asked nil)))
+          (puthash turn (append (gethash turn harness-provider-copilot--builtin-calls) (list call))
+                   harness-provider-copilot--builtin-calls)
+          (harness-provider-copilot--emit
+           turn (list :type 'tool-call :id id :name name :input input :builtin t))
+          call))))
+
+(defun harness-provider-copilot--builtin-asked (turn request)
+  "Return the record of the call of Copilot's own tools that REQUEST asks about.
+REQUEST is the `permissionRequest' of a permission request in TURN.  It
+names the call by its `toolCallId', or the tool by its `toolName', when
+the oldest call of that tool not asked about yet is meant; a call TURN
+has not heard of is reported first.  Nil when REQUEST is about anything
+else."
+  (let* ((id (plist-get request :toolCallId))
+         (known (harness-provider-copilot--builtin-call turn id))
+         (name (and (not known) (harness-provider-copilot--builtin-name turn (plist-get request :toolName)))))
+    (cond
+     (known known)
+     (name
+      (or (and (null id)
+               (cl-find-if (lambda (c) (and (equal name (plist-get c :name)) (not (plist-get c :asked))))
+                           (gethash turn harness-provider-copilot--builtin-calls)))
+          (harness-provider-copilot--announce-builtin
+           turn id name (or (plist-get request :args) (plist-get request :arguments))))))))
+
+(defun harness-provider-copilot--ask-builtin (entry sid data turn call)
+  "Ask TURN whether Copilot may run its tool for CALL, a record in TURN.
+DATA is Copilot session SID's permission request on ENTRY, answered once
+the harness has decided: the `tool-permission' event's `:respond' gets
+the harness's DECISION."
+  (let ((proc (harness-provider-copilot-session-process entry))
+        (answered nil))
+    (plist-put call :asked t)
+    (harness-log 'debug "provider-copilot: asking the harness about %s (%s)"
+                 (plist-get call :name) (plist-get call :id))
+    (harness-provider-copilot--emit
+     turn
+     (list :type 'tool-permission :id (plist-get call :id) :name (plist-get call :name)
+           :input (plist-get call :input)
+           :respond
+           (lambda (decision)
+             (unless answered
+               (setq answered t)
+               (if (not (eq proc (harness-provider-copilot-session-process entry)))
+                   (harness-log 'debug "provider-copilot: dropping the permission of %s: its process is gone"
+                                (plist-get call :id))
+                 (harness-provider-copilot--rpc
+                  entry "session.permissions.handlePendingPermissionRequest"
+                  (list :sessionId sid :requestId (plist-get data :requestId)
+                        :result (if (eq (plist-get decision :behavior) 'allow)
+                                    '(:kind "approve-once")
+                                  (list :kind "reject"
+                                        :feedback (or (plist-get decision :message)
+                                                      "The harness denied this call"))))
+                  #'ignore))))))))
+
+(defun harness-provider-copilot--execution-text (data)
+  "Return the text of the tool.execution_complete DATA: its result, or its error."
+  (let ((content (harness-plist-get-in data '(:result :content)))
+        (failure (harness-plist-get-in data '(:error :message))))
+    (cond ((and (stringp content) (not (string-empty-p content))) content)
+          ((stringp failure) failure)
+          ((consp content)
+           (mapconcat (lambda (b) (if (and (listp b) (stringp (plist-get b :text))) (plist-get b :text) ""))
+                      content "\n"))
+          ((stringp content) content)
+          (t ""))))
 
 ;;;; Usage and billing
 
@@ -1381,12 +1527,16 @@ catalogue does not know get LEVEL as is."
 
 (defun harness-provider-copilot-session-config (request)
   "Return the session.create / session.resume parameters for REQUEST.
-Only the harness tools are available; the system prompt replaces
-Copilot's."
+Only the harness tools are available, and those of Copilot's own that
+stand in for one (see `harness-provider-copilot-builtin-tools'); the
+system prompt replaces Copilot's."
   (let* ((model (harness-provider-copilot--model-name request))
          (effort (harness-provider-copilot--effort model (plist-get request :thinking)))
          (system (plist-get request :system))
-         (tools (plist-get request :tools)))
+         (builtin (harness-provider-copilot--cli-tools request))
+         ;; An external tool of the same name would override Copilot's.
+         (tools (cl-remove-if (lambda (s) (member (plist-get s :name) builtin))
+                              (plist-get request :tools))))
     (append
      (list :model model
            :clientName harness-provider-copilot--client-name
@@ -1394,7 +1544,8 @@ Copilot's."
                               (file-local-name (harness-provider-copilot--directory (plist-get request :session))))
            :streaming t
            :tools (harness-json-array (mapcar #'harness-provider-copilot-tool tools))
-           :availableTools (harness-json-array (mapcar (lambda (s) (plist-get s :name)) tools))
+           :availableTools (harness-json-array (append (mapcar (lambda (s) (plist-get s :name)) tools)
+                                                       builtin))
            :toolSearch '(:enabled :false)
            :requestPermission t
            :requestUserInput :false)
