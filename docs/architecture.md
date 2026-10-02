@@ -133,7 +133,7 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :model "PROVIDER:MODEL"            ; e.g. "claude:claude-fable-5-1"
  :permission-mode ask|accept-edits|auto|yolo
  :thinking nil|"low"|"medium"|"high"|"xhigh"|"max"
- :non-interactive nil|t
+ :non-interactive nil|t             ; its own switch, from harness-non-interactive at creation
  :status idle|running|blocked|inactive
  :parent-id nil|"uuid"  :fork-node nil|"node-id"
  :created FLOAT  :updated FLOAT
@@ -649,6 +649,12 @@ request and resolves when answered).
 - Non-interactive: `ask` becomes `deny` with the reason "non-interactive
   mode: the user is away" and a hint to find another approach inside the
   permitted scope; a steering message is sent to the agent once per call.
+  The session's own `:non-interactive` switch decides, off as much as
+  on.  It starts from `harness-non-interactive` when the session is
+  created (an explicit false turns it off whatever the setting says);
+  forks and sub-agents start with their parent's.  Changing the setting
+  later leaves the sessions that exist alone.  The setting decides by
+  itself only for a request without a session record.
 
 ### sandbox
 
@@ -1228,8 +1234,13 @@ signals is shown unformatted with a note, so one bad node never costs the
 buffer the rest of its transcript or its compose box.  Opening a session
 from any view never resumes it: an inactive session shows its transcript,
 a notice and the compose box, and the first message sent from it resumes
-it (through `agent/prompt`).  Other UI modules hook into a chat buffer
-without owning it: `harness-chat-send-functions` sees each message sent
+it (through `agent/prompt`).  The header line shows the session's
+status, name, model, permission mode, whether it is non-interactive
+("non-interactive" in `harness-non-interactive-face`, else a dim
+"interactive"), thinking level, context, cost and [menu]; clicking a
+setting changes it, and the non-interactive one toggles.  Other UI
+modules hook into a chat buffer without owning it:
+`harness-chat-send-functions` sees each message sent
 or queued from its box (the text as typed, and the attachments),
 `harness-chat-header-functions` (buffer-local) puts segments in front of
 its header line, leaving the session's own segments as they are, and the
@@ -1284,9 +1295,12 @@ texts open in `string-edit`.  The page reloads on `config/changed`,
 keeping edits not saved yet.
 
 Session settings: `harness-set-model`, `-thinking`, `-permission-mode`
-and `harness-toggle-non-interactive` change what the buffer's
-`harness-ui-setting-target-function` names -- a session id, or a
-settings plist with its setter -- and otherwise the current session.
+and `harness-toggle-non-interactive` (`C-c h m` `T` `p` `i`) change what
+the buffer's `harness-ui-setting-target-function` names -- a session
+id, or a settings plist with its setter -- and otherwise the current
+session.  The menu's `i` entry says whether that is non-interactive
+("Non-interactive: on"), and has no state where the command would
+ask for a session.
 
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in five
 sections -- requires your input, ready for review, in progress, pending,
@@ -1354,8 +1368,8 @@ with it or with other BTWs (`session/btw`), or, over a view that sets
 in the session's own chat buffer with point in its compose box, so the
 question is written and sent like any message; nothing is read in the
 minibuffer.  The buffer is the full chat: its header line (model,
-permission mode, thinking, context, cost, [menu]), keys and menu are a
-session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
+permission mode, non-interactive, thinking, context, cost, [menu]),
+keys and menu are a session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
 front of the header through `harness-chat-header-functions` (what it
 is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep
 it; one over a session starts in that session's permission mode.  The

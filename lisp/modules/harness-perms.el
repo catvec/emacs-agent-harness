@@ -133,9 +133,14 @@ generic \"Allow\" button) grants the directory to the session.")
       'ask))
 
 (defun harness-perms--non-interactive-p (session)
-  "Non-nil when SESSION should never wait for the user."
-  (or (harness-json-true-p (plist-get session :non-interactive))
-      (harness-json-true-p (harness-perms--config 'harness-non-interactive session))))
+  "Non-nil when SESSION should never wait for the user.
+A session record's own switch decides, off as much as on: it starts
+from `harness-non-interactive' and the user flips it per session.  The
+setting alone decides only for a request without a session record."
+  (harness-json-true-p
+   (if (plist-member session :non-interactive)
+       (plist-get session :non-interactive)
+     (harness-perms--config 'harness-non-interactive session))))
 
 ;;;; Roots and the jail
 

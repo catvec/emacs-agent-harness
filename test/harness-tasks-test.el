@@ -279,9 +279,13 @@ turn `harness-tasks-require-verification' on themselves."
         (should (equal "demo:scripted" (plist-get s :model)))
         (should (equal "high" (plist-get s :thinking)))))))
 
+(defvar harness-non-interactive)
+
 (ert-deftest harness-tasks-submit-with-session-settings ()
   (harness-tasks-test-with
-    (let* ((id (plist-get (harness-call 'task/submit default-directory "careful one"
+    ;; An explicit false is off even where sessions start non-interactive.
+    (let* ((harness-non-interactive t)
+           (id (plist-get (harness-call 'task/submit default-directory "careful one"
                                         (list :permission-mode "ask" :thinking "high" :non-interactive :false))
                           :id))
            (session (harness-call 'session/get (plist-get (harness-tasks-test-task id) :session))))

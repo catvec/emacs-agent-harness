@@ -4,8 +4,9 @@
 
 ;; One buffer per session, "*harness: NAME*", laid out top to bottom:
 ;;
-;;   header line   status, name, model, permission mode, thinking, context, cost, menu,
-;;                 after what `harness-chat-header-functions' put in front (a BTW's buttons)
+;;   header line   status, name, model, permission mode, non-interactive or interactive,
+;;                 thinking, context, cost, menu, after what
+;;                 `harness-chat-header-functions' put in front (a BTW's buttons)
 ;;   transcript    one block per node, rendered incrementally with markers
 ;;   activity      while a turn runs, what it does and for how long
 ;;   pending panel permission requests and questions waiting for the user
@@ -2094,6 +2095,18 @@ quota.  Clicking it opens the usage dashboard."
                          text)
     text))
 
+(defun harness-chat--non-interactive-segment (session)
+  "Return the header segment saying whether SESSION waits for the user.
+It reads \"non-interactive\" or \"interactive\"; clicking it toggles."
+  (let ((value (plist-get session :non-interactive)))
+    (harness-chat--segment (harness-ui-non-interactive-label value)
+                           #'harness-toggle-non-interactive
+                           (concat (harness-ui-non-interactive-help value)
+                                   (if (harness-json-true-p value)
+                                       " (mouse-1: make it interactive)"
+                                     " (mouse-1: make it non-interactive)"))
+                           (if (harness-json-true-p value) 'harness-non-interactive-face 'harness-dim-face))))
+
 (defun harness-chat--on-quota (_provider _quota)
   "Redraw the header lines, which show the plan's quota."
   (force-mode-line-update t))
@@ -2103,7 +2116,7 @@ quota.  Clicking it opens the usage dashboard."
 Each is called without arguments in the chat buffer whenever the header
 line is drawn, and returns a string, or nil for nothing.  The header
 shows their strings first, in order, then the session's own segments:
-status, name, model, permission mode and the rest.  Add to it
+status, name, model, permission mode, non-interactive and the rest.  Add to it
 buffer-locally, so only that buffer's header changes, and with a
 symbol, so a reload redefines it.  The BTW module marks a side
 conversation and gives it its [close] and [keep] buttons this way.")
@@ -2141,6 +2154,8 @@ conversation and gives it its [close] and [keep] buttons this way.")
      (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
                             #'harness-set-permission-mode
                             "Permission mode (mouse-1: change)")
+     "  "
+     (harness-chat--non-interactive-segment s)
      "  "
      (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
                             #'harness-set-thinking "Thinking level (mouse-1: change)" 'harness-dim-face)

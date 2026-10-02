@@ -316,9 +316,31 @@
                                                      (expand-file-name "f" (plist-get harness-perms-test--session :cwd)))))
     (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive nil))
     (should (equal "no user available" (plist-get (harness-perms-test--decide (harness-perms-test--request "bash" 'exec)) :reason)))
+    (should-not (plist-get (harness-call 'permission/rules "s1") :non-interactive))))
+
+(ert-deftest harness-perms-non-interactive-is-the-sessions-own-switch ()
+  "A session record's switch decides, off as much as on; the setting
+`harness-non-interactive' only starts new sessions, and decides alone
+for a request without a session record."
+  (let* ((s (harness-perms-test--setup :permission-mode 'ask :non-interactive nil))
+         (cwd (plist-get s :cwd))
+         (reason (lambda () (plist-get (harness-perms-test--decide (harness-perms-test--request "bash" 'exec)) :reason))))
+    (harness-register-method 'agent/prompt (lambda (&rest _) (harness-resolved nil)))
     (let ((harness-non-interactive t))
-      (should (equal "non-interactive mode: the user is away"
-                     (plist-get (harness-perms-test--decide (harness-perms-test--request "bash" 'exec)) :reason))))))
+      ;; Turned off in the session, as the UI sends it (false) or as stored (nil).
+      (dolist (off '(nil :false))
+        (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive off))
+        (should (equal "no user available" (funcall reason)))
+        (should-not (plist-get (harness-call 'permission/rules "s1") :non-interactive)))
+      ;; Without a session record, the setting decides.
+      (setq harness-perms-test--session (list :id "s1" :cwd cwd :permission-mode 'ask))
+      (should (equal "non-interactive mode: the user is away" (funcall reason)))
+      (should (plist-get (harness-call 'permission/rules "s1") :non-interactive)))
+    ;; And the session's switch on wins over the setting off.
+    (let ((harness-non-interactive nil))
+      (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive t))
+      (should (equal "non-interactive mode: the user is away" (funcall reason)))
+      (should (plist-get (harness-call 'permission/rules "s1") :non-interactive)))))
 
 (ert-deftest harness-perms-task-sessions-can-search-the-web ()
   ;; Task sessions run in auto mode, non-interactive.  web_search used to

@@ -170,6 +170,7 @@ named by `harness-server-init-file`.
 | `C-c h m` | `harness-set-model` | Choose the model |
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
+| `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
@@ -180,8 +181,7 @@ named by `harness-server-init-file`.
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |
 
-The menu (`C-c h ?`) also toggles non-interactive mode (`i`), in which
-a session avoids waiting for you, and renames the session (`r`).
+The menu (`C-c h ?`) also renames the session (`r`).
 
 With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
@@ -216,6 +216,17 @@ the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list, or the waiting session itself when only one needs you.
 
+The header line shows the session's status, name, model, permission
+mode, whether it is `non-interactive` or `interactive`, thinking level,
+context and cost. Click the model, the permission mode, the
+non-interactive switch or the thinking level to change it. A
+non-interactive session never waits for you: what would ask for
+permission is denied, and the agent is told to find another way, which
+suits a session you leave to work while you are away. New sessions
+start non-interactive when `harness-non-interactive` is set, and task
+sessions while `harness-tasks-non-interactive` is. From then on each
+session has its own switch.
+
 Opening an inactive session shows it without resuming it. Its compose
 box stays available, and the first message you send resumes it.
 
@@ -229,8 +240,8 @@ below the session. A BTW is a new, empty session that shares nothing
 with the session or with other BTWs, which makes it a good place for
 quick questions. It has the full chat interface, including the header
 line with the model, permission mode and thinking level, which start
-from the session's. Two extra controls appear at the front of its
-header line:
+from the session's, and whether it is non-interactive. Two extra
+controls appear at the front of its header line:
 
 - `[close]` (`C-c C-k`) closes the BTW. A BTW in which nothing was
   asked is deleted.
@@ -247,8 +258,9 @@ so several tasks can work in parallel.
   which starts the task at once, and **Refine**, which has an agent
   write the task up first. A refined task waits in *Pending*, across
   restarts, until you start it with `s`.
-- `C-c h m`, `C-c h T` and `C-c h p` set the model, thinking level and
-  permission mode of the next task, or of the task at point.
+- `C-c h m`, `C-c h T`, `C-c h p` and `C-c h i` set the model, thinking
+  level, permission mode and non-interactive mode of the next task, or
+  of the task at point.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback. With `harness-tasks-require-verification`

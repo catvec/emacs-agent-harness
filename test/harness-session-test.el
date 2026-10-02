@@ -41,6 +41,32 @@
         (should (= 2 (length nodes)))
         (should (cl-every (lambda (n) (eq (plist-get n :kind) 'hint)) nodes))))))
 
+(defvar harness-non-interactive)
+
+(ert-deftest harness-session-non-interactive-is-its-own-switch ()
+  "A session's non-interactive switch starts from the setting, unless an
+explicit false turns it off; it is stored as t or nil; a fork copies
+its parent's, off as well as on; and the hint of a change says which."
+  (harness-session-test-with
+    (let ((cwd (harness-test-temp-dir)))
+      (let* ((harness-non-interactive t)
+             (on (harness-call 'session/create :cwd cwd))
+             (off (harness-call 'session/create :cwd cwd :non-interactive :false)))
+        (should (eq t (plist-get on :non-interactive)))
+        (should (null (plist-get off :non-interactive)))
+        (should (eq t (plist-get (harness-await (harness-call 'session/fork (plist-get on :id))) :non-interactive)))
+        (should (null (plist-get (harness-await (harness-call 'session/fork (plist-get off :id))) :non-interactive))))
+      (let ((harness-non-interactive nil))
+        (should (null (plist-get (harness-call 'session/create :cwd cwd) :non-interactive))))
+      ;; Turned off as the UI sends it, JSON false, and on again.
+      (let ((id (plist-get (harness-call 'session/create :cwd cwd :non-interactive t) :id)))
+        (harness-call 'session/update id :non-interactive :false)
+        (should (null (plist-get (harness-call 'session/get id) :non-interactive)))
+        (harness-call 'session/update id :non-interactive t)
+        (should (eq t (plist-get (harness-call 'session/get id) :non-interactive)))
+        (should (equal '("non-interactive off" "non-interactive on")
+                       (mapcar (lambda (n) (plist-get n :content)) (harness-call 'session/nodes id))))))))
+
 (ert-deftest harness-session-nodes-append-update-and-reload ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
