@@ -1,14 +1,8 @@
 # Emacs Agent Harness
 
-Emacs Agent Harness runs AI coding agents inside GNU Emacs. Sessions,
-tools, permissions, cost tracking and remote control are implemented in
-Emacs Lisp, and the interface is made of ordinary Emacs buffers.
-
-By default it uses Claude Fable 5.1 through the `claude` command line,
-so a Claude subscription is enough to get started. It also supports
-GitHub Copilot (GPT, Claude, Gemini and other models through the
-`copilot` command line), OpenAI-compatible APIs such as OpenRouter and
-OpenAI, and models on AWS Bedrock.
+Emacs Agent Harness runs AI coding agents in GNU Emacs. It is written
+in Emacs Lisp and supports Claude, GitHub Copilot, OpenAI-compatible
+APIs and AWS Bedrock.
 
 ![A chat session](docs/media/chat-tour.png)
 
