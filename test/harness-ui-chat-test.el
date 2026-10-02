@@ -406,9 +406,23 @@ the header follows, and the transcript notes each change."
           (should (string-match-p "running.* bash" (harness-chat--mode-line))))
         (activity :phase "tool" :tool "bash" :title "bash npm test" :count 3 :since (float-time))
         (should (shows "Running bash npm test and 2 more"))
-        ;; One line, under the last block and above the box, wherever
-        ;; blocks and the tail are drawn.
-        (should (= 1 (cl-count ?\n (line))))
+        ;; One line and a blank one, under the last block and above the
+        ;; box, wherever blocks and the tail are drawn.
+        (should (string-match-p "\\`[^\n]+\n\n\\'" (line)))
+        ;; The line has a background of its own.  Both lines are drawn
+        ;; over the default face, to the window's edge, so the box's
+        ;; background, which an overlay string takes, shows in neither.
+        (let* ((line (line))
+               (ground '(:inherit default :extend t))
+               (end (1- (length line))))
+          (dotimes (pos end)
+            (let ((faces (ensure-list (get-text-property pos 'face line))))
+              (should (memq 'harness-chat-activity-face faces))
+              (should (equal ground (car (last faces))))))
+          (should (equal ground (get-text-property end 'face line))))
+        (should (face-attribute 'harness-chat-activity-face :extend))
+        (should-not (equal (face-attribute 'harness-chat-activity-face :background)
+                           (face-attribute 'harness-compose-face :background)))
         (with-current-buffer buf
           (cl-flet ((at-end () (= (overlay-start harness-chat--activity-overlay)
                                   (marker-position harness-chat--transcript-end))))

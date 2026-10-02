@@ -8,7 +8,8 @@
 ;;                 thinking, context, cost, menu, after what
 ;;                 `harness-chat-header-functions' put in front (a BTW's buttons)
 ;;   transcript    one block per node, rendered incrementally with markers
-;;   activity      while a turn runs, what it does and for how long
+;;   activity      while a turn runs, what it does and for how long, on a
+;;                 background of its own, then a blank line
 ;;   pending panel permission requests and questions waiting for the user
 ;;   queue         messages queued for the next turn
 ;;   attachments   chips for files attached to the next message
@@ -102,6 +103,13 @@ Once two pages of nodes lie above every window, all but one are dropped."
   '((((background light)) :background "#fff1cf" :extend t)
     (((background dark)) :background "#463a1c" :extend t))
   "Background of the pending permission and question panel." :group 'harness-ui-chat)
+
+(defface harness-chat-activity-face
+  '((((background light)) :background "#efe9f9" :extend t)
+    (((background dark)) :background "#2e2942" :extend t))
+  "Background of the activity line, which says what a running turn does.
+A colour of its own, so the line stands apart from the compose box
+under it." :group 'harness-ui-chat)
 
 (defface harness-chat-key-face '((t :inherit help-key-binding))
   "Keyboard shortcut hints in panels." :group 'harness-ui-chat)
@@ -1919,6 +1927,8 @@ While the agent is running the message steers the current turn."
 ;; for minutes and stream nothing (the Claude CLI never sends thinking
 ;; text), write a long tool input, or wait on a slow tool.  The line is
 ;; an overlay string, so its spinner ticks without editing the buffer.
+;; Its own background and a blank line under it keep it apart from the
+;; compose box below.
 
 (defun harness-chat--spinner-frame ()
   "Return the current frame of the running spinner."
@@ -1971,7 +1981,9 @@ The size of the tool input written so far, the latest line a tool reported."
 
 (defun harness-chat--activity-line ()
   "Return the activity line due now, or nil unless the session runs.
-A blocked session shows its panel instead."
+A blocked session shows its panel instead.  The line wears
+`harness-chat-activity-face' and a blank line follows it: both keep it
+apart from what comes below, the compose box or the queue."
   (when (and (equal (plist-get (harness-chat--session) :status) "running")
              (not harness-chat--dead))
     (let* ((activity harness-chat--activity)
@@ -1982,10 +1994,19 @@ A blocked session shows its panel instead."
            (text (string-join (cons head (harness-chat--activity-details activity)) " \N{U+00B7} "))
            (w (car (harness-chat--windows)))
            ;; One screen line, so the box below never jumps.
-           (room (max 12 (- (if w (window-body-width w) 80) 4))))
-      (concat " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
-              (propertize (truncate-string-to-width text room nil nil "\N{U+2026}") 'face 'harness-dim-face)
-              "\n"))))
+           (room (max 12 (- (if w (window-body-width w) 80) 4)))
+           (line (concat " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
+                         (propertize (truncate-string-to-width text room nil nil "\N{U+2026}") 'face 'harness-dim-face)
+                         "\n")))
+      ;; Emacs draws an overlay string over the face of the text it
+      ;; precedes: the box's prompt or the queue, whose background would
+      ;; make the line look like their first.  Both lines are drawn over
+      ;; `default' instead, extended: the space after the end of a line
+      ;; takes only faces that extend, so the box's would fill it.
+      (let ((ground '(:inherit default :extend t)))
+        (add-face-text-property 0 (length line) 'harness-chat-activity-face t line)
+        (add-face-text-property 0 (length line) ground t line)
+        (concat line (propertize "\n" 'face ground))))))
 
 (defun harness-chat--activity-overlay ()
   "Return the activity line's overlay, empty at the end of the transcript.
