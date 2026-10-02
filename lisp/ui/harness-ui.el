@@ -757,6 +757,13 @@ Signal unless NOERROR when none can be found."
           ((>= f 0.70) 'harness-context-warning-face)
           (t 'harness-context-ok-face))))
 
+(defun harness-ui-mode-line-escape (string)
+  "Return a copy of STRING for a mode or header line, every % doubled.
+Those lines read % as the start of a construct such as %b, so a literal
+one -- a quota window's \"23%\" -- would vanish together with the
+character after it.  Text properties are kept."
+  (replace-regexp-in-string "%" (lambda (match) (concat match match)) string t t))
+
 (defun harness-ui-format-context (session)
   "Return \"12.3k/200k\" for SESSION with the warning face applied."
   (let* ((usage (plist-get session :usage))
