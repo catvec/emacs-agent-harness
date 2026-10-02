@@ -580,14 +580,25 @@ request and resolves when answered).
 - `usage/budgets`, `usage/set-budget BUDGET`, `usage/remove-budget ID`,
   `usage/budget-status ID &rest (:now)` (ID may be "session:SID" for a
   session's implicit budget) → `(:budget :spent :amount :remaining
-  :fraction :hard :per-day :days-left :period-start :period-end)`;
+  :fraction :hard :per-day :days-left :period-start :period-end
+  :baseline)`;
   `usage/session-budgets SID`, `usage/plan-budget AMOUNT PERIOD DAYS`,
   `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`.
   BUDGET = `(:id :scope session|project|period :target ID-OR-ROOT
-  :amount F :hard BOOL :period day|week|month :days business|all)`.
+  :amount F :hard BOOL :period day|week|month :days business|all
+  :baseline F :baseline-period-start "YYYY-MM-DD")`.
+- A baseline is what was spent that the harness never recorded (other
+  tools, the console, days before it kept usage), set by hand so a
+  budget made mid-month does not start at $0.  `:spent` is the recorded cost plus
+  the baseline that counts: a period budget's only while the current
+  period starts on `:baseline-period-start` (set-budget fills in the
+  period containing now, and moves any date or float time to its
+  period's start), one without a period always.  The status's
+  `:baseline` is that part, 0 otherwise.  nil or 0 clears it.
 - Hard budgets block via `agent/before-turn`; soft ones emit
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
-  count billed cost, so calls a subscription covers spend none.
+  count billed cost, so calls a subscription covers spend none; a
+  baseline counts toward both.
 - Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
 
 ### compaction

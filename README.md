@@ -78,7 +78,10 @@ The session shows its plan and quota instead, for example `Max` with
 the 5-hour and weekly windows in the chat header, and the usage
 dashboard (`C-c a u`) lists every quota window with its reset time, the
 plan's extra usage, and the value at API prices the plan covered.
-Budgets count billed cost only.
+Budgets count billed cost only.  A budget made in the middle of a month
+can start from what was already spent outside the harness: `s` on its
+line in the dashboard (or the add-budget wizard) sets that baseline,
+which counts until the period rolls over.
 
 Settings persist through `.dir-locals.el` (project, then directory) and
 customize (global); the settings page (`C-c a S`, `M-x harness-settings`)

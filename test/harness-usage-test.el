@@ -238,6 +238,94 @@ Return (PROJECT-A PROJECT-B)."
         (should (equal "2026-09-14" (plist-get (car plan) :date)))
         (should (cl-every (lambda (p) (= 10.0 (plist-get p :allowance))) plan))))))
 
+(ert-deftest harness-usage-baseline-counts-in-its-period-only ()
+  "A month budget made mid-month counts what was spent before it, that month only."
+  (harness-usage-test-with
+    (let* ((now (harness-usage-test-ts 2026 9 16))
+           (budget (harness-call 'usage/set-budget '(:scope period :period month :days all :amount 100
+                                                     :baseline 20 :baseline-period-start "2026-09-01")))
+           (id (plist-get budget :id)))
+      (harness-call 'usage/record (list :ts (harness-usage-test-ts 2026 9 10) :session "s" :project "/p/" :model "m" :cost 5.0))
+      ;; September: $20 spent before plus $5 recorded, over the 16th to the 30th.
+      (let ((st (harness-call 'usage/budget-status id :now now)))
+        (should (= 25.0 (plist-get st :spent)))
+        (should (= 20.0 (plist-get st :baseline)))
+        (should (= 75.0 (plist-get st :remaining)))
+        (should (harness-usage-test-near 0.25 (plist-get st :fraction)))
+        (should (= 15 (plist-get st :days-left)))
+        (should (= 5.0 (plist-get st :per-day))))
+      ;; October: the baseline was September's, so only October's rows count.
+      (harness-call 'usage/record (list :ts (harness-usage-test-ts 2026 10 5) :session "s" :project "/p/" :model "m" :cost 3.0))
+      (let ((st (harness-call 'usage/budget-status id :now (harness-usage-test-ts 2026 10 14))))
+        (should (= 3.0 (plist-get st :spent)))
+        (should (= 0.0 (plist-get st :baseline)))
+        (should (= 97.0 (plist-get st :remaining)))
+        (should (harness-usage-test-near 0.03 (plist-get st :fraction)))
+        (should (= 18 (plist-get st :days-left)))
+        (should (harness-usage-test-near (/ 97.0 18) (plist-get st :per-day))))
+      ;; Any date or time inside the period names it; week budgets start on Monday.
+      (let ((mid (harness-call 'usage/set-budget '(:scope period :period month :amount 50 :baseline 10
+                                                   :baseline-period-start "2026-09-23")))
+            (week (harness-call 'usage/set-budget (list :scope 'period :period 'week :amount 50 :baseline 10
+                                                        :baseline-period-start now))))
+        (should (equal "2026-09-01" (plist-get mid :baseline-period-start)))
+        (should (equal "2026-09-14" (plist-get week :baseline-period-start)))
+        (should (= 10.0 (plist-get (harness-call 'usage/budget-status (plist-get week :id) :now now) :baseline)))
+        (should (= 0.0 (plist-get (harness-call 'usage/budget-status (plist-get week :id)
+                                                :now (harness-usage-test-ts 2026 9 21))
+                                  :baseline))))
+      ;; Without a period the baseline always counts.
+      (let ((st (harness-call 'usage/budget-status '(:scope project :target "/p/" :amount 40 :baseline 12)
+                              :now (harness-usage-test-ts 2027 1 1))))
+        (should (= 20.0 (plist-get st :spent)))
+        (should (= 12.0 (plist-get st :baseline)))
+        (should (harness-usage-test-near 0.5 (plist-get st :fraction))))
+      ;; Budgets without a baseline report none.
+      (should (= 0.0 (plist-get (harness-call 'usage/budget-status '(:scope period :period day :amount 1) :now now)
+                                :baseline))))))
+
+(ert-deftest harness-usage-baseline-persists-and-validates ()
+  (harness-usage-test-with
+    (let ((b (harness-call 'usage/set-budget '(:scope period :period month :amount 100 :baseline 20
+                                               :baseline-period-start "2026-09-01"))))
+      (should (= 20.0 (plist-get b :baseline)))
+      (should (equal "2026-09-01" (plist-get b :baseline-period-start)))
+      ;; Stored in budgets.json as given, and read back unchanged.
+      (let ((on-disk (car (harness-call 'store/load "budgets.json"))))
+        (should (= 20.0 (plist-get on-disk :baseline)))
+        (should (equal "2026-09-01" (plist-get on-disk :baseline-period-start))))
+      (setq harness-usage-budgets nil)
+      (harness-usage--load-budgets)
+      (should (equal b (car harness-usage-budgets)))
+      ;; A baseline set without a period start is this period's.
+      (let ((this-month (harness-usage--date-key (car (harness-usage-period-bounds 'month))))
+            (b2 (harness-call 'usage/set-budget (harness-plist-merge b '(:baseline 7 :baseline-period-start nil)))))
+        (should (= 1 (length (harness-call 'usage/budgets))))
+        (should (= 7.0 (plist-get b2 :baseline)))
+        (should (equal this-month (plist-get b2 :baseline-period-start)))
+        (should (= 7.0 (plist-get (harness-call 'usage/budget-status (plist-get b2 :id)) :baseline))))
+      ;; 0, nil or false clears it, leaving no baseline keys behind.
+      (dolist (none '(0 nil :false))
+        (harness-call 'usage/set-budget (harness-plist-merge b (list :baseline none)))
+        (let ((stored (car (harness-call 'usage/budgets)))
+              (on-disk (car (harness-call 'store/load "budgets.json"))))
+          (should-not (plist-member stored :baseline))
+          (should-not (plist-member stored :baseline-period-start))
+          (should-not (plist-member on-disk :baseline))
+          (should (= 0.0 (plist-get (harness-call 'usage/budget-status (plist-get b :id)) :baseline))))))
+    ;; A budget without a period keeps no period start: its baseline always counts.
+    (let ((p (harness-call 'usage/set-budget '(:scope project :target "/p/" :amount 10 :baseline 4
+                                               :baseline-period-start "2026-09-01"))))
+      (should (= 4.0 (plist-get p :baseline)))
+      (should-not (plist-member p :baseline-period-start)))
+    (should-error (harness-call 'usage/set-budget '(:scope period :period month :amount 10 :baseline -1)))
+    (should-error (harness-call 'usage/set-budget '(:scope period :period month :amount 10 :baseline "20")))
+    (should-error (harness-call 'usage/set-budget '(:scope period :period month :amount 10 :baseline 5
+                                                    :baseline-period-start "September")))
+    (should-error (harness-call 'usage/set-budget '(:scope period :period month :amount 10 :baseline 5
+                                                    :baseline-period-start "2026-02-30")))
+    (should (= 2 (length (harness-call 'usage/budgets))))))
+
 ;;;; Enforcement
 
 (defun harness-usage-test-hints (id)
@@ -266,6 +354,21 @@ Return (PROJECT-A PROJECT-B)."
         (harness-call 'usage/set-budget (list :scope 'project :target project :amount 0.0001 :hard t))
         (should (eq 'blocked (plist-get (harness-await (harness-call 'agent/prompt other "hello")) :stop-reason)))
         (should (= 0 (plist-get (harness-call 'usage/totals :session other) :calls)))))))
+
+(ert-deftest harness-usage-baseline-counts-toward-hard-budgets ()
+  "What was spent before the harness counted can exhaust a hard budget."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session))
+           (project (plist-get (harness-call 'session/get id) :project)))
+      (harness-call 'usage/set-budget (list :scope 'project :target project :amount 10 :hard t :baseline 10))
+      (let ((r (harness-await (harness-call 'agent/prompt id "hello"))))
+        (should (eq 'blocked (plist-get r :stop-reason)))
+        (should (string-match-p "exhausted: spent \\$10\\.00 (incl\\. \\$10\\.00 baseline) of \\$10\\.00"
+                                (plist-get r :error))))
+      (should (= 0 (plist-get (harness-call 'usage/totals :session id) :calls)))
+      ;; Without the baseline the turn runs.
+      (harness-call 'usage/set-budget (harness-plist-merge (car (harness-call 'usage/budgets)) '(:baseline nil)))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello")) :stop-reason))))))
 
 (ert-deftest harness-usage-soft-budget-warns-once ()
   (harness-usage-test-with
