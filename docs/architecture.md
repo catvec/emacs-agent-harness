@@ -1237,9 +1237,7 @@ in the minibuffer).  The header counts the tasks to review, and
 (`harness-ui-tasks-notify-review`).  RET opens the session, and
 `C-c a a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
-the main checkout's board (`harness-files-main-root`, also for a
-worktree whose record `git worktree prune` deleted while it was out of
-sight, in another task's sandbox say).  The
+the main checkout's board (`harness-files-main-root`).  The
 session setting commands change the task at point, or from the compose
 box the settings the next task starts with (shown as buttons under the
 New task label).  A

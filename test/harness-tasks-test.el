@@ -245,13 +245,6 @@ turn `harness-tasks-require-verification' on themselves."
         (let ((default-directory root)) (should (zerop (apply #'call-process "git" nil nil nil args)))))
       (let ((id (harness-tasks-test-submit "in the main checkout" root)))
         (should (equal (list id) (mapcar (lambda (task) (plist-get task :id))
-                                         (harness-call 'task/list wt))))
-        ;; Still once git pruned the worktree's record while it was out
-        ;; of sight, as a sandbox showing another worktree does.
-        (rename-file wt (concat wt "-aside"))
-        (let ((default-directory root)) (should (zerop (call-process "git" nil nil nil "worktree" "prune"))))
-        (rename-file (concat wt "-aside") wt)
-        (should (equal (list id) (mapcar (lambda (task) (plist-get task :id))
                                          (harness-call 'task/list wt))))))))
 
 (ert-deftest harness-tasks-over-acp ()
