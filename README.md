@@ -1,8 +1,8 @@
 # Emacs Agent Harness
 
 Emacs Agent Harness runs AI coding agents in GNU Emacs. It is written
-in Emacs Lisp and supports Claude, GitHub Copilot, OpenAI-compatible
-APIs and AWS Bedrock.
+in Emacs Lisp and supports Claude, GitHub Copilot, DeepSeek,
+OpenAI-compatible APIs and AWS Bedrock.
 
 ![A session beside the code it wrote: the agent read the project, added rate limiting, ran the tests and summed up](docs/media/chat.png)
 
@@ -14,7 +14,7 @@ APIs and AWS Bedrock.
 - **Never blocks your editor.** The harness runs in a separate Emacs
   process, and your Emacs only hosts the UI.
 - **Multiple providers.** Claude through the `claude` CLI (subscription
-  or API key), GitHub Copilot through the `copilot` CLI,
+  or API key), GitHub Copilot through the `copilot` CLI, DeepSeek,
   OpenAI-compatible endpoints, and AWS Bedrock.
 - **Built-in tools.** Tools for files (read, write, edit, search), the
   shell, Emacs (buffers, documentation, `*Messages*`, Emacs Lisp
@@ -70,6 +70,7 @@ Optional dependencies:
 | `rg` (ripgrep) | Faster file search |
 | GitHub Copilot CLI 1.0 or later (`copilot`) | Models of a GitHub Copilot plan |
 | `OPENROUTER_API_KEY` or `OPENAI_API_KEY` | OpenRouter and OpenAI models |
+| `DEEPSEEK_API_KEY` | DeepSeek models, with off-peak pricing tracked |
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
 | `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
 | `ffmpeg`, `mpv` | Audio recording and playback, video thumbnails |
@@ -401,6 +402,27 @@ API as a provider, with models named `ID:MODEL`. OpenRouter
 (`OPENROUTER_API_KEY`) and OpenAI (`OPENAI_API_KEY`) are configured by
 default.
 
+### DeepSeek
+
+Set `DEEPSEEK_API_KEY` (or `harness-deepseek-api-key`, or an
+auth-source entry for `api.deepseek.com`) and `deepseek:` models appear
+in the model picker. The provider is created when a key is found and
+removed when none is; `harness-deepseek-always-register` keeps it
+regardless. Models are `deepseek-flash` (V4.1 Flash, text and images),
+`deepseek-v4-pro` and the still-accepted legacy names
+`deepseek-v4-flash` and `deepseek-v4-flash-vision-exp`.
+
+DeepSeek prices by the clock: peak hours (01:00-04:00 and 06:00-10:00
+UTC, Monday to Friday, except Chinese public holidays) cost double the
+off-peak rate. The recorded cost follows the rate in effect and cached
+input is billed at the cheaper cache-hit rate. When a call is made in a
+peak window, the session is told once, as a hint, and a
+`provider/pricing-warning` event fires; nothing is blocked.
+`harness-deepseek-pricing` holds the rates, so update it from the
+[DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing)
+when they change, and extend `harness-deepseek-off-peak-dates` each year
+with the Chinese public holiday calendar.
+
 ### AWS Bedrock
 
 `bedrock:` models run on AWS Bedrock and authenticate with an AWS
@@ -587,7 +609,7 @@ ACP, so it works the same with a local or a remote harness.
 | Area | Modules |
 |---|---|
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
-| Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-bedrock` `provider-demo` |
+| Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 

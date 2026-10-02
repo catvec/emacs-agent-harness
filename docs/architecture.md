@@ -15,8 +15,8 @@ module needs something more, add it here first.
  State          session, agent, config, project, store, usage, naming, compaction,
                 worktree, merge, tasks, tasks-notify, skills, perms, sandbox,
                 notifications
- Completion     provider, provider-openai, provider-claude, provider-bedrock,
-                provider-copilot
+ Completion     provider, provider-openai, provider-deepseek, provider-claude,
+                provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
                 tools-sessions, tools-notify
  ------------------------------- bus (lisp/harness-core.el)
@@ -379,7 +379,12 @@ gone.
 MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
 :context-window N :max-output N :input-modalities ("text" "image")
 :thinking-levels (…) :pricing (:input F :output F :cache-read F :cache-write F)
-:capabilities (…))`.  Pricing is USD per million tokens.
+:pricing-fn SYMBOL :capabilities (…))`.  Pricing is USD per million
+tokens.  A model whose rates change with the clock carries `:pricing-fn`,
+a symbol called as `(MODEL USAGE AT)` that returns the pricing plist in
+effect at AT; `usage/price` uses its answer instead of `:pricing`.  This
+is how the DeepSeek provider follows its peak and off-peak tiers, and it
+keeps the catalogue plain data that crosses the wire unchanged.
 
 The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
@@ -551,6 +556,22 @@ catalogue.  Claude and Nova requests carry prompt cache points; Claude
 reasoning returned with tool calls is kept and sent back with them while
 the tool loop lasts.  `harness-http-request` takes `:binary t` for such
 framings: the response then reaches `:on-chunk` as unibyte strings.
+
+The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
+OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
+harness-provider-openai.el, which splits DeepSeek's cached input out of
+`prompt_tokens` (its `:input` bills the cache misses, `:cache-read` the
+hits) and sends the reasoning efforts DeepSeek accepts, and
+`harness-deepseek-*` adds registration and prices.  The provider is
+created only while a key is found (`harness-deepseek-api-key`,
+DEEPSEEK_API_KEY, or auth-source), so nothing uncallable is listed; see
+`harness-deepseek-always-register`.  DeepSeek bills peak hours
+(01:00-04:00 and 06:00-10:00 UTC, Monday to Friday, minus Chinese public
+holidays) at double the off-peak rate, so the catalogue carries
+`:pricing' (off-peak) and `:peak-pricing' and the model's
+`:pricing-fn' picks between them; cached input, cache-miss input and
+output are priced separately.  A `provider/pricing-warning` event and a
+session hint say once per peak window that a call costs more.
 
 The Copilot provider (`copilot:` models) drives `copilot --headless
 --stdio`, the GitHub Copilot CLI's server mode that GitHub's Copilot

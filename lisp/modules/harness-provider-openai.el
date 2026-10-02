@@ -72,7 +72,9 @@ Every entry is a plist with these keys:
   :models          static list of model names or model plists, for servers
                    without a /models route
   :default-context context window used for models that do not report one
-  :flavor          `openrouter' or `openai'; guessed from the URL when absent
+  :flavor          `openrouter', `openai' or `deepseek'; guessed from
+                   the URL when absent (`deepseek' is never guessed, so
+                   name it for an endpoint that needs its handling)
   :capabilities    static capability plist overriding the flavor default
 
 When neither :api-key nor :api-key-env yields a key, auth-source is
@@ -103,12 +105,21 @@ variable through customize re-registers the providers."
   "Non-nil when ENDPOINT speaks the OpenRouter dialect."
   (eq (harness-openai--flavor endpoint) 'openrouter))
 
+(defun harness-openai--deepseek-p (endpoint)
+  "Non-nil when ENDPOINT speaks the DeepSeek dialect.
+DeepSeek differs from plain OpenAI in how it reports cached input (its
+`prompt_tokens' includes the cached tokens, which are billed apart) and
+in the reasoning efforts it accepts."
+  (eq (harness-openai--flavor endpoint) 'deepseek))
+
 (defun harness-openai--capabilities (endpoint)
   "Return the static capability plist for ENDPOINT."
   (or (plist-get endpoint :capabilities)
-      (if (harness-openai--openrouter-p endpoint)
-          '(:vision t :thinking t :pricing dynamic :cost-reported t)
-        '(:vision t :thinking t))))
+      (pcase (harness-openai--flavor endpoint)
+        ('openrouter '(:vision t :thinking t :pricing dynamic :cost-reported t))
+        ;; DeepSeek reports vision per model, so the endpoint does not claim it.
+        ('deepseek '(:thinking t))
+        (_ '(:vision t :thinking t)))))
 
 (defun harness-openai--host (endpoint)
   "Return the host part of ENDPOINT's base URL."
@@ -411,10 +422,24 @@ hides the others."
     ("low" "low")
     (_ nil)))
 
+(defun harness-openai--deepseek-effort (level)
+  "Map the harness thinking LEVEL onto a DeepSeek reasoning effort.
+DeepSeek takes none, low, high or max; minimal is low, and medium and
+xhigh are high."
+  (pcase (harness-openai--string level)
+    ("max" "max")
+    ((or "high" "medium" "xhigh") "high")
+    ((or "low" "minimal") "low")
+    ((or "none" "off" "disabled") "none")
+    (_ nil)))
+
 (defun harness-openai--body (endpoint name request)
   "Build the chat completions body for model NAME at ENDPOINT from REQUEST."
   (let* ((openrouter (harness-openai--openrouter-p endpoint))
-         (effort (harness-openai--effort (plist-get request :thinking)))
+         (deepseek (harness-openai--deepseek-p endpoint))
+         (effort (if deepseek
+                     (harness-openai--deepseek-effort (plist-get request :thinking))
+                   (harness-openai--effort (plist-get request :thinking))))
          (tools (harness-openai--tools (plist-get request :tools)))
          (body (list :model name
                      :messages (harness-openai--messages request)
@@ -422,7 +447,8 @@ hides the others."
                      :stream_options '(:include_usage t))))
     (when tools (setq body (plist-put body :tools tools)))
     (when-let* ((max (plist-get request :max-tokens)))
-      (setq body (plist-put body (if openrouter :max_tokens :max_completion_tokens) max)))
+      (setq body (plist-put body (if (or openrouter deepseek) :max_tokens :max_completion_tokens) max)))
+    ;; OpenRouter reports the cost of each call when asked.
     (when openrouter (setq body (plist-put body :usage '(:include t))))
     (when effort
       (setq body (if openrouter
@@ -455,7 +481,7 @@ hides the others."
 
 (cl-defstruct (harness-openai--stream (:copier nil))
   "Accumulated state of one streamed completion."
-  on-event calls finish-reason usage error (finished nil) http)
+  on-event calls finish-reason usage error (finished nil) http endpoint)
 
 (defun harness-openai--stream-tool-call (stream index call)
   "Merge fragment CALL at INDEX into STREAM's accumulated tool calls."
@@ -518,19 +544,28 @@ shows a model writing a large input.  At most one report every
         (when (and finish (stringp finish))
           (setf (harness-openai--stream-finish-reason stream) finish))))))
 
-(defun harness-openai--usage-event (usage)
-  "Build the usage event from an OpenAI USAGE object.
-OpenAI-compatible endpoints bill per token, so the event says `api'."
-  (let ((input (or (plist-get usage :prompt_tokens) 0))
-        (cost (plist-get usage :cost)))
+(defun harness-openai--usage-event (usage endpoint)
+  "Build the usage event from an OpenAI USAGE object for ENDPOINT.
+OpenAI-compatible endpoints bill per token, so the event says `api'.
+DeepSeek's `prompt_tokens' includes the cached tokens, so they are
+split: `:input' counts the cache misses, `:cache-read' the hits, and
+`:context' both."
+  (let* ((input (or (plist-get usage :prompt_tokens) 0))
+         (hit (or (plist-get usage :prompt_cache_hit_tokens)
+                  (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens))
+                  0))
+         (miss (or (plist-get usage :prompt_cache_miss_tokens)
+                   (max 0 (- input hit))))
+         (cost (plist-get usage :cost))
+         (deepseek (harness-openai--deepseek-p endpoint)))
     (list :type 'usage
-          :input input
+          :input (if deepseek miss input)
           :output (or (plist-get usage :completion_tokens) 0)
-          :cache-read (or (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens)) 0)
+          :cache-read (if deepseek hit (or (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens)) 0))
           :cache-write 0
           :cost (and (numberp cost) cost)
           :billing 'api
-          :context input)))
+          :context (if deepseek (+ miss hit) input))))
 
 (defun harness-openai--stream-finish (stream reason &optional error)
   "End STREAM with stop REASON and optional ERROR text, emitting once."
@@ -540,7 +575,7 @@ OpenAI-compatible endpoints bill per token, so the event says `api'."
           (calls (harness-openai--stream-calls stream)))
       (when-let* ((usage (harness-openai--stream-usage stream)))
         (unless (eq reason 'cancelled)
-          (funcall on-event (harness-openai--usage-event usage))))
+          (funcall on-event (harness-openai--usage-event usage (harness-openai--stream-endpoint stream)))))
       (when (eq reason 'tool-use)
         (dolist (slot calls)
           (let ((call (cdr slot)))
@@ -571,7 +606,7 @@ OpenAI-compatible endpoints bill per token, so the event says `api'."
   "Start a streamed chat completion for REQUEST at ENDPOINT; return a handle."
   (pcase-let* ((`(,_ . ,name) (harness-provider-parse-model (plist-get request :model)))
                (on-event (or (plist-get request :on-event) #'ignore))
-               (stream (make-harness-openai--stream :on-event on-event))
+               (stream (make-harness-openai--stream :on-event on-event :endpoint endpoint))
                (key (harness-openai--api-key endpoint))
                (url (concat (harness-openai--base-url endpoint) "/chat/completions"))
                (status nil) (raw "")
@@ -622,16 +657,24 @@ OpenAI-compatible endpoints bill per token, so the event says `api'."
 
 ;;;; Registration
 
-(defun harness-openai--register (endpoint)
-  "Register the provider described by ENDPOINT."
+(defun harness-openai-register-endpoint (endpoint)
+  "Register ENDPOINT as an OpenAI-compatible provider and return its id.
+ENDPOINT is a plist as described by `harness-openai-endpoints'.  It
+is captured as it is, not looked up by id, so a module can register an
+endpoint of its own without adding it to that option; call this again
+to pick up a changed plist."
   (let ((id (plist-get endpoint :id)))
     (harness-define-provider id
       :label (or (plist-get endpoint :label) (symbol-name id))
       :doc (format "OpenAI-compatible endpoint at %s" (harness-openai--base-url endpoint))
-      :models (lambda () (harness-openai--models (harness-openai-endpoint id)))
-      :complete (lambda (request) (harness-openai--complete (harness-openai-endpoint id) request))
+      :models (lambda () (harness-openai--models endpoint))
+      :complete (lambda (request) (harness-openai--complete endpoint request))
       :capabilities (harness-openai--capabilities endpoint))
     id))
+
+(defun harness-openai--register (endpoint)
+  "Register the provider described by ENDPOINT."
+  (harness-openai-register-endpoint endpoint))
 
 (defun harness-openai--register-all ()
   "Register a provider for every endpoint; drop providers of removed ones."
