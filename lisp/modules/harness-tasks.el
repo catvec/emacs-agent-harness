@@ -487,8 +487,10 @@ Its text is remembered as what PATH holds, so writing the same is skipped."
       (error (harness-log 'error "tasks: cannot parse %s: %S" path err) nil))))
 
 (defun harness-tasks--write-json (path obj)
-  "Write OBJ as JSON to PATH atomically, unless PATH holds that already."
-  (let ((json (harness-json-encode obj)))
+  "Write OBJ as JSON to PATH atomically, unless PATH holds that already.
+The JSON is text, as `harness-read-file' reads it, so a store holding
+non-ASCII text compares equal too."
+  (let ((json (harness-json-encode-text obj)))
     (unless (equal json (gethash path harness-tasks--written))
       (harness-write-file-atomically path json)
       (puthash path json harness-tasks--written))))

@@ -124,6 +124,24 @@
   (should (equal "[{\"x\":1}]" (harness-json-encode '((:x 1)))))
   (should (equal "{\"lines\":[2,30]}" (harness-json-encode '(:lines (2 . 30))))))
 
+(ert-deftest harness-util-json-encode-text ()
+  ;; Since Emacs 30 `harness-json-encode' gives bytes, which become raw-byte
+  ;; characters inside other text and then cannot be encoded again.  The
+  ;; text variant gives characters.
+  (let* ((s "\N{U+2717} caf\N{U+E9} \N{U+D7} \N{U+2026}")
+         (obj (list :s s))
+         (text (harness-json-encode-text obj)))
+    (should (multibyte-string-p text))
+    (should (equal (concat "{\"s\":\"" s "\"}") text))
+    (should (equal obj (harness-json-parse text)))
+    ;; The same bytes on the wire either way.
+    (should (equal (encode-coding-string text 'utf-8-unix)
+                   (encode-coding-string (harness-json-encode obj) 'utf-8-unix)))
+    ;; Inside other text, and that text inside other JSON, it stays text.
+    (let ((outer (format "Input (JSON):\n%s\nNote: %s" text s)))
+      (should (equal outer (plist-get (harness-json-parse (harness-json-encode (list :text outer))) :text)))))
+  (should (equal "{\"a\":[1,\"b\"]}" (harness-json-encode-text '(:a (1 "b"))))))
+
 (ert-deftest harness-util-misc ()
   (should (= 36 (length (harness-uuid))))
   (should (equal "12.3k" (harness-format-tokens 12345)))

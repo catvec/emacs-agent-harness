@@ -100,7 +100,7 @@
 A tool call reads as the tool's name, as the model knows it, and its input."
   (pcase (plist-get node :kind)
     ('tool-call (format "%s %s" (or (plist-get node :tool) (plist-get node :title) "")
-                        (if (plist-get node :input) (harness-json-encode (plist-get node :input)) "")))
+                        (if (plist-get node :input) (harness-json-encode-text (plist-get node :input)) "")))
     ('tool-result (or (plist-get node :output) ""))
     (_ (or (plist-get node :content) ""))))
 
