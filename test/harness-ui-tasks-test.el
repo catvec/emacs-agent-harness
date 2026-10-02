@@ -224,6 +224,46 @@ Finished tasks are completed at once, without review, unless BODY turns
             (should-not (get-buffer-window board)))
         (kill-buffer session-buf)))))
 
+(defvar harness-ui-session-id)
+
+(ert-deftest harness-ui-tasks-back-from-a-tasks-session ()
+  "The board's key in a task's session goes back to the board the task is on.
+Whatever the session's directory: one the board's project cannot be
+told from, like a worktree git lost track of, still leads back."
+  (harness-ui-tasks-test-with
+    (let* ((elsewhere (harness-test-temp-dir))
+           (session-buf nil)
+           (harness-ui-open-session-function
+            (lambda (id)
+              ;; What a chat buffer is: its session, in the session's directory.
+              (setq session-buf (get-buffer-create " *a task's session*"))
+              (with-current-buffer session-buf
+                (setq harness-ui-session-id id
+                      default-directory elsewhere))
+              session-buf)))
+      (unwind-protect
+          (let ((window (get-buffer-window board)))
+            (harness-ui-tasks-test--type-and-submit board "Come back to me")
+            (harness-ui-tasks-test--wait-text board "Completed  1")
+            (with-selected-window window
+              (goto-char (point-min))
+              (search-forward "Come back to me")
+              (harness-ui-tasks-open))
+            (harness-test-wait (lambda () (eq session-buf (window-buffer window))) 5 "the session to replace the board")
+            (with-selected-window window
+              (with-current-buffer session-buf
+                (should (eq board (call-interactively #'harness-tasks)))))
+            (should (eq board (window-buffer window)))
+            ;; Without a task's session the directory picks the board.
+            (with-temp-buffer
+              (setq default-directory elsewhere)
+              (let ((other (call-interactively #'harness-tasks)))
+                (unwind-protect
+                    (progn (should-not (eq board other))
+                           (should (equal elsewhere (buffer-local-value 'default-directory other))))
+                  (kill-buffer other)))))
+        (when (buffer-live-p session-buf) (kill-buffer session-buf))))))
+
 (defvar harness-compose-attachments)
 (defvar harness-compose--files)
 (declare-function harness-compose-completion-at-point "harness-ui-compose")

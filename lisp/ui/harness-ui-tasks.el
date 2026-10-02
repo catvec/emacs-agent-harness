@@ -1080,9 +1080,17 @@ anything that moves a task without one, so a board never drifts.")
 
 (defun harness-ui-tasks--local-root (dir)
   "Guess DIR's project root in this Emacs, for naming the buffer only.
-From a task's worktree it is the main checkout, so opening the board from
-a task's session comes back to the same board."
+From a task's worktree it is the main checkout, so the board opened
+there is the project's."
   (harness-files-main-root dir))
+
+(defun harness-ui-tasks--board-of-session (session-id)
+  "Return the open board listing the task SESSION-ID works on, or nil."
+  (and session-id
+       (cl-find-if (lambda (board)
+                     (cl-find session-id (buffer-local-value 'harness-ui-tasks--tasks board)
+                              :key (lambda (task) (plist-get task :session)) :test #'equal))
+                   (harness-ui-tasks--buffers))))
 
 (declare-function project-root "project")
 
@@ -1092,15 +1100,23 @@ a task's session comes back to the same board."
 Task mode runs one session per task: submit tasks from the compose box
 at the bottom and follow them from pending to completed.
 
+Without DIRECTORY, in the buffer of a task's session it is the open
+board that lists the task, whatever directory the session works in:
+from a session opened on a board, the board's key leads back to it.
+
 The board takes a position like a session does (`harness-ui-positions')
 and replaces whatever is shown there; opening a task's session from it
 puts the session in the same position.  POSITION defaults to the one the
 board had last, then to `harness-ui-default-position'; with a prefix
 argument it is read."
-  (interactive (list default-directory (and current-prefix-arg (harness-ui-read-position))))
-  (let* ((dir (file-name-as-directory (expand-file-name (or directory default-directory))))
-         (root (file-name-as-directory (expand-file-name (harness-ui-tasks--local-root dir))))
-         (buf (get-buffer-create (harness-ui-tasks--buffer-name root))))
+  (interactive (list nil (and current-prefix-arg (harness-ui-read-position))))
+  (let* ((own (and (null directory) (harness-ui-tasks--board-of-session harness-ui-session-id)))
+         (root (unless own
+                 (file-name-as-directory
+                  (expand-file-name (harness-ui-tasks--local-root
+                                     (file-name-as-directory
+                                      (expand-file-name (or directory default-directory))))))))
+         (buf (or own (get-buffer-create (harness-ui-tasks--buffer-name root)))))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-tasks-mode)
         (harness-ui-tasks-mode)
