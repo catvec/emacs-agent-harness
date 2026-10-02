@@ -14,7 +14,7 @@ module needs something more, add it here first.
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, naming, compaction,
                 worktree, merge, tasks, skills, perms, sandbox
- Completion     provider, provider-openai, provider-claude
+ Completion     provider, provider-openai, provider-claude, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
                 tools-sessions
  ------------------------------- bus (lisp/harness-core.el)
@@ -427,6 +427,43 @@ Each result's `total_cost_usd` is a running total for the process,
 seeded on `--resume` with the session's restored spend.  A turn
 therefore costs the difference to the previous total, starting from the
 `session.total_cost_usd` the spawn-time usage report gives.
+
+The Copilot provider (`copilot:` models) drives `copilot --headless
+--stdio`, the GitHub Copilot CLI's server mode that GitHub's Copilot
+SDKs use: JSON-RPC 2.0 framed by `Content-Length` headers, SDK protocol
+version 3 or newer.  Per harness session one CLI process:
+- `connect` then `auth.getStatus` start it; a CLI that is not logged
+  in, too old, missing or silent fails the turn with what to do.
+- `session.create` / `session.resume` open a Copilot session whose only
+  tools are the harness's (external tools, `availableTools` set to their
+  names) and whose system prompt is the harness's (`systemMessage` mode
+  replace); resuming an open session again applies changed settings.
+- `session.send` runs a turn.  `assistant.message_delta` and
+  `assistant.reasoning_delta` stream, `external_tool.requested` becomes a
+  `tool-call` whose `:respond` answers `session.tools.handlePendingToolCall`,
+  `assistant.usage` reports each model call, `session.idle` ends the
+  turn, and `session.abort` cancels it (the process is killed when it
+  stays busy).
+- The provider state is `(:copilot-session-id ID :model NAME)`; a fork's
+  is `(:copilot-session-id PARENT :fork-pending t)`, which the first
+  turn turns into `sessions.fork`.  When the harness session already has
+  its conversation open in the process, a request on a fork of it or
+  without state (session naming) runs in a throwaway session that is
+  deleted afterwards.
+
+Copilot plans include a monthly allowance, counted in AI credits ($0.01
+each, at each model's token prices) or, on the legacy billing, in
+premium requests.  A turn's usage says `:billing subscription`, `:cost`
+0 and as `:list-cost` the dollar value of the nano AI units the CLI
+reports (none on the legacy billing: the catalogue's token prices price
+it); `extra-usage` at that value once the allowance is used up and
+additional usage is on.  Quota comes from `account.getQuota`
+(`premium_interactions`: a window named `credits` or `premium`, plus
+`:extra`) and from the snapshots in `assistant.usage`.  The catalogue
+comes from `models.list` (context window, image input, reasoning
+efforts, token prices as `:pricing`), or before `copilot login` from
+`models.getBuiltInCatalog`, asked of a short-lived probe process when
+no session process runs.
 
 ### tools
 

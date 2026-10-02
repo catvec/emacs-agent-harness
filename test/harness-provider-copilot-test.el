@@ -142,8 +142,8 @@ tool is answered with \"echo: TEXT\"."
 
 (defun harness-provider-copilot-test--starts (file)
   "Return the start records (argv, directory) of session processes logged in FILE.
-The probe that lists models when the provider module starts runs in
-`temporary-file-directory' itself and is left out."
+The probe that lists models when the provider module starts runs in the
+directory the variable `temporary-file-directory' names, and is left out."
   (let ((tmp (file-name-as-directory (file-truename temporary-file-directory))))
     (cl-remove-if-not (lambda (e)
                         (and (plist-get e :start)
@@ -300,7 +300,7 @@ The probe that lists models when the provider module starts runs in
                  (harness-provider-copilot-tool-result '(:content "no" :is-error t)))))
 
 (ert-deftest harness-provider-copilot-model-conversion ()
-  "models.list entries become catalogue entries."
+  "Entries of a models.list answer become catalogue entries."
   (harness-provider-copilot-test--setup)
   (let ((m (harness-provider-copilot-model-from-entry
             '(:id "claude-sonnet-5" :name "Claude Sonnet 5"

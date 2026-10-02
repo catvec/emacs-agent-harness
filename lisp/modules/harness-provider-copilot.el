@@ -700,7 +700,8 @@ anything waiting for SID to be idle resumes."
       (dolist (fn (reverse (cdr w))) (funcall fn t)))))
 
 (defun harness-provider-copilot--tool-request (entry sid data)
-  "Turn the external tool request DATA of Copilot session SID into a tool call."
+  "Turn the external tool request DATA of Copilot session SID into a tool call.
+The call goes to ENTRY's turn, whose `:respond' answers the CLI."
   (let* ((proc (harness-provider-copilot-session-process entry))
          (request-id (plist-get data :requestId))
          (name (plist-get data :toolName))
@@ -1313,7 +1314,7 @@ Only what follows the last assistant message is new to the CLI."
            (t '(:type done :stop-reason end-turn))))))
 
 (defun harness-provider-copilot--drop-side (entry sid)
-  "Close and delete the throwaway Copilot session SID once its turn is idle."
+  "Close and delete the throwaway Copilot session SID on ENTRY once it is idle."
   (let ((drop (lambda ()
                 (when (assoc sid (harness-provider-copilot-session-opened entry))
                   (setf (harness-provider-copilot-session-opened entry)
@@ -1368,10 +1369,10 @@ is stopped on purpose first, and with an error when it dies."
   "Non-nil when ERR says that the process was stopped on purpose."
   (eq (car-safe err) 'harness-provider-copilot-restart))
 
-(defun harness-provider-copilot--resume (entry sid config key)
+(defun harness-provider-copilot--resume (entry sid config key note)
   "Return a promise of Copilot session SID opened with CONFIG on ENTRY.
-When it cannot be resumed, a new session takes its place and the turn
-is told so."
+When it cannot be resumed, a new session takes its place and NOTE, a
+function, is called with a hint saying so."
   (harness-then
    (harness-provider-copilot--call entry "session.resume" (append (list :sessionId sid) config))
    (lambda (_) (harness-provider-copilot--mark-open entry sid key))
@@ -1379,36 +1380,35 @@ is told so."
      (if (harness-provider-copilot--restart-p err)
          (harness-rejected err)
        (harness-log 'warn "provider-copilot: cannot resume %s: %s" sid (harness-error-message err))
-       (harness-provider-copilot--emit
-        entry (list :type 'hint
-                    :text (format "Copilot could not resume its conversation (%s); this turn starts a new one without the earlier context"
-                                  (harness-error-message err))))
+       (funcall note (format "Copilot could not resume its conversation (%s); this turn starts a new one without the earlier context"
+                             (harness-error-message err)))
        (harness-provider-copilot--create entry config key)))))
 
-(defun harness-provider-copilot--fork (entry source config key)
-  "Return a promise of a new fork of Copilot session SOURCE, opened with CONFIG."
+(defun harness-provider-copilot--fork (entry source config key note)
+  "Return a promise of a new fork of Copilot session SOURCE.
+The fork is opened on ENTRY with CONFIG, whose KEY it is remembered by.
+When it cannot be made, a new session takes its place and NOTE, a
+function, is called with a hint saying so."
   (harness-then
    (harness-provider-copilot--call entry "sessions.fork" (list :sessionId source))
-   (lambda (result) (harness-provider-copilot--resume entry (plist-get result :sessionId) config key))
+   (lambda (result) (harness-provider-copilot--resume entry (plist-get result :sessionId) config key note))
    (lambda (err)
      (if (harness-provider-copilot--restart-p err)
          (harness-rejected err)
        (harness-log 'warn "provider-copilot: cannot fork %s: %s" source (harness-error-message err))
-       (harness-provider-copilot--emit
-        entry (list :type 'hint
-                    :text (format "Copilot could not fork its conversation (%s); this turn starts a new one"
-                                  (harness-error-message err))))
+       (funcall note (format "Copilot could not fork its conversation (%s); this turn starts a new one"
+                             (harness-error-message err)))
        (harness-provider-copilot--create entry config key)))))
 
-(defun harness-provider-copilot--open (entry sid config key)
+(defun harness-provider-copilot--open (entry sid config key note)
   "Return a promise of Copilot session SID, open on ENTRY with CONFIG.
 A session open with other settings is resumed again once idle, which
-applies them in place."
+applies them in place.  NOTE is passed to `harness-provider-copilot--resume'."
   (let ((open (assoc sid (harness-provider-copilot-session-opened entry))))
     (if (and open (equal (cdr open) key))
         (harness-resolved sid)
       (harness-then (harness-provider-copilot--when-idle entry sid)
-                    (lambda (_) (harness-provider-copilot--resume entry sid config key))))))
+                    (lambda (_) (harness-provider-copilot--resume entry sid config key note))))))
 
 (defun harness-provider-copilot--open-target (entry request live)
   "Return a promise of the Copilot session REQUEST runs in, open on ENTRY.
@@ -1417,19 +1417,22 @@ already has one in this process, a request that brings a fork of it, or
 no state at all, is a side request (the naming of the session, say): it
 runs in a throwaway session that is deleted afterwards, and the
 conversation is left as it was.  LIVE says whether the turn still
-wants the session once it is open."
+wants the session, and to hear about it, once it is open."
   (let* ((state (plist-get request :provider-state))
          (id (plist-get state :copilot-session-id))
          (fork (and id (harness-json-true-p (plist-get state :fork-pending))))
          (main (harness-provider-copilot-session-main entry))
          (config (harness-provider-copilot-session-config request))
          (key (harness-provider-copilot--key config))
-         (side (and main (or (null id) (and fork (equal id main))))))
+         (side (and main (or (null id) (and fork (equal id main)))))
+         (note (lambda (text)
+                 (when (funcall live)
+                   (harness-provider-copilot--emit entry (list :type 'hint :text text))))))
     (setf (harness-provider-copilot-session-side entry) side)
     (harness-then
-     (cond (fork (harness-provider-copilot--fork entry id config key))
+     (cond (fork (harness-provider-copilot--fork entry id config key note))
            ((null id) (harness-provider-copilot--create entry config key))
-           (t (harness-provider-copilot--open entry id config key)))
+           (t (harness-provider-copilot--open entry id config key note)))
      (lambda (sid)
        (cond
         (side
@@ -1437,9 +1440,10 @@ wants the session once it is open."
          (unless (funcall live) (harness-provider-copilot--drop-side entry sid)))
         (t
          (setf (harness-provider-copilot-session-main entry) sid)
-         (harness-provider-copilot--emit
-          entry (list :type 'provider-state
-                      :state (list :copilot-session-id sid :model (plist-get config :model))))))
+         (when (funcall live)
+           (harness-provider-copilot--emit
+            entry (list :type 'provider-state
+                        :state (list :copilot-session-id sid :model (plist-get config :model)))))))
        sid))))
 
 (defun harness-provider-copilot--ensure-process (entry request)
@@ -1467,7 +1471,7 @@ logged in."
                       (harness-rejected (list 'error (harness-provider-copilot--login-message auth))))))))
 
 (defun harness-provider-copilot--send-turn (entry sid prompt)
-  "Send PROMPT, (TEXT . ATTACHMENTS), as the turn of Copilot session SID."
+  "Send PROMPT, (TEXT . ATTACHMENTS), as the turn of Copilot session SID on ENTRY."
   (setf (harness-provider-copilot-session-target entry) sid
         (harness-provider-copilot-session-sent entry) t)
   (push sid (harness-provider-copilot-session-busy entry))

@@ -76,7 +76,7 @@
 (defconst harness-ui-config--module-titles
   '(("config" . "Session defaults") ("agent" . "Agent") ("compaction" . "Compaction")
     ("merge" . "Merge queue") ("naming" . "Session naming") ("perms" . "Permissions")
-    ("provider" . "Models") ("provider-claude" . "Claude Code")
+    ("provider" . "Models") ("provider-claude" . "Claude Code") ("provider-copilot" . "GitHub Copilot")
     ("provider-openai" . "OpenAI-compatible providers") ("provider-demo" . "Demo provider")
     ("sandbox" . "Sandbox") ("session" . "Sessions") ("skills" . "Skills") ("tasks" . "Task mode")
     ("tools" . "Tools") ("tools-fs" . "File tools") ("tools-sessions" . "Session tools")
