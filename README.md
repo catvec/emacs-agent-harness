@@ -453,6 +453,8 @@ Further documentation:
 - [docs/ui-guide.md](docs/ui-guide.md): the presentation layer, for
   writing UI modules
 - [docs/dev-loop.md](docs/dev-loop.md): the live development loop
+- [docs/screenshots.md](docs/screenshots.md): how the screenshots are
+  taken, and how to take them again when a view changes
 
 ## Development
 

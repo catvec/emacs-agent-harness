@@ -12,6 +12,8 @@
 # else a headless kwin_wayland with a rootful Xwayland (KDE), else
 # $DISPLAY, where a frame then shows while the run lasts.
 #
+# docs/screenshots.md says how the pictures are made and how to add one.
+#
 # Environment:
 #   HARNESS_MEDIA_OUT      where the pictures go (default docs/media)
 #   HARNESS_MEDIA_DUMPS    also write each picture's text there, to review it

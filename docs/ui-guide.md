@@ -51,3 +51,4 @@ Display
 - Redraw incrementally with markers and `inhibit-read-only`; never re-render the whole transcript on a delta.
 - Buffers must survive `harness-reload`: keep state in buffer-local variables, rebuild from `harness-ui-redraw-hook`.
 - Respect the user's theme: faces inherit from standard faces and specify light/dark variants only for backgrounds.
+- A new view, or one that now looks different, gets its README picture taken again: see [screenshots.md](screenshots.md).
