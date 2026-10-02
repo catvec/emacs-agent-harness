@@ -3,7 +3,9 @@
 An agent harness that is native to Emacs: sessions, tools, permissions,
 cost tracking and remote control are all Emacs Lisp, the UI is Emacs
 buffers, and the default model is Claude Fable 5.1 through the `claude`
-command line, so a Claude subscription is enough.
+command line, so a Claude subscription is enough.  A GitHub Copilot plan
+works too: the `copilot` command line brings its models (GPT, Claude,
+Gemini and others).
 
 ![chat](docs/media/chat-tour.png)
 
@@ -17,11 +19,14 @@ does can freeze yours; your Emacs keeps only the UI.
 
 Requires Emacs 29.1 or newer (31.1 is what it is developed on), `curl`,
 and the `claude` CLI logged in for the default provider.  Optional:
-`bwrap` for the kernel sandbox, `rg` for fast search, `OPENROUTER_API_KEY`
-or `OPENAI_API_KEY` for OpenAI-compatible providers, an AWS profile or
-a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) for models on AWS Bedrock
-(`bedrock:` models, see `harness-bedrock-endpoints`), `BRAVE_API_KEY` for
-web search.
+`bwrap` for the kernel sandbox, `rg` for fast search, the `copilot` CLI
+(GitHub Copilot CLI 1.0 or newer, `npm install -g @github/copilot`, then
+`copilot login` once) for the models of a Copilot plan,
+`OPENROUTER_API_KEY` or `OPENAI_API_KEY` for OpenAI-compatible
+providers, an AWS profile or a Bedrock API key
+(`AWS_BEARER_TOKEN_BEDROCK`) for models on AWS Bedrock (`bedrock:`
+models, see `harness-bedrock-endpoints`), `BRAVE_API_KEY` for web
+search.
 
 ```elisp
 ;; straight / Doom
@@ -87,6 +92,17 @@ which counts until the period rolls over.  An organisation billed per
 token can fetch it instead: with an Anthropic Admin API key
 (`harness-anthropic-admin-api-key`), `I` on a month budget offers the
 month's API cost less what the harness recorded.
+
+GitHub Copilot models are the `copilot:` ones in the model picker
+(`C-c a m`), listed from what your plan offers; `copilot:default` stands
+for `harness-provider-copilot-default-model`.  Copilot runs the agent
+loop with the harness's tools only (its own shell and file tools are
+off) and keeps the conversation, so a session resumes it after a
+restart.  The plan pays: each turn shows the AI credits it used at
+their dollar value (a credit is $0.01) as covered by the plan, the
+month's allowance shows with the plan's quota, and turns past the
+allowance with additional usage on are billed.  When `copilot` is not
+installed or not logged in, a turn says so and how to fix it.
 
 Settings persist through `.dir-locals.el` (project, then directory) and
 customize (global); the settings page (`C-c a S`, `M-x harness-settings`)
@@ -154,8 +170,8 @@ layer and [docs/dev-loop.md](docs/dev-loop.md) for the live development
 loop (`scripts/dev.sh`, `scripts/test.sh`, `scripts/lint.sh`).
 
 Modules: `config project store session agent provider provider-claude
-provider-openai provider-bedrock provider-demo tools tools-fs tools-shell tools-emacs
-tools-web tools-agent tools-sessions perms sandbox usage compaction naming skills
+provider-copilot provider-openai provider-bedrock provider-demo tools tools-fs tools-shell
+tools-emacs tools-web tools-agent tools-sessions perms sandbox usage compaction naming skills
 worktree merge tasks acp` and, in the presentation layer, `ui ui-chat
 ui-sessions ui-tasks ui-tree ui-notify ui-usage ui-worktree ui-btw ui-media
 ui-config`.

@@ -14,7 +14,8 @@ module needs something more, add it here first.
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, naming, compaction,
                 worktree, merge, tasks, skills, perms, sandbox
- Completion     provider, provider-openai, provider-claude, provider-bedrock
+ Completion     provider, provider-openai, provider-claude, provider-bedrock,
+                provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
                 tools-sessions
  ------------------------------- bus (lisp/harness-core.el)
@@ -487,6 +488,55 @@ catalogue.  Claude and Nova requests carry prompt cache points; Claude
 reasoning returned with tool calls is kept and sent back with them while
 the tool loop lasts.  `harness-http-request` takes `:binary t` for such
 framings: the response then reaches `:on-chunk` as unibyte strings.
+
+The Copilot provider (`copilot:` models) drives `copilot --headless
+--stdio`, the GitHub Copilot CLI's server mode that GitHub's Copilot
+SDKs use: JSON-RPC 2.0 framed by `Content-Length` headers, SDK protocol
+version 3 or newer.  Per harness session one CLI process:
+- `connect` then `auth.getStatus` start it; a CLI that is not logged
+  in, too old, missing or silent fails the turn with what to do.
+- `session.create` / `session.resume` open a Copilot session whose only
+  tools are the harness's (external tools, `availableTools` set to their
+  names) and whose system prompt is the harness's (`systemMessage` mode
+  replace); resuming an open session again applies changed settings.
+- `session.send` runs a turn.  `assistant.message_delta` and
+  `assistant.reasoning_delta` stream, `external_tool.requested` becomes a
+  `tool-call` whose `:respond` answers `session.tools.handlePendingToolCall`,
+  `assistant.usage` reports each model call, `session.idle` ends the
+  turn, and `session.abort` cancels it (the process is killed when it
+  stays busy).  A request the CLI leaves unanswered (opening a session,
+  forking one, sending) fails after `harness-provider-copilot-startup-timeout`
+  (30 s) instead of hanging.
+- The provider state is `(:copilot-session-id ID :model NAME)`; a fork's
+  is `(:copilot-session-id PARENT :fork-pending t)`, which the first
+  turn turns into `sessions.fork`.
+- Side requests are one-off questions: naming, compaction and the
+  permission judge.  A request is one when it sets `:max-tokens` (a turn
+  of the conversation never caps its answer), when its provider state
+  is not the one its session has recorded (naming brings a fork of it),
+  or when its session record has no state at all (the judge's).  Any
+  number of them run at once, beside the conversation's turn and beside
+  each other, each in a throwaway session: a fork of the conversation
+  its own state names, else of the one its session has recorded (so a
+  summary for compaction sees the real conversation), else a new
+  session.  They never write into the conversation, and their sessions
+  are deleted afterwards (by the next process when theirs goes away
+  first).  Only a new turn of the conversation takes over from the
+  running one.
+
+Copilot plans include a monthly allowance, counted in AI credits ($0.01
+each, at each model's token prices) or, on the legacy billing, in
+premium requests.  A turn's usage says `:billing subscription`, `:cost`
+0 and as `:list-cost` the dollar value of the nano AI units the CLI
+reports (none on the legacy billing: the catalogue's token prices price
+it); `extra-usage` at that value once the allowance is used up and
+additional usage is on.  Quota comes from `account.getQuota`
+(`premium_interactions`: a window named `credits` or `premium`, plus
+`:extra`) and from the snapshots in `assistant.usage`.  The catalogue
+comes from `models.list` (context window, image input, reasoning
+efforts, token prices as `:pricing`), or before `copilot login` from
+`models.getBuiltInCatalog`, asked of a short-lived probe process when
+no session process runs.
 
 ### tools
 
