@@ -446,10 +446,12 @@ version 3 or newer.  Per harness session one CLI process:
   stays busy).
 - The provider state is `(:copilot-session-id ID :model NAME)`; a fork's
   is `(:copilot-session-id PARENT :fork-pending t)`, which the first
-  turn turns into `sessions.fork`.  When the harness session already has
-  its conversation open in the process, a request on a fork of it or
-  without state (session naming) runs in a throwaway session that is
-  deleted afterwards.
+  turn turns into `sessions.fork`.  A side request, one whose provider
+  state is not the one its session has recorded (naming brings a fork
+  of it, compaction none, the permission judge a session record without
+  state), runs in a throwaway session (a fork, or a new one) beside the
+  conversation's turn, at the same time, and the session is deleted
+  afterwards.  A new request takes over only from one of its own kind.
 
 Copilot plans include a monthly allowance, counted in AI credits ($0.01
 each, at each model's token prices) or, on the legacy billing, in

@@ -18,10 +18,11 @@ Behaviour is chosen by the prompt text:
                    streams the decision it got
   "hang"        -> streams "wait" and waits for session.abort (forever
                    with "hang ignore", to exercise the kill path)
-  "die"         -> exits mid-turn with status 3
+  "die"         -> makes one model call, then exits with status 3
   "fail"        -> reports a session.error, then goes idle
   "long"        -> the model stops at its output limit
   "compact"     -> Copilot compacts the context first
+  "subagent"    -> a sub-agent streams, fails and goes idle first
 Anything else streams the thinking "hmm", then the text "hello".  Each
 model call reports 12 uncached input tokens, 2000 cached, 100 written to
 the cache and 7 output tokens, and costs one AI credit (1e9 nano-AIU).
@@ -33,15 +34,19 @@ The environment picks the situation:
   HARNESS_FAKE_COPILOT_SILENT=1      read everything, answer nothing
   HARNESS_FAKE_COPILOT_LEGACY=1      premium request billing: no credit figures
   HARNESS_FAKE_COPILOT_EXHAUSTED=1   the allowance is used up, extra usage on
+  HARNESS_FAKE_COPILOT_SLOW_CREATE=S wait S seconds before answering
+                                     session.create
   HARNESS_FAKE_COPILOT_LOG=FILE      append one JSON line per request
                                      received (and one with the argv and
                                      the directory at start)
-Session ids starting with "missing" cannot be resumed or forked.
+Session ids starting with "missing" cannot be resumed or forked; those
+starting with "locked" are in use by another process.
 """
 
 import json
 import os
 import sys
+import time
 import uuid
 
 AUTH = os.environ.get("HARNESS_FAKE_COPILOT_AUTH", "")
@@ -50,6 +55,7 @@ NO_CONNECT = bool(os.environ.get("HARNESS_FAKE_COPILOT_NO_CONNECT"))
 SILENT = bool(os.environ.get("HARNESS_FAKE_COPILOT_SILENT"))
 LEGACY = bool(os.environ.get("HARNESS_FAKE_COPILOT_LEGACY"))
 EXHAUSTED = bool(os.environ.get("HARNESS_FAKE_COPILOT_EXHAUSTED"))
+SLOW_CREATE = float(os.environ.get("HARNESS_FAKE_COPILOT_SLOW_CREATE", "0"))
 LOG = os.environ.get("HARNESS_FAKE_COPILOT_LOG")
 
 STDIN = sys.stdin.buffer
@@ -162,12 +168,14 @@ class Fake:
     def error(self, msg, code, message):
         write({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": code, "message": message}})
 
-    def event(self, sid, kind, data, ephemeral=False):
+    def event(self, sid, kind, data, ephemeral=False, agent=None):
         self.counter += 1
         event = {"type": kind, "data": data, "id": "ev-%d" % self.counter,
                  "timestamp": "2026-10-01T12:00:00.000Z", "parentId": None}
         if ephemeral:
             event["ephemeral"] = True
+        if agent:
+            event["agentId"] = agent
         write({"jsonrpc": "2.0", "method": "session.event",
                "params": {"sessionId": sid, "event": event}})
 
@@ -224,12 +232,16 @@ class Fake:
                 self.answer(msg, {"quotaSnapshots": quota_snapshots()})
         elif method == "session.create":
             sid = params.get("sessionId") or str(uuid.uuid4())
+            if SLOW_CREATE:
+                time.sleep(SLOW_CREATE)
             self.sessions[sid] = params
             self.answer(msg, self.opened(sid, params))
         elif method == "session.resume":
             sid = params.get("sessionId")
             if not sid or sid.startswith("missing"):
                 self.error(msg, -32603, "Request session.resume failed with message: Failed to load session events: Session not found: %s" % sid)
+            elif sid.startswith("locked"):
+                self.error(msg, -32603, "Request session.resume failed with message: Session %s is in use by another process" % sid)
             else:
                 self.sessions[sid] = params
                 self.answer(msg, self.opened(sid, params))
@@ -296,9 +308,18 @@ class Fake:
         self.event(sid, "user.message", {"content": text, "attachments": params.get("attachments") or []})
         self.event(sid, "assistant.turn_start", {"turnId": "0"})
         if "die" in text:
+            self.usage(sid, "tool_calls")
             sys.stderr.write("fake-copilot: dying on request\n")
             sys.stderr.flush()
             sys.exit(3)
+        if "subagent" in text:
+            self.event(sid, "assistant.message_delta", {"messageId": "ms", "deltaContent": "sub"},
+                       ephemeral=True, agent="agent-1")
+            self.event(sid, "assistant.usage", {"model": "fake", "inputTokens": 50, "outputTokens": 5,
+                                                "cost": 0.0}, ephemeral=True, agent="agent-1")
+            self.event(sid, "session.error", {"errorType": "query", "message": "sub-agent trouble"},
+                       agent="agent-1")
+            self.event(sid, "session.idle", {"mode": "interactive"}, ephemeral=True, agent="agent-1")
         if "fail" in text:
             self.event(sid, "session.error", {"errorType": "quota", "message": "You have no AI credits left",
                                               "statusCode": 402})
