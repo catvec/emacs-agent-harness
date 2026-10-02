@@ -161,6 +161,30 @@ reaching a custom file."
     (should (eq 'none (harness-config-test--read root)))
     (should-not saved)))
 
+(ert-deftest harness-config-corporate-mode-is-set-in-the-init-file-only ()
+  "The settings page never lists `harness-corporate-mode', and neither
+`config/set' nor `config/unset' changes it, here or over ACP."
+  (harness-config-test-with
+    (let ((keys (mapcar (lambda (s) (plist-get s :key))
+                        (plist-get (harness-call 'config/describe sub) :settings))))
+      (should-not (member "harness-corporate-mode" keys)))
+    (dolist (key '(harness-corporate-mode "harness-corporate-mode"))
+      (dolist (call (list (lambda () (harness-call 'config/set key t :cwd sub))
+                          (lambda () (harness-call 'config/set key "t" :printed t :scope 'global :cwd sub))
+                          (lambda () (harness-call 'config/unset key :cwd sub))))
+        (let ((message (error-message-string (should-error (funcall call)))))
+          (should (equal "harness-corporate-mode is set in the init file only" message)))))
+    ;; Over ACP too.
+    (let* ((conn (harness-test-connect-ui-client))
+           (err (should-error
+                 (harness-test-await
+                  (harness-acp-request conn "_harness/config/set"
+                                       (list :key "harness-corporate-mode" :value "t"
+                                             :printed t :scope "global" :cwd sub))))))
+      (should (string-search "set in the init file only" (format "%S" err))))
+    (should-not harness-corporate-mode)
+    (should-not saved)))
+
 (ert-deftest harness-config-unset-removes-the-entry-then-the-file ()
   (skip-unless (executable-find "git"))
   (harness-config-test-with

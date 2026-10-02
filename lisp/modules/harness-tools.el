@@ -22,6 +22,12 @@
 ;; session's provider runs itself; `tools/list' then leaves them out.
 ;; The calls the provider runs still need a permission decision, which
 ;; `tools/authorize' gives without running anything.
+;;
+;; Corporate mode (`harness-corporate-mode') turns the tools of kind net
+;; off.  No session gets them, so no provider runs a search of its own
+;; in their place either, and a call to one is refused before the
+;; permission chain, whatever the permission mode and the standing
+;; rules say (`harness-tools--corporate-refusal').
 
 ;;; Code:
 
@@ -195,13 +201,46 @@ reached through a `_harness/client/tool' request to the UI."
                 (delq nil (funcall (harness-tool-paths-fn tool) input)))
       (error (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err) nil))))
 
+;;;; Corporate mode
+
+(defconst harness-tools-corporate-hint
+  "Work with the project and the tools you have; do not try to reach the network another way, such as with curl in the shell. If the task cannot be done without the web, finish what you can and say so in your answer."
+  "What the model is told when corporate mode refuses a network tool.")
+
+(defun harness-tools--off-p (name)
+  "Non-nil when tool NAME is off: of kind net, with corporate mode on."
+  (and (harness-corporate-p)
+       (let ((tool (harness-tool-get name)))
+         (and tool (eq (harness-tool-kind tool) 'net)))))
+
+(defun harness-tools--corporate-refusal (kind)
+  "Return the decision refusing a call of KIND in corporate mode, or nil.
+With `harness-corporate-mode' on, the tools of kind net are off: a call
+to one is refused without asking the `permission/decide' chain, so no
+permission mode, standing rule or answer lets it run."
+  (when (and (eq kind 'net) (harness-corporate-p))
+    (list :behavior 'deny :reason "corporate mode: network tools are off"
+          :hint harness-tools-corporate-hint)))
+
+(defun harness-tools--decide (request)
+  "Return a promise of the permission decision on REQUEST.
+A call corporate mode refuses (`harness-tools--corporate-refusal')
+never reaches the `permission/decide' chain; any other call does."
+  (let ((refusal (harness-tools--corporate-refusal (plist-get request :kind))))
+    (if refusal
+        (harness-resolved refusal)
+      (harness-run-filter-async 'permission/decide (list :behavior 'ask) request))))
+
 ;;;; Tools a provider runs itself
 
 (defun harness-tools--names (session)
   "Return the names of the tools SESSION gets, after `agent/tools'.
-Without SESSION, every registered tool."
+In corporate mode no session gets the tools of kind net.  Without
+SESSION, every registered tool: a catalogue, offered to no model."
   (let ((names (let (n) (maphash (lambda (k _) (push k n)) harness-tools) (sort n #'string<))))
-    (if session (harness-run-filter 'agent/tools names session) names)))
+    (if session
+        (cl-remove-if #'harness-tools--off-p (harness-run-filter 'agent/tools names session))
+      names)))
 
 (defun harness-tools--offered (session)
   "Return the harness tools that SESSION's provider has counterparts of.
@@ -227,7 +266,8 @@ filter `agent/builtin-tools' pick them."
 (harness-defmethod tools/list (&optional session-id)
   "Return tool specs available to SESSION-ID (or all), after `agent/tools'.
 The tools SESSION-ID's provider runs itself (see `tools/builtin') are
-left out."
+left out, and in corporate mode (`harness-corporate-mode') the tools of
+kind net.  Without SESSION-ID, every registered tool is listed."
   (let* ((session (and session-id (harness-tools--session session-id)))
          (names (harness-tools--names session))
          (builtin (harness-tools--builtin session names))
@@ -241,8 +281,9 @@ A provider names the harness tools it has a counterpart of in its
 say).  The sync filter `agent/builtin-tools' (value: list of names,
 initially nil; args: the session and the names its provider offers)
 picks the ones the provider should run; only tools the session would
-get otherwise count.  `tools/list' leaves them out, and the agent asks
-the provider to turn them on with the request's `:builtin-tools'."
+get otherwise count, so in corporate mode none of kind net does.
+`tools/list' leaves them out, and the agent asks the provider to turn
+them on with the request's `:builtin-tools'."
   (let ((session (harness-tools--session session-id)))
     (harness-tools--builtin session (harness-tools--names session))))
 
@@ -260,8 +301,9 @@ Nothing runs: this is for a tool the provider runs itself (see
 `tools/builtin'), whose call still needs the harness's permission.  The
 call goes through the `permission/decide' chain as `tools/execute'
 sends it, as a call of the harness tool NAME: that tool's kind and paths
-apply when it is registered, else CALL's `:kind', else exec.  Emits
-`permission/decided'.  Return a promise of the DECISION, whose
+apply when it is registered, else CALL's `:kind', else exec.  In
+corporate mode a call of kind net is denied without asking the chain.
+Emits `permission/decided'.  Return a promise of the DECISION, whose
 `:behavior' is allow or deny; a denial carries `:message', what the
 model is told."
   (let* ((name (plist-get call :name))
@@ -281,7 +323,7 @@ model is told."
                         :call-id call-id
                         :builtin t)))
     (harness-then
-     (harness-run-filter-async 'permission/decide (list :behavior 'ask) request)
+     (harness-tools--decide request)
      (lambda (decision)
        (harness-emit 'permission/decided session-id request decision)
        (if (eq (plist-get decision :behavior) 'allow)
@@ -322,7 +364,9 @@ model is told."
                                         (harness-error-message err)))))))))
 
 (harness-defmethod tools/execute (session-id call)
-  "Execute CALL (:id :name :input) for SESSION-ID; return a promise of a RESULT."
+  "Execute CALL (:id :name :input) for SESSION-ID; return a promise of a RESULT.
+The `permission/decide' chain decides first; in corporate mode a call of
+a tool of kind net is denied without asking it."
   (let* ((name (plist-get call :name))
          (call-id (or (plist-get call :id) (harness-short-id)))
          (input (plist-get call :input))
@@ -345,7 +389,7 @@ model is told."
                             :kind (harness-tool-kind tool)
                             :paths (harness-tools--paths tool input ctx)
                             :call-id call-id))
-             (decision (harness-run-filter-async 'permission/decide (list :behavior 'ask) request)))
+             (decision (harness-tools--decide request)))
         (harness-then
          decision
          (lambda (decision)
