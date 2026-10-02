@@ -3,13 +3,17 @@
 ;;; Commentary:
 
 ;; A `tabulated-list-mode' buffer of the git worktrees of the current
-;; project: path, branch, head, flags (main, locked, detached,
+;; project: path, branch, head, flags (main, locked, detached, missing,
 ;; prunable), the working-copy status (clean or dirty, ahead/behind its
 ;; upstream) fetched per row after the list is shown, and the sessions
-;; that live in each worktree.
+;; that live in each worktree.  The harness locks the worktrees it makes
+;; until their branch is merged; the locked flag shows the reason.
 ;;
-;; Keys: n create a worktree, d remove (offers --force when git
-;; refuses), p prune, s start a session in the worktree at point, f fork
+;; Keys: n create a worktree, d remove (lifts the harness's lock; offers
+;; --force when git refuses), p prune (keeps locked worktrees, as git
+;; does), l lock or unlock the worktree at point, L lock the harness's
+;; worktrees that have no lock (made before locks, or registered again
+;; after a prune), s start a session in the worktree at point, f fork
 ;; the current session into a fresh worktree, m ask for the worktree's
 ;; session to be merged back into its parent session (the merge queue
 ;; shows in the mode line), RET open the directory in Dired, g refresh.
@@ -86,12 +90,24 @@
            (propertize (format "  +%d more" (- (length sessions) 3)) 'face 'harness-dim-face)
          "")))))
 
+(defun harness-ui-worktree--lock-help (wt)
+  "Return the help text of the locked flag of worktree WT."
+  (let ((reason (plist-get wt :lock-reason)))
+    (concat (if (and (stringp reason) (string-prefix-p "harness: " reason))
+                "Locked by the harness until its branch is merged"
+              "Locked")
+            (if (stringp reason) (format " (%s)" reason) "")
+            ": git worktree prune keeps it, and the prune here leaves it alone")))
+
 (defun harness-ui-worktree--flags (wt)
   "Return the flags string of worktree WT."
   (string-join (delq nil (list (and (harness-json-true-p (plist-get wt :main)) (propertize "main" 'face 'harness-worktree-main-face))
                                (and (harness-json-true-p (plist-get wt :bare)) "bare")
-                               (and (harness-json-true-p (plist-get wt :locked)) (propertize "locked" 'face 'warning))
+                               (and (harness-json-true-p (plist-get wt :locked))
+                                    (propertize "locked" 'face 'warning 'help-echo (harness-ui-worktree--lock-help wt)))
                                (and (harness-json-true-p (plist-get wt :detached)) (propertize "detached" 'face 'harness-dim-face))
+                               (and (harness-json-true-p (plist-get wt :missing))
+                                    (propertize "missing" 'face 'error 'help-echo "Its directory is gone"))
                                (and (harness-json-true-p (plist-get wt :prunable)) (propertize "prunable" 'face 'error))))
                " "))
 
@@ -143,6 +159,8 @@
    (harness-ui-worktree--segment "[n new]" #'harness-ui-worktree-create "Create a worktree (n)")
    (harness-ui-worktree--segment "[d remove]" #'harness-ui-worktree-remove "Remove the worktree at point (d)")
    (harness-ui-worktree--segment "[p prune]" #'harness-ui-worktree-prune "Prune stale worktree records (p)")
+   (harness-ui-worktree--segment "[l lock]" #'harness-ui-worktree-toggle-lock
+                                 "Lock the worktree at point, or unlock it (l); lock all of the harness's (L)")
    (harness-ui-worktree--segment "[s session]" #'harness-ui-worktree-new-session "Start a session in the worktree at point (s)")
    (harness-ui-worktree--segment "[f fork]" #'harness-ui-worktree-fork-session "Fork the current session into a new worktree (f)")
    (harness-ui-worktree--segment "[m merge]" #'harness-ui-worktree-merge "Queue the worktree's session for a merge into its parent (m)")
@@ -232,6 +250,8 @@
     (define-key map (kbd "n") #'harness-ui-worktree-create)
     (define-key map (kbd "d") #'harness-ui-worktree-remove)
     (define-key map (kbd "p") #'harness-ui-worktree-prune)
+    (define-key map (kbd "l") #'harness-ui-worktree-toggle-lock)
+    (define-key map (kbd "L") #'harness-ui-worktree-lock-existing)
     (define-key map (kbd "s") #'harness-ui-worktree-new-session)
     (define-key map (kbd "f") #'harness-ui-worktree-fork-session)
     (define-key map (kbd "m") #'harness-ui-worktree-merge)
@@ -246,7 +266,7 @@
         (vector (list "Path" 40 t)
                 (list "Branch" 24 t)
                 (list "Head" 9 nil)
-                (list "Flags" 14 nil)
+                (list "Flags" 16 nil)
                 (list "Status" 14 nil)
                 (list "Sessions" 40 nil)))
   (setq tabulated-list-padding 1)
@@ -261,11 +281,13 @@
         (". RET" "Open in Dired" harness-ui-worktree-dired)
         (". s" "New session in it" harness-ui-worktree-new-session)
         (". m" "Merge its session" harness-ui-worktree-merge)
+        (". l" "Lock or unlock" harness-ui-worktree-toggle-lock)
         (". d" "Remove" harness-ui-worktree-remove)]
        ["Repository"
         (". n" "New worktree" harness-ui-worktree-create)
         (". f" "Fork a session into one" harness-ui-worktree-fork-session)
         (". p" "Prune stale records" harness-ui-worktree-prune)
+        (". L" "Lock the harness's worktrees" harness-ui-worktree-lock-existing)
         (". g" "Refresh" harness-ui-worktree-refresh)]))
 
 ;;;; Commands
@@ -347,7 +369,14 @@ When git refuses because of local changes, offer to force."
          (root harness-ui-worktree--root))
     (when (harness-json-true-p (plist-get wt :main))
       (user-error "The main worktree cannot be removed"))
-    (when (yes-or-no-p (format "Remove worktree %s%s? " (abbreviate-file-name path) (if force " (force)" "")))
+    (when (yes-or-no-p (format "Remove worktree %s%s%s? " (abbreviate-file-name path)
+                               (if (harness-json-true-p (plist-get wt :locked))
+                                   (format " (locked%s; its work may not be merged)"
+                                           (if (stringp (plist-get wt :lock-reason))
+                                               (format ": %s" (plist-get wt :lock-reason))
+                                             ""))
+                                 "")
+                               (if force " (force)" "")))
       (cl-labels ((run (force)
                     (harness-ui-call "_harness/worktree/remove"
                                      (append (list :root root :path path) (and force (list :force t)))
@@ -362,12 +391,54 @@ When git refuses because of local changes, offer to force."
         (run force)))))
 
 (defun harness-ui-worktree-prune ()
-  "Prune stale worktree records."
+  "Prune stale worktree records.
+The harness runs `git worktree prune' outside any sandbox, so git sees
+every worktree directory; locked worktrees are kept, and reported when
+their directory is missing."
   (interactive)
   (let ((buf (current-buffer)))
     (harness-ui-call "_harness/worktree/prune" (list :root harness-ui-worktree--root)
                      (lambda (lines)
                        (message "%s" (if lines (string-join lines "; ") "Nothing to prune"))
+                       (when (buffer-live-p buf) (harness-ui-worktree--load buf))))))
+
+(defun harness-ui-worktree-toggle-lock ()
+  "Lock the worktree at point, or unlock it after asking.
+git keeps a locked worktree when it prunes, even when it cannot see its
+directory, as in a session's sandbox.  The harness locks the worktrees
+it makes until their branch is merged."
+  (interactive)
+  (let* ((wt (harness-ui-worktree--worktree))
+         (path (harness-ui-worktree--path))
+         (buf (current-buffer))
+         (root harness-ui-worktree--root)
+         (reload (lambda (text)
+                   (message text (abbreviate-file-name path))
+                   (when (buffer-live-p buf) (harness-ui-worktree--load buf)))))
+    (when (harness-json-true-p (plist-get wt :main))
+      (user-error "The main worktree cannot be locked"))
+    (if (not (harness-json-true-p (plist-get wt :locked)))
+        (harness-ui-call "_harness/worktree/lock" (list :root root :path path)
+                         (lambda (_) (funcall reload "Locked %s")))
+      (when (yes-or-no-p (format "Unlock worktree %s%s?  A prune that cannot see its directory would drop it. "
+                                 (abbreviate-file-name path)
+                                 (if (stringp (plist-get wt :lock-reason))
+                                     (format " (locked: %s)" (plist-get wt :lock-reason))
+                                   "")))
+        (harness-ui-call "_harness/worktree/unlock" (list :root root :path path :any t)
+                         (lambda (_) (funcall reload "Unlocked %s")))))))
+
+(defun harness-ui-worktree-lock-existing ()
+  "Lock the harness's worktrees of this repository that have no lock.
+Those are the worktrees in the directory the harness makes them in,
+apart from merged tasks' (`worktree/lock-existing'): worktrees made
+before the harness locked them, or registered again after a prune."
+  (interactive)
+  (let ((buf (current-buffer)))
+    (harness-ui-call "_harness/worktree/lock-existing" (list :root harness-ui-worktree--root)
+                     (lambda (paths)
+                       (message (if paths (format "Locked %d worktree(s)" (length paths))
+                                  "The harness's worktrees are all locked"))
                        (when (buffer-live-p buf) (harness-ui-worktree--load buf))))))
 
 (defun harness-ui-worktree-new-session ()

@@ -284,5 +284,52 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
                      (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
       (should (null (gethash parent harness-merge--locks))))))
 
+(defun harness-merge-test--lock-line (root path)
+  "Return the `locked' line `git worktree list --porcelain' gives PATH of ROOT, or nil."
+  (let ((dir (file-name-as-directory (file-truename path))))
+    (cl-some (lambda (block)
+               (let ((lines (split-string block "\n" t)))
+                 (and (equal dir (file-name-as-directory (file-truename (substring (car lines) 9))))
+                      (seq-find (lambda (l) (string-prefix-p "locked" l)) lines))))
+             (split-string (harness-merge-test--git root "worktree" "list" "--porcelain") "\n\n" t))))
+
+(ert-deftest harness-merge-unlocks-the-merged-worktree ()
+  "Once its branch is merged, a child's worktree loses the harness's lock; until then it keeps it."
+  (harness-merge-test-with
+    (harness-test-load-module 'worktree)
+    (harness-merge-test--git root "worktree" "lock" "--reason" "harness: child" wt)
+    (let ((finished nil))
+      (harness-on 'merge/finished (lambda (c _p s) (push (cons c s) finished)))
+      ;; A merge that fails leaves the lock on.
+      (harness-merge-test--write wt "feature.txt" "new feature\n")
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "the failed merge")
+      (should (equal (cons child 'failed) (car finished)))
+      (should (equal "locked harness: child" (harness-merge-test--lock-line root wt)))
+      (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get child) :status))) 10 "child idle")
+      ;; Committed, it merges, and the lock goes.
+      (harness-merge-test--commit wt "add feature" "feature.txt")
+      (setq finished nil)
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "the merge")
+      (should (equal (cons child 'merged) (car finished)))
+      (harness-test-wait (lambda () (not (harness-merge-test--lock-line root wt))) 10 "the unlock")
+      (should (file-exists-p (expand-file-name "feature.txt" root))))))
+
+(ert-deftest harness-merge-keeps-a-lock-of-someone-else ()
+  "Only the harness's own lock goes with the merge."
+  (harness-merge-test-with
+    (harness-test-load-module 'worktree)
+    (harness-merge-test--git root "worktree" "lock" "--reason" "on a usb stick" wt)
+    (harness-merge-test--write wt "feature.txt" "new feature\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    (let ((finished nil))
+      (harness-on 'merge/finished (lambda (c _p s) (push (cons c s) finished)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "the merge")
+      (should (equal (cons child 'merged) (car finished)))
+      (accept-process-output nil 0.3)
+      (should (equal "locked on a usb stick" (harness-merge-test--lock-line root wt))))))
+
 (provide 'harness-merge-test)
 ;;; harness-merge-test.el ends here

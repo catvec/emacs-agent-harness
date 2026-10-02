@@ -759,7 +759,7 @@ for a request without a session record."
   (should (equal "bash echo hi" (harness-perms-describe-request '(:tool "bash" :input (:command "echo hi\nmore")))))
   ;; Re-running init keeps exactly one handler per stage.
   (harness-perms--init)
-  (should (= 6 (length (gethash 'permission/decide harness--filters))))
+  (should (= 7 (length (gethash 'permission/decide harness--filters))))
   (should (memq 'permission/requested (mapcar #'car (harness-events))))
   ;; A hot reload does not run `:init' again for a ready module; loading
   ;; the file still installs the stage that decides directory requests.
@@ -767,7 +767,69 @@ for a request without a session record."
   (harness-test-load-module 'perms)
   (should (harness-module-ready-p 'perms))
   (should (rassq #'harness-perms--dir-request (gethash 'permission/decide harness--filters)))
-  (should (= 6 (length (gethash 'permission/decide harness--filters)))))
+  (should (= 7 (length (gethash 'permission/decide harness--filters)))))
+
+;;;; Commands the sandbox makes destructive
+
+(defvar harness-sandbox-policy)
+
+(defun harness-perms-test--bash (command)
+  "Return the permission request of a bash call running COMMAND."
+  (list :session harness-perms-test--session :tool "bash" :kind 'exec
+        :input (list :command command) :paths (list (plist-get harness-perms-test--session :cwd))
+        :call-id (harness-short-id)))
+
+(ert-deftest harness-perms-sandbox-guard-is-final ()
+  "What the sandbox refuses is denied in every mode; the rest goes on."
+  (let ((s (harness-perms-test--setup :permission-mode 'yolo :worktree "/repo/.worktrees/own/"))
+        (seen nil))
+    (harness-register-method 'sandbox/check-command
+                             (lambda (cwd command &optional own)
+                               (push (list cwd command own) seen)
+                               (when (string-match-p "prune" command)
+                                 (list :reason "refused: use worktree/prune" :hint "never prune"))))
+    (let ((d (harness-perms-test--decide (harness-perms-test--bash "git worktree prune"))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (plist-get d :final))
+      (should (equal "refused: use worktree/prune" (plist-get d :reason)))
+      (should (equal "never prune" (plist-get d :hint))))
+    ;; The sandbox learns where the command runs and the session's worktree.
+    (should (equal (list (plist-get s :cwd) "git worktree prune" "/repo/.worktrees/own/") (car seen)))
+    ;; A standing rule allowing bash does not help either.
+    (harness-perms-add-rule "s1" '(:tool "bash" :behavior allow) 'session)
+    (should (eq 'deny (plist-get (harness-perms-test--decide (harness-perms-test--bash "git worktree prune")) :behavior)))
+    ;; Other commands go on: yolo allows them.
+    (should (eq 'allow (plist-get (harness-perms-test--decide (harness-perms-test--bash "git status")) :behavior)))
+    ;; Calls that run no shell command are not looked at.
+    (setq seen nil)
+    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "f" (plist-get s :cwd)))))
+    (should-not seen)
+    ;; A guard that fails lets the chain decide.
+    (harness-register-method 'sandbox/check-command (lambda (&rest _) (error "Broken")))
+    (should (eq 'allow (plist-get (harness-perms-test--decide (harness-perms-test--bash "git status")) :behavior)))))
+
+(ert-deftest harness-perms-sandbox-guard-end-to-end ()
+  "In a sandbox, the bash tool never runs the cleanup that unregistered every worktree."
+  (harness-perms-test--setup :permission-mode 'yolo)
+  (harness-test-load-module 'sandbox)
+  (harness-test-load-module 'tools-shell)
+  (unwind-protect
+      (let ((harness-sandbox-policy 'preferred)
+            (ran nil))
+        (cl-letf (((symbol-function 'executable-find)
+                   (lambda (name &optional _remote) (and (equal name "bwrap") "/usr/bin/bwrap"))))
+          (harness-sandbox-detect))
+        (cl-letf (((symbol-function 'harness-run-command) (lambda (&rest _) (setq ran t) (harness-resolved nil))))
+          (let ((r (harness-test-await
+                    (harness-call 'tools/execute "s1"
+                                  (list :id "c1" :name "bash"
+                                        :input (list :command "git worktree remove --force .test-logs/base && git worktree prune"))))))
+            (should (plist-get r :is-error))
+            (should (plist-get r :denied))
+            (should (string-match-p "\\`Denied: `git worktree prune` is refused in the sandbox" (plist-get r :content)))
+            (should (string-match-p "worktree/prune" (plist-get r :content)))))
+        (should-not ran))
+    (harness-sandbox-detect)))
 
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here
