@@ -56,8 +56,10 @@
       (should (string-search "past the end" (plist-get r :content))))
     ;; Absolute paths work too, and the title shows the range.
     (should-not (plist-get (harness-tools-fs-test--call "read_file" :path (expand-file-name "a.txt" root)) :is-error))
-    (should (equal "read_file src/x.el:10-40" (harness-tool-title "read_file" '(:path "src/x.el" :offset 10 :limit 31))))
-    (should (equal "read_file src/x.el" (harness-tool-title "read_file" '(:path "src/x.el"))))))
+    (should (equal "Read file: src/x.el:10-40" (harness-tool-title "read_file" '(:path "src/x.el" :offset 10 :limit 31))))
+    (should (equal "Read file: src/x.el" (harness-tool-title "read_file" '(:path "src/x.el"))))
+    ;; Without a path the call is about nothing yet: the label alone.
+    (should (equal "Read file" (harness-tool-title "read_file" nil)))))
 
 (ert-deftest harness-tools-fs-read-file-refusals-and-images ()
   (harness-tools-fs-test--setup)
@@ -135,7 +137,7 @@
         (kill-buffer buf)))
     (should (string-search "Overwrote" (plist-get (harness-tools-fs-test--call "write_file" :path "sub/dir/new.txt" :content "x") :content)))
     (should (plist-get (harness-tools-fs-test--call "write_file" :path "sub") :is-error))
-    (should (equal "write_file a.txt (3 bytes)" (harness-tool-title "write_file" '(:path "a.txt" :content "abc"))))))
+    (should (equal "Write file: a.txt (3 bytes)" (harness-tool-title "write_file" '(:path "a.txt" :content "abc"))))))
 
 (ert-deftest harness-tools-fs-edit-file-success-and-failure-modes ()
   (harness-tools-fs-test--setup)
@@ -224,7 +226,7 @@
     (let ((harness-tools-fs-glob-limit 2))
       (should (string-search "showing 2" (plist-get (harness-tools-fs-test--call "glob" :pattern "**/*.el") :content))))
     (should (plist-get (harness-tools-fs-test--call "glob" :pattern "*" :path "nope") :is-error))
-    (should (equal "glob **/*.el in src" (harness-tool-title "glob" '(:pattern "**/*.el" :path "src"))))))
+    (should (equal "Find files: **/*.el in src" (harness-tool-title "glob" '(:pattern "**/*.el" :path "src"))))))
 
 (ert-deftest harness-tools-fs-glob-regexp ()
   (harness-tools-fs-test--setup)

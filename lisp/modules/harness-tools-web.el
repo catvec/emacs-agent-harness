@@ -237,13 +237,14 @@ have passed since it was last asked."
                                      (harness-error-message err)))))))))
 
 (harness-define-tool "web_search"
+  :label "Web search"
   :description "Search the web. Returns a numbered list of results with title, URL and snippet; use web_fetch to read a result."
   :schema '(:type "object"
             :properties (:query (:type "string" :description "The search query")
                          :count (:type "integer" :description "Number of results, 1-20. Default 5"))
             :required ("query"))
   :kind 'net
-  :title (lambda (input) (format "web_search %s" (harness-truncate-end (plist-get input :query) 60)))
+  :subject (lambda (input) (harness-first-line (plist-get input :query) 60))
   :handler #'harness-tools-web--search)
 
 ;;;; The model provider's own search
@@ -339,17 +340,18 @@ filter on `agent/builtin-tools' (see `tools/builtin')."
                  :meta (list :status status :chars total :html html)))))))))))))
 
 (harness-define-tool "web_fetch"
+  :label "Fetch page"
   :description "Fetch a URL and return its content as plain text (HTML is rendered, scripts and styles dropped). Long pages are cut at max_chars (default 20000)."
   :schema '(:type "object"
             :properties (:url (:type "string" :description "The http(s) URL to fetch")
                          :max_chars (:type "integer" :description "Maximum characters of text to return. Default 20000"))
             :required ("url"))
   :kind 'net
-  :title (lambda (input) (format "web_fetch %s" (harness-truncate-middle (plist-get input :url) 70)))
+  :subject (lambda (input) (harness-truncate-middle (or (plist-get input :url) "") 70))
   :handler #'harness-tools-web--fetch)
 
 (harness-define-module 'tools-web
-  :doc "web_search (pluggable providers, Brave built in; else the model provider's own search) and web_fetch (shr rendering)."
+  :doc "Web search (pluggable providers, Brave built in; else the model provider's own search) and Fetch page (rendered with shr)."
   :requires '(tools)
   :init #'harness-tools-web--init)
 

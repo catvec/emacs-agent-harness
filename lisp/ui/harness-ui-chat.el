@@ -624,7 +624,7 @@ of an ask_user) are left out."
          (call-only (equal (harness-chat--str (plist-get node :kind)) "tool-call"))
          (result (if call-only (harness-chat-block-result block) node))
          (title (if call-only
-                    (or (plist-get node :title) (plist-get node :tool) "tool")
+                    (harness-ui-tool-title (plist-get node :tool) (plist-get node :title))
                   "result of an earlier tool call"))
          (input (and call-only (plist-get node :input)))
          (output (or (plist-get result :output) ""))
@@ -637,7 +637,9 @@ of an ask_user) are left out."
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
                          " " (harness-ui-icon 'harness-icon-tool) " "
-                         (propertize (harness-first-line title 120) 'face 'harness-tool-title-face)
+                         (if call-only
+                             (harness-ui-tool-title-string (plist-get node :tool) (plist-get node :title) 120)
+                           (propertize title 'face 'harness-tool-title-face))
                          "  " (harness-chat--tool-status result) "\n"))
          (line (and input (harness-chat--input-summary input title)))
          (summary (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") ""))
@@ -718,7 +720,7 @@ down with it: the transcript below it and the compose box still draw."
   (let* ((gid (harness-chat-group-id group))
          (names (mapcar (lambda (nid)
                           (let ((b (gethash nid harness-chat--blocks)))
-                            (or (plist-get (harness-chat-block-node b) :tool) "tool")))
+                            (harness-ui-tool-label (plist-get (harness-chat-block-node b) :tool))))
                         (harness-chat-group-members group)))
          (counts nil))
     (dolist (n names)
@@ -1372,7 +1374,7 @@ offers are shown, so an agent's own directory request has no
   (let ((pid (plist-get r :id))
         (start (point)))
     (insert (propertize (concat " " (harness-ui-icon 'harness-icon-blocked) " Permission  ") 'face 'harness-label-face)
-            (propertize (or (plist-get r :title) "tool call") 'face 'harness-tool-title-face)
+            (harness-ui-tool-title-string (plist-get r :tool) (plist-get r :title))
             "\n")
     (let ((facts (delq nil (list (and (plist-get r :tool-kind) (format "kind: %s" (plist-get r :tool-kind)))
                                  (and (plist-get r :paths)
@@ -1730,7 +1732,9 @@ end afterwards."
       (harness-chat--fetch-session #'harness-compose-fetch-completions))
     (harness-chat--fetch-activity)
     (harness-then
-     (harness-all (list (harness-ui-request "_harness/tools/list" (list :session-id sid))
+     ;; Every tool, not just the session's: its transcript may hold calls
+     ;; of tools it no longer has, and they too go by their labels.
+     (harness-all (list (harness-ui-fetch-tools)
                         (harness-ui-request "_harness/session/nodes"
                                             (list :id sid :opts (list :limit harness-chat-history-limit)))))
      (lambda (results)
@@ -1738,9 +1742,11 @@ end afterwards."
          (with-current-buffer buf
            (when (= gen harness-chat--generation)
              (setq harness-chat--coalescable
-                   (delq nil (mapcar (lambda (tool) (and (harness-json-true-p (plist-get tool :coalescable))
-                                                         (plist-get tool :name)))
-                                     (car results))))
+                   (let (names)
+                     (maphash (lambda (name spec)
+                                (when (harness-json-true-p (plist-get spec :coalescable)) (push name names)))
+                              (car results))
+                     names))
              (let ((nodes (cadr results))
                    (anchors (harness-chat--window-anchors))
                    (offset (and (harness-compose-in-p) (- (point) harness-compose-start))))
@@ -1940,7 +1946,9 @@ The text ends in an ellipsis.  Without an activity, as from a harness
 that does not report one, it is \"Working\"."
   (let* ((tool (plist-get activity :tool))
          (count (plist-get activity :count))
-         (call (concat (or (plist-get activity :title) tool "a tool")
+         (call (concat (if (or tool (plist-get activity :title))
+                           (harness-ui-tool-title tool (plist-get activity :title))
+                         "a tool")
                        (if (and (numberp count) (> count 1)) (format " and %d more" (1- count)) ""))))
     (concat
      (pcase (plist-get activity :phase)
@@ -1948,7 +1956,7 @@ that does not report one, it is \"Working\"."
        ("thinking" "Thinking")
        ("writing" "Writing")
        ("compacting" "Compacting the conversation")
-       ("tool-input" (concat "Preparing " (or tool "a tool call")))
+       ("tool-input" (concat "Preparing " (if tool (harness-ui-tool-label tool) "a tool call")))
        ("tool" (if (harness-json-true-p (plist-get activity :checking))
                    (concat "Checking permission for " call)
                  (concat "Running " call)))
@@ -1956,8 +1964,9 @@ that does not report one, it is \"Working\"."
      "\N{U+2026}")))
 
 (defun harness-chat--activity-label (activity)
-  "Return a word or two for ACTIVITY, for the mode line: \"thinking\", \"bash\"."
-  (let ((tool (or (plist-get activity :tool) "a call")))
+  "Return a word or two for ACTIVITY, for the mode line: \"thinking\", \"Bash\".
+A tool goes by its label."
+  (let ((tool (if (plist-get activity :tool) (harness-ui-tool-label (plist-get activity :tool)) "a call")))
     (pcase (plist-get activity :phase)
       ("tool-input" (concat "preparing " tool))
       ("tool" (if (harness-json-true-p (plist-get activity :checking)) (concat "checking " tool) tool))

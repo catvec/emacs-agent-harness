@@ -50,7 +50,7 @@
                              (plist-get (harness-tools-shell-test--call "bash" :command "pwd -P" :cwd "sub") :content)))
     (should (plist-get (harness-tools-shell-test--call "bash" :command "pwd" :cwd "nope") :is-error))
     (should (plist-get (harness-tools-shell-test--call "bash" :command "") :is-error))
-    (should (equal "bash echo hi" (harness-tool-title "bash" '(:command "echo hi\nsecond"))))
+    (should (equal "Bash: echo hi" (harness-tool-title "bash" '(:command "echo hi\nsecond"))))
     (should (eq 'exec (harness-tool-kind (harness-tool-get "bash"))))
     (should (equal '("sub") (funcall (harness-tool-paths-fn (harness-tool-get "bash")) '(:command "x" :cwd "sub"))))
     (should (equal '(".") (funcall (harness-tool-paths-fn (harness-tool-get "bash")) '(:command "x"))))))
@@ -146,7 +146,7 @@
     (let ((harness-elisp-max-value-chars 20))
       (should (<= (length (plist-get (harness-tools-shell-test--call "elisp" :code "(make-string 500 ?x)") :content)) 24)))
     (should (eq 'exec (harness-tool-kind (harness-tool-get "elisp"))))
-    (should (equal "elisp (+ 1 2)" (harness-tool-title "elisp" '(:code "(+ 1 2)\n(more)"))))))
+    (should (equal "Emacs Lisp: (+ 1 2)" (harness-tool-title "elisp" '(:code "(+ 1 2)\n(more)"))))))
 
 (ert-deftest harness-tools-shell-elisp-errors ()
   (harness-tools-shell-test--setup)

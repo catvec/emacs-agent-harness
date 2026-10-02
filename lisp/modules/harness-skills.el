@@ -343,6 +343,7 @@ when no such skill exists."
                       " Use skill_search to list the available skills.")))))))))
 
 (harness-define-tool "skill_search"
+  :label "Search skills"
   :description "Search the installed skills (reusable instructions for specific tasks) by name and description. Returns matching skill names with a one-line summary; load one with skill_load before following it."
   :schema '(:type "object"
             :properties (:query (:type "string"
@@ -350,17 +351,18 @@ when no such skill exists."
             :required ("query"))
   :kind 'read
   :coalescable t
-  :title (lambda (input) (format "skill_search %s" (or (plist-get input :query) "")))
+  :subject (lambda (input) (plist-get input :query))
   :handler #'harness-skills--tool-search)
 
 (harness-define-tool "skill_load"
+  :label "Load skill"
   :description "Load a skill by name and return its full instructions and the list of its supporting files. Always load a skill before relying on it."
   :schema '(:type "object"
             :properties (:name (:type "string" :description "The skill name as listed by skill_search."))
             :required ("name"))
   :kind 'read
   :coalescable t
-  :title (lambda (input) (format "skill_load %s" (or (plist-get input :name) "")))
+  :subject (lambda (input) (plist-get input :name))
   :handler #'harness-skills--tool-load)
 
 ;;;; System prompt

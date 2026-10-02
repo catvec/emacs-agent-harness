@@ -378,10 +378,11 @@ Verify and close the conflicted merge of the session in CTX."
                     (harness-tool-ok (format "Merge into %s completed; the parent session continues." parent-cwd))))))))))))))
 
 (harness-define-tool "merge_done"
+  :label "Finish merge"
   :description "Call after resolving a merge conflict the merge queue handed to you: verifies the parent repository has no unmerged paths and that the merge is committed, then releases the parent session."
   :schema '(:type "object" :properties :empty)
   :kind 'meta
-  :title (lambda (_input) "merge_done")
+  :subject #'ignore
   :handler #'harness-merge--done)
 
 ;;;; Registration

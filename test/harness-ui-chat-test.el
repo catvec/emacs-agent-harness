@@ -40,13 +40,14 @@
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       (dolist (name '("list_dir" "read_file" "glob" "grep"))
-         (harness-define-tool name :description name :kind 'read :coalescable t
-                              :title (let ((n name)) (lambda (input) (format "%s %s" n (or (plist-get input :path) (plist-get input :pattern) ""))))
-                              :handler (let ((n name)) (lambda (input _ctx) (format "%s of %s" n (plist-get input :path))))))
-       (harness-define-tool "bash" :description "bash" :kind 'exec
+       (pcase-dolist (`(,name . ,label) '(("list_dir" . "List directory") ("read_file" . "Read file")
+                                          ("glob" . "Find files") ("grep" . "Search files")))
+         (harness-define-tool name :label label :description name :kind 'read :coalescable t
+                              :subject (lambda (input) (or (plist-get input :path) (plist-get input :pattern)))
+                              :handler (lambda (input _ctx) (format "%s of %s" name (plist-get input :path)))))
+       (harness-define-tool "bash" :label "Bash" :description "bash" :kind 'exec
                             :handler (lambda (input _ctx) (format "ran %s" (plist-get input :command))))
-       (harness-define-tool "ask_user" :description "ask" :kind 'meta
+       (harness-define-tool "ask_user" :label "Question" :description "ask" :kind 'meta
                             :handler (lambda (input _ctx) (format "answer to %s: red" (plist-get input :question))))
        (harness-test-load-module 'ui)
        (harness-test-load-module 'ui-chat)
@@ -159,10 +160,18 @@
         (let ((tools (harness-ui-chat-test-blocks buf "tool-call")))
           (should (= 1 (length tools)))
           (should (harness-chat-block-result (car tools)))
-          (should (string-match-p "list_dir" (plist-get (harness-chat-block-node (car tools)) :title)))
+          ;; Titled with the tool's label, which the header shows in place of its name.
+          (should (string-prefix-p "List directory: " (plist-get (harness-chat-block-node (car tools)) :title)))
           (should-not (harness-ui-chat-test-blocks buf "tool-result"))
-          (let ((title-pos (harness-ui-chat-test-find buf "list_dir")))
-            (should (harness-ui-chat-test-face-at (1- title-pos) 'harness-tool-face)))
+          (let ((title-pos (harness-ui-chat-test-find buf "List directory")))
+            (should (harness-ui-chat-test-face-at (1- title-pos) 'harness-tool-face))
+            (should (harness-ui-chat-test-face-at (1- title-pos) 'harness-tool-title-face))
+            ;; What the call is about follows, in a face of its own.
+            (should (harness-ui-chat-test-face-at (1+ title-pos) 'harness-tool-subject-face))
+            (let ((header (save-excursion (goto-char title-pos)
+                                          (buffer-substring-no-properties (line-beginning-position) (line-end-position)))))
+              (should (string-match-p "List directory /" header))
+              (should-not (string-match-p "list_dir" header))))
           (should (harness-ui-chat-test-find buf "✓"))
           (let ((out (harness-ui-chat-test-find buf "list_dir of")))
             (should out)
@@ -396,16 +405,25 @@ the header follows, and the transcript notes each change."
         (should (shows "Waiting for the model"))
         (activity :phase "thinking" :since (- (float-time) 75))
         (should (shows "Thinking.* 1m15s"))
+        ;; Tools go by their labels.
+        (activity :phase "tool-input" :tool "bash" :chars 4200 :since (float-time))
+        (should (shows "Preparing Bash.*4\\.2k chars"))
+        (with-current-buffer buf
+          (should (string-match-p "running.* preparing Bash" (harness-chat--mode-line))))
+        ;; One the harness does not know goes by its name.
         (activity :phase "tool-input" :tool "write_file" :chars 4200 :since (float-time))
         (should (shows "Preparing write_file.*4\\.2k chars"))
-        (activity :phase "tool" :tool "bash" :title "bash npm test" :checking t :since (float-time))
-        (should (shows "Checking permission for bash npm test"))
-        (activity :phase "tool" :tool "bash" :title "bash npm test" :detail "PASS b.test" :since (float-time))
-        (should (shows "Running bash npm test.*PASS b\\.test"))
+        (activity :phase "tool" :tool "bash" :title "Bash: npm test" :checking t :since (float-time))
+        (should (shows "Checking permission for Bash: npm test"))
+        (activity :phase "tool" :tool "bash" :title "Bash: npm test" :detail "PASS b.test" :since (float-time))
+        (should (shows "Running Bash: npm test.*PASS b\\.test"))
         (with-current-buffer buf
-          (should (string-match-p "running.* bash" (harness-chat--mode-line))))
-        (activity :phase "tool" :tool "bash" :title "bash npm test" :count 3 :since (float-time))
-        (should (shows "Running bash npm test and 2 more"))
+          (should (string-match-p "running.* Bash" (harness-chat--mode-line))))
+        (activity :phase "tool" :tool "bash" :title "Bash: npm test" :count 3 :since (float-time))
+        (should (shows "Running Bash: npm test and 2 more"))
+        ;; A title from before tools had labels names the tool by its label too.
+        (activity :phase "tool" :tool "bash" :title "bash npm test" :since (float-time))
+        (should (shows "Running Bash: npm test"))
         ;; One line and a blank one, under the last block and above the
         ;; box, wherever blocks and the tail are drawn.
         (should (string-match-p "\\`[^\n]+\n\n\\'" (line)))
@@ -459,7 +477,7 @@ the message is complete."
            (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_GATE=" gate) process-environment)))
       (harness-test-load-module 'provider-claude)
       (setq harness-provider-claude-program (harness-test-fixture "fake-claude.py"))
-      (harness-define-tool "echo" :description "echo" :kind 'read
+      (harness-define-tool "echo" :label "Echo" :description "echo" :kind 'read
                            :handler (lambda (input _ctx) (format "echo: %s" (plist-get input :text))))
       (unwind-protect
           (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
@@ -474,7 +492,7 @@ the message is complete."
               (with-current-buffer buf (harness-chat-send))
               (wait-line "Waiting for the model" "waiting before the first event")
               (open 1)
-              (wait-line "Preparing echo.* 8 chars" "the tool input streaming")
+              (wait-line "Preparing Echo.* 8 chars" "the tool input streaming")
               (open 2)
               ;; The call ran, and the model thinks without a word.
               (wait-line "Thinking" "thinking")
@@ -521,7 +539,9 @@ The call and its result appear as any tool call's would."
             (harness-ui-chat-test-prompt buf "search the web")
             (let ((calls (harness-ui-chat-test-blocks buf "tool-call")))
               (should (= 1 (length calls)))
-              (should (harness-ui-chat-test-find buf "web_search emacs")))
+              ;; Named by web_search's label, as the harness's own search would be.
+              (should (equal "Web search: emacs" (plist-get (harness-chat-block-node (car calls)) :title)))
+              (should (harness-ui-chat-test-find buf "Web search emacs")))
             (should (harness-ui-chat-test-find buf "Web search results for query"))
             (should (harness-ui-chat-test-find buf "hello"))
             (when (getenv "HARNESS_SHOW_CHAT")
@@ -612,7 +632,7 @@ It is never added to the running turn."
                                      (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
                                                        (harness-call 'session/nodes sid))))))
       ;; The turn waits in this tool until the test lets it go.
-      (harness-define-tool "hold" :description "hold" :kind 'read
+      (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
                            :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
       (harness-ui-chat-test-type buf "go")
       (with-current-buffer buf (harness-chat-send))
@@ -647,7 +667,7 @@ It is never added to the running turn."
            (answers nil)
            (respond (lambda (r) (push r answers)))
            (params (list :sessionId sid
-                         :toolCall (list :toolCallId "c1" :title "bash ls -la" :kind "execute"
+                         :toolCall (list :toolCallId "c1" :title "Bash: ls -la" :kind "execute"
                                          :rawInput '(:command "ls -la"))
                          :options harness-acp--permission-options
                          :_harness (list :pendingId "p1" :tool "bash" :paths '("/tmp") :reason "exec asks"))))
@@ -656,7 +676,11 @@ It is never added to the running turn."
       (should (harness-chat--on-permission params respond))
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "Permission"))
-        (should (harness-ui-chat-test-find buf "bash ls -la"))
+        ;; The tool's label, set apart from what the call is about by its face.
+        (let ((pos (harness-ui-chat-test-find buf "Bash ls -la")))
+          (should pos)
+          (should (harness-ui-chat-test-face-at (- pos (length "Bash ls -la")) 'harness-tool-title-face))
+          (should (harness-ui-chat-test-face-at (1- pos) 'harness-tool-subject-face)))
         (should (harness-ui-chat-test-find buf "kind: execute"))
         (should (harness-ui-chat-test-find buf "/tmp"))
         (should (harness-ui-chat-test-find buf "exec asks"))
@@ -688,7 +712,7 @@ It is never added to the running turn."
                                          :rawInput '(:path "~/notes/todo.org"))
                          :options harness-acp--dir-permission-options
                          :_harness (list :pendingId "d1" :tool "read_file" :dir "/home/u/notes/"
-                                         :reason "read_file wants ~/notes/todo.org, which is outside the allowed directories"))))
+                                         :reason "Read file wants ~/notes/todo.org, which is outside the allowed directories"))))
       (should (harness-chat--on-permission params (lambda (r) (push r answers))))
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "Access ~/notes/"))
@@ -755,12 +779,12 @@ It is never added to the running turn."
                                (lambda (session-id pending-id answer)
                                  (push (list session-id pending-id answer) recorded) answer))
       (harness-call 'session/pending-add sid (list :id "pre" :kind 'permission
-                                                   :payload (list :tool "bash" :title "bash echo" :kind 'exec
+                                                   :payload (list :tool "bash" :title "Bash: echo" :kind 'exec
                                                                   :input '(:command "echo"))))
       (let ((buf (harness-ui-chat-test-open sid)))
         (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
         (with-current-buffer buf
-          (should (harness-ui-chat-test-find buf "bash echo"))
+          (should (harness-ui-chat-test-find buf "Bash echo"))
           (goto-char (1- (harness-ui-chat-test-find buf "[Always allow]")))
           (harness-chat-push))
         (harness-test-wait (lambda () recorded) 5 "answered through the method")
@@ -820,12 +844,13 @@ It is never added to the running turn."
         (should-not (member "bash" harness-chat--coalescable))
         (should (= 1 (hash-table-count harness-chat--groups)))
         (let* ((group (car (hash-table-values harness-chat--groups)))
-               (summary (harness-ui-chat-test-find buf "5 tool calls: read_file ×3, grep, glob"))
+               ;; Tools are counted by their labels.
+               (summary (harness-ui-chat-test-find buf "5 tool calls: Read file ×3, Search files, Find files"))
                (first (gethash (car (harness-chat-group-members group)) harness-chat--blocks)))
           (should summary)
           (should (= 5 (length (harness-chat-group-members group))))
           (should (invisible-p (harness-chat-block-start first)))
-          (should (invisible-p (harness-ui-chat-test-find buf "read_file c.el")))
+          (should (invisible-p (harness-ui-chat-test-find buf "Read file c.el")))
           ;; The hidden stretch starts on a plain newline: one starting on
           ;; the first member's fold icon would still draw that icon.
           (let ((ov (harness-chat-group-overlay group)))
@@ -857,7 +882,7 @@ It is never added to the running turn."
         (harness-chat-redraw)
         (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn")
         (should (= 1 (hash-table-count harness-chat--groups)))
-        (should (harness-ui-chat-test-find buf "5 tool calls: read_file ×3, grep, glob"))))))
+        (should (harness-ui-chat-test-find buf "5 tool calls: Read file ×3, Search files, Find files"))))))
 
 ;;;; History
 
@@ -1296,13 +1321,13 @@ It is never added to the running turn."
 
 (ert-deftest harness-ui-chat-summary-skips-title-values ()
   ;; The summary line leaves out what the title already shows.
-  (should-not (harness-chat--input-summary '(:command "ls -la") "bash ls -la"))
-  (should (equal (harness-chat--input-summary '(:pattern "defun" :glob "*.el") "grep defun in .")
+  (should-not (harness-chat--input-summary '(:command "ls -la") "Bash: ls -la"))
+  (should (equal (harness-chat--input-summary '(:pattern "defun" :glob "*.el") "Search files: defun in .")
                  "glob: *.el"))
-  (should (equal (harness-chat--input-summary '(:question "Which?" :options ("A" "B")) "ask_user Which?")
+  (should (equal (harness-chat--input-summary '(:question "Which?" :options ("A" "B")) "Question: Which?")
                  "options: A, B"))
   (let ((long "/home/someone/projects/a-rather-long-directory-name/sub"))
-    (should-not (harness-chat--input-summary (list :path long) (concat "glob *.el in " long "/"))))
+    (should-not (harness-chat--input-summary (list :path long) (concat "Find files: *.el in " long "/"))))
   (should (equal (harness-chat--input-summary '(:path "a.el")) "path: a.el")))
 
 (ert-deftest harness-ui-chat-reopens-shown-sessions-on-connect ()

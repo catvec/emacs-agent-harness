@@ -92,6 +92,7 @@ The waiting ask_user call returns \"The user dismissed the question\"."
                     (harness-call 'session/pending session-id)))
 
 (harness-define-tool "ask_user"
+  :label "Question"
   :description "Ask the user a question and wait for the answer. Use it when only the user can decide (ambiguous requirements, destructive choices, credentials). Offer options when there is a small set of sensible answers; the user may also type a free-form answer unless allow_free_text is false."
   :schema '(:type "object"
             :properties (:question (:type "string" :description "The question to ask.")
@@ -102,7 +103,7 @@ The waiting ask_user call returns \"The user dismissed the question\"."
             :required ("question"))
   :kind 'meta
   :timeout 86400
-  :title (lambda (input) (format "ask_user %s" (harness-truncate-end (harness-first-line (or (plist-get input :question) "")) 60)))
+  :subject (lambda (input) (harness-first-line (plist-get input :question) 60))
   :handler #'harness-tools-agent--ask-user)
 
 ;;;; Plan
@@ -134,14 +135,15 @@ Keep the plan short and concrete; update the todo list (todo_write) as steps com
     (harness-tool-ok "Plan recorded. Proceed when the user agrees or continue if they asked you to just do it.")))
 
 (harness-define-tool "plan"
+  :label "Plan"
   :description "Record a plan for a complex task before starting it: approach, steps, verification, and how the work is split (forks, sub-agents, worktrees, merges). The plan is shown to the user."
   :schema '(:type "object"
             :properties (:plan (:type "string" :description "The plan in markdown.")
                          :title (:type "string" :description "Optional short title."))
             :required ("plan"))
   :kind 'meta
-  :title (lambda (input) (format "plan %s" (or (plist-get input :title)
-                                               (harness-truncate-end (harness-first-line (or (plist-get input :plan) "")) 60))))
+  :subject (lambda (input) (let ((title (plist-get input :title)))
+                             (if (harness-string-blank-p title) (harness-first-line (plist-get input :plan) 60) title)))
   :handler #'harness-tools-agent--plan)
 
 ;;;; Todos
@@ -190,6 +192,7 @@ Replace the todos of the session in CTX with those in INPUT."
     (harness-tool-ok (harness-tools-agent--render-todos todos))))
 
 (harness-define-tool "todo_write"
+  :label "Todo list"
   :description "Replace the session's todo list. Each item has id, text and status (pending, in-progress or done); plain strings are accepted as pending items. Keep exactly one item in progress at a time and mark items done as soon as they are."
   :schema '(:type "object"
             :properties (:todos (:type "array"
@@ -201,7 +204,8 @@ Replace the todos of the session in CTX with those in INPUT."
             :required ("todos"))
   :kind 'meta
   :coalescable t
-  :title (lambda (input) (format "todo_write %d items" (length (plist-get input :todos))))
+  :subject (lambda (input) (let ((n (length (plist-get input :todos))))
+                             (format "%d item%s" n (if (= n 1) "" "s"))))
   :handler #'harness-tools-agent--todo-write)
 
 ;;;; Sub-agents
@@ -303,6 +307,7 @@ Run INPUT's prompt in a child of the session in CTX."
                (signal 'harness-error (list (harness-error-message err))))))))))))
 
 (harness-define-tool "spawn_agent"
+  :label "Sub-agent"
   :description "Run a sub-agent on a prompt and return its final answer. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. The call returns when the child finishes."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "The task for the sub-agent.")
@@ -314,9 +319,9 @@ Run INPUT's prompt in a child of the session in CTX."
             :required ("prompt"))
   :kind 'meta
   :timeout 3600
-  :title (lambda (input) (format "spawn_agent%s %s" (if (harness-json-true-p (plist-get input :fork)) " (fork)" "")
-                                 (or (plist-get input :name)
-                                     (harness-truncate-end (harness-first-line (or (plist-get input :prompt) "")) 50))))
+  :subject (lambda (input) (format "%s%s"
+                                   (or (plist-get input :name) (harness-first-line (plist-get input :prompt) 50))
+                                   (if (harness-json-true-p (plist-get input :fork)) " (fork)" "")))
   :handler #'harness-tools-agent--spawn)
 
 ;;;; Session info
@@ -365,11 +370,12 @@ Run INPUT's prompt in a child of the session in CTX."
                 "none"))))))
 
 (harness-define-tool "session_info"
+  :label "Session info"
   :description "Describe the current session: id, name, model, working directory, permission mode, non-interactive mode, status, usage and related sessions."
   :schema '(:type "object" :properties :empty)
   :kind 'read
   :coalescable t
-  :title (lambda (_input) "session_info")
+  :subject #'ignore
   :handler #'harness-tools-agent--session-info)
 
 ;;;; Registration
@@ -386,7 +392,7 @@ Run INPUT's prompt in a child of the session in CTX."
 (harness-declare-event 'agent/spawned "(PARENT-ID CHILD-ID) after spawn_agent created a child session.")
 
 (harness-define-module 'tools-agent
-  :doc "ask_user, plan, todo_write, spawn_agent and session_info tools."
+  :doc "Question, Plan, Todo list, Sub-agent and Session info tools."
   :requires '(tools session agent)
   :init #'harness-tools-agent--init)
 

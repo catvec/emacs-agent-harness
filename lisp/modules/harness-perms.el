@@ -276,7 +276,7 @@ the entry kept until then."
 DECISION and NEXT continue the chain once `permission/answer' arrives."
   (harness-perms--pend-dir request next (harness-perms--dir-of bad)
                            (format "%s wants %s, which is outside the allowed directories"
-                                   (plist-get request :tool) (abbreviate-file-name bad))
+                                   (harness-tools-label (plist-get request :tool)) (abbreviate-file-name bad))
                            harness-perms-dir-options
                            :decision decision))
 
@@ -440,13 +440,14 @@ the grant itself happens in `permission/answer'.  CTX names the session."
         " Tools that take paths can use it; to run bash there, set its cwd inside it."))))))
 
 (harness-define-tool harness-perms-dir-tool
+  :label "Request access"
   :description "Ask the user for access to a directory outside the allowed directories (the working directory and the directories granted so far), for instance another repository you need to read or change. The user is always asked, in every permission mode, and either grants it to this session, grants it to every session, or denies it; the call waits for the answer. Ask for the narrowest directory that does the job and say why. If the user denies it, do not ask again. A non-interactive session cannot ask and is denied at once."
   :schema '(:type "object"
             :properties (:path (:type "string" :description "The directory, absolute or relative to the working directory.")
                          :reason (:type "string" :description "Why you need it; shown to the user."))
             :required ("path" "reason"))
   :kind 'meta
-  :title (lambda (input) (format "%s %s" harness-perms-dir-tool (or (plist-get input :path) "")))
+  :subject (lambda (input) (plist-get input :path))
   :handler #'harness-perms--dir-request-result)
 
 ;;;; Commands the sandbox makes destructive

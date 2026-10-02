@@ -19,16 +19,18 @@
 (require 'harness-client-tools)
 
 (harness-define-tool "emacs_buffers"
+  :label "List buffers"
   :description "List the live buffers in the user's Emacs: name, major mode, modified flag (M), size and visited file."
   :schema '(:type "object"
             :properties (:filter (:type "string" :description "Only buffers whose name or file matches this regexp")
                          :all (:type "boolean" :description "Include hidden buffers (names starting with a space). Default false")))
   :kind 'read
   :coalescable t
-  :title (lambda (input) (if (plist-get input :filter) (format "emacs_buffers /%s/" (plist-get input :filter)) "emacs_buffers"))
+  :subject (lambda (input) (when-let* ((filter (plist-get input :filter))) (format "/%s/" filter)))
   :handler (harness-tools-in-client "emacs_buffers"))
 
 (harness-define-tool "emacs_buffer"
+  :label "Read buffer"
   :description "Read the text of a live buffer with line numbers, optionally a range (offset is the 1-based first line, limit the number of lines)."
   :schema '(:type "object"
             :properties (:name (:type "string" :description "Buffer name, exactly as emacs_buffers lists it")
@@ -37,33 +39,36 @@
             :required ("name"))
   :kind 'read
   :coalescable t
-  :title (lambda (input)
-           (let ((o (plist-get input :offset)) (l (plist-get input :limit)))
-             (format "emacs_buffer %s%s" (plist-get input :name)
-                     (cond ((and o l) (format ":%s-%s" o (+ o l -1))) (o (format ":%s-" o)) (t "")))))
+  :subject (lambda (input)
+             (when-let* ((name (plist-get input :name)))
+               (let ((o (plist-get input :offset)) (l (plist-get input :limit)))
+                 (format "%s%s" name
+                         (cond ((and o l) (format ":%s-%s" o (+ o l -1))) (o (format ":%s-" o)) (t ""))))))
   :handler (harness-tools-in-client "emacs_buffer"))
 
 (harness-define-tool "emacs_describe"
+  :label "Describe symbol"
   :description "Describe an Emacs symbol: function signature and docstring, variable docstring and current value (truncated)."
   :schema '(:type "object"
             :properties (:symbol (:type "string" :description "The symbol name, e.g. find-file or fill-column"))
             :required ("symbol"))
   :kind 'read
   :coalescable t
-  :title (lambda (input) (format "emacs_describe %s" (plist-get input :symbol)))
+  :subject (lambda (input) (plist-get input :symbol))
   :handler (harness-tools-in-client "emacs_describe"))
 
 (harness-define-tool "emacs_messages"
+  :label "Emacs messages"
   :description "Return the last lines of the *Messages* buffer (errors, warnings and messages Emacs showed the user)."
   :schema '(:type "object"
             :properties (:count (:type "integer" :description "Number of lines. Default 50")))
   :kind 'read
   :coalescable t
-  :title (lambda (input) (format "emacs_messages %s" (or (plist-get input :count) harness-tools-emacs-messages-default)))
+  :subject (lambda (input) (format "last %s lines" (or (plist-get input :count) harness-tools-emacs-messages-default)))
   :handler (harness-tools-in-client "emacs_messages"))
 
 (harness-define-module 'tools-emacs
-  :doc "Read-only tools into the running Emacs: buffers, describe, messages."
+  :doc "List buffers, Read buffer, Describe symbol and Emacs messages: read-only tools into the running Emacs."
   :requires '(tools))
 
 (provide 'harness-tools-emacs)

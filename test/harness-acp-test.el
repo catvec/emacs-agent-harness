@@ -33,7 +33,7 @@
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       (harness-define-tool "list_dir" :description "list" :kind 'read
+       (harness-define-tool "list_dir" :label "List directory" :description "list" :kind 'read
                             :handler (lambda (input _ctx) (format "listing of %s" (plist-get input :path))))
        (unwind-protect
            (progn ,@body)
@@ -279,7 +279,9 @@
       ;; camelCase keys map onto kebab-case argument names.
       (let ((tools (harness-acp-test-request conn "_harness/tools/list" (list :sessionId sid))))
         (should (equal '("list_dir") (mapcar (lambda (tl) (plist-get tl :name)) tools)))
-        (should (equal "read" (plist-get (car tools) :kind))))
+        (should (equal "read" (plist-get (car tools) :kind)))
+        ;; With the name people read, which UIs show for it.
+        (should (equal "List directory" (plist-get (car tools) :label))))
       (let ((api (harness-acp-test-request conn "_harness/harness/api" nil)))
         (should (member "session/get" (mapcar (lambda (m) (plist-get m :name)) (plist-get api :methods))))
         (should (cl-every #'stringp (plist-get api :filters))))
@@ -305,7 +307,7 @@ Once the turn ends the message runs as a turn of its own."
            (file (make-temp-file "harness-acp-queued" nil ".txt" "x"))
            (p (progn
                 ;; The turn waits in this tool until the test lets it go.
-                (harness-define-tool "hold" :description "hold" :kind 'read
+                (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
                                      :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
                 (harness-acp-request conn "session/prompt"
                                      (list :sessionId sid :prompt (list (list :type "text" :text "tour")))))))

@@ -299,8 +299,10 @@ With CONTINUATION, draw only the lanes continuing below the row."
 (defun harness-ui-tree--excerpt (node)
   "Return a one-line excerpt of NODE."
   (pcase (harness-ui-tree--kind node)
-    ("tool-call" (or (plist-get node :title)
-                     (format "%s %s" (plist-get node :tool) (harness-first-line (format "%S" (plist-get node :input))))))
+    ("tool-call" (if (plist-get node :title)
+                     (harness-ui-tool-title (plist-get node :tool) (plist-get node :title))
+                   (format "%s: %s" (harness-ui-tool-label (plist-get node :tool))
+                           (harness-first-line (format "%S" (plist-get node :input))))))
     ("tool-result" (concat (if (harness-json-true-p (plist-get node :is-error)) "✗ " "→ ")
                            (harness-first-line (or (plist-get node :output) ""))))
     (_ (harness-first-line (or (plist-get node :content) "")))))
@@ -366,7 +368,7 @@ With CONTINUATION, draw only the lanes continuing below the row."
   "Return the full content of NODE rendered for the expanded view."
   (let ((clip (lambda (s) (harness-truncate-end (or s "") harness-ui-tree-expand-limit))))
     (pcase (harness-ui-tree--kind node)
-      ("tool-call" (concat (propertize (or (plist-get node :title) (plist-get node :tool) "") 'face 'harness-tool-title-face)
+      ("tool-call" (concat (harness-ui-tool-title-string (plist-get node :tool) (plist-get node :title))
                            "\n" (propertize (funcall clip (pp-to-string (plist-get node :input))) 'face 'harness-tool-face)))
       ("tool-result" (propertize (funcall clip (plist-get node :output))
                                  'face (if (harness-json-true-p (plist-get node :is-error)) 'harness-tool-error-face 'harness-tool-face)))
@@ -467,13 +469,16 @@ Every window showing the buffer keeps its own row too."
     (setq harness-ui-tree--loading t harness-ui-tree--error nil)
     (setq header-line-format (harness-ui-tree--header))
     (let ((sid harness-ui-tree--session-id))
-      (harness-ui-call
-       "_harness/session/tree" (list :id sid)
-       (lambda (data)
+      (harness-then
+       (harness-all (list (harness-ui-request "_harness/session/tree" (list :id sid))
+                          ;; The tools too: tool calls go by their labels.
+                          (harness-ui-fetch-tools)))
+       (lambda (results)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
-             (setq harness-ui-tree--data data
-                   harness-ui-tree--family (mapcar (lambda (s) (plist-get s :id)) (plist-get data :sessions))
+             (setq harness-ui-tree--data (car results)
+                   harness-ui-tree--family (mapcar (lambda (s) (plist-get s :id))
+                                                   (plist-get harness-ui-tree--data :sessions))
                    harness-ui-tree--loading nil)
              (let ((name (harness-ui-tree--buffer-name sid)))
                (unless (or (equal name (buffer-name)) (get-buffer name)) (rename-buffer name)))
