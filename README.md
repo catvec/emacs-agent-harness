@@ -26,6 +26,9 @@ APIs and AWS Bedrock.
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
   queue.
+- **Notifications.** A desktop notification, and a push to your phone
+  through Gotify once you set it up, when a task waits for your review
+  or is done. Agents can notify you too.
 - **Conversation management.** Fork sessions, ask side questions in
   BTW conversations, browse the conversation tree, and let long
   conversations compact automatically.
@@ -69,6 +72,8 @@ Optional dependencies:
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
 | `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
 | `ffmpeg`, `mpv` | Audio recording and playback, video thumbnails |
+| `notify-send` (libnotify), or Emacs with D-Bus support | Desktop notifications on GNU/Linux; macOS uses `osascript` |
+| A [Gotify](https://gotify.net) server | Notifications on your phone |
 
 ## Installation
 
@@ -291,6 +296,40 @@ so several tasks can work in parallel.
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
 
+### Notifications
+
+The harness tells you when a task's work waits for your review and
+when a task is done, so you can leave it working:
+
+- A desktop notification, shown by your Emacs. Clicking it opens the
+  task board on that task. It uses `notify-send` on GNU/Linux (or
+  Emacs's D-Bus support) and `osascript` on macOS; set
+  `harness-notifications-desktop-backend` to choose.
+- A push through [Gotify](https://gotify.net), for your phone, once it
+  is set up. Create an application in Gotify and give the harness its
+  address and token:
+
+  ```elisp
+  (setopt harness-gotify-url "https://push.example.com")
+  (setopt harness-gotify-token "AbCdEf123")
+  ```
+
+  The token can also come from the `GOTIFY_TOKEN` environment variable
+  (the address from `GOTIFY_URL`) or from auth-source:
+  `machine push.example.com login harness password AbCdEf123`.
+
+`M-x harness-test-notifications` (`N` in the `C-c h ?` menu) sends a
+test notification and says what each provider did with it.
+
+- `harness-notifications-providers` lists the providers used, by
+  default `(system gotify)`. One that is not set up is skipped.
+- `harness-tasks-notify-events` picks the task events that notify you:
+  `review` and `done` by default, and `needs-input` for a task that
+  asks a question or stopped part way.
+- Agents can notify you with the `notify` tool, for example when long
+  work you asked for has finished. Clicking such a notification opens
+  the session.
+
 ## Configuration
 
 `C-c h S` (`M-x harness-settings`) opens the settings page, which lists
@@ -450,9 +489,9 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `acp` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-bedrock` `provider-demo` |
-| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` |
+| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` |
 
 Further documentation:

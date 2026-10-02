@@ -175,6 +175,15 @@
   (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'accept-edits))
   (should (eq 'allow (harness-perms-test--behavior "web_search" 'net))))
 
+(ert-deftest harness-perms-notify-needs-no-approval ()
+  ;; notify only reaches the user, through the providers they set up, so
+  ;; unattended sessions can tell them they are needed.
+  (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
+  (should (member "notify" harness-perms-auto-allow-tools))
+  (should (eq 'allow (harness-perms-test--behavior "notify" 'meta)))
+  (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'auto))
+  (should (eq 'allow (harness-perms-test--behavior "notify" 'meta))))
+
 (ert-deftest harness-perms-rules-beat-auto-allow ()
   ;; web_search used to ask, so a user may have answered deny-always: the
   ;; rule must still hold now that the tool needs no approval.

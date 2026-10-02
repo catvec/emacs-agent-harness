@@ -33,6 +33,7 @@
 (require 'harness-server)
 (require 'harness-client-tools)
 (require 'harness-files)
+(require 'harness-notifications-desktop)
 
 (defvar harness-directory)
 
@@ -224,6 +225,14 @@ RESPOND with the outcome plist.")
 (defvar harness-ui-question-functions nil
   "Functions called with (PARAMS RESPOND) for `_harness/ask_user'.
 Same protocol as `harness-ui-permission-functions'.")
+
+(defvar harness-ui-notification-functions nil
+  "Functions called with (NOTIFICATION) when a desktop notification is clicked.
+NOTIFICATION is the wire plist of `_harness/client/notify': `:title',
+`:body', `:urgency', and what it is about (`:session', `:task',
+`:project', `:kind', `:source').  The first function that returns
+non-nil has shown what the notification is about; when none does, its
+session opens.")
 
 (defvar harness-ui-sessions-changed-hook nil
   "Hook run after the session cache changes.")
@@ -430,6 +439,10 @@ tasks among them carry on once the process is back (see
        (error (harness-acp-respond-error respond -32000 (error-message-string err)))))
     ("_harness/client/tool"
      (funcall respond (harness-client-tools-run (plist-get params :name) (plist-get params :input))))
+    ("_harness/client/notify"
+     (harness-then (harness-ui--show-notification params)
+                   (lambda (shown) (funcall respond shown) nil)
+                   (lambda (err) (harness-acp-respond-error respond -32000 (harness-error-message err)) nil)))
     ("_harness/event"
      (let ((event (plist-get params :event)) (args (plist-get params :args)))
        (when (equal event "tools/file-written")
@@ -462,6 +475,62 @@ as needing input and its chat panel or task card answers it later."
 (defun harness-ui--default-question (params respond)
   "Fallback when no UI module claimed question PARAMS: leave it pending."
   (harness-ui--leave-pending params respond "question"))
+
+;;;; Desktop notifications
+
+(defun harness-ui--show-notification (params)
+  "Show the notification PARAMS of `_harness/client/notify' on this desktop.
+Return a promise of (:backend NAME) once it shows.  One about a session
+or a task opens it when clicked (`harness-ui--notification-clicked')."
+  (harness-then
+   (harness-notifications-desktop-notify
+    :title (plist-get params :title)
+    :body (plist-get params :body)
+    :urgency (plist-get params :urgency)
+    :on-action (and (or (plist-get params :session) (plist-get params :task))
+                    (lambda ()
+                      ;; Out of the process filter or D-Bus handler first.
+                      (harness-run-soon #'harness-ui--notification-clicked params))))
+   (lambda (shown)
+     (list :backend (format "%s" (plist-get shown :backend))))))
+
+(defun harness-ui--notification-clicked (params)
+  "Show what the clicked notification PARAMS is about.
+`harness-ui-notification-functions' come first (the task board opens
+on a task); otherwise the notification's session opens.  The frame it
+opens in comes to the front, as the user just asked for it."
+  (let ((frame (if (display-graphic-p (selected-frame))
+                   (selected-frame)
+                 (cl-find-if #'display-graphic-p (frame-list)))))
+    (when (and frame (frame-live-p frame))
+      (harness-ignore-errors-logged "showing the frame for a notification"
+        (select-frame-set-input-focus frame))))
+  (unless (run-hook-with-args-until-success 'harness-ui-notification-functions params)
+    (when-let* ((sid (plist-get params :session)))
+      (harness-ui-display-session sid))))
+
+(defun harness-ui--notification-summary (result)
+  "Describe RESULT, what `notification/send' returned, in one line."
+  (if (harness-json-true-p (plist-get result :dropped))
+      "dropped by a notification/before-send filter"
+    (let ((parts (mapcar (lambda (r)
+                           (format "%s %s%s" (plist-get r :provider) (plist-get r :status)
+                                   (let ((why (or (plist-get r :detail) (plist-get r :error))))
+                                     (if why (format " (%s)" why) ""))))
+                         (plist-get result :results))))
+      (if parts (string-join parts "; ") "no notification provider is enabled"))))
+
+;;;###autoload
+(defun harness-test-notifications ()
+  "Check the notification setup with a test notification.
+It goes to every notification provider that is set up, and the echo
+area says what each provider did with it."
+  (interactive)
+  (harness-ui-call "_harness/notification/send"
+                   (list :notification (list :title "Test notification" :source "ui" :kind "test"
+                                             :body "Notifications from the Emacs Agent Harness reach you here."))
+                   (lambda (result)
+                     (message "Harness notifications: %s" (harness-ui--notification-summary result)))))
 
 (defvar harness-process)
 
@@ -1391,6 +1460,7 @@ leaves the buffer's commands out, never the whole menu."
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
     ("c" "Connect remote" harness-connect-remote)
+    ("N" "Test notifications" harness-test-notifications)
     ("R" "Reload harness" harness-reload)
     ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes

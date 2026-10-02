@@ -96,8 +96,12 @@
 ;; are told to carry on (`harness-tasks-resume-interrupted'), a write-up
 ;; cut short is written again, and merges in flight are queued again.
 ;; Tasks in review simply wait on.  Events `task/changed' (TASK) and
-;; `task/deleted' (ID) let a UI follow, and `task/review' (TASK) tells
-;; it when a task's work waits for the user to review it.
+;; `task/deleted' (ID) let a UI follow, `task/review' (TASK) tells it
+;; when a task's work waits for the user to review it, and `task/done'
+;; (TASK HOW) when a task becomes done: HOW is `merged' (its branch
+;; merged), `finished' (its turn ended with nothing to merge or review),
+;; `verified' (the user accepted it, with nothing left to merge) or
+;; `completed' (marked done by hand).
 ;;
 ;; A board can also host BTW side conversations (`task/btw'), where the
 ;; user asks how the tasks are going.  Like every BTW, each is a new
@@ -422,6 +426,18 @@ verified the work."
 Return the task's view."
   (let ((view (apply #'harness-tasks--set id :state 'review :merge-status nil :conflicts nil plist)))
     (harness-emit 'task/review view)
+    view))
+
+(defun harness-tasks--to-done (id how &rest plist)
+  "Complete task ID with PLIST merged in; emit `task/done' if it was not done.
+HOW says what completed it: `merged' (the merge queue merged its
+branch), `finished' (its turn ended with nothing to merge or review),
+`verified' (the user accepted its work, with nothing left to merge) or
+`completed' (marked done by hand).  Return the task's view."
+  (let* ((was (plist-get (harness-tasks--get id) :state))
+         (view (apply #'harness-tasks--set id :state 'done plist)))
+    (unless (eq was 'done)
+      (harness-emit 'task/done view how))
     view))
 
 ;;;; Stores
@@ -1759,10 +1775,10 @@ task keeps the time its work finished."
       (if (eq status 'merged)
           (if (harness-tasks--needs-review-p task)
               (harness-tasks--to-review id :merged t :outcome 'merged :finished (float-time))
-            (harness-tasks--set id :state 'done :merge-status nil :conflicts nil :merged t
-                                :outcome 'merged
-                                :finished (or (and (harness-tasks--verified-p task) (plist-get task :finished))
-                                              (float-time))))
+            (harness-tasks--to-done id 'merged :merge-status nil :conflicts nil :merged t
+                                    :outcome 'merged
+                                    :finished (or (and (harness-tasks--verified-p task) (plist-get task :finished))
+                                                  (float-time))))
         ;; The merge queue steers the agent when it can fix things itself
         ;; (uncommitted changes); its next clean turn merges again.
         (if (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running child))
@@ -2189,7 +2205,7 @@ puts its write-up in the backlog."
         (harness-tasks--to-review id :outcome reason :error nil :finished (float-time)))
        ((and (plist-get task :worktree) (not (plist-get task :worktree-removed)))
         (harness-tasks--enqueue-merge id))
-       (t (harness-tasks--set id :state 'done :outcome reason :finished (float-time))))
+       (t (harness-tasks--to-done id 'finished :outcome reason :finished (float-time))))
       (harness-run-soon #'harness-tasks--schedule))))
 
 (defun harness-tasks--on-pending-changed (session-id &rest _)
@@ -2532,8 +2548,8 @@ That is the user accepting it, so it counts as verified."
   (let ((task (harness-tasks--get id)))
     (when (and (plist-get task :session) (harness-method-exists-p 'merge/cancel))
       (harness-call 'merge/cancel (plist-get task :session)))
-    (prog1 (harness-tasks--set id :state 'done :merge-status nil :finished (float-time)
-                               :verified t :verified-at (float-time))
+    (prog1 (harness-tasks--to-done id 'completed :merge-status nil :finished (float-time)
+                                   :verified t :verified-at (float-time))
       (harness-run-soon #'harness-tasks--schedule))))
 
 (harness-defmethod task/verify (id)
@@ -2549,8 +2565,8 @@ already, it is done now."
              (not (harness-tasks--merged-p task)) (harness-method-exists-p 'merge/enqueue))
         (progn (harness-tasks--set id :merge-attempts 0)
                (harness-tasks--enqueue-merge id))
-      (harness-tasks--set id :state 'done :outcome (or (plist-get task :outcome) 'end-turn)
-                          :finished (or (plist-get task :finished) (float-time))))
+      (harness-tasks--to-done id 'verified :outcome (or (plist-get task :outcome) 'end-turn)
+                              :finished (or (plist-get task :finished) (float-time))))
     (harness-run-soon #'harness-tasks--schedule)
     (harness-call 'task/get id)))
 
@@ -2669,6 +2685,7 @@ up again, merges in flight are queued again and waiting tasks start."
 (harness-declare-event 'task/changed "(TASK) after a task is submitted or changes state or column.")
 (harness-declare-event 'task/deleted "(ID) after a task is removed.")
 (harness-declare-event 'task/review "(TASK) when a task's finished work starts waiting for the user's review.")
+(harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
 
 (harness-define-module 'tasks
   :doc "Task mode: one session per task, from backlog write-up or worktree through your review to merged, with a concurrency limit."
