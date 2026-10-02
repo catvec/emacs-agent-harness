@@ -323,6 +323,12 @@ gone.
   `:persist t`.  `:context-window N` sets the session's own window, nil
   its model's again; a new `:model` drops a window set for the old one
   unless PLIST sets one too.  Event `session/updated ID CHANGES`.
+- `session/set-all SETTINGS &optional FILTER` — the same change on every
+  session FILTER selects (`session/list`'s filter plus `:except` ids);
+  returns the ids that changed, newest first.  A session already holding
+  the value is skipped, and each one changed gets the same event and hint
+  as `session/update`.  This is what `harness-set-model-all` uses to move
+  every session to another model or provider at once.
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
 - `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
   (closed: still listed and readable; the next message sent to it resumes it).

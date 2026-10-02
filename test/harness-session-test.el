@@ -43,6 +43,47 @@
 
 (defvar harness-non-interactive)
 
+(ert-deftest harness-session-set-all-switches-what-differs ()
+  "A bulk model switch touches every session not already on that model."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (a (plist-get (harness-call 'session/create :cwd cwd :model "claude:opus") :id))
+           (b (plist-get (harness-call 'session/create :cwd cwd :model "claude:sonnet") :id))
+           (c (plist-get (harness-call 'session/create :cwd cwd :model "deepseek:deepseek-flash") :id))
+           (events nil))
+      (harness-on 'session/updated (lambda (id _ch) (push id events)))
+      (let ((changed (harness-call 'session/set-all (list :model "deepseek:deepseek-flash"))))
+        (should (= 2 (length changed)))
+        (should (member a changed))
+        (should (member b changed))
+        (should-not (member c changed))
+        (should (equal "deepseek:deepseek-flash" (plist-get (harness-call 'session/get a) :model)))
+        (should (equal "deepseek:deepseek-flash" (plist-get (harness-call 'session/get b) :model)))
+        (should (= 2 (length events))))
+      ;; Asking for what every session already has changes nothing.
+      (should-not (harness-call 'session/set-all (list :model "deepseek:deepseek-flash")))
+      ;; A filter can leave sessions alone, and a second setting rides along.
+      (let ((changed (harness-call 'session/set-all (list :model "claude:opus" :thinking "high")
+                                   (list :except (list b)))))
+        (should (= 2 (length changed)))
+        (should (member a changed))
+        (should (member c changed))
+        (should-not (member b changed))
+        (should (equal "deepseek:deepseek-flash" (plist-get (harness-call 'session/get b) :model)))
+        (should (equal "high" (plist-get (harness-call 'session/get c) :thinking)))))))
+
+(ert-deftest harness-session-set-all-filters-by-project ()
+  "A bulk switch can stay inside one project."
+  (harness-session-test-with
+    (let* ((here (harness-test-temp-dir)) (there (harness-test-temp-dir))
+           (a (harness-call 'session/create :cwd here :model "claude:opus"))
+           (b (harness-call 'session/create :cwd there :model "claude:opus")))
+      (let ((changed (harness-call 'session/set-all (list :model "deepseek:deepseek-flash")
+                                   (list :project (plist-get a :project)))))
+        (should (equal (list (plist-get a :id)) changed))
+        (should (equal "deepseek:deepseek-flash" (plist-get (harness-call 'session/get (plist-get a :id)) :model)))
+        (should (equal "claude:opus" (plist-get (harness-call 'session/get (plist-get b :id)) :model)))))))
+
 (ert-deftest harness-session-non-interactive-is-its-own-switch ()
   "A session's non-interactive switch starts from the setting, unless an
 explicit false turns it off; it is stored as t or nil; a fork copies

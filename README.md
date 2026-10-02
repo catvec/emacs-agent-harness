@@ -184,6 +184,7 @@ named by `harness-server-init-file`.
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
+| `C-c h M` | `harness-set-model-all` | Choose a model and switch every session to it |
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
@@ -428,6 +429,17 @@ with the Chinese public holiday calendar.
 `bedrock:` models run on AWS Bedrock and authenticate with an AWS
 profile or a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`). See
 `harness-bedrock-endpoints` for the configuration.
+
+### Switching model or provider
+
+`C-c h m` (`harness-set-model`) chooses the model for the current
+session. `C-c h M` (`harness-set-model-all`) chooses one model and
+switches every session of every project to it, and makes it the default
+for new sessions too; with a prefix argument (`C-u C-c h M`) the default
+is left alone. Use it when a plan runs out of credit, a provider fails,
+or a cheaper model should take over work already in flight: no running
+turn is cancelled, each session records the change as a hint, and
+provider state is kept so switching back can still resume it.
 
 ### Usage and budgets
 
