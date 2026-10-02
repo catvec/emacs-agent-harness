@@ -183,6 +183,32 @@ turn `harness-tasks-require-verification' on themselves."
           (harness-call 'task/complete b)
           (should (eq 'done (harness-tasks-test-state b))))))))
 
+(ert-deftest harness-tasks-done-event-says-how ()
+  "`task/done' fires once a task becomes done, saying what completed it."
+  (harness-tasks-test-with
+    (let ((done nil))
+      (harness-on 'task/done (lambda (task how) (push (cons (plist-get task :id) how) done)))
+      ;; Its turn ended, with nothing to merge or review.
+      (let ((id (harness-tasks-test-submit "finish it")))
+        (harness-tasks-test-wait-state id 'done)
+        (should (equal (list (cons id 'finished)) done))
+        (should (eq 'done (plist-get (harness-tasks-test-task id) :column))))
+      ;; Marked done by hand, once: completing a done task again says nothing.
+      (setq done nil)
+      (let ((harness-tasks-max-running 0))
+        (let ((id (harness-tasks-test-submit "never mind")))
+          (harness-call 'task/complete id)
+          (harness-call 'task/complete id)
+          (should (equal (list (cons id 'completed)) done))))
+      ;; Verified, with nothing to merge.
+      (setq done nil)
+      (let ((harness-tasks-require-verification t))
+        (let ((id (harness-tasks-test-submit "check it")))
+          (harness-tasks-test-wait-state id 'review)
+          (should (null done))
+          (harness-call 'task/verify id)
+          (should (equal (list (cons id 'verified)) done)))))))
+
 (ert-deftest harness-tasks-message-revives-archived-task ()
   ;; Sending in an archived task's chat buffer (`agent/prompt', not
   ;; `task/prompt') resumes its session and puts the task back on the board.
@@ -387,7 +413,7 @@ A task that already waits in review waits on until the user verifies it."
 (defun harness-tasks-test--hang-tool ()
   "Define the tool `hang', whose first call never returns."
   (let ((calls 0))
-    (harness-define-tool "hang" :description "never returns the first time" :kind 'read
+    (harness-define-tool "hang" :label "Hang" :description "never returns the first time" :kind 'read
                          :handler (lambda (_input _ctx)
                                     (if (= 1 (cl-incf calls)) (harness-make-promise) "ok")))))
 
@@ -640,6 +666,53 @@ A task that already waits in review waits on until the user verifies it."
           (should (= 1 (length steers)))
           (should (string-match-p "enough looking" (plist-get (car steers) :content))))))))
 
+(defvar harness-perms-auto-model)
+
+(ert-deftest harness-tasks-write-up-only-reads ()
+  "A backlog write-up reads and does nothing else.  Its session is
+non-interactive, where the judge decides what would ask the user, but
+the write-up's own stage denies that first; once the task starts, the
+judge decides the work's calls."
+  (harness-tasks-test-with
+    (harness-test-load-module 'perms)
+    ;; The real permission chain, without this suite's allow-everything stage.
+    (dolist (stage (gethash 'permission/decide harness--filters))
+      (unless (symbolp (cdr stage)) (harness-remove-filter 'permission/decide (cdr stage))))
+    (let* ((judged nil)
+           (harness-perms-auto-model "judge:small")
+           (harness-provider-demo-script-override
+            `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn)))
+           (id (harness-tasks-test-refine "the parser chokes on nested quotes"))
+           (sid (plist-get (harness-tasks-test-task id) :session))
+           (decide (lambda (tool kind &rest paths)
+                     (harness-test-await
+                      (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                                (list :session (harness-call 'session/get sid) :tool tool :kind kind
+                                                      :input nil :paths paths :call-id (harness-short-id)))))))
+      (harness-define-provider 'judge :label "Judge"
+        :complete (lambda (req)
+                    (push req judged)
+                    (let ((cb (plist-get req :on-event)))
+                      (run-at-time 0.01 nil (lambda ()
+                                              (funcall cb '(:type text :delta "{\"decision\":\"allow\",\"reason\":\"fine\"}"))
+                                              (funcall cb '(:type done :stop-reason end-turn)))))
+                    (list :cancel #'ignore)))
+      ;; Being written up, then waiting in the backlog with that session.
+      (dolist (state '(refining pending))
+        (when (eq state 'pending) (harness-tasks-test-wait-state id 'pending))
+        (let ((d (funcall decide "bash" 'exec)))
+          (should (eq 'deny (plist-get d :behavior)))
+          (should (plist-get d :final))
+          (should (string-match-p "only reads" (plist-get d :reason)))
+          (should (equal harness-tasks--write-up-hint (plist-get d :hint))))
+        (should (eq 'allow (plist-get (funcall decide "read_file" 'read (expand-file-name "f" default-directory))
+                                      :behavior))))
+      (should-not judged)
+      ;; Started, the session does the work: the judge decides.
+      (harness-call 'task/start id)
+      (should (eq 'allow (plist-get (funcall decide "bash" 'exec) :behavior)))
+      (should judged))))
+
 (ert-deftest harness-tasks-backlog-survives-a-restart ()
   "A written-up task waits in the backlog across a restart; nothing starts it."
   (harness-tasks-test-with
@@ -803,7 +876,7 @@ commits from call `harness-tasks-test--commit-on-call' on."
              '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
                (:type text :delta "Changed it.")
                (:type done :stop-reason end-turn))))
-       (harness-define-tool "change_shared" :description "edit shared.txt" :kind 'write
+       (harness-define-tool "change_shared" :label "Change shared file" :description "edit shared.txt" :kind 'write
                             :handler (lambda (input ctx)
                                        (let ((cwd (plist-get ctx :cwd)))
                                          (cl-incf harness-tasks-test--calls)
@@ -1083,6 +1156,23 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (harness-tasks-flush)
       (should (equal (list id) (harness-tasks-test--stored-ids global)))
       (should-not (file-exists-p (file-name-directory store))))))
+
+(ert-deftest harness-tasks-store-with-non-ascii-text-is-not-written-again ()
+  ;; What a store holds is compared as text, the way it is read, so saving
+  ;; what was just read is skipped for non-ASCII text too.
+  (harness-tasks-test-with
+    (let* ((path (expand-file-name "store.json" harness-state-directory))
+           (prompt "Fix caf\N{U+E9} \N{U+2717}")
+           (obj (list :tasks (harness-json-array (list (list :id "t1" :prompt prompt)))))
+           (writes 0))
+      (harness-tasks--write-json path obj)
+      (harness-tasks--forget-stores)
+      (should (equal prompt (plist-get (car (plist-get (harness-tasks--read-json path) :tasks)) :prompt)))
+      (cl-letf* ((write (symbol-function 'harness-write-file-atomically))
+                 ((symbol-function 'harness-write-file-atomically)
+                  (lambda (&rest args) (cl-incf writes) (apply write args))))
+        (harness-tasks--write-json path obj))
+      (should (= 0 writes)))))
 
 (ert-deftest harness-tasks-leave-another-harness-store-alone ()
   "Another live harness's repository store is left alone; a gone one's taken over."
@@ -1915,6 +2005,15 @@ Each is a new session, never an earlier one."
           (should (plist-get task :verified))
           (should (eq 'merged (plist-get task :outcome))))
         (should (equal "two\n" (harness-tasks-test--main-text root)))))))
+
+(ert-deftest harness-tasks-git-done-event-when-merged ()
+  "A task the merge queue completes is done `merged', once."
+  (harness-tasks-test-with-git
+    (let ((done nil))
+      (harness-on 'task/done (lambda (task how) (push (list (plist-get task :id) how (plist-get task :merged)) done)))
+      (let ((id (harness-tasks-test-submit "Change the shared file")))
+        (harness-tasks-test-wait-state id 'done)
+        (should (equal (list (list id 'merged t)) done))))))
 
 (defun harness-tasks-test--lock-line (root path)
   "Return the `locked' line `git worktree list --porcelain' gives PATH of ROOT, or nil."

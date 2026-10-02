@@ -112,6 +112,7 @@
                                       :sandboxed (not (equal (car cmd) harness-bash-program))))))))))))))
 
 (harness-define-tool "bash"
+  :label "Bash"
   :description "Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed."
   :schema '(:type "object"
             :properties (:command (:type "string" :description "The command line to run")
@@ -121,22 +122,23 @@
   :kind 'exec
   :timeout 3700
   :paths (lambda (input) (list (or (plist-get input :cwd) ".")))
-  :title (lambda (input) (format "bash %s" (harness-truncate-end (harness-first-line (plist-get input :command)) 70)))
+  :subject (lambda (input) (harness-first-line (plist-get input :command) 70))
   :handler #'harness-tools-shell--bash)
 
 ;;;; elisp
 
 (harness-define-tool "elisp"
+  :label "Emacs Lisp"
   :description "Evaluate Emacs Lisp in the running Emacs (lexical binding). Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation. Use it to inspect or drive Emacs, or as an alternative to bash for file work."
   :schema '(:type "object"
             :properties (:code (:type "string" :description "One or more Emacs Lisp forms"))
             :required ("code"))
   :kind 'exec
-  :title (lambda (input) (format "elisp %s" (harness-truncate-end (harness-first-line (plist-get input :code)) 70)))
+  :subject (lambda (input) (harness-first-line (plist-get input :code) 70))
   :handler (harness-tools-in-client "elisp"))
 
 (harness-define-module 'tools-shell
-  :doc "bash (async, sandboxed when available) and elisp evaluation tools."
+  :doc "Bash (asynchronous, sandboxed when available) and Emacs Lisp evaluation."
   :requires '(tools))
 
 (provide 'harness-tools-shell)

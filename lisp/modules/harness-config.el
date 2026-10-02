@@ -16,9 +16,12 @@
 ;; Only `harness-config-keys' layer.  The other harness options have a
 ;; global value alone; `config/describe' lists them too, so a settings
 ;; page can show every option of the harness in one place, and
-;; `config/set' and `config/unset' change their global value.  Values
-;; cross the wire printed (see `config/describe'): JSON cannot tell a
-;; symbol from a string, nor an unset layer from one set to nil.
+;; `config/set' and `config/unset' change their global value.  Those
+;; that decide how the harness starts, and `harness-corporate-mode',
+;; are left out and refused (`harness-config-hidden-options'): only the
+;; init file sets them.  Values cross the wire printed (see
+;; `config/describe'): JSON cannot tell a symbol from a string, nor an
+;; unset layer from one set to nil.
 
 ;;; Code:
 
@@ -74,13 +77,14 @@ when available, `off' never sandboxes."
 
 (defcustom harness-non-interactive nil
   "Whether new sessions start non-interactive.
-A non-interactive session never waits for the user: what would ask for
-permission is denied instead, and the agent is told to find another
-way.  From then on each session has its own switch, which its header
-line shows and `harness-toggle-non-interactive' flips; changing this
-setting leaves the sessions that exist as they are.  Task sessions
-start non-interactive anyway while `harness-tasks-non-interactive' is
-on."
+A non-interactive session never waits for the user: the auto-mode
+judge decides what would ask them for permission, whatever the
+permission mode, and after a denial the agent is told to find another
+way.  Directories are still granted by the user only.  From then on
+each session has its own switch, which its header line shows and
+`harness-toggle-non-interactive' flips; changing this setting leaves
+the sessions that exist as they are.  Task sessions start
+non-interactive anyway while `harness-tasks-non-interactive' is on."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defcustom harness-context-reserve 20000
@@ -110,11 +114,13 @@ folder for that project, or nil to keep none there."
 (defconst harness-config-hidden-options
   '(harness-process harness-module-directories harness-enabled-modules harness-disabled-modules
     harness-state-directory harness-server-emacs harness-server-forward-variables
-    harness-server-init-file)
+    harness-server-init-file harness-corporate-mode)
   "Harness options `config/describe' leaves out, besides the `harness-acp-' ones.
 They decide how the harness starts and how its process reaches the UI,
-which a running harness cannot change under itself; set them in the
-init file.")
+which a running harness cannot change under itself, or, for
+`harness-corporate-mode', what the harness may do at all, which no
+settings page or ACP client may change.  `config/set' and `config/unset'
+refuse them: set them in the init file.")
 
 (defconst harness-config-secret-regexp "-\\(?:api-key\\|token\\|secret\\|password\\)\\'"
   "Options whose names match this hold secrets.
@@ -187,9 +193,13 @@ the harness modules and core, not those of the UI (its own groups)."
     (sort out (lambda (a b) (string< (symbol-name a) (symbol-name b))))))
 
 (defun harness-config--key (key)
-  "Return the option KEY names, a symbol or its name; signal for anything else."
+  "Return the option KEY names, a symbol or its name; signal for anything else.
+An option of `harness-config-hidden-options' is refused as set in the
+init file only."
   (let ((sym (cond ((symbolp key) key)
                    ((stringp key) (intern-soft key)))))
+    (when (and sym (memq sym harness-config-hidden-options))
+      (error "%s is set in the init file only" sym))
     (unless (and sym (or (memq sym harness-config-keys) (harness-config--listed-p sym)))
       (error "Unknown config key %s" key))
     sym))

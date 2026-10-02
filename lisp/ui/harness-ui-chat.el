@@ -8,8 +8,11 @@
 ;;                 thinking, context, cost, menu, after what
 ;;                 `harness-chat-header-functions' put in front (a BTW's buttons)
 ;;   transcript    one block per node, rendered incrementally with markers
-;;   activity      while a turn runs, what it does and for how long
-;;   pending panel permission requests and questions waiting for the user
+;;   activity      while a turn runs, what it does and for how long, on a
+;;                 background of its own, then a blank line
+;;   pending panel permission requests and questions waiting for the user;
+;;                 a question whose options have diagrams shows one of
+;;                 them at a time, in one place, and switches between them
 ;;   queue         messages queued for the next turn
 ;;   attachments   chips for files attached to the next message
 ;;   notice        the session was deleted, or is inactive (sending resumes it)
@@ -103,6 +106,13 @@ Once two pages of nodes lie above every window, all but one are dropped."
     (((background dark)) :background "#463a1c" :extend t))
   "Background of the pending permission and question panel." :group 'harness-ui-chat)
 
+(defface harness-chat-activity-face
+  '((((background light)) :background "#efe9f9" :extend t)
+    (((background dark)) :background "#2e2942" :extend t))
+  "Background of the activity line, which says what a running turn does.
+A colour of its own, so the line stands apart from the compose box
+under it." :group 'harness-ui-chat)
+
 (defface harness-chat-key-face '((t :inherit help-key-binding))
   "Keyboard shortcut hints in panels." :group 'harness-ui-chat)
 
@@ -150,6 +160,10 @@ Once two pages of nodes lie above every window, all but one are dropped."
 (defvar-local harness-chat--queue nil "Queued items as last rendered.")
 (defvar-local harness-chat--pending nil "Pending request records: (:id :kind :respond :created …).")
 (defvar-local harness-chat--editing nil "Queue item id loaded into the compose box.")
+(defvar-local harness-chat--diagram-shown nil
+  "Alist: pending question id -> index of the option whose diagram its panel shows.")
+(defvar-local harness-chat--option-at-point nil
+  "(QUESTION-ID . INDEX) of the option line point was on after the last command.")
 (defvar-local harness-chat--has-more nil "Non-nil when older nodes exist.")
 (defvar-local harness-chat--loading nil "Non-nil while the transcript is being fetched.")
 (defvar-local harness-chat--fetching nil "Non-nil while an older page is being fetched.")
@@ -515,12 +529,20 @@ opening the file is returned instead."
         ((numberp value) (number-to-string value))
         (t (format "%S" value))))
 
+(defun harness-chat--option-label (value)
+  "Return the label of VALUE, an option of an ask_user call, or nil.
+An option is a string or an object (a plist) with a `:label'."
+  (cond ((stringp value) value)
+        ((and (consp value) (keywordp (car value)) (stringp (plist-get value :label)))
+         (plist-get value :label))))
+
 (defun harness-chat--summary-value (value)
   "Return VALUE on one line for a tool input summary.
-A list of strings reads as a comma-separated list, not a Lisp form."
+A list of strings, or of objects with labels such as the options of an
+ask_user call, reads as a comma-separated list, not a Lisp form."
   (harness-first-line
-   (if (and (or (consp value) (vectorp value)) (cl-every #'stringp value))
-       (mapconcat #'identity value ", ")
+   (if (and (or (consp value) (vectorp value)) (cl-every #'harness-chat--option-label value))
+       (mapconcat #'harness-chat--option-label value ", ")
      (harness-chat--format-value value))
    60))
 
@@ -536,11 +558,39 @@ of an ask_user) are left out."
                     (push (format "%s: %s" (substring (symbol-name k) 1) text) parts))))
     (and parts (harness-truncate-end (string-join (nreverse parts) "  ") 110))))
 
+(defun harness-chat--objects-p (value)
+  "Non-nil when VALUE is a list holding objects (plists), such as todos."
+  (and (consp value) (not (keywordp (car value)))
+       (cl-some (lambda (item) (and (consp item) (keywordp (car item)))) value)))
+
+(defun harness-chat--format-objects (value)
+  "Return VALUE, a list of objects (plists), one key per line, like YAML.
+`- ' starts each item; a value of several lines, such as the diagram of
+an ask_user option, goes under its key, indented."
+  (mapconcat
+   (lambda (item)
+     (if (not (and (consp item) (keywordp (car item))))
+         (concat "- " (harness-chat--format-value item) "\n")
+       (let ((lead "- "))
+         (cl-loop for (k v) on item by #'cddr
+                  concat (let ((text (harness-chat--format-value v))
+                               (key (substring (symbol-name k) 1)))
+                           (prog1 (if (string-search "\n" text)
+                                      (concat lead key ":\n"
+                                              (mapconcat (lambda (line) (concat "    " line "\n"))
+                                                         (split-string (string-trim-right text "\n+") "\n")
+                                                         ""))
+                                    (concat lead key ": " text "\n"))
+                             (setq lead "  ")))))))
+   value ""))
+
 (defun harness-chat--input-listing (input)
   "Return tool INPUT pretty printed, one key per line."
   (let (out)
     (cl-loop for (k v) on input by #'cddr
-             do (let ((text (harness-chat--format-value v))
+             do (let ((text (if (harness-chat--objects-p v)
+                                (harness-chat--format-objects v)
+                              (harness-chat--format-value v)))
                       (key (substring (symbol-name k) 1)))
                   (push (if (string-search "\n" text)
                             (concat (propertize (concat key ":") 'face 'harness-dim-face) "\n"
@@ -601,12 +651,26 @@ of an ask_user) are left out."
          (body (harness-chat--foldable (harness-chat--face (harness-chat--plain content) 'harness-thinking-face))))
     (harness-chat--margin (concat header body))))
 
+(defun harness-chat--outcome-status (outcome &optional count)
+  "Return the status text of a tool call that ended with OUTCOME.
+OUTCOME is `failed', the call ran and reported an error, or `denied',
+the permission system refused it, so it never ran.  With COUNT, say
+how many calls ended so, as a group summary does."
+  (let ((denied (eq outcome 'denied)))
+    (propertize (format "%s %s%s" (if denied "\N{U+2298}" "\N{U+2717}")
+                        (if count (format "%d " count) "") outcome)
+                'face (if denied 'warning 'error)
+                'help-echo (if denied "The permission system refused this call, so it never ran"
+                             "The tool ran and reported an error"))))
+
 (defun harness-chat--tool-status (result)
-  "Return the status string for a tool call with RESULT (a node or nil)."
+  "Return the status string for a tool call with RESULT (a node or nil).
+A call that was refused reads apart from one that ran and failed."
   (cond ((and (null result) (member (plist-get (harness-chat--session) :status) '("running" "blocked")))
          (propertize "⋯ running" 'face 'harness-dim-face))
         ((null result) (propertize "– no result" 'face 'harness-dim-face))
-        ((harness-json-true-p (plist-get result :is-error)) (propertize "✗ failed" 'face 'error))
+        ((memq (harness-ui-tool-outcome result) '(failed denied))
+         (harness-chat--outcome-status (harness-ui-tool-outcome result)))
         (t (propertize "✓" 'face 'success))))
 
 (defun harness-chat--render-tool (block)
@@ -616,12 +680,15 @@ of an ask_user) are left out."
          (call-only (equal (harness-chat--str (plist-get node :kind)) "tool-call"))
          (result (if call-only (harness-chat-block-result block) node))
          (title (if call-only
-                    (or (plist-get node :title) (plist-get node :tool) "tool")
+                    (harness-ui-tool-title (plist-get node :tool) (plist-get node :title))
                   "result of an earlier tool call"))
          (input (and call-only (plist-get node :input)))
          (output (or (plist-get result :output) ""))
-         (error-p (and result (harness-json-true-p (plist-get result :is-error))))
-         (bg (if error-p 'harness-tool-error-face 'harness-tool-face))
+         (outcome (harness-ui-tool-outcome result))
+         (bg (pcase outcome
+               ('denied 'harness-tool-denied-face)
+               ('failed 'harness-tool-error-face)
+               (_ 'harness-tool-face)))
          (indent (propertize "  " 'face bg))
          (limit harness-chat-tool-output-limit)
          (long (and (not (harness-chat-block-show-all block)) (> (length output) limit)))
@@ -629,7 +696,9 @@ of an ask_user) are left out."
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
                          " " (harness-ui-icon 'harness-icon-tool) " "
-                         (propertize (harness-first-line title 120) 'face 'harness-tool-title-face)
+                         (if call-only
+                             (harness-ui-tool-title-string (plist-get node :tool) (plist-get node :title) 120)
+                           (propertize title 'face 'harness-tool-title-face))
                          "  " (harness-chat--tool-status result) "\n"))
          (line (and input (harness-chat--input-summary input title)))
          (summary (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") ""))
@@ -641,7 +710,11 @@ of an ask_user) are left out."
            (cond
             ((null result) "")
             ((string-empty-p output) (propertize "  (no output)\n" 'face 'harness-dim-face))
-            (t (concat (propertize (format "  output (%s chars)\n" (harness-format-tokens (length output)))
+            ;; A refused call never ran: its text is the permission
+            ;; system's reason, not output.
+            (t (concat (propertize (if (eq outcome 'denied)
+                                       "  reason\n"
+                                     (format "  output (%s chars)\n" (harness-format-tokens (length output))))
                                    'face 'harness-label-face)
                        (propertize (harness-chat--ensure-newline shown) 'face 'harness-chat-output-face
                                    'line-prefix indent 'wrap-prefix indent)
@@ -705,12 +778,24 @@ down with it: the transcript below it and the compose box still draw."
              (propertize (format "(shown unformatted: rendering failed with %s)\n" (error-message-string err))
                          'face 'harness-dim-face)))))
 
+(defun harness-chat--group-outcomes (group)
+  "Return the status text counting GROUP's failed and denied tool calls.
+Empty when none failed or was denied; a collapsed group would hide them."
+  (let ((failed 0) (denied 0))
+    (dolist (nid (harness-chat-group-members group))
+      (let ((b (gethash nid harness-chat--blocks)))
+        (pcase (and b (harness-ui-tool-outcome (harness-chat-block-result b)))
+          ('failed (cl-incf failed))
+          ('denied (cl-incf denied)))))
+    (concat (if (> failed 0) (concat "  " (harness-chat--outcome-status 'failed failed)) "")
+            (if (> denied 0) (concat "  " (harness-chat--outcome-status 'denied denied)) ""))))
+
 (defun harness-chat--render-group (group)
   "Return the body of the summary block of GROUP."
   (let* ((gid (harness-chat-group-id group))
          (names (mapcar (lambda (nid)
                           (let ((b (gethash nid harness-chat--blocks)))
-                            (or (plist-get (harness-chat-block-node b) :tool) "tool")))
+                            (harness-ui-tool-label (plist-get (harness-chat-block-node b) :tool))))
                         (harness-chat-group-members group)))
          (counts nil))
     (dolist (n names)
@@ -730,6 +815,7 @@ down with it: the transcript below it and the compose box still draw."
                                  (mapconcat (lambda (c) (if (> (cdr c) 1) (format "%s ×%d" (car c) (cdr c)) (car c)))
                                             counts ", "))
                          'face 'harness-summary-face)
+             (harness-chat--group-outcomes group)
              "  "
              (harness-chat--button (if (harness-chat-group-expanded group) "[collapse]" "[expand]")
                                    (lambda () (harness-chat-toggle-group gid))
@@ -977,6 +1063,14 @@ draws it, so carrying that over would keep drawing the old image."
                                   (1- (marker-position (harness-chat-group-end group)))
                                   (substring text 0 -1))))
 
+(defun harness-chat--refresh-group-of (block)
+  "Render again the summary of the group BLOCK is folded into, if any.
+The summary counts the group's failed and denied calls, so a result
+arriving for one of them changes it."
+  (when-let* ((gid (harness-chat-block-group block))
+              (group (gethash gid harness-chat--groups)))
+    (harness-chat--update-group-summary group)))
+
 (defun harness-chat--extend-group (group id)
   "Add block ID to GROUP, which ends right before it."
   (let ((block (gethash id harness-chat--blocks))
@@ -1076,11 +1170,13 @@ draws it, so carrying that over would keep drawing the old image."
       (setf (harness-chat-block-result call) node)
       (setq harness-chat--unfinished (delete (harness-chat-block-id call) harness-chat--unfinished))
       (puthash id call harness-chat--blocks)
-      (harness-chat--rerender call))
+      (harness-chat--rerender call)
+      (harness-chat--refresh-group-of call))
      ;; An update of a result already merged into its call block.
      ((and block (not (equal (harness-chat-block-id block) id)))
       (setf (harness-chat-block-result block) node)
-      (harness-chat--rerender block))
+      (harness-chat--rerender block)
+      (harness-chat--refresh-group-of block))
      (block
       (setf (harness-chat-block-node block) node
             (harness-chat-block-content block) (plist-get node :content)
@@ -1205,7 +1301,8 @@ draws it, so carrying that over would keep drawing the old image."
 
 (defun harness-chat--remove-pending (id)
   "Forget pending request ID and redraw the panel."
-  (setq harness-chat--pending (cl-remove id harness-chat--pending :key (lambda (r) (plist-get r :id)) :test #'equal))
+  (setq harness-chat--pending (cl-remove id harness-chat--pending :key (lambda (r) (plist-get r :id)) :test #'equal)
+        harness-chat--diagram-shown (cl-remove id harness-chat--diagram-shown :key #'car :test #'equal))
   (harness-chat--render-tail))
 
 (defun harness-chat--sync-pending (items)
@@ -1220,7 +1317,8 @@ Return non-nil when something changed."
                 (append harness-chat--pending
                         (list (if (equal kind "question")
                                   (list :id (plist-get item :id) :kind "question" :created now
-                                        :question (plist-get payload :question) :options (plist-get payload :options))
+                                        :question (plist-get payload :question) :options (plist-get payload :options)
+                                        :diagrams (plist-get payload :diagrams))
                                 (list :id (plist-get item :id) :kind "permission" :created now
                                       :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
                                       :tool (plist-get payload :tool) :tool-kind (harness-chat--str (plist-get payload :kind))
@@ -1231,7 +1329,9 @@ Return non-nil when something changed."
     (dolist (r harness-chat--pending)
       (when (and (not (cl-find (plist-get r :id) items :key (lambda (i) (plist-get i :id)) :test #'equal))
                  (> (- now (or (plist-get r :created) 0)) 0.5))
-        (setq harness-chat--pending (cl-remove r harness-chat--pending) changed t)))
+        (setq harness-chat--pending (cl-remove r harness-chat--pending) changed t
+              harness-chat--diagram-shown (cl-remove (plist-get r :id) harness-chat--diagram-shown
+                                                     :key #'car :test #'equal))))
     changed))
 
 (defun harness-chat--on-permission (params respond)
@@ -1258,7 +1358,8 @@ The panel answers through RESPOND."
       (harness-chat--add-pending
        (list :id (or (plist-get params :requestId) (harness-short-id 6)) :kind "question" :respond respond
              :created (float-time)
-             :question (plist-get params :question) :options (plist-get params :options))))
+             :question (plist-get params :question) :options (plist-get params :options)
+             :diagrams (plist-get params :diagrams))))
     t))
 
 (defun harness-chat--answer-permission (pid option)
@@ -1364,7 +1465,7 @@ offers are shown, so an agent's own directory request has no
   (let ((pid (plist-get r :id))
         (start (point)))
     (insert (propertize (concat " " (harness-ui-icon 'harness-icon-blocked) " Permission  ") 'face 'harness-label-face)
-            (propertize (or (plist-get r :title) "tool call") 'face 'harness-tool-title-face)
+            (harness-ui-tool-title-string (plist-get r :tool) (plist-get r :title))
             "\n")
     (let ((facts (delq nil (list (and (plist-get r :tool-kind) (format "kind: %s" (plist-get r :tool-kind)))
                                  (and (plist-get r :paths)
@@ -1382,9 +1483,7 @@ offers are shown, so an agent's own directory request has no
                                       :help (format "Answer %s (%s)" (nth 0 o) (nth 1 o)))
                 " " (harness-chat--kbd (nth 1 o)) "  ")))
     (insert "\n")
-    (add-text-properties start (point) (list 'harness-chat-pending pid))
-    (add-face-text-property start (point) 'harness-chat-panel-face t)
-    (harness-chat--add-keymap start (point) harness-chat-panel-map)))
+    (harness-chat--decorate-panel start (point) pid harness-chat-panel-map)))
 
 (defun harness-chat--question-command (n)
   "Return a command answering the question at point with its Nth option."
@@ -1397,43 +1496,232 @@ offers are shown, so an agent's own directory request has no
           (harness-chat--answer-question pid option)
         (user-error "No such option")))))
 
-(defvar harness-chat-question-map
-  (let ((map (make-sparse-keymap)))
-    (dotimes (i 9)
-      (define-key map (kbd (number-to-string (1+ i))) (harness-chat--question-command i)))
-    map)
+(defvar harness-chat-question-map (make-sparse-keymap)
   "Keys active while point is on a question panel.")
+
+(defvar harness-chat-diagram-question-map (make-sparse-keymap)
+  "Keys active while point is on the panel of a question with diagrams.")
+
+;; Filled at top level, not in the `defvar's, so a reload updates them.
+(dotimes (i 9)
+  (define-key harness-chat-question-map (kbd (number-to-string (1+ i))) (harness-chat--question-command i)))
+(set-keymap-parent harness-chat-diagram-question-map harness-chat-question-map)
+(define-key harness-chat-diagram-question-map (kbd "n") #'harness-chat-next-diagram)
+(define-key harness-chat-diagram-question-map (kbd "p") #'harness-chat-previous-diagram)
+
+(defun harness-chat--decorate-panel (start end pid map)
+  "Make START..END the panel of pending request PID, with the keymap MAP."
+  (add-text-properties start end (list 'harness-chat-pending pid))
+  (add-face-text-property start end 'harness-chat-panel-face t)
+  (harness-chat--add-keymap start end map))
+
+;;;;; Diagrams of a question's options
+;;
+;; The options of a question may each have a diagram, ASCII art or an
+;; image (all of them or none: the ask_user tool sees to it).  The panel
+;; shows one at a time, in one area under the options: a line of tabs,
+;; one per option, between previous and next arrows, then the diagram of
+;; the option whose tab is current, whose label is bold in the list.  A
+;; click on a tab or an arrow, n and p on the panel, C-c C-f and C-c C-b
+;; anywhere in the buffer, and point moving onto an option's line switch
+;; it.  Answering is as without diagrams: a digit, a click on the option,
+;; or the compose box.  Switching redraws the options and the area
+;; alone, in place, so point, the windows and the compose box stay put.
+
+(defun harness-chat--diagrams (r)
+  "Return the diagrams of question record R, one per option, or nil.
+Each is (:type \"ascii\" :text TEXT) or (:type \"image\" :path PATH :mime MIME)."
+  (and (equal (plist-get r :kind) "question")
+       (plist-get r :options)
+       (append (plist-get r :diagrams) nil)))
+
+(defun harness-chat--shown-option (r)
+  "Return the index of the option whose diagram question record R's panel shows."
+  (let ((i (cdr (assoc (plist-get r :id) harness-chat--diagram-shown)))
+        (count (length (plist-get r :options))))
+    (if (and (integerp i) (< -1 i count)) i 0)))
+
+(defun harness-chat--question-map (r)
+  "Return the keymap of the panel of question record R."
+  (if (harness-chat--diagrams r) harness-chat-diagram-question-map harness-chat-question-map))
+
+(defun harness-chat--diagram-image (path mime)
+  "Return a line showing the image file PATH, of type MIME, of a diagram.
+A remote file is not read, which would block: a button opens it instead."
+  (if (file-remote-p path)
+      (concat (harness-chat--button (format "[image %s]" path) (lambda () (find-file-other-window path))
+                                    :help "Open the image")
+              "\n")
+    (harness-chat--image-string path mime)))
+
+(defun harness-chat--diagram-string (diagram)
+  "Return the lines showing DIAGRAM, an option's (see `harness-chat--diagrams')."
+  (let ((indent (propertize "     " 'face 'harness-chat-panel-face)))
+    (pcase (harness-chat--str (plist-get diagram :type))
+      ("ascii" (propertize (harness-chat--ensure-newline (plist-get diagram :text))
+                           'face 'harness-chat-output-face 'line-prefix indent 'wrap-prefix indent))
+      ("image" (propertize (harness-chat--diagram-image (plist-get diagram :path) (plist-get diagram :mime))
+                           'line-prefix indent 'wrap-prefix indent))
+      (_ (propertize "     (no diagram)\n" 'face 'harness-dim-face)))))
+
+(defun harness-chat--diagram-nav (label nav action help face)
+  "Return a button LABEL of a diagram area's tab line, running ACTION.
+NAV names it, `previous', `next' or an option's index, so point stays
+on it as the area is redrawn.  HELP is its tooltip, FACE its face."
+  (propertize (harness-chat--button label action :help help :face face)
+              'harness-chat-diagram-nav nav))
+
+(defun harness-chat--diagram-area (r shown)
+  "Return the diagram area of question record R, showing option SHOWN's diagram."
+  (let ((pid (plist-get r :id))
+        (options (plist-get r :options)))
+    (concat
+     (propertize "   Diagram " 'face 'harness-dim-face)
+     (harness-chat--diagram-nav " \N{U+2039} " 'previous (lambda () (harness-chat--step-diagram pid -1))
+                                "Show the diagram of the previous option (p, C-c C-b)" 'harness-dim-face)
+     (mapconcat (lambda (i)
+                  (harness-chat--diagram-nav (format " %d " (1+ i)) i (lambda () (harness-chat--show-diagram pid i))
+                                             (format "Show the diagram of option %d, %s" (1+ i) (nth i options))
+                                             (if (= i shown) 'harness-chat-key-face 'harness-dim-face)))
+                (number-sequence 0 (1- (length options))) "")
+     (harness-chat--diagram-nav " \N{U+203A} " 'next (lambda () (harness-chat--step-diagram pid 1))
+                                "Show the diagram of the next option (n, C-c C-f)" 'harness-dim-face)
+     "  "
+     (propertize (nth shown options) 'face 'bold 'wrap-prefix "   ")
+     "\n"
+     (harness-chat--diagram-string (nth shown (harness-chat--diagrams r))))))
+
+(defun harness-chat--option-line (pid option i shown)
+  "Return the line of OPTION, the Ith of question PID; SHOWN: its diagram shows."
+  (propertize
+   (concat (propertize "   " 'wrap-prefix "       ")
+           (if (< i 9) (harness-chat--kbd (format " %d " (1+ i))) "   ")
+           " "
+           (propertize (harness-chat--button option
+                                             (lambda () (harness-chat--answer-question pid option))
+                                             :face (if shown 'bold 'default)
+                                             :help (if (< i 9) (format "Answer with this option (%d)" (1+ i))
+                                                     "Answer with this option"))
+                       'wrap-prefix "       ")
+           "\n")
+   'harness-chat-option i))
+
+(defun harness-chat--question-body (r)
+  "Return the options of question record R, then their diagram area if any.
+The text is marked `harness-chat-question-body', so that switching the
+diagram redraws it alone (`harness-chat--redraw-question-body')."
+  (let* ((pid (plist-get r :id))
+         (shown (and (harness-chat--diagrams r) (harness-chat--shown-option r))))
+    (propertize
+     (concat (apply #'concat (seq-map-indexed (lambda (option i) (harness-chat--option-line pid option i (eql i shown)))
+                                              (plist-get r :options)))
+             (if shown (concat "\n" (harness-chat--diagram-area r shown)) ""))
+     'harness-chat-question-body pid)))
+
+(defun harness-chat--question-body-region (pid)
+  "Return (START . END) of the options and diagram area of question PID, or nil."
+  (let ((pos (and harness-chat--transcript-end (marker-position harness-chat--transcript-end)))
+        (limit (point-max))
+        found)
+    (while (and pos (not found) (< pos limit))
+      (let ((next (next-single-property-change pos 'harness-chat-question-body nil limit)))
+        (when (equal (get-text-property pos 'harness-chat-question-body) pid)
+          (setq found (cons pos next)))
+        (setq pos next)))
+    found))
+
+(defun harness-chat--redraw-question-body (r)
+  "Redraw the options and diagram area of question record R in place.
+Point and the windows stay where they were; point on a tab or an arrow
+stays on it."
+  (let* ((pid (plist-get r :id))
+         (region (harness-chat--question-body-region pid)))
+    (if (not region)
+        (harness-chat--render-tail)
+      (let ((nav (and (equal (get-text-property (point) 'harness-chat-question-body) pid)
+                      (get-text-property (point) 'harness-chat-diagram-nav)))
+            (text (harness-chat--with-display (harness-chat--question-body r)))
+            (from (car region)))
+        (harness-chat--replace-region from (cdr region) text)
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t)
+              (end (+ from (length text))))
+          (harness-chat--decorate-panel from end pid (harness-chat--question-map r))
+          (put-text-property from end 'read-only t)
+          (when-let* ((pos (and nav (text-property-any from end 'harness-chat-diagram-nav nav))))
+            (goto-char pos)))))))
+
+(defun harness-chat--show-diagram (pid index)
+  "Show the diagram of option INDEX of question PID, counting round."
+  (let ((r (harness-chat--pending-record pid)))
+    (unless (harness-chat--diagrams r)
+      (user-error "This question has no diagrams"))
+    (let ((i (mod index (length (plist-get r :options)))))
+      (unless (= i (harness-chat--shown-option r))
+        (setf (alist-get pid harness-chat--diagram-shown nil nil #'equal) i)
+        (harness-chat--redraw-question-body r)))))
+
+(defun harness-chat--step-diagram (pid n)
+  "Show the diagram N options after the one question PID shows, counting round."
+  (let ((r (harness-chat--pending-record pid)))
+    (harness-chat--show-diagram pid (+ (if r (harness-chat--shown-option r) 0) n))))
+
+(defun harness-chat--diagram-question ()
+  "Return the question whose diagrams the diagram commands switch.
+That is the one whose panel point is on, else the newest with diagrams."
+  (let* ((at (get-text-property (point) 'harness-chat-pending))
+         (r (and at (harness-chat--pending-record at))))
+    (or (and (harness-chat--diagrams r) r)
+        (cl-find-if #'harness-chat--diagrams (reverse harness-chat--pending))
+        (user-error "No question with diagrams is waiting"))))
+
+(defun harness-chat-next-diagram (&optional n)
+  "Show the diagram of the next option of the question waiting with diagrams.
+That is the question whose panel point is on, else the newest.  With
+prefix argument N, move N options on; a negative N moves back."
+  (interactive "p")
+  (harness-chat--step-diagram (plist-get (harness-chat--diagram-question) :id) (or n 1)))
+
+(defun harness-chat-previous-diagram (&optional n)
+  "Show the diagram of the previous option of the question waiting with diagrams.
+With prefix argument N, move N options back."
+  (interactive "p")
+  (harness-chat-next-diagram (- (or n 1))))
+
+(defun harness-chat--follow-option ()
+  "Show the diagram of the option whose line point moved onto.
+Only a move counts: a diagram switched with point on an option's line
+stays switched."
+  (let* ((pid (get-text-property (point) 'harness-chat-pending))
+         (i (and pid (get-text-property (point) 'harness-chat-option)))
+         (here (and i (cons pid i))))
+    (unless (equal here harness-chat--option-at-point)
+      (setq harness-chat--option-at-point here)
+      (when (and here (harness-chat--diagrams (harness-chat--pending-record pid)))
+        (harness-chat--show-diagram pid i)))))
 
 (defun harness-chat--insert-question-panel (r)
   "Insert the panel for question record R.
 The question and each option get a line of their own, wrapped under
-their indentation; digit keys pick an option while point is on the panel."
+their indentation; digit keys pick an option while point is on the panel.
+Options with diagrams get the area showing one of them under them."
   (let ((pid (plist-get r :id))
         (start (point)))
     (insert (propertize (concat " " (harness-ui-icon 'harness-chat-icon-question) " Question") 'face 'harness-label-face)
             "\n"
             (propertize (concat "   " (or (plist-get r :question) "")) 'face 'bold 'wrap-prefix "   ")
             "\n")
-    (when-let* ((options (plist-get r :options)))
-      (insert "\n")
-      (seq-do-indexed
-       (lambda (option i)
-         (insert (propertize "   " 'wrap-prefix "       ")
-                 (if (< i 9) (harness-chat--kbd (format " %d " (1+ i))) "   ")
-                 " "
-                 (propertize (harness-chat--button option
-                                                   (lambda () (harness-chat--answer-question pid option))
-                                                   :face 'default
-                                                   :help (if (< i 9) (format "Answer with this option (%d)" (1+ i))
-                                                           "Answer with this option"))
-                             'wrap-prefix "       ")
-                 "\n"))
-       options))
-    (insert (propertize (if (plist-get r :options) "\n   or type another answer below\n" "   type your answer below\n")
-                        'face 'harness-dim-face))
-    (add-text-properties start (point) (list 'harness-chat-pending pid))
-    (add-face-text-property start (point) 'harness-chat-panel-face t)
-    (harness-chat--add-keymap start (point) harness-chat-question-map)))
+    (when (plist-get r :options)
+      (insert "\n" (harness-chat--question-body r)))
+    (insert (cond ((not (plist-get r :options))
+                   (propertize "   type your answer below\n" 'face 'harness-dim-face))
+                  ((harness-chat--diagrams r)
+                   (concat "\n   " (harness-chat--kbd "C-c C-f")
+                           (propertize " next diagram, " 'face 'harness-dim-face)
+                           (harness-chat--kbd "C-c C-b")
+                           (propertize " previous\n   or type another answer below\n" 'face 'harness-dim-face)))
+                  (t (propertize "\n   or type another answer below\n" 'face 'harness-dim-face))))
+    (harness-chat--decorate-panel start (point) pid (harness-chat--question-map r))))
 
 (defun harness-chat--insert-queue ()
   "Insert the queued messages list."
@@ -1722,7 +2010,9 @@ end afterwards."
       (harness-chat--fetch-session #'harness-compose-fetch-completions))
     (harness-chat--fetch-activity)
     (harness-then
-     (harness-all (list (harness-ui-request "_harness/tools/list" (list :session-id sid))
+     ;; Every tool, not just the session's: its transcript may hold calls
+     ;; of tools it no longer has, and they too go by their labels.
+     (harness-all (list (harness-ui-fetch-tools)
                         (harness-ui-request "_harness/session/nodes"
                                             (list :id sid :opts (list :limit harness-chat-history-limit)))))
      (lambda (results)
@@ -1730,9 +2020,11 @@ end afterwards."
          (with-current-buffer buf
            (when (= gen harness-chat--generation)
              (setq harness-chat--coalescable
-                   (delq nil (mapcar (lambda (tool) (and (harness-json-true-p (plist-get tool :coalescable))
-                                                         (plist-get tool :name)))
-                                     (car results))))
+                   (let (names)
+                     (maphash (lambda (name spec)
+                                (when (harness-json-true-p (plist-get spec :coalescable)) (push name names)))
+                              (car results))
+                     names))
              (let ((nodes (cadr results))
                    (anchors (harness-chat--window-anchors))
                    (offset (and (harness-compose-in-p) (- (point) harness-compose-start))))
@@ -1919,6 +2211,8 @@ While the agent is running the message steers the current turn."
 ;; for minutes and stream nothing (the Claude CLI never sends thinking
 ;; text), write a long tool input, or wait on a slow tool.  The line is
 ;; an overlay string, so its spinner ticks without editing the buffer.
+;; Its own background and a blank line under it keep it apart from the
+;; compose box below.
 
 (defun harness-chat--spinner-frame ()
   "Return the current frame of the running spinner."
@@ -1930,7 +2224,9 @@ The text ends in an ellipsis.  Without an activity, as from a harness
 that does not report one, it is \"Working\"."
   (let* ((tool (plist-get activity :tool))
          (count (plist-get activity :count))
-         (call (concat (or (plist-get activity :title) tool "a tool")
+         (call (concat (if (or tool (plist-get activity :title))
+                           (harness-ui-tool-title tool (plist-get activity :title))
+                         "a tool")
                        (if (and (numberp count) (> count 1)) (format " and %d more" (1- count)) ""))))
     (concat
      (pcase (plist-get activity :phase)
@@ -1938,7 +2234,7 @@ that does not report one, it is \"Working\"."
        ("thinking" "Thinking")
        ("writing" "Writing")
        ("compacting" "Compacting the conversation")
-       ("tool-input" (concat "Preparing " (or tool "a tool call")))
+       ("tool-input" (concat "Preparing " (if tool (harness-ui-tool-label tool) "a tool call")))
        ("tool" (if (harness-json-true-p (plist-get activity :checking))
                    (concat "Checking permission for " call)
                  (concat "Running " call)))
@@ -1946,8 +2242,9 @@ that does not report one, it is \"Working\"."
      "\N{U+2026}")))
 
 (defun harness-chat--activity-label (activity)
-  "Return a word or two for ACTIVITY, for the mode line: \"thinking\", \"bash\"."
-  (let ((tool (or (plist-get activity :tool) "a call")))
+  "Return a word or two for ACTIVITY, for the mode line: \"thinking\", \"Bash\".
+A tool goes by its label."
+  (let ((tool (if (plist-get activity :tool) (harness-ui-tool-label (plist-get activity :tool)) "a call")))
     (pcase (plist-get activity :phase)
       ("tool-input" (concat "preparing " tool))
       ("tool" (if (harness-json-true-p (plist-get activity :checking)) (concat "checking " tool) tool))
@@ -1971,7 +2268,9 @@ The size of the tool input written so far, the latest line a tool reported."
 
 (defun harness-chat--activity-line ()
   "Return the activity line due now, or nil unless the session runs.
-A blocked session shows its panel instead."
+A blocked session shows its panel instead.  The line wears
+`harness-chat-activity-face' and a blank line follows it: both keep it
+apart from what comes below, the compose box or the queue."
   (when (and (equal (plist-get (harness-chat--session) :status) "running")
              (not harness-chat--dead))
     (let* ((activity harness-chat--activity)
@@ -1982,10 +2281,19 @@ A blocked session shows its panel instead."
            (text (string-join (cons head (harness-chat--activity-details activity)) " \N{U+00B7} "))
            (w (car (harness-chat--windows)))
            ;; One screen line, so the box below never jumps.
-           (room (max 12 (- (if w (window-body-width w) 80) 4))))
-      (concat " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
-              (propertize (truncate-string-to-width text room nil nil "\N{U+2026}") 'face 'harness-dim-face)
-              "\n"))))
+           (room (max 12 (- (if w (window-body-width w) 80) 4)))
+           (line (concat " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
+                         (propertize (truncate-string-to-width text room nil nil "\N{U+2026}") 'face 'harness-dim-face)
+                         "\n")))
+      ;; Emacs draws an overlay string over the face of the text it
+      ;; precedes: the box's prompt or the queue, whose background would
+      ;; make the line look like their first.  Both lines are drawn over
+      ;; `default' instead, extended: the space after the end of a line
+      ;; takes only faces that extend, so the box's would fill it.
+      (let ((ground '(:inherit default :extend t)))
+        (add-face-text-property 0 (length line) 'harness-chat-activity-face t line)
+        (add-face-text-property 0 (length line) ground t line)
+        (concat line (propertize "\n" 'face ground))))))
 
 (defun harness-chat--activity-overlay ()
   "Return the activity line's overlay, empty at the end of the transcript.
@@ -2087,8 +2395,9 @@ are searched on hover, not on every redisplay of the header line."
 (defun harness-chat--spend-segment (session)
   "Return the header segment showing what SESSION cost and who pays for it.
 Per-token billing shows the cost; a subscription shows its plan and
-quota.  Clicking it opens the usage dashboard."
-  (let ((text (copy-sequence (harness-ui-format-spend session t))))
+quota.  Clicking it opens the usage dashboard.  Its percentages are
+escaped, or the header line would take \"23% \" for a %-construct."
+  (let ((text (harness-ui-mode-line-escape (harness-ui-format-spend session t))))
     (add-text-properties 0 (length text)
                          (list 'mouse-face 'mode-line-highlight
                                'local-map (harness-chat--segment-map #'harness-chat-show-usage))
@@ -2280,23 +2589,26 @@ message sent from it resumes it."
 (define-obsolete-function-alias 'harness-chat-newline #'harness-compose-newline "3.1")
 (define-obsolete-function-alias 'harness-chat-completion-at-point #'harness-compose-completion-at-point "3.1")
 
-(defvar harness-chat-mode-map
-  (let ((map (make-sparse-keymap)))
-    ;; The compose box's keys; not `special-mode-map', whose letters would
-    ;; eat typing in the box.
-    (set-keymap-parent map harness-compose-map)
-    (define-key map (kbd "TAB") #'harness-chat-tab)
-    (define-key map (kbd "C-c C-q") #'harness-chat-queue)
-    (define-key map (kbd "C-c C-c") #'harness-chat-send)
-    (define-key map (kbd "C-c C-k") #'harness-chat-cancel)
-    (define-key map (kbd "C-c C-s") #'harness-chat-search)
-    (define-key map (kbd "C-c C-y") #'harness-chat-allow-newest)
-    (define-key map (kbd "C-c C-n") #'harness-chat-deny-newest)
-    (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
-    (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
-    (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom)
-    map)
+(defvar harness-chat-mode-map (make-sparse-keymap)
   "Keymap of `harness-chat-mode'.")
+
+;; Filled at top level, not in the `defvar', so a reload updates the map.
+(let ((map harness-chat-mode-map))
+  ;; The compose box's keys; not `special-mode-map', whose letters would
+  ;; eat typing in the box.
+  (set-keymap-parent map harness-compose-map)
+  (define-key map (kbd "TAB") #'harness-chat-tab)
+  (define-key map (kbd "C-c C-q") #'harness-chat-queue)
+  (define-key map (kbd "C-c C-c") #'harness-chat-send)
+  (define-key map (kbd "C-c C-k") #'harness-chat-cancel)
+  (define-key map (kbd "C-c C-s") #'harness-chat-search)
+  (define-key map (kbd "C-c C-y") #'harness-chat-allow-newest)
+  (define-key map (kbd "C-c C-n") #'harness-chat-deny-newest)
+  (define-key map (kbd "C-c C-f") #'harness-chat-next-diagram)
+  (define-key map (kbd "C-c C-b") #'harness-chat-previous-diagram)
+  (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
+  (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
+  (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom))
 
 (define-derived-mode harness-chat-mode special-mode "Chat"
   "Major mode of a harness session buffer.
@@ -2332,6 +2644,8 @@ on \\[harness-menu] here, or the [menu] button in the header line.
        ["Agent"
         ("C-c C-y" "Allow request" harness-chat-allow-newest)
         ("C-c C-n" "Deny request" harness-chat-deny-newest)
+        ("C-c C-f" "Next diagram" harness-chat-next-diagram)
+        ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
         ("C-c C-k" "Cancel turn" harness-chat-cancel)]
        ["Transcript"
         (". TAB" "Fold block" harness-chat-tab)
@@ -2341,10 +2655,13 @@ on \\[harness-menu] here, or the [menu] button in the header line.
         ("C-c C-r" "Redraw" harness-chat-redraw)]))
 
 (defun harness-chat--post-command ()
-  "Keep the new-messages indicator current."
+  "Keep the new-messages indicator current.
+Point moved onto an option of a question with diagrams shows its diagram."
   (when (and harness-chat--unseen (harness-chat--at-bottom-p (selected-window)))
     (setq harness-chat--unseen nil)
-    (force-mode-line-update)))
+    (force-mode-line-update))
+  (with-demoted-errors "harness-chat: %S"
+    (harness-chat--follow-option)))
 
 (defun harness-chat--on-kill ()
   "Forget the buffer and its timers."

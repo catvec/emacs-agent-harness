@@ -96,10 +96,11 @@
      (if pending (format "\n    waiting on the user: %s" pending) ""))))
 
 (defun harness-tools-sessions--node-text (node)
-  "Return the readable text of transcript NODE."
+  "Return the readable text of transcript NODE.
+A tool call reads as the tool's name, as the model knows it, and its input."
   (pcase (plist-get node :kind)
-    ('tool-call (format "%s %s" (or (plist-get node :title) (plist-get node :tool) "")
-                        (if (plist-get node :input) (harness-json-encode (plist-get node :input)) "")))
+    ('tool-call (format "%s %s" (or (plist-get node :tool) (plist-get node :title) "")
+                        (if (plist-get node :input) (harness-json-encode-text (plist-get node :input)) "")))
     ('tool-result (or (plist-get node :output) ""))
     (_ (or (plist-get node :content) ""))))
 
@@ -225,6 +226,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
           ""))))))
 
 (harness-define-tool "session_list"
+  :label "List sessions"
   :description "List harness sessions with id, status (idle, running, blocked, inactive), kind, name, model, working directory, cost and what each one waits on. Defaults to the open sessions of this project; set include_inactive for closed ones and all_projects for every project. Session ids (or a unique prefix, or a unique name) are accepted by the other session_* tools."
   :schema '(:type "object"
             :properties (:status (:type "string" :enum ("idle" "running" "blocked" "inactive")
@@ -237,7 +239,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
                          :limit (:type "integer" :description "Most sessions to show (default 50).")))
   :kind 'read
   :coalescable t
-  :title (lambda (input) (string-trim (format "session_list %s" (or (plist-get input :status) (plist-get input :name) ""))))
+  :subject (lambda (input) (or (plist-get input :status) (plist-get input :name)))
   :handler #'harness-tools-sessions--list)
 
 ;;;; session_search
@@ -349,6 +351,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
                    "")))))))))))
 
 (harness-define-tool "session_search"
+  :label "Search sessions"
   :description "Search the transcripts of other sessions (messages, thinking, tool calls and results) and their names for a string, case-insensitively. Returns the matching sessions, newest first, with snippets and node ids; read one with session_read. Searches this project unless all_projects is set; closed sessions are included."
   :schema '(:type "object"
             :properties (:query (:type "string" :description "Text to find.")
@@ -360,7 +363,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
   :kind 'read
   :coalescable t
   :timeout 90
-  :title (lambda (input) (format "session_search %s" (harness-truncate-end (or (plist-get input :query) "") 60)))
+  :subject (lambda (input) (harness-first-line (plist-get input :query) 60))
   :handler #'harness-tools-sessions--search)
 
 ;;;; session_read
@@ -401,6 +404,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
                  shown "\n")))))
 
 (harness-define-tool "session_read"
+  :label "Read session"
   :description "Read another session: its status, plan, todos and the last nodes of its transcript (user and assistant messages, thinking, tool calls and results). Page back with before=<node id> from the previous result."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "Session id, unique id prefix or unique name.")
@@ -412,7 +416,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
             :required ("session_id"))
   :kind 'read
   :coalescable t
-  :title (lambda (input) (format "session_read %s" (harness-tools-sessions--short (plist-get input :session_id))))
+  :subject (lambda (input) (harness-tools-sessions--short (plist-get input :session_id)))
   :handler #'harness-tools-sessions--read)
 
 ;;;; session_send
@@ -452,6 +456,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
                                  (harness-tools-sessions--describe sid 8000)))))))))
 
 (harness-define-tool "session_send"
+  :label "Message session"
   :description "Send a message to another session, as the user would. An idle or closed session starts a turn; a running one gets it as steering at its next step; mode=queue holds it for the session's next turn instead. The message is marked as coming from this session. wait=true returns once the turn ends, with the session's reply; otherwise it returns at once (follow with session_wait)."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "Session id, unique id prefix or unique name.")
@@ -461,8 +466,8 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
             :required ("session_id" "message"))
   :kind 'meta
   :timeout 3600
-  :title (lambda (input) (format "session_send %s %s" (harness-tools-sessions--short (plist-get input :session_id))
-                                 (harness-truncate-end (harness-first-line (or (plist-get input :message) "")) 50)))
+  :subject (lambda (input) (string-trim (format "%s %s" (harness-tools-sessions--short (plist-get input :session_id))
+                                                (harness-first-line (plist-get input :message) 50))))
   :handler #'harness-tools-sessions--send)
 
 ;;;; session_control
@@ -508,6 +513,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
       (_ (signal 'harness-error (list (format "Unknown action %S" action)))))))
 
 (harness-define-tool "session_control"
+  :label "Control session"
   :description "Control another session. action=cancel stops its running turn; resume reopens a closed session; close deactivates it (it can be resumed later); rename sets its name; answer replies to a question it asked with ask_user (question_id may be omitted when there is one). Permission requests are left to the user."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "Session id, unique id prefix or unique name.")
@@ -517,8 +523,8 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
                          :answer (:type "string" :description "The answer, for answer."))
             :required ("session_id" "action"))
   :kind 'meta
-  :title (lambda (input) (format "session_control %s %s" (or (plist-get input :action) "")
-                                 (harness-tools-sessions--short (plist-get input :session_id))))
+  :subject (lambda (input) (string-trim (format "%s %s" (or (plist-get input :action) "")
+                                                (harness-tools-sessions--short (plist-get input :session_id)))))
   :handler #'harness-tools-sessions--control)
 
 ;;;; Waiting
@@ -613,6 +619,7 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                 (mapconcat (lambda (sid) (harness-tools-sessions--describe sid)) ids "\n\n")))))))
 
 (harness-define-tool "session_wait"
+  :label "Wait for sessions"
   :description "Wait for other sessions without polling. until=stopped (default) returns when each session is no longer running (its turn ended, it is blocked on the user, or it closed); idle, blocked and running wait for that status; changed waits for any new status, message or pending request. mode=all (default) waits for every session, any for the first. Returns each session's status, what it waits on and its last reply; on timeout it returns the same report, not an error."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "A session id, unique id prefix or unique name.")
@@ -622,8 +629,8 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                          :timeout_seconds (:type "number" :description "Give up after this long (default 600, at most 3600).")))
   :kind 'read
   :timeout 3700
-  :title (lambda (input) (format "session_wait %s" (mapconcat #'harness-tools-sessions--short
-                                                              (harness-tools-sessions--refs input :session_id :session_ids) " ")))
+  :subject (lambda (input) (mapconcat #'harness-tools-sessions--short
+                                      (harness-tools-sessions--refs input :session_id :session_ids) " "))
   :handler #'harness-tools-sessions--session-wait)
 
 ;;;; Tasks
@@ -687,6 +694,7 @@ before its prompt."
        "No tasks match."))))
 
 (harness-define-tool "task_list"
+  :label "List tasks"
   :description "List the task board: tasks (one session each, usually in its own worktree, done once the user verified the work and it merged) with their title (their session's name, once it has one), prompt, column (pending, needs-input, active, review, done), state, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back. Defaults to this project's unarchived tasks. Inspect a task's work with session_read on its session."
   :schema '(:type "object"
             :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "review" "done"))
@@ -694,7 +702,7 @@ before its prompt."
                          :all_projects (:type "boolean" :description "Every project (default false).")))
   :kind 'read
   :coalescable t
-  :title (lambda (input) (string-trim (format "task_list %s" (or (plist-get input :column) ""))))
+  :subject (lambda (input) (plist-get input :column))
   :handler #'harness-tools-sessions--task-list)
 
 (defun harness-tools-sessions--task-submit (input ctx)
@@ -712,6 +720,7 @@ before its prompt."
                      :meta (list :task-id (plist-get task :id)))))
 
 (harness-define-tool "task_submit"
+  :label "Submit task"
   :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when a slot is free. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. Returns the task id; follow it with task_wait or task_list."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "What the task should do; self-contained, the task does not see this conversation.")
@@ -721,7 +730,7 @@ before its prompt."
                          :refine (:type "boolean" :description "Write it up for the backlog instead of starting it (default false)."))
             :required ("prompt"))
   :kind 'meta
-  :title (lambda (input) (format "task_submit %s" (harness-truncate-end (harness-first-line (or (plist-get input :prompt) "")) 60)))
+  :subject (lambda (input) (harness-first-line (plist-get input :prompt) 60))
   :handler #'harness-tools-sessions--task-submit)
 
 (defun harness-tools-sessions--task-control (input _ctx)
@@ -757,6 +766,7 @@ before its prompt."
        (format "%s done; task %s is gone." action id)))))
 
 (harness-define-tool "task_control"
+  :label "Control task"
   :description "Act on a task. start runs a pending task now; message sends a follow-up to its session (or, while pending, appends to its prompt); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); reject sends a task in review back to its session with the feedback in message, to work on it again; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept)."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "Task id or unique prefix.")
@@ -764,7 +774,7 @@ before its prompt."
                          :message (:type "string" :description "Text, for message; the feedback, for reject."))
             :required ("task_id" "action"))
   :kind 'meta
-  :title (lambda (input) (format "task_control %s %s" (or (plist-get input :action) "") (or (plist-get input :task_id) "")))
+  :subject (lambda (input) (string-trim (format "%s %s" (or (plist-get input :action) "") (or (plist-get input :task_id) ""))))
   :handler #'harness-tools-sessions--task-control)
 
 (defun harness-tools-sessions--task-reached-p (id until baseline)
@@ -822,6 +832,7 @@ before its prompt."
                  ids "\n\n")))))))
 
 (harness-define-tool "task_wait"
+  :label "Wait for tasks"
   :description "Wait for tasks without polling. until=settled (default) returns when each task is done, needs input or waits in review for the user to verify it, or is written up and waits in the backlog for someone to start it; done, needs-input, active and review wait for that column; changed waits for any change of column, state or merge status. mode=all (default) waits for every task, any for the first. Returns each task's line and its session's last reply; on timeout it returns the same report, not an error."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "A task id or unique prefix.")
@@ -831,7 +842,7 @@ before its prompt."
                          :timeout_seconds (:type "number" :description "Give up after this long (default 600, at most 3600).")))
   :kind 'read
   :timeout 3700
-  :title (lambda (input) (format "task_wait %s" (string-join (harness-tools-sessions--refs input :task_id :task_ids) " ")))
+  :subject (lambda (input) (string-join (harness-tools-sessions--refs input :task_id :task_ids) " "))
   :handler #'harness-tools-sessions--task-wait)
 
 ;;;; Registration

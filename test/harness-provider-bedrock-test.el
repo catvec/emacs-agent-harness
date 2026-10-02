@@ -395,6 +395,15 @@ Folded header lines continue the header above them."
       (should-not (string-search "reasoningContent"
                                  (harness-json-encode (harness-bedrock--messages request :reasoning nil)))))))
 
+(ert-deftest harness-provider-bedrock-flattens-non-ascii-tool-calls ()
+  ;; A flattened call is text inside the body's JSON: as bytes it made the
+  ;; body fail to encode once a call had non-ASCII input.
+  (let* ((value "\N{U+2717} caf\N{U+E9} \N{U+2026}")
+         (flat (harness-bedrock--flatten-tools
+                (list (list :toolUse (list :toolUseId "t1" :name "echo" :input (list :value value)))))))
+    (should (equal (list (list :text (format "[called tool echo with {\"value\":\"%s\"}]" value))) flat))
+    (should (equal flat (harness-json-parse (harness-json-encode flat))))))
+
 (ert-deftest harness-provider-bedrock-request-body ()
   (harness-bedrock-test-with-env ()
     (let* ((endpoint '(:id testrock :region "us-east-1" :request-fields (:anthropic_beta ("beta-1"))))
@@ -1045,7 +1054,7 @@ Folded header lines continue the header above them."
               (harness-bedrock-clear-models-cache)
               (harness-add-filter 'permission/decide
                                   (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-              (harness-define-tool "list_dir" :description "List a directory." :kind 'read
+              (harness-define-tool "list_dir" :label "List directory" :description "List a directory." :kind 'read
                                    :schema '(:type "object" :properties (:path (:type "string")) :required ("path"))
                                    :handler (lambda (input _ctx) (format "listing of %s: a.txt" (plist-get input :path))))
               ;; The catalogue lists the Bedrock models with their context windows.

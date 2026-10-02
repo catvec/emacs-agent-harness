@@ -9,6 +9,12 @@
 ;; module is installed every call is denied, so a misconfigured harness
 ;; fails safe.
 ;;
+;; A tool has two names: NAME, the identifier the model calls it by
+;; (read_file), and its `:label', the name people read (Read file),
+;; which every UI shows in its place.  A call's title is the label,
+;; then what the call is about, from the tool's `:subject' function:
+;; "Read file: src/x.el".
+;;
 ;; Some providers have tools of their own that can stand in for a
 ;; harness tool: Claude Code's web search for web_search, say.  A
 ;; provider names the harness tools it has such a counterpart of in its
@@ -16,10 +22,17 @@
 ;; session's provider runs itself; `tools/list' then leaves them out.
 ;; The calls the provider runs still need a permission decision, which
 ;; `tools/authorize' gives without running anything.
+;;
+;; Corporate mode (`harness-corporate-mode') turns the tools of kind net
+;; off.  No session gets them, so no provider runs a search of its own
+;; in their place either, and a call to one is refused before the
+;; permission chain, whatever the permission mode and the standing
+;; rules say (`harness-tools--corporate-refusal').
 
 ;;; Code:
 
 (require 'cl-lib)
+(require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
 
@@ -34,19 +47,29 @@
   :type 'number :group 'harness)
 
 (cl-defstruct (harness-tool (:copier nil))
-  name description schema handler kind paths-fn coalescable title-fn module timeout)
+  ;; New slots go last, so a tool registered before a reload still reads
+  ;; right should its module fail to load again (see `harness-tools--label').
+  name description schema handler kind paths-fn coalescable subject-fn module timeout label)
 
 (defvar harness-tools (make-hash-table :test 'equal)
   "Tool name -> `harness-tool'.")
 
-(cl-defun harness-define-tool (name &key description schema handler (kind 'meta)
-                                    paths coalescable title timeout)
-  "Register tool NAME.  See docs/architecture.md for the keyword arguments."
+(cl-defun harness-define-tool (name &key label description schema handler (kind 'meta)
+                                    paths coalescable subject timeout)
+  "Register tool NAME.  See docs/architecture.md for the keyword arguments.
+LABEL is required: the name people read, such as \"Read file\" for
+read_file, which the UI shows wherever it names the tool.  SUBJECT is
+a function of a call's input returning what the call is about (the
+path it reads, the command it runs) or nil; it follows the label in
+the call's title (see `harness-tool-title')."
   (unless (functionp handler) (error "Tool %s needs a handler" name))
-  (puthash name (make-harness-tool :name name :description (or description "")
+  (unless (and (stringp label) (not (harness-string-blank-p label)))
+    (error "Tool %s needs a :label, the name people read (such as \"Read file\")" name))
+  (puthash name (make-harness-tool :name name :label (string-trim label)
+                                   :description (or description "")
                                    :schema (or schema '(:type "object" :properties :empty))
                                    :handler handler :kind kind :paths-fn paths
-                                   :coalescable coalescable :title-fn title
+                                   :coalescable coalescable :subject-fn subject
                                    :timeout timeout
                                    :module (and (boundp 'harness--defining-module)
                                                 harness--defining-module))
@@ -57,24 +80,56 @@
   "Return the tool struct for NAME or nil."
   (gethash name harness-tools))
 
+(defun harness-tools--label (tool)
+  "Return the label of TOOL, a `harness-tool', or its name when it has none.
+A tool registered by code from before tools had labels has none: its
+record is a slot short."
+  (or (ignore-errors (harness-tool-label tool))
+      (harness-tool-name tool)))
+
+(defun harness-tools-label (name)
+  "Return the name people read for tool NAME: its label, else NAME itself.
+A tool nobody registered, one a model made up say, has no label."
+  (let ((tool (and name (harness-tool-get name))))
+    (if tool (harness-tools--label tool) (format "%s" (or name "tool")))))
+
 (defun harness-tool-spec (tool)
   "Return the public spec plist of TOOL."
   (list :name (harness-tool-name tool)
+        :label (harness-tools--label tool)
         :description (harness-tool-description tool)
         :schema (harness-tool-schema tool)
         :kind (harness-tool-kind tool)
         :coalescable (and (harness-tool-coalescable tool) t)))
 
+(defun harness-tools--subject (tool input)
+  "Return what a call of TOOL (a struct or nil) with INPUT is about, or nil.
+That is what TOOL's subject function says, nil included; without one,
+or when it fails, the first string in INPUT."
+  (let* ((fn (and tool (harness-tool-subject-fn tool)))
+         (said (and fn
+                    (condition-case err
+                        (list (funcall fn input))
+                      (error (harness-log 'debug "tool %s: subject failed: %S" (harness-tool-name tool) err)
+                             nil))))
+         (subject (if said
+                      (car said)
+                    (cl-loop for (_k v) on input by #'cddr
+                             when (and (stringp v) (not (harness-string-blank-p v)))
+                             return (harness-truncate-end (harness-first-line v) 60)))))
+    (and (stringp subject) (not (harness-string-blank-p subject))
+         (harness-first-line subject))))
+
 (defun harness-tool-title (name input)
-  "Return a short label for a call to NAME with INPUT."
-  (let ((tool (harness-tool-get name)))
-    (or (and tool (harness-tool-title-fn tool)
-             (ignore-errors (funcall (harness-tool-title-fn tool) input)))
-        (let ((first (cl-loop for (_k v) on input by #'cddr
-                              when (stringp v) return v)))
-          (if first
-              (format "%s %s" name (harness-truncate-end (harness-first-line first) 60))
-            name)))))
+  "Return the title of a call to tool NAME with INPUT, for people to read.
+It is the tool's label, then a colon and what the call is about, as
+\"Read file: x.el\" for read_file on x.el; or the label alone when the
+call is about nothing in particular."
+  (let* ((tool (harness-tool-get name))
+         (subject (harness-tools--subject tool input)))
+    (if subject
+        (format "%s: %s" (harness-tools-label name) subject)
+      (harness-tools-label name))))
 
 ;;;; Results
 
@@ -146,13 +201,46 @@ reached through a `_harness/client/tool' request to the UI."
                 (delq nil (funcall (harness-tool-paths-fn tool) input)))
       (error (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err) nil))))
 
+;;;; Corporate mode
+
+(defconst harness-tools-corporate-hint
+  "Work with the project and the tools you have; do not try to reach the network another way, such as with curl in the shell. If the task cannot be done without the web, finish what you can and say so in your answer."
+  "What the model is told when corporate mode refuses a network tool.")
+
+(defun harness-tools--off-p (name)
+  "Non-nil when tool NAME is off: of kind net, with corporate mode on."
+  (and (harness-corporate-p)
+       (let ((tool (harness-tool-get name)))
+         (and tool (eq (harness-tool-kind tool) 'net)))))
+
+(defun harness-tools--corporate-refusal (kind)
+  "Return the decision refusing a call of KIND in corporate mode, or nil.
+With `harness-corporate-mode' on, the tools of kind net are off: a call
+to one is refused without asking the `permission/decide' chain, so no
+permission mode, standing rule or answer lets it run."
+  (when (and (eq kind 'net) (harness-corporate-p))
+    (list :behavior 'deny :reason "corporate mode: network tools are off"
+          :hint harness-tools-corporate-hint)))
+
+(defun harness-tools--decide (request)
+  "Return a promise of the permission decision on REQUEST.
+A call corporate mode refuses (`harness-tools--corporate-refusal')
+never reaches the `permission/decide' chain; any other call does."
+  (let ((refusal (harness-tools--corporate-refusal (plist-get request :kind))))
+    (if refusal
+        (harness-resolved refusal)
+      (harness-run-filter-async 'permission/decide (list :behavior 'ask) request))))
+
 ;;;; Tools a provider runs itself
 
 (defun harness-tools--names (session)
   "Return the names of the tools SESSION gets, after `agent/tools'.
-Without SESSION, every registered tool."
+In corporate mode no session gets the tools of kind net.  Without
+SESSION, every registered tool: a catalogue, offered to no model."
   (let ((names (let (n) (maphash (lambda (k _) (push k n)) harness-tools) (sort n #'string<))))
-    (if session (harness-run-filter 'agent/tools names session) names)))
+    (if session
+        (cl-remove-if #'harness-tools--off-p (harness-run-filter 'agent/tools names session))
+      names)))
 
 (defun harness-tools--offered (session)
   "Return the harness tools that SESSION's provider has counterparts of.
@@ -178,7 +266,8 @@ filter `agent/builtin-tools' pick them."
 (harness-defmethod tools/list (&optional session-id)
   "Return tool specs available to SESSION-ID (or all), after `agent/tools'.
 The tools SESSION-ID's provider runs itself (see `tools/builtin') are
-left out."
+left out, and in corporate mode (`harness-corporate-mode') the tools of
+kind net.  Without SESSION-ID, every registered tool is listed."
   (let* ((session (and session-id (harness-tools--session session-id)))
          (names (harness-tools--names session))
          (builtin (harness-tools--builtin session names))
@@ -192,8 +281,9 @@ A provider names the harness tools it has a counterpart of in its
 say).  The sync filter `agent/builtin-tools' (value: list of names,
 initially nil; args: the session and the names its provider offers)
 picks the ones the provider should run; only tools the session would
-get otherwise count.  `tools/list' leaves them out, and the agent asks
-the provider to turn them on with the request's `:builtin-tools'."
+get otherwise count, so in corporate mode none of kind net does.
+`tools/list' leaves them out, and the agent asks the provider to turn
+them on with the request's `:builtin-tools'."
   (let ((session (harness-tools--session session-id)))
     (harness-tools--builtin session (harness-tools--names session))))
 
@@ -211,8 +301,9 @@ Nothing runs: this is for a tool the provider runs itself (see
 `tools/builtin'), whose call still needs the harness's permission.  The
 call goes through the `permission/decide' chain as `tools/execute'
 sends it, as a call of the harness tool NAME: that tool's kind and paths
-apply when it is registered, else CALL's `:kind', else exec.  Emits
-`permission/decided'.  Return a promise of the DECISION, whose
+apply when it is registered, else CALL's `:kind', else exec.  In
+corporate mode a call of kind net is denied without asking the chain.
+Emits `permission/decided'.  Return a promise of the DECISION, whose
 `:behavior' is allow or deny; a denial carries `:message', what the
 model is told."
   (let* ((name (plist-get call :name))
@@ -232,7 +323,7 @@ model is told."
                         :call-id call-id
                         :builtin t)))
     (harness-then
-     (harness-run-filter-async 'permission/decide (list :behavior 'ask) request)
+     (harness-tools--decide request)
      (lambda (decision)
        (harness-emit 'permission/decided session-id request decision)
        (if (eq (plist-get decision :behavior) 'allow)
@@ -273,7 +364,9 @@ model is told."
                                         (harness-error-message err)))))))))
 
 (harness-defmethod tools/execute (session-id call)
-  "Execute CALL (:id :name :input) for SESSION-ID; return a promise of a RESULT."
+  "Execute CALL (:id :name :input) for SESSION-ID; return a promise of a RESULT.
+The `permission/decide' chain decides first; in corporate mode a call of
+a tool of kind net is denied without asking it."
   (let* ((name (plist-get call :name))
          (call-id (or (plist-get call :id) (harness-short-id)))
          (input (plist-get call :input))
@@ -296,7 +389,7 @@ model is told."
                             :kind (harness-tool-kind tool)
                             :paths (harness-tools--paths tool input ctx)
                             :call-id call-id))
-             (decision (harness-run-filter-async 'permission/decide (list :behavior 'ask) request)))
+             (decision (harness-tools--decide request)))
         (harness-then
          decision
          (lambda (decision)

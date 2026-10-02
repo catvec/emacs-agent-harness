@@ -60,7 +60,7 @@
             (let ((r (harness-tools-emacs-test--call "emacs_buffer" :name "no-such-buffer-xyz")))
               (should (plist-get r :is-error))
               (should (string-search "emacs_buffers" (plist-get r :content))))
-            (should (equal "emacs_buffer x:5-9" (harness-tool-title "emacs_buffer" '(:name "x" :offset 5 :limit 5)))))
+            (should (equal "Read buffer: x:5-9" (harness-tool-title "emacs_buffer" '(:name "x" :offset 5 :limit 5)))))
         (kill-buffer buf)))))
 
 (ert-deftest harness-tools-emacs-describe ()

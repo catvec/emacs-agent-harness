@@ -11,6 +11,9 @@
 ;;   notifications and agent→client requests to hooks other UI modules
 ;;   join;
 ;; - a cache of session plists kept fresh from `_harness/session' updates;
+;; - a cache of the harness's tools, so views name each tool by its
+;;   label (Read file) rather than the name the model calls it by
+;;   (read_file);
 ;; - a cache of each provider's billing and plan quota kept fresh from
 ;;   `provider/quota-updated' events, and the helpers that show what a
 ;;   session cost: a price when it is billed per token, the plan's name
@@ -33,6 +36,7 @@
 (require 'harness-server)
 (require 'harness-client-tools)
 (require 'harness-files)
+(require 'harness-notifications-desktop)
 
 (defvar harness-directory)
 
@@ -69,10 +73,23 @@
 (defface harness-tool-error-face
   '((((background light)) :background "#f7e9e9" :extend t)
     (((background dark)) :background "#3a2a2a" :extend t))
-  "Background of failed tool call blocks." :group 'harness-ui)
+  "Background of failed tool call blocks.
+The tool ran and reported an error." :group 'harness-ui)
+
+(defface harness-tool-denied-face
+  '((((background light)) :background "#f9efe0" :extend t)
+    (((background dark)) :background "#3a3226" :extend t))
+  "Background of denied tool call blocks.
+The permission system refused the call, so it never ran." :group 'harness-ui)
 
 (defface harness-tool-title-face '((t :inherit (font-lock-function-name-face bold)))
-  "Face of a tool call's title." :group 'harness-ui)
+  "Face of a tool call's title: the tool's label, such as \"Read file\"." :group 'harness-ui)
+
+(defface harness-tool-subject-face '((t))
+  "Face of what a tool call is about, after the tool's label in its title.
+The path a call reads, the command it runs.  It sets nothing by
+default, so the text keeps the face of what it is drawn on."
+  :group 'harness-ui)
 
 (defface harness-thinking-face '((t :inherit shadow :slant italic))
   "Face of thinking text." :group 'harness-ui)
@@ -218,6 +235,14 @@ RESPOND with the outcome plist.")
   "Functions called with (PARAMS RESPOND) for `_harness/ask_user'.
 Same protocol as `harness-ui-permission-functions'.")
 
+(defvar harness-ui-notification-functions nil
+  "Functions called with (NOTIFICATION) when a desktop notification is clicked.
+NOTIFICATION is the wire plist of `_harness/client/notify': `:title',
+`:body', `:urgency', and what it is about (`:session', `:task',
+`:project', `:kind', `:source').  The first function that returns
+non-nil has shown what the notification is about; when none does, its
+session opens.")
+
 (defvar harness-ui-sessions-changed-hook nil
   "Hook run after the session cache changes.")
 
@@ -246,7 +271,12 @@ Each is (METHOD PARAMS PROMISE); PROMISE is nil for notifications.")
   "Connect the UI to ADDRESS: nil for the in-process harness, `process'
 for the managed harness process, or \"host:port\".  Return the
 connection, or nil while the harness process is still starting; requests
-made meanwhile are queued and sent once it listens."
+made meanwhile are queued and sent once it listens.
+In corporate mode (`harness-corporate-mode') a \"host:port\" ADDRESS
+gives way to this Emacs's own harness: the UI connects to no other."
+  (when (and (stringp address) (harness-corporate-p))
+    (message "Harness: corporate mode is on, so the UI connects to the local harness, not %s" address)
+    (setq address (harness-ui--local-address)))
   (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
   (setq harness-ui-connection nil
         harness-ui-connection-address address)
@@ -264,6 +294,8 @@ initialize: one it let go of for another closes on purpose."
   (let ((conn (let ((harness-acp-token (or token harness-acp-token)))
                 (harness-acp-connect address))))
     (setq harness-ui-connection conn)
+    ;; Another harness, or the same one started again, may have other tools.
+    (harness-ui--forget-tools)
     (harness-acp-set-handler conn #'harness-ui--dispatch)
     (harness-acp-on-close conn (lambda ()
                                  (when (eq conn harness-ui-connection)
@@ -423,6 +455,10 @@ tasks among them carry on once the process is back (see
        (error (harness-acp-respond-error respond -32000 (error-message-string err)))))
     ("_harness/client/tool"
      (funcall respond (harness-client-tools-run (plist-get params :name) (plist-get params :input))))
+    ("_harness/client/notify"
+     (harness-then (harness-ui--show-notification params)
+                   (lambda (shown) (funcall respond shown) nil)
+                   (lambda (err) (harness-acp-respond-error respond -32000 (harness-error-message err)) nil)))
     ("_harness/event"
      (let ((event (plist-get params :event)) (args (plist-get params :args)))
        (when (equal event "tools/file-written")
@@ -430,6 +466,8 @@ tasks among them carry on once the process is back (see
        (when (member event '("session/created" "session/deleted"))
          (harness-ui-refresh-sessions))
        (when (equal event "harness/reloaded")
+         ;; Reloaded code may label its tools anew: views fetch them again.
+         (harness-ui--forget-tools)
          (run-hooks 'harness-ui-redraw-hook))
        (when (member event '("provider/models-updated" "harness/reloaded"))
          (harness-ui-refresh-models))
@@ -456,6 +494,62 @@ as needing input and its chat panel or task card answers it later."
   "Fallback when no UI module claimed question PARAMS: leave it pending."
   (harness-ui--leave-pending params respond "question"))
 
+;;;; Desktop notifications
+
+(defun harness-ui--show-notification (params)
+  "Show the notification PARAMS of `_harness/client/notify' on this desktop.
+Return a promise of (:backend NAME) once it shows.  One about a session
+or a task opens it when clicked (`harness-ui--notification-clicked')."
+  (harness-then
+   (harness-notifications-desktop-notify
+    :title (plist-get params :title)
+    :body (plist-get params :body)
+    :urgency (plist-get params :urgency)
+    :on-action (and (or (plist-get params :session) (plist-get params :task))
+                    (lambda ()
+                      ;; Out of the process filter or D-Bus handler first.
+                      (harness-run-soon #'harness-ui--notification-clicked params))))
+   (lambda (shown)
+     (list :backend (format "%s" (plist-get shown :backend))))))
+
+(defun harness-ui--notification-clicked (params)
+  "Show what the clicked notification PARAMS is about.
+`harness-ui-notification-functions' come first (the task board opens
+on a task); otherwise the notification's session opens.  The frame it
+opens in comes to the front, as the user just asked for it."
+  (let ((frame (if (display-graphic-p (selected-frame))
+                   (selected-frame)
+                 (cl-find-if #'display-graphic-p (frame-list)))))
+    (when (and frame (frame-live-p frame))
+      (harness-ignore-errors-logged "showing the frame for a notification"
+        (select-frame-set-input-focus frame))))
+  (unless (run-hook-with-args-until-success 'harness-ui-notification-functions params)
+    (when-let* ((sid (plist-get params :session)))
+      (harness-ui-display-session sid))))
+
+(defun harness-ui--notification-summary (result)
+  "Describe RESULT, what `notification/send' returned, in one line."
+  (if (harness-json-true-p (plist-get result :dropped))
+      "dropped by a notification/before-send filter"
+    (let ((parts (mapcar (lambda (r)
+                           (format "%s %s%s" (plist-get r :provider) (plist-get r :status)
+                                   (let ((why (or (plist-get r :detail) (plist-get r :error))))
+                                     (if why (format " (%s)" why) ""))))
+                         (plist-get result :results))))
+      (if parts (string-join parts "; ") "no notification provider is enabled"))))
+
+;;;###autoload
+(defun harness-test-notifications ()
+  "Check the notification setup with a test notification.
+It goes to every notification provider that is set up, and the echo
+area says what each provider did with it."
+  (interactive)
+  (harness-ui-call "_harness/notification/send"
+                   (list :notification (list :title "Test notification" :source "ui" :kind "test"
+                                             :body "Notifications from the Emacs Agent Harness reach you here."))
+                   (lambda (result)
+                     (message "Harness notifications: %s" (harness-ui--notification-summary result)))))
+
 (defvar harness-process)
 
 (defun harness-ui--local-address ()
@@ -470,22 +564,54 @@ nil when it runs in this Emacs."
 An empty or nil ADDRESS connects back to this Emacs's own harness: the
 harness process when `harness-process' is on, else the harness in this
 Emacs.  When the connection cannot be opened, for instance as ADDRESS
-has no port, the UI stays connected where it was."
+has no port, the UI stays connected where it was.  In corporate mode
+\(`harness-corporate-mode') the UI connects to its own harness only, and
+any other ADDRESS is refused."
   (interactive
    ;; Offer the remote address in use; a local harness's is `process' or nil.
    (list (read-string "Harness server (host:port, empty for the local harness): "
                       (and (stringp harness-ui-connection-address) harness-ui-connection-address))))
-  (let* ((remote (and address (not (string-blank-p address)) (string-trim address)))
-         (previous harness-ui-connection-address)
-         (failure (condition-case err
-                      (progn (harness-ui-connect (or remote (harness-ui--local-address))) nil)
-                    (error (ignore-errors (harness-ui-connect previous))
-                           err))))
-    (run-hooks 'harness-ui-redraw-hook)
-    (if failure
-        (user-error "Harness: cannot connect to %s: %s"
-                    (or remote "the local harness") (harness-error-message failure))
-      (message "Harness: connected to %s" (or remote "the local harness")))))
+  (let ((remote (and address (not (string-blank-p address)) (string-trim address))))
+    (when (and remote (harness-corporate-p))
+      (user-error "Corporate mode is on: the UI connects only to this Emacs's own harness"))
+    (let* ((previous harness-ui-connection-address)
+           (failure (condition-case err
+                        (progn (harness-ui-connect (or remote (harness-ui--local-address))) nil)
+                      (error (ignore-errors (harness-ui-connect previous))
+                             err))))
+      (run-hooks 'harness-ui-redraw-hook)
+      (if failure
+          (user-error "Harness: cannot connect to %s: %s"
+                      (or remote "the local harness") (harness-error-message failure))
+        (message "Harness: connected to %s" (or remote "the local harness"))))))
+
+(defun harness-ui--corporate-mode-changed ()
+  "Make a change of `harness-corporate-mode' reach the harness.
+Run from `harness-corporate-mode-change-hook'.  Turned on, the option
+takes the UI off a remote harness, back to this Emacs's own.  The
+harness process reads the option as it starts, so the process the UI
+uses is restarted if it is running; a harness in this Emacs reads the
+option as it goes.  While Emacs initialises the process has not started
+yet: it starts after the init file, with the value set there."
+  (let* ((on (harness-corporate-p))
+         (remote (and on (stringp harness-ui-connection-address) harness-ui-connection-address)))
+    (when remote
+      ;; Nothing more goes to the remote harness.
+      (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
+      (setq harness-ui-connection nil
+            harness-ui-connection-address (harness-ui--local-address)))
+    (cond
+     ((and (eq harness-ui-connection-address 'process)
+           harness-ui--server (process-live-p harness-ui--server))
+      (message "Harness: corporate mode is now %s%s; restarting the harness process so that it applies"
+               (if on "on" "off")
+               (if remote (format " and the UI left %s" remote) ""))
+      ;; The views redraw once the new process listens.
+      (harness-restart))
+     (remote
+      (harness-ui-connect harness-ui-connection-address)
+      (run-hooks 'harness-ui-redraw-hook)
+      (message "Harness: corporate mode is now on; the UI left %s for the local harness" remote)))))
 
 ;;;; Session cache
 
@@ -544,6 +670,117 @@ has no port, the UI stays connected where it was."
                      (run-hooks 'harness-ui-redraw-hook)
                      (when callback (funcall callback models)))
                    (unless callback #'ignore)))
+
+;;;; Tool catalogue cache
+;;
+;; A tool has a name the model calls it by (read_file) and a label
+;; people read (Read file).  Views show the label, looked up here in the
+;; specs of every tool of the connected harness (`tools/list' without a
+;; session, so the tools of any transcript are there), fetched once per
+;; connection and again after a reload.
+
+(defvar harness-ui--tools nil
+  "Tool name -> spec plist (`tools/list' wire shape) of the connected harness.
+Nil until fetched; see `harness-ui-fetch-tools'.")
+
+(defvar harness-ui--tools-fetch nil
+  "The promise of the tool specs being fetched, or nil.")
+
+(defvar harness-ui--tools-generation 0
+  "Counter bumped when the cached tool specs go stale; drops late answers.")
+
+(defun harness-ui--forget-tools ()
+  "Drop the cached tool specs; the next `harness-ui-fetch-tools' fetches them."
+  (setq harness-ui--tools nil harness-ui--tools-fetch nil)
+  (cl-incf harness-ui--tools-generation))
+
+(defun harness-ui-fetch-tools ()
+  "Return a promise of the table of tool specs, fetched unless cached.
+The table maps tool names to spec plists.  A failed fetch resolves to
+an empty table, which is not cached: views then show tool names until
+a later fetch succeeds."
+  (cond
+   (harness-ui--tools (harness-resolved harness-ui--tools))
+   (harness-ui--tools-fetch)
+   (t
+    (let ((gen harness-ui--tools-generation)
+          (fetch (harness-make-promise)))
+      ;; Recorded before the handlers can run: a request that settles at
+      ;; once runs them right away, and they let go of it.
+      (setq harness-ui--tools-fetch fetch)
+      (harness-then
+       (harness-ui-request "_harness/tools/list" nil)
+       (lambda (specs)
+         (let ((table (make-hash-table :test 'equal)))
+           (dolist (spec specs)
+             (when (plist-get spec :name)
+               (puthash (format "%s" (plist-get spec :name)) spec table)))
+           (when (= gen harness-ui--tools-generation)
+             (setq harness-ui--tools table))
+           (when (eq harness-ui--tools-fetch fetch)
+             (setq harness-ui--tools-fetch nil))
+           (harness-resolve fetch table)))
+       (lambda (err)
+         (when (eq harness-ui--tools-fetch fetch)
+           (setq harness-ui--tools-fetch nil))
+         (harness-log 'warn "ui: fetching the tools failed: %s" (harness-error-message err))
+         (harness-resolve fetch (make-hash-table :test 'equal))))
+      fetch))))
+
+(defun harness-ui-tool (name)
+  "Return the cached spec of tool NAME, or nil."
+  (and harness-ui--tools name (gethash (format "%s" name) harness-ui--tools)))
+
+(defun harness-ui-tool-label (name)
+  "Return the name people read for tool NAME: its label, such as \"Read file\".
+A tool the cache does not know (not fetched yet, or one a model made
+up) reads as NAME itself."
+  (let ((label (plist-get (harness-ui-tool name) :label)))
+    (if (and (stringp label) (not (string-empty-p label)))
+        label
+      (format "%s" (or name "tool")))))
+
+(defun harness-ui-tool-title-parts (name title)
+  "Split TITLE, the title of a call to tool NAME, into (LABEL . SUBJECT).
+A title is the tool's label, then \": \" and what the call is about
+\(\"Read file: x.el\"), or the label alone, when SUBJECT is nil.  One
+recorded before tools had labels starts with NAME instead (\"read_file
+x.el\"), which gives way to the label.  A title of another shape is
+all SUBJECT, with a nil LABEL; without a title the call is its label."
+  (let ((label (harness-ui-tool-label name))
+        (name (and name (format "%s" name))))
+    (cond
+     ((or (not (stringp title)) (string-empty-p title)) (cons label nil))
+     ((equal title label) (cons label nil))
+     ((string-prefix-p (concat label ": ") title)
+      (cons label (substring title (+ (length label) 2))))
+     ((and name (equal title name)) (cons label nil))
+     ((and name (string-prefix-p (concat name " ") title))
+      (cons label (string-trim-left (substring title (length name)))))
+     (t (cons nil title)))))
+
+(defun harness-ui-tool-title (name title)
+  "Return TITLE, the title of a call to tool NAME, as people should read it.
+That is the tool's label and what the call is about, \"Read file:
+x.el\", whatever NAME's label was when TITLE was recorded (see
+`harness-ui-tool-title-parts')."
+  (pcase-let ((`(,label . ,subject) (harness-ui-tool-title-parts name title)))
+    (cond ((null subject) label)
+          ((null label) subject)
+          (t (concat label ": " subject)))))
+
+(defun harness-ui-tool-title-string (name title &optional max)
+  "Return the title of a call to tool NAME, TITLE, styled for a header.
+The tool's label is in `harness-tool-title-face' and what the call is
+about follows in `harness-tool-subject-face', which tells them apart
+instead of the colon; a title of another shape is all in the title
+face.  The first line only, cut to MAX characters when MAX is given."
+  (pcase-let ((`(,label . ,subject) (harness-ui-tool-title-parts name title)))
+    (let ((text (harness-first-line (if (and label subject) (concat label " " subject) (or label subject)) max)))
+      (if (and label subject (> (length text) (length label)))
+          (concat (propertize (substring text 0 (length label)) 'face 'harness-tool-title-face)
+                  (propertize (substring text (length label)) 'face 'harness-tool-subject-face))
+        (propertize text 'face 'harness-tool-title-face)))))
 
 ;;;; Billing and plan quota cache
 
@@ -757,6 +994,13 @@ Signal unless NOERROR when none can be found."
           ((>= f 0.70) 'harness-context-warning-face)
           (t 'harness-context-ok-face))))
 
+(defun harness-ui-mode-line-escape (string)
+  "Return a copy of STRING for a mode or header line, every % doubled.
+Those lines read % as the start of a construct such as %b, so a literal
+one -- a quota window's \"23%\" -- would vanish together with the
+character after it.  Text properties are kept."
+  (replace-regexp-in-string "%" (lambda (match) (concat match match)) string t t))
+
 (defun harness-ui-format-context (session)
   "Return \"12.3k/200k\" for SESSION with the warning face applied."
   (let* ((usage (plist-get session :usage))
@@ -798,8 +1042,19 @@ VALUE is as it comes over the wire: nil and `:false' are off."
 (defun harness-ui-non-interactive-help (value)
   "Return what a session's non-interactive switch VALUE means, for a tooltip."
   (if (harness-json-true-p value)
-      "Non-interactive: the agent never waits for you.  What would ask for permission is denied, and the agent is told to find another way."
+      "Non-interactive: the agent never waits for you.  The auto-mode judge decides what would ask you for permission, and after a denial the agent is told to find another way."
     "Interactive: the agent asks you for permission and waits for your answer."))
+
+(defun harness-ui-tool-outcome (result)
+  "Return how the tool call whose tool-result node is RESULT ended.
+`denied' when the permission system refused the call, so it never ran:
+the agent records `:denied' in the node's `:meta'.  `failed' when it
+ran and reported an error, such as a non-zero exit or an edit whose
+text did not match.  `ok' otherwise, and nil without RESULT."
+  (cond ((null result) nil)
+        ((harness-json-true-p (harness-plist-get-in result '(:meta :denied))) 'denied)
+        ((harness-json-true-p (plist-get result :is-error)) 'failed)
+        (t 'ok)))
 
 (defun harness-ui-model-label (model-id)
   "Return a short, readable \"model (provider)\" label for MODEL-ID.
@@ -1058,9 +1313,10 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
 ;;;###autoload
 (defun harness-toggle-non-interactive (&optional session-id)
   "Toggle non-interactive mode for SESSION-ID.
-A non-interactive session never waits for the user: what would ask for
-permission is denied, and the agent is told to find another way.  The
-session's header line shows which it is; clicking there toggles too."
+A non-interactive session never waits for the user: the auto-mode
+judge decides what would ask for permission, and after a denial the
+agent is told to find another way.  The session's header line shows
+which it is; clicking there toggles too."
   (interactive)
   (let* ((target (harness-ui--setting-target session-id))
          (now (harness-json-true-p (harness-ui--setting-get target :non-interactive))))
@@ -1365,7 +1621,11 @@ leaves the buffer's commands out, never the whole menu."
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
-    ("c" "Connect remote" harness-connect-remote)
+    ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
+    ("P" "Remote control" harness-remote-control
+     :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
+     :inapt-if harness-corporate-p)
+    ("N" "Test notifications" harness-test-notifications)
     ("R" "Reload harness" harness-reload)
     ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes
@@ -1381,6 +1641,7 @@ leaves the buffer's commands out, never the whole menu."
 
 (defun harness-ui--init ()
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
+  (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
   (harness-ui-connect harness-ui-connection-address)
   ;; A reload reaches the UI as the forwarded `harness/reloaded' event, for
   ;; local and remote harnesses alike, so no bus subscription is needed.

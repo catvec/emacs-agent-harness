@@ -35,7 +35,7 @@
        (ignore port)
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       (harness-define-tool "list_dir" :description "list" :kind 'read
+       (harness-define-tool "list_dir" :label "List directory" :description "list" :kind 'read
                             :handler (lambda (input _ctx) (format "listing of %s" (plist-get input :path))))
        (unwind-protect
            (progn ,@body)
@@ -156,7 +156,7 @@
                                   :sessionId)))
            (p (progn
                 ;; The turn waits in this tool until the test lets it go.
-                (harness-define-tool "hold" :description "hold" :kind 'read
+                (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
                                      :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
                 (harness-acp-request conn "session/prompt"
                                      (list :sessionId sid :prompt (list (list :type "text" :text "tour")))))))
@@ -212,12 +212,13 @@
             (let ((conn (harness-acp-tcp-test-connect port)))
               (setq harness-acp-token "s3cret")
               (should (= 1 (plist-get (harness-test-await (harness-acp-initialize conn)) :protocolVersion)))
-              (should (= -32001 (car (harness-acp-tcp-test-error conn "_harness/harness/version" nil))))
-              (should (= -32001 (car (harness-acp-tcp-test-error conn "session/new" (list :cwd dir)))))
-              (should (= -32001 (car (condition-case err
+              ;; ACP's auth_required, which clients answer by authenticating.
+              (should (= -32000 (car (harness-acp-tcp-test-error conn "_harness/harness/version" nil))))
+              (should (= -32000 (car (harness-acp-tcp-test-error conn "session/new" (list :cwd dir)))))
+              (should (= -32000 (car (condition-case err
                                          (progn (harness-test-await (harness-acp-authenticate conn "wrong")) nil)
                                        (acp-error (cdr err))))))
-              (should (= -32001 (car (harness-acp-tcp-test-error conn "_harness/harness/version" nil))))
+              (should (= -32000 (car (harness-acp-tcp-test-error conn "_harness/harness/version" nil))))
               (should (null (harness-test-await (harness-acp-authenticate conn "s3cret"))))
               (should (equal harness-version (plist-get (harness-acp-tcp-test-request conn "_harness/harness/version" nil)
                                                         :version)))
@@ -280,6 +281,82 @@
     (let ((harness-acp-allow-remote nil))
       (should-error (harness-call 'acp/start :host "0.0.0.0" :port 0) :type 'harness-error))
     (should (eq :false (plist-get (harness-call 'acp/status) :running)))))
+
+(ert-deftest harness-acp-tcp-corporate-mode-stays-on-this-machine ()
+  "Corporate mode ignores `harness-acp-allow-remote' and connects nowhere else."
+  (harness-acp-tcp-test-with
+    (harness-call 'acp/stop)
+    (let ((harness-corporate-mode t)
+          (harness-acp-allow-remote t))
+      (let ((err (should-error (harness-call 'acp/start :host "0.0.0.0" :port 0) :type 'harness-error)))
+        (should (string-match-p "corporate mode" (cadr err))))
+      (should (eq :false (plist-get (harness-call 'acp/status) :running)))
+      (let ((err (should-error (harness-acp-connect "192.0.2.1:9") :type 'acp-error)))
+        (should (string-match-p "Corporate mode" (nth 2 err))))
+      ;; This machine's own harness stays reachable.
+      (let* ((contact (harness-call 'acp/start :port 0))
+             (conn (harness-acp-tcp-test-connect (plist-get contact :port))))
+        (should (equal harness-version
+                       (plist-get (harness-acp-tcp-test-request conn "_harness/harness/version" nil) :version)))
+        (harness-acp-close conn)))))
+
+(ert-deftest harness-acp-tcp-ignores-dollar-notifications ()
+  "`$/ping' heartbeats get no answer and leave nothing in the log."
+  (harness-acp-tcp-test-with
+    (pcase-let ((`(,proc . ,lines) (harness-acp-tcp-test-raw-client port)))
+      (unwind-protect
+          (let ((logged (with-current-buffer (get-buffer-create harness-log-buffer-name) (buffer-size))))
+            (process-send-string proc "{\"jsonrpc\":\"2.0\",\"method\":\"$/ping\"}\n")
+            (process-send-string proc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"_harness/harness/version\",\"params\":{}}\n")
+            (harness-test-wait (lambda () (car lines)) 5 "the version")
+            (should (= 1 (length (car lines))))
+            (should-not (string-match-p "\\$/ping"
+                                        (with-current-buffer harness-log-buffer-name
+                                          (buffer-substring-no-properties (1+ logged) (point-max))))))
+        (delete-process proc)))))
+
+(defun harness-acp-tcp-test-add-client (address)
+  "Register a client of a test transport from ADDRESS; return (CLIENT . SENT-CELL).
+SENT-CELL's car collects the parsed messages the server writes, newest first."
+  (let* ((sent (list nil))
+         (client (harness-acp-add-client
+                  'test :writer (lambda (_c text) (push (harness-json-parse text) (car sent)))
+                  :remote (list :address address))))
+    (cons client sent)))
+
+(defun harness-acp-tcp-test-answer (sent client id method &optional params)
+  "Send request ID METHOD PARAMS as CLIENT and return the answer from SENT."
+  (harness-acp-client-receive client (harness-json-encode (list :jsonrpc "2.0" :id id :method method
+                                                                :params (or params :empty))))
+  (harness-test-wait (lambda () (cl-find id (car sent) :key (lambda (m) (plist-get m :id)))) 5 method)
+  (cl-find id (car sent) :key (lambda (m) (plist-get m :id))))
+
+(ert-deftest harness-acp-other-transport-clients ()
+  "A client from another device authenticates even without a token."
+  (harness-acp-tcp-test-with
+    (pcase-let ((`(,client . ,sent) (harness-acp-tcp-test-add-client "192.0.2.7"))
+                (harness-acp-authorize-functions nil))
+      (should (equal '(:address "192.0.2.7") (harness-acp-client-remote-info client)))
+      (should (= 1 (plist-get (plist-get (harness-acp-tcp-test-answer sent client 1 "initialize"
+                                                                      '(:protocolVersion 1))
+                                         :result)
+                              :protocolVersion)))
+      (let ((answer (harness-acp-tcp-test-answer sent client 2 "_harness/harness/version")))
+        (should (= -32000 (plist-get (plist-get answer :error) :code))))
+      ;; A function of `harness-acp-authorize-functions' lets it in.
+      (let ((harness-acp-authorize-functions (list (lambda (c) (eq c client)))))
+        (should (equal harness-version
+                       (plist-get (plist-get (harness-acp-tcp-test-answer sent client 3 "_harness/harness/version")
+                                             :result)
+                                  :version)))
+        ;; Corporate mode refuses it all the same, and drops it once turned on.
+        (let ((harness-corporate-mode t))
+          (should (= -32000 (plist-get (plist-get (harness-acp-tcp-test-answer
+                                                   sent client 4 "_harness/harness/version")
+                                                  :error)
+                                       :code)))
+          (harness-acp--on-corporate-mode)
+          (should-not (memq client harness-acp--clients)))))))
 
 (provide 'harness-acp-tcp-test)
 ;;; harness-acp-tcp-test.el ends here

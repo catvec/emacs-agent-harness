@@ -13,11 +13,12 @@ module needs something more, add it here first.
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, naming, compaction,
-                worktree, merge, tasks, skills, perms, sandbox
+                worktree, merge, tasks, tasks-notify, skills, perms, sandbox,
+                notifications
  Completion     provider, provider-openai, provider-claude, provider-bedrock,
                 provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
-                tools-sessions
+                tools-sessions, tools-notify
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -65,8 +66,10 @@ default) the layers above are split across two Emacs processes:
 - Work about the user's Emacs runs there, asked for by the harness with
   `client/request` (below): the `emacs_*` and `elisp` tools
   (lisp/harness-client-tools.el), saving user options to `custom-file`
-  (`harness-save-user-option`), and reverting buffers after a tool
-  writes a file (event `tools/file-written`).
+  (`harness-save-user-option`), reverting buffers after a tool
+  writes a file (event `tools/file-written`), and desktop notifications
+  (lisp/harness-notifications-desktop.el, see notifications), so they
+  show where the user is and a click on one opens what it is about.
 - Project roots and file lists (lisp/harness-files.el) are computed on
   both sides with the same code; the UI lists files itself so `@`
   completion uses the user's projectile cache.
@@ -120,6 +123,10 @@ UI redraws every session buffer.
 
 All shapes are keyword plists (the JSON convention in harness-util:
 objects are plists, arrays are lists, `nil` is null, `:false` is false).
+`harness-json-encode` gives bytes (unibyte UTF-8 since Emacs 30) for a
+process, a file or an HTTP body; JSON that goes inside other text (a
+prompt, a tool result) or inside other JSON comes from
+`harness-json-encode-text`, since bytes there break the next encoding.
 Symbols used as enum values travel as strings over the wire and are
 interned back by the ACP layer for a fixed set of keys (`:status`,
 `:permission-mode`, `:kind`, `:behavior`, `:scope`).
@@ -170,8 +177,8 @@ catalogue changes, the sessions whose window moved get `session/changed`.
  :kind user|assistant|thinking|tool-call|tool-result|hint|compaction|plan
  ;; user / assistant / thinking / hint / compaction / plan:
  :content "text"  :blocks (BLOCK…)          ; blocks only when non-text content exists
- ;; tool-call:
- :tool "read_file" :call-id "toolu_…" :input PLIST :title "read_file src/x.el"
+ ;; tool-call (:title from `harness-tool-title': the tool's label, then what the call is about):
+ :tool "read_file" :call-id "toolu_…" :input PLIST :title "Read file: src/x.el"
  ;; tool-result:
  :call-id "toolu_…" :output "text" :is-error BOOL :attachments (ATTACHMENT…)
  :usage PLIST        ; assistant nodes: this response's usage
@@ -234,10 +241,13 @@ project-root `.dir-locals.el` → customize default.  Variables are
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
 `harness-process`, `harness-state-directory`, the module lists, the
-`harness-server-*` and `harness-acp-*` options, minor modes) have a
-global value only.  Options named `...-api-key`, `-token`, `-secret`
-or `-password` are secrets: their values never leave the harness and
-never go to a `.dir-locals.el`.
+`harness-server-*` and `harness-acp-*` options, minor modes, and less
+`harness-corporate-mode`) have a global value only.  `config/set` and
+`config/unset` refuse the ones of `harness-config-hidden-options`,
+`harness-corporate-mode` among them, as set in the init file only.
+Options named `...-api-key`, `-token`, `-secret` or `-password` are
+secrets: their values never leave the harness and never go to a
+`.dir-locals.el`.
 
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
   or its name; layered settings only).
@@ -607,21 +617,39 @@ no session process runs.
 
 ```elisp
 (harness-define-tool "read_file"
+  :label "Read file"                      ; required: the name people read
   :description "…"                       ; what the model sees
   :schema '(:type "object" :properties (:path (:type "string" :description "…")) :required ("path"))
   :kind read|write|exec|net|meta          ; permission class
   :paths (lambda (input) (list …))        ; paths touched, for the jail
   :coalescable t                          ; may be folded into a summary block in the UI
-  :title (lambda (input) "read_file x.el") ; short label
+  :subject (lambda (input) "x.el")        ; what a call is about, or nil
   :handler (lambda (input ctx) …))        ; → RESULT | string | promise
 ```
+
+A tool has two names: NAME, the identifier the model calls it by, and
+its `:label`, a short name in sentence case for people ("Read file",
+"Bash", "Web search").  The label is required (`harness-define-tool`
+signals without one) and every UI shows it wherever it names a tool;
+the identifier stays for the model, for configuration (permission
+rules, `harness-perms-auto-allow-tools`) and in the text agents read
+about other sessions (`session_read`).  `harness-tools-label NAME`
+returns the label, or NAME for a tool nobody registered.
+`harness-tool-title NAME INPUT` titles a call: the label, then a colon
+and the `:subject` of INPUT ("Read file: x.el"), or the label alone
+when the subject is nil.  Without a `:subject` function, or when it
+fails, the subject is the first line of the first string in INPUT.
+Tool-call nodes, permission prompts, the activity of a running turn and
+ACP `tool_call` titles all carry this title.
 
 CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
 `:report` accepts a string for progress.  RESULT = `(:content "…"
 :is-error BOOL :attachments (…) :meta PLIST)`.
 
-- `tools/list &optional SESSION-ID` → TOOL-SPECs, filtered through sync
-  filter `agent/tools` (value: list of names; args: session).
+- `tools/list &optional SESSION-ID` → TOOL-SPECs `(:name :label
+  :description :schema :kind :coalescable)`, filtered through sync
+  filter `agent/tools` (value: list of names; args: session).  Without
+  SESSION-ID every registered tool: how UIs learn the labels.
 - `tools/execute SESSION-ID CALL` (CALL = `(:id :name :input)`) → promise of
   RESULT.  Pipeline: lookup → `permission/decide` (async filter) →
   handler (with `harness-tools-timeout`) → context-bomb guard → sync
@@ -642,10 +670,21 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   nothing runs.  Emits `permission/decided`.  The `:behavior` is allow
   or deny; a denial carries `:message`, the text `tools/execute` would
   have returned.
+- Corporate mode (`harness-corporate-mode`) turns off the tools of kind
+  `net`.  No session gets them, so `tools/builtin` never picks a
+  provider's own web search either; the list without a session still
+  has them.  `tools/execute` and `tools/authorize` deny a call to one
+  before the `permission/decide` chain, whatever the mode and the
+  standing rules: reason "corporate mode: network tools are off", a
+  hint to work with the project and the tools the session has,
+  `:denied t`, and `permission/decided` as for any decision.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.
-- Denied calls return `(:is-error t :content "Denied: REASON. HINT")`.
+- Denied calls return `(:is-error t :denied t :content "Denied: REASON. HINT")`.
+  The agent keeps `:denied t` in the `:meta` of the call's tool-result
+  node, so a view can tell a call the permission system refused, which
+  never ran, from one that ran and failed (`harness-ui-tool-outcome`).
 
 ### perms
 
@@ -653,8 +692,9 @@ Async filter `permission/decide`: value is a DECISION
 `(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
 :paths (…))`.  Chain (priority): 5 dir-request, 7 sandbox-guard, 10 jail,
-20 mode, 30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask`
-into a pending request and resolves when answered).
+20 mode, 25 write-up (the tasks module: a backlog write-up only reads),
+30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a
+pending request and resolves when answered).
 
 - The sandbox guard asks `sandbox/check-command` about every `exec` call
   whose input has a `:command` (the bash tool), passing the directory it
@@ -714,17 +754,30 @@ into a pending request and resolves when answered).
   `harness-perms-auto-model`, decides the rest with a reason; falls back
   to ask), `yolo` (allow everything; the jail still applies).  Tools in
   `harness-perms-auto-allow-tools` are allowed in every mode: the meta
-  tools, skill and Emacs lookups, and `web_search`, which only sends its
-  query to the configured search provider, so task sessions can search.
+  tools, skill and Emacs lookups, `web_search`, which only sends its
+  query to the configured search provider, so task sessions can search,
+  and `notify`, which only reaches the user through the notification
+  providers they set up, so unattended sessions can say they need them.
   The model provider's own search, standing in for `web_search` (see
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
   `web_fetch` reaches any URL and stays with the mode (the judge in auto).
 - Jail denials are final and carry a constructive hint listing the
   allowed roots and how to widen them.
-- Non-interactive: `ask` becomes `deny` with the reason "non-interactive
-  mode: the user is away" and a hint to find another approach inside the
-  permitted scope; a steering message is sent to the agent once per call.
+- Non-interactive (the user is away) is no permission policy of its
+  own and refuses nothing for being unattended: the auto judge
+  (stage 30, `harness-perms--judge-p`) decides what would ask the user,
+  in every mode, and its verdict stands.  A call it gives no verdict on
+  (it failed, timed out or answered without one; stage 30 passes the
+  `ask` on with `:no-verdict` saying why) nobody can approve, so stage
+  40 denies it, with that cause as the reason and a hint that this was
+  no verdict on the call, which may be tried once more.  Directories are
+  still granted by a person only: the jail and the dir-request stage
+  deny.  After every denial in a non-interactive session, whoever made
+  it, the `permission/decided` handler sends the agent a steering
+  message (`harness-perms-steering-text`), once per call and only while
+  a turn runs to take it: the user is away, so respect the denial and
+  reach the goal another way.
   The session's own `:non-interactive` switch decides, off as much as
   on.  It starts from `harness-non-interactive` when the session is
   created (an explicit false turns it off whatever the setting says);
@@ -988,8 +1041,11 @@ to the task's file (below); the record also keeps `:file-base` and
   With `:refine` the task goes to the backlog instead (below).
 - Backlog refinement (once called grooming): a `:refine` task is
   `refining` while a session at its directory -- `ask` and
-  non-interactive, so read-only, `harness-tasks-refine-model` and
-  `-refine-thinking` (low) -- writes it up as told by
+  non-interactive, `harness-tasks-refine-model` and
+  `-refine-thinking` (low), read-only through the tasks module's
+  `permission/decide` stage at 25, which denies (final) whatever the
+  mode and its rules leave undecided in a turn of a write-up, before
+  the auto judge could allow it -- writes it up as told by
   `harness-tasks-refine-prompt` (brief, no changes, no questions, a
   self-contained ticket: title line, what and why, what to change, how to
   tell it is done, open questions); after `harness-tasks-refine-tool-calls`
@@ -1069,7 +1125,12 @@ to the task's file (below); the record also keeps `:file-base` and
   task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree).
 - Events `task/changed TASK`, `task/deleted ID`, `task/review TASK` (its
-  work waits for the user's review).  Records are written
+  work waits for the user's review), `task/done TASK HOW` (it became
+  done; HOW is `merged` when the merge queue merged its branch,
+  `finished` when its turn ended with nothing to merge or review,
+  `verified` when the user verified it with nothing left to merge, or
+  `completed` when it was marked done by hand, `task/complete`; a task
+  already done emits nothing).  Records are written
   shortly after a change and on exit (`harness-tasks-flush`), each into
   its project's store; a store whose text would not change is skipped.
 - Stores: a git project's records go to `harness/tasks.json` in the
@@ -1215,44 +1276,140 @@ to the task's file (below); the record also keeps `:file-base` and
   nil: `:outcome interrupted`).  Merges in flight are queued again, and
   tasks in review wait on for the user.
 
-### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions
+### notifications
 
-Tool names and inputs (all paths relative to cwd or absolute; TRAMP
-prefixes come from the session host):
+Any module tells the user something with `notification/send`, and
+providers deliver it.  NOTIFICATION = `(:title :body :urgency
+low|normal|critical :source :kind :session :task :project :url)`: a
+title or a body is required, urgency defaults to normal, `:source` and
+`:kind` say who sends it and why, `:session`, `:task` and `:project` say
+what it is about (a click on a desktop notification opens it), and
+`:url` is a link for providers that can open one.  `notification/send`
+fills in `:id` and `:ts`.
 
-| tool | input | kind |
-|---|---|---|
-| `read_file` | path, offset, limit | read |
-| `write_file` | path, content | write |
-| `edit_file` | path, old_string, new_string, replace_all | write |
-| `list_dir` | path, depth | read |
-| `glob` | pattern, path | read |
-| `grep` | pattern, path, glob, case_sensitive, max_results | read |
-| `bash` | command, timeout, cwd | exec |
-| `elisp` | code | exec |
-| `emacs_buffers` | filter, all | read |
-| `emacs_buffer` | name, offset, limit | read |
-| `emacs_describe` | symbol | read |
-| `web_search` | query, count | net |
-| `web_fetch` | url, max_chars | net |
-| `emacs_messages` | count | read |
-| `ask_user` | question, options, allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
-| `request_directory_access` | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
-| `session_info` | — | read |
-| `plan` | plan | meta |
-| `todo_write` | todos | meta |
-| `spawn_agent` | prompt, fork, model, name | meta |
-| `skill_search` / `skill_load` | query / name | read |
-| `session_list` | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
-| `session_search` | query, regexp, all_projects, max_sessions, max_matches | read |
-| `session_read` | session_id, limit, before, kinds, max_chars | read |
-| `session_send` | session_id, message, mode (send/queue), wait | meta |
-| `session_control` | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
-| `session_wait` | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | column (pending/needs-input/active/review/done), include_archived, all_projects | read |
-| `task_submit` | prompt, cwd, model, thinking, refine (for the backlog) | meta |
-| `task_control` | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
-| `task_wait` | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
+- `notification/send NOTIFICATION &optional PROVIDERS` -> promise of
+  `(:id ID :results ((:provider NAME :status sent|failed|skipped :detail
+  TEXT :error TEXT) ...))`, a result per provider, in order.  PROVIDERS
+  (names; strings accepted) overrides `harness-notifications-providers`
+  (default `(system gotify)`).  The sync filter
+  `notification/before-send` (value NOTIFICATION, no args) sees it first
+  and may change it, or drop it by returning nil (the result is then
+  `(:id ID :dropped t :results nil)`).  Every provider that is set up
+  gets it at once; one that signals, rejects or takes longer than
+  `harness-notifications-timeout` (30 s) is `failed`, one not set up, or
+  unknown, is `skipped`, and neither holds up the others.  It never
+  rejects for a provider, and signals when the notification has neither
+  a title nor a body.  Event `notification/sent NOTIFICATION RESULTS`.
+- `notification/providers` -> `(:name :label :doc :ready :enabled)` for
+  every provider, in definition order.
+- `(harness-notifications-define-provider 'NAME :label :doc :send FN
+  :ready FN)` adds or replaces a provider.  SEND gets the NOTIFICATION
+  and returns anything or a promise (a plist's `:detail` says how it
+  went); it signals or rejects when it cannot deliver.  READY (no
+  arguments, quick: it runs before every notification) says whether it
+  is set up; without it, it always is.
+- `system`: a desktop notification.  With a client connected
+  (`acp/status`), the harness asks it to show one with `client/request
+  "_harness/client/notify"` (params `:id :title :body :urgency`, plus
+  `:source :kind :session :task :project :url` when set; the URL ends
+  the body, and without a title the body's first line is the title), so
+  it shows on the user's desktop even for a remote harness, and a click
+  on it opens what it is about (see Presentation contracts).  When no
+  client answers within 10 s, or every client declines, the harness
+  process shows it itself.  Ready while a client is connected or this
+  process has a desktop backend.
+- Desktop backends (lisp/harness-notifications-desktop.el, loaded on
+  both sides): `harness-notifications-desktop-notify &rest (:title :body
+  :urgency :on-action)` -> promise of `(:backend NAME :id ID)`.
+  `harness-notifications-desktop-backend` is `auto` (the first that
+  works of `notify-send`, `dbus`, `osascript`, `w32`), one of those, or
+  a function of that plist.  notify-send runs as an asynchronous process
+  with `--print-id` (an id says the server took it) and, with
+  `:on-action`, `--action=default=Open`: the process then waits and
+  prints `default` when the notification is clicked (at most
+  `harness-notifications-desktop-max-waiting` processes wait; an old
+  notify-send without these options shows a plain notification).  D-Bus
+  calls org.freedesktop.Notifications asynchronously and hears
+  ActionInvoked in an interactive Emacs; a batch Emacs, which reads no
+  D-Bus events, calls it synchronously with a 2 s timeout and hears no
+  clicks.  The body is escaped for markup (`&`, `<`, `>`); the title is
+  never markup.
+- `gotify`: `POST URL/message` through harness-http, the application
+  token in `X-Gotify-Key` (so never on a command line), with `title`,
+  `message` (the title when there is no body), `priority` (from
+  `harness-gotify-priorities`: low 2, normal 5, critical 8) and `extras`
+  (`client::display` `text/plain`; `client::notification` `click.url`
+  for `:url`).  Ready once an address and a token are found:
+  `harness-gotify-url` and `harness-gotify-token` (a secret), else the
+  GOTIFY_URL and GOTIFY_TOKEN environment variables, else for the token
+  auth-source (the URL's host, login `harness`; its answer is trusted
+  for 5 minutes).  Failures read `Gotify: HTTP 401 Unauthorized: ...`.
+
+### tasks-notify
+
+Notifies the user about tasks through `notification/send` (`:source
+"tasks"`, `:task :session :project` set, urgency normal) for the events
+in `harness-tasks-notify-events` (default `(review done)`), sent to
+`harness-tasks-notify-providers` (nil: the default providers):
+
+- `review` (`task/review`): "Ready for review: TITLE", body "PROJECT: "
+  and the start of the agent's last reply (200 characters on one line),
+  or "waits for you to verify it or send it back".  Kind `task-review`.
+- `done` (`task/done` with HOW `merged` or `finished`; `verified` and
+  `completed` are the user's own doing): "Task done: TITLE", body
+  "PROJECT: merged into BASE" (or "merged"), or "PROJECT: finished".
+  Kind `task-done`.
+- `needs-input` (opt-in, from `task/changed`): a task whose `:column`
+  turns `needs-input` from another column it was seen in, unless its
+  outcome is `cancelled`: "Task needs you: TITLE", body "PROJECT: has a
+  question for you", "needs your permission" or "stopped: OUTCOME" and
+  its error.  Kind `task-needs-input`.
+
+TITLE is the session's name, else the prompt's first line without its
+leading `#`, at most 80 characters; PROJECT is `project/name` of the
+task's project.
+
+### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify
+
+Tool names, labels and inputs (all paths relative to cwd or absolute;
+TRAMP prefixes come from the session host):
+
+| tool | label | input | kind |
+|---|---|---|---|
+| `read_file` | Read file | path, offset, limit | read |
+| `write_file` | Write file | path, content | write |
+| `edit_file` | Edit file | path, old_string, new_string, replace_all | write |
+| `list_dir` | List directory | path, depth | read |
+| `glob` | Find files | pattern, path | read |
+| `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
+| `bash` | Bash | command, timeout, cwd | exec |
+| `elisp` | Emacs Lisp | code | exec |
+| `emacs_buffers` | List buffers | filter, all | read |
+| `emacs_buffer` | Read buffer | name, offset, limit | read |
+| `emacs_describe` | Describe symbol | symbol | read |
+| `web_search` | Web search | query, count | net |
+| `web_fetch` | Fetch page | url, max_chars | net |
+| `emacs_messages` | Emacs messages | count | read |
+| `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
+| `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
+| `session_info` | Session info | — | read |
+| `plan` | Plan | plan | meta |
+| `todo_write` | Todo list | todos | meta |
+| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
+| `skill_search` / `skill_load` | Search skills / Load skill | query / name | read |
+| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
+| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read |
+| `session_read` | Read session | session_id, limit, before, kinds, max_chars | read |
+| `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
+| `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
+| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
+| `task_list` | List tasks | column (pending/needs-input/active/review/done), include_archived, all_projects | read |
+| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog) | meta |
+| `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
+| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
+| `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms-auto-allow-tools`) |
+| `notification_providers` | Notification providers | (none) | read |
+| `merge_done` | Finish merge | none | meta (merge module) |
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
@@ -1286,6 +1443,17 @@ condition, their timeout (`harness-tools-sessions-wait-default`, at most
 an error.  Nothing here grants permissions: permission requests and
 permission modes stay with the user, and `task_submit` uses the task
 defaults.  The task tools need the `tasks` module.
+
+`notify` (`tools-notify`) sends a notification through
+`notification/send` with `:source "agent"`, `:kind "agent"` and the
+calling session's `:session` and `:project`, so a click opens the
+session; its title defaults to the session's name.  The result names
+the providers that delivered it, failed (and why) or were skipped as
+not set up; it is an error only when none delivered it, and then says
+how providers are set up.  A session sends at most
+`harness-tools-notify-rate-limit` notifications (default 10 in 600 s);
+past that it is told when it can send again.  `notification_providers`
+lists `notification/providers`: set up or not, used by default or not.
 
 `elisp` and the `emacs_*` tools are about the user's Emacs, so their
 handlers (`harness-tools-in-client NAME`) forward the call to the UI as
@@ -1331,12 +1499,16 @@ change), `_harness/node` (a finalised or updated node), `_harness/hint`,
 `agent/activity` returns it; null once the turn ends).
 Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}]}` → `{outcome:{outcome:"selected",optionId}}`
-and `_harness/ask_user {sessionId, requestId, question, options}` → `{answer}`.
+and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
+Its `options` are the answers' labels; `diagrams`, present when the
+options have them, holds one per option, `{type: "ascii", text}` or
+`{type: "image", path, mime}`: a path on the harness's machine, never
+the image data, since the pending question is saved with the session.
 
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
-`sandbox/status`, `harness/api`, `harness/version`, `harness/reload` is callable as `_harness/NAME` with a
+`notification/`, `sandbox/status`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
@@ -1346,16 +1518,96 @@ method `client/request METHOD PARAMS` → promise of the first client's
 answer; it rejects at once when no client is connected or all decline
 (never callable over ACP).  Methods: `_harness/client/tool {name, input}`
 → tool result, `_harness/client/customize-save {symbol, value}` (value
-printed; only `harness-` options).
+printed; only `harness-` options), `_harness/client/notify {id, title,
+body, urgency, source, kind, session, task, project, url}` -> `{backend}`
+once a desktop notification shows (see notifications), or an error.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token
 to `<state>/acp-token` (mode 600); `scripts/harness-acp-stdio`
 authenticates with it on behalf of the editor it bridges.
 
+Errors follow ACP's codes.  A call before `authenticate` (when a
+client must authenticate) gets -32000, ACP's `auth_required`, which
+clients answer by offering the `authMethods` of `initialize`; so a
+method that fails gets -32603 (internal error), never -32000.  A wrong
+token is -32000 too.  Notifications under `$/` (such as `$/ping`
+heartbeats) are ignored without a log line.
+
+Other transports hand their connections to the server:
+`harness-acp-add-client KIND &key process writer remote` registers a
+client whose messages to it go through WRITER `(CLIENT JSON-TEXT)`,
+`harness-acp-client-receive CLIENT TEXT` dispatches one message it
+sent, and `harness-acp-drop-client` disconnects one.  A client with
+REMOTE, a plist describing another device
+(`harness-acp-client-remote-info`), must authenticate even when
+`harness-acp-token` is nil, unless a function of
+`harness-acp-authorize-functions` (called with the client) lets it in.
+Modules add auth methods too: `harness-acp-auth-methods-functions`
+(client → list of `AuthMethod` plists) are listed by `initialize`
+before the token, and `harness-acp-authenticate-functions` (client,
+method id, params → nil for a method not its own, else a value or a
+promise) answer `authenticate` for them; once the answer resolves the
+client is authenticated.
+
+Corporate mode (`harness-corporate-mode`): `acp/start` refuses an
+address beyond this machine whatever `harness-acp-allow-remote` says,
+`harness-acp-connect` refuses a harness elsewhere, a client with REMOTE
+is refused, and turning the mode on (`harness-corporate-mode-change-hook`)
+drops such clients and moves a server listening beyond this machine
+back to 127.0.0.1.
+
 The local transport dispatches lisp objects directly, no JSON, and
 delivers notifications through `harness-run-soon` so callers are never
 re-entered.
+
+### acp-remote
+
+ACP for phones and other devices on the network, off until
+`harness-acp-remote`.  One listener (`harness-acp-remote-host`
+0.0.0.0, `harness-acp-remote-port` 4276, binary sockets) reads the
+first bytes of each connection: `{` hands it to ACP's line framing
+(client kind `remote-tcp`), anything else is an HTTP request.  A
+WebSocket upgrade (RFC 6455, implemented in the module: handshake,
+streaming frame decoder over a unibyte buffer, ping/pong, close codes
+1002/1009) on any path, `/acp` documented, becomes a client of kind
+`websocket`; the subprotocol `acp.v1` is chosen when offered, and
+`Acp-Connection-Id` is sent, as ACP's draft transport asks.  A text
+message may carry several newline-separated JSON-RPC messages.
+`GET /pair?code=C` pairs, `GET /` explains; every answer is
+`Connection: close`, `Cache-Control: no-store`, `Referrer-Policy:
+no-referrer`.
+
+Pairing: `acp/remote-pair` → `(:url "http://ADDR:PORT/pair?code=C"
+:ws-url "ws://ADDR:PORT/acp" :address :port :expires :lifetime)` makes
+the one code in force (100 random bits, `harness-acp-remote-code-lifetime`).
+Opening the link from an address other than this machine's consumes
+it and pairs that address (devices `(:id :address :agent :paired
+:seen)`, in memory only, dropped after `harness-acp-remote-idle-timeout`
+without a connection), answers the waiting `authenticate` requests of
+that address and emits `acp/remote-changed`.  Every client the
+listener registers carries `:remote (:address A :transport T [:agent
+UA :origin O :web BOOL])`; `harness-acp-authorize-functions` lets in a
+paired address unless `:web` (an Origin naming a web page, not an
+app's own), `harness-acp-auth-methods-functions` offers `pair`, and
+`harness-acp-authenticate-functions` answers `authenticate pair` with a
+promise settled by the pairing or rejected (-32000) after the code
+lifetime.  A bearer token equal to `harness-acp-token` (subprotocol
+`bearer.T`, `Authorization: Bearer T`, `?token=T`) authenticates too.
+
+Methods (callable as `_harness/acp/remote-*`): `acp/remote-status` →
+`(:running :enabled :corporate :host :port :address :address-set
+:addresses ((:address :interface :kind lan|vpn|other) ...) :ws-url
+:code-expires :devices (... :connected N) :clients)`,
+`acp/remote-start` and `acp/remote-stop` (save `harness-acp-remote`;
+stopping drops the clients, the code and every pairing),
+`acp/remote-pair`, `acp/remote-forget-code`, `acp/remote-revoke ID`,
+`acp/remote-set-address ADDRESS` (saves `harness-acp-remote-address`,
+"" detects; drops the code).  Event `acp/remote-changed (:what
+started|stopped|connected|disconnected|paired|revoked|address|corporate
+:address A)`, forwarded to UIs.  Corporate mode refuses start and pair,
+closes connections as they are accepted, and its change hook stops the
+listener.
 
 ## Presentation contracts
 
@@ -1366,7 +1618,11 @@ runs after every connect, where the chat reopens the closed sessions its
 buffers show, as a harness that just started has them all closed), the face set
 (`harness-user-face`, `harness-agent-face`, `harness-tool-face`,
 `harness-thinking-face`, `harness-hint-face`, warning ramps), the
-session cache updated from `_harness/session` updates, window
+session cache updated from `_harness/session` updates, the tool cache
+(every tool's spec from `_harness/tools/list` without a session,
+fetched once per connection and again after `harness/reloaded`;
+`harness-ui-fetch-tools`), through which views name every tool by its
+label (`harness-ui-tool-label`, `harness-ui-tool-title`), window
 positions (`harness-ui-display-session SID &optional POSITION`; presets
 `right`, `bottom`, `full`, `other`; one session per position, replacing),
 the global keymap and the transient menu `harness-menu` (with a group for
@@ -1386,6 +1642,26 @@ stays snappy.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
 the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
+A tool call's header says how it ended, each on a background of its
+own: a check mark (`harness-tool-face`), "failed" when it ran and
+reported an error, such as a non-zero exit or an edit whose text did
+not match (`harness-tool-error-face`), or "denied" when the permission
+system refused it, so it never ran (`harness-tool-denied-face`); a
+denied call's text is labelled as the reason rather than as output.  A
+summary block counts the failed and denied calls it folds.
+The panel of a question whose options have diagrams shows one diagram
+at a time, in an area under the options; its tabs, `n` and `p` on the
+panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
+it.  Switching redraws the options and that area alone, in place, so
+point, the windows and the compose box stay put.
+Tools go by their labels everywhere: a tool block's header shows the
+label in `harness-tool-title-face` and what the call is about after it
+in `harness-tool-subject-face` (the faces stand in for the colon of the
+title), a summary block counts the calls by label ("5 tool calls: Read
+file ×3, Search files, Find files"), and so do the permission panel,
+the activity line and the mode line.  A title recorded before tools had
+labels starts with the tool's name ("read_file x.el"), which the label
+replaces, so old transcripts read the same.
 Auto-scroll follows unless the user scrolled up.  While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a
@@ -1393,7 +1669,11 @@ tool call (with the size of its input so far), running one (with the
 last line it reported), checking its permission, or compacting, behind
 a spinner.  It is an overlay string redrawn by the spinner's timer, so
 it ticks without editing the buffer; a blocked session shows its panel
-instead, and the mode line names the phase too.  A buffer opened
+instead, and the mode line names the phase too.  It has a background of
+its own (`harness-chat-activity-face`) and a blank line under it, which
+set it apart from the compose box: an overlay string is drawn over the
+face of the text it precedes, the box's prompt, so both lines are drawn
+over `default` extended to the window's edge.  A buffer opened
 mid-turn asks `agent/activity`; a harness that reports none gets
 "Working" with the turn's duration.  A block whose renderer
 signals is shown unformatted with a note, so one bad node never costs the
@@ -1467,6 +1747,34 @@ id, or a settings plist with its setter -- and otherwise the current
 session.  The menu's `i` entry says whether that is non-interactive
 ("Non-interactive: on"), and has no state where the command would
 ask for a session.
+
+Desktop notifications: `harness-ui` answers `_harness/client/notify` by
+showing the notification on this Emacs's desktop
+(`harness-notifications-desktop-notify`), with `{backend}` once it
+shows or an error when it cannot.  One about a session or a task can be
+clicked; the click, out of the process filter or D-Bus handler, brings
+a graphical frame of this Emacs to the front and runs
+`harness-ui-notification-functions` (the wire plist; the first that
+returns non-nil has shown what it is about), else opens its session.
+The task board's function opens the board of the notification's
+`:project` with point on the task's card, once the board shows it
+(within 10 s).  `harness-test-notifications` (menu `N`) sends a test
+notification through `_harness/notification/send` and says in the
+echo area what each provider did with it.
+
+Remote control page (`harness-ui-remote`, `C-c h P`,
+`harness-remote-control`): whether the harness serves other devices
+(start or stop), the ACP address their clients connect to, the address
+of this machine that QR codes carry (chosen among the interfaces), the
+pairing QR code and the paired devices (unpair at point).  The QR code
+starts folded and unfolds with a fresh code (`acp/remote-pair`); it
+folds again once `acp/remote-changed` says a device paired, when its
+code expires, and when hidden, which drops the code
+(`acp/remote-forget-code`).  It is drawn by `harness-ui-qr`
+(`harness-qr-encode TEXT &optional LEVEL MASK` → `(:size :version
+:level :mask :modules)`, byte mode, versions 1–40; `harness-qr-image`
+one SVG path, black on white; `harness-qr-insert`, half blocks without
+images).  In corporate mode the page shows a notice only.
 
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in five
 sections -- requires your input, ready for review, in progress, pending,

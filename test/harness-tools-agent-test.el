@@ -71,6 +71,68 @@
       (should (null (harness-call 'session/pending sid)))
       (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
 
+(defun harness-tools-agent-test-asked (sid input)
+  "Ask INPUT in SID; return the pending question's payload once it waits."
+  (harness-tools-agent-test-run sid "ask_user" input)
+  (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "pending question")
+  (plist-get (car (harness-call 'question/pending sid)) :payload))
+
+(ert-deftest harness-tools-agent-ask-user-options-with-diagrams ()
+  "Options may each carry an ASCII diagram or an image; the question keeps
+the labels as its options and the diagrams beside them, one per option."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (cwd (plist-get (harness-call 'session/get sid) :cwd)))
+      (make-directory (expand-file-name "img" cwd) t)
+      (write-region "not really a png" nil (expand-file-name "img/top.png" cwd) nil 'silent)
+      (let ((payload (harness-tools-agent-test-asked
+                      sid `(:question "Which layout?"
+                            :options ((:label "Sidebar" :diagram "\n```text\n+--+----+\n|  |    |\n+--+----+\n```\n")
+                                      (:label "Tabs" :image "img/top.png"))))))
+        (should (equal '("Sidebar" "Tabs") (plist-get payload :options)))
+        (should (equal `((:type "ascii" :text "+--+----+\n|  |    |\n+--+----+")
+                         (:type "image" :path ,(expand-file-name "img/top.png" cwd) :mime "image/png"))
+                       (plist-get payload :diagrams)))
+        (let ((pid (plist-get (car (harness-call 'question/pending sid)) :id)))
+          ;; The answer is the label.
+          (should (harness-call 'question/answer sid pid "Tabs"))))
+      ;; Without diagrams nothing changes: no `:diagrams', strings as they were.
+      (let ((payload (harness-tools-agent-test-asked
+                      sid '(:question "Which colour?" :options ("red" (:label "green") 7)))))
+        (should (equal '("red" "green") (plist-get payload :options)))
+        (should-not (plist-member payload :diagrams))))))
+
+(ert-deftest harness-tools-agent-ask-user-diagrams-all-or-none ()
+  "A call where only some options have a diagram, or with a malformed
+option, is an error saying what to fix, and asks nothing."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (cwd (plist-get (harness-call 'session/get sid) :cwd))
+           (try (lambda (options)
+                  (let ((result (harness-test-await
+                                 (harness-tools-agent-test-run sid "ask_user"
+                                                               (list :question "Which?" :options options)))))
+                    (should (plist-get result :is-error))
+                    (should-not (harness-call 'question/pending sid))
+                    (plist-get result :content)))))
+      (write-region "x" nil (expand-file-name "notes.txt" cwd) nil 'silent)
+      (should (string-match-p "Every option needs a diagram once one has: options 2 and 3 have none"
+                              (funcall try '((:label "A" :diagram "[A]") "B" (:label "C")))))
+      (should (string-match-p "option 1 has none"
+                              (funcall try '("A" (:label "B" :diagram "[B]")))))
+      ;; A blank diagram is none.
+      (should (string-match-p "option 2 has none"
+                              (funcall try '((:label "A" :diagram "[A]") (:label "B" :diagram " \n ")))))
+      (should (string-match-p "Option 1 has both a diagram and an image"
+                              (funcall try '((:label "A" :diagram "[A]" :image "a.png")))))
+      (should (string-match-p "Option 2 needs a label"
+                              (funcall try '((:label "A" :diagram "[A]") (:diagram "[B]")))))
+      (should (string-match-p "Option 1: image missing.png not found"
+                              (funcall try '((:label "A" :image "missing.png") (:label "B" :diagram "[B]")))))
+      (should (string-match-p "Option 1: notes.txt is not an image file"
+                              (funcall try '((:label "A" :image "notes.txt") (:label "B" :diagram "[B]")))))
+      (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
+
 (ert-deftest harness-tools-agent-ask-user-string-answer-and-cancel ()
   (harness-tools-agent-test-with
     (let* ((sid (harness-tools-agent-test-session))
@@ -234,6 +296,25 @@
       (should (string-match-p "^Non-interactive: on (the user is away"
                               (plist-get (harness-test-await (harness-tools-agent-test-run sid "session_info" nil))
                                          :content))))))
+
+(ert-deftest harness-tools-agent-spawn-cwd-is-jailed ()
+  "A sub-agent works where it starts, so the jail checks its cwd as it
+checks bash's: one outside the allowed directories needs the user,
+and with the user away the call is denied and no child starts."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'perms)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
+                                         :non-interactive t)
+                           :id))
+           (cwd (plist-get (harness-call 'session/get sid) :cwd))
+           (outside (harness-test-temp-dir))
+           (tool (harness-tool-get "spawn_agent")))
+      (should (equal (list (expand-file-name "." cwd)) (harness-tools--paths tool '(:prompt "hi") (list :cwd cwd))))
+      (should (equal (list outside) (harness-tools--paths tool (list :prompt "hi" :cwd outside) (list :cwd cwd))))
+      (let ((r (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" (list :prompt "hi" :cwd outside)))))
+        (should (plist-get r :denied))
+        (should (string-match-p "outside the allowed directories" (plist-get r :content))))
+      (should-not (harness-call 'session/list (list :parent-id sid))))))
 
 (defvar harness-non-interactive)
 

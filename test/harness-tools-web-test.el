@@ -290,6 +290,126 @@ Models whose name starts with \"searching\" have their own web search."
       (harness-add-filter 'permission/decide #'harness-tools-web-test--allow 10)
       (harness-off (cons 'permission/decided on-decided)))))
 
+;;;; Corporate mode
+
+(ert-deftest harness-tools-corporate-mode-offers-no-network-tools ()
+  "In corporate mode no session gets a tool of kind net, nor its
+provider's own search in web_search's place; other tools stay."
+  (harness-tools-web-test--setup)
+  (harness-test-load-module 'tools-fs)
+  (harness-tools-web-test--with-session "fake:searching"
+    (harness-tools-web-test--without-key
+      (cl-flet ((names (sid) (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list sid))))
+        (let ((harness-corporate-mode nil))
+          (should (member "web_fetch" (names "s1")))
+          (should (equal '("web_search") (harness-call 'tools/builtin "s1"))))
+        (let ((harness-corporate-mode t))
+          (should-not (member "web_fetch" (names "s1")))
+          (should-not (member "web_search" (names "s1")))
+          (should (member "read_file" (names "s1")))
+          ;; The provider offers its search; it is not turned on.
+          (should-not (harness-call 'tools/builtin "s1"))
+          ;; Nor is web_search offered once Brave could search.
+          (let ((harness-brave-api-key "custom-key"))
+            (should-not (member "web_search" (names "s1"))))
+          ;; A filter on what sessions get cannot bring them back.
+          (let ((filter (lambda (names _s) (append names '("web_fetch" "web_search")))))
+            (harness-add-filter 'agent/tools filter)
+            (unwind-protect
+                (progn (should-not (cl-intersection '("web_fetch" "web_search") (names "s1") :test #'equal))
+                       (should-not (harness-call 'tools/builtin "s1")))
+              (harness-remove-filter 'agent/tools filter)))
+          ;; Listed without a session, for views that name tools, every
+          ;; tool is there: no model is offered that list.
+          (should (member "web_fetch" (names nil))))))))
+
+(defmacro harness-tools-web-test--watching-permissions (&rest body)
+  "Run BODY with every call allowed at once and the permission traffic recorded.
+ASKED lists the requests the `permission/decide' chain saw, DECIDED the
+\(REQUEST . DECISION) pairs of `permission/decided', FINISHED the
+results of `tools/finished', newest first.  Nothing may reach the web."
+  (declare (indent 0))
+  `(let* ((asked nil) (decided nil) (finished nil)
+          (allow-all (lambda (_d next request)
+                       (push request asked)
+                       (funcall next '(:behavior allow :reason "the test allows everything" :final t))))
+          (on-decided (lambda (_sid request decision) (push (cons request decision) decided)))
+          (on-finished (lambda (_sid _call result) (push result finished))))
+     (harness-add-filter 'permission/decide allow-all 1)
+     (harness-on 'permission/decided on-decided)
+     (harness-on 'tools/finished on-finished)
+     (unwind-protect
+         (cl-letf (((symbol-function 'harness-http-request)
+                    (lambda (&rest _) (error "Nothing may reach the web")))
+                   ((symbol-function 'harness-http-request-json)
+                    (lambda (&rest _) (error "Nothing may reach the web"))))
+           ,@body)
+       (harness-remove-filter 'permission/decide allow-all)
+       (harness-off (cons 'permission/decided on-decided))
+       (harness-off (cons 'tools/finished on-finished)))))
+
+(ert-deftest harness-tools-corporate-mode-denies-network-calls ()
+  "In corporate mode a call to a tool of kind net is denied before the
+permission chain, which would allow it, and marked as denied."
+  (harness-tools-web-test--setup)
+  (harness-test-with-temp-state
+    (harness-tools-web-test--watching-permissions
+      (let ((harness-corporate-mode t))
+        (dolist (call '(("web_fetch" :url "https://example.com/")
+                        ("web_search" :query "emacs")))
+          (let ((r (apply #'harness-tools-web-test--call call)))
+            (should (plist-get r :is-error))
+            (should (eq t (plist-get r :denied)))
+            (should (equal (concat "Denied: corporate mode: network tools are off "
+                                   harness-tools-corporate-hint)
+                           (plist-get r :content)))
+            ;; Decided as any call is, without asking the chain.
+            (should-not asked)
+            (let ((request (caar decided)) (decision (cdar decided)))
+              (should (equal (car call) (plist-get request :tool)))
+              (should (eq 'net (plist-get request :kind)))
+              (should (eq 'deny (plist-get decision :behavior)))
+              (should (equal "corporate mode: network tools are off" (plist-get decision :reason)))
+              (should (string-search "do not try to reach the network another way" (plist-get decision :hint))))
+            (should (equal r (car finished))))))
+      (should (= 2 (length decided)))
+      ;; Out of corporate mode the chain decides, and the call runs.
+      (let ((harness-corporate-mode nil)
+            (harness-websearch-providers harness-websearch-providers)
+            (harness-websearch-ready-functions harness-websearch-ready-functions))
+        (harness-websearch-register-provider 'fake (lambda (_q _c) (list (list :title "T" :url "u"))))
+        (let* ((harness-websearch-provider 'fake)
+               (r (harness-tools-web-test--call "web_search" :query "emacs")))
+          (should-not (plist-get r :is-error))
+          (should-not (plist-get r :denied))
+          (should (equal "web_search" (plist-get (car asked) :tool))))))))
+
+(ert-deftest harness-tools-corporate-mode-denies-provider-searches ()
+  "In corporate mode `tools/authorize' denies a call of kind net, which
+the chain would allow, and says why; other calls still go to the chain."
+  (harness-tools-web-test--setup)
+  (harness-tools-web-test--watching-permissions
+    (let ((harness-corporate-mode t))
+      (let ((d (harness-test-await
+                (harness-call 'tools/authorize "s1" '(:id "c20" :name "web_search" :input (:query "x"))))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (equal "corporate mode: network tools are off" (plist-get d :reason)))
+        (should (equal (concat "Denied: corporate mode: network tools are off "
+                               harness-tools-corporate-hint)
+                       (plist-get d :message)))
+        (should-not asked)
+        (should (equal "c20" (plist-get (caar decided) :call-id)))
+        (should (eq 'deny (plist-get (cdar decided) :behavior))))
+      ;; A tool the harness lacks, of the kind the call names.
+      (should (eq 'deny (plist-get (harness-test-await
+                                    (harness-call 'tools/authorize "s1" '(:id "c21" :name "WebFetch" :kind "net")))
+                                   :behavior)))
+      (should-not asked)
+      (should (eq 'allow (plist-get (harness-test-await
+                                     (harness-call 'tools/authorize "s1" '(:id "c22" :name "mystery" :kind "read")))
+                                    :behavior)))
+      (should (equal "c22" (plist-get (car asked) :call-id))))))
+
 (defun harness-tools-web-test--stub-http (status headers body &optional err)
   "Return a `harness-http-request' replacement answering STATUS HEADERS BODY ERR."
   (lambda (_url &rest args)

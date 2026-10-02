@@ -1,16 +1,10 @@
 # Emacs Agent Harness
 
-Emacs Agent Harness runs AI coding agents inside GNU Emacs. Sessions,
-tools, permissions, cost tracking and remote control are implemented in
-Emacs Lisp, and the interface is made of ordinary Emacs buffers.
+Emacs Agent Harness runs AI coding agents in GNU Emacs. It is written
+in Emacs Lisp and supports Claude, GitHub Copilot, OpenAI-compatible
+APIs and AWS Bedrock.
 
-By default it uses Claude Fable 5.1 through the `claude` command line,
-so a Claude subscription is enough to get started. It also supports
-GitHub Copilot (GPT, Claude, Gemini and other models through the
-`copilot` command line), OpenAI-compatible APIs such as OpenRouter and
-OpenAI, and models on AWS Bedrock.
-
-![A chat session](docs/media/chat-tour.png)
+![A session beside the code it wrote: the agent read the project, added rate limiting, ran the tests and summed up](docs/media/chat.png)
 
 ## Features
 
@@ -32,15 +26,34 @@ OpenAI, and models on AWS Bedrock.
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
   queue.
+- **Notifications.** A desktop notification, and a push to your phone
+  through Gotify once you set it up, when a task waits for your review
+  or is done. Agents can notify you too.
 - **Conversation management.** Fork sessions, ask side questions in
   BTW conversations, browse the conversation tree, and let long
   conversations compact automatically.
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
 - **Remote control.** The harness speaks the Agent Client Protocol
-  (ACP), so another Emacs or any ACP client can drive it.
+  (ACP), so another Emacs or any ACP client can drive it, including one
+  on your phone, paired by scanning a QR code.
 - **Modular and reloadable.** Every feature is a module, and the whole
   harness reloads in place without losing running sessions.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![A chat waiting for permission to run pip install, with the allow and deny buttons](docs/media/chat-permission.png) | ![A chat waiting for the answer to a question, with three options](docs/media/chat-question.png) |
+| A permission request, answered in the chat | A question from the agent, answered with a digit |
+| ![The task board with tasks needing input, in review, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
+| The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
+| ![The usage dashboard: a month of cost per day, cost by model, the plan's quota and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
+| Usage: cost per day and model, plan quota, budgets | Settings, here as one project overrides them |
+| ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
+| The session list | The worktrees of a project and their sessions |
+| ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
+| A BTW side conversation under its session | The menu, with the chat's own commands |
 
 ## Requirements
 
@@ -60,6 +73,8 @@ Optional dependencies:
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
 | `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
 | `ffmpeg`, `mpv` | Audio recording and playback, video thumbnails |
+| `notify-send` (libnotify), or Emacs with D-Bus support | Desktop notifications on GNU/Linux; macOS uses `osascript` |
+| A [Gotify](https://gotify.net) server | Notifications on your phone |
 
 ## Installation
 
@@ -177,6 +192,7 @@ named by `harness-server-init-file`.
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
+| `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |
@@ -204,6 +220,7 @@ the `[menu]` button in the header line.
 | `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
 | `C-c C-v` | Attach the image in the clipboard |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
+| `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
 | `TAB` | Complete in the compose box; elsewhere, fold or unfold the block at point |
 | `C-c C-s` | Search the transcript |
@@ -216,13 +233,24 @@ the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list, or the waiting session itself when only one needs you.
 
+A digit answers a question with that option; any other answer goes in
+the compose box. When the options are easier to compare by sight, such
+as layouts or architectures, the agent can give each one a diagram,
+ASCII art or an image. The diagrams share one area under the options
+and show one at a time. Switch between them with the tabs above the
+area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
+buffer, or by moving point onto an option.
+
 The header line shows the session's status, name, model, permission
 mode, whether it is `non-interactive` or `interactive`, thinking level,
 context and cost. Click the model, the permission mode, the
 non-interactive switch or the thinking level to change it. A
-non-interactive session never waits for you: what would ask for
-permission is denied, and the agent is told to find another way, which
-suits a session you leave to work while you are away. New sessions
+non-interactive session never waits for you, which suits a session you
+leave to work while you are away. Whatever would ask you for
+permission, the auto-mode judge decides instead, whatever the
+permission mode. After any denial the agent is told to find another
+way. Access to directories outside the session's own still needs you,
+so it is denied while you are away. New sessions
 start non-interactive when `harness-non-interactive` is set, and task
 sessions while `harness-tasks-non-interactive` is. From then on each
 session has its own switch.
@@ -277,6 +305,40 @@ so several tasks can work in parallel.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
+
+### Notifications
+
+The harness tells you when a task's work waits for your review and
+when a task is done, so you can leave it working:
+
+- A desktop notification, shown by your Emacs. Clicking it opens the
+  task board on that task. It uses `notify-send` on GNU/Linux (or
+  Emacs's D-Bus support) and `osascript` on macOS; set
+  `harness-notifications-desktop-backend` to choose.
+- A push through [Gotify](https://gotify.net), for your phone, once it
+  is set up. Create an application in Gotify and give the harness its
+  address and token:
+
+  ```elisp
+  (setopt harness-gotify-url "https://push.example.com")
+  (setopt harness-gotify-token "AbCdEf123")
+  ```
+
+  The token can also come from the `GOTIFY_TOKEN` environment variable
+  (the address from `GOTIFY_URL`) or from auth-source:
+  `machine push.example.com login harness password AbCdEf123`.
+
+`M-x harness-test-notifications` (`N` in the `C-c h ?` menu) sends a
+test notification and says what each provider did with it.
+
+- `harness-notifications-providers` lists the providers used, by
+  default `(system gotify)`. One that is not set up is skipped.
+- `harness-tasks-notify-events` picks the task events that notify you:
+  `review` and `done` by default, and `needs-input` for a task that
+  asks a question or stopped part way.
+- Agents can notify you with the `notify` tool, for example when long
+  work you asked for has finished. Clicking such a notification opens
+  the session.
 
 ## Configuration
 
@@ -360,6 +422,43 @@ billed per token can fetch the baseline instead: with an Anthropic Admin
 API key (`harness-anthropic-admin-api-key`), `I` on a monthly budget
 offers the month's API cost minus what the harness recorded.
 
+## Corporate mode
+
+Corporate mode turns off the harness features that could carry data off
+your machine. It is meant for work machines whose policy lets code and
+data go to the model provider in use and nowhere else.
+
+Turn it on in `config.el` (Doom) or your init file, before
+`(harness-start)`:
+
+```elisp
+(setq harness-corporate-mode t)
+```
+
+It turns off:
+
+- Remote control. The harness serves ACP on this machine only and
+  ignores `harness-acp-allow-remote`. Pairing phones and other devices
+  is refused, and the UI cannot connect to a harness elsewhere
+  (`harness-connect-remote`).
+- Network tools. Sessions do not get `web_fetch`, `web_search` or the
+  web search that Claude Code and Copilot run themselves. When a model
+  calls one anyway, the call is denied and the model is told why.
+
+It leaves alone:
+
+- The model provider. The provider you choose still receives what
+  sessions send it.
+- Shell commands. They follow the permission mode and the sandbox, as
+  always, so a command can still reach the network. Use a permission
+  mode that asks before commands run (Ask or Accept edits), and set
+  `harness-sandbox-policy` to `required` so that no command runs
+  outside the sandbox.
+
+The settings page does not list the option, and no ACP client can
+change it. If you change it later with `setopt` or Customize, the
+harness process restarts so that the change reaches it.
+
 ## Persistence
 
 Sessions and tasks are stored in `harness-state-directory` (`harness/`
@@ -429,13 +528,56 @@ the token yourself.
 - `scripts/harness-acp-stdio` bridges ACP to standard input and output,
   for editors that start ACP agents as subprocesses.
 
-## Screenshots
+### Pairing a phone
 
-| | |
-|---|---|
-| ![A permission request](docs/media/chat-permission.png) | ![A question from the agent](docs/media/chat-question.png) |
-| ![The conversation tree](docs/media/tree.png) | ![The usage dashboard](docs/media/usage.png) |
-| ![The worktree list](docs/media/worktrees.png) | ![A chat with a dark theme](docs/media/chat-dark.png) |
+A phone (or any other device on the network) can drive the harness
+with an ACP client of its own, such as ACP UI, Agmente or Ferngeist.
+ACP defines no way to pair a device, so the harness pairs it with a web
+link, which works whatever client the phone uses:
+
+1. Press `C-c h P` to open the remote control page, then `[start
+   serving]` (`s`). The harness listens on port 4276 of every network
+   interface, for ACP over WebSocket and for ACP's own line framing
+   (plain TCP clients such as VACP).
+2. Unfold the pairing QR code (`TAB` or a click on its heading). It
+   starts folded because the code it carries pairs whichever device
+   scans it.
+3. Scan the code with the phone's camera and open the link. The page
+   that opens says the phone is paired and gives the address to add in
+   its ACP client, `ws://ADDRESS:4276/acp`.
+4. Add a remote agent with that address in the phone's ACP client and
+   connect.
+
+A client that supports ACP authentication can also connect first: the
+harness offers it the method "Pair with a QR code", whose answer waits
+until the QR code is opened on that device.
+
+Each code works once and expires after ten minutes; unfolding the QR
+code again or pressing `n` makes a new one, and hiding it drops it. A
+pairing belongs to the device's network address. It lasts while the
+device uses it, ends once it goes unused for eight hours, ends when the
+harness stops serving, and is never saved. The page lists the paired
+devices, and `k` or `[unpair]` unpairs one at once. A WebSocket that a
+web page opens is never let in by a pairing, since any page the phone
+shows could open one. Clients can authenticate with
+`harness-acp-token` instead, as the subprotocol `bearer.TOKEN`, an
+`Authorization: Bearer TOKEN` header or `?token=TOKEN` in the address.
+
+The connection is not encrypted. Pair on a network you trust, or over a
+VPN such as Tailscale, whose addresses also stay fixed per device. The
+page shows the address of this machine that QR codes carry, chosen
+among its network interfaces (local network first); `a` picks another.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `harness-acp-remote` | `nil` | Serve other devices; the page turns it on and off |
+| `harness-acp-remote-host` | `"0.0.0.0"` | Address the listener binds |
+| `harness-acp-remote-port` | `4276` | Port of the listener |
+| `harness-acp-remote-address` | `nil` (detect) | Address of this machine in pairing links |
+| `harness-acp-remote-code-lifetime` | `600` | Seconds a pairing code is valid |
+| `harness-acp-remote-idle-timeout` | `28800` | Seconds unused before a pairing ends |
+
+Corporate mode turns all of this off.
 
 ## Architecture
 
@@ -445,10 +587,10 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `acp` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-bedrock` `provider-demo` |
-| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` |
+| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 
 Further documentation:
 
@@ -457,6 +599,8 @@ Further documentation:
 - [docs/ui-guide.md](docs/ui-guide.md): the presentation layer, for
   writing UI modules
 - [docs/dev-loop.md](docs/dev-loop.md): the live development loop
+- [docs/screenshots.md](docs/screenshots.md): how the screenshots are
+  taken, and how to take them again when a view changes
 
 ## Development
 
@@ -465,6 +609,7 @@ scripts/test.sh                              # run every test suite, each in a c
 scripts/test.sh test/harness-core-test.el    # run one suite (optionally with an ERT selector)
 scripts/lint.sh [--checkdoc]                 # byte-compile every file out of tree
 scripts/dev.sh start                         # start a clean development Emacs
+scripts/media.sh [NAME...]                   # take the screenshots in docs/media again
 ```
 
 Tests that talk to real models run only when `HARNESS_INTEGRATION=1` is

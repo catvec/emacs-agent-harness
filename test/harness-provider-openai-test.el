@@ -216,6 +216,19 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
         (should (string-match-p "\"content\":null" (harness-json-encode body))))
       (delete-file img))))
 
+(ert-deftest harness-provider-openai-non-ascii-tool-arguments ()
+  ;; Arguments are a string inside the body's JSON: as bytes they made the
+  ;; body fail to encode once a call had non-ASCII input.
+  (let* ((input (list :value "\N{U+2717} caf\N{U+E9} \N{U+2026}"))
+         (msgs (harness-openai--messages
+                (list :messages `((:role user :content "go")
+                                  (:role assistant :content ((:type "tool_use" :id "call_1" :name "echo" :input ,input)))
+                                  (:role user :content ((:type "tool_result" :tool_use_id "call_1" :content "ok")))))))
+         (sent (harness-json-parse (harness-json-encode (list :messages msgs))))
+         (call (car (plist-get (nth 1 (plist-get sent :messages)) :tool_calls))))
+    (should (equal "echo" (harness-plist-get-in call '(:function :name))))
+    (should (equal input (harness-json-parse (harness-plist-get-in call '(:function :arguments)))))))
+
 (ert-deftest harness-provider-openai-request-body-plain-openai-dialect ()
   (harness-openai-test-with-fake
       `(("chat/completions" . (:chunks (,(harness-openai-test--sse

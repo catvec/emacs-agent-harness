@@ -149,13 +149,15 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
 
 (defun harness-server--forwardable-p (sym)
   "Non-nil when SYM configures the harness process, not this Emacs's UI."
-  (let ((name (symbol-name sym))
-        (file (symbol-file sym 'defvar)))
+  (let ((name (symbol-name sym)))
     (and (string-prefix-p "harness-" name)
          (not (string-match-p "--" name))
          (not (memq sym harness-server--own-variables))
-         (not (and file (string-match-p "/lisp/ui/" file)))
          (not (and (fboundp sym) (string-suffix-p "-mode" name)))
+         ;; Last: `symbol-file' walks `load-history', far too slow to ask
+         ;; of every symbol `harness-server--forwarded' goes through.
+         (not (let ((file (symbol-file sym 'defvar)))
+                (and file (string-match-p "/lisp/ui/" file))))
          (harness-server--user-set-p sym))))
 
 (defun harness-server--forwarded ()

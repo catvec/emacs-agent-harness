@@ -187,17 +187,19 @@ TEXT is numbered and already trimmed to the output budget."
                text
              (format "%s\n\n[%s: lines %d-%d of %d]" text shown first shown-last total))))))))))
 
-(defun harness-tools-fs--read-title (input)
-  "Title for a read_file call with INPUT."
-  (let ((offset (harness-tools-fs--int input :offset nil))
-        (limit (harness-tools-fs--int input :limit nil)))
-    (format "read_file %s%s" (plist-get input :path)
-            (cond ((and offset limit) (format ":%d-%d" offset (+ offset limit -1)))
-                  (offset (format ":%d-" offset))
-                  (limit (format ":1-%d" limit))
-                  (t "")))))
+(defun harness-tools-fs--read-subject (input)
+  "What a read_file call with INPUT reads: the path and the lines asked for."
+  (when-let* ((path (plist-get input :path)))
+    (let ((offset (harness-tools-fs--int input :offset nil))
+          (limit (harness-tools-fs--int input :limit nil)))
+      (format "%s%s" path
+              (cond ((and offset limit) (format ":%d-%d" offset (+ offset limit -1)))
+                    (offset (format ":%d-" offset))
+                    (limit (format ":1-%d" limit))
+                    (t ""))))))
 
 (harness-define-tool "read_file"
+  :label "Read file"
   :description "Read a text file. Output lines are prefixed with their line number. Use offset (1-based line) and limit (number of lines) to read a range of a large file; a read that would be too big is trimmed and tells you where to continue. Images are attached as images; binary files are refused."
   :schema '(:type "object"
             :properties (:path (:type "string" :description "File path, absolute or relative to the working directory")
@@ -207,7 +209,7 @@ TEXT is numbered and already trimmed to the output budget."
   :kind 'read
   :coalescable t
   :paths (lambda (input) (list (plist-get input :path)))
-  :title #'harness-tools-fs--read-title
+  :subject #'harness-tools-fs--read-subject
   :handler #'harness-tools-fs--read-file)
 
 ;;;; write_file
@@ -230,6 +232,7 @@ TEXT is numbered and already trimmed to the output budget."
                        :meta (list :bytes (string-bytes content) :created (not existed))))))
 
 (harness-define-tool "write_file"
+  :label "Write file"
   :description "Write a whole file, creating it and any missing parent directories. Overwrites existing content; prefer edit_file for small changes to an existing file."
   :schema '(:type "object"
             :properties (:path (:type "string" :description "File path, absolute or relative to the working directory")
@@ -237,8 +240,8 @@ TEXT is numbered and already trimmed to the output budget."
             :required ("path" "content"))
   :kind 'write
   :paths (lambda (input) (list (plist-get input :path)))
-  :title (lambda (input) (format "write_file %s (%d bytes)" (plist-get input :path)
-                                 (string-bytes (or (plist-get input :content) ""))))
+  :subject (lambda (input) (when-let* ((path (plist-get input :path)))
+                             (format "%s (%d bytes)" path (string-bytes (or (plist-get input :content) "")))))
   :handler #'harness-tools-fs--write-file)
 
 ;;;; edit_file
@@ -304,6 +307,7 @@ Used only to give a better error message."
                :meta (list :replacements count :line line)))))))))))
 
 (harness-define-tool "edit_file"
+  :label "Edit file"
   :description "Replace an exact string in a file. old_string must match the current file text exactly (including whitespace) and, unless replace_all is true, must occur exactly once; include enough surrounding lines to make it unique."
   :schema '(:type "object"
             :properties (:path (:type "string" :description "File path, absolute or relative to the working directory")
@@ -313,7 +317,7 @@ Used only to give a better error message."
             :required ("path" "old_string" "new_string"))
   :kind 'write
   :paths (lambda (input) (list (plist-get input :path)))
-  :title (lambda (input) (format "edit_file %s" (plist-get input :path)))
+  :subject (lambda (input) (plist-get input :path))
   :handler #'harness-tools-fs--edit-file)
 
 ;;;; list_dir
@@ -368,6 +372,7 @@ PREFIX is the relative path shown for entries; LIMIT caps the total."
                      (format "(%d entr%s in %s, depth %d)" n (if (= n 1) "y" "ies") shown depth))))))))))
 
 (harness-define-tool "list_dir"
+  :label "List directory"
   :description "List a directory: files with sizes, directories with a trailing slash, .git skipped. depth > 1 recurses."
   :schema '(:type "object"
             :properties (:path (:type "string" :description "Directory, absolute or relative to the working directory. Default: the working directory")
@@ -375,7 +380,7 @@ PREFIX is the relative path shown for entries; LIMIT caps the total."
   :kind 'read
   :coalescable t
   :paths (lambda (input) (list (or (plist-get input :path) ".")))
-  :title (lambda (input) (format "list_dir %s" (or (plist-get input :path) ".")))
+  :subject (lambda (input) (or (plist-get input :path) "."))
   :handler #'harness-tools-fs--list-dir)
 
 ;;;; glob
@@ -445,6 +450,7 @@ A predicate for `directory-files-recursively'."
                        (format ", showing %d" harness-tools-fs-glob-limit) "")))))))))
 
 (harness-define-tool "glob"
+  :label "Find files"
   :description "Find files by name pattern (e.g. \"*.el\", \"src/**/*.ts\"). Results are relative to path, newest first, capped at 500."
   :schema '(:type "object"
             :properties (:pattern (:type "string" :description "Glob pattern; ** matches across directories")
@@ -453,8 +459,8 @@ A predicate for `directory-files-recursively'."
   :kind 'read
   :coalescable t
   :paths (lambda (input) (list (or (plist-get input :path) ".")))
-  :title (lambda (input) (format "glob %s%s" (plist-get input :pattern)
-                                 (if (plist-get input :path) (format " in %s" (plist-get input :path)) "")))
+  :subject (lambda (input) (format "%s%s" (or (plist-get input :pattern) "")
+                                   (if (plist-get input :path) (format " in %s" (plist-get input :path)) "")))
   :handler #'harness-tools-fs--glob)
 
 ;;;; grep
@@ -531,6 +537,7 @@ TARGET is a path local to the host CWD lives on."
                     (format "%s\n(%d match%s)" text total (if (= total 1) "" "es")))))))))))))))
 
 (harness-define-tool "grep"
+  :label "Search files"
   :description "Search file contents with a regular expression (ripgrep when available). Output lines are path:line: text. Use glob to restrict file names (e.g. \"*.el\"). Case-insensitive unless case_sensitive is true."
   :schema '(:type "object"
             :properties (:pattern (:type "string" :description "Regular expression to search for")
@@ -542,8 +549,8 @@ TARGET is a path local to the host CWD lives on."
   :kind 'read
   :coalescable t
   :paths (lambda (input) (list (or (plist-get input :path) ".")))
-  :title (lambda (input) (format "grep %s in %s" (harness-truncate-end (plist-get input :pattern) 40)
-                                 (or (plist-get input :path) ".")))
+  :subject (lambda (input) (format "%s in %s" (harness-truncate-end (or (plist-get input :pattern) "") 40)
+                                   (or (plist-get input :path) ".")))
   :handler #'harness-tools-fs--grep)
 
 ;;;; file_info
@@ -590,6 +597,7 @@ TARGET is a path local to the host CWD lives on."
          :meta (list :size size :type kind :lines lines))))))
 
 (harness-define-tool "file_info"
+  :label "File info"
   :description "Metadata for a path: type, size, modification time, mode, mime type and line count for text files."
   :schema '(:type "object"
             :properties (:path (:type "string" :description "File or directory, absolute or relative to the working directory"))
@@ -597,11 +605,11 @@ TARGET is a path local to the host CWD lives on."
   :kind 'read
   :coalescable t
   :paths (lambda (input) (list (plist-get input :path)))
-  :title (lambda (input) (format "file_info %s" (plist-get input :path)))
+  :subject (lambda (input) (plist-get input :path))
   :handler #'harness-tools-fs--file-info)
 
 (harness-define-module 'tools-fs
-  :doc "File tools: read_file, write_file, edit_file, list_dir, glob, grep, file_info."
+  :doc "Read file, Write file, Edit file, List directory, Find files, Search files and File info."
   :requires '(tools))
 
 (provide 'harness-tools-fs)

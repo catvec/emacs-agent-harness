@@ -405,6 +405,17 @@ nothing about it and asks for nothing."
         (should (equal '((:non-interactive nil)) set))))
     (should-not sent)))
 
+(ert-deftest harness-ui-tool-outcome-tells-denied-from-failed ()
+  "A refused call is `denied' whatever else its result says; one that
+ran and reported an error is `failed'.  Wire values: a call that was
+not refused carries `:denied' null (nil) or false."
+  (should-not (harness-ui-tool-outcome nil))
+  (should (eq 'ok (harness-ui-tool-outcome '(:kind "tool-result" :output "fine" :is-error :false))))
+  (should (eq 'ok (harness-ui-tool-outcome '(:output "fine" :is-error nil :meta (:denied :false)))))
+  (should (eq 'failed (harness-ui-tool-outcome '(:output "exit 1" :is-error t))))
+  (should (eq 'failed (harness-ui-tool-outcome '(:output "exit 1" :is-error t :meta (:denied nil :duration 0.1)))))
+  (should (eq 'denied (harness-ui-tool-outcome '(:output "Denied: no" :is-error t :meta (:denied t))))))
+
 ;;;; The prefix key
 
 (ert-deftest harness-ui-prefix-key-moves-the-keys ()
@@ -466,6 +477,228 @@ agenda or Embark for instance."
     (let ((harness-process nil)) (harness-connect-remote nil))
     (harness-connect-remote " 127.0.0.1:9000 ")
     (should (equal '(process nil nil "127.0.0.1:9000") connected))))
+
+;;;; Tools by their labels
+
+(defmacro harness-ui-test-with-tools (specs &rest body)
+  "Run BODY with the tool cache holding SPECS, as `tools/list' returns them."
+  (declare (indent 1))
+  `(let ((harness-ui--tools (make-hash-table :test 'equal))
+         (harness-ui--tools-fetch nil)
+         (harness-ui--tools-generation 0))
+     (dolist (spec ,specs) (puthash (plist-get spec :name) spec harness-ui--tools))
+     ,@body))
+
+(ert-deftest harness-ui-tools-go-by-their-labels ()
+  "Views name a tool by its label, the name the model calls it by when it has none."
+  (harness-ui-test-with-tools '((:name "read_file" :label "Read file") (:name "bash" :label "Bash"))
+    (should (equal "Read file" (harness-ui-tool-label "read_file")))
+    (should (equal "t_unknown" (harness-ui-tool-label "t_unknown")))
+    ;; A title is the label, then what the call is about.
+    (should (equal '("Read file" . "a.el") (harness-ui-tool-title-parts "read_file" "Read file: a.el")))
+    (should (equal '("Bash" . nil) (harness-ui-tool-title-parts "bash" "Bash")))
+    (should (equal '("Bash" . nil) (harness-ui-tool-title-parts "bash" nil)))
+    ;; One recorded before tools had labels starts with the tool's name.
+    (should (equal '("Read file" . "a.el:1-9") (harness-ui-tool-title-parts "read_file" "read_file a.el:1-9")))
+    (should (equal '("Bash" . nil) (harness-ui-tool-title-parts "bash" "bash")))
+    (should (equal "Read file: a.el" (harness-ui-tool-title "read_file" "read_file a.el")))
+    (should (equal "Read file: a.el" (harness-ui-tool-title "read_file" "Read file: a.el")))
+    ;; A title of another shape, such as a directory prompt's, stays as it is.
+    (should (equal '(nil . "Access ~/notes/") (harness-ui-tool-title-parts "read_file" "Access ~/notes/")))
+    (should (equal "Access ~/notes/" (harness-ui-tool-title "read_file" "Access ~/notes/")))
+    ;; In a header the label's face sets it apart from the rest, in place of the colon.
+    (let ((s (harness-ui-tool-title-string "read_file" "Read file: a.el")))
+      (should (equal "Read file a.el" s))
+      (should (eq 'harness-tool-title-face (get-text-property 0 'face s)))
+      (should (eq 'harness-tool-title-face (get-text-property 8 'face s)))
+      (should (eq 'harness-tool-subject-face (get-text-property 10 'face s))))
+    (let ((s (harness-ui-tool-title-string "read_file" "Read file: a-rather-long-file-name.el" 14)))
+      (should (= 14 (length s))))
+    (let ((s (harness-ui-tool-title-string "read_file" "Access ~/notes/")))
+      (should (equal "Access ~/notes/" s))
+      (should (eq 'harness-tool-title-face (get-text-property 0 'face s))))))
+
+(ert-deftest harness-ui-tools-are-fetched-once-per-connection ()
+  "Every tool's spec is fetched once, again after a reload or reconnect."
+  (harness-ui-test-with-tools nil
+    (setq harness-ui--tools nil)
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (method params)
+                   (push (list method params) asked)
+                   (harness-resolved (list (list :name "bash" :label "Bash"))))))
+        (should (equal "bash" (harness-ui-tool-label "bash")))
+        (let ((table (harness-test-await (harness-ui-fetch-tools))))
+          (should (equal "Bash" (plist-get (gethash "bash" table) :label))))
+        ;; Every tool, not one session's.
+        (should (equal '(("_harness/tools/list" nil)) asked))
+        (should (equal "Bash" (harness-ui-tool-label "bash")))
+        (harness-test-await (harness-ui-fetch-tools))
+        (should (= 1 (length asked)))
+        (harness-ui--forget-tools)
+        (should (equal "bash" (harness-ui-tool-label "bash")))
+        (harness-test-await (harness-ui-fetch-tools))
+        (should (= 2 (length asked)))
+        (should (equal "Bash" (harness-ui-tool-label "bash"))))
+      ;; A failed fetch leaves names in place and is tried again next time.
+      (harness-ui--forget-tools)
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) (harness-rejected '(error "down")))))
+        (let ((table (harness-test-await (harness-ui-fetch-tools))))
+          (should (hash-table-p table))
+          (should (zerop (hash-table-count table))))
+        (should-not harness-ui--tools)
+        (should-not harness-ui--tools-fetch)))))
+
+;;;; Corporate mode
+
+(defconst harness-ui-test-corporate-refusal
+  (format-message "Corporate mode is on: the UI connects only to this Emacs's own harness")
+  "What `harness-connect-remote' says when corporate mode refuses an address.")
+
+(ert-deftest harness-ui-connect-remote-refused-in-corporate-mode ()
+  "In corporate mode the UI connects to its own harness only: an address
+is refused, and an empty one still goes back to the local harness."
+  (harness-ui-test-with-connect-stub connected
+    (let ((harness-corporate-mode t) (harness-process t))
+      (let ((err (should-error (harness-connect-remote "example.org:9000") :type 'user-error)))
+        (should (equal harness-ui-test-corporate-refusal (error-message-string err))))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "127.0.0.1:9000")))
+        (should-error (call-interactively #'harness-connect-remote) :type 'user-error))
+      (should-not connected)
+      (harness-connect-remote "")
+      (harness-connect-remote nil)
+      (should (equal '(process process) connected)))))
+
+(ert-deftest harness-ui-connect-stays-local-in-corporate-mode ()
+  "In corporate mode a remote address gives way to the local harness,
+whoever asks for it: an address set before `harness-start', say, or a
+reconnection."
+  (let ((harness-ui-connection nil) (harness-ui-connection-address nil)
+        (harness-ui--server-address nil) (opened nil) (started 0))
+    (cl-letf (((symbol-function 'harness-ui--open) (lambda (address token) (push (cons address token) opened) nil))
+              ((symbol-function 'harness-ui--ensure-server) (lambda () (cl-incf started))))
+      (let ((harness-corporate-mode t))
+        (let ((harness-process t))
+          (harness-ui-connect "example.org:9000")
+          (should (eq 'process harness-ui-connection-address))
+          (should (= 1 started))
+          (should-not opened))
+        (let ((harness-process nil))
+          (harness-ui-connect "example.org:9000")
+          (should-not harness-ui-connection-address)
+          (should (equal '((nil . nil)) opened))))
+      (let ((harness-corporate-mode nil))
+        (harness-ui-connect "example.org:9000")
+        (should (equal "example.org:9000" harness-ui-connection-address))
+        (should (equal '("example.org:9000" . nil) (car opened)))))))
+
+(ert-deftest harness-ui-menu-connect-remote-is-inapt-in-corporate-mode ()
+  "The menu shows Connect remote as inapt in corporate mode."
+  (cl-flet ((inapt-p ()
+              (harness-ui-test-with-menu-buffer #'fundamental-mode
+                (call-interactively #'harness-menu)
+                (unwind-protect
+                    (with-current-buffer transient--buffer-name
+                      (goto-char (point-min))
+                      (should (search-forward "Connect remote" nil t))
+                      (and (memq 'transient-inapt-suffix
+                                 (ensure-list (get-text-property (match-beginning 0) 'face)))
+                           t))
+                  (execute-kbd-macro (kbd "C-g"))))))
+    (let ((harness-corporate-mode nil)) (should-not (inapt-p)))
+    (let ((harness-corporate-mode t)) (should (inapt-p)))))
+
+(defmacro harness-ui-test-with-corporate-change (&rest body)
+  "Run BODY with `harness-restart' and `harness-ui-connect' recorded, not run.
+RESTARTS counts the restarts, CONNECTED lists the addresses connected
+to, oldest first, and REDRAWN counts the redraws.  SERVER is a live
+process standing for the harness process."
+  (declare (indent 0))
+  `(let ((server (make-pipe-process :name "harness-ui-test-server" :noquery t))
+         (restarts 0) (redrawn 0)
+         (harness-ui-connection nil) (harness-process t))
+     (unwind-protect
+         (harness-ui-test-with-connect-stub connected
+           (add-hook 'harness-ui-redraw-hook (lambda () (cl-incf redrawn)))
+           (cl-letf (((symbol-function 'harness-restart) (lambda () (cl-incf restarts))))
+             ,@body))
+       (delete-process server))))
+
+(ert-deftest harness-ui-corporate-mode-change-restarts-the-running-process ()
+  "A change of corporate mode restarts the harness process the UI uses,
+when it runs.  While Emacs initialises it has not started yet."
+  (harness-ui-test-with-corporate-change
+    (let ((harness-ui-connection-address 'process) (harness-ui--server server))
+      (dolist (on '(t nil))
+        (let ((harness-corporate-mode on))
+          (harness-ui--corporate-mode-changed)))
+      (should (= 2 restarts)))
+    ;; Not started yet, as while Emacs initialises.
+    (let ((harness-ui-connection-address 'process) (harness-ui--server nil)
+          (harness-corporate-mode t))
+      (harness-ui--corporate-mode-changed))
+    ;; A harness in this Emacs reads the option as it goes.
+    (let ((harness-ui-connection-address nil) (harness-ui--server server)
+          (harness-corporate-mode t))
+      (harness-ui--corporate-mode-changed))
+    (should (= 2 restarts))
+    (should-not connected)
+    (should (= 0 redrawn))))
+
+(ert-deftest harness-ui-corporate-mode-on-leaves-a-remote-harness ()
+  "Corporate mode turned on takes the UI off a remote harness, back to
+the local one, whose process restarts when it runs.  Turned off, it
+leaves the UI where it is."
+  (harness-ui-test-with-corporate-change
+    (let ((harness-ui-connection-address "example.org:9000") (harness-ui--server server)
+          (harness-corporate-mode nil))
+      (harness-ui--corporate-mode-changed)
+      (should (equal "example.org:9000" harness-ui-connection-address)))
+    (should (= 0 restarts))
+    ;; No harness process runs: the UI connects to a new one.
+    (let ((harness-ui-connection-address "example.org:9000") (harness-ui--server nil)
+          (harness-corporate-mode t))
+      (harness-ui--corporate-mode-changed)
+      (should (eq 'process harness-ui-connection-address)))
+    (should (equal '(process) connected))
+    (should (= 0 restarts))
+    (should (= 1 redrawn))
+    ;; It runs: it restarts, which connects the UI to it and redraws.
+    (let ((harness-ui-connection-address "example.org:9000") (harness-ui--server server)
+          (harness-corporate-mode t))
+      (harness-ui--corporate-mode-changed)
+      (should (eq 'process harness-ui-connection-address)))
+    (should (equal '(process) connected))
+    (should (= 1 restarts))
+    (should (= 1 redrawn))
+    ;; The harness runs in this Emacs: the UI connects to it there.
+    (let ((harness-ui-connection-address "example.org:9000") (harness-ui--server nil)
+          (harness-process nil) (harness-corporate-mode t))
+      (harness-ui--corporate-mode-changed)
+      (should-not harness-ui-connection-address))
+    (should (equal '(process nil) connected))
+    (should (= 2 redrawn))))
+
+(ert-deftest harness-ui-init-hooks-corporate-mode-changes ()
+  "The UI's init adds its function to `harness-corporate-mode-change-hook'
+once, and a change made with `setopt' reaches it."
+  (let ((harness-corporate-mode-change-hook nil)
+        (kill-emacs-hook nil))
+    (cl-letf (((symbol-function 'harness-global-mode) #'ignore))
+      (harness-ui-test-with-corporate-change
+        (harness-ui--init)
+        (harness-ui--init)
+        (should (equal '(harness-ui--corporate-mode-changed) harness-corporate-mode-change-hook))
+        (let ((harness-ui-connection-address 'process) (harness-ui--server server))
+          (unwind-protect
+              (progn
+                (setopt harness-corporate-mode t)
+                (should (= 1 restarts))
+                ;; The same value again is no change.
+                (setopt harness-corporate-mode t)
+                (should (= 1 restarts)))
+            (setopt harness-corporate-mode nil))
+          (should (= 2 restarts)))))))
 
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

@@ -1165,5 +1165,56 @@ click and open the session instead."
                                                                     :state))))
                            5 "the task to start")))))
 
+;;;; Notifications
+
+(defvar harness-notifications-providers)
+(defvar harness-tasks-notify-events)
+(defvar harness-ui-tasks--focus)
+(declare-function harness-ui-tasks--on-notification "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-notification-click-opens-the-task ()
+  "A task's desktop notification, clicked, shows its card on the board.
+All the way through: the task waits for review, the tasks-notify module
+notifies, the system provider asks the UI over ACP, the UI shows it on
+the desktop (stubbed here) and the click opens the board on the card."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'notifications)
+    (harness-test-load-module 'tasks-notify)
+    (let ((harness-tasks-require-verification t)
+          (harness-notifications-providers '(system))
+          (harness-tasks-notify-events '(review done))
+          (shown nil))
+      (cl-letf (((symbol-function 'harness-notifications-desktop-notify)
+                 (lambda (&rest params) (push params shown) (harness-resolved '(:backend test)))))
+        (harness-ui-tasks-test--type-and-submit board "first task")
+        (harness-ui-tasks-test--type-and-submit board "second task")
+        (harness-test-wait (lambda () (= 2 (length shown))) 10 "both notifications")
+        (let* ((first (cl-find-if (lambda (p) (string-search "first task" (plist-get p :title))) shown))
+               (id (plist-get (cl-find "first task" (harness-call 'task/list dir)
+                                       :key (lambda (task) (plist-get task :prompt)) :test #'equal)
+                              :id)))
+          (should (equal "Ready for review: first task" (plist-get first :title)))
+          (harness-ui-tasks-test--wait-text board "second task")
+          (with-current-buffer board (goto-char (point-max)))
+          ;; The click.
+          (funcall (plist-get first :on-action))
+          (harness-test-wait (lambda () (with-current-buffer board
+                                          (equal id (get-text-property (point) 'harness-task-id))))
+                             5 "point on the card")
+          (should (eq board (window-buffer (selected-window))))
+          (should-not (buffer-local-value 'harness-ui-tasks--focus board)))))))
+
+(ert-deftest harness-ui-tasks-notification-for-a-card-not-shown-yet ()
+  "A click before the board has the task waits for it, a while."
+  (harness-ui-tasks-test-with
+    (should-not (harness-ui-tasks--on-notification '(:session "s1")))
+    (should (harness-ui-tasks--on-notification (list :task "t-later" :project dir)))
+    (with-current-buffer board
+      (should (equal "t-later" (car harness-ui-tasks--focus)))
+      ;; Long past: the board forgets it.
+      (setq harness-ui-tasks--focus (cons "t-later" (- (float-time) 60)))
+      (harness-ui-tasks--render)
+      (should-not harness-ui-tasks--focus))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

@@ -34,3 +34,11 @@ signals.
 Integration suites that talk to real models run only with
 `HARNESS_INTEGRATION=1`; the local ACP suites and the TCP suites both
 run by default so both transports stay green.
+
+## Screenshots
+
+`scripts/media.sh` takes the pictures in `docs/media` again, all of
+them or the ones named (`scripts/media.sh chat tasks`), in an `emacs -Q`
+of its own with a demo project and scripted agents, on a private
+display.  [screenshots.md](screenshots.md) says how it works and how to
+add or change a picture when a view changes.

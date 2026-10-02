@@ -96,8 +96,12 @@
 ;; are told to carry on (`harness-tasks-resume-interrupted'), a write-up
 ;; cut short is written again, and merges in flight are queued again.
 ;; Tasks in review simply wait on.  Events `task/changed' (TASK) and
-;; `task/deleted' (ID) let a UI follow, and `task/review' (TASK) tells
-;; it when a task's work waits for the user to review it.
+;; `task/deleted' (ID) let a UI follow, `task/review' (TASK) tells it
+;; when a task's work waits for the user to review it, and `task/done'
+;; (TASK HOW) when a task becomes done: HOW is `merged' (its branch
+;; merged), `finished' (its turn ended with nothing to merge or review),
+;; `verified' (the user accepted it, with nothing left to merge) or
+;; `completed' (marked done by hand).
 ;;
 ;; A board can also host BTW side conversations (`task/btw'), where the
 ;; user asks how the tasks are going.  Like every BTW, each is a new
@@ -141,8 +145,9 @@ for review where they are, for the user to verify."
 
 (defcustom harness-tasks-non-interactive t
   "When non-nil, task sessions run non-interactive.
-Permission prompts become denials with a hint to find another way, so a
-task keeps working while nobody watches it."
+They never wait for the user: the auto-mode judge decides what would
+ask them, and after a denial the agent is told to find another way, so
+a task keeps working while nobody watches it."
   :type 'boolean :group 'harness)
 
 (defcustom harness-tasks-model nil
@@ -428,6 +433,18 @@ Return the task's view."
     (harness-emit 'task/review view)
     view))
 
+(defun harness-tasks--to-done (id how &rest plist)
+  "Complete task ID with PLIST merged in; emit `task/done' if it was not done.
+HOW says what completed it: `merged' (the merge queue merged its
+branch), `finished' (its turn ended with nothing to merge or review),
+`verified' (the user accepted its work, with nothing left to merge) or
+`completed' (marked done by hand).  Return the task's view."
+  (let* ((was (plist-get (harness-tasks--get id) :state))
+         (view (apply #'harness-tasks--set id :state 'done plist)))
+    (unless (eq was 'done)
+      (harness-emit 'task/done view how))
+    view))
+
 ;;;; Stores
 ;;
 ;; Every record is kept in one store, picked by its project.  A git
@@ -475,8 +492,10 @@ Its text is remembered as what PATH holds, so writing the same is skipped."
       (error (harness-log 'error "tasks: cannot parse %s: %S" path err) nil))))
 
 (defun harness-tasks--write-json (path obj)
-  "Write OBJ as JSON to PATH atomically, unless PATH holds that already."
-  (let ((json (harness-json-encode obj)))
+  "Write OBJ as JSON to PATH atomically, unless PATH holds that already.
+The JSON is text, as `harness-read-file' reads it, so a store holding
+non-ASCII text compares equal too."
+  (let ((json (harness-json-encode-text obj)))
     (unless (equal json (gethash path harness-tasks--written))
       (harness-write-file-atomically path json)
       (puthash path json harness-tasks--written))))
@@ -1763,10 +1782,10 @@ task keeps the time its work finished."
       (if (eq status 'merged)
           (if (harness-tasks--needs-review-p task)
               (harness-tasks--to-review id :merged t :outcome 'merged :finished (float-time))
-            (harness-tasks--set id :state 'done :merge-status nil :conflicts nil :merged t
-                                :outcome 'merged
-                                :finished (or (and (harness-tasks--verified-p task) (plist-get task :finished))
-                                              (float-time))))
+            (harness-tasks--to-done id 'merged :merge-status nil :conflicts nil :merged t
+                                    :outcome 'merged
+                                    :finished (or (and (harness-tasks--verified-p task) (plist-get task :finished))
+                                                  (float-time))))
         ;; The merge queue steers the agent when it can fix things itself
         ;; (uncommitted changes); its next clean turn merges again.
         (if (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running child))
@@ -2064,13 +2083,34 @@ At `harness-tasks-refine-tool-calls' calls it is steered to write up now."
 
 (defun harness-tasks--refine-settings (task)
   "Return the `session/create' settings of the session refining TASK.
-Asking with nobody to ask makes it read-only: reads are allowed, and
-anything else is denied with a hint, which keeps a write-up a write-up."
+Ask mode allows reads, and non-interactive the session never waits for
+the user; whatever would ask `harness-tasks--write-up-gate' denies with
+a hint, which keeps a write-up a write-up."
   (let ((model (or harness-tasks-refine-model (plist-get task :model) harness-tasks-model))
         (thinking (or harness-tasks-refine-thinking (plist-get task :thinking) harness-tasks-thinking)))
     (append (list :permission-mode 'ask :non-interactive t)
             (and model (list :model model))
             (and thinking (list :thinking thinking)))))
+
+(defconst harness-tasks--write-up-hint
+  "Write the task up from what you can read; put what you could not check in the write-up as an open question."
+  "Hint of a call denied because a backlog write-up only reads.")
+
+(defun harness-tasks--write-up-gate (decision next request)
+  "Keep the turns that write a backlog task up read-only.
+A `permission/decide' stage at 25, after the mode and its rules and
+before the auto-mode judge: a call of such a turn (see
+`harness-tasks--refinement-p') still undecided there would ask the
+user, or, the session being non-interactive, go to the judge.  It is
+denied instead, for good.  DECISION is the current value and NEXT
+continues the chain with REQUEST's decision."
+  (let ((task (and (eq (plist-get decision :behavior) 'ask)
+                   (harness-tasks--by-session (plist-get (plist-get request :session) :id)))))
+    (funcall next (if (and task (harness-tasks--refinement-p task))
+                      (list :behavior 'deny :final t
+                            :reason "this session writes a backlog task up rather than doing it, so it only reads"
+                            :hint harness-tasks--write-up-hint)
+                    decision))))
 
 (defun harness-tasks--refine-failed (id err)
   "Record ERR as the reason task ID's refinement stopped."
@@ -2193,7 +2233,7 @@ puts its write-up in the backlog."
         (harness-tasks--to-review id :outcome reason :error nil :finished (float-time)))
        ((and (plist-get task :worktree) (not (plist-get task :worktree-removed)))
         (harness-tasks--enqueue-merge id))
-       (t (harness-tasks--set id :state 'done :outcome reason :finished (float-time))))
+       (t (harness-tasks--to-done id 'finished :outcome reason :finished (float-time))))
       (harness-run-soon #'harness-tasks--schedule))))
 
 (defun harness-tasks--on-pending-changed (session-id &rest _)
@@ -2540,8 +2580,8 @@ That is the user accepting it, so it counts as verified."
   (let ((task (harness-tasks--get id)))
     (when (and (plist-get task :session) (harness-method-exists-p 'merge/cancel))
       (harness-call 'merge/cancel (plist-get task :session)))
-    (prog1 (harness-tasks--set id :state 'done :merge-status nil :finished (float-time)
-                               :verified t :verified-at (float-time))
+    (prog1 (harness-tasks--to-done id 'completed :merge-status nil :finished (float-time)
+                                   :verified t :verified-at (float-time))
       (harness-run-soon #'harness-tasks--schedule))))
 
 (harness-defmethod task/verify (id)
@@ -2557,8 +2597,8 @@ already, it is done now."
              (not (harness-tasks--merged-p task)) (harness-method-exists-p 'merge/enqueue))
         (progn (harness-tasks--set id :merge-attempts 0)
                (harness-tasks--enqueue-merge id))
-      (harness-tasks--set id :state 'done :outcome (or (plist-get task :outcome) 'end-turn)
-                          :finished (or (plist-get task :finished) (float-time))))
+      (harness-tasks--to-done id 'verified :outcome (or (plist-get task :outcome) 'end-turn)
+                              :finished (or (plist-get task :finished) (float-time))))
     (harness-run-soon #'harness-tasks--schedule)
     (harness-call 'task/get id)))
 
@@ -2665,6 +2705,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
+  (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
   (harness-tasks--start-polling)
   (harness-tasks--pick-up))
 
@@ -2677,12 +2718,18 @@ up again, merges in flight are queued again and waiting tasks start."
 (harness-declare-event 'task/changed "(TASK) after a task is submitted or changes state or column.")
 (harness-declare-event 'task/deleted "(ID) after a task is removed.")
 (harness-declare-event 'task/review "(TASK) when a task's finished work starts waiting for the user's review.")
+(harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
 
 (harness-define-module 'tasks
   :doc "Task mode: one session per task, from backlog write-up or worktree through your review to merged, with a concurrency limit."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)
+
+;; A reload does not initialise a running module again, and a write-up
+;; must not go without the stage that keeps it read-only: install it now.
+(when (harness-module-ready-p 'tasks)
+  (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25))
 
 (provide 'harness-tasks)
 ;;; harness-tasks.el ends here

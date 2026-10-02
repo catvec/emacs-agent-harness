@@ -293,5 +293,16 @@ the UI redraw.  When any file fails to compile nothing is loaded."
           (push (file-notify-add-watch full '(change) #'harness--auto-reload-callback)
                 harness--watches))))))
 
+;; A reload loads this file first, then every module file by name, and
+;; the modules that define tools (harness-tools-fs.el, harness-merge.el,
+;; harness-perms.el ...) sort before harness-tools.el, whose
+;; `harness-define-tool' they call as they load.  So that they define
+;; their tools with the registry as it is now, not as it was, a reload
+;; loads the registry before them.
+(when (featurep 'harness-tools)
+  (condition-case err
+      (harness--load-file (harness--path "lisp/modules/harness-tools.el"))
+    (error (harness-log 'error "reloading the tool registry first failed: %S" err))))
+
 (provide 'harness)
 ;;; harness.el ends here
