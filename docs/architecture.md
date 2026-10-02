@@ -992,9 +992,12 @@ positions (`harness-ui-display-session SID &optional POSITION`; presets
 `right`, `bottom`, `full`, `other`; one session per position, replacing),
 the global keymap and the transient menu `harness-menu` (with a group for
 the commands of the buffer it is opened from, which each mode lists in
-its `harness-menu-group` property), and icons via
-`icons.el` (`define-icon`) with text fallbacks.  Every command has a
-mouse target: buttons, header-line segments, or mode-line segments.
+its `harness-menu-group` property; opened from a side window it gets a
+side window of its own, at the bottom, or at the top when a window such
+as a BTW is at the bottom already, never in another window's slot),
+and icons via `icons.el` (`define-icon`) with text fallbacks.  Every
+command has a mouse target: buttons, header-line segments, or mode-line
+segments.
 
 Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
 list + attachments row + compose region at the bottom.  Rendering is
@@ -1011,7 +1014,9 @@ from any view never resumes it: an inactive session shows its transcript,
 a notice and the compose box, and the first message sent from it resumes
 it (through `agent/prompt`).  Other UI modules hook into a chat buffer
 without owning it: `harness-chat-send-functions` sees each message sent
-or queued from its box (the text as typed, and the attachments), and the
+or queued from its box (the text as typed, and the attachments),
+`harness-chat-header-functions` (buffer-local) puts segments in front of
+its header line, leaving the session's own segments as they are, and the
 buffer-local `harness-chat-placeholder` replaces the empty box's usual
 hint.
 
@@ -1104,10 +1109,16 @@ the session it is opened over, or, over a view that sets
 `harness-ui-btw-start-function`, a conversation the view starts, shown
 in the session's own chat buffer with point in its compose box, so the
 question is written and sent like any message; nothing is read in the
-minibuffer.  The first message names it `btw: ...`, unless it was named
-by hand.  Closing it returns there; a BTW nothing was asked in is
-deleted with its buffer, once the harness confirms it holds no node of
-its own, and an idle one is closed.  Keeping it makes it a normal
-session window in that place), media
+minibuffer.  The buffer is the full chat: its header line (model,
+permission mode, thinking, context, cost, [menu]), keys and menu are a
+session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
+front of the header through `harness-chat-header-functions` (what it
+is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep
+it; a fork starts in its parent's permission mode.  The first message
+names it `btw: ...`, unless it was named by hand.  Closing it returns
+there; a BTW nothing was asked in is deleted with its buffer, once the
+harness confirms it holds no node of its own, and an idle one is
+closed.  Keeping it makes it a normal session window in that place,
+with nothing of the BTW left in its header), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video thumbnails/open).

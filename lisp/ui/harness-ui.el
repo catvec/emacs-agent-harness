@@ -1096,17 +1096,32 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
 (defun harness-ui--command-available-p (symbol)
   (fboundp symbol))
 
+(defun harness-ui--free-side-slot (side)
+  "Return the first slot from 1 up that no window on SIDE of the frame has."
+  (let ((taken (cl-loop for window in (window-list nil 'nomini)
+                        when (eq (window-parameter window 'window-side) side)
+                        collect (window-parameter window 'window-slot))))
+    (cl-loop for slot from 1
+             unless (memql slot taken) return slot)))
+
 (defun harness-ui--display-menu (buffer alist)
   "Display the menu BUFFER, keeping it out of the windows around a side window.
 Sessions usually live in side windows, which cannot be split.  Actions
 such as `display-buffer-below-selected' then fall back to reusing
 another window, which transient fits horizontally to the menu and
 cannot delete afterwards, wrecking the layout.  So from a side window
-the menu gets a bottom side window of its own; elsewhere it follows
+the menu gets a side window of its own: at the bottom, or at the top
+when a window is at the bottom already, such as a BTW, whose height a
+menu beside it would be cut to.  It takes a slot no window has: given
+a window's slot, `display-buffer-in-side-window' shows the menu in
+that window, the selected one included, and transient deletes the
+window as the menu closes.  Elsewhere the menu follows
 `transient-display-buffer-action'.  ALIST is the action alist."
   (if (window-parameter (selected-window) 'window-side)
-      (display-buffer-in-side-window
-       buffer (append '((side . bottom) (slot . 1) (dedicated . t)) alist))
+      (let ((side (if (window-with-parameter 'window-side 'bottom) 'top 'bottom)))
+        (display-buffer-in-side-window
+         buffer (append `((side . ,side) (slot . ,(harness-ui--free-side-slot side)) (dedicated . t))
+                        alist)))
     (display-buffer buffer transient-display-buffer-action)))
 
 ;;;;; The commands of the buffer the menu is opened from

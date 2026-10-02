@@ -36,6 +36,30 @@ The side window is selected and not dedicated, as Doom leaves it."
       (delete-window window)
       (should (eq other (window-buffer other-window))))))
 
+(ert-deftest harness-ui-menu-with-a-window-at-the-bottom-goes-to-the-top ()
+  "With a window at the bottom, as a BTW's, the menu from a side window
+goes to the top, whole, in a window of its own.  In that window's slot
+it would show in its place, and transient would delete the window as
+the menu closes; beside it, it would get its height only."
+  (harness-ui-test-with-layout
+    (let* ((btw (get-buffer-create " *harness-test-btw*"))
+           (btw-window (display-buffer-in-side-window
+                        btw '((side . bottom) (slot . 1) (window-height . 0.2) (preserve-size . (nil . t)))))
+           (edges (window-edges btw-window)))
+      (unwind-protect
+          ;; From the BTW, and from the session it was opened over.
+          (dolist (from (list btw-window (get-buffer-window chat)))
+            (select-window from)
+            (let ((window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
+              (should (eq 'top (window-parameter window 'window-side)))
+              (should (= (frame-width) (window-total-width window)))
+              (should (eq menu (window-buffer window)))
+              (should (eq btw (window-buffer btw-window)))
+              (should (equal edges (window-edges btw-window)))
+              (delete-window window)
+              (should (eq btw (window-buffer btw-window)))))
+        (kill-buffer btw)))))
+
 (ert-deftest harness-ui-menu-from-main-window-follows-transient-action ()
   (harness-ui-test-with-layout
     (select-window (get-buffer-window other))

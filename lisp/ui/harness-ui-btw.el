@@ -5,12 +5,17 @@
 ;; A "by the way" conversation is a fork of the current session opened
 ;; in a side window over it, so a quick question can be asked and
 ;; answered without leaving the main session or losing its output.  It
+;; is the session's own chat buffer, the full chat UI in another place:
+;; its header line (model, permission mode and the rest, all clickable),
+;; keys and harness menu are a normal session's, with a BTW segment in
+;; front of the header and C-c C-k and C-c C-o to close or keep it.  It
 ;; opens blank, with point in its compose box: the box every session
 ;; has (multi-line editing, @file and /skill completion, attachments),
 ;; where C-c C-c asks.  Its first message names it.  Closing the side
 ;; window returns to the main session untouched; a BTW closed before
 ;; anything was asked in it is deleted, so one opened by mistake leaves
-;; nothing behind.  BTW sessions are ordinary forks and show up in the
+;; nothing behind.  BTW sessions are ordinary forks, settings included
+;; (a BTW starts in its parent's permission mode), and show up in the
 ;; session list and the conversation tree.
 ;;
 ;; A view without a session of its own can host BTWs too: it sets
@@ -29,6 +34,7 @@
 
 ;; Buffer-local in the chat buffer a BTW shows.
 (defvar harness-chat-send-functions)
+(defvar harness-chat-header-functions)
 (defvar harness-chat-placeholder)
 
 (defgroup harness-ui-btw nil
@@ -57,16 +63,13 @@ starts one about its tasks this way.  nil forks the buffer's session.")
 The BTW's compose box and its window's header say it.")
 
 (defvar-local harness-ui-btw--label nil
-  "What the header of this BTW buffer calls the conversation.")
+  "What the BTW segment of this buffer's header calls the conversation.")
 
 (defvar-local harness-ui-btw--hint nil
   "What the empty compose box of this BTW buffer says.")
 
 (defvar-local harness-ui-btw--asked nil
   "Non-nil once a message was sent in this BTW buffer.")
-
-(defvar-local harness-ui-btw--saved-header nil
-  "(HEADER) this buffer had before it showed a BTW, or nil.")
 
 (defun harness-ui-btw-name (text)
   "Return the name of a BTW whose first message is TEXT."
@@ -97,7 +100,9 @@ once instead.  Return a promise that settles once the BTW is shown."
 
 (defun harness-ui-btw--show (id over about question)
   "Show BTW session ID in a side window over buffer OVER, point in its box.
-ABOUT says what the conversation is about, nil for one about OVER's
+The window shows the session's chat buffer as any session's, header
+line, keys and menu included; `harness-ui-btw-minor-mode' only adds to
+it.  ABOUT says what the conversation is about, nil for one about OVER's
 session.  QUESTION, when non-nil, is asked at once; otherwise the first
 message sent from the box names the BTW."
   (puthash id over harness-ui-btw--open)
@@ -211,33 +216,48 @@ It takes the position of the buffer it was opened over."
     (define-key map (kbd "C-c C-o") #'harness-ui-btw-promote)
     map))
 
+(defvar harness-ui-btw--close-map (harness-ui-mouse-keymap #'harness-ui-btw-close)
+  "Keymap of the [close] button in the header line of a BTW.")
+
+(defvar harness-ui-btw--keep-map (harness-ui-mouse-keymap #'harness-ui-btw-promote)
+  "Keymap of the [keep] button in the header line of a BTW.")
+
 (defun harness-ui-btw--header ()
-  "The header line of a BTW window."
-  (list (propertize " BTW " 'face 'harness-label-face)
-        (propertize (or harness-ui-btw--label "side conversation") 'face 'harness-dim-face)
-        "  "
-        (propertize "[close]" 'face 'button 'mouse-face 'highlight
-                    'help-echo "Close and go back to where it was opened (C-c C-k)"
-                    'local-map (harness-ui-mouse-keymap #'harness-ui-btw-close))
-        " "
-        (propertize "[keep]" 'face 'button 'mouse-face 'highlight
-                    'help-echo "Keep it as a normal session window (C-c C-o)"
-                    'local-map (harness-ui-mouse-keymap #'harness-ui-btw-promote))))
+  "Return the BTW segment of this buffer's header line.
+It says what the conversation is about and has buttons to close it and
+to keep it.  `harness-ui-btw-minor-mode' puts it in front of the
+session's own header line through `harness-chat-header-functions'."
+  (concat (propertize " BTW " 'face 'harness-label-face)
+          (propertize (or harness-ui-btw--label "side conversation") 'face 'harness-dim-face)
+          "  "
+          (propertize "[close]" 'face 'button 'mouse-face 'mode-line-highlight
+                      'help-echo "Close and go back to where it was opened (C-c C-k)"
+                      'local-map harness-ui-btw--close-map)
+          " "
+          (propertize "[keep]" 'face 'button 'mouse-face 'mode-line-highlight
+                      'help-echo "Keep it as a normal session window (C-c C-o)"
+                      'local-map harness-ui-btw--keep-map)
+          " "))
 
 (define-minor-mode harness-ui-btw-minor-mode
-  "Minor mode active in BTW side conversation buffers."
+  "Minor mode of a chat buffer shown as a BTW side conversation.
+The buffer stays a chat like any other, with the session's own header
+line, keys and harness menu.  The mode puts the BTW segment in front of
+the header line (what the conversation is about, [close] and [keep]),
+says what to ask in the empty compose box, and adds keys to close the
+BTW and to keep it as a normal session, over the chat's own:
+
+\\{harness-ui-btw-minor-mode-map}
+Turned off, it leaves the buffer a normal session's."
   :lighter " BTW" :keymap harness-ui-btw-minor-mode-map
   (if harness-ui-btw-minor-mode
       (progn
-        (unless harness-ui-btw--saved-header
-          (setq harness-ui-btw--saved-header (list header-line-format)))
-        (setq-local header-line-format (harness-ui-btw--header))
+        (add-hook 'harness-chat-header-functions #'harness-ui-btw--header nil t)
         (setq-local harness-chat-placeholder harness-ui-btw--hint))
     ;; Back to the session's own header and hint, as a kept BTW is a normal session.
-    (when harness-ui-btw--saved-header
-      (setq-local header-line-format (car harness-ui-btw--saved-header))
-      (setq harness-ui-btw--saved-header nil))
+    (remove-hook 'harness-chat-header-functions #'harness-ui-btw--header t)
     (kill-local-variable 'harness-chat-placeholder))
+  (force-mode-line-update)
   (harness-compose-update-placeholder))
 
 ;; Its keys in the harness menu.  They beat the chat's own `C-c C-k'
