@@ -16,6 +16,13 @@
 ;; once it has resolved and committed the merge.  A safety timer aborts
 ;; a merge nobody finishes.
 ;;
+;; The harness locks the worktrees it makes so that `git worktree
+;; prune' keeps them (see harness-worktree.el).  Once a child's branch
+;; is merged its work is safe on the parent's branch, so the lock goes
+;; (`worktree/unlock', which lifts only the harness's own locks) and the
+;; worktree can be pruned again.  A merge that fails, is aborted or is
+;; cancelled leaves the lock on.
+;;
 ;; Everything runs asynchronously through `harness-run-command'.
 
 ;;; Code:
@@ -304,12 +311,28 @@ filter core would adopt a returned promise as the gate value."
          (harness-merge--finish entry 'aborted
                                 (format "not resolved within %s" (harness-format-duration harness-merge-hold-timeout))))))))
 
+(defun harness-merge--unlock-worktree (entry)
+  "Lift the harness's lock on the worktree of ENTRY's child, now merged.
+Return a promise, or nil without a worktree or the worktree module."
+  (let* ((child (harness-merge--session (plist-get entry :child)))
+         (parent (harness-merge--session (plist-get entry :parent)))
+         (worktree (plist-get child :worktree)))
+    (when (and worktree (harness-method-exists-p 'worktree/unlock))
+      (harness-catch
+       (harness-call-async 'worktree/unlock (or (plist-get parent :cwd) worktree) worktree)
+       (lambda (err)
+         (harness-log 'warn "merge: could not unlock the merged worktree %s: %s"
+                      worktree (harness-error-message err))
+         nil)))))
+
 (defun harness-merge--finish (entry status &optional reason)
   "Close ENTRY with STATUS (merged, failed, aborted, cancelled) and REASON.
-Releases the lock, dequeues, hints both sessions and serves the queue."
+Releases the lock, dequeues, hints both sessions and serves the queue.
+A merged child's worktree loses the harness's lock."
   (let* ((child-id (plist-get entry :child))
          (parent-id (plist-get entry :parent))
          (timer (gethash parent-id harness-merge--timers)))
+    (when (eq status 'merged) (harness-merge--unlock-worktree entry))
     (when timer (cancel-timer timer) (remhash parent-id harness-merge--timers))
     (puthash parent-id (cl-remove entry (gethash parent-id harness-merge--queues))
              harness-merge--queues)

@@ -232,25 +232,217 @@
       (should (equal (harness-worktree-test--dir root)
                      (harness-worktree-test--dir (harness-files-main-root path)))))))
 
-(ert-deftest harness-worktree-root-of-and-prune ()
+(ert-deftest harness-worktree-root-of ()
   (harness-worktree-test-with-repo
-    (let* ((path (expand-file-name "wt-prune" base))
-           (wt (harness-test-await (harness-call 'worktree/create root :branch "prune-me" :path path))))
-      (ignore wt)
+    (let ((path (expand-file-name "wt-root-of" base)))
+      (harness-test-await (harness-call 'worktree/create root :branch "root-of" :path path))
       (make-directory (expand-file-name "sub/dir" path) t)
       (should (equal (harness-worktree-test--dir root)
                      (harness-test-await (harness-call 'worktree/root-of (expand-file-name "sub/dir" path)))))
       (should (equal (harness-worktree-test--dir root)
                      (harness-test-await (harness-call 'worktree/root-of (expand-file-name "README" path)))))
-      (should (equal (harness-worktree-test--dir root) (harness-test-await (harness-call 'worktree/root-of root))))
-      ;; Delete the directory behind git's back; prune drops the record.
-      (delete-directory path t)
-      (should (= 2 (length (harness-test-await (harness-call 'worktree/list root)))))
-      (let ((pruned (harness-test-await (harness-call 'worktree/prune root))))
-        (should (= 1 (length pruned)))
-        (should (string-match-p "wt-prune" (car pruned))))
+      (should (equal (harness-worktree-test--dir root) (harness-test-await (harness-call 'worktree/root-of root)))))))
+
+(defun harness-worktree-test--lock-line (root path)
+  "Return the `locked' line `git worktree list --porcelain' gives PATH of ROOT.
+nil when it is not locked or not registered."
+  (cl-some (lambda (block)
+             (let ((lines (split-string block "\n" t)))
+               (and (string-prefix-p "worktree " (car lines))
+                    (equal (harness-worktree-test--dir (substring (car lines) 9)) (harness-worktree-test--dir path))
+                    (seq-find (lambda (l) (string-prefix-p "locked" l)) lines))))
+           (split-string (harness-worktree-test--git root "worktree" "list" "--porcelain") "\n\n" t)))
+
+(defun harness-worktree-test--create (root branch)
+  "Create a worktree of ROOT on BRANCH the way the harness does; return its path."
+  (plist-get (harness-test-await (harness-call 'worktree/create root :branch branch)) :path))
+
+(ert-deftest harness-worktree-create-locks ()
+  "The harness locks every worktree it makes, naming the branch."
+  (harness-worktree-test-with-repo
+    (let ((new (harness-worktree-test--create root "task/new")))
+      (should (equal "locked harness: task/new" (harness-worktree-test--lock-line root new)))
+      (let ((wt (harness-worktree-test--find (harness-test-await (harness-call 'worktree/list root)) new)))
+        (should (plist-get wt :locked))
+        (should (equal "harness: task/new" (plist-get wt :lock-reason)))
+        (should (harness-worktree-harness-lock-p wt))
+        (should-not (plist-get wt :missing)))
+      ;; An existing branch is checked out locked as well.
+      (harness-test-await (harness-call 'worktree/remove root new))
+      (let ((again (harness-worktree-test--create root "task/new")))
+        (should (equal "locked harness: task/new" (harness-worktree-test--lock-line root again))))
+      ;; The main checkout never is.
+      (should-not (harness-worktree-test--lock-line root root)))))
+
+(ert-deftest harness-worktree-locked-survives-a-hidden-prune ()
+  "A prune that cannot see the worktree directories keeps the locked ones.
+That is a prune in a session's sandbox: git takes every worktree it
+cannot see for deleted."
+  (harness-worktree-test-with-repo
+    (let ((locked (harness-worktree-test--create root "task/locked"))
+          (plain (file-name-as-directory (expand-file-name ".worktrees/plain" root)))
+          (hidden (expand-file-name "hidden" base)))
+      ;; One made as the harness makes them now, one as it did before.
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "plain" plain)
+      ;; Out of sight, as in the sandbox, then a prune, then back.
+      (make-directory hidden)
+      (rename-file (directory-file-name locked) (expand-file-name "locked" hidden))
+      (rename-file (directory-file-name plain) (expand-file-name "plain" hidden))
+      (harness-worktree-test--git root "worktree" "prune")
+      (rename-file (expand-file-name "locked" hidden) (directory-file-name locked))
+      (rename-file (expand-file-name "plain" hidden) (directory-file-name plain))
+      ;; The locked worktree is still registered, and git works in it.
+      (should (equal "task/locked\n" (harness-worktree-test--git locked "branch" "--show-current")))
+      (should (equal "" (harness-worktree-test--git locked "status" "--porcelain")))
+      (should (equal "locked harness: task/locked" (harness-worktree-test--lock-line root locked)))
+      ;; The other lost its registration: git fails in it.
+      (should-not (harness-worktree-test--find (harness-test-await (harness-call 'worktree/list root)) plain))
+      (should-error (harness-worktree-test--git plain "status")))))
+
+(ert-deftest harness-worktree-remove-locked ()
+  "git refuses to remove a locked worktree unless forced twice; `worktree/remove' still removes it."
+  (harness-worktree-test-with-repo
+    (let ((clean (harness-worktree-test--create root "clean"))
+          (dirty (harness-worktree-test--create root "dirty"))
+          (removed nil))
+      (harness-on 'worktree/removed (lambda (_r p) (push p removed)))
+      ;; One --force does not override the lock.
+      (should-error (harness-worktree-test--git root "worktree" "remove" "--force" clean))
+      (should (file-directory-p clean))
+      ;; The harness lifts its own lock.
+      (should (equal clean (harness-test-await (harness-call 'worktree/remove root clean))))
+      (should-not (file-exists-p clean))
+      (should (equal (list clean) removed))
+      ;; Local changes still need FORCE, and the lock goes back on meanwhile.
+      (with-temp-file (expand-file-name "scratch" dirty) (insert "x\n"))
+      (let ((err (should-error (harness-test-await (harness-call 'worktree/remove root dirty))
+                               :type 'harness-error)))
+        (should (string-match-p "modified or untracked" (harness-error-message err))))
+      (should (equal "locked harness: dirty" (harness-worktree-test--lock-line root dirty)))
+      (harness-test-await (harness-call 'worktree/remove root dirty t))
+      (should-not (file-exists-p dirty))
+      ;; Someone else's lock is kept, unless forced.
+      (let ((foreign (file-name-as-directory (expand-file-name "foreign" base))))
+        (harness-worktree-test--git root "worktree" "add" "-q" "--lock" "--reason" "on a usb stick" "-b" "foreign" foreign)
+        (let ((err (should-error (harness-test-await (harness-call 'worktree/remove root foreign))
+                                 :type 'harness-error)))
+          (should (string-match-p "locked" (harness-error-message err))))
+        (should (equal "locked on a usb stick" (harness-worktree-test--lock-line root foreign)))
+        (harness-test-await (harness-call 'worktree/remove root foreign t))
+        (should-not (file-exists-p foreign)))
+      ;; A locked worktree whose directory is gone goes too.
+      (let ((gone (harness-worktree-test--create root "gone")))
+        (delete-directory gone t)
+        (harness-test-await (harness-call 'worktree/remove root gone)))
+      (should (= 1 (length (harness-test-await (harness-call 'worktree/list root))))))))
+
+(ert-deftest harness-worktree-lock-and-unlock ()
+  (harness-worktree-test-with-repo
+    (let ((path (file-name-as-directory (expand-file-name "wt-lock" base)))
+          (events nil))
+      (harness-on 'worktree/locked (lambda (_r p) (push (cons 'locked p) events)))
+      (harness-on 'worktree/unlocked (lambda (_r p) (push (cons 'unlocked p) events)))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "feature/lock" path)
+      (should (harness-test-await (harness-call 'worktree/lock root path)))
+      (should (equal "locked harness: feature/lock" (harness-worktree-test--lock-line root path)))
+      ;; Locked already: it keeps its lock.
+      (should-not (harness-test-await (harness-call 'worktree/lock root path "another reason")))
+      (should (equal "locked harness: feature/lock" (harness-worktree-test--lock-line root path)))
+      (should (harness-test-await (harness-call 'worktree/unlock root path)))
+      (should-not (harness-worktree-test--lock-line root path))
+      (should-not (harness-test-await (harness-call 'worktree/unlock root path)))
+      ;; Someone else's lock stays, unless ANY.
+      (harness-worktree-test--git root "worktree" "lock" "--reason" "mine" path)
+      (should-not (harness-test-await (harness-call 'worktree/unlock root path)))
+      (should (equal "locked mine" (harness-worktree-test--lock-line root path)))
+      (should (harness-test-await (harness-call 'worktree/unlock root path t)))
+      (should-not (harness-worktree-test--lock-line root path))
+      (should (equal (list (cons 'locked path) (cons 'unlocked path) (cons 'unlocked path))
+                     (reverse events)))
+      ;; The main checkout cannot be locked.
+      (should-error (harness-test-await (harness-call 'worktree/lock root root)) :type 'harness-error))))
+
+(ert-deftest harness-worktree-prune-skips-locked ()
+  "`worktree/prune' keeps a locked worktree whose directory is gone and prunes the others."
+  (harness-worktree-test-with-repo
+    (let ((locked (harness-worktree-test--create root "keep-me"))
+          (plain (expand-file-name "wt-plain" base)))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "prune-me" plain)
+      (delete-directory locked t)
+      (delete-directory plain t)
+      (let ((listed (harness-test-await (harness-call 'worktree/list root))))
+        (should (= 3 (length listed)))
+        (should (plist-get (harness-worktree-test--find listed locked) :missing))
+        (should-not (plist-get (harness-worktree-test--find listed locked) :prunable))
+        (should (plist-get (harness-worktree-test--find listed plain) :prunable)))
+      ;; git's line for the one it pruned, then the one it kept.
+      (let ((lines (harness-test-await (harness-call 'worktree/prune root))))
+        (should (= 2 (length lines)))
+        (should (string-match-p "wt-plain" (car lines)))
+        (should (string-match-p "\\`Kept .*keep-me: .*locked (harness: keep-me)" (cadr lines))))
+      (let ((listed (harness-test-await (harness-call 'worktree/list root))))
+        (should (= 2 (length listed)))
+        (should (harness-worktree-test--find listed locked)))
+      ;; Unlocked, as once its branch is merged, it is pruned like any other.
+      (harness-test-await (harness-call 'worktree/unlock root locked))
+      (should (= 1 (length (harness-test-await (harness-call 'worktree/prune root)))))
       (should (= 1 (length (harness-test-await (harness-call 'worktree/list root)))))
       (should-not (harness-test-await (harness-call 'worktree/prune root))))))
+
+(ert-deftest harness-worktree-lock-existing ()
+  "Worktrees made before the harness locked them get their lock; no others do."
+  (harness-worktree-test-with-repo
+    (let* ((container (expand-file-name ".worktrees" root))
+           (old (file-name-as-directory (expand-file-name "old" container)))
+           (merged (file-name-as-directory (expand-file-name "merged" container)))
+           (gone (file-name-as-directory (expand-file-name "gone" container)))
+           (theirs (file-name-as-directory (expand-file-name "theirs" container)))
+           (foreign (file-name-as-directory (expand-file-name "foreign" base)))
+           (asked nil))
+      (dolist (wt (list (cons old "task/old") (cons merged "task/merged") (cons gone "task/gone")
+                        (cons foreign "foreign")))
+        (harness-worktree-test--git root "worktree" "add" "-q" "-b" (cdr wt) (car wt)))
+      (harness-worktree-test--git root "worktree" "add" "-q" "--lock" "--reason" "theirs" "-b" "theirs" theirs)
+      (delete-directory gone t)
+      ;; A filter turns one down, as the tasks module does a merged task's.
+      (harness-add-filter 'worktree/lock-existing-p
+                          (lambda (lock _root wt)
+                            (push (plist-get wt :branch) asked)
+                            (and lock (not (equal "task/merged" (plist-get wt :branch))))))
+      (let ((locked (harness-test-await (harness-call 'worktree/lock-existing root))))
+        (should (equal (list (harness-worktree-test--dir old)) (mapcar #'harness-worktree-test--dir locked))))
+      (should (equal '("task/merged" "task/old") (sort asked #'string<)))
+      (should (equal "locked harness: task/old" (harness-worktree-test--lock-line root old)))
+      (should-not (harness-worktree-test--lock-line root merged))
+      (should-not (harness-worktree-test--lock-line root gone))
+      (should-not (harness-worktree-test--lock-line root foreign))
+      (should (equal "locked theirs" (harness-worktree-test--lock-line root theirs)))
+      (should-not (harness-worktree-test--lock-line root root))
+      ;; Nothing left to lock.
+      (should-not (harness-test-await (harness-call 'worktree/lock-existing root))))))
+
+(ert-deftest harness-worktree-lock-known-once-per-repository ()
+  "When the harness starts, the repositories its sessions use get their worktrees locked, once."
+  (harness-worktree-test-with-repo
+    (harness-test-with-temp-state
+      (let ((old (file-name-as-directory (expand-file-name ".worktrees/old" root)))
+            (outside (harness-test-temp-dir)))
+        (harness-worktree-test--git root "worktree" "add" "-q" "-b" "task/old" old)
+        (harness-register-method 'session/list
+                                 (lambda (&optional _filter)
+                                   (list (list :id "a" :cwd old :project old :worktree old)
+                                         (list :id "b" :cwd root :project root)
+                                         (list :id "c" :cwd outside :project outside))))
+        (harness-emit 'harness/started)
+        (harness-test-wait (lambda () (harness-worktree--locked-roots)) 10 "the repository noted")
+        (should (equal "locked harness: task/old" (harness-worktree-test--lock-line root old)))
+        (should (equal (list (harness-worktree-test--dir root))
+                       (mapcar #'harness-worktree-test--dir (harness-worktree--locked-roots))))
+        ;; Merged and unlocked, it stays so: the next start leaves the repository alone.
+        (harness-test-await (harness-call 'worktree/unlock root old))
+        (harness-emit 'harness/reloaded)
+        (accept-process-output nil 0.3)
+        (should-not (harness-worktree-test--lock-line root old))))))
 
 (ert-deftest harness-worktree-parsers ()
   (let ((wts (harness-worktree--parse-list
@@ -262,13 +454,30 @@
                    (car wts)))
     (should (plist-get (nth 1 wts) :detached))
     (should (plist-get (nth 1 wts) :locked))
+    (should (equal "reason" (plist-get (nth 1 wts) :lock-reason)))
+    (should-not (harness-worktree-harness-lock-p (nth 1 wts)))
     (should-not (plist-get (nth 1 wts) :branch))
     (should (plist-get (nth 2 wts) :bare)))
+  (harness-worktree-test--parse-lock-reasons)
   (should (equal '(:dirty t :ahead 2 :behind 1 :branch "x")
                  (harness-worktree--parse-status
                   "# branch.oid abc\n# branch.head x\n# branch.upstream origin/x\n# branch.ab +2 -1\n1 .M N... 100644 100644 100644 abc abc f.el\n")))
   (should (equal '(:dirty nil :ahead 0 :behind 0 :branch nil)
                  (harness-worktree--parse-status "# branch.oid abc\n# branch.head (detached)\n"))))
+
+(defun harness-worktree-test--parse-lock-reasons ()
+  "Check locks without a reason, and reasons git quoted."
+  ;; git quotes the UTF-8 bytes of e with acute accent as two octal escapes.
+  (let* ((octal (string ?\\ ?3 ?0 ?3 ?\\ ?2 ?5 ?1))
+         (wts (harness-worktree--parse-list
+               (concat "worktree /repo\nHEAD 0123\nbranch refs/heads/main\n\n"
+                       "worktree /repo/a\nHEAD 0123\nlocked\n\n"
+                       "worktree /repo/b\nHEAD 0123\nlocked \"harness: task/caf" octal "\"\n\n"))))
+    (should (plist-get (nth 1 wts) :locked))
+    (should-not (plist-get (nth 1 wts) :lock-reason))
+    (should-not (harness-worktree-harness-lock-p (nth 1 wts)))
+    (should (equal (concat "harness: task/caf" (string #xe9)) (plist-get (nth 2 wts) :lock-reason)))
+    (should (harness-worktree-harness-lock-p (nth 2 wts)))))
 
 (provide 'harness-worktree-test)
 ;;; harness-worktree-test.el ends here

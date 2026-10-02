@@ -1881,6 +1881,65 @@ Each is a new session, never an earlier one."
           (should (eq 'merged (plist-get task :outcome))))
         (should (equal "two\n" (harness-tasks-test--main-text root)))))))
 
+(defun harness-tasks-test--lock-line (root path)
+  "Return the `locked' line `git worktree list --porcelain' gives PATH of ROOT, or nil."
+  (let ((dir (file-name-as-directory (file-truename path))))
+    (cl-some (lambda (block)
+               (let ((lines (split-string block "\n" t)))
+                 (and (equal dir (file-name-as-directory (file-truename (substring (car lines) 9))))
+                      (seq-find (lambda (l) (string-prefix-p "locked" l)) lines))))
+             (split-string (harness-tasks-test--git root "worktree" "list" "--porcelain") "\n\n" t))))
+
+(ert-deftest harness-tasks-git-worktree-locked-until-merged ()
+  "A task's worktree is locked until its branch is merged, and again while it works after that."
+  (harness-tasks-test-with-git
+    (let ((harness-tasks-require-verification t))
+      (let* ((id (harness-tasks-test-submit "Change the shared file"))
+             (worktree nil) (lock nil))
+        (harness-tasks-test-wait-state id 'review)
+        (setq worktree (plist-get (harness-tasks-test-task id) :worktree)
+              lock (concat "locked harness: " (plist-get (harness-tasks-test-task id) :branch)))
+        (should (equal lock (harness-tasks-test--lock-line root worktree)))
+        (harness-call 'task/verify id)
+        (harness-tasks-test-wait-state id 'done)
+        (harness-test-wait (lambda () (not (harness-tasks-test--lock-line root worktree))) 10 "the unlock")
+        ;; Merged, it is left out when the harness locks the worktrees made before locks.
+        (should-not (harness-test-await (harness-call 'worktree/lock-existing root)))
+        (should-not (harness-tasks-test--lock-line root worktree))
+        ;; A follow-up works there again: locked until that is merged too.
+        (let ((harness-provider-demo-script-override
+               '((:type tool-call :id "c2" :name "change_shared" :input (:text "three"))
+                 (:type text :delta "Changed it again.")
+                 (:type done :stop-reason end-turn))))
+          (harness-call 'task/prompt id "Make it three.")
+          (harness-tasks-test-wait-state id 'review))
+        (harness-test-wait (lambda () (harness-tasks-test--lock-line root worktree)) 10 "the lock again")
+        (should (equal lock (harness-tasks-test--lock-line root worktree)))
+        (harness-call 'task/verify id)
+        (harness-tasks-test-wait-state id 'done)
+        (harness-test-wait (lambda () (not (harness-tasks-test--lock-line root worktree))) 10 "the second unlock")
+        (should (equal "three\n" (harness-tasks-test--main-text root)))
+        ;; Archived, its worktree goes.
+        (harness-call 'task/archive id)
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 10 "worktree removal")
+        (should-not (file-directory-p worktree))))))
+
+(ert-deftest harness-tasks-git-archive-removes-a-still-locked-worktree ()
+  "Archiving right after the merge, before the lock is lifted, still removes the worktree."
+  (harness-tasks-test-with-git
+    (let ((id (harness-tasks-test-submit "Change the shared file")))
+      (harness-tasks-test-wait-state id 'done)
+      (let ((task (harness-tasks-test-task id)))
+        ;; As if the merge queue had not unlocked it yet.
+        (harness-test-wait (lambda () (not (harness-tasks-test--lock-line root (plist-get task :worktree)))) 10
+                           "the merge queue's unlock")
+        (harness-tasks-test--git root "worktree" "lock" "--reason" (concat "harness: " (plist-get task :branch))
+                                 (directory-file-name (plist-get task :worktree)))
+        (should (harness-tasks-test--lock-line root (plist-get task :worktree)))
+        (harness-call 'task/archive id)
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 10 "worktree removal")
+        (should-not (file-directory-p (plist-get task :worktree)))))))
+
 (ert-deftest harness-tasks-git-reject-continues-in-its-worktree ()
   "Sent back, the session works on in its own worktree, its conversation kept; verifying merges it all."
   (harness-tasks-test-with-git

@@ -8,6 +8,8 @@
 ;; decision:
 ;;
 ;;    5 dir-request      request_directory_access: the user's answer decides
+;;    7 sandbox-guard    shell commands the sandbox would make destructive
+;;                       (`git worktree prune' and the like) are refused
 ;;   10 jail             every path must lie inside an allowed root;
 ;;                       otherwise the user is asked for the directory
 ;;   20 mode             ask / accept-edits / auto / yolo, plus standing rules
@@ -442,6 +444,32 @@ the grant itself happens in `permission/answer'.  CTX names the session."
   :title (lambda (input) (format "%s %s" harness-perms-dir-tool (or (plist-get input :path) "")))
   :handler #'harness-perms--dir-request-result)
 
+;;;; Commands the sandbox makes destructive
+
+(defun harness-perms--sandbox-guard (decision next request)
+  "Refuse a shell command that would do damage because it runs sandboxed.
+In the sandbox git sees only the session's own directory, so `git
+worktree prune' there drops every other worktree; the sandbox module's
+`sandbox/check-command' tells which commands are like that.  Its
+refusal is final, in every mode.  Other calls go on with DECISION; NEXT
+continues the chain with REQUEST's decision."
+  (let* ((input (plist-get request :input))
+         (command (and (listp input) (plist-get input :command))))
+    (if (not (and (stringp command)
+                  (eq (harness-perms--sym (plist-get request :kind)) 'exec)
+                  (harness-method-exists-p 'sandbox/check-command)))
+        (funcall next decision)
+      (let* ((session (plist-get request :session))
+             (cwd (or (car (plist-get request :paths)) (plist-get session :cwd) default-directory))
+             (own (or (plist-get session :worktree) (plist-get session :cwd)))
+             (refusal (condition-case err
+                          (harness-call 'sandbox/check-command cwd command own)
+                        (error (harness-log 'warn "perms: the sandbox guard failed: %S" err) nil))))
+        (funcall next (if refusal
+                          (list :behavior 'deny :final t
+                                :reason (plist-get refusal :reason) :hint (plist-get refusal :hint))
+                        decision))))))
+
 ;;;; Mode and standing rules
 
 (defun harness-perms--rule-matches-p (rule request)
@@ -842,6 +870,7 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
 (defun harness-perms--init ()
   "Install the `permission/decide' chain.  Safe to call again."
   (harness-add-filter 'permission/decide #'harness-perms--dir-request 5)
+  (harness-add-filter 'permission/decide #'harness-perms--sandbox-guard 7)
   (harness-add-filter 'permission/decide #'harness-perms--jail 10)
   (harness-add-filter 'permission/decide #'harness-perms--mode 20)
   (harness-add-filter 'permission/decide #'harness-perms--auto 30)
@@ -850,8 +879,8 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
 
 (defun harness-perms--shutdown ()
   "Remove the `permission/decide' chain."
-  (dolist (fn '(harness-perms--dir-request harness-perms--jail harness-perms--mode harness-perms--auto
-                harness-perms--non-interactive harness-perms--ask))
+  (dolist (fn '(harness-perms--dir-request harness-perms--sandbox-guard harness-perms--jail harness-perms--mode
+                harness-perms--auto harness-perms--non-interactive harness-perms--ask))
     (harness-remove-filter 'permission/decide fn)))
 
 ;; A reload does not run `:init' again for a ready module, and the tools
@@ -861,7 +890,7 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
 (harness-perms--init)
 
 (harness-define-module 'perms
-  :doc "Directory jail, directory requests, permission modes, auto judge and user prompts."
+  :doc "Directory jail, directory requests, sandbox guard, permission modes, auto judge and user prompts."
   :requires '(config tools)
   :init #'harness-perms--init
   :shutdown #'harness-perms--shutdown)

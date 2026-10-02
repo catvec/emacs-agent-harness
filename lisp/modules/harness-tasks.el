@@ -20,6 +20,9 @@
 ;; merges.  Conflicts are handed back to the task's own session by the
 ;; merge queue; any other failure puts the task in front of the user.
 ;; Archiving a merged task removes its worktree and its merged branch.
+;; The worktree is locked until its branch is merged, so a `git worktree
+;; prune' run where it cannot be seen (in another session's sandbox)
+;; keeps it; a merged task that goes back to work locks it again.
 ;;
 ;; Review: finished work is not done until the user has looked at it
 ;; (`harness-tasks-require-verification').  A task whose turn ends
@@ -1767,6 +1770,37 @@ task keeps the time its work finished."
           (harness-tasks--set id :state 'active :merge-status nil :outcome 'merge-failed
                               :error (format "merge %s" status)))))))
 
+(defun harness-tasks--same-dir-p (a b)
+  "Non-nil when directories A and B are the same."
+  (or (string= (file-name-as-directory (expand-file-name a)) (file-name-as-directory (expand-file-name b)))
+      (ignore-errors (file-equal-p a b))))
+
+(defun harness-tasks--lock-existing-p (lock _root worktree)
+  "Keep the worktree of a merged task out of the harness's locks.
+A `worktree/lock-existing-p' filter: LOCK is the verdict so far and
+WORKTREE the worktree plist of ROOT about to be locked.  The merge queue
+unlocks a task's worktree when it merges the branch; this keeps the
+worktrees of tasks merged before the harness locked worktrees the same."
+  (and lock
+       (not (cl-some (lambda (task)
+                       (and (harness-tasks--merged-p task)
+                            (plist-get task :worktree)
+                            (harness-tasks--same-dir-p (plist-get task :worktree) (plist-get worktree :path))))
+                     (hash-table-values harness-tasks--table)))))
+
+(defun harness-tasks--relock-worktree (task)
+  "Lock merged TASK's worktree again, as new work starts there.
+The merge queue lifted the lock when it merged the branch; the new work
+is not merged yet.  Return a promise, or nil when there is nothing to do."
+  (let ((worktree (plist-get task :worktree)))
+    (when (and worktree (harness-tasks--merged-p task) (not (plist-get task :worktree-removed))
+               (harness-method-exists-p 'worktree/lock))
+      (harness-catch (harness-call-async 'worktree/lock (plist-get task :project) worktree)
+                     (lambda (err)
+                       (harness-log 'warn "task %s: could not lock its worktree again: %s"
+                                    (plist-get task :id) (harness-error-message err))
+                       nil)))))
+
 (defun harness-tasks--remove-worktree (task)
   "Remove merged TASK's worktree and delete its branch; return a promise."
   (let ((root (plist-get task :project))
@@ -2116,7 +2150,8 @@ A turn during a merge (resolving a conflict) keeps the task merging; a
 turn before the task started (a backlog task's) refines it.  A message
 sent to an archived task's session brings the task back too.  New work
 needs a new review, so a verification goes, unless the turn is part of
-a merge: the merge queue steering the agent to commit, say."
+a merge: the merge queue steering the agent to commit, say.  A merged
+task's worktree is locked again for the new work."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (remhash (plist-get task :id) harness-tasks--starting)
@@ -2124,7 +2159,8 @@ a merge: the merge queue steering the agent to commit, say."
      ((harness-tasks--refinement-p task)
       (harness-tasks--set (plist-get task :id) :state 'refining :outcome nil :error nil :archived nil))
      ((and (eq (plist-get task :state) 'merging) (plist-get task :merge-status)) nil)
-     (t (apply #'harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
+     (t (harness-tasks--relock-worktree task)
+        (apply #'harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
                :merged nil :archived nil
                (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil)))))))
 
@@ -2614,6 +2650,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-on 'merge/started #'harness-tasks--on-merge-started)
   (harness-on 'merge/conflict #'harness-tasks--on-merge-conflict)
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
+  (harness-add-filter 'worktree/lock-existing-p #'harness-tasks--lock-existing-p)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)

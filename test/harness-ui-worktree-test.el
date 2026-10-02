@@ -113,7 +113,7 @@
     (should (harness-ui-worktree-test-same-p root harness-ui-worktree--root))
     ;; The mode line carries a mouse target for every command.
     (let ((ml (harness-ui-worktree-test-mode-line)))
-      (dolist (label '("new" "remove" "prune" "session" "fork" "merge"))
+      (dolist (label '("new" "remove" "prune" "lock" "session" "fork" "merge"))
         (should (string-match-p label ml)))
       (dolist (seg mode-line-process)
         (when (and (stringp seg) (string-match-p "\\[" seg))
@@ -164,6 +164,67 @@
       (delete-directory gone t)
       (harness-ui-worktree-prune)
       (harness-ui-worktree-test-wait-rows 2))))
+
+(ert-deftest harness-ui-worktree-locked-rows ()
+  "A locked worktree says so; prune keeps it, saying why; d removes it all the same."
+  (harness-ui-worktree-test-with
+    (let ((locked (plist-get (harness-test-await (harness-call 'worktree/create root :branch "task/locked")) :path))
+          (shown nil))
+      (harness-ui-worktree-test-open root 3)
+      (harness-ui-worktree-test-goto locked)
+      (should (string-match-p "locked" (harness-ui-worktree-test-column "Flags")))
+      (let* ((flags (aref (tabulated-list-get-entry)
+                          (cl-position "Flags" tabulated-list-format :key #'car :test #'equal)))
+             (help (get-text-property (string-match "locked" flags) 'help-echo flags)))
+        (should (string-match-p "harness: task/locked" help))
+        (should (string-match-p "prune" help)))
+      ;; Its directory gone, the prune keeps it and says so.
+      (delete-directory locked t)
+      (cl-letf (((symbol-function 'message) (lambda (fmt &rest args) (push (apply #'format fmt args) shown))))
+        (harness-ui-worktree-prune)
+        (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "\\`Kept .*task-locked" m)) shown))
+                           10 "the prune message"))
+      (harness-ui-worktree-test-wait-rows 3)
+      (harness-ui-worktree-test-goto locked)
+      (should (string-match-p "locked missing" (harness-ui-worktree-test-column "Flags")))
+      ;; d asks, mentioning the lock, and removes it without forcing.
+      (let ((asked nil) (asked-force nil))
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (prompt) (setq asked prompt) t))
+                  ((symbol-function 'y-or-n-p) (lambda (&rest _) (setq asked-force t) t)))
+          (harness-ui-worktree-remove)
+          (harness-ui-worktree-test-wait-rows 2))
+        (should (string-match-p "locked: harness: task/locked" asked))
+        (should-not asked-force)))))
+
+(ert-deftest harness-ui-worktree-lock-keys ()
+  "l locks or unlocks the worktree at point; L locks the harness's worktrees that have none."
+  (harness-ui-worktree-test-with
+    (let ((old (expand-file-name ".worktrees/old" root)))
+      ;; Made as before locks, in the harness's worktree directory.
+      (harness-ui-worktree-test--git root "worktree" "add" "-q" "-b" "task/old" old)
+      (harness-ui-worktree-test-open root 3)
+      (cl-flet ((flags (path) (harness-ui-worktree-test-goto path) (harness-ui-worktree-test-column "Flags")))
+        (should-not (string-match-p "locked" (flags old)))
+        ;; L locks it, but not the foreign worktree outside that directory.
+        (harness-ui-worktree-lock-existing)
+        (harness-test-wait (lambda () (and (harness-ui-worktree-test-wait-rows 3) (string-match-p "locked" (flags old))))
+                           10 "the lock")
+        (should-not (string-match-p "locked" (flags wt)))
+        ;; l unlocks it after asking, and locks it again.
+        (harness-ui-worktree-test-goto old)
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (prompt) (should (string-match-p "harness: task/old" prompt)) t)))
+          (harness-ui-worktree-toggle-lock))
+        (harness-test-wait (lambda () (and (harness-ui-worktree-test-wait-rows 3) (not (string-match-p "locked" (flags old)))))
+                           10 "the unlock")
+        (harness-ui-worktree-test-goto wt)
+        (harness-ui-worktree-toggle-lock)
+        (harness-test-wait (lambda () (and (harness-ui-worktree-test-wait-rows 3) (string-match-p "locked" (flags wt))))
+                           10 "the lock at point")
+        (should (equal "locked harness: feature/x"
+                       (seq-find (lambda (l) (string-prefix-p "locked" l))
+                                 (split-string (harness-ui-worktree-test--git root "worktree" "list" "--porcelain") "\n"))))
+        (harness-ui-worktree-test-goto root)
+        (should-error (harness-ui-worktree-toggle-lock) :type 'user-error)))))
 
 (ert-deftest harness-ui-worktree-fork-and-merge-queue ()
   (harness-ui-worktree-test-with

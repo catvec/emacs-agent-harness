@@ -586,9 +586,16 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
 Async filter `permission/decide`: value is a DECISION
 `(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
-:paths (…))`.  Chain (priority): 5 dir-request, 10 jail, 20 mode, 30 auto
-(LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a pending
-request and resolves when answered).
+:paths (…))`.  Chain (priority): 5 dir-request, 7 sandbox-guard, 10 jail,
+20 mode, 30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask`
+into a pending request and resolves when answered).
+
+- The sandbox guard asks `sandbox/check-command` about every `exec` call
+  whose input has a `:command` (the bash tool), passing the directory it
+  runs in and the session's own worktree (`:worktree`, else `:cwd`).  A
+  refusal is a final deny, in every mode, yolo and standing rules
+  included: the command would do damage only because it runs sandboxed
+  (see sandbox).  A guard that fails lets the chain go on.
 
 - `permission/answer SESSION-ID PENDING-ID ANSWER` — ANSWER
   `(:behavior allow|deny :scope once|session|always :reason)`, or an
@@ -661,6 +668,24 @@ request and resolves when answered).
   nothing planted there runs when the harness uses git unconfined) and
   the host's `user.name`/`user.email` as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`,
   so worktree sessions can commit.
+- Git in the sandbox sees no other worktree's files, so it takes every
+  other worktree for deleted.  `sandbox/check-command CWD COMMAND
+  &optional OWN` gives nil or `(:reason :hint)`: why a shell command must
+  not run confined in CWD.  It refuses `git worktree prune`, and `git
+  worktree unlock|remove|move` of a worktree that is outside OWN (the
+  session's own worktree, by default the one holding CWD), is OWN itself,
+  is locked by the harness (reason `harness: ...`), or cannot be told
+  (variables, globs, `xargs`).  It reads the command line as the shell
+  does, closely enough: quotes, operators and redirections, `$(...)` and
+  backticks, `sh -c` and `eval` scripts, wrappers (env, timeout, xargs,
+  find...), `cd`, git's global options (`-C`, `-c alias.NAME=...`), and
+  worktrees named by the end of their path, as git allows; a `cd` in a
+  subshell or a pipe does not carry on.  Shell variables, scripts run
+  from files and aliases from git's config are not resolved: the locks
+  protect the harness's worktrees from those.  The reason points to
+  `worktree/prune` and `worktree/remove`, which run outside the sandbox.
+  Commands that run unconfined (no backend, policy `off`, remote CWD)
+  are never refused.  The perms module's sandbox guard calls it.
 
 ### agent
 
@@ -790,9 +815,58 @@ request and resolves when answered).
 
 - `worktree/list ROOT`, `worktree/create ROOT &key branch path base`,
   `worktree/remove ROOT PATH &optional FORCE`, `worktree/prune ROOT`,
+  `worktree/lock ROOT PATH &optional REASON`,
+  `worktree/unlock ROOT PATH &optional ANY`, `worktree/lock-existing ROOT`,
   `worktree/root-of PATH`, `worktree/branch PATH`,
   `worktree/status PATH` → `(:dirty :ahead :behind :branch)`.  All return promises.
 - Sessions created with `:worktree PATH` get `:cwd` = PATH.
+- `worktree/list` gives `(:path :branch :head :bare :detached :locked
+  :main)` plists, plus `:lock-reason`, `:prunable` (git would prune it)
+  and `:missing` (its directory is gone) when they apply.
+- Locks: `worktree/create` locks every worktree it makes (`git worktree
+  add --lock --reason "harness: BRANCH"`).  Agents run git in a sandbox
+  that shows only their own worktree, where `git worktree prune` takes
+  every other worktree for deleted and drops its registration: its files
+  stay, without an index, and git fails in them.  Prune never touches a
+  locked worktree, and git removes one only when forced twice.  The
+  harness's locks are those whose reason starts with `harness: `
+  (`harness-worktree-lock-prefix`); other locks are left alone.
+  - `worktree/lock` (default reason `harness: BRANCH`; a locked worktree
+    keeps its lock) and `worktree/unlock` (lifts only a harness lock,
+    unless ANY) resolve to non-nil when they changed something and emit
+    `worktree/locked` / `worktree/unlocked` (ROOT PATH).
+  - The merge queue unlocks a child's worktree once its branch is
+    merged, so merged worktrees can be pruned again; a failed, aborted or
+    cancelled merge leaves the lock on.  A merged task that goes back to
+    work locks its worktree again.
+  - `worktree/remove` lifts a harness lock first, and puts it back when
+    git still refuses (local changes).  FORCE is `git worktree remove -f
+    -f`, past local changes and any lock.  Task archive and the worktree
+    list's `d` go through it.
+  - `worktree/prune` runs `git worktree prune -v` outside the sandbox,
+    where git sees every worktree, so it prunes only worktrees really
+    gone, and skips locked ones as git does.  It returns git's lines plus
+    a `Kept ...` line for each locked worktree whose directory is missing
+    (`worktree/remove` takes those away).
+  - Worktrees made before locks: `worktree/lock-existing ROOT` locks the
+    registered worktrees in the directory the harness puts its worktrees
+    in (`harness-worktree-directory-function`, ROOT/.worktrees/ by
+    default) that have no lock, whose directory exists, and that the sync
+    filter `worktree/lock-existing-p` (value t, args ROOT WORKTREE) does
+    not turn down; the tasks module turns down merged tasks' worktrees.
+    The main checkout and foreign worktrees are never touched.  On
+    `harness/started` and `harness/reloaded` it runs for the main
+    checkout of every repository the sessions work in, once per
+    repository: worktree-locks.json in the state directory lists those
+    done, so a merged and unlocked worktree stays unlocked.  The
+    worktree list runs it again with `L` (for worktrees registered again
+    by hand after a prune), and `l` locks or unlocks the worktree at
+    point.
+  - The sandbox module's `sandbox/check-command`, through the perms
+    module's sandbox guard, refuses `git worktree prune` and touching
+    other worktrees in sandboxed commands (see sandbox).
+- Nothing re-registers a worktree whose registration was pruned anyway;
+  that is a repair by hand, after which `L` locks it.
 
 ### merge
 
@@ -802,7 +876,9 @@ request and resolves when answered).
   the harness runs `git merge --no-ff` of the child's branch in the
   parent's cwd; on conflict the child session receives a steering
   message describing the conflicts and its jail is widened to the
-  parent's cwd until it resolves; then the lock passes on.
+  parent's cwd until it resolves; then the lock passes on.  A merged
+  child's worktree loses the harness's lock (`worktree/unlock`; see
+  worktree).
 - `merge/status CHILD-SID`; the `merge_done` tool releases a conflict lock.
 - Events `merge/queued CHILD PARENT POSITION`, `merge/started`,
   `merge/conflict CHILD PARENT FILES`, `merge/finished CHILD PARENT STATUS`
@@ -864,6 +940,8 @@ to the task's file (below); the record also keeps `:file-base` and
   that worktree (`harness-tasks-permission-mode`, non-interactive by
   default) prompted with the task; a system-prompt section tells it to
   commit on its branch and not merge.  Outside git the session runs in CWD.
+  The worktree stays locked until its branch is merged; a follow-up to
+  a merged task locks it again (see worktree).
 - The session's name is the task's title: `naming/system-prompt` adds
   `harness-tasks-naming-prompt` (nil for none) so the model titles task
   sessions like tickets.
