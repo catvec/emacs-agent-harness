@@ -2087,8 +2087,9 @@ are searched on hover, not on every redisplay of the header line."
 (defun harness-chat--spend-segment (session)
   "Return the header segment showing what SESSION cost and who pays for it.
 Per-token billing shows the cost; a subscription shows its plan and
-quota.  Clicking it opens the usage dashboard."
-  (let ((text (copy-sequence (harness-ui-format-spend session t))))
+quota.  Clicking it opens the usage dashboard.  Its percentages are
+escaped, or the header line would take \"23% \" for a %-construct."
+  (let ((text (harness-ui-mode-line-escape (harness-ui-format-spend session t))))
     (add-text-properties 0 (length text)
                          (list 'mouse-face 'mode-line-highlight
                                'local-map (harness-chat--segment-map #'harness-chat-show-usage))

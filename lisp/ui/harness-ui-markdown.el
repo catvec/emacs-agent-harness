@@ -169,13 +169,16 @@
     s))
 
 (defun harness-ui-markdown--table (lines)
-  "Render table LINES (strings with | separators) as an aligned text table."
+  "Render table LINES (strings with | separators) as an aligned text table.
+Cells are measured as rendered: the markers of inline markup, such as
+the backquotes of `code', take no room."
   (let* ((rows (mapcar (lambda (l)
                          (mapcar #'string-trim
                                  (split-string (string-trim (string-trim l) "|" "|") "|")))
                        lines))
          (sep-index (cl-position-if (lambda (r) (cl-every (lambda (c) (string-match-p "\\`:?-+:?\\'" c)) r)) rows))
          (rows (if sep-index (append (seq-take rows sep-index) (seq-drop rows (1+ sep-index))) rows))
+         (rows (mapcar (lambda (r) (mapcar #'harness-ui-markdown-inline r)) rows))
          (ncols (apply #'max 1 (mapcar #'length rows)))
          (widths (make-vector ncols 0)))
     (dolist (r rows)
@@ -185,8 +188,7 @@
       (dolist (r rows)
         (let ((cells (cl-loop for i from 0 below ncols
                               for c = (or (nth i r) "")
-                              collect (let ((s (harness-ui-markdown-inline c)))
-                                        (concat s (make-string (- (aref widths i) (string-width c)) ?\s))))))
+                              collect (concat c (make-string (- (aref widths i) (string-width c)) ?\s)))))
           (let ((line (concat " " (string-join cells " │ ") "\n")))
             (when first
               (add-face-text-property 0 (length line) 'harness-md-table-header t line)
