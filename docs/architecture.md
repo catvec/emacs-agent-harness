@@ -1014,7 +1014,12 @@ to the task's file (below); the record also keeps `:file-base` and
   :thinking :non-interactive)` → task; it starts when one of
   `harness-tasks-max-running` slots is free.  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
-  `-non-interactive` (on); an explicit false turns non-interactive off.
+  `-non-interactive` (off), else from what the directory configures, so
+  a task is interactive unless `harness-tasks-non-interactive` or the
+  directory's `harness-non-interactive` is on; an explicit false turns
+  non-interactive off whatever they say.  `task/settings` reports the
+  values a new task would get, the configured ones included, and the
+  board submits them with each task.
   With `:refine` the task goes to the backlog instead (below).
 - Backlog refinement (once called grooming): a `:refine` task is
   `refining` while a session at its directory -- `ask` and
@@ -1043,7 +1048,7 @@ to the task's file (below); the record also keeps `:file-base` and
   like any task; an idle one waits in `needs-input` with `:outcome adopted`).
 - Starting: in a git project (`harness-tasks-worktrees`) `worktree/create`
   on branch `harness-tasks-branch-prefix` + slug + id, then a session in
-  that worktree (`harness-tasks-permission-mode`, non-interactive by
+  that worktree (`harness-tasks-permission-mode`, interactive by
   default) prompted with the task; a system-prompt section tells it to
   commit on its branch and not merge.  Outside git the session runs in CWD.
   The worktree stays locked until its branch is merged; a follow-up to

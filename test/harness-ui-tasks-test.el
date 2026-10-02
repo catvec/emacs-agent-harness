@@ -322,12 +322,13 @@ told from, like a worktree git lost track of, still leads back."
     (with-current-buffer board
       (harness-test-wait (lambda () harness-ui-tasks--new) 5 "the defaults")
       (should (equal "auto" (format "%s" (plist-get harness-ui-tasks--new :permission-mode))))
+      ;; Nothing configures it here, so new tasks start interactive.
+      (should-not (plist-get harness-ui-tasks--new :non-interactive))
       (goto-char harness-compose-end)
       ;; The ordinary commands change the settings of the next task.
       (should (consp (harness-ui--setting-target nil)))
-      (let ((before (plist-get harness-ui-tasks--new :non-interactive)))
-        (harness-toggle-non-interactive)
-        (should (eq (not before) (plist-get harness-ui-tasks--new :non-interactive))))
+      (harness-toggle-non-interactive)
+      (should (eq t (plist-get harness-ui-tasks--new :non-interactive)))
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Ask")))
         (harness-set-permission-mode))
       (should (equal "ask" (plist-get harness-ui-tasks--new :permission-mode)))
@@ -338,7 +339,7 @@ told from, like a worktree git lost track of, still leads back."
            (sid (plist-get task :session))
            (session (harness-call 'session/get sid)))
       (should (eq 'ask (plist-get session :permission-mode)))
-      (should-not (plist-get session :non-interactive))
+      (should (plist-get session :non-interactive))
       ;; On a started task's card the same commands change its session.
       (with-current-buffer board
         (goto-char (point-min))

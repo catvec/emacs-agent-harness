@@ -79,8 +79,8 @@ permission is denied instead, and the agent is told to find another
 way.  From then on each session has its own switch, which its header
 line shows and `harness-toggle-non-interactive' flips; changing this
 setting leaves the sessions that exist as they are.  Task sessions
-start non-interactive anyway while `harness-tasks-non-interactive' is
-on."
+follow it too, unless `harness-tasks-non-interactive' is on: then they
+start non-interactive anyway."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defcustom harness-context-reserve 20000

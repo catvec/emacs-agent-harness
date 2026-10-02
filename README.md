@@ -245,9 +245,10 @@ context and cost. Click the model, the permission mode, the
 non-interactive switch or the thinking level to change it. A
 non-interactive session never waits for you: what would ask for
 permission is denied, and the agent is told to find another way, which
-suits a session you leave to work while you are away. New sessions
-start non-interactive when `harness-non-interactive` is set, and task
-sessions while `harness-tasks-non-interactive` is. From then on each
+suits a session you leave to work while you are away. New sessions,
+task sessions included, start interactive unless
+`harness-non-interactive` is set. Setting `harness-tasks-non-interactive`
+makes every new task session start non-interactive. From then on each
 session has its own switch.
 
 Opening an inactive session shows it without resuming it. Its compose
@@ -283,7 +284,10 @@ so several tasks can work in parallel.
   restarts, until you start it with `s`.
 - `C-c h m`, `C-c h T`, `C-c h p` and `C-c h i` set the model, thinking
   level, permission mode and non-interactive mode of the next task, or
-  of the task at point.
+  of the task at point. New tasks run in auto mode and are interactive
+  unless your configuration says otherwise, so a request that needs
+  you, such as access to another directory, waits for you in *Requires
+  your input* instead of being denied.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback. With `harness-tasks-require-verification`
