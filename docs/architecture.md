@@ -1235,7 +1235,7 @@ prefixes come from the session host):
 | `web_search` | query, count | net |
 | `web_fetch` | url, max_chars | net |
 | `emacs_messages` | count | read |
-| `ask_user` | question, options, allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
+| `ask_user` | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
 | `request_directory_access` | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
 | `session_info` | — | read |
 | `plan` | plan | meta |
@@ -1330,7 +1330,11 @@ change), `_harness/node` (a finalised or updated node), `_harness/hint`,
 `agent/activity` returns it; null once the turn ends).
 Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}]}` → `{outcome:{outcome:"selected",optionId}}`
-and `_harness/ask_user {sessionId, requestId, question, options}` → `{answer}`.
+and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
+Its `options` are the answers' labels; `diagrams`, present when the
+options have them, holds one per option, `{type: "ascii", text}` or
+`{type: "image", path, mime}`: a path on the harness's machine, never
+the image data, since the pending question is saved with the session.
 
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
@@ -1392,6 +1396,11 @@ not match (`harness-tool-error-face`), or "denied" when the permission
 system refused it, so it never ran (`harness-tool-denied-face`); a
 denied call's text is labelled as the reason rather than as output.  A
 summary block counts the failed and denied calls it folds.
+The panel of a question whose options have diagrams shows one diagram
+at a time, in an area under the options; its tabs, `n` and `p` on the
+panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
+it.  Switching redraws the options and that area alone, in place, so
+point, the windows and the compose box stay put.
 Auto-scroll follows unless the user scrolled up.  While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a

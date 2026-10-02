@@ -6,7 +6,8 @@
 ;; rather than on files.
 ;;
 ;; - `ask_user' blocks the turn on a pending question and resolves when
-;;   a UI answers it through `question/answer'.
+;;   a UI answers it through `question/answer'.  Its options may each
+;;   have a diagram (ASCII art or an image), all of them or none.
 ;; - `plan' records a plan on the session (and adds a Planning section
 ;;   to the system prompt that explains forks, sub-agents, worktrees
 ;;   and the merge queue, so plans can use them).
@@ -38,23 +39,120 @@
   (cl-find pid (harness-call 'session/pending session-id)
            :key (lambda (it) (plist-get it :id)) :test #'equal))
 
+;; An option is a string, or an object with a label and a diagram of the
+;; answer: ASCII art (`diagram') or an image file (`image').  Either every
+;; option has a diagram or none does, so the UI can show them in one
+;; place and flip between them.  The pending question keeps the labels in
+;; `:options', as before, and the diagrams in `:diagrams', one per option:
+;; (:type "ascii" :text TEXT) or (:type "image" :path PATH :mime MIME).
+;; An image travels as its path, never its data: pending items are saved
+;; with the session and sent with every change to it.
+
+(defconst harness-tools-agent-image-types
+  '(("png" . "image/png") ("jpg" . "image/jpeg") ("jpeg" . "image/jpeg")
+    ("gif" . "image/gif") ("svg" . "image/svg+xml") ("webp" . "image/webp")
+    ("bmp" . "image/bmp") ("tif" . "image/tiff") ("tiff" . "image/tiff"))
+  "File extensions an ask_user image may have, with their MIME types.")
+
+(defun harness-tools-agent--invalid (format-string &rest args)
+  "Reject the ask_user call: its result is the message FORMAT-STRING with ARGS."
+  (throw 'harness-tools-agent--invalid (apply #'format format-string args)))
+
+(defun harness-tools-agent--ascii-text (text)
+  "Return ASCII diagram TEXT without blank lines or a Markdown fence around it.
+The lines in between keep their indentation, which places the drawing."
+  (let* ((trim (lambda (lines)
+                 (dotimes (_ 2)
+                   (while (and lines (string-blank-p (car lines))) (pop lines))
+                   (setq lines (nreverse lines)))
+                 lines))
+         (lines (funcall trim (split-string (string-replace "\r" "" text) "\n"))))
+    (when (and (cdr lines)
+               (string-prefix-p "```" (string-trim-left (car lines)))
+               (string-match-p "\\`[ \t]*```[ \t]*\\'" (car (last lines))))
+      (setq lines (funcall trim (butlast (cdr lines)))))
+    (mapconcat #'identity lines "\n")))
+
+(defun harness-tools-agent--image (file n ctx)
+  "Return the diagram of option N showing image FILE, relative to CTX's cwd."
+  (let* ((path (harness-tools-resolve-path file ctx))
+         (mime (cdr (assoc (downcase (or (file-name-extension path) "")) harness-tools-agent-image-types))))
+    (cond
+     ((not mime)
+      (harness-tools-agent--invalid "Option %d: %s is not an image file; use a PNG, JPEG, GIF, SVG or WebP file, or an ASCII diagram"
+                                    n file))
+     ((not (and (file-regular-p path) (file-readable-p path)))
+      (harness-tools-agent--invalid "Option %d: image %s not found (cwd %s)" n file (plist-get ctx :cwd)))
+     (t (list :type "image" :path path :mime mime)))))
+
+(defun harness-tools-agent--option (item n ctx)
+  "Return option ITEM, the Nth, of an ask_user call in CTX as (LABEL . DIAGRAM).
+ITEM is a string, or an object (a plist) with `:label' and at most one
+of `:diagram' (ASCII art) and `:image' (an image file).  DIAGRAM is nil
+when ITEM has none."
+  (if (stringp item)
+      (cons item nil)
+    (let* ((label (plist-get item :label))
+           (ascii (plist-get item :diagram))
+           (ascii (and (stringp ascii) (harness-tools-agent--ascii-text ascii)))
+           (ascii (and ascii (not (string-empty-p ascii)) ascii))
+           (image (plist-get item :image))
+           (image (and (stringp image) (not (string-blank-p image)) (string-trim image))))
+      (unless (and (stringp label) (not (string-blank-p label)))
+        (harness-tools-agent--invalid "Option %d needs a label: the answer, as a string" n))
+      (when (and ascii image)
+        (harness-tools-agent--invalid "Option %d has both a diagram and an image; give it one of them" n))
+      (cons label (cond (ascii (list :type "ascii" :text ascii))
+                        (image (harness-tools-agent--image image n ctx)))))))
+
+(defun harness-tools-agent--numbers (numbers)
+  "Return NUMBERS as words: \"2\", \"2 and 3\", \"1, 2 and 4\"."
+  (let ((words (mapcar #'number-to-string numbers)))
+    (if (cdr words)
+        (concat (string-join (butlast words) ", ") " and " (car (last words)))
+      (car words))))
+
+(defun harness-tools-agent--options (input ctx)
+  "Return (LABELS . DIAGRAMS) for the options of ask_user INPUT in CTX.
+DIAGRAMS is nil when no option has one, else a list with one per option.
+Items that are neither strings nor objects are left out.  Throws the
+message for the model to `harness-tools-agent--invalid' when an option
+is malformed, or when only some options have a diagram."
+  (let* ((items (cl-remove-if-not (lambda (it) (or (stringp it) (and (consp it) (keywordp (car it)))))
+                                  (append (plist-get input :options) nil)))
+         (parsed (cl-loop for item in items for n from 1
+                          collect (harness-tools-agent--option item n ctx)))
+         (missing (cl-loop for option in parsed for n from 1 unless (cdr option) collect n)))
+    (when (and missing (< (length missing) (length parsed)))
+      (harness-tools-agent--invalid
+       "Every option needs a diagram once one has: option%s %s ha%s none. Give each option a diagram or an image, or none of them a diagram"
+       (if (cdr missing) "s" "") (harness-tools-agent--numbers missing) (if (cdr missing) "ve" "s")))
+    (cons (mapcar #'car parsed)
+          (and parsed (not missing) (mapcar #'cdr parsed)))))
+
 (defun harness-tools-agent--ask-user (input ctx)
-  "Handler of the ask_user tool: block on a pending question from INPUT in CTX."
+  "Handler of the ask_user tool: block on a pending question from INPUT in CTX.
+A malformed call (see `harness-tools-agent--options') returns an error
+saying what to fix, and asks nothing."
   (let* ((sid (plist-get ctx :session-id))
          (question (or (plist-get input :question) ""))
-         (options (cl-remove-if-not #'stringp (plist-get input :options)))
          (free (if (plist-member input :allow_free_text)
                    (harness-json-true-p (plist-get input :allow_free_text))
-                 t)))
-    (harness-with-promise (resolve reject)
-      (ignore reject)
-      (let ((pid (harness-call 'session/pending-add sid
-                               (list :kind 'question
-                                     :payload (list :question question :options options
-                                                    :allow-free-text free
-                                                    :call-id (plist-get ctx :call-id))))))
-        (puthash pid (list :session-id sid :resolve resolve) harness-tools-agent--questions)
-        (harness-emit 'question/asked sid (harness-tools-agent--pending-item sid pid))))))
+                 t))
+         (parsed (catch 'harness-tools-agent--invalid
+                   (harness-tools-agent--options input ctx))))
+    (if (stringp parsed)
+        (harness-tool-error parsed)
+      (harness-with-promise (resolve reject)
+        (ignore reject)
+        (let ((pid (harness-call 'session/pending-add sid
+                                 (list :kind 'question
+                                       :payload (append (list :question question :options (car parsed))
+                                                        (and (cdr parsed) (list :diagrams (cdr parsed)))
+                                                        (list :allow-free-text free
+                                                              :call-id (plist-get ctx :call-id)))))))
+          (puthash pid (list :session-id sid :resolve resolve) harness-tools-agent--questions)
+          (harness-emit 'question/asked sid (harness-tools-agent--pending-item sid pid)))))))
 
 (defun harness-tools-agent--answer-text (answer)
   "Return the answer text from ANSWER, a string or a plist with `:answer'."
@@ -92,11 +190,19 @@ The waiting ask_user call returns \"The user dismissed the question\"."
                     (harness-call 'session/pending session-id)))
 
 (harness-define-tool "ask_user"
-  :description "Ask the user a question and wait for the answer. Use it when only the user can decide (ambiguous requirements, destructive choices, credentials). Offer options when there is a small set of sensible answers; the user may also type a free-form answer unless allow_free_text is false."
+  :description "Ask the user a question and wait for the answer. Use it when only the user can decide (ambiguous requirements, destructive choices, credentials). Offer options when there is a small set of sensible answers; the user may also type a free-form answer unless allow_free_text is false. When the options are easier to tell apart seen than described (layouts, architectures, data flows, UI sketches), give each option a diagram: ASCII art in diagram, or an image file in image. If one option has a diagram, every option must have one; the user flips between them in one place before answering."
   :schema '(:type "object"
             :properties (:question (:type "string" :description "The question to ask.")
-                         :options (:type "array" :items (:type "string")
-                                   :description "Optional list of suggested answers.")
+                         ;; Plain objects: the schema reaches every provider
+                         ;; as it is, and not all of them may take anyOf.  A
+                         ;; string is accepted too, as todo_write does.
+                         :options (:type "array"
+                                   :items (:type "object"
+                                           :properties (:label (:type "string" :description "The answer, as the user reads it and as it is returned when picked.")
+                                                        :diagram (:type "string" :description "ASCII diagram of this answer, shown in a fixed-width font.")
+                                                        :image (:type "string" :description "Path of an image file (PNG, JPEG, GIF, SVG or WebP) showing this answer, instead of an ASCII diagram."))
+                                           :required ("label"))
+                                   :description "Optional list of suggested answers, each with a label and, to compare them by sight, a diagram or an image illustrating it; a plain string is an option without one. If one option has a diagram or image, every option must have one.")
                          :allow_free_text (:type "boolean"
                                            :description "Whether a free-form answer is acceptable (default true)."))
             :required ("question"))
