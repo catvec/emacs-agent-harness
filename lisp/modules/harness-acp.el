@@ -146,7 +146,7 @@ Each is called with the `harness-acp-client' and returns a list of ACP
   "Functions answering `authenticate' for the auth methods they advertise.
 Each is called with the client, the method id and the request params,
 and returns nil when the method is not its own, else a value or a
-promise: once it resolves the client is authenticated, a rejection
+promise: once it resolves the client is authenticated; a rejection
 \(an `acp-error' list) is the answer the client gets.")
 
 ;;;; Structures
@@ -601,20 +601,40 @@ ARGLIST is (CLIENT PARAMS)."
         :agentCapabilities (list :loadSession t
                                  :promptCapabilities (list :image t :audio t :embeddedContext t))
         :agentInfo (list :name "emacs-agent-harness" :version (harness-acp--version))
-        :authMethods (if harness-acp-token
-                         (list (list :id "token" :name "Shared secret"
-                                     :description "Call authenticate with {\"token\": …}"))
-                       (harness-json-array nil))
+        :authMethods (harness-json-array (harness-acp--auth-methods client))
         :_harness (list :methods (harness-acp--extension-methods)
                         :events (mapcar (lambda (e) (symbol-name (car e))) (harness-events)))))
 
+(defun harness-acp--auth-methods (client)
+  "Return the ACP auth methods `initialize' advertises to CLIENT.
+Those of `harness-acp-auth-methods-functions' come first, then the
+shared secret when `harness-acp-token' is set."
+  (append (cl-mapcan (lambda (fn)
+                       (condition-case err (copy-sequence (funcall fn client))
+                         (error (harness-log 'warn "acp: auth methods from %s failed: %S" fn err) nil)))
+                     harness-acp-auth-methods-functions)
+          (and harness-acp-token
+               (list (list :id "token" :name "Shared secret"
+                           :description "Call authenticate with {\"token\": …}")))))
+
 (harness-acp--define-standard "authenticate" (client params)
-  (cond
-   ((null harness-acp-token) (setf (harness-acp-client-authenticated client) t) :empty)
-   ((and (stringp (plist-get params :token)) (string= (plist-get params :token) harness-acp-token))
-    (setf (harness-acp-client-authenticated client) t)
-    :empty)
-   (t (signal 'acp-error (list harness-acp-error-unauthenticated "Invalid token" nil)))))
+  (let ((token (plist-get params :token))
+        (method (plist-get params :methodId))
+        (accept (lambda (_) (setf (harness-acp-client-authenticated client) t) :empty)))
+    (cond
+     ;; Nothing to prove: a local client while no token is set, or one
+     ;; a function of `harness-acp-authorize-functions' lets in.
+     ((not (harness-acp--auth-needed-p client)) (funcall accept nil))
+     ((and (stringp token) harness-acp-token (string= token harness-acp-token)) (funcall accept nil))
+     ((stringp token) (signal 'acp-error (list harness-acp-error-unauthenticated "Invalid token" nil)))
+     ((let ((answer (run-hook-with-args-until-success 'harness-acp-authenticate-functions
+                                                       client method params)))
+        (and answer (harness-then (harness-as-promise answer) accept))))
+     (t (signal 'acp-error (list harness-acp-error-unauthenticated
+                                 (if (member method '(nil "token"))
+                                     "Invalid token"
+                                   (format "Unknown authentication method %s" method))
+                                 nil))))))
 
 (defun harness-acp--modes-plist (session)
   "Return the ACP modes object for SESSION."
@@ -949,8 +969,7 @@ an agent's own directory request has no \"Allow once\"."
 ;; each connection to the server with these: it registers a client,
 ;; passes every JSON-RPC message the client sends to
 ;; `harness-acp-client-receive', and the server writes back through the
-;; client's WRITER.  A socket speaking ACP's own framing (one message
-;; per line) can be handed over whole with `harness-acp-serve-socket'.
+;; client's WRITER.
 
 (cl-defun harness-acp-add-client (kind &key process writer remote)
   "Register and return a client that reached the server through another transport.
@@ -979,20 +998,6 @@ Text that does not parse is answered with a parse error."
 (defun harness-acp-drop-client (client)
   "Disconnect CLIENT and fail whatever it still owed."
   (harness-acp--drop-client client))
-
-(cl-defun harness-acp-serve-socket (proc &key remote initial)
-  "Serve ACP's own line framing on the accepted socket PROC.
-REMOTE is as for `harness-acp-add-client'.  INITIAL is text PROC sent
-already, before it was handed over.  Return the client."
-  (let ((client (harness-acp--make-client :kind 'tcp :process proc :remote remote)))
-    (process-put proc 'harness-acp-client client)
-    (push client harness-acp--clients)
-    (set-process-coding-system proc 'utf-8-unix 'utf-8-unix)
-    (set-process-filter proc #'harness-acp--server-filter)
-    (set-process-sentinel proc #'harness-acp--server-sentinel)
-    (when (and initial (not (string-empty-p initial)))
-      (harness-acp--server-filter proc initial))
-    client))
 
 (defun harness-acp--server-contact ()
   "Return (:host :port) of the running server, or nil."

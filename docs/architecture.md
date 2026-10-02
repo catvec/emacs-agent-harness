@@ -1363,6 +1363,36 @@ The server writes its address to `<state>/acp-address` and, when
 to `<state>/acp-token` (mode 600); `scripts/harness-acp-stdio`
 authenticates with it on behalf of the editor it bridges.
 
+Errors follow ACP's codes.  A call before `authenticate` (when a
+client must authenticate) gets -32000, ACP's `auth_required`, which
+clients answer by offering the `authMethods` of `initialize`; so a
+method that fails gets -32603 (internal error), never -32000.  A wrong
+token is -32000 too.  Notifications under `$/` (such as `$/ping`
+heartbeats) are ignored without a log line.
+
+Other transports hand their connections to the server:
+`harness-acp-add-client KIND &key process writer remote` registers a
+client whose messages to it go through WRITER `(CLIENT JSON-TEXT)`,
+`harness-acp-client-receive CLIENT TEXT` dispatches one message it
+sent, and `harness-acp-drop-client` disconnects one.  A client with
+REMOTE, a plist describing another device
+(`harness-acp-client-remote-info`), must authenticate even when
+`harness-acp-token` is nil, unless a function of
+`harness-acp-authorize-functions` (called with the client) lets it in.
+Modules add auth methods too: `harness-acp-auth-methods-functions`
+(client → list of `AuthMethod` plists) are listed by `initialize`
+before the token, and `harness-acp-authenticate-functions` (client,
+method id, params → nil for a method not its own, else a value or a
+promise) answer `authenticate` for them; once the answer resolves the
+client is authenticated.
+
+Corporate mode (`harness-corporate-mode`): `acp/start` refuses an
+address beyond this machine whatever `harness-acp-allow-remote` says,
+`harness-acp-connect` refuses a harness elsewhere, a client with REMOTE
+is refused, and turning the mode on (`harness-corporate-mode-change-hook`)
+drops such clients and moves a server listening beyond this machine
+back to 127.0.0.1.
+
 The local transport dispatches lisp objects directly, no JSON, and
 delivers notifications through `harness-run-soon` so callers are never
 re-entered.

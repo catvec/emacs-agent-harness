@@ -104,8 +104,9 @@ It is meant for work machines whose policy allows code and data to go
 to the model provider in use and nowhere else.  With it on:
 
 - The harness serves ACP on this machine only: `harness-acp-allow-remote'
-  is ignored, and the listener for phones and other devices, with its
-  pairing QR codes (`harness-acp-remote'), is refused.
+  is ignored, the listener for phones and other devices, with its
+  pairing QR codes (`harness-acp-remote'), is refused, and so is any
+  client on another device.
 - This Emacs's UI connects to its own harness only, never to a harness
   elsewhere (`harness-connect-remote').
 - Network tools (web_fetch, web_search, and the web search model
