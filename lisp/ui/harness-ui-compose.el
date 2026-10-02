@@ -10,9 +10,12 @@
 ;;   - multi-line editing: RET and C-j insert a newline, typing outside
 ;;     the box jumps into it, a placeholder shows while it is empty;
 ;;   - @file completion over the project's files (each completed file
-;;     becomes an attachment) and /skill completion at its start;
-;;   - attachments: C-c C-a picks a file, C-c C-v pastes the clipboard
-;;     (images and other MIME types), files dropped on the window attach;
+;;     becomes an attachment) and /skill completion at its start; a
+;;     popup that shows as you type (corfu, company) shows for them even
+;;     while the host redraws around the box;
+;;   - attachments: C-c C-a finds a project file by part of its name
+;;     (C-u C-c C-a: any file), C-c C-v pastes the clipboard (images and
+;;     other MIME types), files dropped on the window attach;
 ;;   - the text and attachments, kept across redraws of the host;
 ;;   - long lines that wrap under the text, never scrolling sideways;
 ;;   - optionally, the box at the bottom of the window: a buffer shorter
@@ -47,6 +50,8 @@
 (defvar-local harness-compose--pads nil "Window -> overlay padding the buffer so the box sits at the bottom.")
 (defvar-local harness-compose--pad-at nil "Function returning where the padding goes, or nil for the top.")
 (defvar-local harness-compose--files-at nil "Start of the @ token whose completion last refreshed the files.")
+(defvar-local harness-compose--last-token nil "The @file or /skill token at point after the last command.")
+(defvar-local harness-compose--popup-timer nil "Timer asking the completion UI to show the token's completions.")
 
 (defvar-local harness-compose-project-function (lambda () default-directory)
   "Function returning the project root files are completed and attached from.")
@@ -99,7 +104,8 @@ window the ones that must stay on one line."
   (setq-local dnd-protocol-alist (cons '("^file:" . harness-compose-dnd-open) dnd-protocol-alist))
   (add-hook 'completion-at-point-functions #'harness-compose-completion-at-point nil t)
   (add-hook 'pre-command-hook #'harness-compose--pre-command nil t)
-  (add-hook 'post-command-hook #'harness-compose-update-placeholder nil t))
+  (add-hook 'post-command-hook #'harness-compose-update-placeholder nil t)
+  (add-hook 'post-command-hook #'harness-compose--after-command nil t))
 
 (defun harness-compose-live-p ()
   "Non-nil when the compose markers point into this buffer."
@@ -366,9 +372,30 @@ is left to the user."
   "Return the MIME type of PATH."
   (or (mailcap-extension-to-mime (file-name-extension path t)) "application/octet-stream"))
 
+(defun harness-compose-read-file (&optional any)
+  "Read a file to attach and return its absolute name.
+Part of a name finds a project file in any subdirectory: the files are
+those @ completes, in the `harness-compose-file' category, which
+matches with `flex' unless configured otherwise.  With ANY, or when the
+project lists no files, browse the file system instead.  The project is
+never listed while you wait: a listing still running fills the
+candidates in when it returns."
+  (let ((root (harness-compose--project))
+        (listing (harness-compose-fetch-files)))
+    (expand-file-name
+     (if (or any (and (harness-promise-settled-p listing) (null harness-compose--files)))
+         (read-file-name "Attach file: " root nil t)
+       (completing-read "Attach project file (C-u: any file): "
+                        (harness-compose--table 'harness-compose--files 'harness-compose-file)
+                        nil t))
+     root)))
+
 (defun harness-compose-add-attachment (path &optional mime)
-  "Attach the file PATH (with MIME) to the next message."
-  (interactive (list (read-file-name "Attach file: " (harness-compose--project) nil t)))
+  "Attach the file PATH (with MIME) to the next message.
+Interactively, part of its name finds a project file in any
+subdirectory; with a prefix argument, any file is read instead (see
+`harness-compose-read-file')."
+  (interactive (list (harness-compose-read-file current-prefix-arg)))
   (let ((path (expand-file-name path)))
     (unless (cl-find path harness-compose-attachments :key (lambda (a) (plist-get a :path)) :test #'equal)
       (setq harness-compose-attachments
@@ -439,10 +466,13 @@ Plain text is inserted into the box."
   "Refresh the files @ completes from the project's file list.
 Listed here, not by the harness process, so it is this Emacs's
 projectile cache (cleared by `projectile-invalidate-cache') that answers;
-a miss lists asynchronously.  On failure the previous list is kept."
+a miss lists asynchronously.  On failure the previous list is kept.
+Return a promise settled once the list is in place."
   (let ((buf (current-buffer)))
     (harness-then (harness-files-list-limited (harness-compose--project) nil 20000)
-                  (lambda (files) (when (buffer-live-p buf) (with-current-buffer buf (setq harness-compose--files files))))
+                  (lambda (files)
+                    (when (buffer-live-p buf)
+                      (with-current-buffer buf (harness-compose--arrived 'harness-compose--files files))))
                   (lambda (err) (harness-log 'warn "compose: listing project files failed: %s" (harness-error-message err))))))
 
 (defun harness-compose-fetch-completions ()
@@ -453,8 +483,18 @@ a miss lists asynchronously.  On failure the previous list is kept."
                      (lambda (skills)
                        (when (buffer-live-p buf)
                          (with-current-buffer buf
-                           (setq harness-compose--skills (mapcar (lambda (s) (plist-get s :name)) skills)))))
+                           (harness-compose--arrived 'harness-compose--skills
+                                                     (mapcar (lambda (s) (plist-get s :name)) skills)))))
                      #'ignore)))
+
+(defun harness-compose--arrived (var value)
+  "Set VAR, a completion source of the box, to VALUE.
+A token typed before the source arrived was offered nothing: when VAR
+was empty, the completion UI is asked again."
+  (let ((was (symbol-value var)))
+    (set var value)
+    (when (and value (null was))
+      (harness-compose--popup-later 0))))
 
 (defun harness-compose--capf-bounds (char)
   "Return (START . END) of the token after CHAR before point in the box."
@@ -467,28 +507,36 @@ a miss lists asynchronously.  On failure the previous list is kept."
                        (memq (char-before) '(?\s ?\t ?\n))))
           (cons (1+ (point)) end))))))
 
-(defun harness-compose--table (candidates category)
-  "Return a completion table over CANDIDATES with CATEGORY metadata."
-  (lambda (string pred action)
-    (if (eq action 'metadata)
-        (list 'metadata (cons 'category category))
-      (complete-with-action action candidates string pred))))
+(defun harness-compose--table (var category)
+  "Return a completion table over the strings in VAR, with CATEGORY metadata.
+VAR, a variable of the current buffer, is read each time the table is
+asked: the box's sources arrive asynchronously, and a table made before
+one did offers it once it has."
+  (let ((buf (current-buffer)))
+    (lambda (string pred action)
+      (if (eq action 'metadata)
+          (list 'metadata (cons 'category category))
+        (complete-with-action action (and (buffer-live-p buf) (buffer-local-value var buf))
+                              string pred)))))
 
 (defun harness-compose-completion-at-point ()
-  "Complete @files and /skills in the box."
+  "Complete @files and /skills in the box.
+The sigil is what starts completion, the way an LSP trigger character
+does: popups that wait for a few characters show right after it."
   (let ((file (harness-compose--capf-bounds ?@))
         (skill (harness-compose--capf-bounds ?/))
         (root (harness-compose--project)))
     (cond
      (file
       ;; A new @ token refreshes the list, so files created since the
-      ;; buffer opened show up from the next keystroke on.
+      ;; buffer opened show up once the listing returns.
       (unless (eql (car file) harness-compose--files-at)
         (setq harness-compose--files-at (car file))
         (harness-compose-fetch-files))
       (list (car file) (cdr file)
-            (harness-compose--table harness-compose--files 'harness-compose-file)
+            (harness-compose--table 'harness-compose--files 'harness-compose-file)
             :exclusive 'no
+            :company-prefix-length t
             :exit-function
             (lambda (str status)
               (when (memq status '(finished sole))
@@ -497,9 +545,106 @@ a miss lists asynchronously.  On failure the previous list is kept."
                   (harness-compose-add-attachment (expand-file-name str root)))))))
      ((and skill (= (1- (car skill)) harness-compose-start))
       (list (car skill) (cdr skill)
-            (harness-compose--table harness-compose--skills 'harness-compose-skill)
+            (harness-compose--table 'harness-compose--skills 'harness-compose-skill)
             :exclusive 'no
+            :company-prefix-length t
             :exit-function (lambda (_str status) (when (memq status '(finished sole)) (insert " "))))))))
+
+;;;; Completing as you type
+
+;; Completion UIs that pop up as you type (corfu with `corfu-auto',
+;; company) wait a moment after a key, then give up when the buffer
+;; changed meanwhile.  Hosts change all the time -- a chat streams its
+;; reply, a task board follows its tasks -- so the popup for an @file or
+;; /skill token rarely showed.  Once the token stops changing, the box
+;; asks them again, ignoring changes outside it.
+
+(defvar corfu-auto)
+(defvar corfu-auto-delay)
+(defvar company-idle-delay)
+(defvar company-candidates)
+(declare-function corfu-auto--complete-deferred "corfu-auto")
+(declare-function corfu--auto-complete-deferred "corfu")
+(declare-function company-idle-begin "company")
+
+(defun harness-compose--token ()
+  "Return the @file or /skill token before point as (OFFSET . TEXT), or nil.
+TEXT starts with the sigil.  OFFSET is point's distance from the start
+of the box, which a host's redraws move."
+  (when-let* ((bounds (or (harness-compose--capf-bounds ?@)
+                          (let ((skill (harness-compose--capf-bounds ?/)))
+                            (and skill (= (1- (car skill)) harness-compose-start) skill)))))
+    (cons (- (point) harness-compose-start)
+          (buffer-substring-no-properties (1- (car bounds)) (cdr bounds)))))
+
+(defun harness-compose--corfu-delay ()
+  "Seconds corfu waits before popping up in this buffer, or nil if it does not."
+  (and (bound-and-true-p corfu-mode) (bound-and-true-p corfu-auto)
+       (let ((delay (bound-and-true-p corfu-auto-delay))) (if (numberp delay) delay 0))))
+
+(defun harness-compose--company-delay ()
+  "Seconds company waits before popping up in this buffer, or nil if it does not."
+  (and (bound-and-true-p company-mode) (boundp 'company-idle-delay)
+       (let ((delay (if (functionp company-idle-delay) (funcall company-idle-delay) company-idle-delay)))
+         (cond ((numberp delay) delay) (delay 0)))))
+
+(defun harness-compose--popup ()
+  "Ask the completion UIs that pop up by themselves to complete at point.
+Only a UI that is not showing already is asked."
+  (when (and (harness-compose--corfu-delay) (not completion-in-region-mode))
+    (cond ((fboundp 'corfu-auto--complete-deferred) (corfu-auto--complete-deferred))
+          ((fboundp 'corfu--auto-complete-deferred) (corfu--auto-complete-deferred))))
+  (when (and (harness-compose--company-delay) (not (bound-and-true-p company-candidates))
+             (fboundp 'company-idle-begin))
+    ;; The tick and position it checks are the ones of now.
+    (company-idle-begin (current-buffer) (selected-window) (buffer-chars-modified-tick) (point))))
+
+(defun harness-compose--popup-later (&optional delay)
+  "Ask the completion UIs for the token at point after DELAY seconds.
+DELAY defaults to just after the UIs' own wait, so that they show the
+popup themselves when nothing changed the buffer.  Nothing happens
+without a token at point or a UI that pops up by itself."
+  (when-let* ((wait (let ((delays (delq nil (list (harness-compose--corfu-delay)
+                                                  (harness-compose--company-delay)))))
+                      (and delays (apply #'max delays))))
+              (token (and (harness-compose-live-p) (harness-compose--token))))
+    (when harness-compose--popup-timer (cancel-timer harness-compose--popup-timer))
+    (setq harness-compose--popup-timer
+          (run-at-time (or delay (+ wait 0.05)) nil #'harness-compose--popup-if-unchanged
+                       (current-buffer) token))))
+
+(defun harness-compose--popup-if-unchanged (buffer token)
+  "Ask the completion UIs to complete TOKEN, if it is still at point in BUFFER.
+BUFFER must be the selected window's, with no input waiting."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq harness-compose--popup-timer nil)
+      (when (and (eq (window-buffer (selected-window)) buffer)
+                 (not (input-pending-p))
+                 (harness-compose-live-p)
+                 (equal token (harness-compose--token)))
+        (condition-case err
+            (harness-compose--popup)
+          (error (harness-log 'warn "compose: completion popup failed: %S" err)))))))
+
+(defun harness-compose--after-command ()
+  "Ask the completion UIs again once the token at point stops changing.
+Runs from `post-command-hook'."
+  (when harness-compose--popup-timer
+    (cancel-timer harness-compose--popup-timer)
+    (setq harness-compose--popup-timer nil))
+  (condition-case err
+      (let ((token (and (harness-compose-live-p) (harness-compose--token))))
+        (when (and token (not (equal token harness-compose--last-token)))
+          (harness-compose--popup-later))
+        (setq harness-compose--last-token token))
+    (error (harness-log 'warn "compose: following the token failed: %S" err))))
+
+;; Boxes set up before a reload follow their tokens too.
+(dolist (buf (buffer-list))
+  (with-current-buffer buf
+    (when (memq #'harness-compose-completion-at-point completion-at-point-functions)
+      (add-hook 'post-command-hook #'harness-compose--after-command nil t))))
 
 (add-to-list 'completion-category-defaults '(harness-compose-file (styles flex)))
 (add-to-list 'completion-category-defaults '(harness-compose-skill (styles basic flex)))

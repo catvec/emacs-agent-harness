@@ -1191,6 +1191,15 @@ with `:bottom` the growing box keeps its last line on the window's last
 line), the placeholder, @file and /skill completion, attachments
 (`C-c C-a`, clipboard `C-c C-v`, drag and drop), skill expansion
 (`harness-compose-with-expanded-text`) and ACP attachment blocks.
+Completion reads the project's files and the skills when it is asked,
+so a token typed before they arrived is offered them once they have.
+Popups that show as you type (corfu's `corfu-auto`, company) give up
+when the buffer changed since the last key, and a host changes all the
+time (a chat streams, a board follows its tasks): once the token stops
+changing, the box asks them again (`harness-compose--popup`).  `C-c C-a`
+reads a project file by part of its name over the same list, never
+listing while you wait; `C-u C-c C-a`, or a directory that is no
+project, reads any file.
 
 Views share positions with sessions: the task board, session list,
 usage dashboard, worktree list, conversation tree and log open through
