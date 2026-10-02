@@ -77,7 +77,8 @@
   '(("config" . "Session defaults") ("agent" . "Agent") ("compaction" . "Compaction")
     ("merge" . "Merge queue") ("naming" . "Session naming") ("perms" . "Permissions")
     ("provider" . "Models") ("provider-claude" . "Claude Code")
-    ("provider-openai" . "OpenAI-compatible providers") ("provider-demo" . "Demo provider")
+    ("provider-openai" . "OpenAI-compatible providers") ("provider-bedrock" . "AWS Bedrock")
+    ("provider-demo" . "Demo provider")
     ("sandbox" . "Sandbox") ("session" . "Sessions") ("skills" . "Skills") ("tasks" . "Task mode")
     ("tools" . "Tools") ("tools-fs" . "File tools") ("tools-sessions" . "Session tools")
     ("tools-shell" . "Shell tools") ("tools-web" . "Web tools") ("tools-agent" . "Agent tools")
@@ -89,7 +90,7 @@
   "Names of settings that the general rule gets wrong, as (KEY . NAME).")
 
 (defconst harness-ui-config--acronyms
-  '("api" "acp" "http" "ttl" "url" "ui" "id" "llm" "json" "usd" "fs" "btw")
+  '("api" "acp" "http" "ttl" "url" "ui" "id" "llm" "json" "usd" "fs" "btw" "aws")
   "Words written in capitals in the names of settings.")
 
 ;;;; Buffer state
