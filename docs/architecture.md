@@ -303,9 +303,17 @@ gone.
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
 - `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
   (closed: still listed and readable; the next message sent to it resumes it).
-- `session/fork ID &rest PLIST` — copies ancestor chain; `:kind fork|btw|subagent`,
+- `session/fork ID &rest PLIST` — copies ancestor chain; `:kind fork|subagent`,
   `:name`, `:cwd` (defaults to parent's).  Asks the provider to fork its
-  state via `provider/fork` when supported.  → new session.
+  state via `provider/fork` when supported; without a forked state the
+  fork has none, never the parent's own, which would carry on the
+  parent's provider conversation.  → new session.
+- `session/btw ID &optional NAME`: a BTW side conversation over ID, a
+  new, empty `btw` session sharing nothing with ID or with any other
+  BTW (no nodes, no fork node, no provider state, no directory grants).
+  It takes ID's cwd, project, host, worktree, model, thinking and
+  permission mode; `:parent-id` is ID only so lists show it under ID.
+  Returns the new session.
 - `session/nodes ID &optional (:limit N :before NODE-ID)` → path nodes,
   oldest first; `session/node ID NODE-ID`; `session/tree ID` → every
   node of the family (session + ancestors + forks) as a list with
@@ -383,7 +391,9 @@ Events delivered to `:on-event` (one plist each, in order):
 Forking: `provider/fork` returns a new provider state that may be marked
 pending (for the CLI: `(:cli-session-id PARENT :fork-pending t)`); the
 first completion consumes it and emits a `provider-state` event that the
-agent persists, replacing the pending one.
+agent persists, replacing the pending one.  When it returns nil or
+fails, the fork starts without provider state: copied as is, the
+parent's would make the fork resume the parent's own CLI session.
 
 Methods: `provider/list`, `provider/models &optional REFRESH` (cached union
 across providers), `provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
@@ -1112,9 +1122,10 @@ resolved to its main checkout once with `harness-files-main-checkout`),
 conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
 svg charts via svg.el), worktrees (`harness-ui-worktree`), notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle
-counts, clickable), BTW side window (`harness-ui-btw`: a blank fork of
-the session it is opened over, or, over a view that sets
-`harness-ui-btw-start-function`, a conversation the view starts, shown
+counts, clickable), BTW side window (`harness-ui-btw`: a new, empty
+session listed under the session it is opened over but sharing nothing
+with it or with other BTWs (`session/btw`), or, over a view that sets
+`harness-ui-btw-start-function`, a new conversation the view starts, shown
 in the session's own chat buffer with point in its compose box, so the
 question is written and sent like any message; nothing is read in the
 minibuffer.  The first message names it `btw: ...`, unless it was named

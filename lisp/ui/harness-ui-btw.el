@@ -2,16 +2,20 @@
 
 ;;; Commentary:
 
-;; A "by the way" conversation is a fork of the current session opened
-;; in a side window over it, so a quick question can be asked and
-;; answered without leaving the main session or losing its output.  It
-;; opens blank, with point in its compose box: the box every session
-;; has (multi-line editing, @file and /skill completion, attachments),
-;; where C-c C-c asks.  Its first message names it.  Closing the side
-;; window returns to the main session untouched; a BTW closed before
-;; anything was asked in it is deleted, so one opened by mistake leaves
-;; nothing behind.  BTW sessions are ordinary forks and show up in the
-;; session list and the conversation tree.
+;; A "by the way" conversation is a side conversation opened in a side
+;; window over the current session, so a quick question can be asked
+;; and answered without leaving the main session or losing its output.
+;; Every BTW is a new session (`session/btw') that shares nothing with
+;; the session it was opened over, nor with any other BTW, even one
+;; opened over the same session: it starts with an empty transcript and
+;; a provider conversation of its own.  It works where that session
+;; does, with its model, and shows up under it in the session list and
+;; the conversation tree.  It opens blank, with point in its compose
+;; box: the box every session has (multi-line editing, @file and /skill
+;; completion, attachments), where C-c C-c asks.  Its first message
+;; names it.  Closing the side window returns to the main session
+;; untouched; a BTW closed before anything was asked in it is deleted,
+;; so one opened by mistake leaves nothing behind.
 ;;
 ;; A view without a session of its own can host BTWs too: it sets
 ;; `harness-ui-btw-start-function' to start a conversation about itself
@@ -46,11 +50,13 @@
   "BTW session id -> the buffer it was opened over, for open side conversations.")
 
 (defvar-local harness-ui-btw-start-function nil
-  "How `harness-btw' starts a conversation over this buffer instead of forking.
+  "How `harness-btw' starts a conversation over this buffer.
 A view without a session of its own sets it to a function of the new
 session's name returning a promise of the session (a wire plist), whose
-system prompt says what the conversation is about.  The task board
-starts one about its tasks this way.  nil forks the buffer's session.")
+system prompt says what the conversation is about.  Like every BTW, it
+must be a new session on every call, never an earlier one.  The task
+board starts one about its tasks this way.  nil starts a BTW over the
+buffer's session (`session/btw').")
 
 (defvar-local harness-ui-btw-about nil
   "What a BTW started over this buffer is about, such as \"the tasks\".
@@ -75,12 +81,14 @@ The BTW's compose box and its window's header say it.")
 ;;;###autoload
 (defun harness-btw (&optional session-id question)
   "Open a BTW side conversation, blank, ready for a question.
-It forks SESSION-ID, by default the current buffer's session.  Over a
-view that starts its own conversations (`harness-ui-btw-start-function'),
-such as the task board, it is a new conversation about that view.  The
-question is written in the BTW's compose box like any message, and the
-first one names the conversation.  From Lisp, QUESTION is asked at
-once instead.  Return a promise that settles once the BTW is shown."
+It is a new session over SESSION-ID, by default the current buffer's
+session: listed under it, but sharing nothing with it or with earlier
+BTWs, not even the transcript (see `session/btw').  Over a view that
+starts its own conversations (`harness-ui-btw-start-function'), such as
+the task board, it is a new conversation about that view.  The question
+is written in the BTW's compose box like any message, and the first one
+names the conversation.  From Lisp, QUESTION is asked at once instead.
+Return a promise that settles once the BTW is shown."
   (interactive)
   (let* ((over (current-buffer))
          (start (and (null session-id) harness-ui-btw-start-function))
@@ -90,16 +98,16 @@ once instead.  Return a promise that settles once the BTW is shown."
     (harness-then
      (if start
          (funcall start name)
-       (harness-ui-request "_harness/session/fork"
-                           (list :id (or session-id (harness-ui-current-session-id)) :kind "btw" :name name)))
+       (harness-ui-request "_harness/session/btw"
+                           (list :id (or session-id (harness-ui-current-session-id)) :name name)))
      (lambda (child) (harness-ui-btw--show (plist-get child :id) over about question))
      (lambda (e) (message "BTW failed: %s" (harness-error-message e)) nil))))
 
 (defun harness-ui-btw--show (id over about question)
   "Show BTW session ID in a side window over buffer OVER, point in its box.
-ABOUT says what the conversation is about, nil for one about OVER's
-session.  QUESTION, when non-nil, is asked at once; otherwise the first
-message sent from the box names the BTW."
+ABOUT says what the conversation is about, nil for a side conversation
+over OVER's session.  QUESTION, when non-nil, is asked at once;
+otherwise the first message sent from the box names the BTW."
   (puthash id over harness-ui-btw--open)
   (harness-ui-refresh-sessions
    (lambda (_)
@@ -175,9 +183,9 @@ from then on."
 
 (defun harness-ui-btw--discard (sid buffer)
   "Delete the unused BTW session SID, then kill BUFFER, which showed it.
-The harness has the last word: only a session still at the node it was
-forked from (without nodes, for one started fresh), idle, with nothing
-queued, is deleted.  Any other is closed like a BTW that was used."
+The harness has the last word: only a session still where it started
+\(a BTW starts without nodes), idle, with nothing queued, is deleted.
+Any other is closed like a BTW that was used."
   (harness-ui-call
    "_harness/session/get" (list :id sid)
    (lambda (session)

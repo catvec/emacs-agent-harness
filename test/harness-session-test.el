@@ -71,11 +71,11 @@
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "main") :id)))
       (harness-call 'session/append id '(:kind user :content "q1"))
       (harness-call 'session/append id '(:kind assistant :content "a1"))
-      (let* ((child (harness-await (harness-call 'session/fork id :kind 'btw :name "side")))
+      (let* ((child (harness-await (harness-call 'session/fork id :kind 'fork :name "side")))
              (cid (plist-get child :id)))
         (should (equal id (plist-get child :parent-id)))
         (should (equal (plist-get (harness-call 'session/get id) :head) (plist-get child :fork-node)))
-        (should (eq 'btw (plist-get child :kind)))
+        (should (eq 'fork (plist-get child :kind)))
         (should (equal (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id))
                        (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes cid))))
         (harness-call 'session/append cid '(:kind user :content "q2-side"))
@@ -107,6 +107,108 @@
         (should-not (member extra (harness-call 'permission/allowed-dirs (plist-get child :id))))
         ;; The parent keeps its grant.
         (should (member extra (harness-call 'permission/allowed-dirs id)))))))
+
+(ert-deftest harness-session-btw-is-a-new-session-sharing-nothing ()
+  "Every BTW over a session is a new, empty session of its own.
+Two in a row over one session are two sessions, neither with the
+parent's transcript, fork node, provider state or directory grants, nor
+with anything of the other.  Each works where the parent does, with its
+model, and is listed under it; the parent is left as it was."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (worktree (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd :name "main" :model "demo:scripted"
+                                        :worktree worktree :permission-mode 'accept-edits :thinking "high"
+                                        :non-interactive t :budget '(:amount 5.0 :hard t))
+                          :id))
+           (state '(:cli-session-id "parent-cli" :model "m")))
+      (harness-call 'session/append id '(:kind user :content "q1"))
+      (harness-call 'session/append id '(:kind assistant :content "a1"))
+      (harness-call 'session/set-provider-state id state)
+      (harness-call 'session/update id :allowed-dirs (list (harness-test-temp-dir)) :silent t)
+      (let* ((parent (harness-call 'session/get id))
+             (nodes (harness-call 'session/nodes id))
+             (one (harness-call 'session/btw id "btw"))
+             (two (harness-call 'session/btw id)))
+        (should-not (equal (plist-get one :id) (plist-get two :id)))
+        (should-not (member id (list (plist-get one :id) (plist-get two :id))))
+        (dolist (btw (list one two))
+          (let ((s (harness-call 'session/get (plist-get btw :id))))
+            (should (eq 'btw (plist-get s :kind)))
+            ;; Nothing of the parent's.
+            (should-not (harness-call 'session/nodes (plist-get s :id)))
+            (should-not (plist-get s :head))
+            (should-not (plist-get s :fork-node))
+            (should-not (plist-get s :provider-state))
+            (should-not (plist-get s :allowed-dirs))
+            (should-not (plist-get s :budget))
+            (should-not (plist-get s :non-interactive))
+            ;; Where the parent works, with its model.
+            (should (equal cwd (plist-get s :cwd)))
+            (should (equal (plist-get parent :project) (plist-get s :project)))
+            (should (equal worktree (plist-get s :worktree)))
+            (should (equal "demo:scripted" (plist-get s :model)))
+            (should (equal "high" (plist-get s :thinking)))
+            (should (eq 'accept-edits (plist-get s :permission-mode)))
+            ;; Under the parent, for the lists only.
+            (should (equal id (plist-get s :parent-id)))))
+        (should (equal "btw" (plist-get one :name)))
+        (should-not (plist-get two :name))
+        ;; What happens in one BTW stays there.
+        (harness-call 'session/append (plist-get one :id) '(:kind user :content "side question"))
+        (harness-call 'session/set-provider-state (plist-get one :id) '(:cli-session-id "btw-cli"))
+        (should-not (harness-call 'session/nodes (plist-get two :id)))
+        (should-not (plist-get (harness-call 'session/get (plist-get two :id)) :provider-state))
+        ;; The parent is as it was.
+        (let ((after (harness-call 'session/get id)))
+          (should (equal nodes (harness-call 'session/nodes id)))
+          (should (equal (plist-get parent :head) (plist-get after :head)))
+          (should (equal state (plist-get after :provider-state))))
+        ;; Both are listed under it.
+        (should (equal (sort (list (plist-get one :id) (plist-get two :id)) #'string<)
+                       (sort (mapcar (lambda (s) (plist-get s :id))
+                                     (harness-call 'session/list (list :parent-id id)))
+                             #'string<)))))))
+
+(ert-deftest harness-session-fork-never-takes-the-parents-provider-state ()
+  "A fork has the provider state `provider/fork' derives, or none.
+Never the parent's own: copied as is, a Claude Code parent's state would
+make the fork resume, and write into, the parent's CLI session.  So a
+fork has none when its provider cannot fork, when the fork fails, and
+when it is forked to a model of a provider that cannot."
+  (harness-session-test-with
+    (let ((state '(:cli-session-id "parent-cli" :model "m")))
+      (unwind-protect
+          (progn
+            (harness-define-provider 'test-plain :complete #'ignore)
+            (harness-define-provider 'test-broken :complete #'ignore
+                                     :fork (lambda (_model _state)
+                                             (harness-rejected (list 'harness-error "no fork today"))))
+            (harness-define-provider 'test-forky :complete #'ignore
+                                     :fork (lambda (_model st)
+                                             (harness-resolved (list :forked-from (plist-get st :cli-session-id)))))
+            (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "test-forky:m")
+                                 :id))
+                  (fork-state (lambda (id &rest plist)
+                                (let* ((child (harness-test-await
+                                               (apply #'harness-call 'session/fork id :kind 'fork plist)))
+                                       (stored (harness-call 'session/get (plist-get child :id))))
+                                  (should (equal (plist-get child :provider-state) (plist-get stored :provider-state)))
+                                  (plist-get stored :provider-state)))))
+              (harness-call 'session/set-provider-state id state)
+              ;; A provider that forks: the fork has the state it derives.
+              (should (equal '(:forked-from "parent-cli") (funcall fork-state id)))
+              ;; Forked to the model of a provider that cannot fork: none.
+              (should-not (funcall fork-state id :model "test-plain:m"))
+              ;; A provider that cannot fork, or whose fork fails: none.
+              (harness-call 'session/update id :model "test-plain:m" :silent t)
+              (should-not (funcall fork-state id))
+              (harness-call 'session/update id :model "test-broken:m" :silent t)
+              (should-not (funcall fork-state id))
+              ;; The parent keeps its own.
+              (should (equal state (plist-get (harness-call 'session/get id) :provider-state)))))
+        (dolist (p '(test-plain test-broken test-forky))
+          (remhash p harness-providers))))))
 
 (defun harness-session-test-kinds (id)
   (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes id)))

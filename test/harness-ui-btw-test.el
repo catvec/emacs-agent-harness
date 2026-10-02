@@ -6,11 +6,13 @@
 ;; provider and the in-process ACP connection.  A BTW opens blank,
 ;; without reading anything in the minibuffer, with point in the
 ;; compose box of its chat buffer; the question is sent from that box
-;; and names the BTW.  A BTW over the task board is a new conversation
-;; about the tasks, one over a session forks it, one from the tree
-;; forks at the node.  Closing goes back to where it was opened and
-;; deletes a BTW nothing was asked in; keeping makes it a normal
-;; session window.
+;; and names the BTW.  Every BTW is a new session sharing nothing with
+;; any other: one over the task board is a conversation about the
+;; tasks; one over a session, or from a node of the tree, is listed
+;; under that session but has none of its transcript or provider state,
+;; nor anything of an earlier BTW.  Closing goes back to where it was
+;; opened and deletes a BTW nothing was asked in; keeping makes it a
+;; normal session window.
 
 ;;; Code:
 
@@ -40,10 +42,15 @@
 (defvar harness-ui-btw-minor-mode)
 (defvar harness-ui-tree--data)
 (defvar harness-ui-tree--loading)
+(defvar harness-ui-tree--family)
+(defvar harness-ui-tree--rows)
 (defvar harness-chat--buffers)
 (defvar harness-chat--loading)
 (defvar harness-compose-end)
 (defvar harness-compose--placeholder)
+(defvar harness-ui-sessions-buffer-name)
+(declare-function harness-sessions "harness-ui-sessions")
+(declare-function harness-ui-sessions--ordered "harness-ui-sessions")
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-btw "harness-ui-tasks")
 (declare-function harness-tree "harness-ui-tree")
@@ -66,7 +73,8 @@
   (delete-other-windows))
 
 (defmacro harness-ui-btw-test-with (&rest body)
-  "Load the state layer, tasks, ACP, the chat, BTW, the board and the tree; run BODY."
+  "Load the state layer, tasks, ACP, the chat, BTW, the board, the tree and
+the session list; run BODY."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -91,7 +99,7 @@
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       (dolist (m '(ui ui-chat ui-btw ui-tasks ui-tree)) (harness-test-load-module m))
+       (dolist (m '(ui ui-chat ui-btw ui-tasks ui-tree ui-sessions)) (harness-test-load-module m))
        (clrhash harness-ui--sessions)
        (clrhash harness-ui-btw--open)
        (harness-ui-btw-test--reset-windows)
@@ -101,7 +109,7 @@
          (maphash (lambda (_ b) (when (buffer-live-p b) (kill-buffer b))) harness-chat--buffers)
          (clrhash harness-chat--buffers)
          (dolist (b (buffer-list))
-           (when (string-match-p "\\`\\*harness \\(?:tasks\\|tree\\)" (buffer-name b)) (kill-buffer b)))
+           (when (string-match-p "\\`\\*harness \\(?:tasks\\|tree\\|sessions\\)" (buffer-name b)) (kill-buffer b)))
          (dolist (c (copy-sequence harness-acp--clients))
            (harness-acp--drop-client c))))))
 
@@ -267,28 +275,69 @@ names the conversation."
                          5 "the chat buffer")
       (cons sid (get-buffer-window buf)))))
 
-(ert-deftest harness-ui-btw-over-a-session-forks-it ()
-  "Over a session a BTW is a blank fork of it, asked from its compose box.
-Closing returns to the session."
+(defun harness-ui-btw-test--converse (sid)
+  "Give session SID a conversation: a question, an answer and a provider state.
+Return (NODES . PROVIDER-STATE), SID's transcript and provider state then."
+  (harness-call 'session/append sid (list :kind 'user :content "the main question"))
+  (harness-call 'session/append sid (list :kind 'assistant :content "the main answer"))
+  (harness-call 'session/set-provider-state sid '(:cli-session-id "main-cli" :model "m"))
+  (cons (harness-call 'session/nodes sid) (plist-get (harness-call 'session/get sid) :provider-state)))
+
+(defun harness-ui-btw-test--user-texts (sid)
+  "Return the texts of the user messages of session SID."
+  (mapcar (lambda (n) (plist-get n :content))
+          (cl-remove-if-not (lambda (n) (eq 'user (plist-get n :kind))) (harness-call 'session/nodes sid))))
+
+(defun harness-ui-btw-test--buffer-text (buffer)
+  "BUFFER's text, without properties."
+  (with-current-buffer buffer (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun harness-ui-btw-test--session-list ()
+  "Show the session list of `default-directory''s project; return its rows.
+Each row is (DEPTH . ID), top to bottom, children right under their parent."
+  (let ((done nil))
+    (harness-ui-refresh-sessions (lambda (_) (setq done t)))
+    (harness-test-wait (lambda () done) 5 "the session cache"))
+  (cl-letf (((symbol-function 'harness-ui-display-view) #'ignore))
+    (harness-sessions))
+  (with-current-buffer harness-ui-sessions-buffer-name
+    (mapcar (lambda (cell) (cons (car cell) (plist-get (cdr cell) :id))) (harness-ui-sessions--ordered))))
+
+(ert-deftest harness-ui-btw-over-a-session-is-a-new-session ()
+  "Over a session a BTW is a new, blank session listed under it, asked from its box.
+It has nothing of the session's: no transcript, no provider state, and
+the session keeps both as they were.  Closing returns to the session."
   (harness-ui-btw-test-with
-    (pcase-let ((`(,parent . ,parent-window) (harness-ui-btw-test--open-session)))
+    (pcase-let* ((`(,parent . ,parent-window) (harness-ui-btw-test--open-session))
+                 (`(,nodes . ,state) (harness-ui-btw-test--converse parent)))
       (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
              (buffer (window-buffer window))
-             (sid (buffer-local-value 'harness-ui-session-id buffer)))
-        (should (eq 'btw (plist-get (harness-call 'session/get sid) :kind)))
-        (should (equal parent (plist-get (harness-call 'session/get sid) :parent-id)))
-        (should (equal "btw" (plist-get (harness-call 'session/get sid) :name)))
+             (sid (buffer-local-value 'harness-ui-session-id buffer))
+             (session (harness-call 'session/get sid)))
+        (should-not (equal parent sid))
+        (should (eq 'btw (plist-get session :kind)))
+        (should (equal parent (plist-get session :parent-id)))
+        (should (equal "btw" (plist-get session :name)))
+        ;; Blank: nothing of the session's conversation, here or with the provider.
+        (should-not (harness-call 'session/nodes sid))
+        (should-not (plist-get session :fork-node))
+        (should-not (plist-get session :provider-state))
         (should (string-match-p "BTW side conversation" (harness-ui-btw-test--header buffer)))
         (should (harness-ui-btw-test--ready-p window))
+        (should-not (string-match-p "the main \\(?:question\\|answer\\)" (harness-ui-btw-test--buffer-text buffer)))
         (should (equal "Ask a side question\N{U+2026}" (harness-ui-btw-test--placeholder buffer)))
         (harness-ui-btw-test--ask window "what was that?")
         (harness-ui-btw-test--wait-reply sid)
         (harness-ui-btw-test--wait-name sid "btw: what was that?")
+        (should (equal '("what was that?") (harness-ui-btw-test--user-texts sid)))
         (with-selected-window window (harness-ui-btw-close))
         (should (eq parent-window (selected-window)))
         (harness-test-wait (lambda () (eq 'inactive (plist-get (harness-call 'session/get sid) :status)))
                            5 "the BTW to be closed")
         (should (eq 'idle (plist-get (harness-call 'session/get parent) :status)))
+        ;; The session is as it was.
+        (should (equal nodes (harness-call 'session/nodes parent)))
+        (should (equal state (plist-get (harness-call 'session/get parent) :provider-state)))
         ;; Its buffer stays, back to a session's own header: opened again
         ;; from the session list, it is a session like any.
         (with-current-buffer buffer
@@ -296,6 +345,56 @@ Closing returns to the session."
           (should-not (string-match-p "\\[keep\\]" (harness-ui-btw-test--header buffer))))
         (with-current-buffer (window-buffer parent-window)
           (should-not harness-ui-btw-minor-mode))))))
+
+(ert-deftest harness-ui-btw-each-one-starts-fresh ()
+  "Two BTWs in a row over one session are two new sessions, sharing nothing.
+The second has nothing of the first: not its question, answer or
+provider state, nor anything of the session's.  The session list shows
+both under the session, which keeps its transcript and provider state."
+  (harness-ui-btw-test-with
+    (pcase-let* ((`(,parent . ,parent-window) (harness-ui-btw-test--open-session))
+                 (`(,nodes . ,state) (harness-ui-btw-test--converse parent)))
+      (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
+             (first (buffer-local-value 'harness-ui-session-id (window-buffer window))))
+        (should (harness-ui-btw-test--ready-p window))
+        (harness-ui-btw-test--ask window "the first side question")
+        (harness-ui-btw-test--wait-reply first)
+        ;; As a provider keeping the conversation would have it.
+        (harness-call 'session/set-provider-state first '(:cli-session-id "first-btw-cli"))
+        (with-selected-window window (harness-ui-btw-close))
+        (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
+               (buffer (window-buffer window))
+               (second (buffer-local-value 'harness-ui-session-id buffer))
+               (session (harness-call 'session/get second)))
+          (should-not (member second (list first parent)))
+          (should (eq 'btw (plist-get session :kind)))
+          (should (equal parent (plist-get session :parent-id)))
+          (should-not (harness-call 'session/nodes second))
+          (should-not (plist-get session :fork-node))
+          (should-not (plist-get session :provider-state))
+          (should (harness-ui-btw-test--ready-p window))
+          (should-not (string-match-p "the first side question\\|the main question"
+                                      (harness-ui-btw-test--buffer-text buffer)))
+          (harness-ui-btw-test--ask window "the second side question")
+          (harness-ui-btw-test--wait-reply second)
+          ;; Each kept its own exchange, and the first its provider state.
+          (should (equal '("the first side question") (harness-ui-btw-test--user-texts first)))
+          (should (equal '("the second side question") (harness-ui-btw-test--user-texts second)))
+          (should (equal '(:cli-session-id "first-btw-cli")
+                         (plist-get (harness-call 'session/get first) :provider-state)))
+          (should-not (plist-get (harness-call 'session/get second) :provider-state))
+          (with-selected-window window (harness-ui-btw-close))
+          (harness-test-wait (lambda () (eq 'inactive (plist-get (harness-call 'session/get second) :status)))
+                             5 "the BTW to be closed")
+          ;; Both are listed under the session, oldest first.
+          (let* ((rows (harness-ui-btw-test--session-list))
+                 (at (cl-position (cons 0 parent) rows :test #'equal)))
+            (should at)
+            (should (equal (list (cons 0 parent) (cons 1 first) (cons 1 second))
+                           (seq-subseq rows at (min (length rows) (+ at 3))))))
+          ;; And the session is as it was.
+          (should (equal nodes (harness-call 'session/nodes parent)))
+          (should (equal state (plist-get (harness-call 'session/get parent) :provider-state))))))))
 
 (ert-deftest harness-ui-btw-first-message-names-it-unless-named ()
   "Only the first message with text names a BTW, and never over a name given by hand."
@@ -368,6 +467,32 @@ One holding a draft is kept, closed, with the draft."
       (should (eq board-window (selected-window)))
       (harness-ui-btw-test--wait-gone sid buffer))))
 
+(ert-deftest harness-ui-btw-each-board-btw-is-a-new-conversation ()
+  "Every BTW over the board starts a new conversation, never an earlier one."
+  (harness-ui-btw-test-with
+    (let* ((board (harness-ui-btw-test--board))
+           (board-window (get-buffer-window board))
+           (window (harness-ui-btw-test--open-btw board-window #'harness-ui-tasks-btw))
+           (first (buffer-local-value 'harness-ui-session-id (window-buffer window))))
+      (should (harness-ui-btw-test--ready-p window))
+      (harness-ui-btw-test--ask window "how are the tasks going?")
+      (harness-ui-btw-test--wait-reply first)
+      (with-selected-window window (harness-ui-btw-close))
+      (let* ((window (harness-ui-btw-test--open-btw board-window #'harness-ui-tasks-btw))
+             (buffer (window-buffer window))
+             (second (buffer-local-value 'harness-ui-session-id buffer))
+             (session (harness-call 'session/get second)))
+        (should-not (equal first second))
+        (should (eq 'btw (plist-get session :kind)))
+        (should-not (plist-get session :parent-id))
+        (should-not (harness-call 'session/nodes second))
+        (should-not (plist-get session :provider-state))
+        (should (harness-ui-btw-test--ready-p window))
+        (should-not (string-match-p "how are the tasks going" (harness-ui-btw-test--buffer-text buffer)))
+        (should (equal '("how are the tasks going?") (harness-ui-btw-test--user-texts first)))
+        (with-selected-window window (harness-ui-btw-close))
+        (harness-ui-btw-test--wait-gone second buffer)))))
+
 (ert-deftest harness-ui-btw-keep-makes-a-normal-session-window ()
   "Keeping a BTW shows it where it was opened, with the session's own header.
 From Lisp a question can be asked at once; it names the BTW."
@@ -400,14 +525,18 @@ From Lisp a question can be asked at once; it names the BTW."
     (forward-line 1))
   (should-not (eobp)))
 
-(ert-deftest harness-ui-btw-from-the-tree-forks-at-the-node ()
-  "b on a node of the tree opens a blank BTW forked there, over the tree.
-The session's head moves back once the fork is made."
+(ert-deftest harness-ui-btw-from-the-tree-is-a-new-session-under-the-node-s ()
+  "b on a node of the tree opens a blank BTW over the node's session, over the tree.
+Like any BTW it is a new session listed under that session, sharing
+nothing with it: the node only says which session, whose head never
+moves.  The tree shows the BTW, still empty, at the top."
   (harness-ui-btw-test-with
     (let* ((sid (plist-get (harness-call 'session/create :cwd default-directory :model "demo:scripted" :name "Main")
                            :id))
            (n1 (plist-get (harness-call 'session/append sid (list :kind 'user :content "first question")) :id))
-           (n2 (plist-get (harness-call 'session/append sid (list :kind 'assistant :content "first answer")) :id)))
+           (n2 (plist-get (harness-call 'session/append sid (list :kind 'assistant :content "first answer")) :id))
+           (moves nil))
+      (harness-on 'session/head-moved (lambda (id node) (push (cons id node) moves)))
       (harness-ui-refresh-sessions)
       (harness-test-wait (lambda () (harness-ui-session sid)) 5 "the session cache")
       (let ((harness-ui-default-position 'full))
@@ -422,12 +551,22 @@ The session's head moves back once the fork is made."
                (buffer (window-buffer window))
                (btw (buffer-local-value 'harness-ui-session-id buffer))
                (session (harness-call 'session/get btw)))
+          (should-not (equal sid btw))
           (should (eq 'btw (plist-get session :kind)))
           (should (equal sid (plist-get session :parent-id)))
-          (should (equal n1 (plist-get session :fork-node)))
+          (should-not (plist-get session :fork-node))
+          (should-not (harness-call 'session/nodes btw))
           (should (harness-ui-btw-test--ready-p window))
-          (harness-test-wait (lambda () (equal n2 (plist-get (harness-call 'session/get sid) :head)))
-                             5 "the head to move back")
+          (should-not (string-match-p "first \\(?:question\\|answer\\)" (harness-ui-btw-test--buffer-text buffer)))
+          ;; The session's head stayed put.
+          (should (equal n2 (plist-get (harness-call 'session/get sid) :head)))
+          (should-not moves)
+          ;; The tree shows the BTW in its family, blank, as its newest row.
+          (harness-test-wait (lambda () (with-current-buffer tree
+                                          (and (member btw harness-ui-tree--family) (not harness-ui-tree--loading))))
+                             5 "the tree to show the BTW")
+          (should (equal (concat "session:" btw)
+                         (plist-get (plist-get (car (buffer-local-value 'harness-ui-tree--rows tree)) :node) :id)))
           ;; Closed unused, back to the tree.
           (with-selected-window window (harness-ui-btw-close))
           (should (eq tree-window (selected-window)))

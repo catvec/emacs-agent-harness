@@ -80,10 +80,11 @@
 ;; Events `task/changed' (TASK) and `task/deleted' (ID) let a UI follow.
 ;;
 ;; A board can also host BTW side conversations (`task/btw'), where the
-;; user asks how the tasks are going.  The board has no session to fork,
-;; so such a conversation is a fresh `btw' session without a parent at
-;; the project root; `harness-tasks-btw-prompt' tells it to answer from
-;; the task and session tools.
+;; user asks how the tasks are going.  Like every BTW, each is a new
+;; `btw' session sharing nothing with any other; as the board has no
+;; session to list it under, it has no parent, and it works at the
+;; project root.  `harness-tasks-btw-prompt' tells it to answer from the
+;; task and session tools.
 
 ;;; Code:
 
@@ -1694,8 +1695,8 @@ afterwards, in a worktree, they learn how the work reaches the main branch."
 
 (defun harness-tasks--btw-p (session)
   "Non-nil when SESSION is a BTW conversation about a task board.
-Those are the sessions `task/btw' starts: a BTW about a session is a
-fork of it, so only the board's have no parent."
+Those are the sessions `task/btw' starts: a BTW over a session is
+listed under it (`session/btw'), so only the board's have no parent."
   (and (eq (plist-get session :kind) 'btw)
        (null (plist-get session :parent-id))))
 
@@ -2254,9 +2255,10 @@ or blocked session is in progress; an idle one waits for the user."
 
 (harness-defmethod task/btw (cwd &optional name)
   "Start a BTW conversation about the task board of CWD's project.
-Return its session, where the user asks how the tasks are going: a
-`btw' session named NAME at the project root, without a parent (a BTW
-about a session is a fork of it instead), which
+Return its session, where the user asks how the tasks are going: a new
+`btw' session named NAME at the project root on every call, sharing
+nothing with earlier ones, and without a parent (a BTW over a session is
+listed under it instead, see `session/btw'), which
 `harness-tasks-btw-prompt' tells to answer with the task and session
 tools.  The caller sends the first question."
   (harness-call 'session/create :cwd (harness-tasks--project cwd) :kind 'btw :name name))

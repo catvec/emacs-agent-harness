@@ -376,13 +376,18 @@ With only ID return the whole runtime plist."
           (t (setf (harness-session-runtime s) (plist-put (harness-session-runtime s) key value))
              value))))
 
-;;;; Methods: forks and trees
+;;;; Methods: forks, BTWs and trees
 
 (harness-defmethod session/fork (id &rest plist)
   "Fork session ID; return a promise of the new session plist.
-PLIST may set `:kind' (fork, btw, subagent), `:name', `:cwd', `:model'
-and any other `session/create' key.  The ancestor chain is copied so
-the fork starts with the parent's transcript."
+PLIST may set `:kind' (fork, subagent), `:name', `:cwd', `:model' and
+any other `session/create' key.  The ancestor chain is copied so the
+fork starts with the parent's transcript.  Its provider state is the
+one `provider/fork' derives from the parent's, or none when the
+provider cannot fork it.  It is never the parent's own state, which
+would carry on the parent's provider conversation: for Claude Code,
+resume and write into the parent's CLI session.  A BTW is no fork; see
+`session/btw'."
   (let* ((parent (harness-session--get id))
          (path (harness-session--path parent))
          (child-plist (harness-plist-merge
@@ -397,8 +402,7 @@ the fork starts with the parent's transcript."
                              :budget (harness-session-budget parent)
                              :kind 'fork
                              :parent-id id
-                             :fork-node (harness-session-head parent)
-                             :provider-state (harness-session-provider-state parent))
+                             :fork-node (harness-session-head parent))
                        plist))
          (child (apply #'harness-call 'session/create child-plist))
          (cs (harness-session--get (plist-get child :id))))
@@ -411,14 +415,40 @@ the fork starts with the parent's transcript."
      (if (harness-method-exists-p 'provider/fork)
          (harness-catch (harness-call 'provider/fork (harness-session-model cs)
                                       (harness-session-provider-state parent))
-                        (lambda (e) (harness-log 'warn "provider fork failed: %s" (harness-error-message e)) nil))
+                        (lambda (e)
+                          (harness-log 'warn "provider fork failed, %s starts without provider state: %s"
+                                       (harness-session-id cs) (harness-error-message e))
+                          nil))
        (harness-resolved nil))
      (lambda (state)
+       ;; Without a state of its own the fork has none, never the parent's.
        (when state (setf (harness-session-provider-state cs) state))
        (harness-session--save (harness-session-id cs))
        (harness-emit 'session/forked id (harness-session-id cs))
        (harness-session--touch cs)
        (harness-session-plist cs)))))
+
+(harness-defmethod session/btw (id &optional name)
+  "Start a BTW side conversation over session ID; return its session.
+It is a new, empty session of kind `btw' named NAME, sharing nothing
+with ID or with any other BTW, even one opened over ID before.  It has
+no transcript and no fork node.  It has no provider state either, so
+its first turn starts a provider conversation of its own (a new CLI
+session for Claude Code).  It has no directory grants.  It works where
+ID does, with ID's model: cwd, project, host, worktree, model,
+thinking level and permission mode are ID's, everything else is the
+configured default, as for any new session.  Its `:parent-id' is ID
+only so that the session list and the tree show it under ID."
+  (let ((parent (harness-session--get id)))
+    (harness-call 'session/create
+                  :kind 'btw :parent-id id :name name
+                  :cwd (harness-session-cwd parent)
+                  :project (harness-session-project parent)
+                  :host (harness-session-host parent)
+                  :worktree (harness-session-worktree parent)
+                  :model (harness-session-model parent)
+                  :thinking (harness-session-thinking parent)
+                  :permission-mode (harness-session-permission-mode parent))))
 
 (defun harness-session--family (s)
   "Return every session struct in the fork family of S."
@@ -455,7 +485,8 @@ created them; every node carries `:session'."
                                               :kind (harness-session-kind m) :head (harness-session-head m)
                                               :parent-id (harness-session-parent-id m)
                                               :fork-node (harness-session-fork-node m)
-                                              :status (harness-session-status m)))
+                                              :status (harness-session-status m)
+                                              :created (harness-session-created m)))
                             family)
           :nodes (sort nodes (lambda (a b) (< (or (plist-get a :ts) 0) (or (plist-get b :ts) 0)))))))
 
