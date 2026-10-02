@@ -141,8 +141,9 @@ task is done once its branch merges, or outside git once its turn ends."
 
 (defcustom harness-tasks-non-interactive t
   "When non-nil, task sessions run non-interactive.
-Permission prompts become denials with a hint to find another way, so a
-task keeps working while nobody watches it."
+They never wait for the user: the auto-mode judge decides what would
+ask them, and after a denial the agent is told to find another way, so
+a task keeps working while nobody watches it."
   :type 'boolean :group 'harness)
 
 (defcustom harness-tasks-model nil
@@ -2078,13 +2079,34 @@ At `harness-tasks-refine-tool-calls' calls it is steered to write up now."
 
 (defun harness-tasks--refine-settings (task)
   "Return the `session/create' settings of the session refining TASK.
-Asking with nobody to ask makes it read-only: reads are allowed, and
-anything else is denied with a hint, which keeps a write-up a write-up."
+Ask mode allows reads, and non-interactive the session never waits for
+the user; whatever would ask `harness-tasks--write-up-gate' denies with
+a hint, which keeps a write-up a write-up."
   (let ((model (or harness-tasks-refine-model (plist-get task :model) harness-tasks-model))
         (thinking (or harness-tasks-refine-thinking (plist-get task :thinking) harness-tasks-thinking)))
     (append (list :permission-mode 'ask :non-interactive t)
             (and model (list :model model))
             (and thinking (list :thinking thinking)))))
+
+(defconst harness-tasks--write-up-hint
+  "Write the task up from what you can read; put what you could not check in the write-up as an open question."
+  "Hint of a call denied because a backlog write-up only reads.")
+
+(defun harness-tasks--write-up-gate (decision next request)
+  "Keep the turns that write a backlog task up read-only.
+A `permission/decide' stage at 25, after the mode and its rules and
+before the auto-mode judge: a call of such a turn (see
+`harness-tasks--refinement-p') still undecided there would ask the
+user, or, the session being non-interactive, go to the judge.  It is
+denied instead, for good.  DECISION is the current value and NEXT
+continues the chain with REQUEST's decision."
+  (let ((task (and (eq (plist-get decision :behavior) 'ask)
+                   (harness-tasks--by-session (plist-get (plist-get request :session) :id)))))
+    (funcall next (if (and task (harness-tasks--refinement-p task))
+                      (list :behavior 'deny :final t
+                            :reason "this session writes a backlog task up rather than doing it, so it only reads"
+                            :hint harness-tasks--write-up-hint)
+                    decision))))
 
 (defun harness-tasks--refine-failed (id err)
   "Record ERR as the reason task ID's refinement stopped."
@@ -2675,6 +2697,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
+  (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
   (harness-tasks--start-polling)
   (harness-tasks--pick-up))
 
@@ -2694,6 +2717,11 @@ up again, merges in flight are queued again and waiting tasks start."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)
+
+;; A reload does not initialise a running module again, and a write-up
+;; must not go without the stage that keeps it read-only: install it now.
+(when (harness-module-ready-p 'tasks)
+  (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25))
 
 (provide 'harness-tasks)
 ;;; harness-tasks.el ends here

@@ -681,8 +681,9 @@ Async filter `permission/decide`: value is a DECISION
 `(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
 :paths (…))`.  Chain (priority): 5 dir-request, 7 sandbox-guard, 10 jail,
-20 mode, 30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask`
-into a pending request and resolves when answered).
+20 mode, 25 write-up (the tasks module: a backlog write-up only reads),
+30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a
+pending request and resolves when answered).
 
 - The sandbox guard asks `sandbox/check-command` about every `exec` call
   whose input has a `:command` (the bash tool), passing the directory it
@@ -752,9 +753,20 @@ into a pending request and resolves when answered).
   `web_fetch` reaches any URL and stays with the mode (the judge in auto).
 - Jail denials are final and carry a constructive hint listing the
   allowed roots and how to widen them.
-- Non-interactive: `ask` becomes `deny` with the reason "non-interactive
-  mode: the user is away" and a hint to find another approach inside the
-  permitted scope; a steering message is sent to the agent once per call.
+- Non-interactive (the user is away) is no permission policy of its
+  own and refuses nothing for being unattended: the auto judge
+  (stage 30, `harness-perms--judge-p`) decides what would ask the user,
+  in every mode, and its verdict stands.  A call it gives no verdict on
+  (it failed, timed out or answered without one; stage 30 passes the
+  `ask` on with `:no-verdict` saying why) nobody can approve, so stage
+  40 denies it, with that cause as the reason and a hint that this was
+  no verdict on the call, which may be tried once more.  Directories are
+  still granted by a person only: the jail and the dir-request stage
+  deny.  After every denial in a non-interactive session, whoever made
+  it, the `permission/decided` handler sends the agent a steering
+  message (`harness-perms-steering-text`), once per call and only while
+  a turn runs to take it: the user is away, so respect the denial and
+  reach the goal another way.
   The session's own `:non-interactive` switch decides, off as much as
   on.  It starts from `harness-non-interactive` when the session is
   created (an explicit false turns it off whatever the setting says);
@@ -1018,8 +1030,11 @@ to the task's file (below); the record also keeps `:file-base` and
   With `:refine` the task goes to the backlog instead (below).
 - Backlog refinement (once called grooming): a `:refine` task is
   `refining` while a session at its directory -- `ask` and
-  non-interactive, so read-only, `harness-tasks-refine-model` and
-  `-refine-thinking` (low) -- writes it up as told by
+  non-interactive, `harness-tasks-refine-model` and
+  `-refine-thinking` (low), read-only through the tasks module's
+  `permission/decide` stage at 25, which denies (final) whatever the
+  mode and its rules leave undecided in a turn of a write-up, before
+  the auto judge could allow it -- writes it up as told by
   `harness-tasks-refine-prompt` (brief, no changes, no questions, a
   self-contained ticket: title line, what and why, what to change, how to
   tell it is done, open questions); after `harness-tasks-refine-tool-calls`
@@ -1365,7 +1380,7 @@ TRAMP prefixes come from the session host):
 | `session_info` | Session info | — | read |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
-| `spawn_agent` | Sub-agent | prompt, fork, model, name | meta |
+| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name | read |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read |

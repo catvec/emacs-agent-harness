@@ -297,6 +297,25 @@ option, is an error saying what to fix, and asks nothing."
                               (plist-get (harness-test-await (harness-tools-agent-test-run sid "session_info" nil))
                                          :content))))))
 
+(ert-deftest harness-tools-agent-spawn-cwd-is-jailed ()
+  "A sub-agent works where it starts, so the jail checks its cwd as it
+checks bash's: one outside the allowed directories needs the user,
+and with the user away the call is denied and no child starts."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'perms)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
+                                         :non-interactive t)
+                           :id))
+           (cwd (plist-get (harness-call 'session/get sid) :cwd))
+           (outside (harness-test-temp-dir))
+           (tool (harness-tool-get "spawn_agent")))
+      (should (equal (list (expand-file-name "." cwd)) (harness-tools--paths tool '(:prompt "hi") (list :cwd cwd))))
+      (should (equal (list outside) (harness-tools--paths tool (list :prompt "hi" :cwd outside) (list :cwd cwd))))
+      (let ((r (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" (list :prompt "hi" :cwd outside)))))
+        (should (plist-get r :denied))
+        (should (string-match-p "outside the allowed directories" (plist-get r :content))))
+      (should-not (harness-call 'session/list (list :parent-id sid))))))
+
 (defvar harness-non-interactive)
 
 (ert-deftest harness-tools-agent-children-keep-the-parents-switch ()

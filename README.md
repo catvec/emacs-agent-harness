@@ -243,9 +243,12 @@ The header line shows the session's status, name, model, permission
 mode, whether it is `non-interactive` or `interactive`, thinking level,
 context and cost. Click the model, the permission mode, the
 non-interactive switch or the thinking level to change it. A
-non-interactive session never waits for you: what would ask for
-permission is denied, and the agent is told to find another way, which
-suits a session you leave to work while you are away. New sessions
+non-interactive session never waits for you, which suits a session you
+leave to work while you are away. Whatever would ask you for
+permission, the auto-mode judge decides instead, whatever the
+permission mode. After any denial the agent is told to find another
+way. Access to directories outside the session's own still needs you,
+so it is denied while you are away. New sessions
 start non-interactive when `harness-non-interactive` is set, and task
 sessions while `harness-tasks-non-interactive` is. From then on each
 session has its own switch.

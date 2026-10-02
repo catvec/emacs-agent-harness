@@ -387,29 +387,141 @@ function giving the judge prompts they encoded, newest first."
 
 ;;;; Non-interactive
 
-(ert-deftest harness-perms-non-interactive-denies-and-steers ()
+(defun harness-perms-test--allowing-judge ()
+  "Register provider `judge' that allows every call; return its probe."
+  (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":\"allow\",\"reason\":\"ordinary work\"}")
+                                        (:type done :stop-reason end-turn))))
+
+(ert-deftest harness-perms-non-interactive-the-judge-decides-for-the-user ()
+  "Non-interactive mode refuses nothing by itself: what would ask the
+user, who is away, the judge decides in every mode, and its verdict
+stands, an allow as much as a deny.  spawn_agent used to be refused
+whenever the judge was not the one deciding."
   (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
-  (let (prompts)
-    (harness-register-method 'agent/prompt (lambda (sid blocks) (push (cons sid blocks) prompts) (harness-resolved nil)))
+  (let ((harness-perms-auto-model "judge:small")
+        (harness-perms-auto-timeout 2))
+    (dolist (mode '(ask accept-edits auto))
+      (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode mode))
+      (let* ((probe (harness-perms-test--allowing-judge))
+             (d (harness-perms-test--decide (list :session harness-perms-test--session :tool "spawn_agent" :kind 'meta
+                                                  :input '(:prompt "Fix the parser \N{U+2014} quickly")
+                                                  :call-id (harness-short-id)))))
+        (should (eq 'allow (plist-get d :behavior)))
+        (should (equal "ordinary work" (plist-get d :reason)))
+        (should (= 1 (length (funcall probe 'requests))))))
+    ;; The judge's denial stands as it gave it.
+    (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"too risky\"}")
+                                          (:type done :stop-reason end-turn)))
     (let ((d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
       (should (eq 'deny (plist-get d :behavior)))
-      (should (equal "non-interactive mode: the user is away" (plist-get d :reason)))
-      (should (string-match-p "do not wait for the user" (plist-get d :hint))))
-    (should (= 1 (length prompts)))
-    (should (equal "s1" (caar prompts)))
-    (should (equal "text" (plist-get (car (cdar prompts)) :type)))
-    (should (string-match-p "bash" (plist-get (car (cdar prompts)) :text)))
-    ;; The same call id does not steer twice; a new call does.
-    (let ((req (harness-perms-test--request "bash" 'exec)))
-      (harness-perms-test--decide req)
-      (harness-perms-test--decide req)
-      (should (= 2 (length prompts))))
-    ;; Reads are unaffected, and so is a session that is interactive.
-    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read
-                                                     (expand-file-name "f" (plist-get harness-perms-test--session :cwd)))))
+      (should (equal "too risky" (plist-get d :reason))))
+    ;; What the mode or a rule decides needs no judge.
+    (let ((probe (harness-perms-test--allowing-judge)))
+      (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'ask))
+      (should (eq 'allow (harness-perms-test--behavior "read_file" 'read
+                                                       (expand-file-name "f" (plist-get harness-perms-test--session :cwd)))))
+      (harness-perms-add-rule "s1" '(:tool "elisp" :behavior deny) 'session)
+      (should (eq 'deny (harness-perms-test--behavior "elisp" 'exec)))
+      (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'yolo))
+      (should (eq 'allow (harness-perms-test--behavior "bash" 'exec)))
+      (should (null (funcall probe 'requests)))
+      ;; Interactive, ask mode asks the user, not the judge (nobody can
+      ;; answer here).
+      (setq harness-perms-test--session (plist-put (plist-put harness-perms-test--session :permission-mode 'ask)
+                                                   :non-interactive nil))
+      (should (equal "no user available" (plist-get (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))
+                                                    :reason)))
+      (should (null (funcall probe 'requests)))
+      (should-not (plist-get (harness-call 'permission/rules "s1") :non-interactive)))))
+
+(ert-deftest harness-perms-non-interactive-denies-only-without-a-verdict ()
+  "A call the judge gave no verdict on cannot be approved while the user
+is away, so it is denied; the reason says why there was no verdict."
+  (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
+  (let ((reason (lambda ()
+                  (let ((d (harness-perms-test--decide (harness-perms-test--request "spawn_agent" 'meta))))
+                    (should (eq 'deny (plist-get d :behavior)))
+                    (should (equal harness-perms-no-verdict-hint (plist-get d :hint)))
+                    (plist-get d :reason)))))
+    (harness-perms-test--judge-provider '((:type text :delta "I refuse to answer in JSON")
+                                          (:type done :stop-reason end-turn)))
+    (let ((harness-perms-auto-model "judge:x"))
+      (should (equal (concat "the auto-mode judge gave no verdict (its answer held no verdict), "
+                             "and with the user away nobody could approve the call")
+                     (funcall reason))))
+    (let ((harness-perms-auto-model "nope:x"))
+      (should (string-match-p "no verdict (it failed: No provider for model nope:x)" (funcall reason))))
+    (harness-define-provider 'judge :label "Judge" :complete (lambda (_req) (error "Cannot encode the request")))
+    (let ((harness-perms-auto-model "judge:x"))
+      (should (string-match-p "no verdict (it failed: Cannot encode the request)" (funcall reason))))
+    (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":") (:type done :stop-reason max-tokens)))
+    (let ((harness-perms-auto-model "judge:x"))
+      (should (string-match-p "no verdict (it stopped: max-tokens)" (funcall reason))))
+    (let ((probe (harness-perms-test--judge-provider '((:type start))))
+          (harness-perms-auto-model "judge:x")
+          (harness-perms-auto-timeout 0.2))
+      (should (string-match-p "no verdict (it took longer than 0.2s)" (funcall reason)))
+      (should (funcall probe 'cancelled))))
+  ;; No judge to ask at all.
+  (harness-unregister-method 'provider/complete)
+  (let ((d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (string-match-p "no auto-mode judge could decide" (plist-get d :reason)))
+    (should (equal harness-perms-non-interactive-hint (plist-get d :hint)))))
+
+(defun harness-perms-test--prompts ()
+  "Register a fake `agent/prompt' that records what it is sent.
+Return a function giving the (SESSION-ID . TEXT) pairs, newest first."
+  (let ((prompts nil))
+    (harness-register-method 'agent/prompt
+                             (lambda (sid blocks &rest _)
+                               (push (cons sid (plist-get (car blocks) :text)) prompts)
+                               (harness-resolved nil)))
+    (lambda () prompts)))
+
+(ert-deftest harness-perms-non-interactive-steers-after-every-denial ()
+  "With the user away, any denial is followed by a steering message,
+once per call, whoever made it: the judge, the jail or a rule."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler (lambda (_in _ctx) "ran"))
+  (harness-define-tool "t_read" :label "Read" :kind 'read :paths (lambda (in) (list (plist-get in :path)))
+                       :handler (lambda (_in _ctx) "read"))
+  (let* ((prompts (harness-perms-test--prompts))
+         (harness-perms-auto-model "judge:small")
+         (run (lambda (id name input)
+                (harness-test-await (harness-call 'tools/execute "s1" (list :id id :name name :input input)))))
+         (count (lambda () (length (funcall prompts)))))
+    (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"not that\"}")
+                                          (:type done :stop-reason end-turn)))
+    (let ((r (funcall run "c1" "t_exec" '(:command "x"))))
+      (should (plist-get r :denied))
+      (should (string-match-p "\\`Denied: not that" (plist-get r :content))))
+    (should (equal (list (cons "s1" (format harness-perms-steering-text "t_exec"))) (funcall prompts)))
+    (should (string-match-p "user is away, so do not wait for them" (cdar (funcall prompts))))
+    ;; The jail's denial, and a standing rule's.
+    (should (plist-get (funcall run "c2" "t_read" '(:path "/etc/hostname")) :denied))
+    (should (= 2 (funcall count)))
+    (should (string-match-p "\\`The call to t_read was denied" (cdar (funcall prompts))))
+    (harness-perms-add-rule "s1" '(:tool "t_exec" :behavior deny) 'session)
+    (funcall run "c3" "t_exec" '(:command "y"))
+    (should (= 3 (funcall count)))
+    ;; Once per call.
+    (funcall run "c3" "t_exec" '(:command "y"))
+    (should (= 3 (funcall count)))
+    ;; Allowed calls steer nothing.
+    (should (equal "read" (plist-get (funcall run "c4" "t_read" '(:path "inside.txt")) :content)))
+    (should (= 3 (funcall count)))
+    ;; Without a turn to take it, nothing is sent: that would start one.
+    (harness-register-method 'agent/running (lambda (&optional _sid) nil))
+    (funcall run "c5" "t_exec" '(:command "z"))
+    (should (= 3 (funcall count)))
+    (harness-register-method 'agent/running (lambda (&optional _sid) t))
+    (funcall run "c6" "t_exec" '(:command "z"))
+    (should (= 4 (funcall count)))
+    ;; Interactive, the denial is only the call's result: the user is there.
     (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive nil))
-    (should (equal "no user available" (plist-get (harness-perms-test--decide (harness-perms-test--request "bash" 'exec)) :reason)))
-    (should-not (plist-get (harness-call 'permission/rules "s1") :non-interactive))))
+    (should (plist-get (funcall run "c7" "t_exec" '(:command "z")) :denied))
+    (should (= 4 (funcall count)))))
 
 (ert-deftest harness-perms-non-interactive-is-the-sessions-own-switch ()
   "A session record's switch decides, off as much as on; the setting
@@ -417,6 +529,8 @@ function giving the judge prompts they encoded, newest first."
 for a request without a session record."
   (let* ((s (harness-perms-test--setup :permission-mode 'ask :non-interactive nil))
          (cwd (plist-get s :cwd))
+         (harness-perms-auto-model "nope:x")
+         (away "\\`the auto-mode judge gave no verdict .*with the user away nobody could approve")
          (reason (lambda () (plist-get (harness-perms-test--decide (harness-perms-test--request "bash" 'exec)) :reason))))
     (harness-register-method 'agent/prompt (lambda (&rest _) (harness-resolved nil)))
     (let ((harness-non-interactive t))
@@ -427,12 +541,12 @@ for a request without a session record."
         (should-not (plist-get (harness-call 'permission/rules "s1") :non-interactive)))
       ;; Without a session record, the setting decides.
       (setq harness-perms-test--session (list :id "s1" :cwd cwd :permission-mode 'ask))
-      (should (equal "non-interactive mode: the user is away" (funcall reason)))
+      (should (string-match-p away (funcall reason)))
       (should (plist-get (harness-call 'permission/rules "s1") :non-interactive)))
     ;; And the session's switch on wins over the setting off.
     (let ((harness-non-interactive nil))
       (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive t))
-      (should (equal "non-interactive mode: the user is away" (funcall reason)))
+      (should (string-match-p away (funcall reason)))
       (should (plist-get (harness-call 'permission/rules "s1") :non-interactive)))))
 
 (ert-deftest harness-perms-task-sessions-can-search-the-web ()

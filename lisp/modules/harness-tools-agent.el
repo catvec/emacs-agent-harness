@@ -420,10 +420,12 @@ Run INPUT's prompt in a child of the session in CTX."
                          :fork (:type "boolean" :description "Fork this session instead of starting fresh (default false).")
                          :model (:type "string" :description "Model id for the child (default: this session's model).")
                          :name (:type "string" :description "Display name for the child session.")
-                         :cwd (:type "string" :description "Working directory for the child (default: this session's).")
+                         :cwd (:type "string" :description "Working directory for the child (default: this session's), inside this session's allowed directories.")
                          :worktree (:type "boolean" :description "Create a git worktree and branch for the child (default false)."))
             :required ("prompt"))
   :kind 'meta
+  ;; The child works where it starts: the jail checks that like bash's cwd.
+  :paths (lambda (input) (list (or (plist-get input :cwd) ".")))
   :timeout 3600
   :subject (lambda (input) (format "%s%s"
                                    (or (plist-get input :name) (harness-first-line (plist-get input :prompt) 50))
@@ -459,7 +461,7 @@ Run INPUT's prompt in a child of the session in CTX."
               (plist-get s :cwd) (or (plist-get s :worktree) "none")
               (plist-get s :permission-mode)
               (if (harness-json-true-p (plist-get s :non-interactive))
-                  "on (the user is away: what would ask for permission is denied)"
+                  "on (the user is away: the auto-mode judge decides what would ask them for permission)"
                 "off")
               (plist-get s :status))
       (format "Usage: %s input, %s output, %s cache read, cost %s, %d turns, context %s of %s\n"
