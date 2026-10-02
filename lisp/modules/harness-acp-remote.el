@@ -412,6 +412,12 @@ Each is a plist (:client :address :resolve :reject :timer).")
 (defvar harness-acp-remote--allow-loopback nil
   "Non-nil lets this machine's own addresses pair; for tests.")
 
+(defvar harness-acp-remote--request-timeout 30
+  "Seconds a connection may take to send its request before it is closed.")
+
+(defvar harness-acp-remote--max-connections 64
+  "Most connections from other devices at once; more are closed at once.")
+
 (defconst harness-acp-remote--virtual-interfaces
   "\\`\\(?:docker\\|br-\\|veth\\|virbr\\|vnet\\|lxc\\|lxd\\|cni\\|flannel\\|podman\\|vmnet\\|vboxnet\\|kube\\)"
   "Interfaces of containers and virtual machines, whose addresses no phone reaches.")
@@ -576,14 +582,15 @@ link-local and container or virtual machine interfaces are left out."
       (when (plist-get entry :timer) (cancel-timer (plist-get entry :timer)))
       (funcall (plist-get entry :resolve) t))))
 
-(defun harness-acp-remote--forget-waiting (&optional client)
-  "Drop the waiting `authenticate' requests of CLIENT, or all of them."
+(defun harness-acp-remote--forget-waiting (&optional client why)
+  "Drop the waiting `authenticate' requests of CLIENT, or all of them.
+Each is answered with an error saying WHY (default: pairing stopped)."
   (dolist (entry (copy-sequence harness-acp-remote--waiting))
     (when (or (null client) (eq client (plist-get entry :client)))
       (setq harness-acp-remote--waiting (delq entry harness-acp-remote--waiting))
       (when (plist-get entry :timer) (cancel-timer (plist-get entry :timer)))
       (funcall (plist-get entry :reject)
-               (list 'acp-error harness-acp-error-unauthenticated "Pairing stopped" nil)))))
+               (list 'acp-error harness-acp-error-unauthenticated (or why "Pairing stopped") nil)))))
 
 ;;;; Who may call ACP
 
@@ -620,6 +627,8 @@ For `harness-acp-authenticate-functions'.  The answer waits at most
     (let ((address (plist-get (harness-acp-client-remote-info client) :address)))
       (if (harness-acp-remote--device address)
           t
+        ;; One wait per client: a newer request replaces the older.
+        (harness-acp-remote--forget-waiting client "Replaced by a newer authenticate request")
         (harness-with-promise (resolve reject)
           (let ((entry (list :client client :address address :resolve resolve :reject reject :timer nil)))
             (plist-put entry :timer
@@ -896,6 +905,8 @@ one; neither is a missing header, as native clients send none."
     (if (eq proc harness-acp-remote--server)
         (progn (setq harness-acp-remote--server nil)
                (harness-acp-remote--changed "stopped"))
+      (when-let* ((timer (process-get proc 'harness-acp-remote-timer)))
+        (cancel-timer timer))
       (when-let* ((decoder (process-get proc 'harness-acp-remote-decoder)))
         (process-put proc 'harness-acp-remote-decoder nil)
         (harness-acp-remote-decoder-free decoder))
@@ -906,14 +917,34 @@ one; neither is a missing header, as native clients send none."
         (harness-acp-remote--touch (process-get proc 'harness-acp-remote-address))
         (harness-acp-remote--changed "disconnected" (process-get proc 'harness-acp-remote-address))))))
 
+(defun harness-acp-remote--connections ()
+  "Return the open sockets the listener accepted."
+  (cl-remove-if-not (lambda (p) (and (process-get p 'harness-acp-remote-address) (process-live-p p)))
+                    (process-list)))
+
 (defun harness-acp-remote--accept (_server proc _message)
-  "Set up the socket PROC the listener just accepted."
+  "Set up the socket PROC the listener just accepted.
+It must send its request within `harness-acp-remote--request-timeout'
+seconds, and is closed at once in corporate mode or past
+`harness-acp-remote--max-connections'."
   (set-process-query-on-exit-flag proc nil)
   (set-process-coding-system proc 'binary 'binary)
   (set-process-filter proc #'harness-acp-remote--filter)
   (set-process-sentinel proc #'harness-acp-remote--sentinel)
   (process-put proc 'harness-acp-remote-address (harness-acp-remote--address-of proc))
-  (when (harness-corporate-p) (delete-process proc)))
+  (cond
+   ((harness-corporate-p) (delete-process proc))
+   ((> (length (harness-acp-remote--connections)) harness-acp-remote--max-connections)
+    (harness-log 'warn "acp-remote: too many connections; closing the one from %s"
+                 (process-get proc 'harness-acp-remote-address))
+    (delete-process proc))
+   (t
+    (process-put proc 'harness-acp-remote-timer
+                 (run-at-time harness-acp-remote--request-timeout nil
+                              (lambda ()
+                                (when (and (process-live-p proc)
+                                           (null (process-get proc 'harness-acp-remote-state)))
+                                  (delete-process proc))))))))
 
 ;;;; Serving
 

@@ -534,6 +534,44 @@ PROTOCOLS are offered; HEADERS, an alist, are sent besides."
           (harness-acp-remote--init)
           (should-not (harness-acp-remote--running-p)))))))
 
+(defun harness-acp-remote-test-idle-socket ()
+  "Open a socket to the test listener that sends nothing; return (PROC . CLOSED-CELL)."
+  (let* ((closed (list nil))
+         (proc (make-network-process
+                :name "acp-remote-test-idle" :host "127.0.0.1" :service harness-acp-remote-test-port
+                :coding 'binary :noquery t
+                :sentinel (lambda (p _e) (unless (process-live-p p) (setcar closed t))))))
+    (cons proc closed)))
+
+(ert-deftest harness-acp-remote-limits ()
+  "Silent connections time out, too many are refused, one pairing wait per client."
+  (harness-acp-remote-test-with
+    (let ((harness-acp-remote--request-timeout 0.3))
+      (pcase-let ((`(,proc . ,closed) (harness-acp-remote-test-idle-socket)))
+        (harness-test-wait (lambda () (car closed)) 5 "the silent connection to close")
+        (delete-process proc)))
+    (let ((harness-acp-remote--max-connections 2)
+          (sockets nil))
+      (unwind-protect
+          (progn
+            (dotimes (_ 3) (push (harness-acp-remote-test-idle-socket) sockets))
+            (harness-test-wait (lambda () (car (cdr (car sockets)))) 5 "the third connection to close")
+            (accept-process-output nil 0.2)
+            (should-not (car (cdr (nth 1 sockets))))
+            (should-not (car (cdr (nth 2 sockets)))))
+        (dolist (s sockets) (delete-process (car s)))))
+    (let ((c (harness-acp-remote-test-connect)))
+      (harness-acp-remote-test-send c '(:jsonrpc "2.0" :id 1 :method "authenticate" :params (:methodId "pair")))
+      (let ((second (progn (accept-process-output nil 0.1)
+                           (harness-acp-remote-test-send c '(:jsonrpc "2.0" :id 2 :method "authenticate"
+                                                                    :params (:methodId "pair")))
+                           (harness-test-wait (lambda () (harness-acp-remote-test-answer c 1)) 5 "the first wait"))))
+        (should (= -32000 (harness-acp-remote-test-code second)))
+        (should (= 1 (length harness-acp-remote--waiting)))
+        (should (= 200 (car (harness-acp-remote-test-get (harness-acp-remote-test-pair-path)))))
+        (should-not (plist-get (harness-test-wait (lambda () (harness-acp-remote-test-answer c 2)) 5 "the second wait")
+                               :error))))))
+
 (ert-deftest harness-acp-remote-addresses ()
   (dolist (c (harness-acp-remote--candidates))
     (should (stringp (plist-get c :address)))
