@@ -17,6 +17,14 @@
 ;; stopped mid-turn (Emacs quit, `harness-restart', a crash), so loading
 ;; settles that turn: tool calls left without a result get one saying
 ;; they were interrupted, and a hint says what the session was doing.
+;;
+;; A session's context window is its model's, looked up in the provider
+;; catalogue whenever the session is described, unless one was set for
+;; the session (`:context-window' to `session/create' or
+;; `session/update').  Only such a window is stored: a copy of the
+;; catalogue's would go stale when the catalogue changes, or keep the
+;; stand-in given for a model the catalogue had not listed yet.  When
+;; the catalogue changes, the sessions whose window moved are announced.
 
 ;;; Code:
 
@@ -36,7 +44,8 @@
   id name kind project cwd host worktree model permission-mode thinking non-interactive
   allowed-dirs (status 'idle) parent-id fork-node created updated
   (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :list-cost 0.0 :context 0 :turns 0))
-  context-window budget head queue pending todos plan provider-state
+  context-window                        ; one set for the session, else nil: the model's
+  budget head queue pending todos plan provider-state
   ;; runtime only
   (nodes (make-hash-table :test 'equal))
   (loaded nil)
@@ -48,7 +57,8 @@
 (defconst harness-session--public-keys
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
-    :context-window :budget :head :queue :pending :todos :plan :provider-state))
+    :context-window :context-window-override :budget :head :queue :pending :todos :plan
+    :provider-state))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
@@ -66,7 +76,9 @@
       (signal 'harness-error (list (format "No session %s" id)))))
 
 (defun harness-session-plist (s)
-  "Return the public plist of session struct S."
+  "Return the public plist of session struct S.
+`:context-window' is the window in effect (see `harness-session--window'),
+`:context-window-override' the one set for S, or nil."
   (list :id (harness-session-id s) :name (harness-session-name s)
         :kind (harness-session-kind s) :project (harness-session-project s)
         :cwd (harness-session-cwd s) :host (harness-session-host s)
@@ -78,7 +90,8 @@
         :status (harness-session-status s) :parent-id (harness-session-parent-id s)
         :fork-node (harness-session-fork-node s) :created (harness-session-created s)
         :updated (harness-session-updated s) :usage (harness-session-usage s)
-        :context-window (harness-session-context-window s)
+        :context-window (harness-session--window s)
+        :context-window-override (harness-session-context-window s)
         :budget (harness-session-budget s) :head (harness-session-head s)
         :queue (harness-session-queue s) :pending (harness-session-pending s)
         :todos (harness-session-todos s) :plan (harness-session-plan s)
@@ -113,7 +126,9 @@
           (harness-session-created s) (or (plist-get pl :created) (float-time))
           (harness-session-updated s) (or (plist-get pl :updated) (float-time))
           (harness-session-usage s) (or (plist-get pl :usage) (harness-session-usage s))
-          (harness-session-context-window s) (plist-get pl :context-window)
+          ;; Not `:context-window': that is the model's window as it was
+          ;; when the record was written, and now comes from the catalogue.
+          (harness-session-context-window s) (plist-get pl :context-window-override)
           (harness-session-budget s) (plist-get pl :budget)
           (harness-session-head s) (plist-get pl :head)
           (harness-session-queue s) (plist-get pl :queue)
@@ -134,12 +149,22 @@
     (when s
       (harness-call 'store/save (harness-session--meta-name id) (harness-session-plist s)))))
 
+(defvar harness-session--announced-windows (make-hash-table :test 'equal)
+  "Session id -> the context window its last `session/changed' carried.")
+
+(defun harness-session--announce (s &optional plist)
+  "Emit `session/changed' for S with PLIST, by default its plist now; return it."
+  (let ((pl (or plist (harness-session-plist s))))
+    (puthash (harness-session-id s) (plist-get pl :context-window) harness-session--announced-windows)
+    (harness-emit 'session/changed (harness-session-id s) pl)
+    pl))
+
 (defun harness-session--touch (s)
   "Mark S changed: update the timestamp, schedule a save, emit `session/changed'."
   (setf (harness-session-updated s) (float-time))
   (harness-debounce (list 'harness-session (harness-session-id s))
                     harness-session-save-delay #'harness-session--save (harness-session-id s))
-  (harness-emit 'session/changed (harness-session-id s) (harness-session-plist s)))
+  (harness-session--announce s))
 
 (defun harness-session-flush ()
   "Write every session record now (used on exit)."
@@ -192,10 +217,19 @@ HEAD defaults to the session head."
       (ignore-errors (harness-call 'config/get key cwd))
     (and (boundp key) (symbol-value key))))
 
-(defun harness-session--context-window (model)
+(defun harness-session--model-window (model)
+  "Return the context window the provider catalogue gives MODEL."
   (or (and (harness-method-exists-p 'provider/model)
-           (plist-get (harness-call 'provider/model model) :context-window))
+           (condition-case err
+               (plist-get (harness-call 'provider/model model) :context-window)
+             (error (harness-log 'debug "session: no context window for %s: %S" model err)
+                    nil)))
       128000))
+
+(defun harness-session--window (s)
+  "Return the context window of S: the one set for it, else its model's."
+  (or (harness-session-context-window s)
+      (harness-session--model-window (harness-session-model s))))
 
 ;;;; Methods: lifecycle
 
@@ -228,8 +262,7 @@ HEAD defaults to the session head."
           (harness-session-fork-node s) (plist-get plist :fork-node)
           (harness-session-created s) (float-time)
           (harness-session-updated s) (float-time)
-          (harness-session-context-window s) (or (plist-get plist :context-window)
-                                                 (harness-session--context-window model))
+          (harness-session-context-window s) (plist-get plist :context-window)
           (harness-session-budget s) (or (plist-get plist :budget) (harness-session--config 'harness-budget cwd))
           (harness-session-provider-state s) (plist-get plist :provider-state)
           (harness-session-loaded s) t)
@@ -237,8 +270,7 @@ HEAD defaults to the session head."
     (harness-session--save (harness-session-id s))
     (let ((pl (harness-session-plist s)))
       (harness-emit 'session/created (harness-session-id s) pl)
-      (harness-emit 'session/changed (harness-session-id s) pl)
-      pl)))
+      (harness-session--announce s pl))))
 
 (harness-defmethod session/get (id)
   "Return the public plist of session ID."
@@ -273,6 +305,7 @@ FILTER keys: :project :status :kind :parent-id :active."
   (let ((s (harness-session--get id)))
     (harness-emit 'session/deleted id (harness-session-plist s))
     (remhash id harness-sessions)
+    (remhash id harness-session--announced-windows)
     (harness-call 'store/delete (harness-session--meta-name id))
     (harness-call 'store/delete (harness-session--nodes-name id))
     t))
@@ -326,7 +359,10 @@ next start settles its turn."
 (harness-defmethod session/update (id &rest plist)
   "Change settings of session ID from PLIST (see `harness-session--settings').
 With `:persist' non-nil, model, permission mode and thinking are also
-written to the configuration layer.  With `:silent' no hint is added."
+written to the configuration layer.  With `:silent' no hint is added.
+`:context-window' sets the session's own context window, nil its
+model's again; a new `:model' brings its own window too, unless PLIST
+also sets one."
   (let* ((s (harness-session--get id))
          (persist (plist-get plist :persist))
          (silent (plist-get plist :silent))
@@ -335,8 +371,10 @@ written to the configuration layer.  With `:silent' no hint is added."
              when (memq k harness-session--settings)
              do (pcase k
                   (:name (setf (harness-session-name s) v))
-                  (:model (setf (harness-session-model s) v
-                                (harness-session-context-window s) (harness-session--context-window v)))
+                  (:model (setf (harness-session-model s) v)
+                          ;; A window set for the old model does not carry over.
+                          (unless (plist-member plist :context-window)
+                            (setf (harness-session-context-window s) nil)))
                   (:permission-mode (setf (harness-session-permission-mode s) (if (stringp v) (intern v) v)))
                   (:thinking (setf (harness-session-thinking s) v))
                   (:non-interactive (setf (harness-session-non-interactive s) (harness-json-true-p v)))
@@ -829,9 +867,33 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
 
 (defun harness-session--on-kill-emacs () (harness-session-flush))
 
+(defun harness-session--on-models-updated (&rest _)
+  "Announce the sessions whose context window changed with the model catalogue."
+  (let (moved)
+    (maphash (lambda (id s)
+               (unless (eql (harness-session--window s) (gethash id harness-session--announced-windows))
+                 (push s moved)))
+             harness-sessions)
+    (mapc #'harness-session--announce moved)))
+
 (defun harness-session--init ()
   (harness-session--load-all)
+  (harness-on 'provider/models-updated #'harness-session--on-models-updated)
   (add-hook 'kill-emacs-hook #'harness-session--on-kill-emacs))
+
+;; A reload does not run `:init' again for a ready module, so the
+;; subscription is made here too.
+(harness-on 'provider/models-updated #'harness-session--on-models-updated)
+
+;; The context-window slot of sessions loaded by an earlier version of
+;; this file holds a copy of their model's window, or the stand-in for
+;; a model the catalogue had not listed yet: no window set for them.
+;; The first load of this version in a running harness drops them.
+(defvar harness-session--window-slot-holds-overrides nil
+  "Non-nil once the context-window slot of loaded sessions holds only overrides.")
+(unless harness-session--window-slot-holds-overrides
+  (maphash (lambda (_ s) (setf (harness-session-context-window s) nil)) harness-sessions)
+  (setq harness-session--window-slot-holds-overrides t))
 
 (dolist (ev '((session/created . "(ID SESSION)")
               (session/changed . "(ID SESSION) after any change")

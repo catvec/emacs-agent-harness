@@ -130,6 +130,20 @@ tool is answered with \"echo: TEXT\"."
       (should (eq 'hosted (plist-get caps :compaction)))
       (should (plist-get caps :cost-reported)))))
 
+(ert-deftest harness-provider-claude-model-known-without-a-listing ()
+  "Every Claude model has its window from the moment the provider is defined.
+After a reload defined the providers again, the harness once gave
+128000 for every Claude model until a client listed the catalogue,
+and the sessions created meanwhile kept that window."
+  (harness-provider-claude-test--setup)
+  ;; As a reload does: the provider is defined again, its listing forgotten.
+  (harness-test-load-module 'provider-claude)
+  (let ((opus (harness-call 'provider/model "claude:claude-opus-5-5")))
+    (should (equal "Claude Opus 5.5" (plist-get opus :label)))
+    (should (= 1000000 (plist-get opus :context-window))))
+  (should (= 200000 (plist-get (harness-call 'provider/model "claude:claude-haiku-4-5-20251001")
+                               :context-window))))
+
 (ert-deftest harness-provider-claude-command-line ()
   (harness-provider-claude-test--setup)
   (let ((cmd (harness-provider-claude--command "claude-opus-5-5" "high" "sys" "abc" t)))
