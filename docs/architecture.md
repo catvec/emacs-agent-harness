@@ -645,7 +645,10 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.
-- Denied calls return `(:is-error t :content "Denied: REASON. HINT")`.
+- Denied calls return `(:is-error t :denied t :content "Denied: REASON. HINT")`.
+  The agent keeps `:denied t` in the `:meta` of the call's tool-result
+  node, so a view can tell a call the permission system refused, which
+  never ran, from one that ran and failed (`harness-ui-tool-outcome`).
 
 ### perms
 
@@ -1382,6 +1385,13 @@ stays snappy.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
 the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
+A tool call's header says how it ended, each on a background of its
+own: a check mark (`harness-tool-face`), "failed" when it ran and
+reported an error, such as a non-zero exit or an edit whose text did
+not match (`harness-tool-error-face`), or "denied" when the permission
+system refused it, so it never ran (`harness-tool-denied-face`); a
+denied call's text is labelled as the reason rather than as output.  A
+summary block counts the failed and denied calls it folds.
 Auto-scroll follows unless the user scrolled up.  While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a

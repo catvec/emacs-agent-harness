@@ -69,7 +69,14 @@
 (defface harness-tool-error-face
   '((((background light)) :background "#f7e9e9" :extend t)
     (((background dark)) :background "#3a2a2a" :extend t))
-  "Background of failed tool call blocks." :group 'harness-ui)
+  "Background of failed tool call blocks.
+The tool ran and reported an error." :group 'harness-ui)
+
+(defface harness-tool-denied-face
+  '((((background light)) :background "#f9efe0" :extend t)
+    (((background dark)) :background "#3a3226" :extend t))
+  "Background of denied tool call blocks.
+The permission system refused the call, so it never ran." :group 'harness-ui)
 
 (defface harness-tool-title-face '((t :inherit (font-lock-function-name-face bold)))
   "Face of a tool call's title." :group 'harness-ui)
@@ -800,6 +807,17 @@ VALUE is as it comes over the wire: nil and `:false' are off."
   (if (harness-json-true-p value)
       "Non-interactive: the agent never waits for you.  What would ask for permission is denied, and the agent is told to find another way."
     "Interactive: the agent asks you for permission and waits for your answer."))
+
+(defun harness-ui-tool-outcome (result)
+  "Return how the tool call whose tool-result node is RESULT ended.
+`denied' when the permission system refused the call, so it never ran:
+the agent records `:denied' in the node's `:meta'.  `failed' when it
+ran and reported an error, such as a non-zero exit or an edit whose
+text did not match.  `ok' otherwise, and nil without RESULT."
+  (cond ((null result) nil)
+        ((harness-json-true-p (harness-plist-get-in result '(:meta :denied))) 'denied)
+        ((harness-json-true-p (plist-get result :is-error)) 'failed)
+        (t 'ok)))
 
 (defun harness-ui-model-label (model-id)
   "Return a short, readable \"model (provider)\" label for MODEL-ID.

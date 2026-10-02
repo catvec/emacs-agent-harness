@@ -859,6 +859,86 @@ It is never added to the running turn."
         (should (= 1 (hash-table-count harness-chat--groups)))
         (should (harness-ui-chat-test-find buf "5 tool calls: read_file ×3, grep, glob"))))))
 
+;;;; Failed and denied tool calls
+
+(defun harness-ui-chat-test-block-text (block)
+  "Return the text of BLOCK without properties."
+  (buffer-substring-no-properties (harness-chat-block-start block) (harness-chat-block-end block)))
+
+(defun harness-ui-chat-test-faces-in (block text)
+  "Return the faces at TEXT inside BLOCK, as a list."
+  (let ((pos (save-excursion
+               (goto-char (harness-chat-block-start block))
+               (search-forward text (harness-chat-block-end block))
+               (match-beginning 0))))
+    (ensure-list (get-text-property pos 'face))))
+
+(ert-deftest harness-ui-chat-tells-denied-calls-from-failed-ones ()
+  ;; A call the permission system refused never ran: it reads "denied",
+  ;; in the warning face on a background of its own, while a call that
+  ;; ran and reported an error reads "failed".  A coalesced group counts
+  ;; both, also when a member's result arrives after the group formed.
+  (harness-ui-chat-test-with
+    (harness-add-filter 'permission/decide
+                        (lambda (decision next request)
+                          (funcall next (if (equal (plist-get request :tool) "glob")
+                                            (list :behavior 'deny :final t :reason "the test refuses glob")
+                                          decision)))
+                        5)
+    (harness-define-tool "grep" :description "grep" :kind 'read :coalescable t
+                         :handler (lambda (_input _ctx) (harness-tool-error "grep: no such file")))
+    (let* ((harness-chat-coalesce-threshold 2)
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      ;; glob is denied, grep fails, bash runs.
+      (harness-ui-chat-test-prompt buf "run the tools")
+      (with-current-buffer buf
+        (cl-flet ((check ()
+                    (let* ((calls (harness-ui-chat-test-blocks buf "tool-call"))
+                           (call (lambda (tool) (cl-find tool calls :test #'equal
+                                                         :key (lambda (b) (plist-get (harness-chat-block-node b) :tool)))))
+                           (glob (funcall call "glob"))
+                           (grep (funcall call "grep"))
+                           (bash (funcall call "bash")))
+                      (should (eq 'denied (harness-ui-tool-outcome (harness-chat-block-result glob))))
+                      (should (eq 'failed (harness-ui-tool-outcome (harness-chat-block-result grep))))
+                      (should (eq 'ok (harness-ui-tool-outcome (harness-chat-block-result bash))))
+                      ;; The denied call: its status, its background, and the
+                      ;; permission system's reason where output would be.
+                      (let ((text (harness-ui-chat-test-block-text glob)))
+                        (should (string-search "\N{U+2298} denied" text))
+                        (should-not (string-search "failed" text))
+                        (should (string-match-p "^ *reason$" text))
+                        (should-not (string-search "output (" text))
+                        (should (string-search "Denied: the test refuses glob" text)))
+                      (should (memq 'warning (harness-ui-chat-test-faces-in glob "\N{U+2298} denied")))
+                      (should (memq 'harness-tool-denied-face (harness-ui-chat-test-faces-in glob "glob")))
+                      (should-not (memq 'harness-tool-error-face (harness-ui-chat-test-faces-in glob "glob")))
+                      ;; The failed call keeps its red status and background.
+                      (let ((text (harness-ui-chat-test-block-text grep)))
+                        (should (string-search "\N{U+2717} failed" text))
+                        (should-not (string-search "denied" text))
+                        (should (string-search "output (" text))
+                        (should (string-search "grep: no such file" text)))
+                      (should (memq 'error (harness-ui-chat-test-faces-in grep "\N{U+2717} failed")))
+                      (should (memq 'harness-tool-error-face (harness-ui-chat-test-faces-in grep "grep")))
+                      ;; The call that ran is a success, as before.
+                      (should (string-search "\N{U+2713}" (harness-ui-chat-test-block-text bash)))
+                      (should (memq 'harness-tool-face (harness-ui-chat-test-faces-in bash "bash")))
+                      ;; glob and grep fold into a group whose summary counts both.
+                      (should (= 1 (hash-table-count harness-chat--groups)))
+                      (let ((summary (harness-ui-chat-test-find buf "2 tool calls: glob, grep")))
+                        (should summary)
+                        (should (harness-ui-chat-test-find buf "\N{U+2717} 1 failed" summary))
+                        (should (harness-ui-chat-test-find buf "\N{U+2298} 1 denied" summary))
+                        (should (< (harness-ui-chat-test-find buf "\N{U+2298} 1 denied" summary)
+                                   (harness-ui-chat-test-find buf "[expand]" summary)))))))
+          (check)
+          ;; A redraw renders the same from the fetched history.
+          (harness-chat-redraw)
+          (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn")
+          (check))))))
+
 ;;;; History
 
 ;; Markers still delimit every block exactly.

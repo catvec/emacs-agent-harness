@@ -405,6 +405,17 @@ nothing about it and asks for nothing."
         (should (equal '((:non-interactive nil)) set))))
     (should-not sent)))
 
+(ert-deftest harness-ui-tool-outcome-tells-denied-from-failed ()
+  "A refused call is `denied' whatever else its result says; one that
+ran and reported an error is `failed'.  Wire values: a call that was
+not refused carries `:denied' null (nil) or false."
+  (should-not (harness-ui-tool-outcome nil))
+  (should (eq 'ok (harness-ui-tool-outcome '(:kind "tool-result" :output "fine" :is-error :false))))
+  (should (eq 'ok (harness-ui-tool-outcome '(:output "fine" :is-error nil :meta (:denied :false)))))
+  (should (eq 'failed (harness-ui-tool-outcome '(:output "exit 1" :is-error t))))
+  (should (eq 'failed (harness-ui-tool-outcome '(:output "exit 1" :is-error t :meta (:denied nil :duration 0.1)))))
+  (should (eq 'denied (harness-ui-tool-outcome '(:output "Denied: no" :is-error t :meta (:denied t))))))
+
 ;;;; The prefix key
 
 (ert-deftest harness-ui-prefix-key-moves-the-keys ()
