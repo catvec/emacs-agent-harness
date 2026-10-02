@@ -428,6 +428,19 @@ seeded on `--resume` with the session's restored spend.  A turn
 therefore costs the difference to the previous total, starting from the
 `session.total_cost_usd` the spawn-time usage report gives.
 
+The Claude provider never needs the CLI to bypass its permission
+checks.  The CLI gets no built-in tools (`--tools ""`), only the
+harness's MCP tools, whose calls the harness's permission system
+decides.  `harness-provider-claude-permission-args` only has to let
+them through.  It defaults to `--permission-mode default --allowedTools
+mcp__harness__*`: a fixed mode, so no settings file starts the CLI in
+plan or auto mode, plus an allow rule.  Where managed settings make the
+CLI ignore such rules, `--permission-prompt-tool stdio` sends its
+permission prompts to the harness instead, as `can_use_tool` control
+requests; the harness allows its own tools and refuses any other.  A
+tool call the CLI refuses on its own (`system/permission_denied`)
+becomes a `hint` that names the setting.
+
 ### tools
 
 ```elisp

@@ -10,10 +10,21 @@ path is tested, and it honours an interrupt control request.
 
 Behaviour is chosen by the prompt text:
   "call echo"  -> issues a tools/call for mcp__harness__echo first
+  "call bash"  -> calls the built-in Bash tool first, as if extra
+                  arguments had given the model built-in tools
   "hang"       -> starts a turn and waits for an interrupt (or forever
                   with "hang ignore", to exercise the kill path)
   "die"        -> exits mid-turn without a result
 Anything else streams the text "hello" and finishes.
+
+Tool calls pass the CLI's permission check first, decided by the
+command line as the real CLI decides it: --permission-mode
+bypassPermissions or a matching --allowedTools rule (a tool name,
+mcp__SERVER, or mcp__SERVER__ followed by a glob) runs the call; else
+--permission-prompt-tool stdio asks the harness with a can_use_tool
+control request; else the call is denied with a permission_denied
+system message.  A denied call gets an error tool result and is listed
+in the result's permission_denials.
 
 Like the real CLI, each result's total_cost_usd is the running total
 of the process: every turn adds 0.01, and --resume or --fork-session
@@ -69,11 +80,46 @@ def read():
 
 
 def arg_value(argv, flag):
-    if flag in argv:
-        i = argv.index(flag)
-        if i + 1 < len(argv):
-            return argv[i + 1]
-    return None
+    """The value of the last FLAG in ARGV, or None."""
+    value = None
+    for i, arg in enumerate(argv[:-1]):
+        if arg == flag:
+            value = argv[i + 1]
+    return value
+
+
+def allowed_tools(argv):
+    """The allow rules of every --allowedTools flag in ARGV.
+
+    The flag takes the arguments up to the next option, each a comma or
+    space separated list of rules."""
+    rules = []
+    i = 0
+    while i < len(argv):
+        if argv[i] in ("--allowedTools", "--allowed-tools"):
+            i += 1
+            while i < len(argv) and not argv[i].startswith("--"):
+                rules.extend(argv[i].replace(",", " ").split())
+                i += 1
+        else:
+            i += 1
+    return rules
+
+
+def rule_allows(rule, tool):
+    """Whether the allow RULE covers TOOL.
+
+    A rule names a tool, a whole MCP server (mcp__SERVER), or tools of
+    one server by glob (mcp__SERVER__*); an unanchored glob such as
+    mcp__* allows nothing."""
+    if rule == tool:
+        return True
+    if not rule.startswith("mcp__"):
+        return False
+    server, sep, glob = rule[len("mcp__"):].partition("__")
+    if not sep:
+        return tool.startswith(rule + "__")
+    return glob.endswith("*") and "*" not in server and tool.startswith(rule[:-1])
 
 
 def account():
@@ -134,6 +180,11 @@ class Fake:
         self.model = arg_value(argv, "--model") or "fake-model"
         self.total = RESTORED_COST if resume else 0.0
         self.needs_handshake = "--mcp-config" in argv
+        self.permission_mode = arg_value(argv, "--permission-mode") or "default"
+        self.allowed = allowed_tools(argv)
+        self.prompt_tool = arg_value(argv, "--permission-prompt-tool")
+        self.denials = []
+        self.interrupted = False
 
     # -- plumbing ---------------------------------------------------------
 
@@ -240,7 +291,71 @@ class Fake:
         emit({"type": "result", "subtype": subtype, "is_error": is_error,
               "duration_ms": 5, "num_turns": 1, "result": text,
               "session_id": self.session_id, "total_cost_usd": round(self.total, 6),
-              "usage": self.usage(), "stop_reason": stop_reason})
+              "usage": self.usage(), "stop_reason": stop_reason,
+              "permission_denials": self.denials})
+
+    def permit(self, tool, tool_input, tool_use_id):
+        """Decide a call of TOOL as the CLI does.
+
+        Return (True, INPUT) to run it with INPUT, or (False, MESSAGE)."""
+        if self.permission_mode == "bypassPermissions" or \
+           any(rule_allows(rule, tool) for rule in self.allowed):
+            return True, tool_input
+        if self.prompt_tool == "stdio":
+            rid = "perm-" + uuid.uuid4().hex[:8]
+            emit({"type": "control_request", "request_id": rid,
+                  "request": {"subtype": "can_use_tool", "tool_name": tool,
+                              "input": tool_input, "tool_use_id": tool_use_id,
+                              "permission_suggestions": []}})
+            answer = self.wait_control_response(rid).get("response") or {}
+            if answer.get("behavior") == "allow":
+                return True, answer.get("updatedInput", tool_input)
+            return False, answer.get("message") or "Permission denied"
+        message = ("Claude requested permissions to use %s, but you haven't granted it yet."
+                   % tool)
+        emit({"type": "system", "subtype": "permission_denied", "tool_name": tool,
+              "tool_use_id": tool_use_id, "message": message,
+              "session_id": self.session_id})
+        return False, message
+
+    def tool_use(self, tool, tool_input, tool_use_id):
+        """Have the model call TOOL, run it if permitted, and echo its result.
+
+        Return False when an interrupt ended the turn meanwhile."""
+        self.stream({"type": "content_block_start", "index": 0,
+                     "content_block": {"type": "tool_use", "id": tool_use_id,
+                                       "name": tool, "input": {}}})
+        self.stream({"type": "content_block_delta", "index": 0,
+                     "delta": {"type": "input_json_delta",
+                               "partial_json": json.dumps(tool_input)}})
+        self.stream({"type": "content_block_stop", "index": 0})
+        emit({"type": "assistant", "session_id": self.session_id,
+              "message": {"id": "msg_1", "role": "assistant", "model": self.model,
+                          "content": [{"type": "tool_use", "id": tool_use_id,
+                                       "name": tool, "input": tool_input}],
+                          "stop_reason": "tool_use", "usage": self.usage()}})
+        permitted, value = self.permit(tool, tool_input, tool_use_id)
+        if self.interrupted:
+            return False
+        if not permitted:
+            self.denials.append({"tool_name": tool, "tool_use_id": tool_use_id,
+                                 "tool_input": tool_input})
+            content, is_error = value, True
+        elif tool.startswith("mcp__harness__"):
+            self.rpc_id += 1
+            reply = self.mcp({"jsonrpc": "2.0", "id": self.rpc_id, "method": "tools/call",
+                              "params": {"name": tool, "arguments": value}})
+            if self.interrupted:
+                return False
+            content = reply.get("result", {}).get("content", [])
+            is_error = bool(reply.get("result", {}).get("isError"))
+        else:
+            content, is_error = "ran %s" % tool, False
+        emit({"type": "user", "session_id": self.session_id,
+              "message": {"role": "user",
+                          "content": [{"type": "tool_result", "tool_use_id": tool_use_id,
+                                       "content": content, "is_error": is_error}]}})
+        return True
 
     def rate_limit_event(self):
         if AUTH == "api":
@@ -257,6 +372,7 @@ class Fake:
 
     def turn(self, message):
         self.interrupted = False
+        self.denials = []
         blocks = message.get("message", {}).get("content", [])
         if isinstance(blocks, str):
             text = blocks
@@ -266,7 +382,7 @@ class Fake:
               "model": self.model, "cwd": os.getcwd(), "tools": [],
               "mcp_servers": [{"name": "harness", "status": "connected"}],
               "apiKeySource": "ANTHROPIC_API_KEY" if AUTH == "api" else "none",
-              "permissionMode": "bypassPermissions"})
+              "permissionMode": self.permission_mode})
         self.stream({"type": "message_start",
                      "message": {"id": "msg_1", "type": "message", "role": "assistant",
                                  "model": self.model, "content": [],
@@ -300,36 +416,16 @@ class Fake:
                                 text="Request was aborted")
                     return
                 self.queue.append(msg)
+        calls = []
         if "call echo" in text:
-            self.stream({"type": "content_block_start", "index": 0,
-                         "content_block": {"type": "tool_use", "id": "toolu_fake_1",
-                                           "name": "mcp__harness__echo", "input": {}}})
-            self.stream({"type": "content_block_delta", "index": 0,
-                         "delta": {"type": "input_json_delta",
-                                   "partial_json": "{\"text\":\"ping\"}"}})
-            self.stream({"type": "content_block_stop", "index": 0})
-            emit({"type": "assistant", "session_id": self.session_id,
-                  "message": {"id": "msg_1", "role": "assistant", "model": self.model,
-                              "content": [{"type": "tool_use", "id": "toolu_fake_1",
-                                           "name": "mcp__harness__echo",
-                                           "input": {"text": "ping"}}],
-                              "stop_reason": "tool_use", "usage": self.usage()}})
-            self.rpc_id += 1
-            reply = self.mcp({"jsonrpc": "2.0", "id": self.rpc_id, "method": "tools/call",
-                              "params": {"name": "mcp__harness__echo",
-                                         "arguments": {"text": "ping"}}})
-            if self.interrupted:
+            calls.append(("mcp__harness__echo", {"text": "ping"}, "toolu_fake_1"))
+        if "call bash" in text:
+            calls.append(("Bash", {"command": "ls"}, "toolu_fake_2"))
+        for tool, tool_input, tool_use_id in calls:
+            if not self.tool_use(tool, tool_input, tool_use_id):
                 self.result(subtype="error_during_execution", is_error=True,
                             text="Request was aborted")
                 return
-            content = reply.get("result", {}).get("content", [])
-            is_error = bool(reply.get("result", {}).get("isError"))
-            emit({"type": "user", "session_id": self.session_id,
-                  "message": {"role": "user",
-                              "content": [{"type": "tool_result",
-                                           "tool_use_id": "toolu_fake_1",
-                                           "content": content,
-                                           "is_error": is_error}]}})
         # Thinking block with empty text and only a signature, as the CLI sends.
         self.stream({"type": "content_block_start", "index": 1,
                      "content_block": {"type": "thinking", "thinking": "", "signature": ""}})

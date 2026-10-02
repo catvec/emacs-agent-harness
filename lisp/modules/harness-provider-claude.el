@@ -17,6 +17,14 @@
 ;;   JSON-RPC calls (initialize, tools/list, tools/call) inline.  A
 ;;   tools/call becomes a `tool-call' provider event whose `:respond'
 ;;   writes the result back, which is how the hosted loop continues.
+;; - The harness's permission system decides every tool call, so the
+;;   CLI only has to let the harness's tools through, never bypass its
+;;   checks: `harness-provider-claude-permission-args' fixes its
+;;   permission mode and allows `mcp__harness__*' by rule.  When a
+;;   permission prompt tool sends the CLI's prompts here instead
+;;   (`can_use_tool' control requests), the harness's tools are allowed
+;;   and any other refused.  A call the CLI refuses on its own
+;;   (`system/permission_denied') becomes a hint.
 ;; - Streaming deltas arrive as `stream_event' messages carrying
 ;;   Anthropic streaming events; `assistant' messages are authoritative
 ;;   and are used to remember tool_use ids; `result' ends the turn.
@@ -75,6 +83,30 @@
 (defcustom harness-provider-claude-extra-args nil
   "Extra command line arguments appended to every `claude' invocation."
   :type '(repeat string) :group 'harness)
+
+(defcustom harness-provider-claude-permission-args
+  '("--permission-mode" "default" "--allowedTools" "mcp__harness__*")
+  "Arguments that let the `claude' CLI run the harness's tools.
+The CLI gets no built-in tools, only the harness's own MCP tools, and
+the harness's permission system decides each of their calls, so the
+CLI only has to let them through.  The default fixes the CLI's
+permission mode, so no settings file starts it in plan or auto mode,
+and allows every harness tool by rule.
+
+Where managed settings make the CLI ignore such rules,
+\(\"--permission-mode\" \"default\" \"--permission-prompt-tool\" \"stdio\")
+has the CLI ask the harness instead, which lets its own tools through
+and refuses any other.  (\"--permission-mode\" \"bypassPermissions\")
+skips the CLI's checks altogether, as the harness once did; managed
+settings may forbid it."
+  :type '(choice (const :tag "Allow the harness's tools by rule"
+                        ("--permission-mode" "default" "--allowedTools" "mcp__harness__*"))
+                 (const :tag "Let the CLI ask the harness"
+                        ("--permission-mode" "default" "--permission-prompt-tool" "stdio"))
+                 (const :tag "Bypass the CLI's permission checks"
+                        ("--permission-mode" "bypassPermissions"))
+                 (repeat :tag "Other arguments" string))
+  :group 'harness)
 
 (defcustom harness-provider-claude-quota-ttl 60
   "Seconds after which the plan's quota report counts as stale.
@@ -260,9 +292,9 @@ FORK non-nil to fork RESUME into a new session."
          "--tools" ""
          "--strict-mcp-config"
          "--mcp-config" (harness-json-encode
-                         '(:mcpServers (:harness (:type "sdk" :name "harness"))))
-         "--permission-mode" "bypassPermissions"
-         "--model" model)
+                         '(:mcpServers (:harness (:type "sdk" :name "harness")))))
+   harness-provider-claude-permission-args
+   (list "--model" model)
    (when effort (list "--effort" effort))
    (when (and system (not (harness-string-blank-p system)))
      (list "--system-prompt" system))
@@ -470,6 +502,26 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
          (harness-provider-claude--control-response
           entry request-id '(:jsonrpc "2.0" :id 0 :result :empty)))))))
 
+(defun harness-provider-claude--can-use-tool (entry request-id request)
+  "Answer the CLI's permission prompt REQUEST under REQUEST-ID on ENTRY.
+The CLI asks when a permission prompt tool sends its prompts here (see
+`harness-provider-claude-permission-args').  The harness's own tools
+are let through, since the harness's permission system decides each
+call when it serves it; any other tool is refused."
+  (let* ((name (plist-get request :tool_name))
+         (ours (and (stringp name) (string-prefix-p harness-provider-claude-tool-prefix name)))
+         (answer (if ours
+                     ;; Parsing turned {} into nil, which would go back as null.
+                     (list :behavior "allow" :updatedInput (or (plist-get request :input) :empty))
+                   (list :behavior "deny"
+                         :message (format "The harness runs only its own tools, and %s is not one of them"
+                                          name)))))
+    (harness-log 'debug "provider-claude: %s %s for %s"
+                 (if ours "allowing" "refusing") name (harness-provider-claude-session-id entry))
+    (harness-provider-claude--send
+     entry (list :type "control_response"
+                 :response (list :subtype "success" :request_id request-id :response answer)))))
+
 (defun harness-provider-claude--handle-control (entry msg)
   "Handle a control_request MSG from the CLI on ENTRY."
   (let* ((request-id (plist-get msg :request_id))
@@ -481,6 +533,7 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
            (harness-provider-claude--handle-mcp entry request-id (plist-get request :message))
          (harness-provider-claude--control-error
           entry request-id (format "unknown MCP server %s" (plist-get request :server_name)))))
+      ("can_use_tool" (harness-provider-claude--can-use-tool entry request-id request))
       (_
        (harness-log 'warn "provider-claude: unsupported control request %s" subtype)
        (harness-provider-claude--control-error
@@ -551,6 +604,21 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
            entry (list :type 'tool-result :id id
                        :content (harness-provider-claude--result-text (plist-get block :content))
                        :is-error (harness-json-true-p (plist-get block :is_error)))))))))
+
+(defun harness-provider-claude--handle-denial (entry msg)
+  "Report that the CLI refused to run a harness tool, from the system MSG on ENTRY.
+The harness never hears of such a call, so the user learns of it here."
+  (let ((name (plist-get msg :tool_name))
+        (why (or (plist-get msg :message) "permission denied")))
+    (when (and (stringp name) (string-prefix-p harness-provider-claude-tool-prefix name))
+      (harness-log 'warn "provider-claude: Claude Code denied %s for %s: %s"
+                   name (harness-provider-claude-session-id entry) why)
+      (harness-provider-claude--emit
+       entry (list :type 'hint
+                   :text (format (concat "Claude Code refused to run %s; its permission rules must let"
+                                         " the harness's tools through (see the setting"
+                                         " harness-provider-claude-permission-args).  It said: %s")
+                                 (harness-provider-claude--strip-prefix name) why))))))
 
 ;;;; Account, billing and quota
 
@@ -1031,6 +1099,7 @@ its usage report has arrived."
       ("system"
        (pcase (plist-get msg :subtype)
          ("init" (harness-provider-claude--handle-init entry msg))
+         ("permission_denied" (harness-provider-claude--handle-denial entry msg))
          ("compact_boundary"
           (harness-provider-claude--emit
            entry '(:type hint :text "Context compacted by Claude Code")))
