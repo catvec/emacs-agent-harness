@@ -506,7 +506,7 @@ told from, like a worktree git lost track of, still leads back."
     (with-current-buffer board
       (goto-char harness-compose-end)
       (insert "first line\nsecond line")
-      (let ((prompt (save-excursion (goto-char harness-compose-start) (line-beginning-position))))
+      (let ((prompt (save-excursion (goto-char harness-compose-start) (pos-bol))))
         (should-not (get-char-property prompt 'line-prefix))
         ;; The box's lines, down to an empty last one.
         (dolist (pos (list harness-compose-start (1- harness-compose-end) harness-compose-end))
@@ -519,6 +519,11 @@ told from, like a worktree git lost track of, still leads back."
       (harness-ui-tasks--render-tail)
       (should (equal "xfirst line\nsecond line" (harness-compose-text)))
       (should (equal "  " (get-char-property (1- harness-compose-end) 'line-prefix))))))
+
+(ert-deftest harness-ui-tasks-compose-c-a-c-k-clears ()
+  "C-a stops after the prompt, so C-a C-k clears the box."
+  (harness-ui-tasks-test-with
+    (harness-test-compose-c-a-c-k board)))
 
 (ert-deftest harness-ui-tasks-tail-fits-the-window ()
   "The lines above the box fit the window, also after it narrows, leaving the box alone."
