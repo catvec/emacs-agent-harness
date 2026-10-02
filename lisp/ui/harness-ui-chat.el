@@ -609,12 +609,26 @@ of an ask_user) are left out."
          (body (harness-chat--foldable (harness-chat--face (harness-chat--plain content) 'harness-thinking-face))))
     (harness-chat--margin (concat header body))))
 
+(defun harness-chat--outcome-status (outcome &optional count)
+  "Return the status text of a tool call that ended with OUTCOME.
+OUTCOME is `failed', the call ran and reported an error, or `denied',
+the permission system refused it, so it never ran.  With COUNT, say
+how many calls ended so, as a group summary does."
+  (let ((denied (eq outcome 'denied)))
+    (propertize (format "%s %s%s" (if denied "\N{U+2298}" "\N{U+2717}")
+                        (if count (format "%d " count) "") outcome)
+                'face (if denied 'warning 'error)
+                'help-echo (if denied "The permission system refused this call, so it never ran"
+                             "The tool ran and reported an error"))))
+
 (defun harness-chat--tool-status (result)
-  "Return the status string for a tool call with RESULT (a node or nil)."
+  "Return the status string for a tool call with RESULT (a node or nil).
+A call that was refused reads apart from one that ran and failed."
   (cond ((and (null result) (member (plist-get (harness-chat--session) :status) '("running" "blocked")))
          (propertize "⋯ running" 'face 'harness-dim-face))
         ((null result) (propertize "– no result" 'face 'harness-dim-face))
-        ((harness-json-true-p (plist-get result :is-error)) (propertize "✗ failed" 'face 'error))
+        ((memq (harness-ui-tool-outcome result) '(failed denied))
+         (harness-chat--outcome-status (harness-ui-tool-outcome result)))
         (t (propertize "✓" 'face 'success))))
 
 (defun harness-chat--render-tool (block)
@@ -628,8 +642,11 @@ of an ask_user) are left out."
                   "result of an earlier tool call"))
          (input (and call-only (plist-get node :input)))
          (output (or (plist-get result :output) ""))
-         (error-p (and result (harness-json-true-p (plist-get result :is-error))))
-         (bg (if error-p 'harness-tool-error-face 'harness-tool-face))
+         (outcome (harness-ui-tool-outcome result))
+         (bg (pcase outcome
+               ('denied 'harness-tool-denied-face)
+               ('failed 'harness-tool-error-face)
+               (_ 'harness-tool-face)))
          (indent (propertize "  " 'face bg))
          (limit harness-chat-tool-output-limit)
          (long (and (not (harness-chat-block-show-all block)) (> (length output) limit)))
@@ -649,7 +666,11 @@ of an ask_user) are left out."
            (cond
             ((null result) "")
             ((string-empty-p output) (propertize "  (no output)\n" 'face 'harness-dim-face))
-            (t (concat (propertize (format "  output (%s chars)\n" (harness-format-tokens (length output)))
+            ;; A refused call never ran: its text is the permission
+            ;; system's reason, not output.
+            (t (concat (propertize (if (eq outcome 'denied)
+                                       "  reason\n"
+                                     (format "  output (%s chars)\n" (harness-format-tokens (length output))))
                                    'face 'harness-label-face)
                        (propertize (harness-chat--ensure-newline shown) 'face 'harness-chat-output-face
                                    'line-prefix indent 'wrap-prefix indent)
@@ -713,6 +734,18 @@ down with it: the transcript below it and the compose box still draw."
              (propertize (format "(shown unformatted: rendering failed with %s)\n" (error-message-string err))
                          'face 'harness-dim-face)))))
 
+(defun harness-chat--group-outcomes (group)
+  "Return the status text counting GROUP's failed and denied tool calls.
+Empty when none failed or was denied; a collapsed group would hide them."
+  (let ((failed 0) (denied 0))
+    (dolist (nid (harness-chat-group-members group))
+      (let ((b (gethash nid harness-chat--blocks)))
+        (pcase (and b (harness-ui-tool-outcome (harness-chat-block-result b)))
+          ('failed (cl-incf failed))
+          ('denied (cl-incf denied)))))
+    (concat (if (> failed 0) (concat "  " (harness-chat--outcome-status 'failed failed)) "")
+            (if (> denied 0) (concat "  " (harness-chat--outcome-status 'denied denied)) ""))))
+
 (defun harness-chat--render-group (group)
   "Return the body of the summary block of GROUP."
   (let* ((gid (harness-chat-group-id group))
@@ -738,6 +771,7 @@ down with it: the transcript below it and the compose box still draw."
                                  (mapconcat (lambda (c) (if (> (cdr c) 1) (format "%s ×%d" (car c) (cdr c)) (car c)))
                                             counts ", "))
                          'face 'harness-summary-face)
+             (harness-chat--group-outcomes group)
              "  "
              (harness-chat--button (if (harness-chat-group-expanded group) "[collapse]" "[expand]")
                                    (lambda () (harness-chat-toggle-group gid))
@@ -985,6 +1019,14 @@ draws it, so carrying that over would keep drawing the old image."
                                   (1- (marker-position (harness-chat-group-end group)))
                                   (substring text 0 -1))))
 
+(defun harness-chat--refresh-group-of (block)
+  "Render again the summary of the group BLOCK is folded into, if any.
+The summary counts the group's failed and denied calls, so a result
+arriving for one of them changes it."
+  (when-let* ((gid (harness-chat-block-group block))
+              (group (gethash gid harness-chat--groups)))
+    (harness-chat--update-group-summary group)))
+
 (defun harness-chat--extend-group (group id)
   "Add block ID to GROUP, which ends right before it."
   (let ((block (gethash id harness-chat--blocks))
@@ -1084,11 +1126,13 @@ draws it, so carrying that over would keep drawing the old image."
       (setf (harness-chat-block-result call) node)
       (setq harness-chat--unfinished (delete (harness-chat-block-id call) harness-chat--unfinished))
       (puthash id call harness-chat--blocks)
-      (harness-chat--rerender call))
+      (harness-chat--rerender call)
+      (harness-chat--refresh-group-of call))
      ;; An update of a result already merged into its call block.
      ((and block (not (equal (harness-chat-block-id block) id)))
       (setf (harness-chat-block-result block) node)
-      (harness-chat--rerender block))
+      (harness-chat--rerender block)
+      (harness-chat--refresh-group-of block))
      (block
       (setf (harness-chat-block-node block) node
             (harness-chat-block-content block) (plist-get node :content)

@@ -184,5 +184,21 @@
           (should (equal n2 (plist-get fork :fork-node))))
         (harness-test-wait (lambda () (equal n1 (plist-get (harness-call 'session/get sid) :head))) 5 "head restored")))))
 
+(ert-deftest harness-ui-tree-tells-denied-results-from-failed-ones ()
+  ;; A result the permission system refused reads apart from a failure.
+  (harness-ui-tree-test-with
+    (let ((denied '(:kind "tool-result" :output "Denied: the user said no" :is-error t :meta (:denied t)))
+          (failed '(:kind "tool-result" :output "exit 1" :is-error t :meta (:denied nil)))
+          (ok '(:kind "tool-result" :output "fine" :is-error :false)))
+      (should (equal "\N{U+2298} Denied: the user said no" (harness-ui-tree--excerpt denied)))
+      (should (equal "\N{U+2717} exit 1" (harness-ui-tree--excerpt failed)))
+      (should (equal "\N{U+2192} fine" (harness-ui-tree--excerpt ok)))
+      (should (eq 'warning (harness-ui-tree--excerpt-face denied)))
+      (should (eq 'error (harness-ui-tree--excerpt-face failed)))
+      (should (eq 'harness-dim-face (harness-ui-tree--excerpt-face ok)))
+      (should (eq 'harness-tool-denied-face (get-text-property 0 'face (harness-ui-tree--expansion-text denied))))
+      (should (eq 'harness-tool-error-face (get-text-property 0 'face (harness-ui-tree--expansion-text failed))))
+      (should (eq 'harness-tool-face (get-text-property 0 'face (harness-ui-tree--expansion-text ok)))))))
+
 (provide 'harness-ui-tree-test)
 ;;; harness-ui-tree-test.el ends here
