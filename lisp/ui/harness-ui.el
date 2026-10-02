@@ -1428,6 +1428,9 @@ leaves the buffer's commands out, never the whole menu."
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
     ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
+    ("P" "Remote control" harness-remote-control
+     :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
+     :inapt-if harness-corporate-p)
     ("R" "Reload harness" harness-reload)
     ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes

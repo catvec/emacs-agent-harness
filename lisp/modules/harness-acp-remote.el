@@ -1018,6 +1018,12 @@ so does a harness that is not serving other devices."
           :expires expires
           :lifetime harness-acp-remote-code-lifetime)))
 
+(harness-defmethod acp/remote-forget-code ()
+  "Drop the pairing code in force: its link pairs no device any more.
+The remote control page calls it when the QR code is hidden.  Return t."
+  (setq harness-acp-remote--code nil)
+  t)
+
 (harness-defmethod acp/remote-revoke (id)
   "Unpair the device ID and close its connections.  Return t."
   (let ((device (cl-find id harness-acp-remote--devices
