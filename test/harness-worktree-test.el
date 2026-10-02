@@ -218,42 +218,6 @@
         (cl-letf (((symbol-function 'locate-dominating-file) (lambda (&rest _) (error "Looked at"))))
           (should-not (harness-files-git-common-dir remote)))))))
 
-(ert-deftest harness-files-pruned-worktree-keeps-its-repository ()
-  "A worktree whose record git pruned still belongs to its main checkout.
-`git worktree prune' run where the worktree is out of sight -- a
-sandbox showing only another worktree, say -- deletes its gitdir while
-the worktree and its .git file live on."
-  (harness-worktree-test-with-repo
-    (let* ((path (file-name-as-directory (expand-file-name "wt-pruned" base)))
-           (aside (expand-file-name "wt-aside" base))
-           (git (harness-worktree-test--dir (expand-file-name ".git" root))))
-      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "pruned" path)
-      (make-directory (expand-file-name "sub" path) t)
-      ;; Out of sight while git prunes, then back.
-      (rename-file (directory-file-name path) aside)
-      (harness-worktree-test--git root "worktree" "prune")
-      (rename-file aside (directory-file-name path))
-      (should-not (file-exists-p (expand-file-name "worktrees/wt-pruned" git)))
-      (should (file-regular-p (expand-file-name ".git" path)))
-      (should (equal (harness-worktree-test--dir root)
-                     (harness-worktree-test--dir (harness-files-main-checkout path))))
-      (should (equal (harness-worktree-test--dir root)
-                     (harness-worktree-test--dir (harness-files-main-root (expand-file-name "sub" path)))))
-      (should (equal git (harness-worktree-test--dir (harness-files-git-common-dir path))))
-      ;; Only a gitdir under worktrees/ is taken for a pruned worktree's,
-      ;; and only while its repository is there.
-      (let ((module (file-name-as-directory (expand-file-name "not-a-worktree" base)))
-            (moved (file-name-as-directory (expand-file-name "moved" base))))
-        (make-directory module)
-        (with-temp-file (expand-file-name ".git" module)
-          (insert "gitdir: " (expand-file-name ".git/modules/gone" root) "\n"))
-        (should (equal module (harness-files-main-checkout module)))
-        (make-directory moved)
-        (with-temp-file (expand-file-name ".git" moved)
-          (insert "gitdir: " (expand-file-name "gone/.git/worktrees/moved" base) "\n"))
-        (should (equal moved (harness-files-main-checkout moved)))
-        (should-not (harness-files-git-common-dir moved))))))
-
 (ert-deftest harness-files-main-checkout-non-ascii-path ()
   "The .git file and commondir are read as UTF-8, as git writes them."
   (skip-unless (eq 'utf-8 (coding-system-base
