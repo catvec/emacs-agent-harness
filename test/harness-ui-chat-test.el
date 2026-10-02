@@ -921,6 +921,11 @@
             (should (= 0 (window-hscroll side))))
         (delete-window side)))))
 
+(ert-deftest harness-ui-chat-compose-c-a-c-k-clears ()
+  "C-a stops after the prompt, so C-a C-k clears the box."
+  (harness-ui-chat-test-with
+    (harness-test-compose-c-a-c-k (harness-ui-chat-test-open (harness-ui-chat-test-session)))))
+
 (ert-deftest harness-ui-chat-box-stays-at-the-bottom ()
   "A box grown past the window keeps its last line above the window's spare last line."
   (harness-ui-chat-test-with

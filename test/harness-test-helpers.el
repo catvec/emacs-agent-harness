@@ -4,7 +4,8 @@
 
 ;; Loaded by scripts/test.sh before every suite.  Provides isolation
 ;; (a throwaway state directory, a fresh bus), waiting primitives for
-;; asynchronous code, and the integration-test switch.
+;; asynchronous code, the integration-test switch, and checks shared by
+;; the buffers that host a compose box (chat and the task board).
 
 ;;; Code:
 
@@ -125,6 +126,52 @@ and reverts buffers on
           (when (equal (plist-get params :event) "tools/file-written")
             (harness-client-tools-revert-visiting (car (plist-get params :args))))))))
     conn))
+
+;;;; The compose box, in each buffer that hosts it
+
+(defvar harness-compose-start)
+(defvar harness-compose-end)
+(declare-function harness-compose-set "harness-ui-compose")
+(declare-function harness-compose-text "harness-ui-compose")
+
+(defun harness-test-compose-c-a-c-k (buffer)
+  "Check C-a and C-k, typed as keys, in BUFFER's compose box.
+C-a stops after the read-only prompt, also when pressed again, so
+C-a C-k clears a one-line box.  On a later line of the box C-a goes
+to the start of that line, as anywhere else; on the first line C-a
+C-k clears that line only."
+  (save-window-excursion
+    ;; Keys reach the buffer of the selected window.
+    (set-window-buffer nil buffer)
+    (with-current-buffer buffer
+      (cl-flet ((keys (k) (execute-kbd-macro (kbd k))))
+        (should-not inhibit-field-text-motion)
+        (harness-compose-set "a message to drop")
+        (goto-char harness-compose-end)
+        (keys "C-a C-k")
+        (should (equal "" (harness-compose-text)))
+        (should (= harness-compose-start (point)))
+        ;; The prompt stays, and the box takes typing again.
+        (should (equal "\N{U+276F} " (buffer-substring-no-properties (- harness-compose-start 2) harness-compose-start)))
+        (keys "hi")
+        (should (equal "hi" (harness-compose-text)))
+        (keys "C-a")
+        (should (= harness-compose-start (point)))
+        (keys "C-a")
+        (should (= harness-compose-start (point)))
+        ;; Doom's C-a finds the line's start with `line-beginning-position'.
+        (should (= harness-compose-start (save-excursion (goto-char harness-compose-end) (line-beginning-position))))
+        ;; Several lines: C-a on a later one goes to its start.
+        (harness-compose-set "first line\nsecond line")
+        (goto-char harness-compose-end)
+        (keys "C-a")
+        (should (looking-at-p "second line"))
+        (keys "C-a")
+        (should (looking-at-p "second line"))
+        (goto-char (+ harness-compose-start 5))
+        (keys "C-a C-k")
+        (should (= harness-compose-start (point)))
+        (should (equal "\nsecond line" (harness-compose-text)))))))
 
 (provide 'harness-test-helpers)
 ;;; harness-test-helpers.el ends here

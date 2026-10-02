@@ -9,6 +9,8 @@
 ;;
 ;;   - multi-line editing: RET and C-j insert a newline, typing outside
 ;;     the box jumps into it, a placeholder shows while it is empty;
+;;   - a prompt that is a field of its own: C-a stops after it, as in
+;;     the minibuffer, so C-a C-k clears the box's first line;
 ;;   - @file completion over the project's files (each completed file
 ;;     becomes an attachment) and /skill completion at its start;
 ;;   - attachments: C-c C-a picks a file, C-c C-v pastes the clipboard
@@ -147,8 +149,13 @@ HELP is the prompt's tooltip.  Point ends after the box's final newline."
     (when ov (delete-overlay ov)))
   (when text (setq harness-compose--text text))
   (let ((label-start (point)))
+    ;; The prompt is a field of its own, like the minibuffer's: C-a, and
+    ;; whatever finds the line's start with `line-beginning-position',
+    ;; stops after it, so C-a C-k clears the line rather than running
+    ;; into the read-only prompt.  Rear-nonsticky, so text typed after
+    ;; the prompt takes neither its field nor its read-only.
     (insert (propertize "❯ " 'face '(harness-dim-face harness-compose-face) 'help-echo help
-                        'read-only t 'rear-nonsticky t))
+                        'read-only t 'rear-nonsticky t 'field 'harness-compose-prompt))
     (setq harness-compose-start (copy-marker (point)))
     (insert harness-compose--text)
     (let ((end (point)))
