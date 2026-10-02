@@ -1304,10 +1304,15 @@ in the minibuffer).  The header counts the tasks to review, and
 (`harness-ui-tasks-notify-review`).  RET opens the session, and
 `C-c a a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
-the main checkout's board (`harness-files-main-root`).  The
-session setting commands change the task at point, or from the compose
-box the settings the next task starts with (shown as buttons under the
-New task label).  A
+the main checkout's board (`harness-files-main-root`).  Redraws, after
+every change and on every tick of the clock, leave point and each
+window where they were: on the same line of the same card (its buttons
+are on the second), on the same button, on the same line above the
+box; never on another button.  Any click on a button pushes it, a slow
+one too, rather than reaching the board's own click, which opens the
+session.  The session setting commands change the task at point, or
+from the compose box the settings the next task starts with (shown as
+buttons under the New task label).  A
 Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
 or go to the backlog, written up by an agent and
