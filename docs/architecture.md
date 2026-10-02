@@ -137,7 +137,8 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :created FLOAT  :updated FLOAT
  :usage (:input N :output N :cache-read N :cache-write N :cost F :list-cost F :context N :turns N
          :billing api|subscription|extra-usage :plan "max")    ; billing and plan of the latest call
- :context-window N
+ :context-window N                  ; in effect: the override, else the model's
+ :context-window-override nil|N     ; a window set for the session
  :budget nil|(:amount F :hard BOOL)
  :head "node-id"
  :queue ((:id "q1" :text "…" :attachments (ATTACHMENT…)) …)
@@ -152,6 +153,13 @@ incl. cache); the UI colours it against `:context-window`.  `:cost`
 is what the session's calls were billed and `:list-cost` the same calls
 at API prices (they differ when a subscription paid); see "Usage
 record".
+
+`:context-window` is looked up in the model catalogue (`provider/model`)
+each time the session is described, so it follows the catalogue; only
+`:context-window-override` is stored.  A copy of the catalogue's window
+would go stale when the catalogue changes, or keep the 128000 stand-in
+given for a model whose provider has not answered yet.  When the
+catalogue changes, the sessions whose window moved get `session/changed`.
 
 ### Node (conversation DAG)
 
@@ -293,13 +301,16 @@ requests are not restored: the turn that would read their answers is
 gone.
 
 - `session/create &rest PLIST` — `:cwd` required; `:name :model
-  :permission-mode :thinking :kind :parent-id :host :worktree`.  Fills
+  :permission-mode :thinking :kind :parent-id :host :worktree`, and
+  `:context-window` to set the session's own window.  Fills
   project, defaults from `config/get`.  → session.  Event `session/created`.
 - `session/get ID`, `session/list &optional FILTER` (`:project :status
   :kind :parent-id :active`), `session/delete ID`.
 - `session/update ID &rest PLIST` — settings and name; appends a `hint`
   node ("model → …") and persists the setting through `config/set` when
-  `:persist t`.  Event `session/updated ID CHANGES`.
+  `:persist t`.  `:context-window N` sets the session's own window, nil
+  its model's again; a new `:model` drops a window set for the old one
+  unless PLIST sets one too.  Event `session/updated ID CHANGES`.
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
 - `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
   (closed: still listed and readable; the next message sent to it resumes it).
@@ -355,6 +366,17 @@ MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
 :context-window N :max-output N :input-modalities ("text" "image")
 :thinking-levels (…) :pricing (:input F :output F :cache-read F :cache-write F)
 :capabilities (…))`.  Pricing is USD per million tokens.
+
+The catalogue is cached per provider.  Defining a provider again, as
+every `harness-reload` does, forgets that provider's models and no
+other's.  A provider whose models are not cached is asked by the first
+`provider/model` that needs one: a static catalogue answers at once and
+is cached before the call returns.  Until a slower provider answers,
+and for a model its provider does not list, a stand-in MODEL with a
+128000-token window is returned.  A failed listing is cached as empty
+(or keeps the models listed before), so lookups do not ask again before
+a refresh (`provider/models t`).  `provider/models-updated` follows
+every listing that is cached.
 
 Capabilities: `:hosted-loop` (provider runs the tool loop and keeps the
 history; the agent only sends new user content), `:fork`, `:resume`,

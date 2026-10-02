@@ -327,6 +327,129 @@ when it is forked to a model of a provider that cannot."
                                  (plist-get (car (plist-get (car msgs) :content)) :text)))
         (should (= 2 (length (plist-get (car msgs) :content))))))))
 
+;;;; Context windows
+
+(defvar harness-providers)
+(defvar harness-session--window-slot-holds-overrides)
+(declare-function harness-define-provider "harness-provider")
+(declare-function harness-provider--forget "harness-provider")
+
+(defun harness-session-test-provider (windows)
+  "Define provider `test-win', listing at once a model per (NAME . WINDOW) in WINDOWS."
+  (harness-define-provider 'test-win
+    :complete #'ignore
+    :models (lambda ()
+              (harness-resolved (mapcar (lambda (w) (list :name (car w) :context-window (cdr w)))
+                                        windows)))))
+
+(defun harness-session-test-drop-provider ()
+  "Remove the provider `harness-session-test-provider' defined."
+  (remhash 'test-win harness-providers)
+  (harness-provider--forget 'test-win))
+
+(defun harness-session-test-window (id)
+  "Return the context window session ID shows."
+  (plist-get (harness-call 'session/get id) :context-window))
+
+(ert-deftest harness-session-window-follows-the-model-catalogue ()
+  "A session's context window is its model's, as the catalogue says now.
+Sessions once kept the window the catalogue gave when they were
+created, the 128000 stand-in when it had not listed their model yet.
+When the catalogue changes, the sessions whose window moved are
+announced, so the UI does not keep showing the old one."
+  (harness-session-test-with
+    (unwind-protect
+        (let ((changed nil) (updated nil))
+          (harness-session-test-provider '(("big" . 1000000) ("small" . 200000)))
+          (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "test-win:big")
+                               :id)))
+            (should (= 1000000 (harness-session-test-window id)))
+            (should-not (plist-get (harness-call 'session/get id) :context-window-override))
+            (harness-call 'session/update id :model "test-win:small" :silent t)
+            (should (= 200000 (harness-session-test-window id)))
+            (harness-on 'session/changed (lambda (sid s) (push (cons sid (plist-get s :context-window)) changed)))
+            (harness-on 'provider/models-updated (lambda (_) (setq updated t)))
+            ;; The catalogue changes (a reload, say).
+            (harness-session-test-provider '(("big" . 1000000) ("small" . 400000)))
+            (should (= 400000 (harness-session-test-window id)))
+            (harness-test-wait (lambda () (assoc id changed)) 2 "the session to be announced")
+            (should (equal (list (cons id 400000)) changed))
+            ;; It changes again, but not for this session: nothing is announced.
+            (setq changed nil updated nil)
+            (harness-session-test-provider '(("big" . 900000) ("small" . 400000)))
+            (harness-call 'provider/models)
+            (harness-test-wait (lambda () updated) 2 "provider/models-updated")
+            (should-not changed)))
+      (harness-session-test-drop-provider))))
+
+(ert-deftest harness-session-window-set-for-the-session ()
+  "A window set for a session is kept across restarts, until the model changes."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("big" . 1000000) ("small" . 200000)))
+          (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                             :model "test-win:big" :context-window 8000)
+                               :id)))
+            (should (= 8000 (harness-session-test-window id)))
+            (harness-session-flush)
+            (clrhash harness-sessions)
+            (harness-session--load-all)
+            (should (= 8000 (harness-session-test-window id)))
+            (should (= 8000 (plist-get (harness-call 'session/get id) :context-window-override)))
+            ;; A new model brings its own window, unless one is set with it.
+            (harness-call 'session/update id :model "test-win:small" :silent t)
+            (should (= 200000 (harness-session-test-window id)))
+            (harness-call 'session/update id :context-window 50000 :model "test-win:big" :silent t)
+            (should (= 50000 (harness-session-test-window id)))
+            ;; Unset, the model's applies again.
+            (harness-call 'session/update id :context-window nil :silent t)
+            (should (= 1000000 (harness-session-test-window id)))))
+      (harness-session-test-drop-provider))))
+
+(ert-deftest harness-session-record-window-copy-ignored-on-load ()
+  "Records used to keep `:context-window', a copy of the model's window.
+That copy may be the 128000 stand-in; a session loads with its model's
+window as the catalogue gives it now."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("big" . 1000000)))
+          (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "test-win:big")
+                                :id))
+                 (name (format "sessions/%s.json" id)))
+            ;; The record as it used to be written.
+            (harness-call 'store/save name (plist-put (harness-plist-remove (harness-call 'store/load name)
+                                                                            :context-window-override)
+                                                      :context-window 128000))
+            (clrhash harness-sessions)
+            (harness-session--load-all)
+            (should (= 1000000 (harness-session-test-window id)))
+            (should-not (plist-get (harness-call 'session/get id) :context-window-override))))
+      (harness-session-test-drop-provider))))
+
+(ert-deftest harness-session-reload-drops-window-copies-once ()
+  "Loaded into a running harness, this version drops the window copies
+that the sessions loaded by the old one hold; later loads keep windows
+set for sessions."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("big" . 1000000)))
+          (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "test-win:big")
+                                :id))
+                 (s (gethash id harness-sessions)))
+            ;; What the old version left in the slot.
+            (aset s (cl-struct-slot-offset 'harness-session 'context-window) 128000)
+            (should (= 128000 (harness-session-test-window id)))
+            (let ((harness-session--window-slot-holds-overrides nil))
+              (harness-test-load-module 'session))
+            (should (= 1000000 (harness-session-test-window id)))
+            (harness-call 'session/update id :context-window 9000 :silent t)
+            (harness-test-load-module 'session)
+            (should (= 9000 (harness-session-test-window id)))))
+      (harness-session-test-drop-provider))))
+
 (ert-deftest harness-session-delete-and-events ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))

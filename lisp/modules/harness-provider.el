@@ -7,6 +7,13 @@
 ;; the model catalogue and the small amount of glue that keeps every
 ;; provider honest: a request always ends with exactly one `done'
 ;; event, and callbacks never see each other's errors.
+;;
+;; The catalogue is cached per provider.  Defining a provider again, as
+;; every reload does, forgets that provider's models and no other's,
+;; and the harness asks for them again on its own: `provider/model'
+;; asks a provider whose models are not cached.  A static catalogue
+;; (Claude Code's, say) answers at once, so its models are always
+;; found; nothing waits for a client to ask `provider/models' first.
 
 ;;; Code:
 
@@ -24,6 +31,47 @@
 (defvar harness-providers (make-hash-table :test 'eq)
   "Provider id -> `harness-provider'.")
 
+;;;; Model catalogue cache
+
+(defvar harness-provider--models nil
+  "The cached models of every registered provider, in one list.")
+
+(defvar harness-provider--models-promise nil "In-flight refresh, if any.")
+
+(defvar harness-provider--models-by-provider (make-hash-table :test 'eq)
+  "Provider id -> its normalised model list, filled as each provider answers.
+A provider whose listing failed maps to nil; one not asked yet is absent.")
+
+(defvar harness-provider--model-index (make-hash-table :test 'equal)
+  "Model id -> its plist in `harness-provider--models'.")
+
+(defvar harness-provider--fetching (make-hash-table :test 'eq)
+  "Provider id -> promise of its model listing, while one is in flight.")
+
+(defun harness-provider--rebuild-cache ()
+  "Rebuild `harness-provider--models' and its index from the cached listings."
+  (let (all)
+    (maphash (lambda (id models)
+               (when (gethash id harness-providers)
+                 (setq all (append all models))))
+             harness-provider--models-by-provider)
+    (setq harness-provider--models all)
+    (clrhash harness-provider--model-index)
+    (dolist (m all)
+      (let ((id (plist-get m :id)))
+        (unless (gethash id harness-provider--model-index)
+          (puthash id m harness-provider--model-index))))))
+
+(defun harness-provider--listed-p (id)
+  "Non-nil when the models of provider ID are cached; a failed listing counts."
+  (not (eq (gethash id harness-provider--models-by-provider 'unlisted) 'unlisted)))
+
+(defun harness-provider--forget (id)
+  "Forget the cached models of provider ID, so the next lookup asks it again."
+  (remhash id harness-provider--models-by-provider)
+  (remhash id harness-provider--fetching)
+  (harness-provider--rebuild-cache))
+
 (cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities)
   "Register provider ID.
 LABEL and DOC describe it.  MODELS is a function returning a promise of
@@ -31,15 +79,15 @@ model plists.  COMPLETE takes a request plist and returns a handle
 plist with `:cancel'.  FORK, when given, takes (MODEL-ID STATE) and
 returns a promise of a new provider state.  QUOTA takes an optional
 REFRESH flag and returns a promise of billing and quota information
-\(see `provider/quota').  CAPABILITIES is the static capability plist."
+\(see `provider/quota').  CAPABILITIES is the static capability plist.
+Defining ID again replaces it and forgets the models it listed, which
+it is asked for again when needed; other providers' models stay cached."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
                                      :capabilities capabilities)
            harness-providers)
-  (setq harness-provider--models nil)
-  (when (boundp 'harness-provider--models-by-provider)
-    (remhash id harness-provider--models-by-provider))
+  (harness-provider--forget id)
   id)
 
 (defun harness-provider-get (id)
@@ -51,9 +99,6 @@ REFRESH flag and returns a promise of billing and quota information
   (if (and model-id (string-match "\\`\\([a-z0-9_-]+\\):\\(.+\\)\\'" model-id))
       (cons (intern (match-string 1 model-id)) (match-string 2 model-id))
     (cons nil model-id)))
-
-(defvar harness-provider--models nil "Cached list of model plists, or nil.")
-(defvar harness-provider--models-promise nil "In-flight refresh, if any.")
 
 (harness-defmethod provider/list ()
   "Return registered providers as (:id :label :doc :capabilities) plists."
@@ -81,13 +126,59 @@ REFRESH flag and returns a promise of billing and quota information
                                                             (plist-get m :capabilities))))
     m))
 
-(defvar harness-provider--models-by-provider (make-hash-table :test 'eq)
-  "Provider id -> its normalised model list, filled as each provider answers.")
+(defun harness-provider--settle (p listing &optional later)
+  "Cache what LISTING, the settled promise of provider P's models, holds.
+Nothing is cached when P was defined again or removed meanwhile.  A
+failed listing is logged; it leaves models P listed before in place,
+else caches P as listing nothing, so lookups do not ask it again
+before a refresh.  Every change is announced as
+`provider/models-updated', from the command loop when LATER is
+non-nil.  Return non-nil when models were cached."
+  (let* ((id (harness-provider-id p))
+         (current (eq (gethash id harness-providers) p))
+         (ok (eq (harness-promise-state listing) 'resolved))
+         (value (harness-promise-value listing)))
+    (when current
+      (remhash id harness-provider--fetching))
+    (unless ok
+      (harness-log 'warn "provider %s: listing models failed: %s" id (harness-error-message value)))
+    (when (and current (or ok (not (harness-provider--listed-p id))))
+      (puthash id (and ok (mapcar (lambda (m) (harness-provider--normalise-model p m)) value))
+               harness-provider--models-by-provider)
+      (harness-provider--rebuild-cache)
+      (if later
+          (harness-emit-later 'provider/models-updated harness-provider--models)
+        (harness-emit 'provider/models-updated harness-provider--models)))
+    (and current ok)))
 
-(defun harness-provider--rebuild-cache ()
-  (let (all)
-    (maphash (lambda (_ models) (setq all (append all models))) harness-provider--models-by-provider)
-    (setq harness-provider--models all)))
+(defun harness-provider--fetch (p &optional lookup)
+  "Ask provider P for its models; return a promise settled once they are cached.
+A listing still in flight is shared, not asked for again.  A provider
+that lists its models at once (a static catalogue) has them cached
+before this returns.  The promise resolves to non-nil when they were
+cached; see `harness-provider--settle'.  LOOKUP non-nil means a lookup
+asks: one answered at once is then announced from the command loop, so
+the lookup calls no subscriber."
+  (let ((id (harness-provider-id p)))
+    (or (gethash id harness-provider--fetching)
+        (let ((listing (condition-case err
+                           (harness-as-promise (funcall (harness-provider-models-fn p)))
+                         (error (harness-rejected err)))))
+          (if (harness-promise-settled-p listing)
+              (harness-resolved (harness-provider--settle p listing lookup))
+            (puthash id (harness-then listing
+                                      (lambda (_) (harness-provider--settle p listing))
+                                      (lambda (_) (harness-provider--settle p listing)))
+                     harness-provider--fetching))))))
+
+(defun harness-provider--complete-p ()
+  "Non-nil when every registered provider that lists models has them cached."
+  (catch 'incomplete
+    (maphash (lambda (id p)
+               (when (and (harness-provider-models-fn p) (not (harness-provider--listed-p id)))
+                 (throw 'incomplete nil)))
+             harness-providers)
+    t))
 
 (harness-defmethod provider/models (&optional refresh)
   "Return a promise of every model from every provider.
@@ -95,8 +186,7 @@ Results are cached per provider as soon as that provider answers, so a
 slow endpoint never hides a fast one; REFRESH forces a new query.  A
 provider that fails is logged and skipped."
   (cond
-   ((and harness-provider--models (not refresh)
-         (= (hash-table-count harness-provider--models-by-provider) (hash-table-count harness-providers)))
+   ((and (not refresh) (harness-provider--complete-p))
     (harness-resolved harness-provider--models))
    ((and harness-provider--models-promise (not refresh)
          (not (harness-promise-settled-p harness-provider--models-promise)))
@@ -104,38 +194,33 @@ provider that fails is logged and skipped."
    (t
     (let (promises)
       (maphash (lambda (id p)
-                 (when (harness-provider-models-fn p)
-                   (push (harness-then
-                          (condition-case err
-                              (harness-as-promise (funcall (harness-provider-models-fn p)))
-                            (error (harness-rejected err)))
-                          (lambda (models)
-                            (puthash id (mapcar (lambda (m) (harness-provider--normalise-model p m)) models)
-                                     harness-provider--models-by-provider)
-                            (harness-provider--rebuild-cache)
-                            (harness-emit 'provider/models-updated harness-provider--models)
-                            t)
-                          (lambda (e)
-                            (harness-log 'warn "provider %s: listing models failed: %s"
-                                         id (harness-error-message e))
-                            (unless (gethash id harness-provider--models-by-provider)
-                              (puthash id nil harness-provider--models-by-provider))
-                            nil))
-                         promises)))
+                 (when (and (harness-provider-models-fn p)
+                            (or refresh (not (harness-provider--listed-p id))))
+                   (push (harness-provider--fetch p) promises)))
                harness-providers)
       (setq harness-provider--models-promise
             (harness-then (harness-all (nreverse promises))
                           (lambda (_) harness-provider--models)))))))
 
 (harness-defmethod provider/model (model-id)
-  "Return the model plist for MODEL-ID from the cache, or a minimal one."
-  (or (cl-find model-id harness-provider--models :key (lambda (m) (plist-get m :id)) :test #'equal)
-      (pcase-let ((`(,pid . ,name) (harness-provider-parse-model model-id)))
-        (let ((p (and pid (harness-provider-get pid))))
-          (if p
-              (harness-provider--normalise-model p (list :name name))
-            (list :id model-id :provider pid :name name :label (or name "?")
-                  :context-window 128000 :input-modalities '("text") :capabilities nil))))))
+  "Return the model plist for MODEL-ID from the catalogue, or a minimal one.
+A provider whose models are not cached is asked for them first.  One
+that lists them at once (a static catalogue) has them cached before
+this returns, so its models are always found.  Until one that answers
+later has, and for a model its provider does not list, a minimal plist
+stands in, with a context window of 128000."
+  (or (gethash model-id harness-provider--model-index)
+      (pcase-let* ((`(,pid . ,name) (harness-provider-parse-model model-id))
+                   (p (and pid (harness-provider-get pid))))
+        (cond
+         ((null p)
+          (list :id model-id :provider pid :name name :label (or name "?")
+                :context-window 128000 :input-modalities '("text") :capabilities nil))
+         ((and (harness-provider-models-fn p)
+               (not (harness-provider--listed-p pid))
+               (progn (harness-provider--fetch p t)
+                      (gethash model-id harness-provider--model-index))))
+         (t (harness-provider--normalise-model p (list :name name)))))))
 
 (harness-defmethod provider/capabilities (model-id)
   "Return the capability plist for MODEL-ID."
@@ -205,7 +290,8 @@ docs/architecture.md."
            (harness-as-promise (funcall fn t)))
           (t (harness-as-promise (funcall fn))))))
 
-(harness-declare-event 'provider/models-updated "(MODELS) after the catalogue refreshes.")
+(harness-declare-event 'provider/models-updated
+                       "(MODELS) after a provider's models were cached; MODELS is the whole catalogue.")
 (harness-declare-event 'provider/request-started "(PROVIDER-ID REQUEST) when a completion starts.")
 (harness-declare-event 'provider/quota-updated
                        "(PROVIDER-ID QUOTA) when a provider learns new billing or quota information.")
