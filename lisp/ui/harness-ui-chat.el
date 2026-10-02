@@ -787,11 +787,15 @@ down with it: the transcript below it and the compose box still draw."
                  (when (and g (not (harness-chat-group-expanded g))) (harness-chat-toggle-group gid)))))))
 
 (defun harness-chat--swap-fold-icon (start end collapsed)
-  "Replace the fold icon between START and END with the COLLAPSED state's icon."
+  "Replace the fold icon between START and END with the COLLAPSED state's icon.
+The new icon keeps the old one's properties (its button, faces and
+margin) but not its `display': an image icon is a space whose `display'
+draws it, so carrying that over would keep drawing the old image."
   (when-let* ((pos (text-property-any start end 'harness-chat-fold-icon t)))
     (let* ((next (or (text-property-not-all pos end 'harness-chat-fold-icon t) end))
-           (props (text-properties-at pos))
-           (icon (harness-ui-icon (if collapsed 'harness-icon-collapsed 'harness-icon-expanded)))
+           (props (harness-ui--plist-without (text-properties-at pos) 'display))
+           (icon (harness-chat--with-display
+                   (harness-ui-icon (if collapsed 'harness-icon-collapsed 'harness-icon-expanded))))
            (new (apply #'propertize (if (string-empty-p icon) (if collapsed "+" "-") icon) props)))
       (harness-chat--writable
         (goto-char pos)

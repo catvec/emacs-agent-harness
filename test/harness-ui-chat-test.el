@@ -197,6 +197,38 @@
         (should (string-match-p "idle" (harness-chat--mode-line)))
         (should (equal "" (harness-compose-text)))))))
 
+;; In a graphical frame an icon is a space whose `display' draws its
+;; image.  Toggling a block once carried the collapsed icon's `display'
+;; over to the expanded one, so the arrow never turned.  Batch draws no
+;; images, so image icons are stubbed in.
+(ert-deftest harness-ui-chat-fold-icon-follows-the-block ()
+  (harness-ui-chat-test-with
+    (cl-letf (((symbol-function 'icon-string)
+               (lambda (name) (propertize " " 'display (list 'image :type 'svg :file (format "%s.svg" name))))))
+      (let* ((sid (harness-ui-chat-test-session "Arrows"))
+             (buf (harness-ui-chat-test-open sid)))
+        (harness-ui-chat-test-prompt buf "give me the tour")
+        (with-current-buffer buf
+          (let ((blocks (append (harness-ui-chat-test-blocks buf "thinking")
+                                (harness-ui-chat-test-blocks buf "tool-call"))))
+            (should (= 2 (length blocks)))
+            (dolist (block blocks)
+              (cl-flet* ((icon-pos () (text-property-any (harness-chat-block-start block) (harness-chat-block-end block)
+                                                         'harness-chat-fold-icon t))
+                         (icon () (plist-get (cdr (get-text-property (icon-pos) 'display)) :file)))
+                (should (harness-chat-block-collapsed block))
+                (should (equal "harness-icon-collapsed.svg" (icon)))
+                ;; Clicking the arrow expands the block and turns the arrow,
+                ;; which stays a working button.
+                (call-interactively (lookup-key (get-text-property (icon-pos) 'keymap) (kbd "RET")))
+                (should-not (harness-chat-block-collapsed block))
+                (should (equal "harness-icon-expanded.svg" (icon)))
+                (should (= 1 (- (next-single-property-change (icon-pos) 'harness-chat-fold-icon) (icon-pos))))
+                (should (equal (harness-chat-block-id block) (get-text-property (icon-pos) 'harness-chat-node)))
+                (call-interactively (lookup-key (get-text-property (icon-pos) 'keymap) (kbd "RET")))
+                (should (harness-chat-block-collapsed block))
+                (should (equal "harness-icon-collapsed.svg" (icon)))))))))))
+
 (ert-deftest harness-ui-chat-header-shows-the-plan ()
   "A session a subscription pays for shows the plan and its quota, not a price."
   (harness-ui-chat-test-with
