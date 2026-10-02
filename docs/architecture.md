@@ -234,10 +234,13 @@ project-root `.dir-locals.el` → customize default.  Variables are
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
 `harness-process`, `harness-state-directory`, the module lists, the
-`harness-server-*` and `harness-acp-*` options, minor modes) have a
-global value only.  Options named `...-api-key`, `-token`, `-secret`
-or `-password` are secrets: their values never leave the harness and
-never go to a `.dir-locals.el`.
+`harness-server-*` and `harness-acp-*` options, minor modes, and less
+`harness-corporate-mode`) have a global value only.  `config/set` and
+`config/unset` refuse the ones of `harness-config-hidden-options`,
+`harness-corporate-mode` among them, as set in the init file only.
+Options named `...-api-key`, `-token`, `-secret` or `-password` are
+secrets: their values never leave the harness and never go to a
+`.dir-locals.el`.
 
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
   or its name; layered settings only).
@@ -642,6 +645,14 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   nothing runs.  Emits `permission/decided`.  The `:behavior` is allow
   or deny; a denial carries `:message`, the text `tools/execute` would
   have returned.
+- Corporate mode (`harness-corporate-mode`) turns off the tools of kind
+  `net`.  No session gets them, so `tools/builtin` never picks a
+  provider's own web search either; the list without a session still
+  has them.  `tools/execute` and `tools/authorize` deny a call to one
+  before the `permission/decide` chain, whatever the mode and the
+  standing rules: reason "corporate mode: network tools are off", a
+  hint to work with the project and the tools the session has,
+  `:denied t`, and `permission/decided` as for any decision.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.

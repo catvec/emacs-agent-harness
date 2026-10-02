@@ -364,6 +364,43 @@ billed per token can fetch the baseline instead: with an Anthropic Admin
 API key (`harness-anthropic-admin-api-key`), `I` on a monthly budget
 offers the month's API cost minus what the harness recorded.
 
+## Corporate mode
+
+Corporate mode turns off the harness features that could carry data off
+your machine. It is meant for work machines whose policy lets code and
+data go to the model provider in use and nowhere else.
+
+Turn it on in `config.el` (Doom) or your init file, before
+`(harness-start)`:
+
+```elisp
+(setq harness-corporate-mode t)
+```
+
+It turns off:
+
+- Remote control. The harness serves ACP on this machine only and
+  ignores `harness-acp-allow-remote`. Pairing phones and other devices
+  is refused, and the UI cannot connect to a harness elsewhere
+  (`harness-connect-remote`).
+- Network tools. Sessions do not get `web_fetch`, `web_search` or the
+  web search that Claude Code and Copilot run themselves. When a model
+  calls one anyway, the call is denied and the model is told why.
+
+It leaves alone:
+
+- The model provider. The provider you choose still receives what
+  sessions send it.
+- Shell commands. They follow the permission mode and the sandbox, as
+  always, so a command can still reach the network. Use a permission
+  mode that asks before commands run (Ask or Accept edits), and set
+  `harness-sandbox-policy` to `required` so that no command runs
+  outside the sandbox.
+
+The settings page does not list the option, and no ACP client can
+change it. If you change it later with `setopt` or Customize, the
+harness process restarts so that the change reaches it.
+
 ## Persistence
 
 Sessions and tasks are stored in `harness-state-directory` (`harness/`

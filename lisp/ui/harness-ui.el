@@ -253,7 +253,12 @@ Each is (METHOD PARAMS PROMISE); PROMISE is nil for notifications.")
   "Connect the UI to ADDRESS: nil for the in-process harness, `process'
 for the managed harness process, or \"host:port\".  Return the
 connection, or nil while the harness process is still starting; requests
-made meanwhile are queued and sent once it listens."
+made meanwhile are queued and sent once it listens.
+In corporate mode (`harness-corporate-mode') a \"host:port\" ADDRESS
+gives way to this Emacs's own harness: the UI connects to no other."
+  (when (and (stringp address) (harness-corporate-p))
+    (message "Harness: corporate mode is on, so the UI connects to the local harness, not %s" address)
+    (setq address (harness-ui--local-address)))
   (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
   (setq harness-ui-connection nil
         harness-ui-connection-address address)
@@ -477,22 +482,54 @@ nil when it runs in this Emacs."
 An empty or nil ADDRESS connects back to this Emacs's own harness: the
 harness process when `harness-process' is on, else the harness in this
 Emacs.  When the connection cannot be opened, for instance as ADDRESS
-has no port, the UI stays connected where it was."
+has no port, the UI stays connected where it was.  In corporate mode
+\(`harness-corporate-mode') the UI connects to its own harness only, and
+any other ADDRESS is refused."
   (interactive
    ;; Offer the remote address in use; a local harness's is `process' or nil.
    (list (read-string "Harness server (host:port, empty for the local harness): "
                       (and (stringp harness-ui-connection-address) harness-ui-connection-address))))
-  (let* ((remote (and address (not (string-blank-p address)) (string-trim address)))
-         (previous harness-ui-connection-address)
-         (failure (condition-case err
-                      (progn (harness-ui-connect (or remote (harness-ui--local-address))) nil)
-                    (error (ignore-errors (harness-ui-connect previous))
-                           err))))
-    (run-hooks 'harness-ui-redraw-hook)
-    (if failure
-        (user-error "Harness: cannot connect to %s: %s"
-                    (or remote "the local harness") (harness-error-message failure))
-      (message "Harness: connected to %s" (or remote "the local harness")))))
+  (let ((remote (and address (not (string-blank-p address)) (string-trim address))))
+    (when (and remote (harness-corporate-p))
+      (user-error "Corporate mode is on: the UI connects only to this Emacs's own harness"))
+    (let* ((previous harness-ui-connection-address)
+           (failure (condition-case err
+                        (progn (harness-ui-connect (or remote (harness-ui--local-address))) nil)
+                      (error (ignore-errors (harness-ui-connect previous))
+                             err))))
+      (run-hooks 'harness-ui-redraw-hook)
+      (if failure
+          (user-error "Harness: cannot connect to %s: %s"
+                      (or remote "the local harness") (harness-error-message failure))
+        (message "Harness: connected to %s" (or remote "the local harness"))))))
+
+(defun harness-ui--corporate-mode-changed ()
+  "Make a change of `harness-corporate-mode' reach the harness.
+Run from `harness-corporate-mode-change-hook'.  Turned on, the option
+takes the UI off a remote harness, back to this Emacs's own.  The
+harness process reads the option as it starts, so the process the UI
+uses is restarted if it is running; a harness in this Emacs reads the
+option as it goes.  While Emacs initialises the process has not started
+yet: it starts after the init file, with the value set there."
+  (let* ((on (harness-corporate-p))
+         (remote (and on (stringp harness-ui-connection-address) harness-ui-connection-address)))
+    (when remote
+      ;; Nothing more goes to the remote harness.
+      (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
+      (setq harness-ui-connection nil
+            harness-ui-connection-address (harness-ui--local-address)))
+    (cond
+     ((and (eq harness-ui-connection-address 'process)
+           harness-ui--server (process-live-p harness-ui--server))
+      (message "Harness: corporate mode is now %s%s; restarting the harness process so that it applies"
+               (if on "on" "off")
+               (if remote (format " and the UI left %s" remote) ""))
+      ;; The views redraw once the new process listens.
+      (harness-restart))
+     (remote
+      (harness-ui-connect harness-ui-connection-address)
+      (run-hooks 'harness-ui-redraw-hook)
+      (message "Harness: corporate mode is now on; the UI left %s for the local harness" remote)))))
 
 ;;;; Session cache
 
@@ -1390,7 +1427,7 @@ leaves the buffer's commands out, never the whole menu."
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
-    ("c" "Connect remote" harness-connect-remote)
+    ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
     ("R" "Reload harness" harness-reload)
     ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes
@@ -1406,6 +1443,7 @@ leaves the buffer's commands out, never the whole menu."
 
 (defun harness-ui--init ()
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
+  (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
   (harness-ui-connect harness-ui-connection-address)
   ;; A reload reaches the UI as the forwarded `harness/reloaded' event, for
   ;; local and remote harnesses alike, so no bus subscription is needed.
