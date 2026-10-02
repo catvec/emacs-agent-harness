@@ -1389,7 +1389,11 @@ tool call (with the size of its input so far), running one (with the
 last line it reported), checking its permission, or compacting, behind
 a spinner.  It is an overlay string redrawn by the spinner's timer, so
 it ticks without editing the buffer; a blocked session shows its panel
-instead, and the mode line names the phase too.  A buffer opened
+instead, and the mode line names the phase too.  It has a background of
+its own (`harness-chat-activity-face`) and a blank line under it, which
+set it apart from the compose box: an overlay string is drawn over the
+face of the text it precedes, the box's prompt, so both lines are drawn
+over `default` extended to the window's edge.  A buffer opened
 mid-turn asks `agent/activity`; a harness that reports none gets
 "Working" with the turn's duration.  A block whose renderer
 signals is shown unformatted with a note, so one bad node never costs the
