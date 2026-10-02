@@ -37,8 +37,11 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'url-util)
+(require 'auth-source)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-http)
 
 (declare-function sqlite-execute "sqlite.c")
 (declare-function sqlite-select "sqlite.c")
@@ -46,6 +49,15 @@
 (defcustom harness-usage-warn-fraction 0.8
   "Fraction of a budget at which the first warning is issued."
   :type 'number :group 'harness)
+
+(defcustom harness-anthropic-admin-api-key nil
+  "Anthropic Admin API key, to fetch this month's API cost for a budget.
+Only organisations of the Claude Console that pay per token have one
+\(it starts with sk-ant-admin); Pro and Max subscriptions have no cost
+report.  When nil, the ANTHROPIC_ADMIN_KEY environment variable and
+then auth-source (host api.anthropic.com, user admin) are tried.  Its
+value never leaves the harness."
+  :type '(choice (const :tag "None" nil) (string :tag "Key")) :group 'harness)
 
 (defconst harness-usage-jsonl-name "usage/records.jsonl"
   "JSONL log of usage rows, used when SQLite is unavailable.")
@@ -688,6 +700,138 @@ period; when DAYS is `business' weekends get an allowance of 0."
               (list :date (harness-usage--date-key d)
                     :allowance (if (harness-usage--counted-day-p d period days) each 0.0)))
             dates)))
+
+;;;; This month's API cost, from Anthropic's Admin API
+
+;; Anthropic's Admin API reports what an organisation was billed, per
+;; UTC day (GET /v1/organizations/cost_report).  It needs an Admin API
+;; key and covers billing per token only: a Pro or Max subscription has
+;; no cost report.  The cost is fetched when asked for, never polled,
+;; and offered as the baseline of a month budget, less what the harness
+;; recorded itself for Claude calls billed per token, which the report
+;; counts too.
+
+(defconst harness-usage-anthropic-api-host "api.anthropic.com"
+  "Host of the Anthropic API; also the auth-source host of the admin key.")
+
+(defconst harness-usage--cost-report-max-pages 10
+  "Most pages of one cost report that are fetched.")
+
+(defun harness-usage--admin-key ()
+  "Return the Anthropic Admin API key, or nil when none is configured.
+`harness-anthropic-admin-api-key' comes first, then the
+ANTHROPIC_ADMIN_KEY environment variable, then auth-source."
+  (let ((env (getenv "ANTHROPIC_ADMIN_KEY"))
+        (usable (lambda (s) (and (stringp s) (not (string-blank-p s)) (string-trim s)))))
+    (or (funcall usable harness-anthropic-admin-api-key)
+        (funcall usable env)
+        (condition-case nil
+            (let* ((found (car (auth-source-search :host harness-usage-anthropic-api-host :user "admin"
+                                                   :max 1 :require '(:secret))))
+                   (secret (plist-get found :secret)))
+              (funcall usable (if (functionp secret) (funcall secret) secret)))
+          (error nil)))))
+
+(defun harness-usage--cost-report-url (since until page)
+  "Return the URL of the cost report from SINCE until UNTIL (RFC 3339) at PAGE."
+  (format "https://%s/v1/organizations/cost_report?%s" harness-usage-anthropic-api-host
+          (url-build-query-string
+           (append (list (list "starting_at" since) (list "ending_at" until)
+                         (list "bucket_width" "1d") (list "limit" "31"))
+                   (and page (list (list "page" page)))))))
+
+(defun harness-usage--cost-report-usd (page)
+  "Return the US dollars that one PAGE of a cost report adds up to.
+Its amounts are decimal strings in cents; other currencies are left out."
+  (let ((cents 0.0))
+    (dolist (bucket (plist-get page :data))
+      (dolist (item (plist-get bucket :results))
+        (let ((amount (plist-get item :amount)))
+          (when (member (or (plist-get item :currency) "USD") '("USD" "usd"))
+            (setq cents (+ cents (cond ((numberp amount) amount)
+                                       ((stringp amount) (string-to-number amount))
+                                       (t 0))))))))
+    (/ cents 100.0)))
+
+(defun harness-usage--cost-report-error (err)
+  "Return the error to reject with when a cost report request failed with ERR."
+  (list 'harness-error
+        (pcase err
+          (`(http-error ,status ,body)
+           (format "Anthropic cost report failed%s: %s%s"
+                   (if status (format " (HTTP %s)" status) "")
+                   (cond ((and (stringp body)
+                               (ignore-errors (harness-plist-get-in (harness-json-parse body) '(:error :message)))))
+                         ((stringp body) (harness-truncate-end (string-trim body) 200))
+                         ((and (consp body) (stringp (cadr body))) (cadr body))
+                         (t (format "%S" body)))
+                   (if (memq status '(401 403)) "; it takes an Admin API key (sk-ant-admin...)" "")))
+          (_ (format "Anthropic cost report failed: %s" (harness-error-message err))))))
+
+(defun harness-usage--cost-report (key since until &optional page total pages)
+  "Return a promise of the US dollars Anthropic billed from SINCE until UNTIL.
+KEY is the Admin API key.  PAGE continues the report from a next_page
+token, adding to the TOTAL of the PAGES fetched before."
+  (harness-then
+   (harness-catch (harness-http-request-json (harness-usage--cost-report-url since until page)
+                                             :headers (list (cons "x-api-key" key)
+                                                            (cons "anthropic-version" "2023-06-01")
+                                                            (cons "User-Agent" "emacs-agent-harness"))
+                                             :timeout 30)
+                  (lambda (err) (harness-rejected (harness-usage--cost-report-error err))))
+   (lambda (json)
+     (let ((total (+ (or total 0.0) (harness-usage--cost-report-usd json)))
+           (pages (1+ (or pages 0)))
+           (next (plist-get json :next_page)))
+       (cond
+        ((not (and (harness-json-true-p (plist-get json :has_more)) (stringp next))) total)
+        ((< pages harness-usage--cost-report-max-pages)
+         (harness-usage--cost-report key since until next total pages))
+        (t (harness-log 'warn "usage: cost report cut short after %d pages" pages)
+           total))))))
+
+(defun harness-usage--recorded-api-cost (since until)
+  "Return the cost recorded from SINCE until UNTIL for Claude billed per token.
+SINCE and UNTIL are float times.  Anthropic's cost report counts these
+calls too, so they are what the harness knows of it already."
+  (let ((total 0.0))
+    (dolist (row (harness-usage--rows :since since :until until) total)
+      (when (and (string-prefix-p "claude:" (or (plist-get row :model) ""))
+                 (memq (harness-billing-of row) '(nil api)))
+        (setq total (+ total (or (plist-get row :cost) 0)))))))
+
+(harness-defmethod usage/fetch-api-cost (&rest opts)
+  "Fetch what Anthropic billed the organisation this month, without blocking.
+The key is `harness-anthropic-admin-api-key', the ANTHROPIC_ADMIN_KEY
+environment variable or auth-source (host api.anthropic.com, user
+admin).  Return a promise of (:available t :amount USD :recorded USD
+:outside USD :period-start \"YYYY-MM-DD\" :since FLOAT :until FLOAT).
+AMOUNT is the cost report's total over the calendar month containing
+OPTS `:now' (default: now), in UTC days as Anthropic bills them;
+RECORDED is what the harness recorded in that time for Claude models
+billed per token, which the report includes; OUTSIDE is the rest, the
+baseline to offer a month budget whose period starts on PERIOD-START.
+Without a key nothing is fetched and the promise gives (:available nil
+:reason TEXT)."
+  (let ((key (harness-usage--admin-key)))
+    (if (null key)
+        (harness-resolved
+         (list :available nil
+               :reason (concat "No Anthropic Admin API key: set harness-anthropic-admin-api-key or "
+                               "ANTHROPIC_ADMIN_KEY, or add an auth-source entry for "
+                               harness-usage-anthropic-api-host " with user admin")))
+      (let* ((start (car (harness-usage-period-bounds 'month (or (plist-get opts :now) (float-time)))))
+             (next (harness-usage--date (harness-usage--encode (list (nth 0 start) (1+ (nth 1 start)) 1) 12)))
+             (utc (lambda (date) (float-time (encode-time (list 0 0 0 1 (nth 1 date) (nth 0 date) nil nil t)))))
+             (since (funcall utc start))
+             (until (funcall utc next)))
+        (harness-then (harness-usage--cost-report key (harness-iso-time since) (harness-iso-time until))
+                      (lambda (amount)
+                        (let ((recorded (harness-usage--recorded-api-cost since until)))
+                          (list :available t :amount amount :recorded recorded
+                                :outside (max 0.0 (- amount recorded))
+                                :period-start (harness-usage--date-key start)
+                                :since since :until until))))))))
 
 ;;;; Enforcement
 

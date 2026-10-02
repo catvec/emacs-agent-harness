@@ -231,6 +231,66 @@
         (cl-letf (((symbol-function 'read-number) (lambda (&rest _) -3)))
           (should-error (harness-ui-usage-set-baseline) :type 'user-error))))))
 
+(ert-deftest harness-ui-usage-import-api-cost-offers-a-baseline ()
+  "With an Admin API key, the month's Anthropic cost is offered as a month budget's baseline."
+  (harness-ui-usage-test-with
+    (let ((harness-anthropic-admin-api-key nil)
+          (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment))
+          (messages nil)
+          (requests 0))
+      (cl-letf (((symbol-function 'auth-source-search) (lambda (&rest _) nil))
+                ((symbol-function 'harness-http-request-json)
+                 (lambda (&rest _)
+                   (cl-incf requests)
+                   (harness-resolved '(:data ((:results ((:amount "1234" :currency "USD")))) :has_more :false))))
+                ((symbol-function 'message)
+                 (lambda (format &rest args) (when format (push (apply #'format-message format args) messages)))))
+        (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                       (list :budget (list :scope "period" :period "month" :amount 100 :label "monthly cap")))
+        (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                       (list :budget (list :scope "period" :period "week" :amount 30 :label "weekly cap")))
+        (harness-ui-usage-test-open)
+        (with-current-buffer harness-ui-usage-buffer-name
+          ;; Only a month budget can take a month's cost.
+          (goto-char (point-min))
+          (search-forward "weekly cap")
+          (should-error (harness-ui-usage-import-api-cost) :type 'user-error)
+          ;; Without a key the step is skipped and says why.
+          (goto-char (point-min))
+          (search-forward "monthly cap")
+          (harness-ui-usage-import-api-cost)
+          (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "No Anthropic Admin API key" m)) messages))
+                             5 "no key")
+          (should (= 0 requests))
+          (should-not harness-ui-usage--api-cost)
+          ;; With one, the cost shows under the budget with a button.
+          (setq harness-anthropic-admin-api-key "sk-ant-admin01-test")
+          (goto-char (point-min))
+          (search-forward "monthly cap")
+          (harness-ui-usage-import-api-cost)
+          (harness-test-wait (lambda () (string-match-p "Anthropic billed \\$12\\.34 this month" (harness-ui-usage-test-text)))
+                             5 "offer shown")
+          (should (= 1 requests))
+          (should (string-match-p "monthly cap.*\n +Anthropic billed \\$12\\.34 this month  \\[use \\$12\\.34 as baseline\\] \\[dismiss\\]"
+                                  (harness-ui-usage-test-text)))
+          (goto-char (point-min))
+          (search-forward "[use $12.34")
+          (push-button)
+          (harness-test-wait (lambda () (string-match-p "incl\\. \\$12\\.34 baseline" (harness-ui-usage-test-text)))
+                             5 "baseline from the API cost")
+          (should-not (string-match-p "Anthropic billed" (harness-ui-usage-test-text)))
+          (let ((b (cl-find "monthly cap" (harness-call 'usage/budgets) :key (lambda (b) (plist-get b :label)) :test #'equal)))
+            (should (< (abs (- 12.34 (or (plist-get b :baseline) 0))) 1e-9))
+            (should (equal (harness-usage--date-key (car (harness-usage-period-bounds 'month)))
+                           (plist-get b :baseline-period-start))))
+          ;; An offer can be dismissed.
+          (goto-char (point-min))
+          (search-forward "monthly cap")
+          (harness-ui-usage-import-api-cost)
+          (harness-test-wait (lambda () (string-match-p "\\[dismiss\\]" (harness-ui-usage-test-text))) 5 "offer again")
+          (harness-ui-usage-dismiss-api-cost)
+          (should-not (string-match-p "Anthropic billed" (harness-ui-usage-test-text))))))))
+
 (defun harness-ui-usage-test-max-quota (now)
   "Return a Claude Max quota plist as the provider reports it at NOW."
   (list :billing "subscription" :plan "max" :plan-label "Claude Max"

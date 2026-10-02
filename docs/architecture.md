@@ -595,6 +595,17 @@ request and resolves when answered).
   period containing now, and moves any date or float time to its
   period's start), one without a period always.  The status's
   `:baseline` is that part, 0 otherwise.  nil or 0 clears it.
+- `usage/fetch-api-cost &rest (:now)` gives a promise of this month's
+  cost from Anthropic's Admin API (`GET /v1/organizations/cost_report`,
+  UTC days, amounts in cents): `(:available t :amount :recorded
+  :outside :period-start :since :until)`.  `:recorded` is what the
+  harness recorded in that time for Claude calls billed per token,
+  which the report counts too, and `:outside` the rest, offered as a
+  month budget's baseline.  It needs an Admin API key
+  (`harness-anthropic-admin-api-key`, ANTHROPIC_ADMIN_KEY, or
+  auth-source host api.anthropic.com user admin); without one nothing
+  is fetched and it gives `(:available nil :reason)`.  Pro and Max
+  subscriptions have no cost report.
 - Hard budgets block via `agent/before-turn`; soft ones emit
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
   count billed cost, so calls a subscription covers spend none; a

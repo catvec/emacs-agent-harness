@@ -461,6 +461,81 @@ Return (PROJECT-A PROJECT-B)."
                                    (harness-call 'usage/summary :group-by 'billing :project "/p/"))
                            #'string<))))))
 
+;;;; This month's API cost
+
+(defconst harness-usage-test-cost-pages
+  '((:data ((:starting_at "2026-09-01T00:00:00Z" :ending_at "2026-09-02T00:00:00Z"
+             :results ((:amount "123.78912" :currency "USD" :description "Claude Opus 5 Usage - Input Tokens")
+                       (:amount "500" :currency "USD")
+                       (:amount "999" :currency "EUR"))))
+     :has_more t :next_page "page_2")
+    (:data ((:starting_at "2026-09-02T00:00:00Z" :ending_at "2026-09-03T00:00:00Z"
+             :results ((:amount "376.21088" :currency "USD"))))
+     :has_more :false :next_page nil))
+  "Two pages of an Anthropic cost report: 1000 US cents, $10.00, in all.")
+
+(ert-deftest harness-usage-fetch-api-cost-from-the-admin-cost-report ()
+  "The month's cost comes from Anthropic's Admin API, less what the harness recorded."
+  (harness-usage-test-with
+    (let ((requests nil)
+          (pages (copy-tree harness-usage-test-cost-pages)))
+      (cl-letf (((symbol-function 'harness-http-request-json)
+                 (lambda (url &rest args) (push (cons url args) requests) (harness-resolved (pop pages))))
+                ((symbol-function 'auth-source-search) (lambda (&rest _) nil)))
+        ;; Without a key anywhere nothing is fetched.
+        (let ((harness-anthropic-admin-api-key nil)
+              (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment)))
+          (let ((r (harness-await (harness-call 'usage/fetch-api-cost))))
+            (should-not (plist-get r :available))
+            (should (string-match-p "harness-anthropic-admin-api-key" (plist-get r :reason))))
+          (should-not requests))
+        (let ((harness-anthropic-admin-api-key " sk-ant-admin01-test "))
+          ;; Claude calls billed per token are in the report already; the rest are not.
+          (dolist (row (list (list :ts (harness-usage-test-ts 2026 9 10) :model "claude:claude-opus-5-5" :cost 2.5 :billing 'api)
+                             (list :ts (harness-usage-test-ts 2026 9 20) :model "claude:claude-opus-5-5" :cost 0.5)
+                             (list :ts (harness-usage-test-ts 2026 9 11) :model "claude:claude-opus-5-5" :cost 0.0
+                                   :list-cost 4.0 :billing 'subscription)
+                             (list :ts (harness-usage-test-ts 2026 9 12) :model "claude:claude-opus-5-5" :cost 1.0
+                                   :billing 'extra-usage)
+                             (list :ts (harness-usage-test-ts 2026 9 13) :model "demo:scripted" :cost 1.0)
+                             (list :ts (harness-usage-test-ts 2026 8 30) :model "claude:claude-opus-5-5" :cost 5.0 :billing 'api)))
+            (harness-call 'usage/record (append (list :session "s" :project "/p/") row)))
+          (let ((r (harness-await (harness-call 'usage/fetch-api-cost :now (harness-usage-test-ts 2026 9 16)))))
+            (should (eq t (plist-get r :available)))
+            (should (harness-usage-test-near 10.0 (plist-get r :amount)))
+            (should (harness-usage-test-near 3.0 (plist-get r :recorded)))
+            (should (harness-usage-test-near 7.0 (plist-get r :outside)))
+            (should (equal "2026-09-01" (plist-get r :period-start))))
+          ;; The whole UTC month, a page at a time, with the key in a header.
+          (should (= 2 (length requests)))
+          (pcase-let ((`(,url . ,args) (car (last requests))))
+            (should (equal (concat "https://api.anthropic.com/v1/organizations/cost_report?starting_at=2026-09-01T00:00:00Z"
+                                   "&ending_at=2026-10-01T00:00:00Z&bucket_width=1d&limit=31")
+                           url))
+            (should (equal "sk-ant-admin01-test" (cdr (assoc "x-api-key" (plist-get args :headers)))))
+            (should (equal "2023-06-01" (cdr (assoc "anthropic-version" (plist-get args :headers))))))
+          (should (string-suffix-p "&page=page_2" (car (car requests)))))))
+    ;; The key comes from the environment, then from auth-source.
+    (let ((harness-anthropic-admin-api-key nil)
+          (process-environment (cons "ANTHROPIC_ADMIN_KEY=sk-ant-admin01-env" process-environment)))
+      (should (equal "sk-ant-admin01-env" (harness-usage--admin-key))))
+    (let ((harness-anthropic-admin-api-key "")
+          (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment)))
+      (cl-letf (((symbol-function 'auth-source-search)
+                 (lambda (&rest spec)
+                   (and (equal "api.anthropic.com" (plist-get spec :host)) (equal "admin" (plist-get spec :user))
+                        (list (list :secret (lambda () "sk-ant-admin01-auth")))))))
+        (should (equal "sk-ant-admin01-auth" (harness-usage--admin-key)))))
+    ;; A refusal reads as Anthropic's own message.
+    (cl-letf (((symbol-function 'harness-http-request-json)
+               (lambda (&rest _)
+                 (harness-rejected
+                  (list 'http-error 401
+                        "{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}")))))
+      (let* ((harness-anthropic-admin-api-key "sk-ant-api03-not-an-admin-key")
+             (err (should-error (harness-await (harness-call 'usage/fetch-api-cost)) :type 'harness-error)))
+        (should (string-match-p "(HTTP 401): invalid x-api-key; it takes an Admin API key" (cadr err)))))))
+
 ;;;; JSONL fallback
 
 (ert-deftest harness-usage-jsonl-fallback-matches-sqlite ()
