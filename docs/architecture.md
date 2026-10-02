@@ -1520,8 +1520,11 @@ positions (`harness-ui-display-session SID &optional POSITION`; presets
 the global keymap and the transient menu `harness-menu` (with a group for
 the commands of the buffer it is opened from, which each mode lists in
 its `harness-menu-group` property; opened from a side window it gets a
-side window of its own, at the bottom, or at the top when a window such
-as a BTW is at the bottom already, never in another window's slot),
+side window of its own across the bottom of the frame, never in another
+window's slot, and below a window such as a BTW at the bottom already,
+which keeps its height: the windows above lend the menu its lines and
+get them back as it closes.  Only when several windows share the bottom
+does it go to the top),
 and icons via `icons.el` (`define-icon`) with text fallbacks.  Every
 command has a mouse target: buttons, header-line segments, or mode-line
 segments.

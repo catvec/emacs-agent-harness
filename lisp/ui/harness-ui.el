@@ -1417,24 +1417,101 @@ the harness UI loads, that is before `harness-start'."
     (cl-loop for slot from 1
              unless (memql slot taken) return slot)))
 
+(defun harness-ui--bottom-windows ()
+  "Return the live windows at the bottom of the selected frame, side windows all."
+  (cl-remove-if-not (lambda (window) (eq (window-parameter window 'window-side) 'bottom))
+                    (window-list nil 'nomini)))
+
+(defun harness-ui--menu-lines (buffer)
+  "Return about how many lines the menu BUFFER needs, its mode line included.
+Transient fills the buffer before it shows it and fits the window to
+it once shown, so this need only be close."
+  (with-current-buffer buffer
+    (max window-min-height
+         (+ (count-lines (point-min) (point-max))
+            (if mode-line-format 1 0)
+            (if header-line-format 1 0)))))
+
+(defun harness-ui--display-menu-below (buffer window alist)
+  "Display the menu BUFFER in a new window below WINDOW and return it.
+WINDOW is the only window at the bottom of the frame, such as a BTW.
+The menu goes under it, as wide, in a bottom side window too: the two
+share the bottom of the frame, which grows by the menu's lines.  They
+come from the windows above, so WINDOW keeps its height while the menu
+shows, and `harness-ui--delete-menu-below' gives them back once the
+menu closes.  Return nil, the windows as they were, when the windows
+above cannot spare the lines.  ALIST is the action alist."
+  (let ((height (window-pixel-height window))
+        (preserved (window-parameter window 'window-preserved-size))
+        (lines (min (harness-ui--menu-lines buffer)
+                    (window-max-delta window nil window)))
+        menu)
+    (when (>= lines window-min-height)
+      (condition-case err
+          (progn
+            (window-resize window lines nil window)
+            (setq menu (let ((window-combination-resize 'side)
+                             (window-combination-limit t)
+                             ;; WINDOW itself, even a Doom popup, whose
+                             ;; `split-window' splits another window.
+                             (ignore-window-parameters t))
+                         (split-window window (- lines) 'below)))
+            (set-window-parameter menu 'harness-ui--menu-below (list window height preserved))
+            (set-window-parameter menu 'delete-window #'harness-ui--delete-menu-below)
+            ;; Fixed at its height while the menu shows, so that transient
+            ;; fits the menu with the lines of the windows above.
+            (window-preserve-size window nil t)
+            (window--display-buffer buffer menu 'window (cons '(dedicated . t) alist)))
+        (error
+         (harness-log 'error "harness-menu: no window below %s: %s" window (error-message-string err))
+         (if (window-live-p menu)
+             (delete-window menu)
+           (window-resize-no-error window (- height (window-pixel-height window)) nil window t))
+         nil)))))
+
+(defun harness-ui--delete-menu-below (menu)
+  "Delete MENU, a window of `harness-ui--display-menu-below', putting sizes back.
+The window MENU was below gets its height back and keeps it as it did,
+and the windows above get back the lines the menu took."
+  (pcase-let ((`(,window ,height ,preserved) (window-parameter menu 'harness-ui--menu-below)))
+    (set-window-parameter menu 'delete-window nil)
+    ;; Fixed at its height, WINDOW could not take MENU's lines, and the
+    ;; deletion would fail.
+    (when (window-live-p window)
+      (window-preserve-size window nil nil))
+    (unwind-protect
+        (delete-window menu)
+      (when (window-live-p window)
+        (unless (window-live-p menu)
+          (window-resize-no-error window (- height (window-pixel-height window)) nil window t))
+        (set-window-parameter window 'window-preserved-size preserved)))))
+
 (defun harness-ui--display-menu (buffer alist)
   "Display the menu BUFFER, keeping it out of the windows around a side window.
 Sessions usually live in side windows, which cannot be split.  Actions
 such as `display-buffer-below-selected' then fall back to reusing
 another window, which transient fits horizontally to the menu and
 cannot delete afterwards, wrecking the layout.  So from a side window
-the menu gets a side window of its own: at the bottom, or at the top
-when a window is at the bottom already, such as a BTW, whose height a
-menu beside it would be cut to.  It takes a slot no window has: given
-a window's slot, `display-buffer-in-side-window' shows the menu in
-that window, the selected one included, and transient deletes the
-window as the menu closes.  Elsewhere the menu follows
-`transient-display-buffer-action'.  ALIST is the action alist."
+the menu gets a side window of its own across the bottom of the frame,
+in a slot no window has: given a window's slot,
+`display-buffer-in-side-window' shows the menu in that window, the
+selected one included, and transient deletes the window as the menu
+closes.  When a window is at the bottom already, such as a BTW, the
+menu goes below it (`harness-ui--display-menu-below'): beside it, the
+menu would be cut to its height, and above everything it would be far
+from where menus open.  Only when several windows share the bottom,
+below one of which a window is not a valid side window, or the windows
+above have no lines to spare, does the menu go to the top.  Elsewhere
+the menu follows `transient-display-buffer-action'.  ALIST is the
+action alist."
   (if (window-parameter (selected-window) 'window-side)
-      (let ((side (if (window-with-parameter 'window-side 'bottom) 'top 'bottom)))
-        (display-buffer-in-side-window
-         buffer (append `((side . ,side) (slot . ,(harness-ui--free-side-slot side)) (dedicated . t))
-                        alist)))
+      (let ((bottom (harness-ui--bottom-windows)))
+        (or (and (= (length bottom) 1)
+                 (harness-ui--display-menu-below buffer (car bottom) alist))
+            (let ((side (if bottom 'top 'bottom)))
+              (display-buffer-in-side-window
+               buffer (append `((side . ,side) (slot . ,(harness-ui--free-side-slot side)) (dedicated . t))
+                              alist)))))
     (display-buffer buffer transient-display-buffer-action)))
 
 ;;;;; The commands of the buffer the menu is opened from
