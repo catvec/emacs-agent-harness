@@ -3,6 +3,8 @@
 
 (require 'harness-test-helpers)
 
+(declare-function harness-define-provider "harness-provider")
+
 (defmacro harness-agent-test-with (&rest body)
   "Load the state layer with the demo provider and permissive tools, run BODY."
   (declare (indent 0))
@@ -28,6 +30,73 @@
 
 (defun harness-agent-test-kinds (id)
   (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes id)))
+
+(defun harness-agent-test-steering-nodes (id)
+  "Return the steering messages recorded in session ID."
+  (cl-remove-if-not (lambda (n) (plist-get (plist-get n :meta) :steering)) (harness-call 'session/nodes id)))
+
+;;;; A hosted loop
+
+(defvar harness-agent-test-prompts nil
+  "What each request to the `hosted' provider sent, oldest first.")
+
+(defvar harness-agent-test-results nil
+  "The tool result contents the agent answered `hosted' with, oldest first.")
+
+(defun harness-agent-test-trailing-text (request)
+  "Return the text a hosted loop sends for REQUEST, or nil.
+That is the user messages after its last assistant message, like the
+Claude provider does; tool results do not count."
+  (let (texts)
+    (dolist (m (plist-get request :messages))
+      (pcase (plist-get m :role)
+        ('assistant (setq texts nil))
+        ('user (dolist (b (plist-get m :content))
+                 (when (equal (plist-get b :type) "text") (push (plist-get b :text) texts))))))
+    (and texts (string-join (nreverse texts) "\n"))))
+
+(defun harness-agent-test-define-hosted (script)
+  "Define `hosted', a provider running its own tool loop from SCRIPT.
+SCRIPT gets the text each request sends and returns its steps: event
+plists (a tool call waits for the agent's answer) or functions, called
+for their side effects, such as a message the user sends mid-step.  A
+request with nothing to send fails like the Claude provider's."
+  (setq harness-agent-test-prompts nil harness-agent-test-results nil)
+  (harness-define-provider 'hosted
+    :label "Hosted"
+    :complete
+    (lambda (request)
+      (let ((on-event (plist-get request :on-event))
+            (prompt (harness-agent-test-trailing-text request))
+            (cancelled nil))
+        (setq harness-agent-test-prompts (append harness-agent-test-prompts (list prompt)))
+        (cl-labels ((play (steps)
+                      (let ((step (car steps)))
+                        (cond
+                         ((or cancelled (null steps)) nil)
+                         ((functionp step) (funcall step) (run-at-time 0.005 nil #'play (cdr steps)))
+                         ((eq (plist-get step :type) 'tool-call)
+                          (funcall on-event
+                                   (append step
+                                           (list :respond
+                                                 (lambda (result)
+                                                   (setq harness-agent-test-results
+                                                         (append harness-agent-test-results
+                                                                 (list (plist-get result :content))))
+                                                   (run-at-time 0.005 nil #'play (cdr steps)))))))
+                         (t (funcall on-event step)
+                            (run-at-time 0.005 nil #'play (cdr steps)))))))
+          (funcall on-event '(:type start))
+          (if prompt
+              (run-at-time 0.005 nil #'play (funcall script prompt))
+            (funcall on-event '(:type done :stop-reason error :error "No user message to send"))))
+        (list :cancel (lambda ()
+                        (setq cancelled t)
+                        (funcall on-event '(:type done :stop-reason cancelled))))))
+    :capabilities '(:hosted-loop t)))
+
+(defun harness-agent-test-hosted-session ()
+  (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "hosted:loop") :id))
 
 (ert-deftest harness-agent-text-turn ()
   (harness-agent-test-with
@@ -100,7 +169,185 @@
       (should (= 1 (length (plist-get (harness-call 'session/get id) :queue))))
       (harness-test-wait (lambda () (= ended 2)) 5 "second turn")
       (should (null (plist-get (harness-call 'session/get id) :queue)))
-      (should (equal '(user assistant user assistant) (harness-agent-test-kinds id))))))
+      (should (equal '(user assistant user assistant) (harness-agent-test-kinds id)))
+      (should-not (harness-agent-test-steering-nodes id)))))
+
+(ert-deftest harness-agent-queue-during-turn-is-not-steering ()
+  "A message queued while a turn runs waits for it to end, then is a turn of its own.
+It is never added to the running turn: no steering node, no
+<user_message> in a tool result."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-hosted-session))
+           (started 0)
+           (queued-meanwhile nil))
+      (harness-on 'agent/turn-started (lambda (_) (cl-incf started)))
+      (harness-agent-test-define-hosted
+       (lambda (prompt)
+         (if (equal prompt "go")
+             `((:type tool-call :id "h1" :name "list_dir" :input (:path "/a"))
+               ,(lambda ()
+                  (harness-await (harness-call 'agent/prompt id "queued one" '(:queue t)))
+                  (setq queued-meanwhile (mapcar (lambda (it) (plist-get it :text))
+                                                 (plist-get (harness-call 'session/get id) :queue))))
+               (:type tool-call :id "h2" :name "list_dir" :input (:path "/b"))
+               (:type text :delta "Done.")
+               (:type done :stop-reason end-turn))
+           '((:type text :delta "Got it.") (:type done :stop-reason end-turn)))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (equal '("queued one") queued-meanwhile))
+      (harness-test-wait (lambda () (and (= started 2) (not (harness-agent-running-p id)))) 5 "the queued turn")
+      (should (equal '("go" "queued one") harness-agent-test-prompts))
+      (should (= 2 (length harness-agent-test-results)))
+      (should-not (cl-some (lambda (c) (string-match-p "user_message" c)) harness-agent-test-results))
+      (should-not (harness-agent-test-steering-nodes id))
+      (should (null (plist-get (harness-call 'session/get id) :queue)))
+      (should (equal '(user tool-call tool-result tool-call tool-result assistant user assistant)
+                     (harness-agent-test-kinds id))))))
+
+(ert-deftest harness-agent-send-queue-with-nothing-to-send ()
+  "Sending an empty queue, or one of empty items, starts no turn."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (started 0))
+      (harness-on 'agent/turn-started (lambda (_) (cl-incf started)))
+      (should (eq 'nothing-queued (plist-get (harness-test-await (harness-call 'agent/send-queue id)) :stop-reason)))
+      (harness-call 'session/queue id "" nil)
+      (harness-call 'session/queue id " \n" nil)
+      (should (eq 'nothing-queued (plist-get (harness-test-await (harness-call 'agent/send-queue id)) :stop-reason)))
+      (should (null (plist-get (harness-call 'session/get id) :queue)))
+      (accept-process-output nil 0.05)
+      (should (= 0 started))
+      (should-not (harness-agent-running-p id))
+      (should (null (harness-call 'session/nodes id))))))
+
+(ert-deftest harness-agent-send-queue-joins-messages ()
+  "Queued messages go out as one turn, each its own paragraph; empty ones are dropped."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session)))
+      (harness-call 'session/queue id "first" nil)
+      (harness-call 'session/queue id "" nil)
+      (harness-call 'session/queue id "second" nil)
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/send-queue id)) :stop-reason)))
+      (should (equal "first\n\nsecond" (plist-get (car (harness-call 'session/nodes id)) :content))))))
+
+(ert-deftest harness-agent-prompt-refuses-empty-messages ()
+  "Nothing to send starts no turn and queues nothing; a JSON false does not queue."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session)))
+      (should-error (harness-call 'agent/prompt id "") :type 'harness-error)
+      (should-error (harness-call 'agent/prompt id (list (list :type "text" :text " \n"))) :type 'harness-error)
+      (should-error (harness-call 'agent/prompt id "  " '(:queue t)) :type 'harness-error)
+      (should-not (harness-agent-running-p id))
+      (should (null (harness-call 'session/nodes id)))
+      (should (null (plist-get (harness-call 'session/get id) :queue)))
+      ;; An attachment alone is worth queueing.
+      (harness-test-await (harness-call 'agent/prompt id ""
+                                        (list :queue t :attachments (list (list :path "/tmp/a.txt" :mime "text/plain"
+                                                                                :name "a.txt" :size 1)))))
+      (should (= 1 (length (plist-get (harness-call 'session/get id) :queue))))
+      (harness-call 'session/queue-take id)
+      ;; `:queue' false, as JSON sends it, sends.
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "hello" '(:queue :false)))
+                                       :stop-reason)))
+      (should (null (plist-get (harness-call 'session/get id) :queue))))))
+
+(ert-deftest harness-agent-queue-waits-for-a-turn-started-meanwhile ()
+  "The queue sent at the end of a turn never steers a turn that started since."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session)))
+      (harness-call 'session/queue id "queued one" nil)
+      (let ((p (harness-call 'agent/prompt id "tour")))
+        (harness-test-wait (lambda () (harness-agent-running-p id)) 5 "the turn")
+        ;; What the end of an earlier turn scheduled, running late.
+        (harness-agent--send-queued id)
+        (should (equal '("queued one") (mapcar (lambda (it) (plist-get it :text))
+                                               (plist-get (harness-call 'session/get id) :queue))))
+        (harness-test-await p))
+      ;; This turn's end sends it, as a turn of its own.
+      (harness-test-wait (lambda () (null (plist-get (harness-call 'session/get id) :queue))) 5 "the queue sent")
+      (harness-test-wait (lambda () (not (harness-agent-running-p id))) 5 "the queued turn")
+      (should-not (harness-agent-test-steering-nodes id))
+      (should (equal "queued one" (plist-get (car (last (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                                                           (harness-call 'session/nodes id))))
+                                             :content))))))
+
+(ert-deftest harness-agent-steering-during-last-step-is-sent-once ()
+  "Steering that arrives after the last tool call gets one more step, then the turn ends.
+It used to stay pending, so every later stop stepped again until max-steps."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (harness-provider-demo-delay 0.05)
+          (steps 0))
+      (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))
+      (let ((p (harness-call 'agent/prompt id "hello")))
+        (harness-test-wait (lambda () (memq 'assistant (harness-agent-test-kinds id))) 5 "the reply")
+        (harness-call 'agent/prompt id "also this")
+        (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason))))
+      (should (= 2 steps))
+      (should (equal '(user assistant user assistant) (harness-agent-test-kinds id)))
+      (should (string-match-p "also this" (plist-get (car (last (harness-call 'session/nodes id))) :content))))))
+
+(ert-deftest harness-agent-steering-after-last-tool-call-hosted ()
+  "A hosted loop gets steering sent after its last tool call once, as its next message.
+Sent while the model was thinking, the message lands before the answer
+in the transcript.  It used to stay pending, so the next request had no
+user message after that answer: \"No user message to send\"."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-hosted-session)))
+      (harness-agent-test-define-hosted
+       (lambda (prompt)
+         (pcase prompt
+           ("start"
+            `((:type tool-call :id "h1" :name "list_dir" :input (:path "/a"))
+              (:type thinking :delta "Reading the listing.")
+              ,(lambda () (harness-call 'agent/prompt id "also check b"))
+              (:type text :delta "Here is the listing.")
+              (:type done :stop-reason end-turn)))
+           ("also check b"
+            '((:type tool-call :id "h2" :name "list_dir" :input (:path "/b"))
+              (:type text :delta "b is fine.")
+              (:type done :stop-reason end-turn)))
+           (_ '((:type text :delta "?") (:type done :stop-reason end-turn))))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "start")) :stop-reason)))
+      (should (equal '("start" "also check b") harness-agent-test-prompts))
+      (should (= 2 (length harness-agent-test-results)))
+      (should-not (cl-some (lambda (c) (string-match-p "user_message" c)) harness-agent-test-results))
+      (should-not (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'hint)
+                                               (string-match-p "No user message" (plist-get n :content))))
+                              (harness-call 'session/nodes id)))
+      ;; The transcript keeps the order things happened in...
+      (should (equal '(user tool-call tool-result thinking user assistant tool-call tool-result assistant)
+                     (harness-agent-test-kinds id)))
+      ;; ...while the model reads the message after the answer it interrupted.
+      (let ((msgs (harness-call 'session/messages id)))
+        (should (equal '(user assistant user assistant user assistant user assistant)
+                       (mapcar (lambda (m) (plist-get m :role)) msgs)))
+        (should (equal '("thinking" "text") (mapcar (lambda (b) (plist-get b :type)) (plist-get (nth 3 msgs) :content))))
+        (should (equal "also check b" (plist-get (car (plist-get (nth 4 msgs) :content)) :text)))))))
+
+(ert-deftest harness-agent-steering-rides-on-one-tool-result-hosted ()
+  "Steering sent while a tool runs goes out with that tool's result, and only there."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-hosted-session)))
+      (harness-define-tool "slow" :description "slow" :kind 'read
+                           :handler (lambda (_input _ctx)
+                                      (harness-call 'agent/prompt id "change of plan")
+                                      "slow output"))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         '((:type tool-call :id "h1" :name "slow" :input (:n 1))
+           (:type tool-call :id "h2" :name "list_dir" :input (:path "/b"))
+           (:type text :delta "Done.")
+           (:type done :stop-reason end-turn))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (equal '("go") harness-agent-test-prompts))
+      (should (equal "slow output\n\n<user_message>\nchange of plan\n</user_message>" (nth 0 harness-agent-test-results)))
+      (should-not (string-match-p "user_message" (nth 1 harness-agent-test-results)))
+      (should (= 1 (length (harness-agent-test-steering-nodes id))))
+      ;; The model's view: the message follows the result that carried it.
+      (let ((msgs (harness-call 'session/messages id)))
+        (should (equal '("tool_result" "text") (mapcar (lambda (b) (plist-get b :type)) (plist-get (nth 2 msgs) :content))))
+        (should (equal "change of plan" (plist-get (cadr (plist-get (nth 2 msgs) :content)) :text)))))))
 
 (ert-deftest harness-agent-cancel ()
   (harness-agent-test-with

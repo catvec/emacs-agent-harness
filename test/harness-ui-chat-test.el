@@ -498,6 +498,49 @@ the message is complete."
       (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--queue))) 5 "removed")
       (should-not (harness-ui-chat-test-find buf "drop me")))))
 
+(defvar harness-provider-demo-script-override)
+
+(ert-deftest harness-ui-chat-queue-while-running ()
+  "A message queued while the agent runs waits in the queue area, then is a turn of its own.
+It is never added to the running turn."
+  (harness-ui-chat-test-with
+    (let* ((gate (harness-make-promise))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "w1" :name "hold" :input (:n 1))
+              (:type text :delta "Done.")
+              (:type done :stop-reason end-turn)))
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (users (lambda () (mapcar (lambda (n) (plist-get n :content))
+                                     (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                                       (harness-call 'session/nodes sid))))))
+      ;; The turn waits in this tool until the test lets it go.
+      (harness-define-tool "hold" :description "hold" :kind 'read
+                           :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
+      (harness-ui-chat-test-type buf "go")
+      (with-current-buffer buf (harness-chat-send))
+      (harness-test-wait (lambda () (memq 'tool-call (mapcar (lambda (n) (plist-get n :kind))
+                                                             (harness-call 'session/nodes sid))))
+                         5 "the turn in its tool")
+      (harness-ui-chat-test-type buf "for later")
+      (with-current-buffer buf (harness-chat-queue))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 1 (length harness-chat--queue)))) 5 "queued")
+      (should (harness-ui-chat-test-find buf "queued for the next turn (1)"))
+      (should (harness-agent-running-p sid))
+      (should (equal '("go") (funcall users)))
+      (harness-resolve gate t)
+      (harness-test-wait (lambda () (= 2 (harness-ui-chat-test-turns-ended sid))) 10 "both turns")
+      (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--queue))) 5 "the queue area emptied")
+      (should (equal '("go" "for later") (funcall users)))
+      (should-not (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering)) (harness-call 'session/nodes sid)))
+      (should-not (harness-ui-chat-test-find buf "queued for the next turn"))
+      ;; Sending an empty queue starts nothing.
+      (with-current-buffer buf (harness-chat-send-queue))
+      (accept-process-output nil 0.2)
+      (should-not (harness-agent-running-p sid))
+      (should (= 2 (harness-ui-chat-test-turns-ended sid)))
+      (should (equal '("go" "for later") (funcall users))))))
+
 ;;;; Pending panel
 
 (ert-deftest harness-ui-chat-permission-panel ()

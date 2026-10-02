@@ -327,6 +327,48 @@ when it is forked to a model of a provider that cannot."
                                  (plist-get (car (plist-get (car msgs) :content)) :text)))
         (should (= 2 (length (plist-get (car msgs) :content))))))))
 
+(ert-deftest harness-session-messages-place-delivered-steering ()
+  "A steering message reaches the model where it was delivered, not where it was sent."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (add (lambda (node) (plist-get (harness-call 'session/append id node) :id)))
+           (deliver (lambda (sid after)
+                      (harness-call 'session/update-node id sid :meta (list :steering t :delivered-after after))))
+           (roles (lambda (msgs) (mapcar (lambda (m) (plist-get m :role)) msgs)))
+           (types (lambda (msg) (mapcar (lambda (b) (plist-get b :type)) (plist-get msg :content)))))
+      (funcall add '(:kind user :content "go"))
+      (funcall add '(:kind tool-call :tool "t" :call-id "c1" :input (:n 1)))
+      (funcall add '(:kind tool-call :tool "t" :call-id "c2" :input (:n 2)))
+      ;; Sent while the tools ran, delivered with the first result: it
+      ;; follows both results, which come first in their message.
+      (let ((s1 (funcall add '(:kind user :content "steer one" :meta (:steering t))))
+            (r1 (funcall add '(:kind tool-result :call-id "c1" :output "A"))))
+        (funcall add '(:kind hint :content "a hint"))
+        (funcall add '(:kind tool-result :call-id "c2" :output "B"))
+        (funcall deliver s1 r1))
+      (funcall add '(:kind thinking :content "hm"))
+      ;; Sent while the model thought, delivered once it stopped.
+      (let* ((s2 (funcall add '(:kind user :content "steer two" :meta (:steering t))))
+             (a (funcall add '(:kind assistant :content "Done."))))
+        (funcall deliver s2 a)
+        (let ((msgs (harness-call 'session/messages id)))
+          (should (equal '(user assistant user assistant user) (funcall roles msgs)))
+          (should (equal '("tool_result" "tool_result" "text") (funcall types (nth 2 msgs))))
+          (should (equal "steer one" (plist-get (nth 2 (plist-get (nth 2 msgs) :content)) :text)))
+          (should (equal '("thinking" "text") (funcall types (nth 3 msgs))))
+          (should (equal '("steer two") (mapcar (lambda (b) (plist-get b :text)) (plist-get (nth 4 msgs) :content)))))
+        ;; The next message joins it.
+        (funcall add '(:kind user :content "next"))
+        (should (equal '("steer two" "next")
+                       (mapcar (lambda (b) (plist-get b :text))
+                               (plist-get (car (last (harness-call 'session/messages id))) :content))))
+        ;; Without its delivery point on the path (the head moved back), it stays where it was sent.
+        (harness-call 'session/set-head id s2)
+        (let ((msgs (harness-call 'session/messages id)))
+          (should (equal '(user assistant user assistant user) (funcall roles msgs)))
+          (should (equal '("thinking") (funcall types (nth 3 msgs))))
+          (should (equal "steer two" (plist-get (car (plist-get (nth 4 msgs) :content)) :text))))))))
+
 ;;;; Context windows
 
 (defvar harness-providers)

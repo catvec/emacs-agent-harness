@@ -8,8 +8,10 @@
 ;; Providers that run their own loop (hosted) hand each tool call to us
 ;; through a `:respond' callback; native providers stop with `tool-use'
 ;; and are called again with the results.  Steering messages sent while
-;; a turn runs are injected at the next step boundary; queued messages
-;; go out together when the turn ends.
+;; a turn runs are delivered once, at the next step boundary: with the
+;; next tool result, or as the next user message when the model stops
+;; first.  Queued messages wait for the turn to end and then go out
+;; together as a turn of their own.
 ;;
 ;; The loop is entirely event driven: nothing here waits.
 
@@ -42,7 +44,8 @@ Work carefully and verify what you do. Prefer the provided tools over guessing; 
   :type 'number :group 'harness)
 
 (cl-defstruct (harness-agent-turn (:copier nil))
-  session-id promise handle (steps 0) cancelled steering
+  session-id promise handle (steps 0) cancelled
+  steering                              ; pending (:node ID :text TEXT), oldest first
   text-node text-buf think-node think-buf
   (pending 0) waiting-done stop-reason error hosted last-usage started)
 
@@ -259,6 +262,20 @@ permission is decided and `:detail', its latest progress, and
 (defun harness-agent--only-text-p (blocks)
   (cl-every (lambda (b) (equal (plist-get b :type) "text")) blocks))
 
+(defun harness-agent--blank-p (block)
+  "Non-nil when BLOCK is a text block holding nothing but whitespace."
+  (and (equal (plist-get block :type) "text")
+       (harness-string-blank-p (plist-get block :text))))
+
+(defun harness-agent--join-texts (blocks)
+  "Return BLOCKS with every run of adjacent text blocks joined into one.
+Messages sent together stay apart as paragraphs."
+  (let (out)
+    (dolist (b blocks (nreverse out))
+      (if (and (equal (plist-get b :type) "text") out (equal (plist-get (car out) :type) "text"))
+          (setcar out (list :type "text" :text (concat (plist-get (car out) :text) "\n\n" (plist-get b :text))))
+        (push b out)))))
+
 (defun harness-agent-attachments-to-blocks (attachments)
   "Turn ATTACHMENT plists into content blocks."
   (mapcar (lambda (a)
@@ -285,25 +302,33 @@ A turn still running in it (it was closed mid-turn) keeps it running."
   "Send BLOCKS (content blocks, or a string) to SESSION-ID.
 Idle session: start a turn and return a promise of (:stop-reason …).
 Running session: steer — the message is recorded now and delivered at
-the next step boundary; the running turn's promise is returned.  OPTS
-`:queue' non-nil only queues the message for the next turn.
-An inactive session is resumed first: sending to it brings it back."
-  (let* ((blocks (if (stringp blocks) (list (list :type "text" :text blocks)) blocks))
+the next step boundary, once; the running turn's promise is returned.
+OPTS `:queue' true only queues the message, with OPTS `:attachments',
+for the next turn, whatever the session is doing.
+An inactive session is resumed first: sending to it brings it back.
+Blank text blocks are dropped; a message left empty signals an error,
+so no turn, steering message or queued item is ever empty."
+  (let* ((blocks (cl-remove-if #'harness-agent--blank-p
+                               (if (stringp blocks) (list (list :type "text" :text blocks)) blocks)))
+         (queue (harness-json-true-p (plist-get opts :queue)))
+         (attachments (and queue (plist-get opts :attachments)))
          (turn (gethash session-id harness-agent--turns)))
-    (unless (plist-get opts :queue)
+    (unless (or blocks attachments)
+      (signal 'harness-error (list "Nothing to send: the message is empty")))
+    (unless queue
       (harness-agent--reanimate session-id))
     (cond
-     ((plist-get opts :queue)
-      (harness-call 'session/queue session-id (harness-agent--blocks-text blocks)
-                    (plist-get opts :attachments))
+     (queue
+      (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments)
       (harness-resolved (list :queued t)))
      (turn
-      (harness-call 'session/append session-id
-                    (list :kind 'user :content (harness-agent--blocks-text blocks)
-                          :blocks (unless (harness-agent--only-text-p blocks) blocks)
-                          :meta (list :steering t)))
-      (setf (harness-agent-turn-steering turn)
-            (append (harness-agent-turn-steering turn) (list (harness-agent--blocks-text blocks))))
+      (let ((node (harness-call 'session/append session-id
+                                (list :kind 'user :content (harness-agent--blocks-text blocks)
+                                      :blocks (unless (harness-agent--only-text-p blocks) blocks)
+                                      :meta (list :steering t)))))
+        (setf (harness-agent-turn-steering turn)
+              (append (harness-agent-turn-steering turn)
+                      (list (list :node (plist-get node :id) :text (harness-agent--blocks-text blocks))))))
       (harness-emit 'agent/steered session-id)
       (harness-agent-turn-promise turn))
      (t (harness-agent--start session-id blocks)))))
@@ -345,6 +370,9 @@ An inactive session is resumed first: sending to it brings it back."
      ((not (harness-call 'session/exists-p sid)) (harness-agent--end turn 'error "session deleted"))
      (t
       (cl-incf (harness-agent-turn-steps turn))
+      ;; Steering still waiting goes out with this request, as the newest
+      ;; user message: after a model that stopped, that is what it answers.
+      (harness-agent--take-steering turn)
       (setf (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil
             (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil
             (harness-agent-turn-pending turn) 0 (harness-agent-turn-waiting-done turn) nil
@@ -363,10 +391,34 @@ An inactive session is resumed first: sending to it brings it back."
         (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
 
 (defun harness-agent--take-steering (turn)
-  "Return and clear pending steering text for TURN, or nil."
-  (let ((texts (harness-agent-turn-steering turn)))
+  "Deliver the pending steering of TURN: clear it and return its text.
+Return nil when nothing is pending.  Every boundary takes it, so a
+message is delivered once.  Each one is recorded as delivered after the
+newest node that is not one of them, which is where `session/messages'
+puts it for the model, rather than where it was sent mid-step."
+  (when-let* ((pending (harness-agent-turn-steering turn)))
     (setf (harness-agent-turn-steering turn) nil)
-    (and texts (string-join texts "\n\n"))))
+    (condition-case err
+        (harness-agent--mark-delivered (harness-agent-turn-session-id turn)
+                                       (delq nil (mapcar (lambda (p) (and (consp p) (plist-get p :node)))
+                                                         pending)))
+      (error (harness-log 'warn "agent: recording delivered steering failed: %S" err)))
+    ;; A turn running across a reload may still hold bare texts.
+    (mapconcat (lambda (p) (if (stringp p) p (plist-get p :text))) pending "\n\n")))
+
+(defun harness-agent--mark-delivered (sid ids)
+  "Mark the steering nodes IDS of session SID as delivered now.
+They count as delivered after the newest node that is not one of them;
+a node already after it keeps its place and is left untouched."
+  (let* ((nodes (and ids (harness-call 'session/nodes sid)))
+         (anchor (cl-find-if-not (lambda (n) (member (plist-get n :id) ids)) nodes :from-end t)))
+    (when anchor
+      (cl-loop for n in nodes
+               until (eq n anchor)
+               when (member (plist-get n :id) ids)
+               do (harness-call 'session/update-node sid (plist-get n :id)
+                                :meta (plist-put (copy-sequence (plist-get n :meta))
+                                                 :delivered-after (plist-get anchor :id)))))))
 
 (defun harness-agent--on-event (turn ev)
   (let ((sid (harness-agent-turn-session-id turn)))
@@ -452,6 +504,15 @@ Whitespace held back for a node that never got visible text is dropped."
   (harness-agent--finalize turn 'thinking)
   (harness-agent--finalize turn 'assistant))
 
+(defun harness-agent--with-steering (turn content)
+  "Return tool result CONTENT carrying the pending steering of TURN.
+The result is a step boundary, so this delivers that steering: a hosted
+loop reads it in the content, a native one with its next request."
+  (let ((steer (harness-agent--take-steering turn)))
+    (if steer
+        (concat content "\n\n<user_message>\n" steer "\n</user_message>")
+      content)))
+
 (defun harness-agent--tool-call (turn ev)
   (let* ((sid (harness-agent-turn-session-id turn))
          (name (plist-get ev :name)) (input (plist-get ev :input))
@@ -478,19 +539,15 @@ Whitespace held back for a node that never got visible text is dropped."
          (harness-agent--remove-call sid call-id)
          (harness-agent--update-activity sid)
          (condition-case err
-             (let* ((steer (harness-agent--take-steering turn))
-                    (content (plist-get result :content))
-                    (content (if steer
-                                 (concat content "\n\n<user_message>\n" steer "\n</user_message>")
-                               content))
-                    (rnode (harness-call 'session/append sid
+             (let* ((rnode (harness-call 'session/append sid
                                          (list :kind 'tool-result :call-id call-id
                                                :output (plist-get result :content)
                                                :is-error (plist-get result :is-error)
                                                :attachments (plist-get result :attachments)
                                                :meta (list :duration (- (float-time) started)
                                                            :denied (plist-get result :denied)
-                                                           :truncated (plist-get result :truncated))))))
+                                                           :truncated (plist-get result :truncated)))))
+                    (content (harness-agent--with-steering turn (plist-get result :content))))
                (harness-emit 'agent/tool-result sid rnode)
                (when respond
                  (funcall respond (list :content content :is-error (plist-get result :is-error)))))
@@ -507,7 +564,8 @@ Whitespace held back for a node that never got visible text is dropped."
          (let ((msg (format "Tool %s failed: %s" name (harness-error-message err))))
            (ignore-errors
              (harness-call 'session/append sid (list :kind 'tool-result :call-id call-id :output msg :is-error t)))
-           (when respond (funcall respond (list :content msg :is-error t)))
+           (let ((content (harness-agent--with-steering turn msg)))
+             (when respond (funcall respond (list :content content :is-error t))))
            (cl-decf (harness-agent-turn-pending turn))
            (harness-agent--maybe-continue turn)))))))
 
@@ -519,6 +577,8 @@ Whitespace held back for a node that never got visible text is dropped."
     (let ((sid (harness-agent-turn-session-id turn))
           (reason (harness-agent-turn-stop-reason turn)))
       (pcase reason
+        ;; A model that stopped with steering still waiting gets it as its
+        ;; next user message: one more step, which takes the steering.
         ((or 'tool-use (and 'end-turn (guard (harness-agent-turn-steering turn))))
          (if (harness-agent-turn-cancelled turn)
              (harness-agent--end turn 'cancelled)
@@ -553,7 +613,18 @@ Whitespace held back for a node that never got visible text is dropped."
       (when (and (eq reason 'end-turn)
                  (harness-call 'session/exists-p sid)
                  (plist-get (harness-call 'session/get sid) :queue))
-        (harness-run-soon #'harness-call 'agent/send-queue sid)))))
+        (harness-run-soon #'harness-agent--send-queued sid)))))
+
+(defun harness-agent--send-queued (session-id)
+  "Send the queue of SESSION-ID as a turn of its own, after a turn ended.
+A turn that started meanwhile sends it when it ends instead: sent into
+a running turn, the queued messages would steer it."
+  (when (and (harness-call 'session/exists-p session-id)
+             (not (harness-agent-running-p session-id)))
+    (harness-catch (harness-call-async 'agent/send-queue session-id)
+                   (lambda (err)
+                     (harness-log 'warn "agent: sending the queue of %s failed: %s"
+                                  session-id (harness-error-message err))))))
 
 ;;;; Cancel and queue
 
@@ -571,14 +642,20 @@ Whitespace held back for a node that never got visible text is dropped."
       t)))
 
 (harness-defmethod agent/send-queue (session-id)
-  "Send every queued message of SESSION-ID as one turn; return its promise."
-  (let ((items (harness-call 'session/queue-take session-id)))
-    (if (null items)
+  "Send every queued message of SESSION-ID as one turn; return its promise.
+Items with neither text nor attachments are dropped.  With nothing to
+send no turn starts and the promise resolves to (:stop-reason
+nothing-queued).  While a turn runs the messages steer it, like any
+message sent then."
+  (let* ((items (harness-call 'session/queue-take session-id))
+         (blocks (harness-agent--join-texts
+                  (cl-loop for it in items
+                           append (append (unless (harness-string-blank-p (plist-get it :text))
+                                            (list (list :type "text" :text (plist-get it :text))))
+                                          (harness-agent-attachments-to-blocks (plist-get it :attachments)))))))
+    (if (null blocks)
         (harness-resolved (list :stop-reason 'nothing-queued))
-      (let ((blocks (cl-loop for it in items
-                             append (cons (list :type "text" :text (plist-get it :text))
-                                          (harness-agent-attachments-to-blocks (plist-get it :attachments))))))
-        (harness-call 'agent/prompt session-id blocks)))))
+      (harness-call 'agent/prompt session-id blocks))))
 
 (harness-defmethod agent/running (&optional session-id)
   "Return running session ids, or non-nil when SESSION-ID is running."

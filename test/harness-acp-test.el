@@ -289,6 +289,55 @@
                                :queued)))
       (should (= 1 (length (plist-get (harness-call 'session/get sid) :queue)))))))
 
+(defvar harness-provider-demo-script-override)
+
+(ert-deftest harness-acp-local-queue-while-running ()
+  "What `harness-chat-queue' sends while a turn runs only queues: it never steers.
+Once the turn ends the message runs as a turn of its own."
+  (harness-acp-test-with
+    (let* ((gate (harness-make-promise))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "w1" :name "hold" :input (:n 1))
+              (:type text :delta "Done.")
+              (:type done :stop-reason end-turn)))
+           (conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (file (make-temp-file "harness-acp-queued" nil ".txt" "x"))
+           (p (progn
+                ;; The turn waits in this tool until the test lets it go.
+                (harness-define-tool "hold" :description "hold" :kind 'read
+                                     :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
+                (harness-acp-request conn "session/prompt"
+                                     (list :sessionId sid :prompt (list (list :type "text" :text "tour")))))))
+      (harness-test-wait (lambda () (memq 'tool-call (mapcar (lambda (n) (plist-get n :kind))
+                                                             (harness-call 'session/nodes sid))))
+                         5 "the turn in its tool")
+      (should (eq t (plist-get (harness-acp-test-request
+                                conn "_harness/agent/prompt"
+                                (list :session-id sid :blocks (list (list :type "text" :text "for later"))
+                                      :opts (list :queue t :attachments (list (list :path file :size 1 :mime "text/plain"
+                                                                                    :name "notes.txt")))))
+                               :queued)))
+      (let ((queue (plist-get (harness-call 'session/get sid) :queue)))
+        (should (equal '("for later") (mapcar (lambda (it) (plist-get it :text)) queue)))
+        (should (equal (list file) (mapcar (lambda (a) (plist-get a :path)) (plist-get (car queue) :attachments)))))
+      (should (harness-agent-running-p sid))
+      (should-not (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering)) (harness-call 'session/nodes sid)))
+      (harness-resolve gate t)
+      (should (equal "end_turn" (plist-get (harness-test-await p) :stopReason)))
+      (harness-test-wait (lambda () (and (null (plist-get (harness-call 'session/get sid) :queue))
+                                         (not (harness-agent-running-p sid))))
+                         10 "the queued turn")
+      (let ((users (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes sid))))
+        (should (equal (list "tour" (concat "for later @" (file-name-nondirectory file)))
+                       (mapcar (lambda (n) (plist-get n :content)) users)))
+        (should-not (cl-some (lambda (n) (plist-get (plist-get n :meta) :steering)) users)))
+      ;; Sending the queue with nothing in it is a no-op.
+      (should (equal "nothing-queued" (plist-get (harness-acp-test-request conn "_harness/agent/send-queue"
+                                                                           (list :session-id sid))
+                                                 :stop-reason)))
+      (should-not (harness-agent-running-p sid)))))
+
 (ert-deftest harness-acp-local-wire-normalisation ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))
