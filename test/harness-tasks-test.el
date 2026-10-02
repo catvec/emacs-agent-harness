@@ -1744,6 +1744,19 @@ Each is a new session, never an earlier one."
                                            :stop-reason)))
           (should (cl-some (lambda (s) (string-match-p (regexp-quote harness-tasks-btw-prompt) s)) systems)))))))
 
+(defvar harness-btw-thinking)
+
+(ert-deftest harness-tasks-btw-thinks-at-the-btw-level ()
+  "A conversation about the board starts at the BTW level, like every BTW.
+With nil it starts at the level the project configures instead."
+  (harness-tasks-test-with
+    ;; Not a task: the project's usual model, whose levels the demo
+    ;; catalogue lists (low and high).
+    (let ((harness-model "demo:scripted") (harness-thinking "high") (harness-btw-thinking "low"))
+      (should (equal "low" (plist-get (harness-call 'task/btw default-directory) :thinking)))
+      (let ((harness-btw-thinking nil))
+        (should (equal "high" (plist-get (harness-call 'task/btw default-directory) :thinking)))))))
+
 (ert-deftest harness-tasks-btw-starts-at-the-project-root ()
   "From anywhere in a repository, or one of its task worktrees, the BTW sits at the main checkout."
   (harness-tasks-test-with

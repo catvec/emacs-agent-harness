@@ -262,13 +262,19 @@ conversation so far and continues independently.
 below the session. A BTW is a new, empty session that shares nothing
 with the session or with other BTWs, which makes it a good place for
 quick questions. It has the full chat interface, including the header
-line with the model, permission mode and thinking level, which start
-from the session's, and whether it is non-interactive. Two extra
-controls appear at the front of its header line:
+line with the model and permission mode, which start from the
+session's, the thinking level and whether it is non-interactive. Two
+extra controls appear at the front of its header line:
 
 - `[close]` (`C-c C-k`) closes the BTW. A BTW in which nothing was
   asked is deleted.
 - `[keep]` (`C-c C-o`) keeps it as a normal session.
+
+So that quick questions get quick answers, a BTW starts at the `low`
+thinking level, whatever the session's level is. Set
+`harness-btw-thinking` to choose another level, or to nil to start
+from the session's level. A BTW whose model does not offer that level
+starts at the session's.
 
 ### Task board
 
@@ -344,6 +350,7 @@ project's, and a project's over the global value.
 
 - `harness-model`
 - `harness-thinking`
+- `harness-btw-thinking`
 - `harness-permission-mode`
 - `harness-allowed-directories`
 - `harness-budget`

@@ -233,7 +233,8 @@ Layered settings: directory `.dir-locals.el` (most specific) →
 project-root `.dir-locals.el` → customize default.  Variables are
 `defcustom`s with `:safe` predicates so dir-locals never prompt:
 `harness-model` (default "claude:claude-fable-5-1"),
-`harness-permission-mode`, `harness-thinking`,
+`harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
+(the level BTWs start at, default "low"; nil for the session's),
 `harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
 `harness-non-interactive`, `harness-context-reserve`,
 `harness-tasks-directory` (the tasks module's folder of task files).
@@ -312,7 +313,10 @@ gone.
 - `session/create &rest PLIST` — `:cwd` required; `:name :model
   :permission-mode :thinking :kind :parent-id :host :worktree`, and
   `:context-window` to set the session's own window.  Fills
-  project, defaults from `config/get`.  → session.  Event `session/created`.
+  project, defaults from `config/get`.  A `btw` session without
+  `:thinking` takes `harness-btw-thinking` when its model offers that
+  level (the catalogue lists it in `:thinking-levels`), else
+  `harness-thinking`.  → session.  Event `session/created`.
 - `session/get ID`, `session/list &optional FILTER` (`:project :status
   :kind :parent-id :active`), `session/delete ID`.
 - `session/update ID &rest PLIST` — settings and name; appends a `hint`
@@ -331,9 +335,11 @@ gone.
 - `session/btw ID &optional NAME`: a BTW side conversation over ID, a
   new, empty `btw` session sharing nothing with ID or with any other
   BTW (no nodes, no fork node, no provider state, no directory grants).
-  It takes ID's cwd, project, host, worktree, model, thinking and
-  permission mode; `:parent-id` is ID only so lists show it under ID.
-  Returns the new session.
+  It takes ID's cwd, project, host, worktree, model and permission
+  mode; `:parent-id` is ID only so lists show it under ID.  It thinks
+  at `harness-btw-thinking` as configured at ID's cwd ("low" by
+  default, so quick questions get quick answers) when the model offers
+  that level, else at ID's level.  Returns the new session.
 - `session/nodes ID &optional (:limit N :before NODE-ID)` → path nodes,
   oldest first; `session/node ID NODE-ID`; `session/tree ID` → every
   node of the family (session + ancestors + forks) as a list with
@@ -1724,7 +1730,8 @@ permission mode, non-interactive, thinking, context, cost, [menu]),
 keys and menu are a session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
 front of the header through `harness-chat-header-functions` (what it
 is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep
-it; one over a session starts in that session's permission mode.  The
+it; one over a session starts in that session's permission mode, and
+every one at the BTW thinking level (`harness-btw-thinking`).  The
 first message names it `btw: ...`, unless it was named by hand.
 Closing it returns there; a BTW nothing was asked in is deleted with
 its buffer, once the harness confirms it holds no node of its own,

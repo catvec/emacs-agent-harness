@@ -69,6 +69,7 @@
 (declare-function harness-ui-display-session "harness-ui")
 (declare-function harness-ui-session "harness-ui")
 (declare-function harness-ui-refresh-sessions "harness-ui")
+(declare-function harness-ui-thinking-label "harness-ui")
 (declare-function harness-acp--drop-client "harness-acp")
 
 (defun harness-ui-btw-test--reset-windows ()
@@ -447,22 +448,25 @@ both under the session, which keeps its transcript and provider state."
   "A BTW's header line is its session's own, the BTW segment in front.
 The permission mode shows there, its parent's to begin with, and the
 header, the key and the harness menu change it for the BTW alone, the
-menu in a window of its own.  Closed, the BTW has the session's header
-and nothing else."
+menu in a window of its own.  The thinking level is the BTW level, low,
+whatever the parent's.  Closed, the BTW has the session's header and
+nothing else."
   (harness-ui-btw-test-with
     (pcase-let ((`(,parent . ,parent-window) (harness-ui-btw-test--open-session)))
-      (harness-call 'session/update parent :permission-mode 'accept-edits)
+      (harness-call 'session/update parent :permission-mode 'accept-edits :thinking "high")
       (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
              (buffer (window-buffer window))
              (sid (buffer-local-value 'harness-ui-session-id buffer)))
         (should (harness-ui-btw-test--ready-p window))
         (harness-ui-btw-test--wait-mode sid 'accept-edits)
+        (should (equal "low" (plist-get (harness-call 'session/get sid) :thinking)))
         ;; The chat's own header line, after the BTW segment.
         (should (equal '(:eval (harness-chat--header)) (buffer-local-value 'header-line-format buffer)))
         (let ((own (harness-ui-btw-test--own-header buffer)))
           (should (equal (concat " BTW side conversation  [close] [keep] " own)
                          (harness-ui-btw-test--header buffer)))
-          (dolist (segment '("btw" "scripted (Demo)" "Accept Edits" "default" "[menu]"))
+          (dolist (segment (list "btw" "scripted (Demo)" "Accept Edits"
+                                 (substring-no-properties (harness-ui-thinking-label "low")) "[menu]"))
             (should (string-search segment own))))
         ;; mouse-1 on the permission mode, from the parent's window.
         (select-window parent-window)

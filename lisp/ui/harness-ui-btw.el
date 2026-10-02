@@ -9,7 +9,8 @@
 ;; the session it was opened over, nor with any other BTW, even one
 ;; opened over the same session: it starts with an empty transcript and
 ;; a provider conversation of its own.  It works where that session
-;; does, with its model and permission mode, and shows up under it in
+;; does, with its model and permission mode, at the low thinking level
+;; of quick questions (`harness-btw-thinking'), and shows up under it in
 ;; the session list and the conversation tree.  It is shown in its own
 ;; chat buffer, the full chat UI in another place: its header line
 ;; (model, permission mode and the rest, all clickable), keys and
