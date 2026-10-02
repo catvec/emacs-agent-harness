@@ -32,12 +32,27 @@
         (file-name-as-directory (expand-file-name (project-root pr)))
       dir)))
 
+(defun harness-files--pruned-common-dir (gitdir)
+  "Return the common git directory of GITDIR, a pruned worktree's, or nil.
+Git keeps a linked worktree's gitdir in COMMON/worktrees/ID.  `git
+worktree prune' deletes it when the worktree is out of its sight -- run
+in a sandbox that shows another worktree only, say -- and the worktree
+lives on with a .git file naming it.  COMMON is returned when GITDIR is
+gone, has that place and COMMON is still a git directory."
+  (let ((parent (directory-file-name (file-name-directory (directory-file-name gitdir)))))
+    (and (equal (file-name-nondirectory parent) "worktrees")
+         (not (file-exists-p gitdir))
+         (let ((common (file-name-directory parent)))
+           (and (file-directory-p (expand-file-name "objects" common)) common)))))
+
 (defun harness-files--linked-git-dir (dotgit)
   "Return the common git directory the .git file DOTGIT points to, or nil.
 That file names the gitdir of a linked worktree, a submodule or a
 separated repository.  A linked worktree's gitdir has a commondir file
 naming the directory its repository shares; the others are their own.
-The result has no trailing slash and may not exist."
+A worktree whose gitdir git pruned still belongs to the repository it
+was in (see `harness-files--pruned-common-dir').  The result has no
+trailing slash and may not exist."
   ;; Git writes these as UTF-8.  Naming the coding system skips
   ;; detection, nearly all of a read's time.
   (let ((coding-system-for-read 'utf-8))
@@ -47,17 +62,19 @@ The result has no trailing slash and may not exist."
         (let* ((gitdir (expand-file-name (match-string 1) (file-name-directory dotgit)))
                (commondir (expand-file-name "commondir" gitdir)))
           (directory-file-name
-           (if (file-readable-p commondir)
-               (progn (erase-buffer)
-                      (insert-file-contents commondir)
-                      (expand-file-name (string-trim (buffer-string)) gitdir))
-             gitdir)))))))
+           (cond ((file-readable-p commondir)
+                  (erase-buffer)
+                  (insert-file-contents commondir)
+                  (expand-file-name (string-trim (buffer-string)) gitdir))
+                 ((harness-files--pruned-common-dir gitdir))
+                 (t gitdir))))))))
 
 (defun harness-files-main-checkout (root)
   "Return the main checkout of project ROOT, or ROOT itself.
-A linked git worktree belongs to the checkout that owns its repository.
-Reads ROOT's .git file and the commondir it points to: no process, no
-walk up the tree, and remote roots are returned untouched."
+A linked git worktree belongs to the checkout that owns its repository,
+also once git pruned its record there.  Reads ROOT's .git file and the
+commondir it points to: no process, no walk up the tree, and remote
+roots are returned untouched."
   (if (file-remote-p root)
       root
     (let ((root (file-name-as-directory (expand-file-name root))))
