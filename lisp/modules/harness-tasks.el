@@ -126,7 +126,11 @@ A task whose turn ends cleanly goes to review instead of done, in a git
 project with its branch not merged yet.  Verifying it (`task/verify')
 merges the branch and completes the task; sending it back with
 feedback (`task/reject') has its session work on it again.  With nil a
-task is done once its branch merges, or outside git once its turn ends."
+task is done once its branch merges, or outside git once its turn ends.
+
+The task board turns review off and on again with its Review switch,
+for every project.  Turning it off leaves the tasks that already wait
+for review where they are, for the user to verify."
   :type 'boolean :group 'harness)
 
 (defcustom harness-tasks-permission-mode 'auto
@@ -2461,11 +2465,15 @@ CWD) is read first, so tasks written by hand show."
 (harness-defmethod task/settings (&optional cwd)
   "Return the settings task sessions start with (for CWD's project).
 Model and thinking are the values a new task would really get: the task
-defaults, else what the project configures."
+defaults, else what the project configures.  `:require-verification'
+is t while finished work waits for the user's review, else false (not
+nil, which JSON could not tell from a harness that does not say):
+`harness-tasks-require-verification'."
   (let ((root (and cwd (harness-tasks--project cwd))))
     (list :max-running harness-tasks-max-running
           :permission-mode harness-tasks-permission-mode
           :non-interactive harness-tasks-non-interactive
+          :require-verification (if harness-tasks-require-verification t :false)
           :model (or harness-tasks-model (harness-tasks--config 'harness-model root)
                      (and (boundp 'harness-default-model) harness-default-model))
           :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))

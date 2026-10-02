@@ -839,6 +839,118 @@ told from, like a worktree git lost track of, still leads back."
         (should-error (harness-ui-tasks-verify) :type 'user-error)
         (should-error (harness-ui-tasks-reject) :type 'user-error)))))
 
+;;;; Review: the switch that turns it off
+
+(declare-function harness-ui-tasks-toggle-review "harness-ui-tasks")
+(declare-function harness-ui-tasks-refresh "harness-ui-tasks")
+(declare-function harness-ui-tasks--new-settings-line "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--settings-say (board review)
+  "Wait until BOARD's settings say REVIEW, t or `:false', about review."
+  (harness-test-wait (lambda () (eq review (plist-get (buffer-local-value 'harness-ui-tasks--settings board)
+                                                     :require-verification)))
+                     5 (format "the board to know review is %s" (if (eq review t) "on" "off"))))
+
+(defun harness-ui-tasks-test--switch (board)
+  "Return (TEXT HELP CLICK) of the Review switch in BOARD's header line, or nil.
+HELP is its tooltip, CLICK what a click on it runs."
+  (with-current-buffer board
+    (let* ((header (harness-ui-tasks--header))
+           (start (string-search "[Review: " header)))
+      (when start
+        (list (substring-no-properties header start (1+ (string-search "]" header start)))
+              (let ((help (get-text-property start 'help-echo header)))
+                (if (functionp help) (funcall help (get-buffer-window board t) nil nil) help))
+              (lookup-key (get-text-property start 'keymap header) [header-line mouse-1]))))))
+
+(defun harness-ui-tasks-test--worktree-note (board)
+  "The settings line BOARD shows above its compose box in a git project."
+  (with-current-buffer board
+    (let ((harness-ui-tasks--settings (append '(:worktrees t) harness-ui-tasks--settings)))
+      (substring-no-properties (harness-ui-tasks--new-settings-line)))))
+
+(ert-deftest harness-ui-tasks-review-switch ()
+  "The Review switch turns review off and on again: an option, saved for every project.
+Off, finished work completes by itself and Ready for review goes away."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (saved nil))
+      (cl-letf (((symbol-function 'harness-save-user-option)
+                 (lambda (symbol value) (set symbol value) (push (cons symbol value) saved)))
+                ;; Nothing waits for review, so turning it off asks nothing.
+                ((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Asked about tasks waiting for review"))))
+        (with-current-buffer board (harness-ui-tasks-refresh))
+        (harness-ui-tasks-test--settings-say board t)
+        (pcase-let ((`(,text ,help ,_) (harness-ui-tasks-test--switch board)))
+          (should (equal "[Review: on]" text))
+          (should (string-search "Review is on" help))
+          (should (string-search "V to turn it off, for every project" help)))
+        (should (string-search "merged once you verify it" (harness-ui-tasks-test--worktree-note board)))
+        ;; V on the board turns it off.
+        (with-current-buffer board
+          (goto-char (point-min))
+          (should (eq 'harness-ui-tasks-toggle-review (key-binding (kbd "V"))))
+          (call-interactively (key-binding (kbd "V"))))
+        (harness-test-wait (lambda () (equal "[Review: off]" (car (harness-ui-tasks-test--switch board))))
+                           5 "the switch to show off")
+        ;; Saved as the option, so it holds for every project and after a restart.
+        (should (equal '((harness-tasks-require-verification)) saved))
+        (should-not harness-tasks-require-verification)
+        (should (string-search "Review is off" (nth 1 (harness-ui-tasks-test--switch board))))
+        (should (string-search "merged when done" (harness-ui-tasks-test--worktree-note board)))
+        ;; Finished work is done without waiting for anyone, and the board
+        ;; has no column for review.
+        (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
+        (harness-ui-tasks-test--wait-text board "Completed  1\\(.\\|\n\\)*Fix the flaky test")
+        (should (string-match-p "In progress  0" (harness-ui-tasks-test--board-text board)))
+        (should-not (string-search "Ready for review" (harness-ui-tasks-test--board-text board)))
+        (should-not (plist-get (car (harness-call 'task/list default-directory)) :verified))
+        ;; A click on the switch turns it on again.
+        (with-current-buffer board (funcall (nth 2 (harness-ui-tasks-test--switch board))))
+        (harness-test-wait (lambda () harness-tasks-require-verification) 5 "review on again")
+        (should (equal '(harness-tasks-require-verification . t) (car saved)))
+        (harness-ui-tasks-test--settings-say board t)
+        (should (equal "[Review: on]" (car (harness-ui-tasks-test--switch board))))
+        (should (string-match-p "Ready for review  0" (harness-ui-tasks-test--board-text board)))))))
+
+(ert-deftest harness-ui-tasks-review-off-verifies-what-waits ()
+  "Turning review off while tasks wait for it offers to verify them.
+No leaves them waiting; yes verifies them, and they complete.  A prefix
+argument says which way to turn it, and turning it on asks nothing."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (answer nil)
+          (asked nil))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (symbol value) (set symbol value)))
+                ((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) answer)))
+        (harness-ui-tasks-test--type-and-submit board "First task")
+        (harness-ui-tasks-test--type-and-submit board "Second task")
+        (harness-ui-tasks-test--wait-text board "Ready for review  2")
+        (harness-ui-tasks-test--settings-say board t)
+        ;; No: they wait on, and so does their column.
+        (with-current-buffer board (harness-ui-tasks-toggle-review))
+        (should (equal '("Verify the 2 tasks waiting for your review too? ") asked))
+        (harness-ui-tasks-test--settings-say board :false)
+        (should-not harness-tasks-require-verification)
+        (harness-ui-tasks-test--wait-text board "Ready for review  2")
+        ;; On, with a prefix argument: nothing to ask.
+        (setq asked nil)
+        (with-current-buffer board
+          (let ((current-prefix-arg 1)) (call-interactively #'harness-ui-tasks-toggle-review)))
+        (harness-ui-tasks-test--settings-say board t)
+        (should harness-tasks-require-verification)
+        (should-not asked)
+        ;; Off again, and yes: both are verified and complete.
+        (setq answer t)
+        (with-current-buffer board
+          (let ((current-prefix-arg -1)) (call-interactively #'harness-ui-tasks-toggle-review)))
+        (should (= 1 (length asked)))
+        (harness-ui-tasks-test--wait-text board "Completed  2")
+        (should-not (string-search "Ready for review" (harness-ui-tasks-test--board-text board)))
+        (dolist (task (harness-call 'task/list default-directory))
+          (should (eq 'done (plist-get task :state)))
+          (should (plist-get task :verified)))))))
+
 ;;;; Point stays where it was put
 
 ;; The board is drawn again on every change of a task or a session and

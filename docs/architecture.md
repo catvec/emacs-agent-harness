@@ -1049,6 +1049,10 @@ to the task's file (below); the record also keeps `:file-base` and
   puts the task in review, merged.  `task/archive` works in review too;
   `task/archive-done` leaves those tasks alone.  With the option nil a
   task is done once merged, or outside git once its turn ends.
+  `task/settings` reports the option as `:require-verification` (t, or
+  false rather than nil), and a board's Review switch turns it off and
+  on with `config/set`, globally and saved; tasks already in review wait
+  on until verified.
 - A turn starting in a task's session makes the task active again, so a
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.
@@ -1477,7 +1481,13 @@ accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
 in the minibuffer).  The header counts the tasks to review, and
 `task/review` says in the echo area that one is ready
-(`harness-ui-tasks-notify-review`).  RET opens the session, and
+(`harness-ui-tasks-notify-review`).  The header's Review switch
+([Review: on], `V`) turns review off and on again for every project
+(`harness-tasks-require-verification`, saved through `config/set`):
+off, finished tasks merge and complete by themselves, and Ready for
+review shows only while tasks from before still wait there; turning it
+off while tasks of the board wait for review offers to verify them.
+`config/changed` brings every board the new value.  RET opens the session, and
 `C-c h a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  Redraws, after

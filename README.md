@@ -263,8 +263,13 @@ so several tasks can work in parallel.
   of the task at point.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
-  its session with feedback. With `harness-tasks-require-verification`
-  set to nil, tasks complete without review.
+  its session with feedback.
+- To skip review, press `V` or click `[Review: on]` in the board's
+  header line. Finished tasks then merge and complete without waiting
+  for you, and if tasks are already waiting for review, the board offers
+  to verify them. The switch sets `harness-tasks-require-verification`,
+  so it applies to every project and is saved for later sessions. Press
+  `V` again to turn review back on.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `RET` opens the session of the task at point. From that session,

@@ -279,6 +279,37 @@ turn `harness-tasks-require-verification' on themselves."
         (should (equal "demo:scripted" (plist-get s :model)))
         (should (equal "high" (plist-get s :thinking)))))))
 
+(ert-deftest harness-tasks-settings-report-review ()
+  "The settings say whether finished work waits for review; off is false, not nil."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t))
+      (should (eq t (plist-get (harness-call 'task/settings default-directory) :require-verification))))
+    (let ((harness-tasks-require-verification nil))
+      (should (eq :false (plist-get (harness-call 'task/settings default-directory) :require-verification)))
+      ;; It stays false over the wire, where nil would be a harness that does not say.
+      (let ((conn (harness-acp-connect)))
+        (should (eq :false (plist-get (harness-test-await
+                                       (harness-acp-request conn "_harness/task/settings"
+                                                            (list :cwd default-directory)))
+                                      :require-verification)))))))
+
+(ert-deftest harness-tasks-review-turned-off-midway ()
+  "Review turned off as the settings page or a board does: work finished after that is done at once.
+A task that already waits in review waits on until the user verifies it."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (symbol value) (set symbol value))))
+        (let ((waiting (harness-tasks-test-submit "first")))
+          (harness-tasks-test-wait-state waiting 'review)
+          (harness-call 'config/set "harness-tasks-require-verification" "nil" :printed t :scope 'global)
+          (should-not harness-tasks-require-verification)
+          (let ((later (harness-tasks-test-submit "second")))
+            (harness-tasks-test-wait-state later 'done)
+            (should-not (plist-get (harness-tasks-test-task later) :verified)))
+          (should (eq 'review (harness-tasks-test-state waiting)))
+          (harness-call 'task/verify waiting)
+          (should (eq 'done (harness-tasks-test-state waiting))))))))
+
 (defvar harness-non-interactive)
 
 (ert-deftest harness-tasks-submit-with-session-settings ()
