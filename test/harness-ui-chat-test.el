@@ -277,6 +277,55 @@ buffer-local function changes only its buffer's header."
         (kill-local-variable 'harness-chat-header-functions)
         (should (equal own (harness-chat--header)))))))
 
+(defun harness-ui-chat-test-segment (header command)
+  "Return (TEXT POS) of the segment of HEADER that runs COMMAND, or nil."
+  (let ((map (harness-chat--segment-map command))
+        (pos 0) found)
+    (while (and (not found) (< pos (length header)))
+      (if (eq map (get-text-property pos 'local-map header))
+          (setq found pos)
+        (setq pos (next-single-property-change pos 'local-map header (length header)))))
+    (when found
+      (list (substring-no-properties header found (next-single-property-change found 'local-map header (length header)))
+            found))))
+
+(ert-deftest harness-ui-chat-header-shows-and-toggles-non-interactive ()
+  "The header line says whether the session waits for the user, right
+after its permission mode.  A click there toggles it in the harness,
+the header follows, and the transcript notes each change."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Away"))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window)))
+      (set-window-buffer w buf)
+      (cl-flet* ((header () (with-current-buffer buf (harness-chat--header)))
+                 (segment () (harness-ui-chat-test-segment (header) #'harness-toggle-non-interactive))
+                 (prop (name) (get-text-property (cadr (segment)) name (header)))
+                 (click () (funcall (lookup-key (prop 'local-map) [header-line mouse-1])
+                                    (list 'mouse-1 (list w 'header-line '(0 . 0) 0))))
+                 (await (on what) (harness-test-wait
+                                   (lambda () (eq on (harness-json-true-p
+                                                      (plist-get (harness-ui-session sid) :non-interactive))))
+                                   5 what)))
+        (should (equal "interactive" (car (segment))))
+        (should (eq 'harness-dim-face (prop 'face)))
+        (should (string-match-p "waits for your answer.*mouse-1: make it non-interactive" (prop 'help-echo)))
+        ;; Next to the permission mode.
+        (should (string-match-p "Ask  interactive  " (substring-no-properties (header))))
+        (click)
+        (await t "switched on")
+        (should (eq t (plist-get (harness-call 'session/get sid) :non-interactive)))
+        (should (equal "non-interactive" (car (segment))))
+        (should (eq 'harness-non-interactive-face (prop 'face)))
+        (should (string-match-p "never waits for you.*mouse-1: make it interactive" (prop 'help-echo)))
+        (click)
+        (await nil "switched off")
+        (should-not (plist-get (harness-call 'session/get sid) :non-interactive))
+        (should (equal "interactive" (car (segment))))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "non-interactive off")) 5 "the hint")
+        (should (< (harness-ui-chat-test-find buf "non-interactive on")
+                   (harness-ui-chat-test-find buf "non-interactive off")))))))
+
 (ert-deftest harness-ui-chat-streaming-appends-cheaply ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))

@@ -254,8 +254,11 @@ HEAD defaults to the session head."
           (harness-session-permission-mode s) (or (plist-get plist :permission-mode)
                                                   (harness-session--config 'harness-permission-mode cwd) 'ask)
           (harness-session-thinking s) (or (plist-get plist :thinking) (harness-session--config 'harness-thinking cwd))
-          (harness-session-non-interactive s) (or (plist-get plist :non-interactive)
-                                                  (harness-session--config 'harness-non-interactive cwd))
+          ;; Its own switch from now on: t or nil.  An explicit false
+          ;; (`:false') turns it off whatever the setting says.
+          (harness-session-non-interactive s) (harness-json-true-p
+                                               (or (plist-get plist :non-interactive)
+                                                   (harness-session--config 'harness-non-interactive cwd)))
           (harness-session-allowed-dirs s) (plist-get plist :allowed-dirs)
           (harness-session-status s) 'idle
           (harness-session-parent-id s) (plist-get plist :parent-id)
@@ -349,7 +352,7 @@ next start settles its turn."
     (:model (format "model → %s" value))
     (:permission-mode (format "permission mode → %s" value))
     (:thinking (format "thinking → %s" (or value "default")))
-    (:non-interactive (format "non-interactive %s" (if value "on" "off")))
+    (:non-interactive (format "non-interactive %s" (if (harness-json-true-p value) "on" "off")))
     (:budget (if value (format "budget → %s%s" (harness-format-cost (plist-get value :amount))
                                (if (plist-get value :hard) " (hard)" ""))
                "budget removed"))
@@ -435,7 +438,9 @@ resume and write into the parent's CLI session.  A BTW is no fork; see
                              :model (harness-session-model parent)
                              :permission-mode (harness-session-permission-mode parent)
                              :thinking (harness-session-thinking parent)
-                             :non-interactive (harness-session-non-interactive parent)
+                             ;; Off too, not left to the setting.
+                             :non-interactive (if (harness-json-true-p (harness-session-non-interactive parent))
+                                                  t :false)
                              :allowed-dirs (harness-session-allowed-dirs parent)
                              :budget (harness-session-budget parent)
                              :kind 'fork

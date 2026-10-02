@@ -1910,7 +1910,10 @@ out, so the session gets what its directory configures."
     (append (and mode (list :permission-mode mode))
             (and model (list :model model))
             (and thinking (list :thinking thinking))
-            (and non-interactive (list :non-interactive t)))))
+            ;; The task's own false is set, not unset: off whatever the
+            ;; directory configures.
+            (cond (non-interactive (list :non-interactive t))
+                  ((plist-member task :non-interactive) (list :non-interactive :false))))))
 
 (defun harness-tasks--open-session (id cwd worktree)
   "Create task ID's session in CWD (in WORKTREE, when non-nil) and prompt it."

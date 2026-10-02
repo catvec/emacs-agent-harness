@@ -73,7 +73,14 @@ when available, `off' never sandboxes."
   :group 'harness)
 
 (defcustom harness-non-interactive nil
-  "When non-nil sessions avoid blocking on the user."
+  "Whether new sessions start non-interactive.
+A non-interactive session never waits for the user: what would ask for
+permission is denied instead, and the agent is told to find another
+way.  From then on each session has its own switch, which its header
+line shows and `harness-toggle-non-interactive' flips; changing this
+setting leaves the sessions that exist as they are.  Task sessions
+start non-interactive anyway while `harness-tasks-non-interactive' is
+on."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defcustom harness-context-reserve 20000

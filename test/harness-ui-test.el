@@ -373,6 +373,37 @@ bottom side window and leaves the other windows alone."
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
 
+(ert-deftest harness-ui-non-interactive-key-and-menu-label ()
+  "C-c a i toggles non-interactive mode.  In the menu its entry says
+whether what it toggles from the buffer is non-interactive, a session
+or a board's new-task settings; from a buffer with neither it says
+nothing about it and asks for nothing."
+  (should (eq 'harness-toggle-non-interactive (lookup-key harness-ui-map (kbd "i"))))
+  (let ((harness-ui--sessions (make-hash-table :test 'equal))
+        (harness-ui-sessions-changed-hook nil)
+        (sent nil) (set nil))
+    (harness-ui-cache-session '(:id "s-away" :non-interactive t))
+    (harness-ui-cache-session '(:id "s-here" :non-interactive :false))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (error "Prompted")))
+              ((symbol-function 'read-string) (lambda (&rest _) (error "Prompted")))
+              ((symbol-function 'harness-ui-call) (lambda (_method params &rest _) (push params sent))))
+      (harness-ui-test-with-menu-buffer #'fundamental-mode
+        (let ((text (harness-ui-test-menu)))
+          (should (string-match-p " i Non-interactive\\( \\|$\\)" text))
+          (should-not (string-match-p "Non-interactive:" text))))
+      (pcase-dolist (`(,sid ,label ,value) '(("s-away" "on" :false) ("s-here" "off" t)))
+        (harness-ui-test-with-menu-buffer #'fundamental-mode
+          (setq harness-ui-session-id sid)
+          (should (string-match-p (concat " i Non-interactive: " label) (harness-ui-test-menu "i")))
+          (should (equal (list :id sid :non-interactive value) (pop sent)))))
+      ;; What a target function names, as the task board's new-task settings.
+      (harness-ui-test-with-menu-buffer #'fundamental-mode
+        (setq-local harness-ui-setting-target-function
+                    (lambda () (cons '(:non-interactive t) (lambda (key value) (push (list key value) set)))))
+        (should (string-match-p " i Non-interactive: on" (harness-ui-test-menu "i")))
+        (should (equal '((:non-interactive nil)) set))))
+    (should-not sent)))
+
 ;;;; Connecting to another harness
 
 (defmacro harness-ui-test-with-connect-stub (var &rest body)

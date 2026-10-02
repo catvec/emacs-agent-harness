@@ -809,7 +809,7 @@ same line of the same task, on the same button (`harness-ui-tasks--anchor')."
                (harness-ui-thinking-label (plist-get new :thinking))
                #'harness-set-thinking "Thinking level of new tasks")
               (harness-ui-tasks--setting-button
-               (if (harness-json-true-p (plist-get new :non-interactive)) "non-interactive" "interactive")
+               (harness-ui-non-interactive-label (plist-get new :non-interactive))
                #'harness-toggle-non-interactive "Non-interactive mode of new tasks"))
         (propertize " · " 'face 'harness-dim-face))
        (let ((notes (if harness-ui-tasks--refine

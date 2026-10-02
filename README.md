@@ -58,8 +58,8 @@ does on the task board).
 | `C-c a n` | new session in a directory (opens on the right by default) |
 | `C-c a s` / `C-c a l` | switch session / session list |
 | `C-c a a` | task mode: a board of one-session tasks, each in its own worktree; finished work waits in Ready for review until you verify it (`v`: its branch merges and the task is done) or send it back with feedback (`R`: its session works on it again), unless `harness-tasks-require-verification` is nil; `I` adds an ongoing session, `b` asks how the tasks are going in a BTW side conversation, and `C-c a m` `T` `p` `i` set the next task up (or change the task at point); `C-c C-t` switches the box between Submit (start now) and Refine (backlog refinement: an agent writes the task up and it waits in Pending, across restarts, until `s` starts it) |
-| `C-c a m` `T` `p` `i` | model, thinking level, permission mode, non-interactive |
-| `C-c a f` / `C-c a b` | fork the session / BTW side conversation: a new, empty session in a side window under the session, sharing nothing with it or with other BTWs, point in its compose box (ask with `C-c C-c` as in any session).  It is the full chat UI, header line included (model, permission mode, thinking, starting from the session's), with `[close]` and `[keep]` in front: `C-c C-k` closes it, deleting it if nothing was asked, `C-c C-o` keeps it as a normal session |
+| `C-c a m` `T` `p` `i` | model, thinking level, permission mode, and `i` toggles non-interactive mode: a non-interactive session never waits for you, since what would ask for permission is denied and the agent is told to find another way.  The chat's header line shows each of them; click one to change it |
+| `C-c a f` / `C-c a b` | fork the session / BTW side conversation: a new, empty session in a side window under the session, sharing nothing with it or with other BTWs, point in its compose box (ask with `C-c C-c` as in any session).  It is the full chat UI, header line included (model, permission mode and thinking, starting from the session's, and whether it is non-interactive), with `[close]` and `[keep]` in front: `C-c C-k` closes it, deleting it if nothing was asked, `C-c C-o` keeps it as a normal session |
 | `C-c a t` `u` `w` | conversation tree, usage dashboard, worktrees |
 | `C-c a S` | settings: every harness setting on one page, edited globally or for the current project (`s` switches) |
 | `C-c a k` | cancel the running turn |
@@ -74,6 +74,11 @@ a name finds a file in any subdirectory), `/` completes skills,
 any file), `C-c C-v` pastes a clipboard image, `TAB` folds a block.
 Typing anywhere goes to the compose box, `?` included, so the menu is
 `C-c a ?` there (or the `[menu]` button in the header line).
+The header line shows the session's model, permission mode, whether it
+is `non-interactive` or `interactive`, and thinking level; clicking one
+changes it.  A session starts non-interactive when
+`harness-non-interactive` is set (task sessions: while
+`harness-tasks-non-interactive` is), and from then on has its own switch.
 Permission and question panels appear inline above the compose box; the
 mode line shows how many sessions need you from any buffer.
 Opening a closed (inactive) session shows it without waking it; it keeps

@@ -123,6 +123,9 @@
 (defface harness-plan-face '((t :inherit font-lock-constant-face))
   "The name of the subscription plan that pays for a session." :group 'harness-ui)
 
+(defface harness-non-interactive-face '((t :inherit warning))
+  "A session that runs non-interactive, never waiting for the user." :group 'harness-ui)
+
 ;;;; Icons
 
 ;; Icons are monochrome SVGs drawn in `currentColor', so they take the
@@ -787,6 +790,17 @@ Signal unless NOERROR when none can be found."
   "Return the label of thinking LEVEL, nil meaning the model's default."
   (format "%s %s" (harness-ui-icon 'harness-icon-thinking) (or level "default")))
 
+(defun harness-ui-non-interactive-label (value)
+  "Return the label of a session's non-interactive switch VALUE.
+VALUE is as it comes over the wire: nil and `:false' are off."
+  (if (harness-json-true-p value) "non-interactive" "interactive"))
+
+(defun harness-ui-non-interactive-help (value)
+  "Return what a session's non-interactive switch VALUE means, for a tooltip."
+  (if (harness-json-true-p value)
+      "Non-interactive: the agent never waits for you.  What would ask for permission is denied, and the agent is told to find another way."
+    "Interactive: the agent asks you for permission and waits for your answer."))
+
 (defun harness-ui-model-label (model-id)
   "Return a short, readable \"model (provider)\" label for MODEL-ID.
 The model part is the catalogue's label, else a prettified slug, else
@@ -1043,12 +1057,34 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
 
 ;;;###autoload
 (defun harness-toggle-non-interactive (&optional session-id)
-  "Toggle non-interactive mode for SESSION-ID."
+  "Toggle non-interactive mode for SESSION-ID.
+A non-interactive session never waits for the user: what would ask for
+permission is denied, and the agent is told to find another way.  The
+session's header line shows which it is; clicking there toggles too."
   (interactive)
   (let* ((target (harness-ui--setting-target session-id))
          (now (harness-json-true-p (harness-ui--setting-get target :non-interactive))))
     (harness-ui--setting-set target :non-interactive (not now)
                              (format "Non-interactive %s" (if now "off" "on")))))
+
+(defun harness-ui--non-interactive-menu-label ()
+  "Return the label of `harness-toggle-non-interactive' in `harness-menu'.
+It says whether what the command changes from the buffer the menu was
+opened from is non-interactive: the buffer's session, or what its
+`harness-ui-setting-target-function' names.  From a buffer without
+either the command asks for a session, so the label has no state."
+  (or (ignore-errors
+        (with-current-buffer (if (and (boundp 'transient--original-buffer)
+                                      (buffer-live-p transient--original-buffer))
+                                 transient--original-buffer
+                               (current-buffer))
+          (when-let* ((target (or (and harness-ui-setting-target-function
+                                       (funcall harness-ui-setting-target-function))
+                                  harness-ui-session-id))
+                      ((or (consp target) (harness-ui-session target))))
+            (format "Non-interactive: %s"
+                    (if (harness-json-true-p (harness-ui--setting-get target :non-interactive)) "on" "off")))))
+      "Non-interactive"))
 
 ;;;###autoload
 (defun harness-rename-session (name &optional session-id)
@@ -1112,6 +1148,10 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
     (define-key map (kbd "?") #'harness-menu)
     map)
   "Prefix keymap of the harness UI.  Other UI modules add their commands.")
+
+;; At top level, not in the `defvar', so a reload binds it in a running
+;; Emacs too.
+(define-key harness-ui-map (kbd "i") #'harness-toggle-non-interactive)
 
 (defcustom harness-ui-prefix-key "C-c a"
   "Prefix key for `harness-ui-map' in `harness-global-mode'."
@@ -1298,7 +1338,7 @@ leaves the buffer's commands out, never the whole menu."
     ("T" "Thinking" harness-set-thinking)
     ("p" "Permission mode" harness-set-permission-mode)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
-    ("i" "Non-interactive" harness-toggle-non-interactive)
+    ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
     ("r" "Rename" harness-rename-session)]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))

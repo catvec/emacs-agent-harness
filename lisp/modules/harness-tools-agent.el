@@ -254,7 +254,8 @@ its worktree path (or nil)."
                      :host (plist-get parent :host)
                      :permission-mode (plist-get parent :permission-mode)
                      :thinking (plist-get parent :thinking)
-                     :non-interactive (plist-get parent :non-interactive))))))
+                     ;; Off too, not left to the setting.
+                     :non-interactive (if (harness-json-true-p (plist-get parent :non-interactive)) t :false))))))
 
 (defun harness-tools-agent--spawn (input ctx)
   "Handler of the spawn_agent tool.
@@ -342,10 +343,14 @@ Run INPUT's prompt in a child of the session in CTX."
          (children (harness-call 'session/list (list :parent-id sid))))
     (harness-tool-ok
      (concat
-      (format "Session: %s\nName: %s\nKind: %s\nModel: %s\nWorking directory: %s\nWorktree: %s\nPermission mode: %s\nStatus: %s\n"
+      (format "Session: %s\nName: %s\nKind: %s\nModel: %s\nWorking directory: %s\nWorktree: %s\nPermission mode: %s\nNon-interactive: %s\nStatus: %s\n"
               sid (or (plist-get s :name) "(unnamed)") (plist-get s :kind) (plist-get s :model)
               (plist-get s :cwd) (or (plist-get s :worktree) "none")
-              (plist-get s :permission-mode) (plist-get s :status))
+              (plist-get s :permission-mode)
+              (if (harness-json-true-p (plist-get s :non-interactive))
+                  "on (the user is away: what would ask for permission is denied)"
+                "off")
+              (plist-get s :status))
       (format "Usage: %s input, %s output, %s cache read, cost %s, %d turns, context %s of %s\n"
               (harness-format-tokens (plist-get u :input)) (harness-format-tokens (plist-get u :output))
               (harness-format-tokens (plist-get u :cache-read)) (harness-format-spend u)
@@ -360,7 +365,7 @@ Run INPUT's prompt in a child of the session in CTX."
                 "none"))))))
 
 (harness-define-tool "session_info"
-  :description "Describe the current session: id, name, model, working directory, permission mode, status, usage and related sessions."
+  :description "Describe the current session: id, name, model, working directory, permission mode, non-interactive mode, status, usage and related sessions."
   :schema '(:type "object" :properties :empty)
   :kind 'read
   :coalescable t

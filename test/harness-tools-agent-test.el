@@ -226,9 +226,31 @@
         (should (string-match-p "Name: main work" text))
         (should (string-match-p "Model: demo:scripted" text))
         (should (string-match-p "Permission mode: ask" text))
+        (should (string-match-p "^Non-interactive: off$" text))
         (should (string-match-p "Status: idle" text))
         (should (string-match-p "Parent: none" text))
-        (should (string-match-p (concat "Children: " cid) text))))))
+        (should (string-match-p (concat "Children: " cid) text)))
+      (harness-call 'session/update sid :non-interactive t :silent t)
+      (should (string-match-p "^Non-interactive: on (the user is away"
+                              (plist-get (harness-test-await (harness-tools-agent-test-run sid "session_info" nil))
+                                         :content))))))
+
+(defvar harness-non-interactive)
+
+(ert-deftest harness-tools-agent-children-keep-the-parents-switch ()
+  "A sub-agent is as non-interactive as its parent, whatever the setting says."
+  (harness-tools-agent-test-with
+    (let ((harness-non-interactive t))
+      (dolist (on '(nil t))
+        (dolist (fork '(nil t))
+          (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
+                                               :non-interactive (if on t :false))
+                                 :id))
+                 (result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent"
+                                                                           (list :prompt "hi" :fork fork))))
+                 (cid (plist-get (plist-get result :meta) :child-id)))
+            (ert-info ((format "parent non-interactive %s, fork %s" on fork))
+              (should (eq on (plist-get (harness-call 'session/get cid) :non-interactive))))))))))
 
 (provide 'harness-tools-agent-test)
 ;;; harness-tools-agent-test.el ends here
