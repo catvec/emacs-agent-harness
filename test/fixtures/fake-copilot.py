@@ -23,9 +23,15 @@ Behaviour is chosen by the prompt text:
   "long"        -> the model stops at its output limit
   "compact"     -> Copilot compacts the context first
   "subagent"    -> a sub-agent streams, fails and goes idle first
+  "refuse"      -> session.send is answered with an error; no turn runs
 Anything else streams the thinking "hmm", then the text "hello".  Each
 model call reports 12 uncached input tokens, 2000 cached, 100 written to
 the cache and 7 output tokens, and costs one AI credit (1e9 nano-AIU).
+
+One turn runs at a time: a session.send read while a turn waits (for a
+tool result, a permission or an abort) is answered once that turn is
+over.  An abort read while a session runs no turn is a no-op, as in the
+real CLI: the session's next turn does not see it.
 
 The environment picks the situation:
   HARNESS_FAKE_COPILOT_AUTH=none     not logged in
@@ -40,7 +46,8 @@ The environment picks the situation:
                                      received (and one with the argv and
                                      the directory at start)
 Session ids starting with "missing" cannot be resumed or forked; those
-starting with "locked" are in use by another process.
+starting with "locked" are in use by another process, and so are the
+forks of those starting with "brittle".
 """
 
 import json
@@ -250,11 +257,14 @@ class Fake:
             if not sid or sid.startswith("missing"):
                 self.error(msg, -32603, "Request sessions.fork failed with message: Session not found: %s" % sid)
             else:
-                self.answer(msg, {"sessionId": "fork-" + uuid.uuid4().hex[:8], "name": "hello (fork)"})
+                prefix = "locked-fork-" if sid.startswith("brittle") else "fork-"
+                self.answer(msg, {"sessionId": prefix + uuid.uuid4().hex[:8], "name": "hello (fork)"})
         elif method == "session.send":
             sid = params.get("sessionId")
             if sid not in self.sessions:
                 self.error(msg, -32603, "Request session.send failed with message: Session not found for sessionId: %s" % sid)
+            elif "refuse" in (params.get("prompt") or ""):
+                self.error(msg, -32603, "Request session.send failed with message: the message was refused")
             else:
                 self.answer(msg, {"messageId": str(uuid.uuid4())})
                 self.turn(sid, params)
@@ -305,6 +315,7 @@ class Fake:
 
     def turn(self, sid, params):
         text = params.get("prompt") or ""
+        self.aborted.discard(sid)   # an abort from before the turn is moot
         self.event(sid, "user.message", {"content": text, "attachments": params.get("attachments") or []})
         self.event(sid, "assistant.turn_start", {"turnId": "0"})
         if "die" in text:

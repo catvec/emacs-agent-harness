@@ -25,7 +25,17 @@
 (declare-function harness-provider-copilot-close-all "harness-provider-copilot")
 (declare-function harness-provider-copilot-session-process "harness-provider-copilot")
 (declare-function harness-provider-copilot-session-main "harness-provider-copilot")
+(declare-function harness-provider-copilot-session-busy "harness-provider-copilot")
+(declare-function harness-provider-copilot-session-aborts "harness-provider-copilot")
+(declare-function harness-provider-copilot-session-doomed "harness-provider-copilot")
+(declare-function harness-provider-copilot-turn-usage "harness-provider-copilot")
 (declare-function harness-provider-copilot--make-session "harness-provider-copilot")
+(declare-function harness-provider-copilot--make-turn "harness-provider-copilot")
+(declare-function harness-provider-copilot--turn-event "harness-provider-copilot")
+(declare-function harness-provider-copilot--kill "harness-provider-copilot")
+(declare-function harness-provider-copilot--call "harness-provider-copilot")
+(declare-function harness-provider-copilot--not-found-p "harness-provider-copilot")
+(declare-function harness-provider-copilot--error-text "harness-provider-copilot")
 (declare-function harness-provider-copilot--drop-stale-entries "harness-provider-copilot")
 (declare-function harness-provider-copilot--effort "harness-provider-copilot")
 (declare-function harness-provider-copilot-frame "harness-provider-copilot")
@@ -167,6 +177,29 @@ directory the variable `temporary-file-directory' names, and is left out."
   "Return the CLI process serving SID, or nil."
   (when-let* ((entry (gethash sid harness-provider-copilot--sessions)))
     (harness-provider-copilot-session-process entry)))
+
+(defun harness-provider-copilot-test--start (request &optional on-event)
+  "Start REQUEST without waiting for it; return (EVENTS . HANDLE).
+EVENTS is a function returning the events so far, oldest first.
+ON-EVENT, when given, is called with each event as well."
+  (let* ((events nil)
+         (handle (harness-call 'provider/complete
+                               (plist-put (copy-sequence request) :on-event
+                                          (lambda (ev)
+                                            (push ev events)
+                                            (when on-event (funcall on-event ev)))))))
+    (cons (lambda () (reverse events)) handle)))
+
+(defun harness-provider-copilot-test--ids (file method)
+  "Return the session ids of the METHOD requests logged in FILE."
+  (mapcar (lambda (p) (plist-get p :sessionId))
+          (harness-provider-copilot-test--requests file method)))
+
+(defun harness-provider-copilot-test--pause (seconds)
+  "Let timers and processes run for SECONDS."
+  (let ((end (+ (float-time) seconds)))
+    (while (< (float-time) end)
+      (accept-process-output nil 0.02))))
 
 ;;;; Framing and conversions
 
@@ -822,24 +855,78 @@ directory the variable `temporary-file-directory' names, and is left out."
   (harness-provider-copilot-close "s21"))
 
 (ert-deftest harness-provider-copilot-side-abort-spares-the-process ()
-  "A throwaway session that ignores its abort ends its request, not the process."
+  "A throwaway session that ignores its abort ends its request, not the process.
+The session, which may never be idle again, is deleted at once."
   (harness-provider-copilot-test--setup)
-  (let ((harness-provider-copilot-interrupt-timeout 0.3) events)
-    (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s22" "hi"))
-    (let* ((proc (harness-provider-copilot-test--process "s22"))
-           (handle (harness-call 'provider/complete
-                                 (plist-put (harness-provider-copilot-test--request
-                                             "s22" "hang ignore" :recorded '(:copilot-session-id "other"))
-                                            :on-event (lambda (ev) (push ev events))))))
-      (harness-test-wait (lambda () (harness-provider-copilot-test--find events 'text)) 10 "first delta")
-      (funcall (plist-get handle :cancel))
-      (harness-test-wait (lambda () (harness-provider-copilot-test--find events 'done)) 10 "done")
-      (accept-process-output nil 0.4)
-      (should (eq 'cancelled (harness-provider-copilot-test--done events)))
-      (should (= 1 (cl-count 'done (harness-provider-copilot-test--types events))))
-      (should (process-live-p proc))
-      (should (eq proc (harness-provider-copilot-test--process "s22")))))
+  (let ((harness-provider-copilot-interrupt-timeout 0.3)
+        (log (harness-provider-copilot-test--log-file))
+        events)
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s22" "hi"))
+      (let* ((proc (harness-provider-copilot-test--process "s22"))
+             (handle (harness-call 'provider/complete
+                                   (plist-put (harness-provider-copilot-test--request
+                                               "s22" "hang ignore" :recorded '(:copilot-session-id "other"))
+                                              :on-event (lambda (ev) (push ev events))))))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--find events 'text)) 10 "first delta")
+        (funcall (plist-get handle :cancel))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--find events 'done)) 10 "done")
+        (accept-process-output nil 0.4)
+        (should (eq 'cancelled (harness-provider-copilot-test--done events)))
+        (should (= 1 (cl-count 'done (harness-provider-copilot-test--types events))))
+        (should (process-live-p proc))
+        (should (eq proc (harness-provider-copilot-test--process "s22")))
+        (let ((fork (car (harness-provider-copilot-test--ids log "session.resume"))))
+          (should (string-prefix-p "fork-" fork))
+          (harness-test-wait (lambda () (harness-provider-copilot-test--requests log "sessions.delete")) 5 "delete")
+          (should (equal (list fork) (harness-provider-copilot-test--ids log "session.detach")))
+          (should (equal (list fork) (harness-provider-copilot-test--ids log "sessions.delete")))))))
   (harness-provider-copilot-close "s22"))
+
+(ert-deftest harness-provider-copilot-superseded-request-leaves-settings-alone ()
+  "A request superseded while it waits to apply new settings does not apply them.
+Otherwise it would change the settings under the request after it."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file)))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let* ((first (harness-provider-copilot-test--start (harness-provider-copilot-test--request "s47" "hang here")))
+             (state (progn
+                      (harness-test-wait (lambda () (harness-provider-copilot-test--find (funcall (car first)) 'text))
+                                         10 "first delta")
+                      (plist-get (harness-provider-copilot-test--find (funcall (car first)) 'provider-state) :state)))
+             ;; Another thinking level: the session is resumed with it once idle...
+             (second (car (harness-provider-copilot-test--start
+                           (harness-provider-copilot-test--request "s47" "hi" :thinking "low" :provider-state state))))
+             ;; ...unless the next request, with the settings as they are, comes first.
+             (third (car (harness-provider-copilot-test--start
+                          (harness-provider-copilot-test--request "s47" "hi" :provider-state state)))))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--find (funcall third) 'done)) 10 "the third request")
+        (should (eq 'end-turn (harness-provider-copilot-test--done (funcall third))))
+        (dolist (events (list (funcall (car first)) (funcall second)))
+          (should (equal "superseded by a new request"
+                         (plist-get (harness-provider-copilot-test--find events 'done) :error))))
+        (should-not (harness-provider-copilot-test--requests log "session.resume"))
+        (should (equal '("hang here" "hi") (mapcar (lambda (p) (plist-get p :prompt))
+                                                   (harness-provider-copilot-test--requests log "session.send"))))))
+    (harness-provider-copilot-close "s47")))
+
+(ert-deftest harness-provider-copilot-unusable-fork-is-deleted ()
+  "A fork that cannot be resumed is deleted before its request fails."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file)))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let* ((events (car (harness-provider-copilot-test--run
+                           (harness-provider-copilot-test--request
+                            "s48" "name it" :tools nil :max-tokens 40 :recorded '(:copilot-session-id "brittle-1")))))
+             (done (harness-provider-copilot-test--find events 'done))
+             (fork (car (harness-provider-copilot-test--ids log "session.resume"))))
+        (should (eq 'error (plist-get done :stop-reason)))
+        (should (string-match-p "in use by another process" (plist-get done :error)))
+        (should (equal '("brittle-1") (harness-provider-copilot-test--ids log "sessions.fork")))
+        (should (string-prefix-p "locked-fork-" fork))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--requests log "sessions.delete")) 5 "delete")
+        (should (equal (list fork) (harness-provider-copilot-test--ids log "sessions.delete")))))
+    (harness-provider-copilot-close "s48")))
 
 (ert-deftest harness-provider-copilot-cancel-while-opening ()
   "A first turn cancelled while its session is created leaves nothing behind."
@@ -906,6 +993,199 @@ directory the variable `temporary-file-directory' names, and is left out."
           (should-not (process-live-p proc))
           (should-not (gethash "s25-perms" harness-provider-copilot--sessions)))))))
 
+(ert-deftest harness-provider-copilot-side-requests-run-together ()
+  "Side requests run at once and never take over from each other.
+Permission judges of tool calls that run in parallel are such requests."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file))
+        (dir (harness-test-temp-dir)))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let* ((judge (lambda (text)
+                      (car (harness-provider-copilot-test--start
+                            (list :model "copilot:gpt-5.4"
+                                  :session (list :id "s30-perms" :cwd dir)
+                                  :system "You judge" :tools nil :max-tokens 200
+                                  :messages (list (list :role 'user
+                                                        :content (list (list :type "text" :text text)))))))))
+             (first (funcall judge "allow the first call?"))
+             (second (funcall judge "allow the second call?")))
+        (harness-test-wait (lambda () (and (harness-provider-copilot-test--find (funcall first) 'done)
+                                           (harness-provider-copilot-test--find (funcall second) 'done)))
+                           10 "both judges")
+        (dolist (events (list (funcall first) (funcall second)))
+          (should (eq 'end-turn (harness-provider-copilot-test--done events)))
+          (should (= 1 (cl-count 'done (harness-provider-copilot-test--types events))))
+          (should (equal "hello" (harness-provider-copilot-test--text events)))
+          (should-not (harness-provider-copilot-test--find events 'provider-state)))
+        ;; Each ran in a session of its own, and both sessions went.
+        (let ((created (sort (harness-provider-copilot-test--ids log "session.create") #'string<)))
+          (should (= 2 (length created)))
+          (should (equal created (sort (harness-provider-copilot-test--ids log "session.send") #'string<)))
+          (harness-test-wait (lambda () (= 2 (length (harness-provider-copilot-test--requests log "sessions.delete"))))
+                             5 "both deletes")
+          (should (equal created (sort (harness-provider-copilot-test--ids log "sessions.delete") #'string<))))))
+    (harness-provider-copilot-close "s30-perms")))
+
+(ert-deftest harness-provider-copilot-capped-request-is-a-side-request ()
+  "A request that caps its answer leaves the conversation alone, even with none recorded.
+Compaction asks so, bringing no provider state, on a session whose
+recorded state is nil too."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file)))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let ((events (car (harness-provider-copilot-test--run
+                          (harness-provider-copilot-test--request
+                           "s31" "Summarise the conversation" :tools nil :provider-state nil :max-tokens 1000)))))
+        (should (eq 'end-turn (harness-provider-copilot-test--done events)))
+        (should (equal "hello" (harness-provider-copilot-test--text events)))
+        ;; Nothing to persist: the summary's session is not the conversation.
+        (should-not (harness-provider-copilot-test--find events 'provider-state))
+        (should-not (harness-provider-copilot-session-main (gethash "s31" harness-provider-copilot--sessions)))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--requests log "sessions.delete")) 5 "delete")
+        (should (equal (harness-provider-copilot-test--ids log "session.create")
+                       (harness-provider-copilot-test--ids log "sessions.delete")))))
+    (harness-provider-copilot-close "s31")))
+
+(ert-deftest harness-provider-copilot-capped-request-forks-the-recorded-conversation ()
+  "A side request without a conversation of its own works on a fork of the recorded one.
+So a summary for compaction sees the real conversation."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file)))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let* ((first (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s32" "hi"))))
+             (main (plist-get (plist-get (harness-provider-copilot-test--find first 'provider-state) :state)
+                              :copilot-session-id))
+             (summary (car (harness-provider-copilot-test--run
+                            (harness-provider-copilot-test--request
+                             "s32" "Summarise the conversation" :tools nil :provider-state nil :max-tokens 1000
+                             :recorded (list :copilot-session-id main))))))
+        (should (eq 'end-turn (harness-provider-copilot-test--done summary)))
+        (should-not (harness-provider-copilot-test--find summary 'provider-state))
+        (should (equal (list main) (harness-provider-copilot-test--ids log "sessions.fork")))
+        (let ((fork (car (harness-provider-copilot-test--ids log "session.resume"))))
+          (should (string-prefix-p "fork-" fork))
+          ;; The summary went to the fork, never to the conversation.
+          (should (equal (list main fork) (harness-provider-copilot-test--ids log "session.send")))
+          (harness-test-wait (lambda () (harness-provider-copilot-test--requests log "sessions.delete")) 5 "delete")
+          (should (equal (list fork) (harness-provider-copilot-test--ids log "sessions.delete"))))
+        (should (equal main (harness-provider-copilot-session-main (gethash "s32" harness-provider-copilot--sessions))))))
+    (harness-provider-copilot-close "s32")))
+
+(ert-deftest harness-provider-copilot-refused-send-leaves-no-stale-abort ()
+  "A send refused after its cancel ends the request as cancelled and forgets the abort.
+A stale abort would keep the next cancel in that conversation from
+sending any abort, or arming any timer."
+  (harness-provider-copilot-test--setup)
+  (let ((harness-provider-copilot-interrupt-timeout 1.0)
+        (log (harness-provider-copilot-test--log-file))
+        side-respond)
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let* ((first (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s35" "hi"))))
+             (main (plist-get (plist-get (harness-provider-copilot-test--find first 'provider-state) :state)
+                              :copilot-session-id))
+             (state (list :copilot-session-id main))
+             (entry (gethash "s35" harness-provider-copilot--sessions))
+             (proc (harness-provider-copilot-test--process "s35"))
+             ;; A side request waits on a tool, so the fake leaves the
+             ;; next send unanswered for now.
+             (side (car (harness-provider-copilot-test--start
+                         (harness-provider-copilot-test--request "s35" "call echo" :max-tokens 100 :recorded state)
+                         (lambda (ev) (when (eq (plist-get ev :type) 'tool-call)
+                                        (setq side-respond (plist-get ev :respond)))))))
+             (refused (progn (harness-test-wait (lambda () side-respond) 10 "the side request's tool call")
+                             (harness-provider-copilot-test--start
+                              (harness-provider-copilot-test--request "s35" "refuse this" :provider-state state)))))
+        (harness-test-wait (lambda () (member main (harness-provider-copilot-session-busy entry))) 5 "the send")
+        ;; Cancelled while its send waits: an abort goes out.
+        (funcall (plist-get (cdr refused) :cancel))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--requests log "session.abort")) 5 "the abort")
+        ;; The fake answers the send once the side request is over: refused.
+        (funcall side-respond '(:content "echo: ping" :is-error nil))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--find (funcall (car refused)) 'done)) 10 "refused")
+        (should (eq 'cancelled (harness-provider-copilot-test--done (funcall (car refused)))))
+        (should-not (assoc main (harness-provider-copilot-session-aborts entry)))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--find (funcall side) 'done)) 10 "the side request")
+        (should (eq 'end-turn (harness-provider-copilot-test--done (funcall side))))
+        ;; Past the abort's timeout, the next turn in the conversation is
+        ;; cancelled like any other: an abort, and the CLI stops.
+        (harness-provider-copilot-test--pause 1.2)
+        (let ((next (harness-provider-copilot-test--start
+                     (harness-provider-copilot-test--request "s35" "hang here" :provider-state state))))
+          (harness-test-wait (lambda () (harness-provider-copilot-test--find (funcall (car next)) 'text)) 10 "delta")
+          (funcall (plist-get (cdr next) :cancel))
+          (harness-test-wait (lambda () (harness-provider-copilot-test--find (funcall (car next)) 'done)) 10 "done")
+          (should (eq 'cancelled (harness-provider-copilot-test--done (funcall (car next)))))
+          (should (= 1 (cl-count 'done (harness-provider-copilot-test--types (funcall (car next)))))))
+        (should (equal (list main main) (harness-provider-copilot-test--ids log "session.abort")))
+        (should (eq proc (harness-provider-copilot-test--process "s35")))))
+    (harness-provider-copilot-close "s35")))
+
+(ert-deftest harness-provider-copilot-lost-side-session-is-deleted-later ()
+  "A side request's session lost with its process is deleted by the next process."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file)) respond)
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let* ((side (car (harness-provider-copilot-test--start
+                         (harness-provider-copilot-test--request "s36" "call echo" :max-tokens 100)
+                         (lambda (ev) (when (eq (plist-get ev :type) 'tool-call)
+                                        (setq respond (plist-get ev :respond)))))))
+             (entry (progn (harness-test-wait (lambda () respond) 10 "the side request's tool call")
+                           (gethash "s36" harness-provider-copilot--sessions)))
+             (proc (harness-provider-copilot-session-process entry))
+             (created (car (harness-provider-copilot-test--ids log "session.create"))))
+        (harness-provider-copilot--kill entry)
+        (should-not (process-live-p proc))
+        (should (eq 'error (harness-provider-copilot-test--done (funcall side))))
+        ;; No process to delete it in: it waits for the next one.
+        (should (equal (list created) (harness-provider-copilot-session-doomed entry)))
+        (should-not (harness-provider-copilot-test--requests log "sessions.delete"))
+        (let ((next (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s36" "hi")))))
+          (should (eq 'end-turn (harness-provider-copilot-test--done next)))
+          (harness-test-wait (lambda () (harness-provider-copilot-test--requests log "sessions.delete")) 5 "delete")
+          (should (equal (list created) (harness-provider-copilot-test--ids log "sessions.delete")))
+          (should-not (harness-provider-copilot-session-doomed entry))
+          (should (= 2 (length (harness-provider-copilot-test--starts log)))))))
+    (harness-provider-copilot-close "s36")))
+
+(ert-deftest harness-provider-copilot-side-session-lost-to-death-is-deleted-later ()
+  "A side request's session lost with a process that died is deleted by the next process."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file)))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let* ((events (car (harness-provider-copilot-test--run
+                           (harness-provider-copilot-test--request "s50" "die now" :tools nil :max-tokens 100))))
+             (created (car (harness-provider-copilot-test--ids log "session.create")))
+             (entry (gethash "s50" harness-provider-copilot--sessions)))
+        (should (string-match-p "exited with status 3"
+                                (plist-get (harness-provider-copilot-test--find events 'done) :error)))
+        (should (equal (list created) (harness-provider-copilot-session-doomed entry)))
+        (let ((next (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s50" "hi")))))
+          (should (eq 'end-turn (harness-provider-copilot-test--done next)))
+          (harness-test-wait (lambda () (harness-provider-copilot-test--requests log "sessions.delete")) 5 "delete")
+          (should (equal (list created) (harness-provider-copilot-test--ids log "sessions.delete")))
+          (should-not (harness-provider-copilot-session-doomed entry)))))
+    (harness-provider-copilot-close "s50")))
+
+(ert-deftest harness-provider-copilot-process-death-is-no-missing-session ()
+  "Only the CLI's own answer can say that a session is missing; its death cannot.
+The reason a process died, its stderr included, may well say \"not
+found\"; a new conversation must not replace the old one for that."
+  (harness-provider-copilot-test--setup)
+  (should (harness-provider-copilot--not-found-p
+           '(error "Copilot session.resume failed: Failed to load session events: Session not found: x")))
+  (should-not (harness-provider-copilot--not-found-p
+               '(harness-provider-copilot-gone "Copilot session.resume failed: copilot exited with status 3: Session not found")))
+  (should-not (harness-provider-copilot--not-found-p '(harness-provider-copilot-restart)))
+  ;; A call that no process can answer is rejected as gone, its reason
+  ;; shown as it is.
+  (let* ((entry (harness-provider-copilot--make-session :id "s49"))
+         (err (condition-case e
+                  (progn (harness-test-await (harness-provider-copilot--call entry "session.resume" nil)) nil)
+                (harness-provider-copilot-gone e))))
+    (should (eq 'harness-provider-copilot-gone (car err)))
+    (should (equal "Copilot session.resume failed: the copilot process is not running"
+                   (harness-provider-copilot--error-text err)))))
+
 (ert-deftest harness-provider-copilot-sub-agent-events ()
   "A sub-agent's text, error and end are not the turn's; its calls still cost."
   (harness-provider-copilot-test--setup)
@@ -919,6 +1199,12 @@ directory the variable `temporary-file-directory' names, and is left out."
     ;; Its 50 input tokens count; the conversation's size is the main agent's.
     (should (= 62 (plist-get u :input)))
     (should (= 2112 (plist-get u :context))))
+  ;; So is the context size that usage_info reports.
+  (let ((turn (harness-provider-copilot--make-turn)))
+    (harness-provider-copilot--turn-event turn "session.usage_info" '(:currentTokens 99999) "agent-1")
+    (should-not (plist-get (harness-provider-copilot-turn-usage turn) :current))
+    (harness-provider-copilot--turn-event turn "session.usage_info" '(:currentTokens 2119) nil)
+    (should (= 2119 (plist-get (harness-provider-copilot-turn-usage turn) :current))))
   (harness-provider-copilot-close "s26"))
 
 (ert-deftest harness-provider-copilot-resume-errors-fail-the-turn ()
@@ -994,6 +1280,71 @@ directory the variable `temporary-file-directory' names, and is left out."
         (should-not (process-live-p (harness-provider-copilot-test--process "s17"))))))
   (harness-provider-copilot-close "s17"))
 
+(ert-deftest harness-provider-copilot-unanswered-create-times-out ()
+  "A session.create answered too late fails its request; the late session is deleted."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file)))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log)
+                                                   "HARNESS_FAKE_COPILOT_SLOW_CREATE=1")
+      ;; The process starts first, for a conversation that is resumed:
+      ;; nothing is created then.
+      (should (eq 'end-turn (harness-provider-copilot-test--done
+                             (car (harness-provider-copilot-test--run
+                                   (harness-provider-copilot-test--request
+                                    "s43" "hi" :provider-state '(:copilot-session-id "old-43")))))))
+      (let ((proc (harness-provider-copilot-test--process "s43")))
+        (let* ((harness-provider-copilot-startup-timeout 0.3)
+               (events (car (harness-provider-copilot-test--run
+                             (harness-provider-copilot-test--request "s43" "allow?" :tools nil :max-tokens 50))))
+               (done (harness-provider-copilot-test--find events 'done)))
+          (should (eq 'error (plist-get done :stop-reason)))
+          (should (equal "copilot did not answer session.create within 0.3s" (plist-get done :error)))
+          (should (= 1 (cl-count 'done (harness-provider-copilot-test--types events)))))
+        ;; The process lives on, and the session it made too late goes.
+        (should (eq proc (harness-provider-copilot-test--process "s43")))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--requests log "sessions.delete")) 5 "delete")
+        (should (equal (harness-provider-copilot-test--ids log "session.create")
+                       (harness-provider-copilot-test--ids log "sessions.delete")))))
+    (harness-provider-copilot-close "s43")))
+
+(ert-deftest harness-provider-copilot-unanswered-send-times-out ()
+  "A session.send left unanswered fails its request; the turn beside it goes on."
+  (harness-provider-copilot-test--setup)
+  (let* ((respond nil)
+         (turn (car (harness-provider-copilot-test--start
+                     (harness-provider-copilot-test--request "s44" "call echo")
+                     (lambda (ev) (when (eq (plist-get ev :type) 'tool-call)
+                                    (setq respond (plist-get ev :respond))))))))
+    ;; While the turn waits on its tool, the fake answers no other send.
+    (harness-test-wait (lambda () respond) 10 "the turn's tool call")
+    (let* ((harness-provider-copilot-startup-timeout 0.3)
+           (events (car (harness-provider-copilot-test--run
+                         (harness-provider-copilot-test--request "s44" "allow?" :tools nil :max-tokens 50)))))
+      (should (eq 'error (harness-provider-copilot-test--done events)))
+      (should (equal "copilot did not answer session.send within 0.3s"
+                     (plist-get (harness-provider-copilot-test--find events 'done) :error))))
+    (funcall respond '(:content "echo: ping" :is-error nil))
+    (harness-test-wait (lambda () (harness-provider-copilot-test--find (funcall turn) 'done)) 10 "the turn's end")
+    (should (eq 'end-turn (harness-provider-copilot-test--done (funcall turn))))
+    (should (equal "hello" (harness-provider-copilot-test--text (funcall turn)))))
+  (harness-provider-copilot-close "s44"))
+
+(ert-deftest harness-provider-copilot-nothing-new-to-send ()
+  "A request with no user message after the last answer says why it sends nothing."
+  (harness-provider-copilot-test--setup)
+  (let* ((events (car (harness-provider-copilot-test--run
+                       (harness-provider-copilot-test--request
+                        "s45" "x" :messages (list '(:role user :content ((:type "text" :text "hi")))
+                                                  '(:role assistant :content ((:type "text" :text "hello"))))))))
+         (done (harness-provider-copilot-test--find events 'done)))
+    (should (eq 'error (plist-get done :stop-reason)))
+    (should (string-prefix-p "No new user message to send: Copilot already has the conversation"
+                             (plist-get done :error)))
+    (should (string-suffix-p "send it again" (plist-get done :error)))
+    ;; Nothing was started for it.
+    (should-not (harness-provider-copilot-test--process "s45")))
+  (harness-provider-copilot-close "s45"))
+
 ;;;; Billing and quota
 
 (ert-deftest harness-provider-copilot-quota-report ()
@@ -1045,6 +1396,25 @@ directory the variable `temporary-file-directory' names, and is left out."
       (should (equal "premium" (plist-get (car (plist-get q :windows)) :name)))))
   (harness-provider-copilot-close "s19"))
 
+(ert-deftest harness-provider-copilot-quota-reaches-every-request ()
+  "Each request hears about the plan's quota, not only the first one to see it."
+  (harness-provider-copilot-test--setup)
+  (let* ((first (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s46" "hi"))))
+         (state (plist-get (harness-provider-copilot-test--find first 'provider-state) :state))
+         (side (car (harness-provider-copilot-test--run
+                     (harness-provider-copilot-test--request
+                      "s46" "name it" :tools nil :max-tokens 40 :recorded state))))
+         (second (car (harness-provider-copilot-test--run
+                       (harness-provider-copilot-test--request "s46" "again" :provider-state state)))))
+    (dolist (events (list first side second))
+      (should (eq 'end-turn (harness-provider-copilot-test--done events)))
+      ;; Once each: the windows did not change within a request.
+      (should (= 1 (cl-count 'quota (harness-provider-copilot-test--types events))))
+      (should (equal "credits" (plist-get (car (plist-get (harness-provider-copilot-test--find events 'quota)
+                                                          :windows))
+                                          :name)))))
+  (harness-provider-copilot-close "s46"))
+
 ;;;; Lifecycle
 
 (ert-deftest harness-provider-copilot-session-events-close-process ()
@@ -1056,16 +1426,92 @@ directory the variable `temporary-file-directory' names, and is left out."
     (should-not (process-live-p proc))
     (should-not (gethash "s20" harness-provider-copilot--sessions))))
 
-(ert-deftest harness-provider-copilot-reload-drops-old-records ()
-  "Records made before the latest slots were added are closed on load."
+(ert-deftest harness-provider-copilot-done-starts-a-request-during-a-kill ()
+  "A request that the done event of a killed one starts at once is left alone by the kill."
   (harness-provider-copilot-test--setup)
-  (let ((old (apply #'record 'harness-provider-copilot-session "old" (make-list 10 nil)))
-        (new (harness-provider-copilot--make-session :id "new")))
+  (let ((harness-provider-copilot-interrupt-timeout 0.3)
+        (log (harness-provider-copilot-test--log-file))
+        (first nil) (second nil))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let ((handle
+             (harness-call
+              'provider/complete
+              (plist-put (harness-provider-copilot-test--request "s41" "hang ignore")
+                         :on-event
+                         (lambda (ev)
+                           (push ev first)
+                           (when (eq (plist-get ev :type) 'done)
+                             ;; The agent's next step, from inside the kill.
+                             (let ((id (plist-get (plist-get (harness-provider-copilot-test--find first 'provider-state)
+                                                             :state)
+                                                  :copilot-session-id)))
+                               (setq second (car (harness-provider-copilot-test--start
+                                                  (harness-provider-copilot-test--request
+                                                   "s41" "hi" :provider-state (list :copilot-session-id id))))))))))))
+        (harness-test-wait (lambda () (harness-provider-copilot-test--find first 'text)) 10 "first delta")
+        (let ((proc (harness-provider-copilot-test--process "s41")))
+          ;; The CLI ignores the abort, so the process is killed.
+          (funcall (plist-get handle :cancel))
+          (harness-test-wait (lambda () (and second (harness-provider-copilot-test--find (funcall second) 'done)))
+                             10 "the second request's end")
+          (should (eq 'cancelled (harness-provider-copilot-test--done first)))
+          (should (= 1 (cl-count 'done (harness-provider-copilot-test--types first))))
+          (let ((events (funcall second)))
+            (should (eq 'end-turn (harness-provider-copilot-test--done events)))
+            (should (= 1 (cl-count 'done (harness-provider-copilot-test--types events))))
+            (should (equal "hello" (harness-provider-copilot-test--text events))))
+          (should-not (process-live-p proc))
+          (should (process-live-p (harness-provider-copilot-test--process "s41")))
+          (should (= 2 (length (harness-provider-copilot-test--starts log)))))))
+    (harness-provider-copilot-close "s41")))
+
+(ert-deftest harness-provider-copilot-done-starts-a-request-as-the-process-dies ()
+  "A request that the done event of one ended by the process's death starts at once works."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file)) (first nil) (second nil))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (harness-call 'provider/complete
+                    (plist-put (harness-provider-copilot-test--request "s42" "die now")
+                               :on-event
+                               (lambda (ev)
+                                 (push ev first)
+                                 (when (eq (plist-get ev :type) 'done)
+                                   (setq second (car (harness-provider-copilot-test--start
+                                                      (harness-provider-copilot-test--request "s42" "hi"))))))))
+      (harness-test-wait (lambda () (and second (harness-provider-copilot-test--find (funcall second) 'done)))
+                         10 "the second request's end")
+      (should (string-match-p "exited with status 3"
+                              (plist-get (harness-provider-copilot-test--find first 'done) :error)))
+      (should (eq 'end-turn (harness-provider-copilot-test--done (funcall second))))
+      (should (= 1 (cl-count 'done (harness-provider-copilot-test--types (funcall second)))))
+      (should (process-live-p (harness-provider-copilot-test--process "s42")))
+      (should (= 2 (length (harness-provider-copilot-test--starts log)))))
+    (harness-provider-copilot-close "s42")))
+
+(ert-deftest harness-provider-copilot-reload-drops-old-records ()
+  "Records made before the latest slots were added are closed on load.
+Whatever their slots hold, alone or in lists, is found: their requests
+end, also those of older layouts, and their timers go."
+  (harness-provider-copilot-test--setup)
+  (let* ((ended nil)
+         ;; A request record of an older, shorter layout, still running.
+         (request (lambda (name)
+                    (record 'harness-provider-copilot-turn nil (lambda (ev) (push (cons name ev) ended)) t)))
+         (timer (run-at-time 60 nil #'ignore))
+         (old (apply #'record 'harness-provider-copilot-session "old"
+                     (funcall request "turn")
+                     (list (funcall request "side 1") (funcall request "side 2"))
+                     (list (cons "copilot-1" (cons timer nil)))
+                     (make-list 7 nil)))
+         (new (harness-provider-copilot--make-session :id "new")))
     (puthash "old" old harness-provider-copilot--sessions)
     (puthash "new" new harness-provider-copilot--sessions)
     (harness-provider-copilot--drop-stale-entries)
     (should-not (gethash "old" harness-provider-copilot--sessions))
-    (should (eq new (gethash "new" harness-provider-copilot--sessions)))))
+    (should (eq new (gethash "new" harness-provider-copilot--sessions)))
+    (should (equal '("side 1" "side 2" "turn") (sort (mapcar #'car ended) #'string<)))
+    (should (cl-every (lambda (e) (eq 'error (plist-get (cdr e) :stop-reason))) ended))
+    (should-not (memq timer timer-list))))
 
 ;;;; Integration
 

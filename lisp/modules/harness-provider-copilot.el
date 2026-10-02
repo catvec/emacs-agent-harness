@@ -31,11 +31,18 @@
 ;;   reports each model call, and `session.idle' ends the turn.
 ;; - `session.abort' cancels a turn and `sessions.fork' copies a
 ;;   session for `:fork'.  A process can hold several sessions at once,
-;;   so a side request (naming the session on a fork of its state, a
-;;   summary for compaction, the permission judge: any request whose
-;;   provider state is not the one the session has recorded) runs in a
-;;   throwaway session beside the conversation's turn, at the same time
-;;   and without restarting anything, and the session is deleted after.
+;;   so side requests run in throwaway sessions beside the
+;;   conversation's turn and beside each other, any number at once and
+;;   without restarting anything.  A side request is a one-off question
+;;   (naming the session, a summary for compaction, the permission
+;;   judge): it caps its answer with `:max-tokens', which a turn of the
+;;   conversation never does, or brings provider state other than the
+;;   one the session has recorded, or a session with none recorded at
+;;   all.  It runs in a fork of the conversation its own state names,
+;;   else of the one the session has recorded (so a summary sees the
+;;   real conversation), else in a new session; never in the
+;;   conversation itself.  The throwaway session is deleted afterwards,
+;;   by the next process when its own goes away first.
 ;;
 ;; The Copilot session id is the provider state, so a harness session
 ;; resumes the same Copilot conversation after Emacs restarts.
@@ -57,7 +64,9 @@
 ;; `copilot login' the CLI's built-in list of model ids stands in.
 ;;
 ;; Nothing here blocks: output is handled in a process filter, death in
-;; a sentinel, timeouts by timers, and every answer by a callback.
+;; a sentinel, timeouts by timers, and every answer by a callback.  A
+;; request the CLI leaves unanswered fails after
+;; `harness-provider-copilot-startup-timeout' instead of hanging.
 
 ;;; Code:
 
@@ -134,6 +143,9 @@ Newer CLIs are used too; the log says when one reports a newer version.")
 
 ;;;; State
 
+;; New slots go last in both records: what a reload leaves behind of
+;; older records (a timer, a callback) still finds the slots it knew.
+
 (cl-defstruct (harness-provider-copilot-session
                (:constructor harness-provider-copilot--make-session)
                (:copier nil))
@@ -151,12 +163,13 @@ Newer CLIs are used too; the log says when one reports a newer version.")
   opened             ; alist of (COPILOT-ID . KEY): sessions open in the process
   busy               ; Copilot session ids with a turn in flight
   waiters            ; alist of (COPILOT-ID . CALLBACKS) waiting for idle
-  aborts             ; alist of (COPILOT-ID TIMER . GENTLE) for aborts in flight
+  aborts             ; list of (COPILOT-ID TIMER . GENTLE) for aborts in flight
   main               ; Copilot session id of the harness session's conversation
   turn               ; the conversation's request in flight, a turn record
-  side-turn          ; a side request in flight beside it, a turn record
+  side-turns         ; side requests in flight beside it, turn records
   probe              ; non-nil for a probe that serves no session
-  users)             ; for a probe: requests still using it
+  users              ; for a probe: requests still using it
+  doomed)            ; throwaway Copilot session ids still to delete
 
 (cl-defstruct (harness-provider-copilot-turn
                (:constructor harness-provider-copilot--make-turn)
@@ -167,11 +180,12 @@ Newer CLIs are used too; the log says when one reports a newer version.")
   (active t)         ; nil once its done event went out
   cancelled          ; non-nil once cancel was asked for
   side               ; non-nil for a side request, in a throwaway session
-  target             ; Copilot session id its message went to
+  target             ; Copilot session id it runs in (a side request's once open)
   sent               ; non-nil once its message went out
   streamed           ; message and reasoning ids that streamed deltas
   usage              ; usage summed over its model calls
-  error)             ; its error message, from session.error
+  error              ; its error message, from session.error
+  quota-told)        ; the quota windows it was last told about
 
 (defvar harness-provider-copilot--sessions (make-hash-table :test 'equal)
   "Harness session id -> `harness-provider-copilot-session'.")
@@ -194,32 +208,45 @@ Newer CLIs are used too; the log says when one reports a newer version.")
 (defvar harness-provider-copilot--newer-protocol-noted nil
   "Non-nil once the log has said that the CLI speaks a newer protocol.")
 
+(defun harness-provider-copilot--drop-stale-value (value depth)
+  "Stop what VALUE, found in a slot of a stale record, holds.
+A process stops, a buffer is killed, a timer is cancelled and a request
+in flight ends with an error.  Lists are searched too, three levels
+down at most; DEPTH is how deep VALUE lies."
+  (cond
+   ((processp value)
+    (set-process-sentinel value #'ignore)
+    (set-process-filter value #'ignore)
+    (when (process-live-p value) (delete-process value)))
+   ((bufferp value) (when (buffer-live-p value) (kill-buffer value)))
+   ((timerp value) (cancel-timer value))
+   ((harness-provider-copilot-turn-p value)
+    ;; Slots are only added at the end, so an older request record
+    ;; has its callback and state where they always were.
+    (when (> (length value) (cl-struct-slot-offset 'harness-provider-copilot-turn 'active))
+      (let ((fn (harness-provider-copilot-turn-on-event value)))
+        (when (and (harness-provider-copilot-turn-active value) (functionp fn))
+          (setf (harness-provider-copilot-turn-active value) nil)
+          (ignore-errors
+            (funcall fn '(:type done :stop-reason error
+                          :error "The Copilot provider was reloaded during this turn")))))))
+   ((and (consp value) (< depth 3))
+    (while (consp value)
+      (harness-provider-copilot--drop-stale-value (pop value) (1+ depth)))
+    (when value (harness-provider-copilot--drop-stale-value value (1+ depth))))))
+
 (defun harness-provider-copilot--drop-stale-entries ()
   "Stop the CLI processes of records older than the current record layout.
 A reload keeps live records; one made before slots were added has no
-room for them, so its process stops, a request it was running ends
+room for them, so its process stops, the requests it was running end
 with an error, and the session's next turn resumes its Copilot session
-in a new process."
-  (let ((size (length (harness-provider-copilot--make-session)))
-        (turn-size (length (harness-provider-copilot--make-turn))))
+in a new process.  The old record's slots are searched whatever they
+were (see `harness-provider-copilot--drop-stale-value')."
+  (let ((size (length (harness-provider-copilot--make-session))))
     (maphash (lambda (id entry)
                (when (< (length entry) size)
                  (cl-loop for i from 1 below (length entry)
-                          for v = (aref entry i)
-                          do (cond
-                              ((processp v)
-                               (set-process-sentinel v #'ignore)
-                               (set-process-filter v #'ignore)
-                               (when (process-live-p v) (delete-process v)))
-                              ((bufferp v) (when (buffer-live-p v) (kill-buffer v)))
-                              ((and (harness-provider-copilot-turn-p v) (= (length v) turn-size)
-                                    (harness-provider-copilot-turn-active v)
-                                    (functionp (harness-provider-copilot-turn-on-event v)))
-                               (let ((fn (harness-provider-copilot-turn-on-event v)))
-                                 (setf (harness-provider-copilot-turn-active v) nil)
-                                 (ignore-errors
-                                   (funcall fn '(:type done :stop-reason error
-                                                 :error "The Copilot provider was reloaded during this turn")))))))
+                          do (harness-provider-copilot--drop-stale-value (aref entry i) 0))
                  (remhash id harness-provider-copilot--sessions)))
              harness-provider-copilot--sessions)))
 
@@ -329,37 +356,79 @@ blocks without a Content-Length are dropped with anything before them."
 
 ;;;; JSON-RPC
 
-(defun harness-provider-copilot--rpc (entry method params &optional callback)
+(defun harness-provider-copilot--rpc (entry method params &optional callback timeout)
   "Send request METHOD with PARAMS to ENTRY's CLI and return its id.
 CALLBACK, when given, is called with (RESULT ERROR) once the answer
 arrives; ERROR is the JSON-RPC error plist, a string when the process
-went away first, or `restart' when it was stopped on purpose."
-  (let ((id (cl-incf (harness-provider-copilot-session-next-id entry))))
-    (when callback
-      (push (cons id callback) (harness-provider-copilot-session-calls entry)))
-    (unless (harness-provider-copilot--send
-             entry (list :jsonrpc "2.0" :id id :method method :params (or params :empty)))
-      (when (assq id (harness-provider-copilot-session-calls entry))
-        (setf (harness-provider-copilot-session-calls entry)
-              (assq-delete-all id (harness-provider-copilot-session-calls entry)))
-        (harness-run-soon callback nil "the copilot process is not running")))
+went away first, `restart' when it was stopped on purpose, or
+`timeout' when TIMEOUT seconds, if given, passed without an answer (a
+late answer is dropped then)."
+  (let* ((id (cl-incf (harness-provider-copilot-session-next-id entry)))
+         (timer nil)
+         (fn (if (and callback timeout)
+                 (lambda (result error)
+                   (when timer (cancel-timer timer))
+                   (funcall callback result error))
+               callback)))
+    (when fn
+      (push (cons id fn) (harness-provider-copilot-session-calls entry)))
+    (if (not (harness-provider-copilot--send
+              entry (list :jsonrpc "2.0" :id id :method method :params (or params :empty))))
+        (when (assq id (harness-provider-copilot-session-calls entry))
+          (setf (harness-provider-copilot-session-calls entry)
+                (assq-delete-all id (harness-provider-copilot-session-calls entry)))
+          (harness-run-soon fn nil "the copilot process is not running"))
+      (when (and fn timeout)
+        (setq timer
+              (run-at-time timeout nil
+                           (lambda ()
+                             ;; Gone from the list, the call was answered or failed.
+                             (when-let* ((call (assq id (harness-provider-copilot-session-calls entry))))
+                               (setf (harness-provider-copilot-session-calls entry)
+                                     (delq call (harness-provider-copilot-session-calls entry)))
+                               (harness-log 'warn "provider-copilot: %s of %s got no answer within %ss"
+                                            method (harness-provider-copilot-session-id entry) timeout)
+                               (funcall callback nil 'timeout)))))))
     id))
 
 (define-error 'harness-provider-copilot-restart "The copilot process was stopped")
 
-(defun harness-provider-copilot--call (entry method params)
+(define-error 'harness-provider-copilot-gone "The copilot process went away")
+
+(defun harness-provider-copilot--timeout-message (method seconds)
+  "Return the message for a request METHOD left unanswered for SECONDS."
+  (format "copilot did not answer %s within %ss" method seconds))
+
+(defun harness-provider-copilot--call (entry method params &optional timeout)
   "Return a promise of the result of METHOD with PARAMS on ENTRY's CLI.
-It is rejected with a readable message when the CLI answers an error,
-and with `harness-provider-copilot-restart' when the process is stopped
-on purpose before it answers."
-  (let ((promise (harness-make-promise)))
+It is rejected with a readable message, an ordinary `error', when the
+CLI answers an error or does not answer within TIMEOUT seconds (by
+default `harness-provider-copilot-startup-timeout'); with
+`harness-provider-copilot-gone' and the reason when the process goes
+away first; and with `harness-provider-copilot-restart' when it is
+stopped on purpose."
+  (let ((promise (harness-make-promise))
+        (seconds (or timeout harness-provider-copilot-startup-timeout)))
     (harness-provider-copilot--rpc
      entry method params
      (lambda (result error)
-       (cond ((eq error 'restart) (harness-reject promise '(harness-provider-copilot-restart)))
-             (error (harness-reject promise (list 'error (harness-provider-copilot--rpc-message method error))))
-             (t (harness-resolve promise result)))))
+       (cond ((null error) (harness-resolve promise result))
+             ((eq error 'restart) (harness-reject promise '(harness-provider-copilot-restart)))
+             ((eq error 'timeout)
+              (harness-reject promise (list 'error (harness-provider-copilot--timeout-message method seconds))))
+             ((stringp error)
+              (harness-reject promise (list 'harness-provider-copilot-gone
+                                            (harness-provider-copilot--rpc-message method error))))
+             (t (harness-reject promise (list 'error (harness-provider-copilot--rpc-message method error))))))
+     seconds)
     promise))
+
+(defun harness-provider-copilot--error-text (err)
+  "Return the readable message of ERR, a rejection from this provider.
+The reason the process went away is shown as it is."
+  (if (and (eq (car-safe err) 'harness-provider-copilot-gone) (stringp (cadr err)))
+      (cadr err)
+    (harness-error-message err)))
 
 (defun harness-provider-copilot--answer (entry id result &optional error)
   "Answer the CLI's request ID on ENTRY with RESULT.
@@ -369,21 +438,26 @@ ERROR, when given, is (CODE . MESSAGE) to answer with instead."
              (list :jsonrpc "2.0" :id id :error (list :code (car error) :message (cdr error)))
            (list :jsonrpc "2.0" :id id :result (or result :empty)))))
 
-(defun harness-provider-copilot--fail-calls (entry reason)
-  "Fail every call and idle waiter of ENTRY with REASON.
+(defun harness-provider-copilot--take-pending (entry)
+  "Take the calls awaiting an answer and the idle waiters of ENTRY.
+ENTRY is left with none.  Return (CALLS . WAITERS), for
+`harness-provider-copilot--fail-pending'."
+  (prog1 (cons (harness-provider-copilot-session-calls entry)
+               (harness-provider-copilot-session-waiters entry))
+    (setf (harness-provider-copilot-session-calls entry) nil
+          (harness-provider-copilot-session-waiters entry) nil)))
+
+(defun harness-provider-copilot--fail-pending (pending reason)
+  "Fail PENDING, the (CALLS . WAITERS) a process left, with REASON.
 REASON is a string saying why the process went away, or `restart' when
 it was stopped on purpose."
-  (let ((calls (harness-provider-copilot-session-calls entry))
-        (waiters (harness-provider-copilot-session-waiters entry)))
-    (setf (harness-provider-copilot-session-calls entry) nil
-          (harness-provider-copilot-session-waiters entry) nil)
-    (dolist (call (nreverse calls))
-      (condition-case err (funcall (cdr call) nil reason)
-        (error (harness-log 'error "provider-copilot: failing a call: %S" err))))
-    (dolist (w waiters)
-      (dolist (fn (reverse (cdr w)))
-        (condition-case err (funcall fn reason)
-          (error (harness-log 'error "provider-copilot: failing a waiter: %S" err)))))))
+  (dolist (call (reverse (car pending)))
+    (condition-case err (funcall (cdr call) nil reason)
+      (error (harness-log 'error "provider-copilot: failing a call: %S" err))))
+  (dolist (w (cdr pending))
+    (dolist (fn (reverse (cdr w)))
+      (condition-case err (funcall fn reason)
+        (error (harness-log 'error "provider-copilot: failing a waiter: %S" err))))))
 
 ;;;; Process
 
@@ -466,8 +540,12 @@ not answer within `harness-provider-copilot-startup-timeout'."
          (authenticate
           (lambda (result)
             (if-let* ((problem (harness-provider-copilot--protocol-problem result)))
-                (progn (funcall fail problem)
-                       (harness-provider-copilot--kill entry))
+                (progn
+                  ;; Killed first: a request the failure ends may start
+                  ;; another at once, whose process must be left alone.
+                  (when (eq proc (harness-provider-copilot-session-process entry))
+                    (harness-provider-copilot--kill entry))
+                  (funcall fail problem))
               (setf (harness-provider-copilot-session-version entry) (plist-get result :version))
               (harness-provider-copilot--rpc
                entry "auth.getStatus" nil
@@ -477,6 +555,8 @@ not answer within `harness-provider-copilot-startup-timeout'."
                    (when timer (cancel-timer timer))
                    (setf (harness-provider-copilot-session-auth entry) auth)
                    (harness-provider-copilot--handle-auth auth)
+                   (when (harness-json-true-p (plist-get auth :isAuthenticated))
+                     (harness-provider-copilot--flush-doomed entry))
                    (harness-resolve promise auth))))))))
     (setq timer
           (run-at-time harness-provider-copilot-startup-timeout nil
@@ -503,6 +583,12 @@ not answer within `harness-provider-copilot-startup-timeout'."
                 (funcall authenticate result))))))))
     promise))
 
+(defun harness-provider-copilot--ready-p (entry)
+  "Non-nil when ENTRY's process is live and its handshake is done."
+  (let ((ready (harness-provider-copilot-session-ready entry)))
+    (and ready (eq (harness-promise-state ready) 'resolved)
+         (process-live-p (harness-provider-copilot-session-process entry)))))
+
 (defun harness-provider-copilot--exit-message (entry)
   "Return the message for ENTRY's CLI going away during a request."
   (let ((proc (harness-provider-copilot-session-process entry))
@@ -514,9 +600,10 @@ not answer within `harness-provider-copilot-startup-timeout'."
             (if (string-empty-p tail) "" (concat ": " tail)))))
 
 (defun harness-provider-copilot--turns (entry)
-  "Return the requests ENTRY has in flight."
-  (delq nil (list (harness-provider-copilot-session-turn entry)
-                  (harness-provider-copilot-session-side-turn entry))))
+  "Return the requests ENTRY has in flight, the conversation's first.
+The list is a fresh one, which finishing a request leaves as it is."
+  (let ((turn (harness-provider-copilot-session-turn entry)))
+    (append (and turn (list turn)) (harness-provider-copilot-session-side-turns entry) nil)))
 
 (defun harness-provider-copilot--forget-process (entry)
   "Forget the state ENTRY's process kept: open sessions, turns and aborts."
@@ -532,11 +619,15 @@ not answer within `harness-provider-copilot-startup-timeout'."
 A request whose message the process already had ends: cancelled when
 it was being cancelled, else with REASON as its error.  One still on
 its way to the process starts again in a new one, unless the process
-had died by itself, when it fails with the exit message."
+had died by itself, when it fails with the exit message.  Only what
+waited on this process is settled: a request whose done event starts
+another at once, in a new process, leaves that one alone."
   (let* ((proc (harness-provider-copilot-session-process entry))
          (buf (harness-provider-copilot-session-stderr entry))
          (live (process-live-p proc))
-         (why (if (or live (not (processp proc))) 'restart (harness-provider-copilot--exit-message entry))))
+         (why (if (or live (not (processp proc))) 'restart (harness-provider-copilot--exit-message entry)))
+         (turns (harness-provider-copilot--turns entry))
+         (pending (harness-provider-copilot--take-pending entry)))
     (when (processp proc)
       (set-process-sentinel proc #'ignore)
       (set-process-filter proc #'ignore)
@@ -545,7 +636,7 @@ had died by itself, when it fails with the exit message."
     (harness-provider-copilot--forget-process entry)
     (setf (harness-provider-copilot-session-process entry) nil
           (harness-provider-copilot-session-stderr entry) nil)
-    (dolist (turn (harness-provider-copilot--turns entry))
+    (dolist (turn turns)
       (when (harness-provider-copilot-turn-sent turn)
         (harness-provider-copilot--finish
          entry turn
@@ -553,7 +644,7 @@ had died by itself, when it fails with the exit message."
              '(:type done :stop-reason cancelled)
            (list :type 'done :stop-reason 'error
                  :error (or reason (if (stringp why) why "the copilot process was stopped")))))))
-    (harness-provider-copilot--fail-calls entry why)))
+    (harness-provider-copilot--fail-pending pending why)))
 
 (defun harness-provider-copilot--filter (entry proc chunk)
   "Handle CHUNK of PROC's stdout for ENTRY: every complete message in it."
@@ -574,21 +665,26 @@ had died by itself, when it fails with the exit message."
                                 (harness-truncate-end body 300) err))))))))
 
 (defun harness-provider-copilot--sentinel (entry proc _event)
-  "Handle the death of ENTRY's process PROC."
+  "Handle the death of ENTRY's process PROC.
+Every request it had ends with the exit message.  Only what waited on
+PROC is settled: a request whose done event starts another at once, in
+a new process, leaves that one alone."
   (unless (process-live-p proc)
     (when (eq proc (harness-provider-copilot-session-process entry))
       (let ((message (harness-provider-copilot--exit-message entry))
-            (buf (harness-provider-copilot-session-stderr entry)))
+            (buf (harness-provider-copilot-session-stderr entry))
+            (turns (harness-provider-copilot--turns entry))
+            (pending (harness-provider-copilot--take-pending entry)))
         (harness-log 'info "provider-copilot: process for %s exited %s"
                      (harness-provider-copilot-session-id entry) (process-exit-status proc))
         (harness-provider-copilot--forget-process entry)
-        (harness-provider-copilot--fail-calls entry message)
-        (dolist (turn (harness-provider-copilot--turns entry))
+        (dolist (turn turns)
           (harness-provider-copilot--finish
            entry turn
            (if (harness-provider-copilot-turn-cancelled turn)
                '(:type done :stop-reason cancelled)
              (list :type 'done :stop-reason 'error :error message))))
+        (harness-provider-copilot--fail-pending pending message)
         (when (buffer-live-p buf) (kill-buffer buf))
         (when (eq buf (harness-provider-copilot-session-stderr entry))
           (setf (harness-provider-copilot-session-stderr entry) nil))
@@ -686,7 +782,8 @@ AGENT is the sub-agent the event comes from, nil for the main agent."
            (harness-provider-copilot--emit turn (list :type 'text :delta text))))))
     ("assistant.usage" (harness-provider-copilot--add-usage turn data agent))
     ("session.usage_info"
-     (when (numberp (plist-get data :currentTokens))
+     ;; A sub-agent's context is not the size of the conversation.
+     (when (and (not agent) (numberp (plist-get data :currentTokens)))
        (setf (harness-provider-copilot-turn-usage turn)
              (plist-put (harness-provider-copilot-turn-usage turn) :current (plist-get data :currentTokens)))))
     ("session.error"
@@ -722,19 +819,27 @@ AGENT is the sub-agent the event comes from, nil for the main agent."
   "Handle the end of a turn of Copilot session SID on ENTRY.
 DATA says whether it was aborted.  The request that ran it ends before
 anything waiting for SID to be idle resumes."
+  (harness-provider-copilot--not-busy entry sid)
+  (when-let* ((turn (harness-provider-copilot--turn-for entry sid)))
+    (harness-provider-copilot--end-turn entry turn (harness-json-true-p (plist-get data :aborted))))
+  (harness-provider-copilot--wake entry sid))
+
+(defun harness-provider-copilot--not-busy (entry sid)
+  "Note that Copilot session SID on ENTRY has no turn in flight.
+An abort of it still in flight is moot: it goes, and its timer with it."
   (setf (harness-provider-copilot-session-busy entry)
         (delete sid (harness-provider-copilot-session-busy entry)))
   (when-let* ((abort (assoc sid (harness-provider-copilot-session-aborts entry))))
     (cancel-timer (cadr abort))
     (setf (harness-provider-copilot-session-aborts entry)
-          (delq abort (harness-provider-copilot-session-aborts entry))))
-  (when-let* ((turn (harness-provider-copilot--turn-for entry sid)))
-    (harness-provider-copilot--end-turn entry turn (harness-json-true-p (plist-get data :aborted))))
-  (let ((w (assoc sid (harness-provider-copilot-session-waiters entry))))
-    (when w
-      (setf (harness-provider-copilot-session-waiters entry)
-            (delq w (harness-provider-copilot-session-waiters entry)))
-      (dolist (fn (reverse (cdr w))) (funcall fn t)))))
+          (delq abort (harness-provider-copilot-session-aborts entry)))))
+
+(defun harness-provider-copilot--wake (entry sid)
+  "Resume what waits on ENTRY for Copilot session SID to be idle."
+  (when-let* ((w (assoc sid (harness-provider-copilot-session-waiters entry))))
+    (setf (harness-provider-copilot-session-waiters entry)
+          (delq w (harness-provider-copilot-session-waiters entry)))
+    (dolist (fn (reverse (cdr w))) (funcall fn t))))
 
 (defun harness-provider-copilot--tool-request (entry sid data)
   "Turn the external tool request DATA of Copilot session SID into a tool call.
@@ -991,12 +1096,13 @@ not count."
                :using-extra (and exhausted extra t)))))))
 
 (defun harness-provider-copilot--handle-quota (turn snapshots)
-  "Publish quota SNAPSHOTS and tell TURN, when given, about the windows."
-  (let* ((old (plist-get harness-provider-copilot--status :windows))
-         (status (harness-provider-copilot--publish
+  "Publish quota SNAPSHOTS and tell TURN, when given, about the windows.
+Every request hears about them once, and again whenever they change."
+  (let* ((status (harness-provider-copilot--publish
                   (harness-provider-copilot-quota-changes snapshots)))
          (windows (plist-get status :windows)))
-    (when (and turn windows (not (equal old windows)))
+    (when (and turn windows (not (equal windows (harness-provider-copilot-turn-quota-told turn))))
+      (setf (harness-provider-copilot-turn-quota-told turn) windows)
       (harness-provider-copilot--emit turn (list :type 'quota :windows windows)))
     status))
 
@@ -1017,14 +1123,12 @@ asked again before `harness-provider-copilot-quota-ttl' has passed."
 Idle ones come first."
   (let (best)
     (maphash (lambda (_ e)
-               (let ((ready (harness-provider-copilot-session-ready e)))
-                 (when (and (process-live-p (harness-provider-copilot-session-process e))
-                            (not (harness-provider-copilot-session-host e))
-                            ready (eq (harness-promise-state ready) 'resolved)
-                            (or (null best)
-                                (and (harness-provider-copilot--turns best)
-                                     (null (harness-provider-copilot--turns e)))))
-                   (setq best e))))
+               (when (and (harness-provider-copilot--ready-p e)
+                          (not (harness-provider-copilot-session-host e))
+                          (or (null best)
+                              (and (harness-provider-copilot--turns best)
+                                   (null (harness-provider-copilot--turns e)))))
+                 (setq best e)))
              harness-provider-copilot--sessions)
     best))
 
@@ -1171,7 +1275,7 @@ before it is logged in.  Without the program there are no models."
                                                (plist-get result :models)))))
                           (lambda (err)
                             (harness-log 'warn "provider-copilot: listing models failed: %s"
-                                         (harness-error-message err))
+                                         (harness-provider-copilot--error-text err))
                             nil))
           (harness-resolved nil))
         (lambda (models)
@@ -1220,7 +1324,8 @@ after `harness-provider-copilot-startup-timeout' seconds."
                                nil (plist-get result :quotaSnapshots)))))))
          settle
          (lambda (err)
-           (harness-log 'debug "provider-copilot: quota report failed: %s" (harness-error-message err))
+           (harness-log 'debug "provider-copilot: quota report failed: %s"
+                        (harness-provider-copilot--error-text err))
            (funcall settle harness-provider-copilot--status)))
         promise)))
 
@@ -1347,16 +1452,22 @@ Only what follows the last assistant message is new to the CLI."
 (defun harness-provider-copilot-side-request-p (request)
   "Non-nil when REQUEST is a side request, which leaves the conversation alone.
 A turn of a harness session brings the provider state the session has
-recorded.  Naming the session brings a fork of it, a summary for
-compaction none, and the permission judge a session record of its own
-making without state: those run in a throwaway Copilot session, beside
-the conversation's turn."
+recorded and lets the model answer at length.  A one-off question
+caps its answer with `:max-tokens' (naming the session, a summary for
+compaction, the permission judge), may bring other state (naming
+brings a fork of the recorded one), or comes with a session record of
+its own making that has no state at all (the judge's).  Such requests
+run in throwaway Copilot sessions, beside the conversation's turn and
+beside each other."
   (let ((session (plist-get request :session)))
-    (or (not (plist-member session :provider-state))
-        (not (equal (plist-get request :provider-state) (plist-get session :provider-state))))))
+    (and (or (not (plist-member session :provider-state))
+             (plist-get request :max-tokens)
+             (not (equal (plist-get request :provider-state) (plist-get session :provider-state))))
+         t)))
 
 (defun harness-provider-copilot--finish (entry turn event)
-  "End TURN on ENTRY: report its usage, then deliver the done EVENT, once."
+  "End TURN on ENTRY: report its usage, then deliver the done EVENT, once.
+A side request's throwaway session goes."
   (when (harness-provider-copilot-turn-active turn)
     (when-let* ((usage (harness-provider-copilot--usage-event turn)))
       (harness-provider-copilot--emit turn usage))
@@ -1364,10 +1475,10 @@ the conversation's turn."
       (setf (harness-provider-copilot-turn-active turn) nil
             (harness-provider-copilot-turn-on-event turn) nil
             (harness-provider-copilot-turn-request turn) nil)
-      (when (eq turn (harness-provider-copilot-session-turn entry))
-        (setf (harness-provider-copilot-session-turn entry) nil))
-      (when (eq turn (harness-provider-copilot-session-side-turn entry))
-        (setf (harness-provider-copilot-session-side-turn entry) nil))
+      (if (eq turn (harness-provider-copilot-session-turn entry))
+          (setf (harness-provider-copilot-session-turn entry) nil)
+        (setf (harness-provider-copilot-session-side-turns entry)
+              (delq turn (harness-provider-copilot-session-side-turns entry))))
       (when (and (harness-provider-copilot-turn-side turn) (harness-provider-copilot-turn-target turn))
         (harness-provider-copilot--drop-session entry (harness-provider-copilot-turn-target turn)))
       (when fn (funcall fn event)))))
@@ -1384,19 +1495,63 @@ the conversation's turn."
            ((equal finish "length") '(:type done :stop-reason max-tokens))
            (t '(:type done :stop-reason end-turn))))))
 
-(defun harness-provider-copilot--drop-session (entry sid)
-  "Close and delete the throwaway Copilot session SID on ENTRY once it is idle."
-  (let ((drop (lambda ()
-                (when (assoc sid (harness-provider-copilot-session-opened entry))
-                  (setf (harness-provider-copilot-session-opened entry)
-                        (cl-remove sid (harness-provider-copilot-session-opened entry)
-                                   :key #'car :test #'equal))
-                  (harness-provider-copilot--rpc
-                   entry "session.detach" (list :sessionId sid)
-                   (lambda (_r _e)
-                     (harness-provider-copilot--rpc entry "sessions.delete" (list :sessionId sid) #'ignore)))))))
-    (when sid
-      (harness-provider-copilot--when-idle* entry sid (lambda (how) (when (eq how t) (funcall drop)))))))
+(defun harness-provider-copilot--drop-session (entry sid &optional now)
+  "Delete the throwaway Copilot session SID of ENTRY.
+Open in ENTRY's live process, SID is detached, then deleted, once it is
+idle, or at once with NOW; open nowhere, it is just deleted.  Until it
+is, SID waits in the `doomed' slot; when the process goes away first,
+the next one deletes it once its handshake is done."
+  (when sid
+    (cond
+     ((not (harness-provider-copilot--ready-p entry))
+      (harness-provider-copilot--doom entry sid))
+     ((not (assoc sid (harness-provider-copilot-session-opened entry)))
+      (harness-provider-copilot--delete-session entry sid))
+     (t
+      (harness-provider-copilot--doom entry sid)
+      (if now
+          (harness-provider-copilot--detach entry sid)
+        (harness-provider-copilot--when-idle*
+         entry sid (lambda (how) (when (eq how t) (harness-provider-copilot--detach entry sid)))))))))
+
+(defun harness-provider-copilot--detach (entry sid)
+  "Detach Copilot session SID from ENTRY's process, then delete it.
+Nothing happens unless SID is still open there and still to delete."
+  (when (and (member sid (harness-provider-copilot-session-doomed entry))
+             (assoc sid (harness-provider-copilot-session-opened entry)))
+    (setf (harness-provider-copilot-session-doomed entry)
+          (delete sid (harness-provider-copilot-session-doomed entry))
+          (harness-provider-copilot-session-opened entry)
+          (cl-remove sid (harness-provider-copilot-session-opened entry) :key #'car :test #'equal))
+    (harness-provider-copilot--rpc
+     entry "session.detach" (list :sessionId sid)
+     (lambda (_result error)
+       (if (or (stringp error) (eq error 'restart))
+           (harness-provider-copilot--doom entry sid)
+         (harness-provider-copilot--delete-session entry sid))))))
+
+(defun harness-provider-copilot--delete-session (entry sid)
+  "Delete Copilot session SID from disk through ENTRY's ready process.
+When the process goes away before it answers, SID waits in the
+`doomed' slot for the next one."
+  (harness-provider-copilot--rpc
+   entry "sessions.delete" (list :sessionId sid)
+   (lambda (_result error)
+     (when (or (stringp error) (eq error 'restart))
+       (harness-provider-copilot--doom entry sid)))))
+
+(defun harness-provider-copilot--doom (entry sid)
+  "Remember that ENTRY has the throwaway Copilot session SID still to delete."
+  (unless (member sid (harness-provider-copilot-session-doomed entry))
+    (push sid (harness-provider-copilot-session-doomed entry))))
+
+(defun harness-provider-copilot--flush-doomed (entry)
+  "Delete the sessions earlier processes of ENTRY left to delete.
+ENTRY's process has just finished its handshake, so none is open in it."
+  (let ((doomed (harness-provider-copilot-session-doomed entry)))
+    (setf (harness-provider-copilot-session-doomed entry) nil)
+    (dolist (sid (reverse doomed))
+      (harness-provider-copilot--delete-session entry sid))))
 
 (defun harness-provider-copilot--when-idle* (entry sid fn)
   "Call FN once Copilot session SID on ENTRY has no turn in flight.
@@ -1412,13 +1567,14 @@ process was stopped on purpose, or a string when it went away."
 (defun harness-provider-copilot--when-idle (entry sid)
   "Return a promise of SID once Copilot session SID on ENTRY is idle.
 It is rejected with `harness-provider-copilot-restart' when the process
-is stopped on purpose first, and with an error when it dies."
+is stopped on purpose first, and with `harness-provider-copilot-gone'
+when it dies."
   (let ((promise (harness-make-promise)))
     (harness-provider-copilot--when-idle*
      entry sid (lambda (how)
                  (cond ((eq how t) (harness-resolve promise sid))
                        ((eq how 'restart) (harness-reject promise '(harness-provider-copilot-restart)))
-                       (t (harness-reject promise (list 'error (format "%s" how)))))))
+                       (t (harness-reject promise (list 'harness-provider-copilot-gone (format "%s" how)))))))
     promise))
 
 (defun harness-provider-copilot--mark-open (entry sid key)
@@ -1430,21 +1586,29 @@ is stopped on purpose first, and with an error when it dies."
 
 (defun harness-provider-copilot--create (entry config key)
   "Return a promise of a new Copilot session opened with CONFIG on ENTRY.
-KEY is what the session is remembered as opened with."
+KEY is what the session is remembered as opened with.  When the
+session cannot be had, it is deleted all the same: the CLI may yet
+make it after a timeout, or have made it before it went away."
   (let ((id (harness-uuid)))
     (harness-then (harness-provider-copilot--call entry "session.create" (append (list :sessionId id) config))
                   (lambda (result)
                     (harness-provider-copilot--mark-open
-                     entry (or (plist-get result :sessionId) id) key)))))
+                     entry (or (plist-get result :sessionId) id) key))
+                  (lambda (err)
+                    (harness-provider-copilot--drop-session entry id)
+                    (harness-rejected err)))))
 
 (defun harness-provider-copilot--restart-p (err)
   "Non-nil when ERR says that the process was stopped on purpose."
   (eq (car-safe err) 'harness-provider-copilot-restart))
 
 (defun harness-provider-copilot--not-found-p (err)
-  "Non-nil when ERR says that a Copilot session does not exist."
-  (let ((case-fold-search t))
-    (string-match-p "not found\\|no such session\\|does not exist" (harness-error-message err))))
+  "Non-nil when ERR says that a Copilot session does not exist.
+Only an answer of the CLI, an ordinary `error' rejection, can say so:
+the process going away cannot, whatever its stderr said."
+  (and (eq (car-safe err) 'error)
+       (let ((case-fold-search t))
+         (string-match-p "not found\\|no such session\\|does not exist" (harness-error-message err)))))
 
 (defun harness-provider-copilot--resume (entry sid config key note)
   "Return a promise of Copilot session SID opened with CONFIG on ENTRY.
@@ -1468,7 +1632,14 @@ When the CLI does not know SOURCE, a new session takes its place and
 NOTE, a function, is called with a hint saying so; other errors fail."
   (harness-then
    (harness-provider-copilot--call entry "sessions.fork" (list :sessionId source))
-   (lambda (result) (harness-provider-copilot--resume entry (plist-get result :sessionId) config key note))
+   (lambda (result)
+     (let ((fork (plist-get result :sessionId)))
+       (harness-then (harness-provider-copilot--resume entry fork config key note)
+                     nil
+                     (lambda (err)
+                       ;; A fork nobody can use goes before the error does.
+                       (harness-provider-copilot--drop-session entry fork)
+                       (harness-rejected err)))))
    (lambda (err)
      (if (not (harness-provider-copilot--not-found-p err))
          (harness-rejected err)
@@ -1477,27 +1648,35 @@ NOTE, a function, is called with a hint saying so; other errors fail."
                              (harness-error-message err)))
        (harness-provider-copilot--create entry config key)))))
 
-(defun harness-provider-copilot--open (entry sid config key note)
+(defun harness-provider-copilot--open (entry sid config key note live)
   "Return a promise of Copilot session SID, open on ENTRY with CONFIG.
 A session open with other settings is resumed again once idle, which
-applies them in place.  NOTE is passed to `harness-provider-copilot--resume'."
+applies them in place, unless LIVE says by then that the request no
+longer wants it: a superseded request must not change the settings
+under the next one.  NOTE is passed to `harness-provider-copilot--resume'."
   (let ((open (assoc sid (harness-provider-copilot-session-opened entry))))
     (if (and open (equal (cdr open) key))
         (harness-resolved sid)
       (harness-then (harness-provider-copilot--when-idle entry sid)
-                    (lambda (_) (harness-provider-copilot--resume entry sid config key note))))))
+                    (lambda (_)
+                      (if (funcall live)
+                          (harness-provider-copilot--resume entry sid config key note)
+                        sid))))))
 
 (defun harness-provider-copilot--open-target (entry turn request live)
   "Return a promise of the Copilot session TURN runs in, open on ENTRY.
-REQUEST's provider state names the conversation; a side request runs in
-a fork of it, or in a new session when it brings none, never in the
+REQUEST's provider state names the conversation.  A side request runs
+in a fork of it, or of the conversation its session has recorded when
+it brings none of its own, or else in a new session; never in the
 conversation itself.  LIVE says whether TURN still wants the session,
 and to hear about it, once it is open; a session made for a request
 that no longer does is deleted again."
   (let* ((state (plist-get request :provider-state))
-         (id (plist-get state :copilot-session-id))
-         (fork (and id (harness-json-true-p (plist-get state :fork-pending))))
          (side (harness-provider-copilot-turn-side turn))
+         (id (or (plist-get state :copilot-session-id)
+                 (and side (plist-get (plist-get (plist-get request :session) :provider-state)
+                                      :copilot-session-id))))
+         (fork (and id (harness-json-true-p (plist-get state :fork-pending))))
          (config (harness-provider-copilot-session-config request))
          (key (harness-provider-copilot--key config))
          (note (lambda (text)
@@ -1508,13 +1687,20 @@ that no longer does is deleted again."
            (side (harness-provider-copilot--create entry config key))
            (fork (harness-provider-copilot--fork entry id config key note))
            ((null id) (harness-provider-copilot--create entry config key))
-           (t (harness-provider-copilot--open entry id config key note)))
+           (t (harness-provider-copilot--open entry id config key note live)))
      (lambda (sid)
        (cond
         ((not (funcall live))
          (when (or side (not (equal sid id)))
            (harness-provider-copilot--drop-session entry sid)))
-        ((not side)
+        (side
+         ;; The session is the request's from now on, sent to or not.
+         ;; One it opened in a process stopped since goes.
+         (let ((old (harness-provider-copilot-turn-target turn)))
+           (when (and old (not (equal old sid)))
+             (harness-provider-copilot--drop-session entry old)))
+         (setf (harness-provider-copilot-turn-target turn) sid))
+        (t
          (setf (harness-provider-copilot-session-main entry) sid)
          (harness-provider-copilot--emit
           turn (list :type 'provider-state
@@ -1529,44 +1715,65 @@ logged in."
          (host (file-remote-p directory))
          (proc (harness-provider-copilot-session-process entry))
          (ready (harness-provider-copilot-session-ready entry)))
+    ;; Killing settles what waited on the old process, and a request
+    ;; that ends there may start another at once, in a new process:
+    ;; the process is read again after a kill.
     (cond
      ((and (processp proc) (not (process-live-p proc)))
       ;; Dead with its sentinel still to run: settle what waited on it.
       (harness-provider-copilot--kill entry)
-      (setq proc nil))
+      (setq proc (harness-provider-copilot-session-process entry)))
      ((and (process-live-p proc)
            (or (not (equal host (harness-provider-copilot-session-host entry)))
                (and ready (eq (harness-promise-state ready) 'rejected))))
       (harness-log 'info "provider-copilot: restarting the process of %s" (harness-provider-copilot-session-id entry))
       (harness-provider-copilot--kill entry)
-      (setq proc nil)))
+      (setq proc (harness-provider-copilot-session-process entry))))
     (unless (process-live-p proc)
       (harness-provider-copilot--spawn entry directory))
-    (harness-then (harness-provider-copilot-session-ready entry)
-                  (lambda (auth)
-                    (if (harness-json-true-p (plist-get auth :isAuthenticated))
-                        auth
-                      ;; Logging in later needs a new process to notice.
-                      (harness-provider-copilot--kill entry)
-                      (harness-rejected (list 'error (harness-provider-copilot--login-message auth))))))))
+    (let ((ready (harness-provider-copilot-session-ready entry)))
+      (harness-then ready
+                    (lambda (auth)
+                      (if (harness-json-true-p (plist-get auth :isAuthenticated))
+                          auth
+                        ;; Logging in later needs a new process to notice;
+                        ;; one started since is not this one.
+                        (when (eq ready (harness-provider-copilot-session-ready entry))
+                          (harness-provider-copilot--kill entry))
+                        (harness-rejected (list 'error (harness-provider-copilot--login-message auth)))))))))
 
 (defun harness-provider-copilot--send-turn (entry turn sid prompt)
-  "Send PROMPT, (TEXT . ATTACHMENTS), as TURN in Copilot session SID on ENTRY."
+  "Send PROMPT, (TEXT . ATTACHMENTS), as TURN in Copilot session SID on ENTRY.
+When the CLI answers an error, or nothing within
+`harness-provider-copilot-startup-timeout' seconds, no turn runs: SID
+is idle again, an abort of it in flight is forgotten, and TURN ends,
+cancelled when it was being cancelled, else with the error."
   (setf (harness-provider-copilot-turn-target turn) sid
         (harness-provider-copilot-turn-sent turn) t)
   (push sid (harness-provider-copilot-session-busy entry))
-  (harness-provider-copilot--rpc
-   entry "session.send"
-   (append (list :sessionId sid :prompt (car prompt))
-           (when (cdr prompt) (list :attachments (harness-json-array (cdr prompt)))))
-   (lambda (_result error)
-     (when error
-       (setf (harness-provider-copilot-session-busy entry)
-             (delete sid (harness-provider-copilot-session-busy entry)))
-       (harness-provider-copilot--finish
-        entry turn (list :type 'done :stop-reason 'error
-                         :error (if (stringp error) (harness-provider-copilot--exit-message entry)
-                                  (harness-provider-copilot--rpc-message "session.send" error))))))))
+  (let ((proc (harness-provider-copilot-session-process entry))
+        (seconds harness-provider-copilot-startup-timeout))
+    (harness-provider-copilot--rpc
+     entry "session.send"
+     (append (list :sessionId sid :prompt (car prompt))
+             (when (cdr prompt) (list :attachments (harness-json-array (cdr prompt)))))
+     (lambda (_result error)
+       (when error
+         ;; A process that went away took SID's state with it.
+         (when (eq proc (harness-provider-copilot-session-process entry))
+           (harness-provider-copilot--not-busy entry sid))
+         (harness-provider-copilot--finish
+          entry turn
+          (if (harness-provider-copilot-turn-cancelled turn)
+              '(:type done :stop-reason cancelled)
+            (list :type 'done :stop-reason 'error
+                  :error (cond ((eq error 'timeout)
+                                (harness-provider-copilot--timeout-message "session.send" seconds))
+                               ((stringp error) (harness-provider-copilot--exit-message entry))
+                               (t (harness-provider-copilot--rpc-message "session.send" error))))))
+         (when (eq proc (harness-provider-copilot-session-process entry))
+           (harness-provider-copilot--wake entry sid))))
+     seconds)))
 
 (defun harness-provider-copilot--run (entry turn request prompt &optional retried)
   "Run TURN, for REQUEST with PROMPT, on ENTRY.
@@ -1587,7 +1794,7 @@ stopped on the way starts again once in a new one (RETRIED)."
                       entry turn (list :type 'done :stop-reason 'error
                                        :error (if (harness-provider-copilot--restart-p err)
                                                   "the copilot process was stopped twice"
-                                                (harness-error-message err))))))
+                                                (harness-provider-copilot--error-text err))))))
                  nil)))
     (condition-case err
         (let* ((step (lambda (fn) (lambda (value) (if (funcall live) (funcall fn value) 'stopped))))
@@ -1604,32 +1811,41 @@ stopped on the way starts again once in a new one (RETRIED)."
   "Ask ENTRY's CLI to stop the turn of Copilot session SID.
 When it is not idle `harness-provider-copilot-interrupt-timeout' later,
 the process is killed; with GENTLE, for a throwaway session, only the
-request that ran it ends then and the process keeps running."
+request that ran it ends then, the session is deleted, and the process
+keeps running."
   (when (and (member sid (harness-provider-copilot-session-busy entry))
              (not (assoc sid (harness-provider-copilot-session-aborts entry))))
     (harness-provider-copilot--rpc entry "session.abort" (list :sessionId sid) #'ignore)
-    (let ((proc (harness-provider-copilot-session-process entry)))
-      (push (cons sid (cons (run-at-time harness-provider-copilot-interrupt-timeout nil
-                                         #'harness-provider-copilot--force-abort entry proc sid)
-                            gentle))
-            (harness-provider-copilot-session-aborts entry)))))
+    ;; The entry, (SID TIMER . GENTLE), is handed to its own timer,
+    ;; which removes exactly it.
+    (let ((abort (list sid)))
+      (setcdr abort (cons (run-at-time harness-provider-copilot-interrupt-timeout nil
+                                       #'harness-provider-copilot--force-abort
+                                       entry (harness-provider-copilot-session-process entry) abort)
+                          gentle))
+      (push abort (harness-provider-copilot-session-aborts entry)))))
 
-(defun harness-provider-copilot--force-abort (entry proc sid)
-  "Act on the abort of SID that ENTRY's process PROC left unanswered.
-A throwaway session's request ends and the process keeps running.
-Otherwise the process is killed: the request being cancelled ends,
-another one the process was running ends with an error, and one on its
-way to it starts again."
-  (when (and (eq proc (harness-provider-copilot-session-process entry))
-             (member sid (harness-provider-copilot-session-busy entry)))
-    (let ((abort (assoc sid (harness-provider-copilot-session-aborts entry))))
-      (setf (harness-provider-copilot-session-aborts entry)
-            (delq abort (harness-provider-copilot-session-aborts entry)))
+(defun harness-provider-copilot--force-abort (entry proc abort)
+  "Act on ABORT, an abort that ENTRY's process PROC left unanswered.
+ABORT, (SID TIMER . GENTLE), leaves the aborts in flight in any case.
+When SID still runs a turn in PROC, a throwaway session's (GENTLE)
+request ends and the session is deleted at once, while the process
+keeps running.  Otherwise the process is killed: the request being
+cancelled ends, another one the process was running ends with an
+error, and one on its way to it starts again."
+  (let ((sid (car abort)))
+    (setf (harness-provider-copilot-session-aborts entry)
+          (delq abort (harness-provider-copilot-session-aborts entry)))
+    (when (and (eq proc (harness-provider-copilot-session-process entry))
+               (member sid (harness-provider-copilot-session-busy entry)))
       (if (cddr abort)
-          (when-let* ((turn (harness-provider-copilot--turn-for entry sid)))
-            (harness-log 'info "provider-copilot: a side request of %s ignored its abort"
-                         (harness-provider-copilot-session-id entry))
-            (harness-provider-copilot--finish entry turn '(:type done :stop-reason cancelled)))
+          (progn
+            (when-let* ((turn (harness-provider-copilot--turn-for entry sid)))
+              (harness-log 'info "provider-copilot: a side request of %s ignored its abort"
+                           (harness-provider-copilot-session-id entry))
+              (harness-provider-copilot--finish entry turn '(:type done :stop-reason cancelled)))
+            ;; It may never be idle: waiting for that would keep it forever.
+            (harness-provider-copilot--drop-session entry sid t))
         (harness-log 'warn "provider-copilot: abort ignored for %s; killing the process"
                      (harness-provider-copilot-session-id entry))
         (harness-provider-copilot--kill entry "copilot ignored an abort and was stopped")))))
@@ -1655,34 +1871,35 @@ way to it starts again."
 
 (defun harness-provider-copilot--complete (request)
   "Run REQUEST through the GitHub Copilot CLI; return a handle with `:cancel'.
-The conversation's turn and a side request (see
-`harness-provider-copilot-side-request-p') run side by side; a new
-request takes over from a running one of its own kind."
+The conversation's turn and any number of side requests (see
+`harness-provider-copilot-side-request-p') run side by side.  Only a
+new turn of the conversation takes over from a running one; side
+requests never take over from each other."
   (let* ((session (plist-get request :session))
          (sid (or (plist-get session :id) "default"))
          (entry (harness-provider-copilot--entry sid))
          (side (harness-provider-copilot-side-request-p request))
-         (old (if side
-                  (harness-provider-copilot-session-side-turn entry)
-                (harness-provider-copilot-session-turn entry)))
+         (old (unless side (harness-provider-copilot-session-turn entry)))
          (turn (harness-provider-copilot--make-turn
                 :request request :on-event (plist-get request :on-event) :side side))
          (prompt (harness-provider-copilot-prompt request)))
     (when (and old (harness-provider-copilot-turn-active old))
       (when (and (harness-provider-copilot-turn-sent old) (harness-provider-copilot-turn-target old))
-        (harness-provider-copilot--abort entry (harness-provider-copilot-turn-target old)
-                                         (harness-provider-copilot-turn-side old)))
+        (harness-provider-copilot--abort entry (harness-provider-copilot-turn-target old)))
       (harness-provider-copilot--finish
        entry old (if (harness-provider-copilot-turn-cancelled old)
                      '(:type done :stop-reason cancelled)
                    '(:type done :stop-reason error :error "superseded by a new request"))))
     (if side
-        (setf (harness-provider-copilot-session-side-turn entry) turn)
+        (setf (harness-provider-copilot-session-side-turns entry)
+              (append (harness-provider-copilot-session-side-turns entry) (list turn)))
       (setf (harness-provider-copilot-session-turn entry) turn))
     (harness-provider-copilot--emit turn '(:type start))
     (if (null prompt)
         (harness-provider-copilot--finish
-         entry turn '(:type done :stop-reason error :error "No user message to send"))
+         entry turn
+         '(:type done :stop-reason error
+           :error "No new user message to send: Copilot already has the conversation, and a message sent while it was answering (not taken by a tool call) does not reach it; send it again"))
       (harness-provider-copilot--run entry turn request prompt))
     (list :cancel (lambda () (harness-provider-copilot--cancel entry turn)))))
 

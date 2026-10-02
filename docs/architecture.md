@@ -443,15 +443,25 @@ version 3 or newer.  Per harness session one CLI process:
   `tool-call` whose `:respond` answers `session.tools.handlePendingToolCall`,
   `assistant.usage` reports each model call, `session.idle` ends the
   turn, and `session.abort` cancels it (the process is killed when it
-  stays busy).
+  stays busy).  A request the CLI leaves unanswered (opening a session,
+  forking one, sending) fails after `harness-provider-copilot-startup-timeout`
+  (30 s) instead of hanging.
 - The provider state is `(:copilot-session-id ID :model NAME)`; a fork's
   is `(:copilot-session-id PARENT :fork-pending t)`, which the first
-  turn turns into `sessions.fork`.  A side request, one whose provider
-  state is not the one its session has recorded (naming brings a fork
-  of it, compaction none, the permission judge a session record without
-  state), runs in a throwaway session (a fork, or a new one) beside the
-  conversation's turn, at the same time, and the session is deleted
-  afterwards.  A new request takes over only from one of its own kind.
+  turn turns into `sessions.fork`.
+- Side requests are one-off questions: naming, compaction and the
+  permission judge.  A request is one when it sets `:max-tokens` (a turn
+  of the conversation never caps its answer), when its provider state
+  is not the one its session has recorded (naming brings a fork of it),
+  or when its session record has no state at all (the judge's).  Any
+  number of them run at once, beside the conversation's turn and beside
+  each other, each in a throwaway session: a fork of the conversation
+  its own state names, else of the one its session has recorded (so a
+  summary for compaction sees the real conversation), else a new
+  session.  They never write into the conversation, and their sessions
+  are deleted afterwards (by the next process when theirs goes away
+  first).  Only a new turn of the conversation takes over from the
+  running one.
 
 Copilot plans include a monthly allowance, counted in AI credits ($0.01
 each, at each model's token prices) or, on the legacy billing, in
