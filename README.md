@@ -10,7 +10,7 @@ GitHub Copilot (GPT, Claude, Gemini and other models through the
 `copilot` command line), OpenAI-compatible APIs such as OpenRouter and
 OpenAI, and models on AWS Bedrock.
 
-![A chat session](docs/media/chat-tour.png)
+![A session beside the code it wrote: the agent read the project, added rate limiting, ran the tests and summed up](docs/media/chat.png)
 
 ## Features
 
@@ -41,6 +41,21 @@ OpenAI, and models on AWS Bedrock.
   (ACP), so another Emacs or any ACP client can drive it.
 - **Modular and reloadable.** Every feature is a module, and the whole
   harness reloads in place without losing running sessions.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![A chat waiting for permission to run pip install, with the allow and deny buttons](docs/media/chat-permission.png) | ![A chat waiting for the answer to a question, with three options](docs/media/chat-question.png) |
+| A permission request, answered in the chat | A question from the agent, answered with a digit |
+| ![The task board with tasks needing input, in review, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
+| The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
+| ![The usage dashboard: a month of cost per day, cost by model, the plan's quota and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
+| Usage: cost per day and model, plan quota, budgets | Settings, here as one project overrides them |
+| ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
+| The session list | The worktrees of a project and their sessions |
+| ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
+| A BTW side conversation under its session | The menu, with the chat's own commands |
 
 ## Requirements
 
@@ -424,14 +439,6 @@ the token yourself.
 - `scripts/harness-acp-stdio` bridges ACP to standard input and output,
   for editors that start ACP agents as subprocesses.
 
-## Screenshots
-
-| | |
-|---|---|
-| ![A permission request](docs/media/chat-permission.png) | ![A question from the agent](docs/media/chat-question.png) |
-| ![The conversation tree](docs/media/tree.png) | ![The usage dashboard](docs/media/usage.png) |
-| ![The worktree list](docs/media/worktrees.png) | ![A chat with a dark theme](docs/media/chat-dark.png) |
-
 ## Architecture
 
 The core only loads modules and passes messages between them. Every
@@ -460,6 +467,7 @@ scripts/test.sh                              # run every test suite, each in a c
 scripts/test.sh test/harness-core-test.el    # run one suite (optionally with an ERT selector)
 scripts/lint.sh [--checkdoc]                 # byte-compile every file out of tree
 scripts/dev.sh start                         # start a clean development Emacs
+scripts/media.sh [NAME...]                   # take the screenshots in docs/media again
 ```
 
 Tests that talk to real models run only when `HARNESS_INTEGRATION=1` is

@@ -34,3 +34,22 @@ signals.
 Integration suites that talk to real models run only with
 `HARNESS_INTEGRATION=1`; the local ACP suites and the TCP suites both
 run by default so both transports stay green.
+
+## Screenshots
+
+`scripts/media.sh` takes the pictures in `docs/media` again, all of
+them or the ones named (`scripts/media.sh chat tasks`).  It runs
+`scripts/harness-media.el` in an `emacs -Q` of its own, under a HOME of
+its own: the harness of the checkout, in process, a demo git project at
+`~/src/acme-api`, and stand-ins for the Claude Code and OpenRouter
+providers that replay a script per prompt.  The tools they call are the
+real ones, so tool output in the pictures is genuine, and nothing calls
+a model.  Tasks really run in worktrees and merge, and a month of usage
+and a few budgets are recorded, so every view has something to show.
+
+The frames are drawn on a private display (Xvfb, or else a headless
+`kwin_wayland` with a rootful Xwayland) and exported by Emacs itself
+with `x-export-frames`, in `modus-vivendi-tinted` with the Hack font.
+`HARNESS_MEDIA_DUMPS=DIR` also writes the text of every window of every
+picture to `DIR`, to check a picture without opening it.  A new view or
+a changed one gets its picture by adding a shot to `harness-media-shots`.
