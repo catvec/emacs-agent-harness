@@ -4,7 +4,8 @@
 
 ;; One buffer per session, "*harness: NAME*", laid out top to bottom:
 ;;
-;;   header line   status, name, model, permission mode, thinking, context, cost, menu
+;;   header line   status, name, model, permission mode, thinking, context, cost, menu,
+;;                 after what `harness-chat-header-functions' put in front (a BTW's buttons)
 ;;   transcript    one block per node, rendered incrementally with markers
 ;;   pending panel permission requests and questions waiting for the user
 ;;   queue         messages queued for the next turn
@@ -1957,6 +1958,26 @@ quota.  Clicking it opens the usage dashboard."
   "Redraw the header lines, which show the plan's quota."
   (force-mode-line-update t))
 
+(defvar harness-chat-header-functions nil
+  "Functions putting segments in front of the chat header line.
+Each is called without arguments in the chat buffer whenever the header
+line is drawn, and returns a string, or nil for nothing.  The header
+shows their strings first, in order, then the session's own segments:
+status, name, model, permission mode and the rest.  Add to it
+buffer-locally, so only that buffer's header changes, and with a
+symbol, so a reload redefines it.  The BTW module marks a side
+conversation and gives it its [close] and [keep] buttons this way.")
+
+(defun harness-chat--header-prefix ()
+  "Return what `harness-chat-header-functions' put in front of the header."
+  (let ((segments nil))
+    (run-hook-wrapped 'harness-chat-header-functions
+                      (lambda (fn)
+                        (when-let* ((segment (funcall fn)))
+                          (push segment segments))
+                        nil))
+    (apply #'concat (nreverse segments))))
+
 (defun harness-chat--header ()
   "Return the header line."
   (let* ((s (harness-chat--session))
@@ -1964,6 +1985,7 @@ quota.  Clicking it opens the usage dashboard."
          (running (equal status "running"))
          (name (or (plist-get s :name) "unnamed")))
     (concat
+     (harness-chat--header-prefix)
      " "
      (if running
          (propertize (aref harness-chat--spinner-frames

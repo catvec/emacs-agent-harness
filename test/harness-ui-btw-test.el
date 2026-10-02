@@ -6,13 +6,16 @@
 ;; provider and the in-process ACP connection.  A BTW opens blank,
 ;; without reading anything in the minibuffer, with point in the
 ;; compose box of its chat buffer; the question is sent from that box
-;; and names the BTW.  Every BTW is a new session sharing nothing with
-;; any other: one over the task board is a conversation about the
-;; tasks; one over a session, or from a node of the tree, is listed
-;; under that session but has none of its transcript or provider state,
-;; nor anything of an earlier BTW.  Closing goes back to where it was
-;; opened and deletes a BTW nothing was asked in; keeping makes it a
-;; normal session window.
+;; and names the BTW.  It is the full chat: the session's own header
+;; line with the BTW segment in front, whose permission mode changes
+;; from the header, the key and the menu like any session's.  Every BTW
+;; is a new session sharing nothing with any other: one over the task
+;; board is a conversation about the tasks; one over a session, or from
+;; a node of the tree, is listed under that session but has none of its
+;; transcript or provider state, nor anything of an earlier BTW.
+;; Closing goes back to where it was opened and deletes a BTW nothing
+;; was asked in; keeping makes it a normal session window, header
+;; included.
 
 ;;; Code:
 
@@ -46,9 +49,11 @@
 (defvar harness-ui-tree--rows)
 (defvar harness-chat--buffers)
 (defvar harness-chat--loading)
+(defvar harness-chat-header-functions)
 (defvar harness-compose-end)
 (defvar harness-compose--placeholder)
 (defvar harness-ui-sessions-buffer-name)
+(defvar transient--buffer-name)
 (declare-function harness-sessions "harness-ui-sessions")
 (declare-function harness-ui-sessions--ordered "harness-ui-sessions")
 (declare-function harness-tasks "harness-ui-tasks")
@@ -58,6 +63,7 @@
 (declare-function harness-ui-btw-close "harness-ui-btw")
 (declare-function harness-ui-btw-promote "harness-ui-btw")
 (declare-function harness-chat-buffer "harness-ui-chat")
+(declare-function harness-chat--header "harness-ui-chat")
 (declare-function harness-compose-in-p "harness-ui-compose")
 (declare-function harness-compose-text "harness-ui-compose")
 (declare-function harness-ui-display-session "harness-ui")
@@ -150,6 +156,47 @@ Nothing may be read from the minibuffer meanwhile."
 (defun harness-ui-btw-test--header (buffer)
   "BUFFER's header line as plain text."
   (with-current-buffer buffer (harness-ui-btw-test--format header-line-format)))
+
+(defun harness-ui-btw-test--own-header (buffer)
+  "BUFFER's header line as plain text, without what modes put in front of it.
+That is the header line any chat buffer of its session has."
+  (with-current-buffer buffer
+    (let ((harness-chat-header-functions nil))
+      (harness-ui-btw-test--header buffer))))
+
+(defun harness-ui-btw-test--normal-header-p (buffer)
+  "Non-nil when BUFFER's header line is the chat's, with nothing of a BTW's."
+  (with-current-buffer buffer
+    (and (equal '(:eval (harness-chat--header)) header-line-format)
+         (not (local-variable-p 'harness-chat-header-functions))
+         (equal (harness-ui-btw-test--own-header buffer) (harness-ui-btw-test--header buffer))
+         ;; The session may well be called "btw".
+         (let ((case-fold-search nil))
+           (not (string-match-p "BTW\\|\\[close\\]\\|\\[keep\\]" (harness-ui-btw-test--header buffer)))))))
+
+(defun harness-ui-btw-test--click-header (window text)
+  "Click mouse-1 on TEXT in the header line of WINDOW, as a user would."
+  (let* ((header (with-current-buffer (window-buffer window) (harness-chat--header)))
+         (pos (or (string-search text header) (error "No %S in the header line" text)))
+         (command (lookup-key (get-text-property pos 'local-map header) [header-line mouse-1])))
+    (should (commandp command))
+    (funcall command (list 'mouse-1 (list window 'header-line '(0 . 0) 0)))))
+
+(defmacro harness-ui-btw-test-choosing (choice &rest body)
+  "Run BODY answering CHOICE when the permission mode is read.
+Any other read fails: the session to change is never asked for."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'completing-read)
+              (lambda (prompt &rest _)
+                (if (string-prefix-p "Permission mode" prompt) ,choice (error "Unexpected read: %s" prompt)))))
+     ,@body))
+
+(defun harness-ui-btw-test--wait-mode (sid mode)
+  "Wait until session SID is in permission MODE, a symbol, in the UI too."
+  (harness-test-wait (lambda () (and (eq mode (plist-get (harness-call 'session/get sid) :permission-mode))
+                                     (equal (symbol-name mode)
+                                            (format "%s" (plist-get (harness-ui-session sid) :permission-mode)))))
+                     5 (format "permission mode %s" mode)))
 
 (defun harness-ui-btw-test--placeholder (buffer)
   "The hint BUFFER's empty compose box shows, as plain text, or nil."
@@ -342,7 +389,7 @@ the session keeps both as they were.  Closing returns to the session."
         ;; from the session list, it is a session like any.
         (with-current-buffer buffer
           (should-not harness-ui-btw-minor-mode)
-          (should-not (string-match-p "\\[keep\\]" (harness-ui-btw-test--header buffer))))
+          (should (harness-ui-btw-test--normal-header-p buffer)))
         (with-current-buffer (window-buffer parent-window)
           (should-not harness-ui-btw-minor-mode))))))
 
@@ -395,6 +442,66 @@ both under the session, which keeps its transcript and provider state."
           ;; And the session is as it was.
           (should (equal nodes (harness-call 'session/nodes parent)))
           (should (equal state (plist-get (harness-call 'session/get parent) :provider-state))))))))
+
+(ert-deftest harness-ui-btw-has-the-full-chat-header ()
+  "A BTW's header line is its session's own, the BTW segment in front.
+The permission mode shows there, its parent's to begin with, and the
+header, the key and the harness menu change it for the BTW alone, the
+menu in a window of its own.  Closed, the BTW has the session's header
+and nothing else."
+  (harness-ui-btw-test-with
+    (pcase-let ((`(,parent . ,parent-window) (harness-ui-btw-test--open-session)))
+      (harness-call 'session/update parent :permission-mode 'accept-edits)
+      (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
+             (buffer (window-buffer window))
+             (sid (buffer-local-value 'harness-ui-session-id buffer)))
+        (should (harness-ui-btw-test--ready-p window))
+        (harness-ui-btw-test--wait-mode sid 'accept-edits)
+        ;; The chat's own header line, after the BTW segment.
+        (should (equal '(:eval (harness-chat--header)) (buffer-local-value 'header-line-format buffer)))
+        (let ((own (harness-ui-btw-test--own-header buffer)))
+          (should (equal (concat " BTW side conversation  [close] [keep] " own)
+                         (harness-ui-btw-test--header buffer)))
+          (dolist (segment '("btw" "scripted (Demo)" "Accept Edits" "default" "[menu]"))
+            (should (string-search segment own))))
+        ;; mouse-1 on the permission mode, from the parent's window.
+        (select-window parent-window)
+        (harness-ui-btw-test-choosing "Auto"
+          (harness-ui-btw-test--click-header window "Accept Edits"))
+        (harness-ui-btw-test--wait-mode sid 'auto)
+        (should (string-search "  Auto  " (harness-ui-btw-test--header buffer)))
+        ;; The key that sets it, as in any session.
+        (with-selected-window window
+          (let ((key (where-is-internal #'harness-set-permission-mode nil t)))
+            (should key)
+            (harness-ui-btw-test-choosing "YOLO"
+              (call-interactively (key-binding key)))))
+        (harness-ui-btw-test--wait-mode sid 'yolo)
+        ;; The harness menu opens in a window of its own, at the top, the
+        ;; BTW's at the bottom staying as it was.
+        (with-selected-window window
+          (call-interactively #'harness-menu)
+          (let ((menu (get-buffer-window transient--buffer-name)))
+            (should (window-live-p menu))
+            (should-not (eq window menu))
+            (should (eq 'top (window-parameter menu 'window-side)))
+            (should (eq buffer (window-buffer window))))
+          (harness-ui-btw-test-choosing "Ask"
+            (execute-kbd-macro (kbd "p"))))
+        (harness-ui-btw-test--wait-mode sid 'ask)
+        (should-not (get-buffer-window transient--buffer-name))
+        (should (eq buffer (window-buffer window)))
+        (should (eq 'accept-edits (plist-get (harness-call 'session/get parent) :permission-mode)))
+        ;; [close]: changed, the BTW is not blank any more; it is closed and
+        ;; its buffer shows the session's own header.
+        (select-window parent-window)
+        (harness-ui-btw-test--click-header window "[close]")
+        (should-not (window-live-p window))
+        (harness-test-wait (lambda () (eq 'inactive (plist-get (harness-call 'session/get sid) :status)))
+                           5 "the BTW to be closed")
+        (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-btw-minor-mode buffer)))
+                           5 "the BTW mode to be off")
+        (should (harness-ui-btw-test--normal-header-p buffer))))))
 
 (ert-deftest harness-ui-btw-first-message-names-it-unless-named ()
   "Only the first message with text names a BTW, and never over a name given by hand."
@@ -494,7 +601,8 @@ One holding a draft is kept, closed, with the draft."
         (harness-ui-btw-test--wait-gone second buffer)))))
 
 (ert-deftest harness-ui-btw-keep-makes-a-normal-session-window ()
-  "Keeping a BTW shows it where it was opened, with the session's own header.
+  "Keeping a BTW, with its [keep] button, shows it where it was opened.
+It has the session's own header there, with nothing of the BTW left.
 From Lisp a question can be asked at once; it names the BTW."
   (harness-ui-btw-test-with
     (pcase-let ((`(,_parent . ,parent-window) (harness-ui-btw-test--open-session)))
@@ -505,14 +613,16 @@ From Lisp a question can be asked at once; it names the BTW."
              (sid (buffer-local-value 'harness-ui-session-id buffer)))
         (should (equal "btw: keep this one" (plist-get (harness-call 'session/get sid) :name)))
         (harness-ui-btw-test--wait-reply sid)
-        (with-selected-window window (harness-ui-btw-promote))
+        ;; Clicked from the parent's window, it keeps the BTW all the same.
+        (select-window parent-window)
+        (harness-ui-btw-test--click-header window "[keep]")
         (should-not (window-live-p window))
         ;; It took the parent's place on the right, once, as a session.
         (should (eq buffer (window-buffer parent-window)))
         (should (equal (list parent-window) (get-buffer-window-list buffer nil t)))
         (with-current-buffer buffer
           (should-not harness-ui-btw-minor-mode)
-          (should-not (string-match-p "\\[keep\\]" (harness-ui-btw-test--header buffer))))
+          (should (harness-ui-btw-test--normal-header-p buffer)))
         ;; With the session's own hint in its box.
         (should (equal "Message\N{U+2026}" (harness-ui-btw-test--placeholder buffer)))
         ;; A kept BTW is open: it stays active.

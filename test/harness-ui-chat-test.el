@@ -250,6 +250,30 @@
             (should (string-match-p "Covered by Claude Pro" (get-text-property pos 'help-echo header)))
             (should (get-text-property pos 'local-map header))))))))
 
+(ert-deftest harness-ui-chat-header-functions-come-first ()
+  "What `harness-chat-header-functions' return leads the header, in order.
+The session's own segments follow unchanged; nil adds nothing; a
+buffer-local function changes only its buffer's header."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "Mine")))
+           (other (harness-ui-chat-test-open (harness-ui-chat-test-session "Other")))
+           (own (with-current-buffer buf (harness-chat--header)))
+           (other-own (with-current-buffer other (harness-chat--header))))
+      (should (string-match-p "Mine" own))
+      (with-current-buffer buf
+        (add-hook 'harness-chat-header-functions (lambda () (propertize " first" 'face 'bold)) nil t)
+        (add-hook 'harness-chat-header-functions #'ignore t t)
+        (add-hook 'harness-chat-header-functions (lambda () " second") t t)
+        (let ((header (harness-chat--header)))
+          (should (equal (concat " first second" own) header))
+          (should (eq 'bold (get-text-property 1 'face header)))
+          ;; The session's segments keep their clicks.
+          (should (get-text-property (string-search "Mine" header) 'local-map header))))
+      (should (equal other-own (with-current-buffer other (harness-chat--header))))
+      (with-current-buffer buf
+        (kill-local-variable 'harness-chat-header-functions)
+        (should (equal own (harness-chat--header)))))))
+
 (ert-deftest harness-ui-chat-streaming-appends-cheaply ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
