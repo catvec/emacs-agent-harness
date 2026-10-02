@@ -8,6 +8,14 @@
 ;; tool never runs without a permission decision; when no permission
 ;; module is installed every call is denied, so a misconfigured harness
 ;; fails safe.
+;;
+;; Some providers have tools of their own that can stand in for a
+;; harness tool: Claude Code's web search for web_search, say.  A
+;; provider names the harness tools it has such a counterpart of in its
+;; `:builtin-tools' capability, and `tools/builtin' says which of them a
+;; session's provider runs itself; `tools/list' then leaves them out.
+;; The calls the provider runs still need a permission decision, which
+;; `tools/authorize' gives without running anything.
 
 ;;; Code:
 
@@ -138,14 +146,99 @@ reached through a `_harness/client/tool' request to the UI."
                 (delq nil (funcall (harness-tool-paths-fn tool) input)))
       (error (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err) nil))))
 
+;;;; Tools a provider runs itself
+
+(defun harness-tools--names (session)
+  "Return the names of the tools SESSION gets, after `agent/tools'.
+Without SESSION, every registered tool."
+  (let ((names (let (n) (maphash (lambda (k _) (push k n)) harness-tools) (sort n #'string<))))
+    (if session (harness-run-filter 'agent/tools names session) names)))
+
+(defun harness-tools--offered (session)
+  "Return the harness tools that SESSION's provider has counterparts of.
+They are the `:builtin-tools' capability of SESSION's model."
+  (let ((model (plist-get session :model)))
+    (when (and (stringp model) (harness-method-exists-p 'provider/capabilities))
+      (condition-case err
+          (let ((offered (plist-get (harness-call 'provider/capabilities model) :builtin-tools)))
+            (and (listp offered) offered))
+        (error (harness-log 'warn "tools: capabilities of %s: %s" model (harness-error-message err))
+               nil)))))
+
+(defun harness-tools--builtin (session names)
+  "Return the tools among NAMES that SESSION's provider runs itself.
+The provider must offer them (`harness-tools--offered') and the sync
+filter `agent/builtin-tools' pick them."
+  (when-let* ((offered (and session (harness-tools--offered session))))
+    (let ((chosen (harness-run-filter 'agent/builtin-tools nil session offered)))
+      (cl-remove-if-not (lambda (n) (and (member n offered) (member n chosen))) names))))
+
 ;;;; Methods
 
 (harness-defmethod tools/list (&optional session-id)
-  "Return tool specs available to SESSION-ID (or all), after `agent/tools'."
+  "Return tool specs available to SESSION-ID (or all), after `agent/tools'.
+The tools SESSION-ID's provider runs itself (see `tools/builtin') are
+left out."
   (let* ((session (and session-id (harness-tools--session session-id)))
-         (names (let (n) (maphash (lambda (k _) (push k n)) harness-tools) (sort n #'string<)))
-         (names (if session (harness-run-filter 'agent/tools names session) names)))
+         (names (harness-tools--names session))
+         (builtin (harness-tools--builtin session names))
+         (names (cl-remove-if (lambda (n) (member n builtin)) names)))
     (delq nil (mapcar (lambda (n) (let ((tool (harness-tool-get n))) (and tool (harness-tool-spec tool)))) names))))
+
+(harness-defmethod tools/builtin (session-id)
+  "Return the names of the harness tools that SESSION-ID's provider runs itself.
+A provider names the harness tools it has a counterpart of in its
+`:builtin-tools' capability (Claude Code's web search for web_search,
+say).  The sync filter `agent/builtin-tools' (value: list of names,
+initially nil; args: the session and the names its provider offers)
+picks the ones the provider should run; only tools the session would
+get otherwise count.  `tools/list' leaves them out, and the agent asks
+the provider to turn them on with the request's `:builtin-tools'."
+  (let ((session (harness-tools--session session-id)))
+    (harness-tools--builtin session (harness-tools--names session))))
+
+(defun harness-tools-denial-message (decision)
+  "Return what the model is told when permission DECISION refuses a call."
+  (format "Denied: %s%s"
+          (or (plist-get decision :reason)
+              (if (eq (plist-get decision :behavior) 'ask) "no permission handler answered"
+                "not permitted"))
+          (if (plist-get decision :hint) (concat " " (plist-get decision :hint)) "")))
+
+(harness-defmethod tools/authorize (session-id call)
+  "Decide whether CALL (:id :name :input :kind) of SESSION-ID may run.
+Nothing runs: this is for a tool the provider runs itself (see
+`tools/builtin'), whose call still needs the harness's permission.  The
+call goes through the `permission/decide' chain as `tools/execute'
+sends it, as a call of the harness tool NAME: that tool's kind and paths
+apply when it is registered, else CALL's `:kind', else exec.  Emits
+`permission/decided'.  Return a promise of the DECISION, whose
+`:behavior' is allow or deny; a denial carries `:message', what the
+model is told."
+  (let* ((name (plist-get call :name))
+         (call-id (or (plist-get call :id) (harness-short-id)))
+         (input (plist-get call :input))
+         (tool (harness-tool-get name))
+         (kind (plist-get call :kind))
+         (session (harness-tools--session session-id))
+         (ctx (list :session-id session-id :cwd (plist-get session :cwd)
+                    :host (plist-get session :host) :call-id call-id))
+         (request (list :session session :tool name :input input
+                        :kind (cond (tool (harness-tool-kind tool))
+                                    ((stringp kind) (intern kind))
+                                    ((and kind (symbolp kind)) kind)
+                                    (t 'exec))
+                        :paths (and tool (harness-tools--paths tool input ctx))
+                        :call-id call-id
+                        :builtin t)))
+    (harness-then
+     (harness-run-filter-async 'permission/decide (list :behavior 'ask) request)
+     (lambda (decision)
+       (harness-emit 'permission/decided session-id request decision)
+       (if (eq (plist-get decision :behavior) 'allow)
+           decision
+         (append (list :behavior 'deny :message (harness-tools-denial-message decision))
+                 (harness-plist-remove decision :behavior :message)))))))
 
 (harness-defmethod tools/get (name)
   "Return the spec of tool NAME or nil."
@@ -213,13 +306,7 @@ reached through a `_harness/client/tool' request to the UI."
               (if (eq behavior 'allow)
                   (harness-tools--run-handler tool (or (plist-get decision :input) input) ctx)
                 (harness-resolved
-                 (harness-tool-error
-                  (format "Denied: %s%s"
-                          (or (plist-get decision :reason)
-                              (if (eq behavior 'ask) "no permission handler answered"
-                                "not permitted"))
-                          (if (plist-get decision :hint) (concat " " (plist-get decision :hint)) ""))
-                  :denied t)))
+                 (harness-tool-error (harness-tools-denial-message decision) :denied t)))
               (lambda (result)
                 (let* ((result (harness-tools--guard-size result call-id))
                        (result (harness-run-filter 'tools/result result session-id call)))

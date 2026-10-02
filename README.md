@@ -26,7 +26,9 @@ and the `claude` CLI logged in for the default provider.  Optional:
 providers, an AWS profile or a Bedrock API key
 (`AWS_BEARER_TOKEN_BEDROCK`) for models on AWS Bedrock (`bedrock:`
 models, see `harness-bedrock-endpoints`), `BRAVE_API_KEY` for web
-search.
+search with any model.  Until a Brave key is set, Claude Code and
+Copilot sessions search with the CLI's own web search instead
+(`harness-websearch-builtin`).
 
 ```elisp
 ;; straight / Doom

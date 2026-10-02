@@ -33,6 +33,12 @@
 (declare-function harness-provider-claude--merge-windows "harness-provider-claude")
 (declare-function harness-provider-claude--drop-stale-entries "harness-provider-claude")
 (declare-function harness-provider-claude--make-session "harness-provider-claude")
+(declare-function harness-provider-claude--cli-tools "harness-provider-claude")
+(defvar harness-brave-api-key)
+(defvar harness-websearch-provider)
+(defvar harness-websearch-builtin)
+(defvar harness-tools-web--auth-source-seen)
+(defvar harness-perms-rules)
 
 (defun harness-provider-claude-test--setup ()
   "Fresh bus with the provider registry and the Claude provider loaded.
@@ -524,6 +530,207 @@ session of its own instead of resuming, and writing into, the parent's."
     (should-not (harness-provider-claude-test--find events 'hint))
     (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
     (harness-provider-claude-close "ask1")))
+
+;;;; The CLI's own web search
+
+(defun harness-provider-claude-test--run-builtin (request decision)
+  "Run REQUEST to completion; answer the CLI's own tools' permission with DECISION.
+The harness's tools are answered as `harness-provider-claude-test--run'
+answers them.  Return the events, oldest first."
+  (let (events)
+    (harness-call 'provider/complete
+                  (plist-put (copy-sequence request) :on-event
+                             (lambda (ev)
+                               (push ev events)
+                               (pcase (plist-get ev :type)
+                                 ('tool-permission (funcall (plist-get ev :respond) decision))
+                                 ('tool-call
+                                  (when-let* ((respond (plist-get ev :respond)))
+                                    (funcall respond '(:content "echo: ping" :is-error nil))))))))
+    (harness-test-wait (lambda () (harness-provider-claude-test--find events 'done)) 10 "done event")
+    (nreverse events)))
+
+(ert-deftest harness-provider-claude-command-line-with-web-search ()
+  "WebSearch is the only built-in tool turned on, and the CLI asks before each search."
+  (harness-provider-claude-test--setup)
+  (cl-flet ((after (flag cmd) (nth (1+ (cl-position flag cmd :test #'equal)) cmd)))
+    (let ((cmd (harness-provider-claude--command "claude-opus-5-5" nil nil nil nil '("WebSearch"))))
+      (should (equal "WebSearch" (after "--tools" cmd)))
+      (should (equal "stdio" (after "--permission-prompt-tool" cmd)))
+      ;; The harness's own tools stay allowed by rule; the search is not.
+      (should (equal "mcp__harness__*" (after "--allowedTools" cmd)))
+      (should (= 1 (cl-count "WebSearch" cmd :test #'equal)))
+      (should (equal "claude-opus-5-5" (after "--model" cmd))))
+    ;; Arguments that already send the prompts somewhere are left alone.
+    (dolist (args '(("--permission-mode" "default" "--permission-prompt-tool" "stdio")
+                    ("--permission-mode" "bypassPermissions")
+                    ("--permission-mode=bypassPermissions")))
+      (let* ((harness-provider-claude-permission-args args)
+             (cmd (harness-provider-claude--command "m" nil nil nil nil '("WebSearch"))))
+        (should (equal "WebSearch" (after "--tools" cmd)))
+        (should (= (if (member "stdio" args) 1 0) (cl-count "--permission-prompt-tool" cmd :test #'equal)))))
+    ;; Without it nothing changes: no built-in tool, no prompt tool.
+    (let ((cmd (harness-provider-claude--command "m" nil nil nil nil)))
+      (should (equal "" (after "--tools" cmd)))
+      (should-not (member "--permission-prompt-tool" cmd)))
+    ;; Only the harness tools Claude Code has a counterpart of count.
+    (should (equal '("WebSearch") (harness-provider-claude--cli-tools '(:builtin-tools ("web_search" "bash")))))
+    (should-not (harness-provider-claude--cli-tools '(:builtin-tools ("bash"))))
+    (should (equal '("web_search")
+                   (plist-get (harness-call 'provider/capabilities "claude:claude-fable-5-1") :builtin-tools)))))
+
+(ert-deftest harness-provider-claude-web-search-stands-in-for-web-search ()
+  "Asked to, the CLI searches itself; the harness decides each search and hears its result.
+The call, the question and the result all name web_search, the harness
+tool the CLI's WebSearch stands in for."
+  (harness-provider-claude-test--setup)
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+         (events (harness-provider-claude-test--run-builtin
+                  (harness-provider-claude-test--request "ws1" "search the web" :builtin-tools '("web_search"))
+                  '(:behavior allow :reason "web_search never needs approval")))
+         (types (harness-provider-claude-test--types events))
+         (call (harness-provider-claude-test--find events 'tool-call))
+         (ask (harness-provider-claude-test--find events 'tool-permission))
+         (result (harness-provider-claude-test--find events 'tool-result))
+         (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+    (should (equal "WebSearch" (nth (1+ (cl-position "--tools" argv :test #'equal)) argv)))
+    (should (equal "stdio" (nth (1+ (cl-position "--permission-prompt-tool" argv :test #'equal)) argv)))
+    (should (plist-get call :builtin))
+    (should-not (plist-get call :respond))
+    (should (equal "web_search" (plist-get call :name)))
+    (should (equal "toolu_fake_3" (plist-get call :id)))
+    (should (equal "emacs" (plist-get (plist-get call :input) :query)))
+    (should (equal '("toolu_fake_3" "web_search") (list (plist-get ask :id) (plist-get ask :name))))
+    (should (equal "emacs" (plist-get (plist-get ask :input) :query)))
+    (should (< (cl-position 'tool-call types) (cl-position 'tool-permission types)
+               (cl-position 'tool-result types) (cl-position 'text types)))
+    (should (= 1 (cl-count 'tool-call types)))
+    (should (equal "toolu_fake_3" (plist-get result :id)))
+    (should-not (plist-get result :is-error))
+    (should (string-match-p "Web search results for query: \"emacs\"" (plist-get result :content)))
+    ;; What the model is busy with names the harness tool too.
+    (should (equal "web_search" (plist-get (cl-find 'tool-input events :key (lambda (e) (plist-get e :phase)))
+                                           :tool)))
+    (should-not (harness-provider-claude-test--find events 'hint))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+    (harness-provider-claude-close "ws1")))
+
+(ert-deftest harness-provider-claude-web-search-denied-by-the-harness ()
+  "A search the harness refuses does not run; the model is told why."
+  (harness-provider-claude-test--setup)
+  (let* ((events (harness-provider-claude-test--run-builtin
+                  (harness-provider-claude-test--request "ws2" "search the web" :builtin-tools '("web_search"))
+                  '(:behavior deny :reason "denied by a standing rule for web_search"
+                    :message "Denied: denied by a standing rule for web_search")))
+         (result (harness-provider-claude-test--find events 'tool-result)))
+    (should (plist-get result :is-error))
+    (should (equal "Denied: denied by a standing rule for web_search" (plist-get result :content)))
+    (should-not (string-match-p "Web search results" (plist-get result :content)))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+    (harness-provider-claude-close "ws2")))
+
+(ert-deftest harness-provider-claude-web-search-only-when-asked-for ()
+  "Without the request asking for it the CLI has no search, and refuses to ask about one."
+  (harness-provider-claude-test--setup)
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+         (events (harness-provider-claude-test--run-builtin
+                  (harness-provider-claude-test--request "ws3" "search the web")
+                  '(:behavior allow)))
+         (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+    (should (equal "" (nth (1+ (cl-position "--tools" argv :test #'equal)) argv)))
+    (should-not (member "--permission-prompt-tool" argv))
+    (should-not (cl-intersection '(tool-call tool-permission tool-result)
+                                 (harness-provider-claude-test--types events)))
+    (harness-provider-claude-close "ws3"))
+  ;; With bypassed checks the CLI does not ask: the call and its result still come.
+  (let* ((harness-provider-claude-permission-args '("--permission-mode" "bypassPermissions"))
+         (events (harness-provider-claude-test--run-builtin
+                  (harness-provider-claude-test--request "ws4" "search the web" :builtin-tools '("web_search"))
+                  '(:behavior deny :message "never asked"))))
+    (should (plist-get (harness-provider-claude-test--find events 'tool-call) :builtin))
+    (should-not (harness-provider-claude-test--find events 'tool-permission))
+    (should (string-match-p "Web search results"
+                            (plist-get (harness-provider-claude-test--find events 'tool-result) :content)))
+    (harness-provider-claude-close "ws4")))
+
+(ert-deftest harness-provider-claude-web-search-change-restarts-with-resume ()
+  "Turning the CLI's search on or off restarts its process, which resumes the conversation."
+  (harness-provider-claude-test--setup)
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+         (process (lambda () (harness-provider-claude-session-process (gethash "ws5" harness-provider-claude--sessions))))
+         (first (car (harness-provider-claude-test--run (harness-provider-claude-test--request "ws5" "hi"))))
+         (id (plist-get (plist-get (harness-provider-claude-test--find first 'provider-state) :state) :cli-session-id))
+         (proc1 (funcall process)))
+    (harness-provider-claude-test--run-builtin
+     (harness-provider-claude-test--request "ws5" "hi" :builtin-tools '("web_search")) '(:behavior allow))
+    (let ((proc2 (funcall process))
+          (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+      (should-not (eq proc1 proc2))
+      (should (equal id (nth (1+ (cl-position "--resume" argv :test #'equal)) argv)))
+      (should (equal "WebSearch" (nth (1+ (cl-position "--tools" argv :test #'equal)) argv)))
+      ;; The same settings again keep the process.
+      (harness-provider-claude-test--run-builtin
+       (harness-provider-claude-test--request "ws5" "search the web" :builtin-tools '("web_search"))
+       '(:behavior allow))
+      (should (eq proc2 (funcall process)))
+      ;; Off again: the next process has no search.
+      (harness-provider-claude-test--run (harness-provider-claude-test--request "ws5" "hi"))
+      (should-not (eq proc2 (funcall process)))
+      (let ((argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+        (should (equal "" (nth (1+ (cl-position "--tools" argv :test #'equal)) argv)))))
+    (harness-provider-claude-close "ws5")))
+
+(ert-deftest harness-provider-claude-session-searches-with-the-cli ()
+  "A session on Claude Code searches with its WebSearch while Brave has no key.
+The turn records each search as a web_search call that the harness's
+permission rules decide; once a key is set the harness's own web_search
+is back and the CLI searches no more."
+  (harness-provider-claude-test-with-sessions
+    (harness-test-load-module 'tools-web)
+    (harness-test-load-module 'perms)
+    (let ((process-environment (cons "BRAVE_API_KEY" process-environment))
+          (auth-sources nil)
+          (harness-brave-api-key nil)
+          (harness-websearch-provider 'brave)
+          (harness-websearch-builtin 'fallback)
+          (harness-tools-web--auth-source-seen nil)
+          (harness-perms-rules nil))
+      (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+             (names (lambda () (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list sid))))
+             (results (lambda () (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'tool-result))
+                                                   (harness-call 'session/nodes sid)))))
+        (should (equal '("web_search") (harness-call 'tools/builtin sid)))
+        (should-not (member "web_search" (funcall names)))
+        (should (member "web_fetch" (funcall names)))
+        (let ((argv (harness-provider-claude-test--turn sid "search the web")))
+          (should (equal "WebSearch" (nth (1+ (cl-position "--tools" argv :test #'equal)) argv))))
+        (let* ((nodes (harness-call 'session/nodes sid))
+               (call (cl-find 'tool-call nodes :key (lambda (n) (plist-get n :kind))))
+               (result (car (funcall results))))
+          (should (equal "web_search" (plist-get call :tool)))
+          (should (equal "web_search emacs" (plist-get call :title)))
+          (should (plist-get (plist-get call :meta) :builtin))
+          (should (equal (plist-get call :call-id) (plist-get result :call-id)))
+          (should-not (plist-get result :is-error))
+          (should (string-match-p "Web search results for query: \"emacs\"" (plist-get result :output))))
+        ;; A standing rule against web_search holds for the CLI's search too.
+        (let ((harness-perms-rules '((:tool "web_search" :behavior deny))))
+          (harness-provider-claude-test--turn sid "search the web once more")
+          (let ((result (car (last (funcall results)))))
+            (should (= 2 (length (funcall results))))
+            (should (plist-get result :is-error))
+            (should (string-match-p "standing rule for web_search" (plist-get result :output)))
+            (should (plist-get (plist-get result :meta) :denied))))
+        ;; With a key the harness's web_search is back, and the CLI searches no more.
+        (let ((harness-brave-api-key "custom-key"))
+          (should-not (harness-call 'tools/builtin sid))
+          (should (member "web_search" (funcall names)))
+          (let ((argv (harness-provider-claude-test--turn sid "hi")))
+            (should (equal "" (nth (1+ (cl-position "--tools" argv :test #'equal)) argv)))
+            (should-not (member "--permission-prompt-tool" argv))))))))
 
 ;;;; Billing and quota
 

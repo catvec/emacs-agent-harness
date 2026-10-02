@@ -43,6 +43,12 @@
 (defvar harness-agent-test-results nil
   "The tool result contents the agent answered `hosted' with, oldest first.")
 
+(defvar harness-agent-test-decisions nil
+  "The permission decisions the agent answered `hosted' with, oldest first.")
+
+(defvar harness-agent-test-requests nil
+  "The requests `hosted' was sent, oldest first.")
+
 (defun harness-agent-test-trailing-text (request)
   "Return the text a hosted loop sends for REQUEST, or nil.
 That is the user messages after its last assistant message, like the
@@ -58,10 +64,14 @@ Claude provider does; tool results do not count."
 (defun harness-agent-test-define-hosted (script)
   "Define `hosted', a provider running its own tool loop from SCRIPT.
 SCRIPT gets the text each request sends and returns its steps: event
-plists (a tool call waits for the agent's answer) or functions, called
-for their side effects, such as a message the user sends mid-step.  A
-request with nothing to send fails like the Claude provider's."
-  (setq harness-agent-test-prompts nil harness-agent-test-results nil)
+plists or functions, called for their side effects, such as a message
+the user sends mid-step.  A tool call waits for the agent's answer,
+unless it is a call of the provider's own tool (`:builtin'); a
+`tool-permission' waits for the agent's decision.  A request with
+nothing to send fails like the Claude provider's.  The provider has
+its own web_search, as Claude Code does."
+  (setq harness-agent-test-prompts nil harness-agent-test-results nil
+        harness-agent-test-decisions nil harness-agent-test-requests nil)
   (harness-define-provider 'hosted
     :label "Hosted"
     :complete
@@ -69,13 +79,14 @@ request with nothing to send fails like the Claude provider's."
       (let ((on-event (plist-get request :on-event))
             (prompt (harness-agent-test-trailing-text request))
             (cancelled nil))
-        (setq harness-agent-test-prompts (append harness-agent-test-prompts (list prompt)))
+        (setq harness-agent-test-prompts (append harness-agent-test-prompts (list prompt))
+              harness-agent-test-requests (append harness-agent-test-requests (list request)))
         (cl-labels ((play (steps)
                       (let ((step (car steps)))
                         (cond
                          ((or cancelled (null steps)) nil)
                          ((functionp step) (funcall step) (run-at-time 0.005 nil #'play (cdr steps)))
-                         ((eq (plist-get step :type) 'tool-call)
+                         ((and (eq (plist-get step :type) 'tool-call) (not (plist-get step :builtin)))
                           (funcall on-event
                                    (append step
                                            (list :respond
@@ -83,6 +94,14 @@ request with nothing to send fails like the Claude provider's."
                                                    (setq harness-agent-test-results
                                                          (append harness-agent-test-results
                                                                  (list (plist-get result :content))))
+                                                   (run-at-time 0.005 nil #'play (cdr steps)))))))
+                         ((eq (plist-get step :type) 'tool-permission)
+                          (funcall on-event
+                                   (append step
+                                           (list :respond
+                                                 (lambda (decision)
+                                                   (setq harness-agent-test-decisions
+                                                         (append harness-agent-test-decisions (list decision)))
                                                    (run-at-time 0.005 nil #'play (cdr steps)))))))
                          (t (funcall on-event step)
                             (run-at-time 0.005 nil #'play (cdr steps)))))))
@@ -93,7 +112,7 @@ request with nothing to send fails like the Claude provider's."
         (list :cancel (lambda ()
                         (setq cancelled t)
                         (funcall on-event '(:type done :stop-reason cancelled))))))
-    :capabilities '(:hosted-loop t)))
+    :capabilities '(:hosted-loop t :builtin-tools ("web_search"))))
 
 (defun harness-agent-test-hosted-session ()
   (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "hosted:loop") :id))
@@ -555,6 +574,129 @@ user message after that answer: \"No user message to send\"."
         (should (eq 'running (plist-get (harness-call 'session/get id) :status)))
         (harness-await p))
       (should (eq 'idle (plist-get (harness-call 'session/get id) :status))))))
+
+;;;; Tools the provider runs itself
+
+(defmacro harness-agent-test-with-builtin-search (&rest body)
+  "Run BODY where the `hosted' provider's own search stands in for web_search.
+The harness has a web_search tool that must never run; a filter on
+`agent/builtin-tools' picks the provider's search whenever it offers one."
+  (declare (indent 0))
+  `(harness-agent-test-with
+     (harness-define-tool "web_search" :description "search" :kind 'net
+                          :title (lambda (input) (format "web_search %s" (plist-get input :query)))
+                          :handler (lambda (&rest _) (error "The harness ran web_search")))
+     (harness-add-filter 'agent/builtin-tools
+                         (lambda (names _session offered)
+                           (if (member "web_search" offered) (cons "web_search" names) names)))
+     ,@body))
+
+(defun harness-agent-test--node (id kind)
+  "Return the first node of KIND in session ID."
+  (cl-find kind (harness-call 'session/nodes id) :key (lambda (n) (plist-get n :kind))))
+
+(ert-deftest harness-agent-builtin-call-is-recorded ()
+  "A call the provider runs itself is decided by the harness and recorded with its result."
+  (harness-agent-test-with-builtin-search
+    (let ((id (harness-agent-test-hosted-session))
+          (decided nil)
+          (activity nil))
+      (harness-on 'permission/decided (lambda (_sid request decision) (push (cons request decision) decided)))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         (list '(:type tool-call :id "ws1" :name "web_search" :input (:query "emacs") :builtin t)
+               (lambda () (setq activity (harness-call 'agent/activity id)))
+               '(:type tool-permission :id "ws1" :name "web_search" :input (:query "emacs"))
+               '(:type tool-result :id "ws1" :content "1. GNU Emacs" :is-error nil)
+               '(:type text :delta "Found it.")
+               '(:type done :stop-reason end-turn))))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "search")) :stop-reason)))
+      ;; The provider was asked to search itself, and not given web_search.
+      (let ((request (car harness-agent-test-requests)))
+        (should (equal '("web_search") (plist-get request :builtin-tools)))
+        (should-not (member "web_search" (mapcar (lambda (s) (plist-get s :name)) (plist-get request :tools)))))
+      ;; The harness's permission chain decided the call, as web_search's.
+      (should (= 1 (length decided)))
+      (let ((request (caar decided)))
+        (should (equal "web_search" (plist-get request :tool)))
+        (should (eq 'net (plist-get request :kind)))
+        (should (equal "ws1" (plist-get request :call-id))))
+      (should (eq 'allow (plist-get (car harness-agent-test-decisions) :behavior)))
+      ;; While it ran the turn said so.
+      (should (eq 'tool (plist-get activity :phase)))
+      (should (equal "web_search emacs" (plist-get activity :title)))
+      ;; The call and its result, in order, as web_search's.
+      (should (equal '(user tool-call tool-result assistant) (harness-agent-test-kinds id)))
+      (let ((call (harness-agent-test--node id 'tool-call))
+            (result (harness-agent-test--node id 'tool-result)))
+        (should (equal "web_search" (plist-get call :tool)))
+        (should (equal "ws1" (plist-get call :call-id)))
+        (should (equal "web_search emacs" (plist-get call :title)))
+        (should (plist-get (plist-get call :meta) :builtin))
+        (should (equal "ws1" (plist-get result :call-id)))
+        (should (equal "1. GNU Emacs" (plist-get result :output)))
+        (should-not (plist-get result :is-error))
+        (should-not (plist-get (plist-get result :meta) :denied)))
+      ;; The transcript pairs them for providers that replay it.
+      (let ((blocks (cl-loop for m in (harness-call 'session/messages id) append (plist-get m :content))))
+        (should (equal "ws1" (plist-get (cl-find "tool_use" blocks :key (lambda (b) (plist-get b :type)) :test #'equal) :id)))
+        (should (equal "ws1" (plist-get (cl-find "tool_result" blocks :key (lambda (b) (plist-get b :type)) :test #'equal)
+                                        :tool_use_id))))
+      (should-not (harness-call 'agent/activity id)))))
+
+(ert-deftest harness-agent-builtin-call-denied ()
+  "A call the permission chain refuses is refused to the provider, with what to tell the model."
+  (harness-agent-test-with-builtin-search
+    (let ((id (harness-agent-test-hosted-session)))
+      (harness-add-filter 'permission/decide
+                          (lambda (_d next request)
+                            (funcall next (if (equal "web_search" (plist-get request :tool))
+                                              '(:behavior deny :reason "no searching today" :final t)
+                                            '(:behavior allow))))
+                          5)
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         (list '(:type tool-call :id "ws2" :name "web_search" :input (:query "emacs") :builtin t)
+               '(:type tool-permission :id "ws2" :name "web_search" :input (:query "emacs"))
+               ;; The provider tells its model what the harness said.
+               '(:type tool-result :id "ws2" :content "Denied: no searching today" :is-error t)
+               '(:type done :stop-reason end-turn))))
+      (harness-await (harness-call 'agent/prompt id "search"))
+      (let ((decision (car harness-agent-test-decisions)))
+        (should (eq 'deny (plist-get decision :behavior)))
+        (should (equal "Denied: no searching today" (plist-get decision :message))))
+      (let ((result (harness-agent-test--node id 'tool-result)))
+        (should (plist-get result :is-error))
+        (should (equal "Denied: no searching today" (plist-get result :output)))
+        (should (plist-get (plist-get result :meta) :denied))))))
+
+(ert-deftest harness-agent-builtin-call-without-result-is-closed ()
+  "A call the provider never reports a result for gets one when it is done."
+  (harness-agent-test-with-builtin-search
+    (let ((id (harness-agent-test-hosted-session)))
+      ;; Reported only when asked about, and never finished.
+      (harness-agent-test-define-hosted
+       (lambda (prompt)
+         (if (equal prompt "stop")
+             (list '(:type tool-permission :id "ws3" :name "web_search" :input (:query "emacs"))
+                   '(:type done :stop-reason end-turn))
+           (list '(:type tool-call :id "ws4" :name "web_search" :input (:query "lisp") :builtin t)
+                 (lambda () (harness-call 'agent/cancel id))))))
+      (harness-await (harness-call 'agent/prompt id "stop"))
+      (should (equal '(user tool-call tool-result) (harness-agent-test-kinds id)))
+      (let ((result (harness-agent-test--node id 'tool-result)))
+        (should (equal "ws3" (plist-get result :call-id)))
+        (should (plist-get result :is-error))
+        (should (string-match-p "stopped before this call returned a result" (plist-get result :output)))
+        (should (plist-get (plist-get result :meta) :interrupted)))
+      ;; Cancelled mid-call.
+      (should (eq 'cancelled (plist-get (harness-await (harness-call 'agent/prompt id "cancel")) :stop-reason)))
+      (let ((result (car (last (harness-call 'session/nodes id)))))
+        (should (eq 'tool-result (plist-get result :kind)))
+        (should (equal "ws4" (plist-get result :call-id)))
+        (should (string-match-p "Cancelled before" (plist-get result :output))))
+      ;; A result reported after the turn is not recorded twice.
+      (should (= 2 (cl-count 'tool-result (harness-agent-test-kinds id)))))))
 
 (provide 'harness-agent-test)
 ;;; harness-agent-test.el ends here

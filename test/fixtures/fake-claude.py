@@ -12,6 +12,11 @@ Behaviour is chosen by the prompt text:
   "call echo"  -> issues a tools/call for mcp__harness__echo first
   "call bash"  -> calls the built-in Bash tool first, as if extra
                   arguments had given the model built-in tools
+  "search the web"
+               -> searches for "emacs" with the built-in WebSearch tool
+                  when --tools turns it on, else with the harness's
+                  mcp__harness__web_search when the harness serves one,
+                  else not at all
   "hang"       -> starts a turn and waits for an interrupt (or forever
                   with "hang ignore", to exercise the kill path)
   "die"        -> exits mid-turn without a result
@@ -42,7 +47,9 @@ mcp__SERVER, or mcp__SERVER__ followed by a glob) runs the call; else
 --permission-prompt-tool stdio asks the harness with a can_use_tool
 control request; else the call is denied with a permission_denied
 system message.  A denied call gets an error tool result and is listed
-in the result's permission_denials.
+in the result's permission_denials.  A permitted WebSearch call returns
+search results the way the real tool words them; any other built-in
+tool returns "ran TOOL".
 
 Like the real CLI, each result's total_cost_usd is the running total
 of the process: every turn adds 0.01, and --resume or --fork-session
@@ -128,6 +135,19 @@ def allowed_tools(argv):
     return rules
 
 
+def builtin_tools(argv):
+    """The built-in tools the --tools flag of ARGV turns on (none for "")."""
+    value = arg_value(argv, "--tools") or ""
+    return value.replace(",", " ").split()
+
+
+def web_search_results(query):
+    """What the real WebSearch tool returns for QUERY, give or take."""
+    links = [{"title": "GNU Emacs", "url": "https://www.gnu.org/software/emacs/"}]
+    return ('Web search results for query: "%s"\n\nLinks: %s\n\n'
+            "GNU Emacs is an extensible, customizable text editor." % (query, json.dumps(links)))
+
+
 def rule_allows(rule, tool):
     """Whether the allow RULE covers TOOL.
 
@@ -204,6 +224,7 @@ class Fake:
         self.needs_handshake = "--mcp-config" in argv
         self.permission_mode = arg_value(argv, "--permission-mode") or "default"
         self.allowed = allowed_tools(argv)
+        self.builtin = builtin_tools(argv)
         self.prompt_tool = arg_value(argv, "--permission-prompt-tool")
         self.denials = []
         self.interrupted = False
@@ -398,6 +419,8 @@ class Fake:
                 return False
             content = reply.get("result", {}).get("content", [])
             is_error = bool(reply.get("result", {}).get("isError"))
+        elif tool == "WebSearch":
+            content, is_error = web_search_results(value.get("query", "")), False
         else:
             content, is_error = "ran %s" % tool, False
         emit({"type": "user", "session_id": self.session_id,
@@ -484,6 +507,12 @@ class Fake:
             calls.append(("mcp__harness__echo", {"text": "ping"}, "toolu_fake_1", "slow-tool" in text))
         if "call bash" in text:
             calls.append(("Bash", {"command": "ls"}, "toolu_fake_2", False))
+        if "search the web" in text:
+            # The model sees only the tools it was given.
+            if "WebSearch" in self.builtin:
+                calls.append(("WebSearch", {"query": "emacs"}, "toolu_fake_3", False))
+            elif any(t.get("name") == "web_search" for t in self.tools):
+                calls.append(("mcp__harness__web_search", {"query": "emacs"}, "toolu_fake_3", False))
         for tool, tool_input, tool_use_id, slow in calls:
             if not self.tool_use(tool, tool_input, tool_use_id, slow):
                 self.result(subtype="error_during_execution", is_error=True,

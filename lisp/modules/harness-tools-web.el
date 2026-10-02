@@ -14,6 +14,15 @@
 ;; api.search.brave.com), in that order.  Add another provider with
 ;; `harness-websearch-register-provider' and select it with
 ;; `harness-websearch-provider'.
+;;
+;; Some model providers search the web themselves: Claude Code has its
+;; WebSearch tool, GitHub Copilot CLI its web_search.  Until a search
+;; provider here is ready to search (Brave without a key is not), a
+;; session on such a provider uses that search in place of web_search,
+;; so searching works out of the box; `harness-websearch-builtin' says
+;; when.  The provider's search is still a web_search call to the
+;; harness: its permission rules decide it and the transcript shows it
+;; (see `tools/builtin' and `tools/authorize').
 
 ;;; Code:
 
@@ -55,18 +64,73 @@ api.search.brave.com) are consulted."
   "Largest number of results web_search asks a provider for."
   :type 'integer :group 'harness)
 
+(defcustom harness-websearch-builtin 'fallback
+  "When a session searches the web with its model provider's own search.
+Claude Code (WebSearch) and GitHub Copilot CLI (web_search) can search
+the web themselves.  A session on such a provider can use that search
+in place of web_search:
+  `fallback'  while `harness-websearch-provider' cannot search (Brave
+              without an API key, say), so searching works before
+              anything is set up and the configured provider takes
+              over once it is;
+  `always'    whenever the session's provider has a search of its own;
+  `never'     never: web_search always uses `harness-websearch-provider'.
+The provider's search is decided by the permission rules for web_search
+and shows as web_search calls."
+  :type '(choice (const :tag "While web_search has no working search provider" fallback)
+                 (const :tag "Whenever the model's provider can search" always)
+                 (const :tag "Never" never))
+  :group 'harness)
+
 (defvar harness-websearch-providers nil
   "Alist of provider name (symbol) to function (QUERY COUNT) returning a promise.
 The promise resolves to a list of (:title STRING :url STRING :snippet STRING).")
 
-(defun harness-websearch-register-provider (name fn)
-  "Register FN as the search provider NAME (a symbol)."
+(defvar harness-websearch-ready-functions nil
+  "Alist of provider name (symbol) to a function saying whether it can search.
+The function takes no arguments and returns non-nil when the provider
+has what it needs (an API key, say).  A provider without one is ready
+whenever it is registered.")
+
+(defun harness-websearch-register-provider (name fn &optional ready)
+  "Register FN as the search provider NAME (a symbol).
+READY, when given, is a function of no arguments that returns non-nil
+when the provider can search now, for instance because its API key is
+set; see `harness-websearch-ready-p'.  It runs before turns, so it must
+be quick."
   (setf (alist-get name harness-websearch-providers) fn)
+  (setf (alist-get name harness-websearch-ready-functions nil 'remove) ready)
   name)
+
+(defun harness-websearch-ready-p (&optional provider)
+  "Non-nil when web_search can search with PROVIDER.
+PROVIDER defaults to `harness-websearch-provider'.  It must be
+registered, and its readiness function (see
+`harness-websearch-register-provider') must say yes."
+  (let* ((provider (or provider harness-websearch-provider))
+         (ready (alist-get provider harness-websearch-ready-functions)))
+    (and (alist-get provider harness-websearch-providers)
+         (or (null ready)
+             (condition-case err
+                 (funcall ready)
+               (error
+                (harness-log 'warn "web search: checking provider %s failed: %s"
+                             provider (harness-error-message err))
+                nil)))
+         t)))
 
 ;;;; Brave
 
 (defconst harness-brave-search-host "api.search.brave.com")
+
+(defconst harness-tools-web--auth-source-ttl 300
+  "Seconds the readiness check trusts what auth-source said about the Brave key.
+Looking a key up may decrypt a file, and ask for its passphrase, so the
+check that runs before every turn does it this seldom.")
+
+(defvar harness-tools-web--auth-source-seen nil
+  "When auth-source was last asked for the Brave key, and whether it had one.
+A cons (FLOAT-TIME . FOUND), or nil before the first lookup.")
 
 (defun harness-tools-web--auth-source-key (host)
   "Return the secret stored in auth-source for HOST, or nil."
@@ -77,12 +141,34 @@ The promise resolves to a list of (:title STRING :url STRING :snippet STRING).")
               ((stringp secret) secret)))
     (error nil)))
 
-(defun harness-tools-web--brave-key ()
-  "Return the Brave API key from the customization, the environment or auth-source."
+(defun harness-tools-web--brave-set-key ()
+  "Return the Brave API key from the customization or the environment, or nil."
   (let ((env (getenv "BRAVE_API_KEY")))
     (or (and (stringp harness-brave-api-key) (not (string-empty-p harness-brave-api-key)) harness-brave-api-key)
-        (and env (not (string-empty-p env)) env)
-        (harness-tools-web--auth-source-key harness-brave-search-host))))
+        (and env (not (string-empty-p env)) env))))
+
+(defun harness-tools-web--brave-stored-key ()
+  "Return the Brave API key stored in auth-source, or nil.
+Remember whether there is one, for `harness-tools-web--brave-ready-p'."
+  (let ((key (harness-tools-web--auth-source-key harness-brave-search-host)))
+    (setq harness-tools-web--auth-source-seen (cons (float-time) (and key t)))
+    key))
+
+(defun harness-tools-web--brave-key ()
+  "Return the Brave API key from the customization, the environment or auth-source."
+  (or (harness-tools-web--brave-set-key)
+      (harness-tools-web--brave-stored-key)))
+
+(defun harness-tools-web--brave-ready-p ()
+  "Non-nil when Brave has an API key.
+The customization and the environment are read every time; auth-source
+is asked again only once `harness-tools-web--auth-source-ttl' seconds
+have passed since it was last asked."
+  (or (and (harness-tools-web--brave-set-key) t)
+      (let ((seen harness-tools-web--auth-source-seen))
+        (if (and seen (< (- (float-time) (car seen)) harness-tools-web--auth-source-ttl))
+            (cdr seen)
+          (and (harness-tools-web--brave-stored-key) t)))))
 
 (defun harness-tools-web--strip-html (text)
   "Remove tags from TEXT and decode the common entities."
@@ -111,7 +197,8 @@ The promise resolves to a list of (:title STRING :url STRING :snippet STRING).")
                          :snippet (harness-tools-web--strip-html (plist-get r :description))))
                  (harness-plist-get-in json '(:web :results))))))))
 
-(harness-websearch-register-provider 'brave #'harness-tools-web--brave-search)
+(harness-websearch-register-provider 'brave #'harness-tools-web--brave-search
+                                     #'harness-tools-web--brave-ready-p)
 
 ;;;; web_search
 
@@ -158,6 +245,32 @@ The promise resolves to a list of (:title STRING :url STRING :snippet STRING).")
   :kind 'net
   :title (lambda (input) (format "web_search %s" (harness-truncate-end (plist-get input :query) 60)))
   :handler #'harness-tools-web--search)
+
+;;;; The model provider's own search
+
+(defun harness-tools-web--use-builtin-p ()
+  "Non-nil when a model provider's own search should stand in for web_search.
+See `harness-websearch-builtin'."
+  (pcase harness-websearch-builtin
+    ('always t)
+    ('never nil)
+    (_ (not (harness-websearch-ready-p)))))
+
+(defun harness-tools-web--builtin-tools (names _session offered)
+  "Add web_search to NAMES when the model provider's own search should run it.
+OFFERED lists the harness tools the provider has counterparts of.  A
+filter on `agent/builtin-tools' (see `tools/builtin')."
+  (if (and (member "web_search" offered)
+           (not (member "web_search" names))
+           (harness-tools-web--use-builtin-p))
+      (cons "web_search" names)
+    names))
+
+(defun harness-tools-web--init ()
+  "Offer web_search to model providers that search themselves (idempotent)."
+  (harness-add-filter 'agent/builtin-tools #'harness-tools-web--builtin-tools))
+
+(harness-tools-web--init)
 
 ;;;; web_fetch
 
@@ -236,8 +349,9 @@ The promise resolves to a list of (:title STRING :url STRING :snippet STRING).")
   :handler #'harness-tools-web--fetch)
 
 (harness-define-module 'tools-web
-  :doc "web_search (pluggable providers, Brave built in) and web_fetch (shr rendering)."
-  :requires '(tools))
+  :doc "web_search (pluggable providers, Brave built in; else the model provider's own search) and web_fetch (shr rendering)."
+  :requires '(tools)
+  :init #'harness-tools-web--init)
 
 (provide 'harness-tools-web)
 ;;; harness-tools-web.el ends here

@@ -804,6 +804,99 @@ ON-EVENT, when given, is called with each event as well."
     (should (eq 'end-turn (harness-provider-copilot-test--done events))))
   (harness-provider-copilot-close "s12"))
 
+;;;; Copilot's own web search
+
+(defconst harness-provider-copilot-test--web-search-tool
+  '(:name "web_search" :description "Search the web."
+    :schema (:type "object" :properties (:query (:type "string")) :required ("query")))
+  "The harness's web_search, as a request carries it.")
+
+(defun harness-provider-copilot-test--run-builtin (request decision)
+  "Run REQUEST to completion; answer Copilot's own tools' permission with DECISION.
+The harness's tools are answered with \"results for QUERY\".  Return the
+events, oldest first."
+  (let (events)
+    (harness-call 'provider/complete
+                  (plist-put (copy-sequence request) :on-event
+                             (lambda (ev)
+                               (push ev events)
+                               (pcase (plist-get ev :type)
+                                 ('tool-permission (funcall (plist-get ev :respond) decision))
+                                 ('tool-call
+                                  (when-let* ((respond (plist-get ev :respond)))
+                                    (funcall respond
+                                             (list :content (format "results for %s"
+                                                                    (plist-get (plist-get ev :input) :query))
+                                                   :is-error nil))))))))
+    (harness-test-wait (lambda () (harness-provider-copilot-test--find events 'done)) 10 "done event")
+    (nreverse events)))
+
+(ert-deftest harness-provider-copilot-session-config-with-web-search ()
+  "Asked to, a session gets Copilot's own web_search in place of the harness's."
+  (harness-provider-copilot-test--setup)
+  (let* ((tools (list harness-provider-copilot-test--echo-tool harness-provider-copilot-test--web-search-tool))
+         (config (harness-provider-copilot-session-config
+                  (harness-provider-copilot-test--request "cfg" "hi" :tools tools :builtin-tools '("web_search")))))
+    (should (equal ["echo" "web_search"] (plist-get config :availableTools)))
+    ;; No external tool of that name overrides Copilot's.
+    (should (equal '("echo") (mapcar (lambda (s) (plist-get s :name)) (plist-get config :tools)))))
+  ;; Not asked to, web_search is the harness's.
+  (let ((config (harness-provider-copilot-session-config
+                 (harness-provider-copilot-test--request
+                  "cfg" "hi" :tools (list harness-provider-copilot-test--web-search-tool)))))
+    (should (equal ["web_search"] (plist-get config :availableTools)))
+    (should (equal "web_search" (plist-get (aref (plist-get config :tools) 0) :name))))
+  (should (equal '("web_search")
+                 (plist-get (harness-call 'provider/capabilities "copilot:gpt-5.4") :builtin-tools))))
+
+(ert-deftest harness-provider-copilot-web-search-stands-in-for-web-search ()
+  "Asked to, Copilot searches itself; the harness decides each search and hears its result."
+  (harness-provider-copilot-test--setup)
+  (let* ((events (harness-provider-copilot-test--run-builtin
+                  (harness-provider-copilot-test--request "ws1" "search the web" :builtin-tools '("web_search"))
+                  '(:behavior allow)))
+         (types (harness-provider-copilot-test--types events))
+         (call (harness-provider-copilot-test--find events 'tool-call))
+         (ask (harness-provider-copilot-test--find events 'tool-permission))
+         (result (harness-provider-copilot-test--find events 'tool-result)))
+    (should (plist-get call :builtin))
+    (should-not (plist-get call :respond))
+    (should (equal '("call_fake_ws" "web_search") (list (plist-get call :id) (plist-get call :name))))
+    (should (equal "emacs" (plist-get (plist-get call :input) :query)))
+    (should (= 1 (cl-count 'tool-call types)))
+    (should (equal '("call_fake_ws" "web_search") (list (plist-get ask :id) (plist-get ask :name))))
+    (should (< (cl-position 'tool-call types) (cl-position 'tool-permission types)
+               (cl-position 'tool-result types)))
+    (should (equal "call_fake_ws" (plist-get result :id)))
+    (should-not (plist-get result :is-error))
+    (should (string-match-p "GNU Emacs" (plist-get result :content)))
+    (should (eq 'end-turn (harness-provider-copilot-test--done events))))
+  ;; Refused, the search fails with what the harness said.
+  (let* ((events (harness-provider-copilot-test--run-builtin
+                  (harness-provider-copilot-test--request "ws1" "search the web" :builtin-tools '("web_search"))
+                  '(:behavior deny :message "Denied: denied by a standing rule for web_search")))
+         (result (harness-provider-copilot-test--find events 'tool-result)))
+    (should (plist-get result :is-error))
+    (should (equal "Denied: denied by a standing rule for web_search" (plist-get result :content)))
+    (should (eq 'end-turn (harness-provider-copilot-test--done events))))
+  (harness-provider-copilot-close "ws1"))
+
+(ert-deftest harness-provider-copilot-web-search-only-when-asked-for ()
+  "Not asked to, Copilot's search stays off and the harness's web_search serves."
+  (harness-provider-copilot-test--setup)
+  (let* ((events (harness-provider-copilot-test--run-builtin
+                  (harness-provider-copilot-test--request
+                   "ws2" "search the web" :tools (list harness-provider-copilot-test--web-search-tool))
+                  '(:behavior deny :message "never asked")))
+         (call (harness-provider-copilot-test--find events 'tool-call)))
+    (should-not (plist-get call :builtin))
+    (should (functionp (plist-get call :respond)))
+    (should (equal "web_search" (plist-get call :name)))
+    (should-not (harness-provider-copilot-test--find events 'tool-permission))
+    (should-not (harness-provider-copilot-test--find events 'tool-result))
+    (should (eq 'end-turn (harness-provider-copilot-test--done events))))
+  (harness-provider-copilot-close "ws2"))
+
 (ert-deftest harness-provider-copilot-images-go-as-attachments ()
   (harness-provider-copilot-test--setup)
   (let ((log (harness-provider-copilot-test--log-file)))

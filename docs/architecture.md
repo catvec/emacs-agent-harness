@@ -388,13 +388,18 @@ history; the agent only sends new user content), `:fork`, `:resume`,
 `:compaction hosted`, `:cost-reported` (usage events carry `:cost`),
 `:billing` (usage events say who paid: `:billing`, `:plan`,
 `:list-cost`), `:pricing dynamic` (pricing comes from the model
-catalogue).
+catalogue), `:builtin-tools` (a list of the harness tools the provider
+has a tool of its own for, which it can run in their place: Claude Code
+and Copilot list `"web_search"`; see `tools/builtin`).
 
 REQUEST = `(:model "ID:NAME" :session SESSION :system "…" :messages (MSG…)
 :tools (TOOL-SPEC…) :thinking LEVEL :max-tokens N :provider-state PLIST
 :on-event FN)`.  MSG = `(:role user|assistant|tool :content (BLOCK…))`.
 TOOL-SPEC = `(:name :description :schema JSON-SCHEMA-PLIST)`.  For hosted
-loops only the trailing user message is sent.
+loops only the trailing user message is sent.  A REQUEST may also carry
+`:builtin-tools`, a list of harness tool names (from `tools/builtin`):
+the provider turns on its own tools in their place for this request,
+and `:tools` lacks them.
 
 Events delivered to `:on-event` (one plist each, in order):
 
@@ -414,6 +419,26 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type hint :text "…")                  ; provider-side notices (compaction, retries)
 (:type done :stop-reason end-turn|tool-use|max-tokens|cancelled|error :error "…")
 ```
+
+A provider that runs one of its own tools in place of a harness tool
+(one the request's `:builtin-tools` names) reports its calls with three
+events, all naming the harness tool and the provider's call id:
+- `tool-call` with `:builtin t` and no `:respond`, once per call, as
+  soon as the provider knows the call's input.  The agent records the
+  call node (meta `:builtin t`), shows it running, and runs nothing.
+- `(:type tool-permission :id ID :name NAME :input PLIST :respond FN)`
+  when the provider wants to know whether the call may run.  The agent
+  asks `tools/authorize`, so the harness's permission chain decides it
+  as a call of NAME, and calls FN with the DECISION: `(:behavior allow
+  ...)` or `(:behavior deny :message TEXT ...)`, TEXT being what the
+  model is to be told.
+- `tool-result`, which the agent records as the call's result (meta
+  `:builtin t`, plus `:denied t` after a refusal).  Results of other
+  calls, which hosted loops echo too, are not recorded twice.
+
+A built-in call still open when the provider's request ends (`done`, or
+the turn cancelled) gets an error result saying it got none, so every
+call in the transcript has a result.
 
 `activity` says what the model is busy with when its output alone would
 not: PHASE `thinking` (a thinking block began, whether or not its text
@@ -490,6 +515,19 @@ requests; the harness allows its own tools and refuses any other.  A
 tool call the CLI refuses on its own (`system/permission_denied`)
 becomes a `hint` that names the setting.
 
+The one exception is WebSearch, which stands in for web_search
+(`harness-provider-claude-builtin-tools`; capability `:builtin-tools`).
+A request whose `:builtin-tools` names web_search starts the CLI with
+`--tools WebSearch`, plus `--permission-prompt-tool stdio` unless the
+permission arguments already send the prompts somewhere or bypass the
+checks, so the CLI asks before every search.  The model's `tool_use`
+becomes a `tool-call` marked `:builtin` (named web_search), the
+`can_use_tool` question a `tool-permission` that the harness's
+permission chain answers (allow, or deny with the message for the
+model), and the echoed `tool_result` a `tool-result`.  The process
+records which tools it was started with, so a request that turns
+WebSearch on or off restarts it with `--resume`.
+
 The Bedrock provider (`provider-bedrock`) is a native loop over the
 Converse API: one ConverseStream request per call, its binary event
 stream decoded into `text`, `thinking`, `usage` and `tool-call` events.
@@ -514,6 +552,18 @@ version 3 or newer.  Per harness session one CLI process:
   tools are the harness's (external tools, `availableTools` set to their
   names) and whose system prompt is the harness's (`systemMessage` mode
   replace); resuming an open session again applies changed settings.
+- The exception is Copilot's own web_search, which stands in for the
+  harness's (`harness-provider-copilot-builtin-tools`; capability
+  `:builtin-tools`).  A request whose `:builtin-tools` names it lists
+  it in `availableTools` and sends no external tool of that name.  Its
+  `tool.execution_start` (or the `toolRequests` of the model's
+  `assistant.message`) becomes a `tool-call` marked `:builtin`, a
+  `permission.requested` about it, matched by `toolCallId` or
+  `toolName`, a `tool-permission` whose decision answers
+  `session.permissions.handlePendingPermissionRequest` (approve-once,
+  or reject with the message as feedback), and its
+  `tool.execution_complete` a `tool-result`.  Which permission kind the
+  CLI uses for web_search was not checked against the real CLI.
 - `session.send` runs a turn.  `assistant.message_delta` and
   `assistant.reasoning_delta` stream, `external_tool.requested` becomes a
   `tool-call` whose `:respond` answers `session.tools.handlePendingToolCall`,
@@ -576,6 +626,22 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   RESULT.  Pipeline: lookup → `permission/decide` (async filter) →
   handler (with `harness-tools-timeout`) → context-bomb guard → sync
   filter `tools/result` → events `tools/started`, `tools/finished`.
+- `tools/builtin SESSION-ID` returns the names of the harness tools
+  that the session's provider runs a tool of its own for, and
+  `tools/list` leaves them out.  They must be in the provider's
+  `:builtin-tools` capability, among the tools the session gets
+  otherwise, and picked by sync filter `agent/builtin-tools` (value:
+  list of names, initially nil; args: session, the names the provider
+  offers); tools-web picks web_search (see below).  The agent passes
+  them in the request's `:builtin-tools`.
+- `tools/authorize SESSION-ID CALL` (CALL = `(:id :name :input :kind)`)
+  returns a promise of the DECISION on a call the provider runs itself.
+  It comes from the same `permission/decide` chain as `tools/execute`,
+  judged as a call of the harness tool NAME (its kind and paths; else
+  CALL's `:kind`, else exec; the REQUEST carries `:builtin t`), and
+  nothing runs.  Emits `permission/decided`.  The `:behavior` is allow
+  or deny; a denial carries `:message`, the text `tools/execute` would
+  have returned.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.
@@ -643,6 +709,9 @@ request and resolves when answered).
   `harness-perms-auto-allow-tools` are allowed in every mode: the meta
   tools, skill and Emacs lookups, and `web_search`, which only sends its
   query to the configured search provider, so task sessions can search.
+  The model provider's own search, standing in for `web_search` (see
+  `tools/builtin`), is decided as `web_search` too, so the same rules
+  and the same auto-allow apply to it.
   `web_fetch` reaches any URL and stays with the mode (the judge in auto).
 - Jail denials are final and carry a constructive hint listing the
   allowed roots and how to widen them.
@@ -675,7 +744,8 @@ request and resolves when answered).
 - `agent/cancel SESSION-ID`.
 - `agent/send-queue SESSION-ID` — sends every queued item as one turn.
 - Sync filter `agent/system-prompt` (value string, args session); sync
-  filter `agent/tools`; async filter `agent/before-turn` (value
+  filter `agent/tools`; sync filter `agent/builtin-tools` (see
+  `tools/builtin`); async filter `agent/before-turn` (value
   `(:proceed t :reason)`, args session) — budgets, merge holds and
   compaction hook in here; async filter `agent/step` at every step
   boundary (same value shape) — merge holds pause here.
@@ -1099,6 +1169,20 @@ prefixes come from the session host):
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
 asynchronous process started with `start-file-process` so TRAMP works.
+
+`web_search` asks the search provider `harness-websearch-provider`
+(Brave, whose key comes from `harness-brave-api-key`, `BRAVE_API_KEY` or
+auth-source).  `harness-websearch-register-provider NAME FN &optional
+READY` adds one; READY says whether it can search now, and
+`harness-websearch-ready-p` asks it (Brave: a key is set; auth-source is
+asked at most every five minutes, since it may decrypt a file).  Some
+model providers search the web themselves (`:builtin-tools`; Claude Code
+has WebSearch, Copilot its web_search).  tools-web's filter on
+`agent/builtin-tools` lets that search stand in for `web_search` as
+`harness-websearch-builtin` says: `fallback` (the default) while the
+search provider cannot search, so searching works before anything is
+set up; `always`; or `never`.  The session then has no `web_search` of
+the harness's, and the provider's searches show as `web_search` calls.
 
 The session and task tools (`tools-sessions`) let an agent coordinate the
 rest of the harness.  Sessions are named by id, a unique id prefix or a

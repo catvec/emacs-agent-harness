@@ -432,6 +432,40 @@ the message is complete."
               (should (equal "Hello" (harness-chat-block-content (car (harness-ui-chat-test-blocks buf "assistant")))))))
         (harness-provider-claude-close-all)))))
 
+(defvar harness-brave-api-key)
+(defvar harness-websearch-provider)
+(defvar harness-websearch-builtin)
+(defvar harness-tools-web--auth-source-seen)
+
+(ert-deftest harness-ui-chat-cli-web-search-shows-as-web-search ()
+  "Without a Brave key, Claude Code searches itself, and the chat shows a web_search call.
+The call and its result appear as any tool call's would."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'provider-claude)
+    (harness-test-load-module 'tools-web)
+    (setq harness-provider-claude-program (harness-test-fixture "fake-claude.py"))
+    (let ((process-environment (cons "BRAVE_API_KEY" process-environment))
+          (auth-sources nil)
+          (harness-brave-api-key nil)
+          (harness-websearch-provider 'brave)
+          (harness-websearch-builtin 'fallback)
+          (harness-tools-web--auth-source-seen nil))
+      (unwind-protect
+          (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                               :model "claude:claude-fable-5-1" :name "Search")
+                                 :id))
+                 (buf (harness-ui-chat-test-open sid)))
+            (harness-ui-chat-test-prompt buf "search the web")
+            (let ((calls (harness-ui-chat-test-blocks buf "tool-call")))
+              (should (= 1 (length calls)))
+              (should (harness-ui-chat-test-find buf "web_search emacs")))
+            (should (harness-ui-chat-test-find buf "Web search results for query"))
+            (should (harness-ui-chat-test-find buf "hello"))
+            (when (getenv "HARNESS_SHOW_CHAT")
+              (message "chat buffer:\n%s" (with-current-buffer buf (buffer-substring-no-properties
+                                                                    (point-min) (point-max))))))
+        (harness-provider-claude-close-all)))))
+
 ;;;; Scrolling
 
 (ert-deftest harness-ui-chat-auto-scroll-predicate ()
