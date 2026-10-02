@@ -938,7 +938,13 @@ Client API used by every UI:
 (harness-acp-set-handler CONN FN)           ; FN (METHOD PARAMS RESPOND); RESPOND nil for notifications
 (harness-acp-close CONN)
 (harness-acp-connection-p CONN) (harness-acp-connected-p CONN)
+(harness-acp-open-p CONN)                   ; connected, or TCP still connecting
 ```
+
+What is sent while a TCP connection connects waits and goes out once
+the socket is up, so a client keeps a connection while `harness-acp-open-p`
+holds rather than connecting again, which would drop it along with
+every request it carries.
 
 Wire: JSON-RPC 2.0, one message per line.  Standard ACP methods:
 `initialize`, `authenticate`, `session/new {cwd}` → `{sessionId}`,
@@ -982,7 +988,8 @@ re-entered.
 ## Presentation contracts
 
 `harness-ui` owns the connection (`harness-ui-connection`, local by
-default; `harness-connect-remote` swaps it; `harness-ui-connected-hook`
+default; `harness-connect-remote` swaps it, and an empty address swaps
+it back to this Emacs's own harness; `harness-ui-connected-hook`
 runs after every connect, where the chat reopens the closed sessions its
 buffers show, as a harness that just started has them all closed), the face set
 (`harness-user-face`, `harness-agent-face`, `harness-tool-face`,
