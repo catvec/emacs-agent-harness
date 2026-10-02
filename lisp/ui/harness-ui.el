@@ -1005,7 +1005,7 @@ VALUE is as it comes over the wire: nil and `:false' are off."
 (defun harness-ui-non-interactive-help (value)
   "Return what a session's non-interactive switch VALUE means, for a tooltip."
   (if (harness-json-true-p value)
-      "Non-interactive: the agent never waits for you.  What would ask for permission is denied, and the agent is told to find another way."
+      "Non-interactive: the agent never waits for you.  The auto-mode judge decides what would ask you for permission, and after a denial the agent is told to find another way."
     "Interactive: the agent asks you for permission and waits for your answer."))
 
 (defun harness-ui-tool-outcome (result)
@@ -1276,9 +1276,10 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
 ;;;###autoload
 (defun harness-toggle-non-interactive (&optional session-id)
   "Toggle non-interactive mode for SESSION-ID.
-A non-interactive session never waits for the user: what would ask for
-permission is denied, and the agent is told to find another way.  The
-session's header line shows which it is; clicking there toggles too."
+A non-interactive session never waits for the user: the auto-mode
+judge decides what would ask for permission, and after a denial the
+agent is told to find another way.  The session's header line shows
+which it is; clicking there toggles too."
   (interactive)
   (let* ((target (harness-ui--setting-target session-id))
          (now (harness-json-true-p (harness-ui--setting-get target :non-interactive))))

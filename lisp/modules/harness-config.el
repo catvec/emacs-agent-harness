@@ -74,13 +74,14 @@ when available, `off' never sandboxes."
 
 (defcustom harness-non-interactive nil
   "Whether new sessions start non-interactive.
-A non-interactive session never waits for the user: what would ask for
-permission is denied instead, and the agent is told to find another
-way.  From then on each session has its own switch, which its header
-line shows and `harness-toggle-non-interactive' flips; changing this
-setting leaves the sessions that exist as they are.  Task sessions
-start non-interactive anyway while `harness-tasks-non-interactive' is
-on."
+A non-interactive session never waits for the user: the auto-mode
+judge decides what would ask them for permission, whatever the
+permission mode, and after a denial the agent is told to find another
+way.  Directories are still granted by the user only.  From then on
+each session has its own switch, which its header line shows and
+`harness-toggle-non-interactive' flips; changing this setting leaves
+the sessions that exist as they are.  Task sessions start
+non-interactive anyway while `harness-tasks-non-interactive' is on."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defcustom harness-context-reserve 20000

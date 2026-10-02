@@ -13,15 +13,29 @@
 ;;   10 jail             every path must lie inside an allowed root;
 ;;                       otherwise the user is asked for the directory
 ;;   20 mode             ask / accept-edits / auto / yolo, plus standing rules
-;;   30 auto             a cheap model judges what is still undecided
-;;   40 non-interactive  the user is away: deny and steer the agent
+;;   30 auto             a cheap model judges what is still undecided, in
+;;                       auto mode and in every non-interactive session
+;;   40 non-interactive  the judge gave no verdict and the user is away:
+;;                       nobody can approve the call, so it is denied
 ;;   90 ask-user         a pending request the UI answers
 ;;
 ;; A handler receives (DECISION NEXT REQUEST) and must call NEXT with
 ;; the new decision; `:final' stops the chain.  Denials always carry a
 ;; `:reason' and, when there is something the model can do about it, a
 ;; `:hint', because a denial the model can act on is the difference
-;; between an autonomous session and one that stalls.
+;; between an autonomous session and one that stalls.  Other modules
+;; add stages of their own: the tasks module keeps the turns that write
+;; a backlog task up read-only at 25.
+;;
+;; Non-interactive mode (the user is away) is no permission policy of
+;; its own: what the session's mode would ask the user, the auto-mode
+;; judge decides in their place, whatever the mode, so the session
+;; never waits and is never refused just for being unattended.  Only a
+;; call the judge gave no verdict on is denied, since nobody could
+;; approve it; directories are still granted by a person only.  After
+;; every denial in such a session, whoever made it, the agent gets a
+;; steering message (`harness-perms--on-decided'): the user is away, so
+;; it should find another way rather than wait.
 ;;
 ;; An agent asks for another directory with the request_directory_access
 ;; tool.  The first stage owns that tool's decision and always makes it
@@ -69,12 +83,15 @@ when a permission request is answered with scope `always'."
   :group 'harness)
 
 (defcustom harness-perms-auto-model "claude:claude-haiku-4-5-20251001"
-  "Model that judges tool calls in `auto' mode, as PROVIDER:NAME.
-When nil the session's own model is used."
+  "Model that judges tool calls, as PROVIDER:NAME.
+It judges in `auto' mode, and in every mode for a non-interactive
+session, deciding what would ask the user while they are away.  When
+nil the session's own model is used."
   :type '(choice (const nil) string) :group 'harness)
 
 (defcustom harness-perms-auto-timeout 30
-  "Seconds the auto-mode judge may take before the call falls back to asking."
+  "Seconds the auto-mode judge may take before it counts as giving no verdict.
+The call then asks the user, or is denied in a non-interactive session."
   :type 'number :group 'harness)
 
 ;;;; Runtime state (survives reloads)
@@ -89,7 +106,7 @@ When nil the session's own model is used."
   "Pending id -> plist (:session-id :request :next) awaiting an answer.")
 
 (defvar harness-perms--steered nil
-  "Recent call ids that already received a non-interactive steering message.")
+  "Recent call ids whose denial already steered a non-interactive session.")
 
 (defconst harness-perms-options '(allow-once allow-session allow-always deny-once deny-always)
   "Answer options offered to the user for a permission request.")
@@ -145,6 +162,14 @@ setting alone decides only for a request without a session record."
    (if (plist-member session :non-interactive)
        (plist-get session :non-interactive)
      (harness-perms--config 'harness-non-interactive session))))
+
+(defun harness-perms--judge-p (session)
+  "Non-nil when the auto-mode judge decides SESSION's undecided calls.
+That is in `auto' mode, and in every mode while SESSION is
+non-interactive: the user is away, so the judge decides in their place
+what would ask them."
+  (or (eq (harness-perms--mode-of session) 'auto)
+      (harness-perms--non-interactive-p session)))
 
 ;;;; Roots and the jail
 
@@ -588,24 +613,35 @@ Return nil when TEXT holds no usable verdict."
                       :hint "Choose a different approach that stays within the allowed scope."))))))
 
 (defun harness-perms--auto (decision next request)
-  "In `auto' mode ask a cheap model to decide REQUEST; fall back to asking.
-DECISION is the current value and NEXT continues the chain."
+  "Ask a cheap model to decide REQUEST, in auto mode or for a user away.
+The judge decides what is still undecided in `auto' mode, and in every
+mode while the session is non-interactive (`harness-perms--judge-p').
+Without a verdict the call goes on undecided, so it asks the user, with
+`:no-verdict' saying why for the stage that denies it when the user is
+away.  DECISION is the current value and NEXT continues the chain."
   (let ((session (plist-get request :session)))
     (if (not (and (eq (plist-get decision :behavior) 'ask)
-                  (eq (harness-perms--mode-of session) 'auto)
+                  (harness-perms--judge-p session)
                   (harness-method-exists-p 'provider/complete)))
         (funcall next decision)
       (let* ((model (or harness-perms-auto-model (plist-get session :model)
                         (harness-perms--config 'harness-model session)))
              (text "") (settled nil) (timer nil) (handle nil)
+             (failure nil)              ; why the judge gave no verdict
+             ;; A verdict is a new decision: DECISION itself comes back
+             ;; when the judge gave none.
              (finish (lambda (d)
                        (unless settled
                          (setq settled t)
                          (when timer (cancel-timer timer))
-                         (funcall next d)))))
+                         (funcall next (if (eq d decision)
+                                           (plist-put (copy-sequence decision) :no-verdict
+                                                      (or failure "it gave no answer"))
+                                         d))))))
         (setq timer (run-at-time harness-perms-auto-timeout nil
                                  (lambda ()
                                    (harness-log 'warn "perms: auto judge timed out for %s" (plist-get request :tool))
+                                   (setq failure (format "it took longer than %ss" harness-perms-auto-timeout))
                                    (funcall finish decision)
                                    (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
         (condition-case err
@@ -621,6 +657,8 @@ DECISION is the current value and NEXT continues the chain."
                                                                     :text (harness-perms--judge-text request)))))
                          :tools nil :max-tokens 200
                          :on-event (lambda (ev)
+                                     (when (eq (plist-get ev :type) 'done)
+                                       (setq failure (harness-perms--judge-failure ev text)))
                                      (pcase (plist-get ev :type)
                                        ('text (setq text (concat text (or (plist-get ev :delta) ""))))
                                        ('done
@@ -632,41 +670,87 @@ DECISION is the current value and NEXT continues the chain."
                                           (funcall finish (or verdict decision)))))))))
           (error
            (harness-log 'warn "perms: auto judge failed: %S" err)
+           (setq failure (format "it failed: %s" (harness-error-message err)))
            (funcall finish decision)))))))
 
 ;;;; Non-interactive mode
 
 (defconst harness-perms-non-interactive-hint
   "Find a different approach that stays inside the permitted scope and still achieves the goal; do not wait for the user."
-  "Hint attached to denials made because the user is away.")
+  "Hint attached to denials made because nobody can approve a call.")
 
-(defun harness-perms--steer (session request)
-  "Send SESSION a steering message about the denied REQUEST, once per call."
-  (let ((sid (plist-get session :id))
-        (call-id (or (plist-get request :call-id) (harness-short-id))))
+(defconst harness-perms-no-verdict-hint
+  "This was not a verdict on the call itself, so you may try it once more. If it is denied again, find a different approach that stays inside the permitted scope and still achieves the goal; do not wait for the user."
+  "Hint attached to a denial made because the judge gave no verdict.")
+
+(defconst harness-perms-steering-text
+  "The call to %s was denied. This session is non-interactive and the user is away, so do not wait for them: respect the denial, whose reason and hint say what is permitted, and do everything in your power to reach the goal another way."
+  "Steering message sent after a denial in a non-interactive session.
+%s is the name of the denied tool.")
+
+(defun harness-perms--judge-failure (event text)
+  "Return why a judge that replied TEXT may give no verdict, from its `done' EVENT.
+It is said to the agent and the user when that denies a call."
+  (let ((err (plist-get event :error)))
+    (cond (err (format "it failed: %s" (harness-truncate-end (harness-error-message err) 200)))
+          ((not (eq (plist-get event :stop-reason) 'end-turn))
+           (format "it stopped: %s" (plist-get event :stop-reason)))
+          ((harness-string-blank-p text) "it gave no answer")
+          (t "its answer held no verdict"))))
+
+(defun harness-perms--unapproved (decision)
+  "Return the denial of a call left undecided with DECISION while the user is away.
+Nobody can approve it: the judge gave no verdict, which DECISION's
+`:no-verdict' explains, or no judge could be asked."
+  (let ((why (plist-get decision :no-verdict)))
+    (if why
+        (list :behavior 'deny
+              :reason (format "the auto-mode judge gave no verdict (%s), and with the user away nobody could approve the call" why)
+              :hint harness-perms-no-verdict-hint)
+      (list :behavior 'deny
+            :reason "no auto-mode judge could decide the call, and with the user away nobody could approve it"
+            :hint harness-perms-non-interactive-hint))))
+
+(defun harness-perms--non-interactive (decision next request)
+  "Deny REQUEST when it is still undecided while the user is away.
+The judge decides a non-interactive session's calls in the user's
+place (see `harness-perms--judge-p'), so one still undecided here got
+no verdict from it, or no judge could be asked, and nobody can approve
+it.  That is the only denial non-interactive mode makes; its reason
+says why there was no verdict.  Steering the agent after a denial is
+left to `harness-perms--on-decided'.  DECISION is the current value and
+NEXT continues the chain."
+  (funcall next (if (and (eq (plist-get decision :behavior) 'ask)
+                         (harness-perms--non-interactive-p (plist-get request :session)))
+                    (harness-perms--unapproved decision)
+                  decision)))
+
+(defun harness-perms--steer (session-id request)
+  "Tell SESSION-ID's agent that REQUEST was denied while the user is away.
+The steering message reaches the running turn with the call's result;
+it goes out once per call, and only while a turn runs to take it."
+  (let ((call-id (or (plist-get request :call-id) (harness-short-id))))
     (when (and (harness-method-exists-p 'agent/prompt)
+               (or (not (harness-method-exists-p 'agent/running))
+                   (harness-call 'agent/running session-id))
                (not (member call-id harness-perms--steered)))
       (push call-id harness-perms--steered)
       (setq harness-perms--steered (seq-take harness-perms--steered 100))
       (condition-case err
-          (harness-call 'agent/prompt sid
+          (harness-call 'agent/prompt session-id
                         (list (list :type "text"
-                                    :text (format "The call to %s was denied because the session runs in non-interactive mode and the user is away. %s"
-                                                  (plist-get request :tool) harness-perms-non-interactive-hint))))
+                                    :text (format harness-perms-steering-text (plist-get request :tool)))))
         (error (harness-log 'warn "perms: steering failed: %S" err))))))
 
-(defun harness-perms--non-interactive (decision next request)
-  "Deny an undecided REQUEST when the user is away, and steer the agent.
-DECISION is the current value and NEXT continues the chain."
-  (let ((session (plist-get request :session)))
-    (if (and (eq (plist-get decision :behavior) 'ask)
-             (harness-perms--non-interactive-p session))
-        (progn
-          (harness-perms--steer session request)
-          (funcall next (list :behavior 'deny
-                              :reason "non-interactive mode: the user is away"
-                              :hint harness-perms-non-interactive-hint)))
-      (funcall next decision))))
+(defun harness-perms--on-decided (session-id request decision)
+  "Steer SESSION-ID's agent when DECISION denies REQUEST and the user is away.
+This is the `permission/decided' handler: in a non-interactive session
+every denial, whoever made it (a rule, the jail, the judge...), is
+followed by a steering message telling the agent to find another way
+instead of waiting for the user."
+  (when (and (not (eq (plist-get decision :behavior) 'allow))
+             (harness-perms--non-interactive-p (harness-perms--session session-id)))
+    (harness-perms--steer session-id request)))
 
 ;;;; Asking the user
 
@@ -876,20 +960,23 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
                        "(SESSION-ID DIR) after `permission/revoke-dir' narrowed the jail.")
 
 (defun harness-perms--init ()
-  "Install the `permission/decide' chain.  Safe to call again."
+  "Install the `permission/decide' chain and the steering after denials.
+Safe to call again."
   (harness-add-filter 'permission/decide #'harness-perms--dir-request 5)
   (harness-add-filter 'permission/decide #'harness-perms--sandbox-guard 7)
   (harness-add-filter 'permission/decide #'harness-perms--jail 10)
   (harness-add-filter 'permission/decide #'harness-perms--mode 20)
   (harness-add-filter 'permission/decide #'harness-perms--auto 30)
   (harness-add-filter 'permission/decide #'harness-perms--non-interactive 40)
-  (harness-add-filter 'permission/decide #'harness-perms--ask 90))
+  (harness-add-filter 'permission/decide #'harness-perms--ask 90)
+  (harness-on 'permission/decided #'harness-perms--on-decided))
 
 (defun harness-perms--shutdown ()
-  "Remove the `permission/decide' chain."
+  "Remove the `permission/decide' chain and the steering after denials."
   (dolist (fn '(harness-perms--dir-request harness-perms--sandbox-guard harness-perms--jail harness-perms--mode
                 harness-perms--auto harness-perms--non-interactive harness-perms--ask))
-    (harness-remove-filter 'permission/decide fn)))
+    (harness-remove-filter 'permission/decide fn))
+  (harness-off (cons 'permission/decided #'harness-perms--on-decided)))
 
 ;; A reload does not run `:init' again for a ready module, and the tools
 ;; above are registered at load time, so the chain is installed here too:
