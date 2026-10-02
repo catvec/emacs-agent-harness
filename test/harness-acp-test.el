@@ -368,8 +368,10 @@ Once the turn ends the message runs as a turn of its own."
       (should (= -32602 (car (harness-acp-test-error conn "_harness/session/get" (list :id sid :bogus 1)))))
       (should (= -32602 (car (harness-acp-test-error conn "session/new" nil))))
       (should (= -32602 (car (harness-acp-test-error conn "session/prompt" '(:prompt nil)))))
+      ;; A failing method is an internal error: -32000 is ACP's
+      ;; auth_required, which would send clients to authenticate.
       (let ((e (harness-acp-test-error conn "_harness/session/get" '(:id "missing"))))
-        (should (= -32000 (car e)))
+        (should (= -32603 (car e)))
         (should (string-match-p "No session" (cadr e)))))))
 
 ;;;; Requests from the agent to the client

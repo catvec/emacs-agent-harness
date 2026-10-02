@@ -78,8 +78,12 @@ Local in-process connections never need it."
 (defconst harness-acp-error-invalid-request -32600)
 (defconst harness-acp-error-method-not-found -32601)
 (defconst harness-acp-error-invalid-params -32602)
-(defconst harness-acp-error-method -32000)
-(defconst harness-acp-error-unauthenticated -32001)
+(defconst harness-acp-error-method -32603
+  "A method failed: JSON-RPC's internal error, which ACP leaves to agents.")
+(defconst harness-acp-error-unauthenticated -32000
+  "ACP's `auth_required': the client must call `authenticate' first.
+Clients answer it by offering the `authMethods' of `initialize', so it
+is never used for any other failure.")
 (defconst harness-acp-error-transport -32003)
 
 (define-error 'acp-error "ACP error" 'harness-error)
@@ -88,7 +92,8 @@ Local in-process connections never need it."
 (defconst harness-acp-extension-prefixes
   '("session/" "agent/" "provider/" "tools/list" "usage/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "naming/" "sandbox/status"
-    "harness/api" "harness/version" "harness/reload" "question/" "project/" "task/")
+    "harness/api" "harness/version" "harness/reload" "question/" "project/" "task/"
+    "acp/remote-")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
 (defconst harness-acp--enum-keys
@@ -124,8 +129,25 @@ Local in-process connections never need it."
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
     question/answered task/changed task/deleted task/review permission/dir-allowed permission/dir-revoked
-    config/changed harness/reloaded tools/file-written)
+    config/changed harness/reloaded tools/file-written acp/remote-changed)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
+
+(defvar harness-acp-authorize-functions nil
+  "Functions deciding that a client may call methods without authenticating.
+Each is called with the `harness-acp-client'; the first non-nil answer
+lets it in.  The remote access module lets paired devices in this way.")
+
+(defvar harness-acp-auth-methods-functions nil
+  "Functions returning extra auth methods `initialize' advertises to a client.
+Each is called with the `harness-acp-client' and returns a list of ACP
+`AuthMethod' plists (:id :name :description), listed before the token.")
+
+(defvar harness-acp-authenticate-functions nil
+  "Functions answering `authenticate' for the auth methods they advertise.
+Each is called with the client, the method id and the request params,
+and returns nil when the method is not its own, else a value or a
+promise: once it resolves the client is authenticated, a rejection
+\(an `acp-error' list) is the answer the client gets.")
 
 ;;;; Structures
 
@@ -147,7 +169,7 @@ Local in-process connections never need it."
 (cl-defstruct (harness-acp-client (:constructor harness-acp--make-client)
                                   (:copier nil))
   "The server's record of one connected client."
-  kind                               ; local | tcp
+  kind                               ; local | tcp | another transport's symbol
   process                            ; tcp socket
   connection                         ; the `harness-acp-connection' (local only)
   (buffer "")
@@ -155,7 +177,10 @@ Local in-process connections never need it."
   initialized
   capabilities
   (next-id 0)
-  (pending (make-hash-table :test 'equal))) ; id -> (lambda (result error))
+  (pending (make-hash-table :test 'equal)) ; id -> (lambda (result error))
+  ;; Slots added later go last, so clients made before a reload keep working.
+  writer                             ; (CLIENT JSON-TEXT) for other transports
+  remote)                            ; plist of a client on another device, else nil
 
 (cl-defstruct (harness-acp-error-value (:constructor harness-acp--make-error-value)
                                        (:copier nil))
@@ -164,6 +189,18 @@ Local in-process connections never need it."
 
 (defvar harness-acp--server nil "The listening TCP process, or nil.")
 (defvar harness-acp--clients nil "Every connected client, TCP and local.")
+
+(defun harness-acp--client-get (client slot)
+  "Return SLOT of CLIENT, nil when CLIENT predates the slot.
+A reload keeps connected clients, whose records lack the slots added
+since they were made."
+  (and (> (length client) (cl-struct-slot-offset 'harness-acp-client slot))
+       (cl-struct-slot-value 'harness-acp-client slot client)))
+
+(defun harness-acp-client-remote-info (client)
+  "Return the plist describing CLIENT's device when it is on another one, else nil.
+Transports serving other devices set it (see `harness-acp-add-client')."
+  (harness-acp--client-get client 'remote))
 
 ;;;; Wire shapes
 
@@ -329,6 +366,14 @@ For example :sessionId becomes :session-id."
              (process-send-string proc (concat (harness-json-encode msg) "\n"))
            (error
             (harness-log 'warn "acp: send to %s failed: %s" (process-name proc) (harness-error-message err))
+            (harness-acp--drop-client client))))))
+    (kind
+     (let ((writer (harness-acp--client-get client 'writer)))
+       (when (and writer (memq client harness-acp--clients))
+         (condition-case err
+             (funcall writer client (harness-json-encode msg))
+           (error
+            (harness-log 'warn "acp: send to a %s client failed: %s" kind (harness-error-message err))
             (harness-acp--drop-client client))))))))
 
 (defun harness-acp--client-notify (client method params)
@@ -433,12 +478,16 @@ waiting on the UI never hangs on a missing one.  Not callable over ACP."
       (error (funcall reply nil (harness-acp--error-triplet err))))))
 
 (defun harness-acp--handle-notification (client method params)
-  "Run METHOD with PARAMS for CLIENT; failures are only logged."
-  (condition-case err
-      (let ((v (harness-acp--invoke client method params)))
-        (when (harness-promise-p v)
-          (harness-catch v (lambda (e) (harness-log 'warn "acp: notification %s failed: %S" method e)))))
-    (error (harness-log 'warn "acp: notification %s failed: %S" method err))))
+  "Run METHOD with PARAMS for CLIENT; failures are only logged.
+Notifications under `$/' are left alone: by the JSON-RPC convention
+they belong to the implementation, such as the `$/ping' heartbeats
+some mobile clients send to keep their connection open."
+  (unless (string-prefix-p "$/" method)
+    (condition-case err
+        (let ((v (harness-acp--invoke client method params)))
+          (when (harness-promise-p v)
+            (harness-catch v (lambda (e) (harness-log 'warn "acp: notification %s failed: %S" method e)))))
+      (error (harness-log 'warn "acp: notification %s failed: %S" method err)))))
 
 (defun harness-acp--handle-response (client id msg)
   "Route MSG, CLIENT's answer to the request ID, to the waiting callback."
@@ -451,15 +500,27 @@ waiting on the UI never hangs on a missing one.  Not callable over ACP."
 (defvar harness-acp--standard-methods (make-hash-table :test 'equal)
   "ACP method name -> function (CLIENT PARAMS).")
 
+(defun harness-acp--auth-needed-p (client)
+  "Non-nil when CLIENT must authenticate before calling methods.
+A client from another device always must, unless a function of
+`harness-acp-authorize-functions' lets it in; one from this machine
+must when `harness-acp-token' is set."
+  (and (not (harness-acp-client-authenticated client))
+       (or harness-acp-token (harness-acp-client-remote-info client))
+       (not (run-hook-with-args-until-success 'harness-acp-authorize-functions client))))
+
 (defun harness-acp--invoke (client method params)
   "Return the value or promise of calling METHOD with PARAMS for CLIENT."
   (let ((params (harness-acp--intern-enums params))
         (standard (gethash method harness-acp--standard-methods)))
     (cond
-     ((and harness-acp-token
-           (not (harness-acp-client-authenticated client))
-           (not (member method '("authenticate" "initialize"))))
-      (signal 'acp-error (list harness-acp-error-unauthenticated "Not authenticated: call authenticate first" nil)))
+     ((and (harness-acp-client-remote-info client) (harness-corporate-p))
+      (signal 'acp-error (list harness-acp-error-unauthenticated
+                               "Corporate mode is on: this harness serves no other device" nil)))
+     ((and (not (member method '("authenticate" "initialize")))
+           (harness-acp--auth-needed-p client))
+      (signal 'acp-error (list harness-acp-error-unauthenticated
+                               "Authentication required: call authenticate first" nil)))
      (standard (funcall standard client params))
      ((string-prefix-p "_harness/" method)
       (harness-acp--call-extension (substring method (length "_harness/")) params))
@@ -882,6 +943,57 @@ an agent's own directory request has no \"Allow once\"."
     (let ((client (process-get proc 'harness-acp-client)))
       (when client (harness-acp--drop-client client))))))
 
+;;;; Other transports
+
+;; A module serving ACP over another transport (WebSocket, say) hands
+;; each connection to the server with these: it registers a client,
+;; passes every JSON-RPC message the client sends to
+;; `harness-acp-client-receive', and the server writes back through the
+;; client's WRITER.  A socket speaking ACP's own framing (one message
+;; per line) can be handed over whole with `harness-acp-serve-socket'.
+
+(cl-defun harness-acp-add-client (kind &key process writer remote)
+  "Register and return a client that reached the server through another transport.
+KIND names the transport (a symbol other than `local' and `tcp').
+WRITER is called with (CLIENT JSON-TEXT) for every message to the
+client.  PROCESS is its socket, deleted when the client is dropped.
+REMOTE, a plist such as (:address \"192.168.1.23\"), marks a client on
+another device: it must authenticate whatever `harness-acp-token' says,
+unless `harness-acp-authorize-functions' let it in, and corporate mode
+refuses it."
+  (let ((client (harness-acp--make-client :kind kind :process process
+                                          :writer writer :remote remote)))
+    (push client harness-acp--clients)
+    (harness-log 'debug "acp: %s client connected (%d connected)" kind (length harness-acp--clients))
+    client))
+
+(defun harness-acp-client-receive (client text)
+  "Dispatch TEXT, one JSON-RPC message CLIENT sent, from the command loop.
+Text that does not parse is answered with a parse error."
+  (let ((msg (harness-acp--parse text)))
+    (if msg
+        (harness-run-soon #'harness-acp--server-receive client msg)
+      (harness-acp--client-send
+       client (harness-acp--message nil nil (list harness-acp-error-parse "Parse error" nil))))))
+
+(defun harness-acp-drop-client (client)
+  "Disconnect CLIENT and fail whatever it still owed."
+  (harness-acp--drop-client client))
+
+(cl-defun harness-acp-serve-socket (proc &key remote initial)
+  "Serve ACP's own line framing on the accepted socket PROC.
+REMOTE is as for `harness-acp-add-client'.  INITIAL is text PROC sent
+already, before it was handed over.  Return the client."
+  (let ((client (harness-acp--make-client :kind 'tcp :process proc :remote remote)))
+    (process-put proc 'harness-acp-client client)
+    (push client harness-acp--clients)
+    (set-process-coding-system proc 'utf-8-unix 'utf-8-unix)
+    (set-process-filter proc #'harness-acp--server-filter)
+    (set-process-sentinel proc #'harness-acp--server-sentinel)
+    (when (and initial (not (string-empty-p initial)))
+      (harness-acp--server-filter proc initial))
+    client))
+
 (defun harness-acp--server-contact ()
   "Return (:host :port) of the running server, or nil."
   (when (and harness-acp--server (process-live-p harness-acp--server))
@@ -899,9 +1011,14 @@ Return (:host :port).  Already running: return the current address."
   (or (harness-acp--server-contact)
       (let ((host (or (plist-get opts :host) harness-acp-host))
             (port (or (plist-get opts :port) harness-acp-port)))
-        (unless (or harness-acp-allow-remote (harness-acp--loopback-p host))
-          (signal 'harness-error
-                  (list (format "acp: refusing to bind %s; set `harness-acp-allow-remote' (and a token) first" host))))
+        (unless (harness-acp--loopback-p host)
+          (cond
+           ((harness-corporate-p)
+            (signal 'harness-error
+                    (list (format "acp: refusing to bind %s: corporate mode is on, so ACP is served on this machine only" host))))
+           ((not harness-acp-allow-remote)
+            (signal 'harness-error
+                    (list (format "acp: refusing to bind %s; set `harness-acp-allow-remote' (and a token) first" host))))))
         (setq harness-acp--server
               (make-network-process :name "harness-acp-server" :server t
                                     :host host :service port
@@ -979,6 +1096,11 @@ and requests, then call `harness-acp-initialize'."
         (setf (harness-acp-connection-client conn) client)
         (push client harness-acp--clients)
         conn)
+    (pcase-let ((`(,host . ,_) (harness-acp--parse-address address)))
+      (when (and (harness-corporate-p) (not (harness-acp--loopback-p host)))
+        (signal 'acp-error (list harness-acp-error-transport
+                                 (format "Corporate mode is on: no connection to a harness on %s" host)
+                                 nil))))
     (pcase-let* ((`(,host . ,port) (harness-acp--parse-address address))
                  (conn (harness-acp--make-connection :kind 'tcp :address (format "%s:%d" host port)))
                  (proc (make-network-process :name "harness-acp-client"
@@ -1183,10 +1305,31 @@ Return a promise of the initialize result."
            (when respond
              (harness-acp-respond-error respond harness-acp-error-method (harness-error-message err)))))))))
 
+;;;; Corporate mode
+
+(defun harness-acp--on-corporate-mode ()
+  "Apply `harness-corporate-mode' turned on to the running server.
+Run from `harness-corporate-mode-change-hook'.  Clients on other
+devices are dropped, and a server listening beyond this machine moves
+to the loopback address, on the same port when it is free."
+  (when (harness-corporate-p)
+    (dolist (client (copy-sequence harness-acp--clients))
+      (when (harness-acp-client-remote-info client)
+        (harness-acp--drop-client client)))
+    (let ((contact (harness-acp--server-contact)))
+      (when (and contact (not (harness-acp--loopback-p (format "%s" (plist-get contact :host)))))
+        (harness-log 'info "acp: corporate mode is on; serving on 127.0.0.1 only")
+        (harness-call 'acp/stop)
+        (condition-case err
+            (harness-call 'acp/start :host "127.0.0.1" :port (plist-get contact :port))
+          (error (harness-log 'warn "acp: could not listen on 127.0.0.1 again: %s"
+                              (harness-error-message err))))))))
+
 ;;;; Module
 
 (defun harness-acp--init ()
   "Subscribe to bus events and start the TCP server when enabled."
+  (add-hook 'harness-corporate-mode-change-hook #'harness-acp--on-corporate-mode)
   (harness-acp--subscribe)
   (when harness-acp-server-enabled
     (condition-case err
@@ -1206,6 +1349,7 @@ Return a promise of the initialize result."
 ;; A reload does not initialise a running module again: subscribe the
 ;; handlers this version adds now.
 (when (harness-module-ready-p 'acp)
+  (add-hook 'harness-corporate-mode-change-hook #'harness-acp--on-corporate-mode)
   (harness-acp--subscribe))
 
 (provide 'harness-acp)
