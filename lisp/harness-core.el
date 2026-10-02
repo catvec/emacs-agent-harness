@@ -81,6 +81,53 @@
       (run-hook-with-args 'harness-log-hook level msg)
       msg)))
 
+;;;; Corporate mode
+
+(defvar harness-corporate-mode-change-hook nil
+  "Hook run after `harness-corporate-mode' changes through `setopt' or Customize.
+The option already holds its new value.  The UI restarts the harness
+process from here, so the change reaches it, and the remote access
+module stops serving other devices.")
+
+(defun harness--set-corporate-mode (symbol value)
+  "Set SYMBOL, `harness-corporate-mode', to VALUE; run the change hook if it flips."
+  (let ((before (and (default-boundp symbol) (default-value symbol))))
+    (set-default-toplevel-value symbol value)
+    (unless (eq (not before) (not value))
+      (condition-case err
+          (run-hooks 'harness-corporate-mode-change-hook)
+        (error (harness-log 'error "corporate mode: a change hook failed: %S" err))))))
+
+(defcustom harness-corporate-mode nil
+  "Non-nil turns off every harness feature that could carry data off this machine.
+It is meant for work machines whose policy allows code and data to go
+to the model provider in use and nowhere else.  With it on:
+
+- The harness serves ACP on this machine only: `harness-acp-allow-remote'
+  is ignored, and the listener for phones and other devices, with its
+  pairing QR codes (`harness-acp-remote'), is refused.
+- This Emacs's UI connects to its own harness only, never to a harness
+  elsewhere (`harness-connect-remote').
+- Network tools (web_fetch, web_search, and the web search model
+  providers run themselves) are not offered to sessions, and calls to
+  them are denied.
+
+Model providers still receive what sessions send them, and shell
+commands stay governed by the permission mode and the sandbox
+\(`harness-sandbox-policy').
+
+Set it in your init file, before `harness-start'.  The settings page
+does not offer it and no ACP client can change it.  Changed later with
+`setopt' or Customize, it restarts the harness process so the change
+reaches it."
+  :type 'boolean :group 'harness
+  :set #'harness--set-corporate-mode
+  :initialize #'custom-initialize-default)
+
+(defun harness-corporate-p ()
+  "Non-nil when `harness-corporate-mode' is on."
+  (and harness-corporate-mode t))
+
 ;;;; Promises
 
 (cl-defstruct (harness-promise (:constructor harness-promise--make)
