@@ -7,6 +7,7 @@
 ;;   header line   status, name, model, permission mode, thinking, context, cost, menu,
 ;;                 after what `harness-chat-header-functions' put in front (a BTW's buttons)
 ;;   transcript    one block per node, rendered incrementally with markers
+;;   activity      while a turn runs, what it does and for how long
 ;;   pending panel permission requests and questions waiting for the user
 ;;   queue         messages queued for the next turn
 ;;   attachments   chips for files attached to the next message
@@ -162,6 +163,10 @@ Once two pages of nodes lie above every window, all but one are dropped."
 (defvar-local harness-chat--session nil "Last session plist seen, for after deletion.")
 (defvar-local harness-chat--unfinished nil "Ids of tool-call blocks without a result yet.")
 (defvar-local harness-chat--inactive nil "Non-nil while the session is inactive; sending resumes it.")
+(defvar-local harness-chat--activity nil
+  "What the running turn does, as `agent/activity' last said (wire shape).")
+(defvar-local harness-chat--activity-overlay nil
+  "Overlay at the end of the transcript whose `before-string' is the activity line.")
 
 ;;;; Small helpers
 
@@ -1041,7 +1046,9 @@ draws it, so carrying that over would keep drawing the old image."
   "Route session UPDATE of SID to its buffer."
   (when-let* ((buf (harness-chat--buffer-for sid)))
     (with-current-buffer buf
-      (if harness-chat--loading
+      (if (and harness-chat--loading
+               ;; Activity is not transcript: it is current however it loads.
+               (not (equal (plist-get update :sessionUpdate) "_harness/activity")))
           (push update harness-chat--deferred)
         (harness-chat--apply-update update)))))
 
@@ -1051,6 +1058,7 @@ draws it, so carrying that over would keep drawing the old image."
     ("_harness/node" (harness-chat--on-node (plist-get update :node)))
     ("agent_message_chunk" (harness-chat--on-chunk update "assistant"))
     ("agent_thought_chunk" (harness-chat--on-chunk update "thinking"))
+    ("_harness/activity" (harness-chat--on-activity (plist-get update :activity)))
     ("_harness/session" (harness-chat--on-session (plist-get update :session)))
     ("_harness/session_deleted" (harness-chat--on-deleted))))
 
@@ -1124,7 +1132,9 @@ draws it, so carrying that over would keep drawing the old image."
            (unless harness-chat--turn-start (setq harness-chat--turn-start (float-time)))
            (harness-chat--start-spinner))
           ((not (equal status "blocked"))
-           (setq harness-chat--turn-start nil)
+           (setq harness-chat--turn-start nil
+                 ;; The turn is over, even if the news of it was lost.
+                 harness-chat--activity nil)
            ;; A cancelled turn leaves calls without results: stop calling them running.
            (dolist (id harness-chat--unfinished)
              (when-let* ((b (gethash id harness-chat--blocks))) (harness-chat--rerender b)))
@@ -1135,7 +1145,9 @@ draws it, so carrying that over would keep drawing the old image."
       (setq harness-chat--inactive (equal status "inactive") changed t))
     (unless (equal (plist-get session :queue) harness-chat--queue)
       (setq harness-chat--queue (plist-get session :queue) changed t))
-    (when changed (harness-chat--render-tail))
+    (if changed
+        (harness-chat--render-tail)
+      (harness-chat--refresh-activity))
     (force-mode-line-update)))
 
 (defun harness-chat--on-deleted ()
@@ -1485,7 +1497,9 @@ their indentation; digit keys pick an option while point is on the panel."
                (set-window-point (car w) harness-compose-end))
              (harness-chat--pin (car w)))
             ((< (cdr w) harness-chat--transcript-end)
-             (set-window-start (car w) (cdr w) t))))))
+             (set-window-start (car w) (cdr w) t))))
+    ;; The new tail went in where the activity line was: put it back above.
+    (harness-chat--refresh-activity)))
 
 (defvar-local harness-chat-placeholder nil
   "What the empty compose box says when nothing more pressing does.
@@ -1705,6 +1719,7 @@ end afterwards."
         (progn (harness-chat--fetch-session) (harness-compose-fetch-completions))
       ;; Completion sources need the project root: fetch them once the session is known.
       (harness-chat--fetch-session #'harness-compose-fetch-completions))
+    (harness-chat--fetch-activity)
     (harness-then
      (harness-all (list (harness-ui-request "_harness/tools/list" (list :session-id sid))
                         (harness-ui-request "_harness/session/nodes"
@@ -1896,6 +1911,131 @@ While the agent is running the message steers the current turn."
   (interactive)
   (harness-cancel-turn harness-ui-session-id))
 
+;;;; The activity line
+;;
+;; While a turn runs, a line at the end of the transcript says what it
+;; is doing and for how long.  Text alone cannot: the model may think
+;; for minutes and stream nothing (the Claude CLI never sends thinking
+;; text), write a long tool input, or wait on a slow tool.  The line is
+;; an overlay string, so its spinner ticks without editing the buffer.
+
+(defun harness-chat--spinner-frame ()
+  "Return the current frame of the running spinner."
+  (aref harness-chat--spinner-frames (% harness-chat--spinner-index (length harness-chat--spinner-frames))))
+
+(defun harness-chat--activity-text (activity)
+  "Say what ACTIVITY (`agent/activity', wire shape) is, such as \"Thinking\".
+The text ends in an ellipsis.  Without an activity, as from a harness
+that does not report one, it is \"Working\"."
+  (let* ((tool (plist-get activity :tool))
+         (count (plist-get activity :count))
+         (call (concat (or (plist-get activity :title) tool "a tool")
+                       (if (and (numberp count) (> count 1)) (format " and %d more" (1- count)) ""))))
+    (concat
+     (pcase (plist-get activity :phase)
+       ("waiting" "Waiting for the model")
+       ("thinking" "Thinking")
+       ("writing" "Writing")
+       ("compacting" "Compacting the conversation")
+       ("tool-input" (concat "Preparing " (or tool "a tool call")))
+       ("tool" (if (harness-json-true-p (plist-get activity :checking))
+                   (concat "Checking permission for " call)
+                 (concat "Running " call)))
+       (_ "Working"))
+     "\N{U+2026}")))
+
+(defun harness-chat--activity-label (activity)
+  "Return a word or two for ACTIVITY, for the mode line: \"thinking\", \"bash\"."
+  (let ((tool (or (plist-get activity :tool) "a call")))
+    (pcase (plist-get activity :phase)
+      ("tool-input" (concat "preparing " tool))
+      ("tool" (if (harness-json-true-p (plist-get activity :checking)) (concat "checking " tool) tool))
+      ((and (pred stringp) phase) phase)
+      (_ "working"))))
+
+(defun harness-chat--activity-details (activity)
+  "Return what shows ACTIVITY progressing, as a list of strings.
+The size of the tool input written so far, the latest line a tool reported."
+  (delq nil (list (let ((chars (plist-get activity :chars)))
+                    (and (numberp chars) (> chars 0) (format "%s chars" (harness-format-tokens chars))))
+                  (let ((detail (plist-get activity :detail)))
+                    (and (stringp detail) (not (string-blank-p detail)) detail)))))
+
+(defun harness-chat--format-elapsed (seconds)
+  "Format SECONDS as a running clock: 7s, 1m04s, 2h05m."
+  (let ((s (max 0 (truncate seconds))))
+    (cond ((< s 60) (format "%ds" s))
+          ((< s 3600) (format "%dm%02ds" (/ s 60) (% s 60)))
+          (t (format "%dh%02dm" (/ s 3600) (/ (% s 3600) 60))))))
+
+(defun harness-chat--activity-line ()
+  "Return the activity line due now, or nil unless the session runs.
+A blocked session shows its panel instead."
+  (when (and (equal (plist-get (harness-chat--session) :status) "running")
+             (not harness-chat--dead))
+    (let* ((activity harness-chat--activity)
+           (since (or (plist-get activity :since) harness-chat--turn-start))
+           (elapsed (and (numberp since) (- (float-time) since)))
+           (head (concat (harness-chat--activity-text activity)
+                         (if (and elapsed (>= elapsed 1)) (concat " " (harness-chat--format-elapsed elapsed)) "")))
+           (text (string-join (cons head (harness-chat--activity-details activity)) " \N{U+00B7} "))
+           (w (car (harness-chat--windows)))
+           ;; One screen line, so the box below never jumps.
+           (room (max 12 (- (if w (window-body-width w) 80) 4))))
+      (concat " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
+              (propertize (truncate-string-to-width text room nil nil "\N{U+2026}") 'face 'harness-dim-face)
+              "\n"))))
+
+(defun harness-chat--activity-overlay ()
+  "Return the activity line's overlay, empty at the end of the transcript.
+FRONT-ADVANCE and REAR-ADVANCE carry it past blocks appended there."
+  (let ((pos (marker-position harness-chat--transcript-end))
+        (ov harness-chat--activity-overlay))
+    (if (and ov (overlay-buffer ov))
+        (unless (and (= pos (overlay-start ov)) (= pos (overlay-end ov)))
+          (move-overlay ov pos pos))
+      (setq ov (make-overlay pos pos nil t t)
+            harness-chat--activity-overlay ov)
+      (overlay-put ov 'harness-chat-activity t))
+    ov))
+
+(defun harness-chat--show-activity (line)
+  "Make LINE, or nothing when nil, the activity line.
+A line appearing or going changes the height of the text above the
+compose box: its padding is sized again and the windows that showed
+the end keep showing it."
+  (let* ((ov (harness-chat--activity-overlay))
+         (old (overlay-get ov 'before-string)))
+    (cond ((equal old line))
+          ((eq (null old) (null line)) (overlay-put ov 'before-string line))
+          (t (let ((bottom (harness-chat--bottom-windows)))
+               (overlay-put ov 'before-string line)
+               (dolist (w (harness-chat--windows)) (harness-compose-repad w))
+               (dolist (w bottom) (harness-chat--pin w)))))))
+
+(defun harness-chat--refresh-activity ()
+  "Draw the activity line as things are now."
+  (when (and harness-chat--transcript-end (marker-buffer harness-chat--transcript-end))
+    (harness-chat--show-activity (harness-chat--activity-line))))
+
+(defun harness-chat--on-activity (activity)
+  "Note that the running turn now does ACTIVITY (nil once it ended)."
+  (setq harness-chat--activity activity)
+  (when (and activity (equal (plist-get (harness-chat--session) :status) "running"))
+    (harness-chat--start-spinner))
+  (harness-chat--refresh-activity)
+  (force-mode-line-update))
+
+(defun harness-chat--fetch-activity ()
+  "Ask what the session's turn does now: the buffer may open while it runs.
+Changes then arrive as `_harness/activity' updates."
+  (let ((buf (current-buffer)))
+    (harness-ui-call "_harness/agent/activity" (list :session-id harness-ui-session-id)
+                     (lambda (activity)
+                       (when (buffer-live-p buf)
+                         (with-current-buffer buf (harness-chat--on-activity activity))))
+                     #'ignore)))
+
 ;;;; Header and mode lines
 
 (defun harness-chat--segment-map (command)
@@ -1988,9 +2128,9 @@ conversation and gives it its [close] and [keep] buttons this way.")
      (harness-chat--header-prefix)
      " "
      (if running
-         (propertize (aref harness-chat--spinner-frames
-                           (% harness-chat--spinner-index (length harness-chat--spinner-frames)))
-                     'face 'harness-status-running-face 'help-echo "Running")
+         (propertize (harness-chat--spinner-frame)
+                     'face 'harness-status-running-face
+                     'help-echo (harness-chat--activity-text harness-chat--activity))
        (propertize (harness-ui-status-icon status) 'help-echo status))
      " "
      (harness-chat--segment name #'harness-rename-session "Session name (mouse-1: rename)" 'bold)
@@ -2025,6 +2165,11 @@ conversation and gives it its [close] and [keep] buttons this way.")
      (if (and harness-chat--turn-start (member status '("running" "blocked")))
          (propertize (format " %s" (harness-format-duration (- (float-time) harness-chat--turn-start)))
                      'face 'harness-dim-face 'help-echo "Turn duration")
+       "")
+     (if (and harness-chat--activity (equal status "running"))
+         (propertize (concat " \N{U+00B7} " (harness-chat--activity-label harness-chat--activity))
+                     'face 'harness-dim-face
+                     'help-echo (harness-chat--activity-text harness-chat--activity))
        ""))))
 
 (defun harness-chat-reposition (position)
@@ -2033,16 +2178,24 @@ conversation and gives it its [close] and [keep] buttons this way.")
   (harness-ui-display-session harness-ui-session-id position))
 
 (defun harness-chat--spinner-tick ()
-  "Advance the spinner while a visible session runs; stop otherwise."
+  "Advance the spinners and activity lines of the visible running sessions.
+The timer runs while a session with a buffer runs, hidden ones included,
+so a buffer shown again mid-turn ticks at once rather than after the
+next change of its session; a blocked one, which may wait for hours,
+keeps it only while it is visible."
   (let ((any nil))
-    (maphash (lambda (_ buf)
-               (when (and (buffer-live-p buf) (get-buffer-window buf 'visible))
-                 (with-current-buffer buf
-                   (when (member (plist-get (harness-chat--session) :status) '("running" "blocked"))
-                     (setq any t)
-                     (force-mode-line-update)))))
-             harness-chat--buffers)
     (cl-incf harness-chat--spinner-index)
+    (maphash (lambda (_ buf)
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (let ((status (plist-get (harness-chat--session) :status))
+                         (visible (get-buffer-window buf 'visible)))
+                     (when (or (equal status "running") (and visible (equal status "blocked")))
+                       (setq any t))
+                     (when (and visible (member status '("running" "blocked")))
+                       (force-mode-line-update)
+                       (harness-chat--refresh-activity))))))
+             harness-chat--buffers)
     (unless any
       (when harness-chat--spinner-timer (cancel-timer harness-chat--spinner-timer))
       (setq harness-chat--spinner-timer nil))))

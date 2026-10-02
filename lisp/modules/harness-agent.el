@@ -37,6 +37,10 @@ Work carefully and verify what you do. Prefer the provided tools over guessing; 
   "Seconds to wait for a provider to acknowledge a cancel before forcing it."
   :type 'number :group 'harness)
 
+(defcustom harness-agent-progress-interval 0.5
+  "Seconds between announcements of a running tool's progress."
+  :type 'number :group 'harness)
+
 (cl-defstruct (harness-agent-turn (:copier nil))
   session-id promise handle (steps 0) cancelled steering
   text-node text-buf think-node think-buf
@@ -52,6 +56,140 @@ Work carefully and verify what you do. Prefer the provided tools over guessing; 
 (defun harness-agent-running-p (session-id)
   "Non-nil while SESSION-ID has a running turn."
   (and (gethash session-id harness-agent--turns) t))
+
+;;;; Activity
+;;
+;; What a running turn is doing right now, so a UI can say so while
+;; nothing else changes: the model may think for minutes without
+;; streaming a word, or write a tool call's input, and a tool may run
+;; for as long.  The tables live beside the turn records rather than in
+;; them, so a reload keeps both working.
+
+(defvar harness-agent--activities (make-hash-table :test 'equal)
+  "Session id -> what its running turn is doing (see `agent/activity').")
+
+(defvar harness-agent--calls (make-hash-table :test 'equal)
+  "Session id -> the tool calls its turn runs, oldest first.
+Each is (CALL-ID :tool NAME :title TITLE :since FLOAT :checking BOOL
+:detail TEXT).")
+
+(defvar harness-agent--progress-timers (make-hash-table :test 'equal)
+  "Session id -> the timer that announces held-back tool progress.")
+
+(defun harness-agent--compact (plist)
+  "Return PLIST without the keys whose value is nil."
+  (cl-loop for (k v) on plist by #'cddr when v append (list k v)))
+
+(defun harness-agent--set-activity (sid activity)
+  "Record ACTIVITY as what SID's turn does now; announce it when it changed.
+ACTIVITY is a plist with `:phase', or nil once the turn is over.  It
+keeps the start time of the activity it continues (same phase and
+tool) unless it brings its own `:since'."
+  (let* ((old (gethash sid harness-agent--activities))
+         (new (and activity
+                   (append (harness-plist-remove activity :since)
+                           (list :since
+                                 (or (plist-get activity :since)
+                                     (and old (eq (plist-get old :phase) (plist-get activity :phase))
+                                          (equal (plist-get old :tool) (plist-get activity :tool))
+                                          (plist-get old :since))
+                                     (float-time)))))))
+    (unless (equal old new)
+      (if new
+          (puthash sid new harness-agent--activities)
+        (remhash sid harness-agent--activities))
+      (harness-emit 'agent/activity-changed sid new))))
+
+(defun harness-agent--calls-activity (sid)
+  "Return the activity of the tool calls SID's turn runs, or nil if none."
+  (when-let* ((calls (gethash sid harness-agent--calls)))
+    (let ((oldest (cdar calls)))
+      (harness-agent--compact
+       (list :phase 'tool
+             :tool (plist-get oldest :tool)
+             :title (plist-get oldest :title)
+             :checking (plist-get oldest :checking)
+             :detail (plist-get oldest :detail)
+             :count (and (cdr calls) (length calls))
+             :since (apply #'min (mapcar (lambda (c) (plist-get (cdr c) :since)) calls)))))))
+
+(defun harness-agent--update-activity (sid &optional activity)
+  "Announce what SID's turn does: its running tool calls, else ACTIVITY.
+Without either it waits for the model.  Nothing happens once the turn
+is over (a tool of a cancelled turn may finish later).  Never signals:
+it runs on the turn's own path, between a tool's result and the
+provider waiting for it."
+  (condition-case err
+      (when (gethash sid harness-agent--turns)
+        (harness-agent--set-activity
+         sid (or (harness-agent--calls-activity sid) activity (list :phase 'waiting))))
+    (error (harness-log 'warn "agent: activity of %s: %S" sid err))))
+
+(defun harness-agent--clear-activity (sid)
+  "Forget what SID's turn was doing; it has ended.  Never signals."
+  (condition-case err
+      (progn
+        (when-let* ((timer (gethash sid harness-agent--progress-timers)))
+          (cancel-timer timer)
+          (remhash sid harness-agent--progress-timers))
+        (remhash sid harness-agent--calls)
+        (harness-agent--set-activity sid nil))
+    (error (harness-log 'warn "agent: clearing the activity of %s: %S" sid err))))
+
+(defun harness-agent--add-call (sid call-id name title)
+  "Record that SID's turn runs tool call CALL-ID of NAME, labelled TITLE.
+It counts as having its permission checked until that is decided."
+  (puthash sid (append (gethash sid harness-agent--calls)
+                       (list (list call-id :tool name :title title :since (float-time) :checking t)))
+           harness-agent--calls))
+
+(defun harness-agent--remove-call (sid call-id)
+  "Record that SID's tool call CALL-ID is over."
+  (let ((calls (cl-remove call-id (gethash sid harness-agent--calls) :key #'car :test #'equal)))
+    (if calls (puthash sid calls harness-agent--calls) (remhash sid harness-agent--calls))))
+
+(defun harness-agent--on-permission-decided (sid request _decision)
+  "The call in REQUEST of session SID runs, or is refused, from now on."
+  (when-let* ((call (assoc (plist-get request :call-id) (gethash sid harness-agent--calls))))
+    (setcdr call (plist-put (plist-put (cdr call) :checking nil) :since (float-time)))
+    (harness-agent--update-activity sid)))
+
+(defun harness-agent--progress-line (text)
+  "Return the last visible line of tool progress TEXT, or nil.
+Terminal colour codes and other control characters go; a progress bar
+redrawn with carriage returns gives its latest state."
+  (let* ((text (replace-regexp-in-string "\e\\[[0-9;?]*[A-Za-z]" "" (or text "")))
+         (lines (split-string text "[\n\r]+" t "[ \t]+"))
+         (line (and lines (string-trim (replace-regexp-in-string "[[:cntrl:]]+" " " (car (last lines)))))))
+    (unless (or (null line) (string-empty-p line))
+      (harness-truncate-end line 80))))
+
+(defun harness-agent--on-tool-progress (sid call-id text)
+  "Note progress TEXT from SID's tool call CALL-ID; announce it now and then."
+  (when-let* ((call (assoc call-id (gethash sid harness-agent--calls)))
+              (line (harness-agent--progress-line text)))
+    (setcdr call (plist-put (cdr call) :detail line))
+    (unless (gethash sid harness-agent--progress-timers)
+      (harness-agent--update-activity sid)
+      ;; Further progress within the interval goes out once it is up.
+      (puthash sid (run-at-time harness-agent-progress-interval nil
+                                (lambda ()
+                                  (remhash sid harness-agent--progress-timers)
+                                  (when (gethash sid harness-agent--turns)
+                                    (harness-agent--update-activity sid))))
+               harness-agent--progress-timers))))
+
+(harness-defmethod agent/activity (session-id)
+  "Return what SESSION-ID's running turn is doing now, or nil.
+The value is a plist (:phase PHASE :since FLOAT ...), `:since' being
+when PHASE began.  PHASE is `waiting' (for the model), `thinking',
+`writing', `tool-input' (the model writes the input of a call to
+`:tool', `:chars' characters so far), `compacting', or `tool': calls
+run, the oldest of them `:tool' with `:title', `:checking' while its
+permission is decided and `:detail', its latest progress, and
+`:count' when several run.  Every change is announced as
+`agent/activity-changed'."
+  (gethash session-id harness-agent--activities))
 
 ;;;; Prompt assembly
 
@@ -221,6 +359,7 @@ An inactive session is resumed first: sending to it brings it back."
                             :provider-state (plist-get session :provider-state)
                             :on-event (lambda (ev) (harness-agent--on-event turn ev)))))
         (harness-emit 'agent/step-started sid (harness-agent-turn-steps turn))
+        (harness-agent--update-activity sid '(:phase waiting))
         (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
 
 (defun harness-agent--take-steering (turn)
@@ -233,6 +372,10 @@ An inactive session is resumed first: sending to it brings it back."
   (let ((sid (harness-agent-turn-session-id turn)))
     (pcase (plist-get ev :type)
       ('start nil)
+      ('activity
+       (harness-agent--update-activity
+        sid (harness-agent--compact (list :phase (plist-get ev :phase) :tool (plist-get ev :tool)
+                                          :chars (plist-get ev :chars)))))
       ('text (harness-agent--stream turn 'assistant (plist-get ev :delta)))
       ('thinking (harness-agent--stream turn 'thinking (plist-get ev :delta)))
       ('tool-call (harness-agent--tool-call turn ev))
@@ -260,28 +403,39 @@ An inactive session is resumed first: sending to it brings it back."
       (other (harness-log 'debug "agent: unknown provider event %S" other)))))
 
 (defun harness-agent--stream (turn kind delta)
-  "Append DELTA of KIND (assistant or thinking) to the live node of TURN."
+  "Append DELTA of KIND (assistant or thinking) to the live node of TURN.
+Whitespace that comes before any visible text is held back and opens
+the node together with that text, so a stray newline the model emits
+before a tool call never becomes an empty message."
   (when (and delta (not (string-empty-p delta)))
     (let* ((sid (harness-agent-turn-session-id turn))
-           (thinking (eq kind 'thinking)))
+           (thinking (eq kind 'thinking))
+           (phase (if thinking 'thinking 'writing)))
+      (unless (eq phase (plist-get (gethash sid harness-agent--activities) :phase))
+        (harness-agent--update-activity sid (list :phase phase)))
       ;; Switching between thinking and text closes the other live node.
-      (if thinking
-          (when (harness-agent-turn-text-node turn) (harness-agent--finalize turn 'assistant))
-        (when (harness-agent-turn-think-node turn) (harness-agent--finalize turn 'thinking)))
-      (let ((node-id (if thinking (harness-agent-turn-think-node turn) (harness-agent-turn-text-node turn))))
-        (if node-id
-            (let ((buf (if thinking (harness-agent-turn-think-buf turn) (harness-agent-turn-text-buf turn))))
-              (setq buf (concat buf delta))
-              (if thinking (setf (harness-agent-turn-think-buf turn) buf) (setf (harness-agent-turn-text-buf turn) buf))
-              (harness-call 'session/update-node sid node-id :content buf :transient t))
-          (let ((node (harness-call 'session/append sid (list :kind kind :content delta))))
-            (setq node-id (plist-get node :id))
-            (if thinking
-                (setf (harness-agent-turn-think-node turn) node-id (harness-agent-turn-think-buf turn) delta)
-              (setf (harness-agent-turn-text-node turn) node-id (harness-agent-turn-text-buf turn) delta))))
-        (harness-emit 'agent/stream sid node-id kind delta)))))
+      (harness-agent--finalize turn (if thinking 'assistant 'thinking))
+      (let ((node-id (if thinking (harness-agent-turn-think-node turn) (harness-agent-turn-text-node turn)))
+            (buf (concat (if thinking (harness-agent-turn-think-buf turn) (harness-agent-turn-text-buf turn))
+                         delta)))
+        (if thinking (setf (harness-agent-turn-think-buf turn) buf) (setf (harness-agent-turn-text-buf turn) buf))
+        (cond
+         (node-id
+          (harness-call 'session/update-node sid node-id :content buf :transient t)
+          (harness-emit 'agent/stream sid node-id kind delta))
+         ;; Only whitespace so far: held back.
+         ((string-blank-p buf))
+         (t
+          (setq node-id (plist-get (harness-call 'session/append sid (list :kind kind :content buf)) :id))
+          (if thinking
+              (setf (harness-agent-turn-think-node turn) node-id)
+            (setf (harness-agent-turn-text-node turn) node-id))
+          ;; The node's first chunk is all it opened with.
+          (harness-emit 'agent/stream sid node-id kind buf)))))))
 
 (defun harness-agent--finalize (turn kind)
+  "Write the live node of KIND (assistant or thinking) of TURN for good.
+Whitespace held back for a node that never got visible text is dropped."
   (let* ((sid (harness-agent-turn-session-id turn))
          (thinking (eq kind 'thinking))
          (node-id (if thinking (harness-agent-turn-think-node turn) (harness-agent-turn-text-node turn)))
@@ -289,10 +443,10 @@ An inactive session is resumed first: sending to it brings it back."
     (when node-id
       (harness-call 'session/update-node sid node-id :content (or buf "")
                     :meta (list :model (plist-get (harness-call 'session/get sid) :model)
-                                :usage (and (not thinking) (harness-agent-turn-last-usage turn))))
-      (if thinking
-          (setf (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil)
-        (setf (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil)))))
+                                :usage (and (not thinking) (harness-agent-turn-last-usage turn)))))
+    (if thinking
+        (setf (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil)
+      (setf (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil))))
 
 (defun harness-agent--finalize-live (turn)
   (harness-agent--finalize turn 'thinking)
@@ -309,11 +463,20 @@ An inactive session is resumed first: sending to it brings it back."
     (cl-incf (harness-agent-turn-pending turn))
     (let ((node (harness-call 'session/append sid
                               (list :kind 'tool-call :tool name :call-id call-id :input input
-                                    :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name)))))
+                                    :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name))))
+          (execution nil))
       (harness-emit 'agent/tool-call sid node)
+      ;; Recorded before it starts, so its permission decision finds it.
+      (harness-agent--add-call sid call-id name (plist-get node :title))
+      (setq execution (harness-call-async 'tools/execute sid (list :id call-id :name name :input input)))
+      (harness-agent--update-activity sid)
       (harness-then
-       (harness-call-async 'tools/execute sid (list :id call-id :name name :input input))
+       execution
        (lambda (result)
+         ;; Before `respond': sending the result can run the provider's
+         ;; process filter, whose news must not hide behind this call.
+         (harness-agent--remove-call sid call-id)
+         (harness-agent--update-activity sid)
          (condition-case err
              (let* ((steer (harness-agent--take-steering turn))
                     (content (plist-get result :content))
@@ -339,6 +502,8 @@ An inactive session is resumed first: sending to it brings it back."
          (cl-decf (harness-agent-turn-pending turn))
          (harness-agent--maybe-continue turn))
        (lambda (err)
+         (harness-agent--remove-call sid call-id)
+         (harness-agent--update-activity sid)
          (let ((msg (format "Tool %s failed: %s" name (harness-error-message err))))
            (ignore-errors
              (harness-call 'session/append sid (list :kind 'tool-result :call-id call-id :output msg :is-error t)))
@@ -375,6 +540,7 @@ An inactive session is resumed first: sending to it brings it back."
   (let ((sid (harness-agent-turn-session-id turn)))
     (when (eq (gethash sid harness-agent--turns) turn)
       (remhash sid harness-agent--turns)
+      (harness-agent--clear-activity sid)
       (when (harness-call 'session/exists-p sid)
         (harness-call 'session/usage-add sid (list :turns 1))
         (let ((session (harness-call 'session/get sid)))
@@ -424,7 +590,9 @@ An inactive session is resumed first: sending to it brings it back."
               (agent/step-started . "(SESSION-ID STEP)")
               (agent/stream . "(SESSION-ID NODE-ID KIND DELTA)")
               (agent/tool-call . "(SESSION-ID NODE)") (agent/tool-result . "(SESSION-ID NODE)")
-              (agent/steered . "(SESSION-ID)") (agent/quota . "(SESSION-ID WINDOWS)")))
+              (agent/steered . "(SESSION-ID)") (agent/quota . "(SESSION-ID WINDOWS)")
+              (agent/activity-changed
+               . "(SESSION-ID ACTIVITY) when what a running turn does changes; ACTIVITY nil once it ends (see `agent/activity')")))
   (harness-declare-event (car ev) (cdr ev)))
 
 ;;;; Exit
@@ -441,14 +609,21 @@ was receiving."
            harness-agent--turns))
 
 (defun harness-agent--init ()
-  "Save streamed text when Emacs exits (idempotent)."
-  (add-hook 'kill-emacs-hook #'harness-agent--save-live))
+  "Save streamed text when Emacs exits; follow tool calls (idempotent)."
+  (add-hook 'kill-emacs-hook #'harness-agent--save-live)
+  (harness-on 'permission/decided #'harness-agent--on-permission-decided)
+  (harness-on 'tools/progress #'harness-agent--on-tool-progress))
 
 (harness-define-module 'agent
   :doc "The turn loop: prompt, stream, run tools, steer, queue."
   :requires '(session provider tools)
   :init #'harness-agent--init
   :shutdown #'harness-agent--save-live)
+
+;; A reload does not initialise a running module again: subscribe the
+;; handlers this version adds now.
+(when (harness-module-ready-p 'agent)
+  (harness-agent--init))
 
 (provide 'harness-agent)
 ;;; harness-agent.el ends here

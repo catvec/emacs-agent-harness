@@ -13,6 +13,9 @@
 (require 'harness-test-helpers)
 (require 'harness-acp)
 
+(defvar harness-provider-claude-program)
+(declare-function harness-provider-claude-close-all "harness-provider-claude")
+
 (defvar harness-ui-chat-test-events nil "Recorded (EVENT . ARGS), newest first.")
 
 (defun harness-ui-chat-test-record-event (event args)
@@ -310,6 +313,124 @@ buffer-local function changes only its buffer's header."
                                           :_harness (list :nodeId "n-think")))
         (should (equal "thinking" (harness-chat-block-kind (gethash "n-think" harness-chat--blocks))))
         (should (equal '("n-think" "n-live") harness-chat--order))))))
+
+;;;; The activity line
+
+(defun harness-ui-chat-test-activity-line (buf)
+  "Return the activity line BUF shows, or nil."
+  (with-current-buffer buf
+    (let ((ov harness-chat--activity-overlay))
+      (and ov (overlay-buffer ov) (overlay-get ov 'before-string)))))
+
+(defun harness-ui-chat-test-set-status (buf status)
+  "Make BUF's session STATUS, as a `_harness/session' push would."
+  (with-current-buffer buf
+    (let ((session (plist-put (copy-sequence (harness-chat--session)) :status status)))
+      (harness-ui-cache-session session)
+      (harness-chat--apply-update (list :sessionUpdate "_harness/session" :session session)))))
+
+(ert-deftest harness-ui-chat-activity-line-says-what-runs ()
+  "While the session runs, the end of the transcript says what it does."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (cl-flet ((activity (&rest plist)
+                  (with-current-buffer buf
+                    (harness-chat--apply-update (list :sessionUpdate "_harness/activity" :activity plist))))
+                (line () (harness-ui-chat-test-activity-line buf))
+                (shows (regexp) (string-match-p regexp (or (harness-ui-chat-test-activity-line buf) ""))))
+        (should-not (line))
+        ;; Running before anything is known: still a live line.
+        (harness-ui-chat-test-set-status buf "running")
+        (should (shows "Working"))
+        (activity :phase "waiting" :since (float-time))
+        (should (shows "Waiting for the model"))
+        (activity :phase "thinking" :since (- (float-time) 75))
+        (should (shows "Thinking.* 1m15s"))
+        (activity :phase "tool-input" :tool "write_file" :chars 4200 :since (float-time))
+        (should (shows "Preparing write_file.*4\\.2k chars"))
+        (activity :phase "tool" :tool "bash" :title "bash npm test" :checking t :since (float-time))
+        (should (shows "Checking permission for bash npm test"))
+        (activity :phase "tool" :tool "bash" :title "bash npm test" :detail "PASS b.test" :since (float-time))
+        (should (shows "Running bash npm test.*PASS b\\.test"))
+        (with-current-buffer buf
+          (should (string-match-p "running.* bash" (harness-chat--mode-line))))
+        (activity :phase "tool" :tool "bash" :title "bash npm test" :count 3 :since (float-time))
+        (should (shows "Running bash npm test and 2 more"))
+        ;; One line, under the last block and above the box, wherever
+        ;; blocks and the tail are drawn.
+        (should (= 1 (cl-count ?\n (line))))
+        (with-current-buffer buf
+          (cl-flet ((at-end () (= (overlay-start harness-chat--activity-overlay)
+                                  (marker-position harness-chat--transcript-end))))
+            (should (at-end))
+            (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                              :node (list :id "n-a" :kind "assistant" :content "Done")))
+            (should (at-end))
+            (harness-chat--render-tail)
+            (should (at-end))
+            (should (< (overlay-start harness-chat--activity-overlay) harness-compose-start))
+            ;; The spinner turns without the buffer changing.
+            (let ((before (line))
+                  (tick (buffer-modified-tick)))
+              (harness-chat--spinner-tick)
+              (harness-chat--refresh-activity)
+              (should-not (equal before (line)))
+              (should (= tick (buffer-modified-tick))))))
+        ;; Blocked: the panel says it; idle: nothing, and the turn is forgotten.
+        (harness-ui-chat-test-set-status buf "blocked")
+        (should-not (line))
+        (harness-ui-chat-test-set-status buf "idle")
+        (should-not (line))
+        (with-current-buffer buf (should-not harness-chat--activity))))))
+
+(ert-deftest harness-ui-chat-fake-cli-shows-every-gap ()
+  "A turn through the real provider, against the fake CLI, never looks stalled.
+The fake stops in each gap a real turn has: before the model answers,
+while it writes a tool input, while it thinks (the CLI sends no
+thinking text), and in the middle of its text.  In each the buffer says
+what is going on, and text streamed so far is in the transcript before
+the message is complete."
+  (harness-ui-chat-test-with
+    (let* ((gate (expand-file-name "gate" (harness-test-temp-dir)))
+           (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_GATE=" gate) process-environment)))
+      (harness-test-load-module 'provider-claude)
+      (setq harness-provider-claude-program (harness-test-fixture "fake-claude.py"))
+      (harness-define-tool "echo" :description "echo" :kind 'read
+                           :handler (lambda (input _ctx) (format "echo: %s" (plist-get input :text))))
+      (unwind-protect
+          (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                               :model "claude:claude-fable-5-1" :name "Gaps")
+                                 :id))
+                 (buf (harness-ui-chat-test-open sid)))
+            (cl-flet ((open (n) (write-region "" nil (format "%s.%d" gate n) nil 'silent))
+                      (wait-line (regexp what)
+                        (harness-test-wait (lambda () (string-match-p regexp (or (harness-ui-chat-test-activity-line buf) "")))
+                                           10 what)))
+              (harness-ui-chat-test-type buf "slow-start slow-tool slow-think slow-text")
+              (with-current-buffer buf (harness-chat-send))
+              (wait-line "Waiting for the model" "waiting before the first event")
+              (open 1)
+              (wait-line "Preparing echo.* 8 chars" "the tool input streaming")
+              (open 2)
+              ;; The call ran, and the model thinks without a word.
+              (wait-line "Thinking" "thinking")
+              (should (harness-ui-chat-test-blocks buf "tool-call"))
+              (should-not (harness-ui-chat-test-blocks buf "thinking"))
+              (open 3)
+              ;; Half the reply is on screen while the turn still runs.
+              (harness-test-wait (lambda () (harness-ui-chat-test-blocks buf "assistant")) 10 "the first delta")
+              (let ((block (car (harness-ui-chat-test-blocks buf "assistant"))))
+                (should (equal "Hel" (harness-chat-block-content block)))
+                (should (harness-ui-chat-test-find buf "Hel")))
+              (should (equal "running" (plist-get (harness-ui-session sid) :status)))
+              (should (string-match-p "Writing" (harness-ui-chat-test-activity-line buf)))
+              (should (= 0 (harness-ui-chat-test-turns-ended sid)))
+              (open 4)
+              (harness-test-wait (lambda () (= 1 (harness-ui-chat-test-turns-ended sid))) 10 "the turn to end")
+              (harness-test-wait (lambda () (not (harness-ui-chat-test-activity-line buf))) 5 "the line to go")
+              (should (equal "Hello" (harness-chat-block-content (car (harness-ui-chat-test-blocks buf "assistant")))))))
+        (harness-provider-claude-close-all)))))
 
 ;;;; Scrolling
 

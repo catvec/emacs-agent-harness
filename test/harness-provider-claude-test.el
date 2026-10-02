@@ -21,6 +21,7 @@
 (defvar harness-provider-claude--status)
 (defvar harness-provider-claude--asked)
 (defvar harness-provider-claude--probe)
+(defvar harness-provider-claude--blocks)
 (declare-function harness-provider-claude-close "harness-provider-claude")
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 (declare-function harness-provider-claude--command "harness-provider-claude")
@@ -724,6 +725,90 @@ session of its own instead of resuming, and writing into, the parent's."
     (harness-provider-claude--drop-stale-entries)
     (should-not (gethash "old" harness-provider-claude--sessions))
     (should (eq new (gethash "new" harness-provider-claude--sessions)))))
+
+;;;; Activity
+
+(defun harness-provider-claude-test--gate ()
+  "Return a fresh gate path for the fixture's pauses."
+  (expand-file-name "gate" (harness-test-temp-dir)))
+
+(defun harness-provider-claude-test--open (gate n)
+  "Let the fixture past its Nth pause on GATE."
+  (write-region "" nil (format "%s.%d" gate n) nil 'silent))
+
+(defun harness-provider-claude-test--activity (events phase)
+  "Return the activity events of PHASE in EVENTS, oldest first."
+  (cl-remove-if-not (lambda (e) (and (eq (plist-get e :type) 'activity)
+                                     (eq (plist-get e :phase) phase)))
+                    (reverse events)))
+
+(ert-deftest harness-provider-claude-reports-activity-in-gaps ()
+  "Thinking without text and a tool input still streaming are reported.
+The fixture stops in each gap, so what the provider said by then is
+what a user would see."
+  (harness-provider-claude-test--setup)
+  (let* ((gate (harness-provider-claude-test--gate))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_GATE=" gate) process-environment))
+         (events nil)
+         (request (plist-put (harness-provider-claude-test--request "act" "slow-tool slow-think paragraphs")
+                             :on-event
+                             (lambda (ev)
+                               (push ev events)
+                               (when (eq (plist-get ev :type) 'tool-call)
+                                 (funcall (plist-get ev :respond) '(:content "echo: ping" :is-error nil)))))))
+    (harness-call 'provider/complete request)
+    ;; Gap 1: the input of the echo call has started streaming.  The
+    ;; size sent just before the gap was held back by the throttle and
+    ;; goes out once its interval is up.
+    (harness-test-wait (lambda () (cl-find 8 (harness-provider-claude-test--activity events 'tool-input)
+                                           :key (lambda (e) (plist-get e :chars))))
+                       5 "the input size before the gap")
+    (let ((inputs (harness-provider-claude-test--activity events 'tool-input)))
+      (should (equal '(0 8) (mapcar (lambda (e) (plist-get e :chars)) inputs)))
+      (should (equal "echo" (plist-get (car inputs) :tool))))
+    (should-not (harness-provider-claude-test--find events 'tool-call))
+    (harness-provider-claude-test--open gate 1)
+    ;; Gap 2: thinking, of which the CLI sends no text.
+    (harness-test-wait (lambda () (harness-provider-claude-test--activity events 'thinking)) 5 "thinking")
+    (should (harness-provider-claude-test--find events 'tool-call))
+    (should-not (harness-provider-claude-test--find events 'thinking))
+    (should-not (harness-provider-claude-test--find events 'text))
+    (harness-provider-claude-test--open gate 2)
+    (harness-test-wait (lambda () (harness-provider-claude-test--find events 'done)) 5 "done")
+    (let ((types (harness-provider-claude-test--types (reverse events))))
+      ;; Writing is announced before its first delta, after the call.
+      (should (< (cl-position 'tool-call types)
+                 (cl-position (car (harness-provider-claude-test--activity events 'writing)) (reverse events))
+                 (cl-position 'text types))))
+    ;; No size report outlives its block: the call came after the last one.
+    (accept-process-output nil 0.4)
+    (let ((evs (reverse events)))
+      (should (< (cl-position (car (last (harness-provider-claude-test--activity events 'tool-input))) evs)
+                 (cl-position 'tool-call (harness-provider-claude-test--types evs)))))
+    ;; Whitespace-only deltas are text too: the paragraphs stay apart.
+    (should (equal "One.\n\nTwo." (harness-provider-claude-test--text (reverse events))))
+    (should (= 0 (hash-table-count harness-provider-claude--blocks)))
+    (harness-provider-claude-close "act")))
+
+(ert-deftest harness-provider-claude-reports-compacting ()
+  (harness-provider-claude-test--setup)
+  (let* ((gate (harness-provider-claude-test--gate))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_GATE=" gate) process-environment))
+         (events nil)
+         (request (plist-put (harness-provider-claude-test--request "cmp" "compacting")
+                             :on-event (lambda (ev) (push ev events)))))
+    (harness-call 'provider/complete request)
+    (harness-test-wait (lambda () (harness-provider-claude-test--activity events 'compacting)) 5 "compacting")
+    (should-not (harness-provider-claude-test--activity events 'waiting))
+    (harness-provider-claude-test--open gate 1)
+    (harness-test-wait (lambda () (harness-provider-claude-test--find events 'done)) 5 "done")
+    (let ((evs (reverse events)))
+      ;; Compacting ends with the CLI waiting for the model again.
+      (should (< (cl-position (car (harness-provider-claude-test--activity events 'compacting)) evs)
+                 (cl-position (car (harness-provider-claude-test--activity events 'waiting)) evs)))
+      (should (equal "Context compacted by Claude Code"
+                     (plist-get (harness-provider-claude-test--find evs 'hint) :text))))
+    (harness-provider-claude-close "cmp")))
 
 ;;;; Integration
 

@@ -407,10 +407,23 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N
        :list-cost F-OR-NIL :billing api|subscription|extra-usage|nil :plan ID)  ; see Usage record
 (:type provider-state :state PLIST)     ; persist on the session
+(:type activity :phase PHASE :tool NAME :chars N)  ; what the model is busy with, see below
 (:type quota :windows (…))
 (:type hint :text "…")                  ; provider-side notices (compaction, retries)
 (:type done :stop-reason end-turn|tool-use|max-tokens|cancelled|error :error "…")
 ```
+
+`activity` says what the model is busy with when its output alone would
+not: PHASE `thinking` (a thinking block began, whether or not its text
+streams), `writing` (a text block began), `tool-input` (the model writes
+the input of a call to `:tool`, `:chars` characters so far, reported at
+most every quarter second), `compacting`, or `waiting` (for the model
+again).  The Claude provider sends all of them: the CLI streams a
+thinking block without its text and a tool call's input as JSON
+fragments, so without them a turn shows nothing for as long as the model
+thinks or writes a large input.  The OpenAI provider sends `tool-input`.
+Text deltas that are only whitespace are still text (a `"\n\n"` delta
+separates paragraphs); the agent keeps them from opening a message.
 
 Forking: `provider/fork` returns a new provider state that may be marked
 pending (for the CLI: `(:cli-session-id PARENT :fork-pending t)`); the
@@ -665,16 +678,31 @@ request and resolves when answered).
   boundary (same value shape) — merge holds pause here.
 - Events `agent/turn-started SID`, `agent/turn-ended SID REASON`,
   `agent/stream SID NODE-ID KIND DELTA` (kind text|thinking),
-  `agent/tool-call SID NODE`, `agent/tool-result SID NODE`.
+  `agent/tool-call SID NODE`, `agent/tool-result SID NODE`,
+  `agent/activity-changed SID ACTIVITY`.
 - Turn loop: build system prompt → messages → `provider/complete`;
-  stream deltas into a live assistant/thinking node (created on first
-  delta, updated in place); on `tool-call` append a tool-call node, run
+  stream deltas into a live assistant/thinking node (created on the
+  first delta with visible text: whitespace before it is held back and
+  opens the node with that text, so a stray newline never makes an empty
+  message; updated in place); on `tool-call` append a tool-call node, run
   `tools/execute`, append the tool-result node; native loops re-call the
   provider until `end-turn`; hosted loops respond through `:respond`.
   Steering text is drained at every boundary.  `max-turns`
   (`harness-agent-max-steps`, 200) ends runaway loops.
 - Streaming updates of the live node are not persisted one by one; on
   exit (`kill-emacs-hook`) and shutdown the text streamed so far is.
+- Activity: `agent/activity SID` returns what the running turn does now,
+  nil when none runs: `(:phase PHASE :since FLOAT ...)`, `:since` being
+  when the phase began.  PHASE is `waiting` (for the model: at every
+  step and after each tool), `thinking`, `writing`, `tool-input`
+  (`:tool`, `:chars`), `compacting` (from the provider's `activity`
+  events and the deltas), or `tool` while calls run: the oldest is
+  `:tool` with `:title`, `:checking` until its permission is decided
+  (its time then starts again), `:detail` the last line of its
+  `tools/progress` (at most every `harness-agent-progress-interval`,
+  0.5 s), and `:count` when several run.  Every change is announced as
+  `agent/activity-changed`, with nil when the turn ends.  The state
+  lives beside the turn records, so a reload keeps it.
 
 ### usage
 
@@ -1121,7 +1149,9 @@ Wire: JSON-RPC 2.0, one message per line.  Standard ACP methods:
 `user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk`,
 `tool_call`, `tool_call_update`, `plan`, `current_mode_update`, and
 the extension kinds `_harness/session` (full session plist after any
-change), `_harness/node` (a finalised or updated node), `_harness/hint`.
+change), `_harness/node` (a finalised or updated node), `_harness/hint`,
+`_harness/activity` (`activity`: what the running turn does, as
+`agent/activity` returns it; null once the turn ends).
 Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}]}` → `{outcome:{outcome:"selected",optionId}}`
 and `_harness/ask_user {sessionId, requestId, question, options}` → `{answer}`.
@@ -1179,7 +1209,16 @@ stays snappy.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
 the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
-Auto-scroll follows unless the user scrolled up.  A block whose renderer
+Auto-scroll follows unless the user scrolled up.  While the session
+runs, an activity line under the last block says what the turn does
+and for how long: waiting for the model, thinking, writing, preparing a
+tool call (with the size of its input so far), running one (with the
+last line it reported), checking its permission, or compacting, behind
+a spinner.  It is an overlay string redrawn by the spinner's timer, so
+it ticks without editing the buffer; a blocked session shows its panel
+instead, and the mode line names the phase too.  A buffer opened
+mid-turn asks `agent/activity`; a harness that reports none gets
+"Working" with the turn's duration.  A block whose renderer
 signals is shown unformatted with a note, so one bad node never costs the
 buffer the rest of its transcript or its compose box.  Opening a session
 from any view never resumes it: an inactive session shows its transcript,
