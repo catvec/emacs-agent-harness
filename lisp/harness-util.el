@@ -10,6 +10,12 @@
 ;;   object, any other list is an array, `nil' is null, `t' is true,
 ;;   `:false' is false, `:empty' is an empty object, and vectors are
 ;;   arrays.  Use `harness-json-array' for an empty array.
+;; - `harness-json-encode' returns bytes for a process, a file or an
+;;   HTTP body: since Emacs 30 `json-serialize' gives unibyte UTF-8.
+;;   JSON that goes inside other text (a prompt, a tool result) or
+;;   inside other JSON as a string value comes from
+;;   `harness-json-encode-text': the bytes would turn into raw-byte
+;;   characters there, which the next `json-serialize' rejects.
 ;;
 ;; Everything else here is plumbing: ids, time, paths and formatting.
 
@@ -54,8 +60,21 @@
    (t (format "%s" obj))))
 
 (defun harness-json-encode (obj)
-  "Encode OBJ (plist/list convention, see Commentary) as a JSON string."
+  "Encode OBJ (plist/list convention, see Commentary) as a JSON string.
+Since Emacs 30 the string is unibyte, the UTF-8 bytes, ready for a
+process, a file or an HTTP body.  Use `harness-json-encode-text' for
+JSON that goes inside other text or inside other JSON."
   (json-serialize (harness--json-prepare obj)))
+
+(defun harness-json-encode-text (obj)
+  "Encode OBJ like `harness-json-encode', as text rather than bytes.
+The result is a multibyte string of characters, so it can be put into
+other text with `format' or `concat', and into other JSON as a string
+value.  The bytes `harness-json-encode' returns would turn into
+raw-byte characters there (\"\\342\\234\\227\" for U+2717), which
+`json-serialize' rejects."
+  (let ((json (harness-json-encode obj)))
+    (if (multibyte-string-p json) json (decode-coding-string json 'utf-8-unix))))
 
 (defun harness-json-parse (string)
   "Parse JSON STRING into the plist convention.  Return nil on empty input."

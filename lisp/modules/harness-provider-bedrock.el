@@ -1338,7 +1338,7 @@ tool calls."
              ((plist-get b :toolUse)
               (let ((use (plist-get b :toolUse)))
                 (list :text (format "[called tool %s with %s]" (plist-get use :name)
-                                    (harness-json-encode (plist-get use :input))))))
+                                    (harness-json-encode-text (plist-get use :input))))))
              ((plist-get b :toolResult)
               (let ((result (plist-get b :toolResult)))
                 (list :text (format "[result of tool call %s%s]\n%s" (plist-get result :toolUseId)

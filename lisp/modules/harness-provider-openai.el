@@ -348,8 +348,9 @@ hides the others."
          (push (list :id (plist-get b :id)
                      :type "function"
                      :function (list :name (plist-get b :name)
+                                     ;; A string inside the body's JSON: text, not bytes.
                                      :arguments (if (plist-get b :input)
-                                                    (harness-json-encode (plist-get b :input))
+                                                    (harness-json-encode-text (plist-get b :input))
                                                   "{}")))
                calls))))
     (let ((text (string-join (nreverse texts) ""))

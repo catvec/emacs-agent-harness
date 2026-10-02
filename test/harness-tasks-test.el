@@ -1053,6 +1053,23 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (should (equal (list id) (harness-tasks-test--stored-ids global)))
       (should-not (file-exists-p (file-name-directory store))))))
 
+(ert-deftest harness-tasks-store-with-non-ascii-text-is-not-written-again ()
+  ;; What a store holds is compared as text, the way it is read, so saving
+  ;; what was just read is skipped for non-ASCII text too.
+  (harness-tasks-test-with
+    (let* ((path (expand-file-name "store.json" harness-state-directory))
+           (prompt "Fix caf\N{U+E9} \N{U+2717}")
+           (obj (list :tasks (harness-json-array (list (list :id "t1" :prompt prompt)))))
+           (writes 0))
+      (harness-tasks--write-json path obj)
+      (harness-tasks--forget-stores)
+      (should (equal prompt (plist-get (car (plist-get (harness-tasks--read-json path) :tasks)) :prompt)))
+      (cl-letf* ((write (symbol-function 'harness-write-file-atomically))
+                 ((symbol-function 'harness-write-file-atomically)
+                  (lambda (&rest args) (cl-incf writes) (apply write args))))
+        (harness-tasks--write-json path obj))
+      (should (= 0 writes)))))
+
 (ert-deftest harness-tasks-leave-another-harness-store-alone ()
   "Another live harness's repository store is left alone; a gone one's taken over."
   (harness-tasks-test-with

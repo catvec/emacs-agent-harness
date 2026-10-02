@@ -132,6 +132,24 @@
       (should (string-match-p (regexp-quote b)
                               (harness-tools-sessions-test-ok me "session_search" '(:query "ZEB+RA s" :regexp t)))))))
 
+(ert-deftest harness-tools-sessions-non-ascii-tool-input ()
+  ;; A tool call's input is shown as text: session_read gives it as it was
+  ;; written, in a result that can go back to the model as JSON, and
+  ;; session_search finds it.
+  (harness-tools-sessions-test-with
+    (let ((me (harness-tools-sessions-test-session :name "Me"))
+          (other (harness-tools-sessions-test-session :name "Other"))
+          (word "caf\N{U+E9} \N{U+2717}"))
+      (harness-call 'session/append other (list :kind 'tool-call :tool "edit_file" :call-id "c1"
+                                                :title "edit_file notes.md"
+                                                :input (list :path "notes.md" :new_string word)))
+      (let ((text (harness-tools-sessions-test-ok me "session_read" '(:session_id "Other"))))
+        (should (string-search word text))
+        (should (equal text (plist-get (harness-json-parse (harness-json-encode (list :text text))) :text))))
+      (let ((text (harness-tools-sessions-test-ok me "session_search" (list :query word))))
+        (should (string-search other text))
+        (should (string-search word text))))))
+
 (ert-deftest harness-tools-sessions-read-transcript ()
   (harness-tools-sessions-test-with
     (let ((me (harness-tools-sessions-test-session))

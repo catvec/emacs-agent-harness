@@ -292,6 +292,90 @@
                                                      (expand-file-name "f" (plist-get harness-perms-test--session :cwd)))))
     (should (null (funcall probe 'requests)))))
 
+(defconst harness-perms-test--non-ascii "\N{U+2717} caf\N{U+E9} 3 \N{U+D7} 4 \N{U+2026}"
+  "Text with a ballot X, an accented letter, a multiplication sign and an ellipsis.")
+
+(defun harness-perms-test--encoding-judge (reply)
+  "Register provider `judge' that encodes each request as JSON, then answers REPLY.
+Real providers encode the request before they send it.  Return a
+function giving the judge prompts they encoded, newest first."
+  (let ((sent nil))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (req)
+                  (let ((json (harness-json-encode (list :system (plist-get req :system)
+                                                         :messages (plist-get req :messages))))
+                        (cb (plist-get req :on-event)))
+                    (push (harness-plist-get-in
+                           (car (plist-get (car (plist-get (harness-json-parse json) :messages)) :content))
+                           '(:text))
+                          sent)
+                    (run-at-time 0.01 nil (lambda ()
+                                            (funcall cb (list :type 'text :delta reply))
+                                            (funcall cb '(:type done :stop-reason end-turn)))))
+                  (list :cancel #'ignore)))
+    (lambda () sent)))
+
+(ert-deftest harness-perms-judge-text-of-non-ascii-input-encodes-again ()
+  ;; A provider sends the judge text as JSON.  The input used to go in as
+  ;; bytes, which became raw-byte characters, and then that encoding
+  ;; failed with (wrong-type-argument json-value-p ...).
+  (harness-perms-test--setup :permission-mode 'auto)
+  (let* ((input (list :path "notes.md" :old_string "- [ ] todo"
+                      :new_string (concat "- " harness-perms-test--non-ascii)))
+         (text (harness-perms--judge-text (list :session harness-perms-test--session :tool "edit_file"
+                                                :kind 'write :input input))))
+    (should (string-search (harness-json-encode-text input) text))
+    (should (string-search harness-perms-test--non-ascii text))
+    (should (equal text (plist-get (harness-json-parse (harness-json-encode (list :text text))) :text)))))
+
+(ert-deftest harness-perms-auto-mode-judges-non-ascii-input ()
+  ;; The judge's verdict on a non-ASCII input stands: an interactive session
+  ;; is not asked needlessly, a non-interactive one (every task) not refused
+  ;; because the user is away.
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-define-tool "t_edit" :kind 'write :description "Edits a file." :handler #'ignore)
+  (let* ((sent (harness-perms-test--encoding-judge "{\"decision\":\"allow\",\"reason\":\"an ordinary edit\"}"))
+         (harness-perms-auto-model "judge:small")
+         (request (lambda () (list :session harness-perms-test--session :tool "t_edit" :kind 'write
+                                   :input (list :path "notes.md" :new_string harness-perms-test--non-ascii)
+                                   :call-id (harness-short-id))))
+         (d (harness-perms-test--decide (funcall request))))
+    (should (eq 'allow (plist-get d :behavior)))
+    (should (equal "an ordinary edit" (plist-get d :reason)))
+    ;; The judge saw the input as it is.
+    (should (string-search harness-perms-test--non-ascii (car (funcall sent))))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive t))
+    (should (eq 'allow (plist-get (harness-perms-test--decide (funcall request)) :behavior)))
+    (harness-perms-test--encoding-judge "{\"decision\":\"deny\",\"reason\":\"not that file\"}")
+    (let ((d (harness-perms-test--decide (funcall request))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (equal "not that file" (plist-get d :reason))))))
+
+(ert-deftest harness-perms-auto-mode-logs-why-there-is-no-verdict ()
+  (harness-perms-test--setup :permission-mode 'auto)
+  (let* ((logged nil)
+         (harness-log-hook (list (lambda (level msg) (when (eq level 'warn) (push msg logged)))))
+         (warning (lambda ()
+                    (setq logged nil)
+                    (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))
+                    (cl-find-if (lambda (m) (string-prefix-p "perms: auto judge" m)) logged))))
+    ;; A provider failing before it sends: its error is in the warning.
+    (harness-define-provider 'judge :label "Judge"
+                             :complete (lambda (_req) (error "Cannot encode the request")))
+    (let ((harness-perms-auto-model "judge:x"))
+      (should (equal "perms: auto judge gave no verdict for bash (error): Cannot encode the request"
+                     (funcall warning))))
+    (let ((harness-perms-auto-model "nope:x"))
+      (should (equal "perms: auto judge gave no verdict for bash (error): No provider for model nope:x"
+                     (funcall warning))))
+    ;; A reply without a verdict is quoted.
+    (harness-perms-test--judge-provider '((:type text :delta "I refuse to answer in JSON")
+                                          (:type done :stop-reason end-turn)))
+    (let ((harness-perms-auto-model "judge:x"))
+      (should (equal "perms: auto judge gave no verdict for bash (end-turn); it replied: I refuse to answer in JSON"
+                     (funcall warning))))))
+
 ;;;; Non-interactive
 
 (ert-deftest harness-perms-non-interactive-denies-and-steers ()

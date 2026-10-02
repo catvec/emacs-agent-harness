@@ -561,14 +561,17 @@ line of JSON and nothing else:
   "System prompt for the auto-mode judge.")
 
 (defun harness-perms--judge-text (request)
-  "Return the user message describing REQUEST for the judge."
+  "Return the user message describing REQUEST for the judge.
+The input goes in as text, not bytes: the provider encodes the whole
+message as JSON again, and the bytes of non-ASCII input would make
+that fail."
   (let* ((tool (plist-get request :tool))
          (spec (and (harness-method-exists-p 'tools/get) (harness-call 'tools/get tool)))
          (session (plist-get request :session)))
     (format "Tool: %s\nKind: %s\nDescription: %s\n\nInput (JSON):\n%s\n\nWorking directory: %s\nAllowed roots:\n%s\n\nAnswer with one line of JSON: {\"decision\":\"allow\"|\"deny\",\"reason\":\"...\"}"
             tool (plist-get request :kind)
             (or (plist-get spec :description) "(no description)")
-            (harness-truncate-end (harness-json-encode (or (plist-get request :input) :empty)) 4000)
+            (harness-truncate-end (harness-json-encode-text (or (plist-get request :input) :empty)) 4000)
             (or (plist-get session :cwd) default-directory)
             (mapconcat (lambda (r) (concat "- " r)) (harness-perms-roots session) "\n"))))
 
@@ -583,6 +586,16 @@ Return nil when TEXT holds no usable verdict."
         ("allow" (list :behavior 'allow :reason (or reason "allowed by the auto-mode judge")))
         ("deny" (list :behavior 'deny :reason (or reason "denied by the auto-mode judge")
                       :hint "Choose a different approach that stays within the allowed scope."))))))
+
+(defun harness-perms--no-verdict-message (tool event text)
+  "Return the warning for a judge of TOOL whose `done' EVENT brought no verdict.
+It names the stop reason and the provider's `:error', when there is
+one, and quotes the start of TEXT, what the judge replied."
+  (let ((err (plist-get event :error)))
+    (concat (format "perms: auto judge gave no verdict for %s (%s)" tool (plist-get event :stop-reason))
+            (if err (concat ": " (harness-truncate-end (harness-error-message err) 300)) "")
+            (if (harness-string-blank-p text) ""
+              (concat "; it replied: " (harness-truncate-end text 200))))))
 
 (defun harness-perms--auto (decision next request)
   "In `auto' mode ask a cheap model to decide REQUEST; fall back to asking.
@@ -624,8 +637,8 @@ DECISION is the current value and NEXT continues the chain."
                                         (let ((verdict (and (eq (plist-get ev :stop-reason) 'end-turn)
                                                             (harness-perms--parse-verdict text))))
                                           (unless verdict
-                                            (harness-log 'warn "perms: auto judge gave no verdict (%s): %s"
-                                                         (plist-get ev :stop-reason) (harness-truncate-end text 200)))
+                                            (harness-log 'warn "%s" (harness-perms--no-verdict-message
+                                                                     (plist-get request :tool) ev text)))
                                           (funcall finish (or verdict decision)))))))))
           (error
            (harness-log 'warn "perms: auto judge failed: %S" err)

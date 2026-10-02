@@ -99,7 +99,7 @@
   "Return the readable text of transcript NODE."
   (pcase (plist-get node :kind)
     ('tool-call (format "%s %s" (or (plist-get node :title) (plist-get node :tool) "")
-                        (if (plist-get node :input) (harness-json-encode (plist-get node :input)) "")))
+                        (if (plist-get node :input) (harness-json-encode-text (plist-get node :input)) "")))
     ('tool-result (or (plist-get node :output) ""))
     (_ (or (plist-get node :content) ""))))
 
