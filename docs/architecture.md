@@ -647,14 +647,17 @@ request and resolves when answered).
 
 Task mode: one session per task.  TASK =
 `(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…)
-:state pending|refining|active|merging|done :column pending|needs-input|active|done
+:state pending|refining|active|merging|review|done
+:column pending|needs-input|active|review|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
 :session SID :outcome nil|end-turn|error|cancelled|merge-failed|merged|…
 :error "…" :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
+:verified BOOL :verified-at F :feedback ((:text "..." :at F) ...)
 :file "docs/tasks/ID-SLUG.md" :updated F :extra (RAW-ENTRY ...))`.
 `:column` is derived on every read: `needs-input` when the session is
-blocked on a request or the task stopped part way.  `:file` (relative
+blocked on a request or the task stopped part way, `review` while its
+finished work waits for the user's verdict.  `:file` (relative
 to `:project`), `:updated` (when the harness last wrote the file) and
 `:extra` (the raw frontmatter entries the harness does not know) belong
 to the task's file (below); the record also keeps `:file-base` and
@@ -699,12 +702,34 @@ to the task's file (below); the record also keeps `:file-base` and
 - The session's name is the task's title: `naming/system-prompt` adds
   `harness-tasks-naming-prompt` (nil for none) so the model titles task
   sessions like tickets.
-- A turn ending `end-turn` queues `merge/enqueue SID TARGET`, TARGET being
-  the project's root session named `harness-tasks-merge-session-name`
+- With nothing to review (below), a turn ending `end-turn` queues
+  `merge/enqueue SID TARGET`, TARGET being the project's root session
+  named `harness-tasks-merge-session-name`
   (created on demand); `merge/finished … merged` makes the task `done`.
   Failures the agent can fix (uncommitted work) are steered by the merge
   queue; others, or more than `harness-tasks-merge-attempts`, set
   `:outcome merge-failed`.  Outside git `end-turn` makes it `done`.
+- Review (`harness-tasks-require-verification`, default t): finished
+  work is not done until the user has looked at it.  A turn ending
+  `end-turn` puts the task in `review` instead, and emits `task/review
+  TASK`; in git its branch waits unmerged, so nothing reaches the base
+  branch unreviewed.  `task/verify ID` accepts the work (`:verified t
+  :verified-at F`): its branch goes through the merge queue as above
+  and the task is `done` once merged (outside git, or when the branch
+  merged already, at once).  `task/reject ID FEEDBACK &optional
+  ATTACHMENTS` sends it back: the feedback goes to the same session, in
+  its own worktree and with its provider conversation, as a prompt
+  opened by `harness-tasks-reject-text`; the task is `active` again and
+  returns to `review` when that turn ends.  Each round is appended to
+  `:feedback`.  Any other new turn of work (a follow-up, a message from
+  the chat) clears the verification, so it is reviewed again; the merge
+  queue's own steering (commit first) does not.  Only clean ends go to
+  review: a turn that stops needs input as before, and `task/complete`
+  (Mark done) counts as accepting the work.  A merge that finishes for
+  work nobody verified (one queued before the option was turned on)
+  puts the task in review, merged.  `task/archive` works in review too;
+  `task/archive-done` leaves those tasks alone.  With the option nil a
+  task is done once merged, or outside git once its turn ends.
 - A turn starting in a task's session makes the task active again, so a
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.
@@ -713,12 +738,15 @@ to the task's file (below); the record also keeps `:file-base` and
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
   steering; reopens), `task/refine ID &optional TEXT`,
-  `task/merge ID` (retry), `task/complete ID`, `task/archive ID &optional
+  `task/merge ID` (retry; not in review), `task/verify ID`,
+  `task/reject ID FEEDBACK &optional ATTACHMENTS` (both in review only),
+  `task/complete ID` (counts as verified), `task/archive ID &optional
   RESTORE` (deactivates the session; removes a merged task's worktree and
   branch), `task/archive-done &optional CWD`, `task/cancel ID` (drops a
   task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree).
-- Events `task/changed TASK`, `task/deleted ID`.  Records are written
+- Events `task/changed TASK`, `task/deleted ID`, `task/review TASK` (its
+  work waits for the user's review).  Records are written
   shortly after a change and on exit (`harness-tasks-flush`), each into
   its project's store; a store whose text would not change is skipped.
 - Stores: a git project's records go to `harness/tasks.json` in the
@@ -789,21 +817,23 @@ to the task's file (below); the record also keeps `:file-base` and
     session's name, else the prompt's first line), `state`, `column`,
     `backlog`, `outcome`, `error` (300 characters at most), `session`,
     `branch`, `base`, `merge` (the merge status, or `merged`), `model`,
-    `thinking`, `created`, `started`, `refined`, `finished`, `updated`
-    (times in ISO 8601 UTC, to the second).  Keys the harness does not
-    know follow, as written.  It is a YAML subset the module reads and
-    writes itself: `key: value` lines whose values are plain, single- or
-    double-quoted or `|` / `>` block scalars, or lists (`[a, b]`, `- a`
-    lines).  Strings are written plain when that reads back the same,
-    else double-quoted.
+    `thinking`, `created`, `started`, `refined`, `finished`, `verified`
+    (when the user verified the work), `updated` (times in ISO 8601 UTC,
+    to the second).  Keys the harness does not know follow, as written.
+    It is a YAML subset the module reads and writes itself: `key: value`
+    lines whose values are plain, single- or double-quoted or `|` / `>`
+    block scalars, or lists (`[a, b]`, `- a` lines).  Strings are written
+    plain when that reads back the same, else double-quoted.
   - Body: the prompt, its first line a level-1 heading when it reads as
     a title (short, and no markdown of its own); then, each behind a
     `<!-- harness:NAME -->` marker line, the sections the harness keeps:
-    `request` (`:note` quoted, once a write-up replaced it) and `plan`
-    (the session's plan, never read back).  Reading takes the text
-    before the first marker outside a code fence as the prompt, a
-    leading `# Title` (or a setext `===` title) becoming its plain first
-    line.
+    `request` (`:note` quoted, once a write-up replaced it), `review`
+    (each round of `:feedback`, quoted under a `### Sent back TIME`
+    heading, oldest first; read back only when the file brings a lost
+    task back) and `plan` (the session's plan, never read back).
+    Reading takes the text before the first marker outside a code fence
+    as the prompt, a leading `# Title` (or a setext `===` title)
+    becoming its plain first line.
   - Names: `ID-SLUG.md` (a slug of the title) for the files the harness
     makes.  A file keeps its name, and `:file` follows a file renamed by
     hand.  `README.md`, `index.md`, `template.md` and names starting
@@ -826,27 +856,29 @@ to the task's file (below); the record also keeps `:file-base` and
     so a file the harness has yet to write again is no edit.  Taken are
     the prompt and the request; `title`, which renames the task's
     session; `model` and `thinking` of a task that has not started; and
-    `state: done`, which completes the task (`task/complete`).  The
-    other known fields are the harness's: a file that contradicts them
-    is written again, and one that contradicts nothing is left as
+    `state: done`, which completes the task (`task/complete`; a task in
+    review is verified, `task/verify`).  The other known fields, and the
+    review and plan sections, are the harness's: a file that contradicts
+    them is written again, and one that contradicts nothing is left as
     written until its task changes.
   - A file no task has becomes one, with its `id` when that is free,
     else a fresh one: `pending` in the backlog (only `task/start` starts
-    it, and no permission mode is read from a file), or `done`.  Without
-    a heading, a frontmatter `title` becomes the prompt's first line.
-    Its `session`, when that still exists, works in the project and is
-    no other task's, makes it the task it was (state, outcome, worktree
-    from the session), except that nothing carries on by itself: a task
-    that was at work waits with `:outcome interrupted`, and `merging`
-    comes back `active`.  So a lost store comes back from the files, at
-    load or when the board is opened.  A file without frontmatter is a
-    task all the same; an empty one, or one whose `---` frontmatter
-    never closes, is not (yet).
+    it, and no permission mode is read from a file), or `review` or
+    `done` as written, with its rounds of feedback and its verification.
+    Without a heading, a frontmatter `title` becomes the prompt's first
+    line.  Its `session`, when that still exists, works in the project
+    and is no other task's, makes it the task it was (state, outcome,
+    worktree from the session), except that nothing carries on by
+    itself: a task that was at work waits with `:outcome interrupted`,
+    and `merging` comes back `active`.  So a lost store comes back from
+    the files, at load or when the board is opened.  A file without
+    frontmatter is a task all the same; an empty one, or one whose `---`
+    frontmatter never closes, is not (yet).
   - A file deleted by hand, or moved out of the folder (into `archive/`,
-    say), archives its task when the task is `pending` or `done` and
-    nothing works on it; a task in progress gets its file back.  A file
-    that comes back to the folder (found by its `id`) brings its
-    archived task back.
+    say), archives its task when the task is `pending`, `review` or
+    `done` and nothing works on it; a task in progress gets its file
+    back.  A file that comes back to the folder (found by its `id`)
+    brings its archived task back.
 - Restarts: when the module starts, an active task without an outcome
   that nothing in this process works on was interrupted.  Without a
   session it starts over (as pending, or in its worktree when it has
@@ -857,7 +889,8 @@ to the task's file (below); the record also keeps `:file-base` and
   interrupted`.  A backlog task cut short before its session got the
   work starts again (with nil: back to the backlog), keeping a worktree
   it got; a write-up cut short is written again by its session (with
-  nil: `:outcome interrupted`).  Merges in flight are queued again.
+  nil: `:outcome interrupted`).  Merges in flight are queued again, and
+  tasks in review wait on for the user.
 
 ### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions
 
@@ -893,10 +926,10 @@ prefixes come from the session host):
 | `session_send` | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
 | `session_wait` | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | column, include_archived, all_projects | read |
+| `task_list` | column (pending/needs-input/active/review/done), include_archived, all_projects | read |
 | `task_submit` | prompt, cwd, model, thinking, refine (for the backlog) | meta |
-| `task_control` | task_id, action (start/message/cancel/merge/complete/archive/restore/delete), message | meta |
-| `task_wait` | task_id / task_ids, until (settled/done/needs-input/active/changed), mode, timeout_seconds | read |
+| `task_control` | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
+| `task_wait` | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
@@ -1056,16 +1089,23 @@ and `harness-toggle-non-interactive` change what the buffer's
 `harness-ui-setting-target-function` names -- a session id, or a
 settings plist with its setter -- and otherwise the current session.
 
-Task board (`harness-ui-tasks`, `C-c a a`): the project's tasks in four
-sections -- requires your input, in progress, pending, completed -- with
-each card's current todo, progress, elapsed time, cost and merge state,
-one-click answers to a blocked task's question or permission, and a
-compose box that submits a task, edits a pending one, messages a
-task's session or answers its question (`C-g` leaves an edit, message
-or answer for a new task again: a question stays waiting, never
-cancelled).  RET opens the session.  The session setting commands
-change the task at point, or from the compose box the settings the next
-task starts with (shown as buttons under the New task label).  A
+Task board (`harness-ui-tasks`, `C-c a a`): the project's tasks in five
+sections -- requires your input, ready for review, in progress, pending,
+completed -- with each card's current todo, progress, elapsed time,
+cost and merge state, one-click answers to a blocked task's question or
+permission, and a compose box that submits a task, edits a pending one,
+messages a task's session, answers its question or takes the feedback
+that sends a task back from review (`C-g` leaves an edit, message,
+answer or feedback for a new task again: a question stays waiting,
+never cancelled).  A task in review shows [Verify] and [Send back]: `v`
+accepts the work (its branch then merges), `R` sends it back to its
+session with the feedback written in the compose box (`C-u R` reads it
+in the minibuffer).  The header counts the tasks to review, and
+`task/review` says in the echo area that one is ready
+(`harness-ui-tasks-notify-review`).  RET opens the session.  The
+session setting commands change the task at point, or from the compose
+box the settings the next task starts with (shown as buttons under the
+New task label).  A
 Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
 or go to the backlog, written up by an agent and
@@ -1075,10 +1115,11 @@ retries a stopped write-up or sends feedback on a backlog task's.  `I` or
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at
-the top of in progress (latest started first) and completed lists the
-latest finished first; pending is the queue, in the order its tasks
-start, with the backlog among it (oldest first; only queued tasks have a
-place in line).
+the top of in progress (latest started first), review lists the latest
+finished first and completed the latest completed (verified, else
+finished) first; pending is the queue, in the order its tasks start,
+with the backlog among it (oldest first; only queued tasks have a place
+in line).
 
 Cost display: whatever shows what a session cost goes through
 `harness-ui-format-spend`.  That is a price when calls are billed per

@@ -22,7 +22,8 @@
 ;;
 ;; Tasks (when the `tasks' module is loaded):
 ;; - `task_list', `task_submit', `task_control' (start, message, cancel,
-;;   merge, complete, archive, restore, delete) and `task_wait'.
+;;   merge, verify, reject, complete, archive, restore, delete) and
+;;   `task_wait'.
 ;;
 ;; Nothing here grants permissions: a session's permission requests and
 ;; permission mode are left to the user, and tasks are submitted with
@@ -656,14 +657,17 @@ before its prompt."
      (format "%s  %-11s %s%s" (plist-get task :id) (plist-get task :column)
              (if (harness-string-blank-p title) "" (format "%S: " title))
              (harness-truncate-end (harness-first-line (or (plist-get task :prompt) "")) 100))
-     (format "\n    state %s%s%s%s%s"
+     (format "\n    state %s%s%s%s%s%s%s"
              (plist-get task :state)
              (if (plist-get task :outcome) (format " (%s)" (plist-get task :outcome)) "")
              (if sid (format ", session %s %s" sid (if session (harness-tools-sessions--status sid) "deleted")) "")
              (if (plist-get task :branch) (format ", branch %s" (plist-get task :branch)) "")
              (cond ((plist-get task :merge-status) (format ", merge %s" (plist-get task :merge-status)))
-                   ((plist-get task :merged) ", merged")
-                   (t "")))
+                   ((harness-json-true-p (plist-get task :merged)) ", merged")
+                   (t ""))
+             (if (harness-json-true-p (plist-get task :verified)) ", verified" "")
+             (let ((rounds (length (plist-get task :feedback))))
+               (if (> rounds 0) (format ", sent back %d time%s" rounds (if (= rounds 1) "" "s")) "")))
      (if (plist-get task :archived) ", archived" "")
      (if pending (format "\n    waiting on the user: %s" pending) ""))))
 
@@ -683,9 +687,9 @@ before its prompt."
        "No tasks match."))))
 
 (harness-define-tool "task_list"
-  :description "List the task board: tasks (one session each, usually in its own worktree, done once merged) with their title (their session's name, once it has one), prompt, column (pending, needs-input, active, done), state, session, branch and merge status. Defaults to this project's unarchived tasks. Inspect a task's work with session_read on its session."
+  :description "List the task board: tasks (one session each, usually in its own worktree, done once the user verified the work and it merged) with their title (their session's name, once it has one), prompt, column (pending, needs-input, active, review, done), state, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back. Defaults to this project's unarchived tasks. Inspect a task's work with session_read on its session."
   :schema '(:type "object"
-            :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "done"))
+            :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "review" "done"))
                          :include_archived (:type "boolean" :description "Include archived tasks (default false).")
                          :all_projects (:type "boolean" :description "Every project (default false).")))
   :kind 'read
@@ -708,7 +712,7 @@ before its prompt."
                      :meta (list :task-id (plist-get task :id)))))
 
 (harness-define-tool "task_submit"
-  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when a slot is free. With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. Returns the task id; follow it with task_wait or task_list."
+  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when a slot is free. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. Returns the task id; follow it with task_wait or task_list."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "What the task should do; self-contained, the task does not see this conversation.")
                          :cwd (:type "string" :description "Project directory (default: this session's).")
@@ -736,6 +740,12 @@ before its prompt."
            (harness-call 'task/prompt id text))))
       ("cancel" (harness-call 'task/cancel id))
       ("merge" (harness-call 'task/merge id))
+      ("verify" (harness-call 'task/verify id))
+      ("reject"
+       (let ((text (or (plist-get input :message) "")))
+         (when (harness-string-blank-p text)
+           (signal 'harness-error (list "reject needs the feedback in message")))
+         (harness-call 'task/reject id text)))
       ("complete" (harness-call 'task/complete id))
       ("archive" (harness-call 'task/archive id))
       ("restore" (harness-call 'task/archive id t))
@@ -747,11 +757,11 @@ before its prompt."
        (format "%s done; task %s is gone." action id)))))
 
 (harness-define-tool "task_control"
-  :description "Act on a task. start runs a pending task now; message sends a follow-up to its session (or, while pending, appends to its prompt); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept)."
+  :description "Act on a task. start runs a pending task now; message sends a follow-up to its session (or, while pending, appends to its prompt); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); reject sends a task in review back to its session with the feedback in message, to work on it again; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept)."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "Task id or unique prefix.")
-                         :action (:type "string" :enum ("start" "message" "cancel" "merge" "complete" "archive" "restore" "delete"))
-                         :message (:type "string" :description "Text, for message."))
+                         :action (:type "string" :enum ("start" "message" "cancel" "merge" "verify" "reject" "complete" "archive" "restore" "delete"))
+                         :message (:type "string" :description "Text, for message; the feedback, for reject."))
             :required ("task_id" "action"))
   :kind 'meta
   :title (lambda (input) (format "task_control %s %s" (or (plist-get input :action) "") (or (plist-get input :task_id) "")))
@@ -766,9 +776,11 @@ before its prompt."
             ("done" (eq column 'done))
             ("needs-input" (eq column 'needs-input))
             ("active" (eq column 'active))
+            ("review" (eq column 'review))
             ("changed" (not (equal (list column (plist-get task :state) (plist-get task :merge-status)) baseline)))
-            ;; A backlog task that is written up waits for someone to start it.
-            (_ (or (memq column '(done needs-input))
+            ;; Finished work waits for the user's review, and a backlog
+            ;; task that is written up for someone to start it.
+            (_ (or (memq column '(done needs-input review))
                    (and (eq (plist-get task :state) 'pending) (plist-get task :backlog) t))))))))
 
 (defun harness-tools-sessions--task-wait (input ctx)
@@ -810,11 +822,11 @@ before its prompt."
                  ids "\n\n")))))))
 
 (harness-define-tool "task_wait"
-  :description "Wait for tasks without polling. until=settled (default) returns when each task is done or needs input, or is written up and waits in the backlog for someone to start it; done, needs-input and active wait for that column; changed waits for any change of column, state or merge status. mode=all (default) waits for every task, any for the first. Returns each task's line and its session's last reply; on timeout it returns the same report, not an error."
+  :description "Wait for tasks without polling. until=settled (default) returns when each task is done, needs input or waits in review for the user to verify it, or is written up and waits in the backlog for someone to start it; done, needs-input, active and review wait for that column; changed waits for any change of column, state or merge status. mode=all (default) waits for every task, any for the first. Returns each task's line and its session's last reply; on timeout it returns the same report, not an error."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "A task id or unique prefix.")
                          :task_ids (:type "array" :items (:type "string") :description "Several tasks.")
-                         :until (:type "string" :enum ("settled" "done" "needs-input" "active" "changed"))
+                         :until (:type "string" :enum ("settled" "done" "needs-input" "active" "review" "changed"))
                          :mode (:type "string" :enum ("all" "any"))
                          :timeout_seconds (:type "number" :description "Give up after this long (default 600, at most 3600).")))
   :kind 'read

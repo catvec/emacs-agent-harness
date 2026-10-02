@@ -123,7 +123,7 @@ Local in-process connections never need it."
     provider/models-updated provider/quota-updated usage/budget-warning usage/budgets-changed
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed session/forked session/head-moved
-    question/answered task/changed task/deleted permission/dir-allowed permission/dir-revoked
+    question/answered task/changed task/deleted task/review permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 

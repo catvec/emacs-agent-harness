@@ -7,10 +7,13 @@
 ;; project, one section per column, most urgent first:
 ;;
 ;;   Requires your input   blocked on a permission or question, or stopped
+;;   Ready for review      finished, waiting for you: verify it (v), which
+;;                         merges it, or send it back with feedback (R)
 ;;   In progress           working, with its current todo and progress
 ;;   Pending               waiting for a slot, or in the backlog (refined,
 ;;                         waiting for you); editable, startable
-;;   Completed             finished; reply to reopen, archive to hide
+;;   Completed             finished and verified; reply to reopen,
+;;                         archive to hide
 ;;
 ;; and a compose box at the bottom: describe a task, C-c C-c submits it
 ;; and it gets a session of its own.  A toggle above the box (C-c C-t)
@@ -20,8 +23,9 @@
 ;; pick them up later, even after a restart.  The same box edits a
 ;; pending task (e), replies to a task's session (m) -- for a backlog
 ;; task that is feedback on its write-up (r) -- without leaving the
-;; board, and answers a task's question (m or [Answer]); C-g leaves such
-;; a box for a new task again, the question still waiting.
+;; board, answers a task's question (m or [Answer]) and takes the
+;; feedback that sends a task back from review (R); C-g leaves such a
+;; box for a new task again, the question still waiting.
 ;; RET or a click on a task opens its session in full.  b or [BTW] asks
 ;; about the tasks in a BTW side conversation over the board, whose agent
 ;; answers with the task and session tools (`task/btw').
@@ -56,6 +60,10 @@
 Either way the toggle above the compose box switches it per board."
   :type 'boolean :group 'harness-ui-tasks)
 
+(defcustom harness-ui-tasks-notify-review t
+  "When non-nil, say in the echo area when a task waits for your review."
+  :type 'boolean :group 'harness-ui-tasks)
+
 (defface harness-task-title-face '((t :inherit bold))
   "Task titles." :group 'harness-ui-tasks)
 (defface harness-task-section-face '((t :inherit (harness-label-face) :height 1.05))
@@ -64,6 +72,8 @@ Either way the toggle above the compose box switches it per board."
   "Why a task needs the user." :group 'harness-ui-tasks)
 (defface harness-task-done-face '((t :inherit success))
   "The completed mark." :group 'harness-ui-tasks)
+(defface harness-task-review-face '((t :inherit success :weight bold))
+  "Tasks waiting for your review: their mark, heading and count." :group 'harness-ui-tasks)
 (defface harness-task-choice-face '((t :inherit bold))
   "The Submit / Refine toggle, which shows the current mode." :group 'harness-ui-tasks)
 
@@ -76,9 +86,12 @@ Either way the toggle above the compose box switches it per board."
 (define-icon harness-icon-task-stopped nil
   '((symbol "■") (text "stop"))
   "Stopped task." :version "29.1")
+(define-icon harness-icon-task-review nil
+  `((symbol ,(string #x2691)) (text "review"))
+  "Task waiting for your review: a flag." :version "29.1")
 
 (defconst harness-ui-tasks--columns
-  '((needs-input "Requires your input") (active "In progress")
+  '((needs-input "Requires your input") (review "Ready for review") (active "In progress")
     (pending "Pending") (done "Completed"))
   "Columns in display order: (COLUMN HEADING).")
 
@@ -113,8 +126,8 @@ harness's task defaults and changed with the usual session commands.")
 (defvar-local harness-ui-tasks--submitting nil "Prompts sent but not yet acknowledged.")
 (defvar-local harness-ui-tasks--target nil
   "What the compose box does: nil for a new task, else (KIND . ID).
-KIND is edit, reply, answer, or refine: feedback on a backlog task's
-write-up.")
+KIND is edit, reply, answer, refine (feedback on a backlog task's
+write-up) or reject (feedback that sends a task back from review).")
 (defvar-local harness-ui-tasks--refine nil
   "Non-nil when new tasks are refined for the backlog, not submitted.")
 (defvar-local harness-ui-tasks--list-end nil "Marker: end of the board, start of the tail.")
@@ -137,7 +150,8 @@ into the board's drawing and loading checks this first."
 (defun harness-ui-tasks--column (task)
   "Return TASK's column as a symbol."
   (intern (or (plist-get task :column)
-              (pcase (plist-get task :state) ("pending" "pending") ("done" "done") (_ "active")))))
+              (pcase (plist-get task :state)
+                ("pending" "pending") ("review" "review") ("done" "done") (_ "active")))))
 
 (defun harness-ui-tasks--archived-p (task)
   (harness-json-true-p (plist-get task :archived)))
@@ -163,11 +177,16 @@ The task record says so as soon as it changes, unlike the session cache."
   "When TASK started, else when it was submitted, else 0."
   (or (plist-get task :started) (plist-get task :created) 0))
 
+(defun harness-ui-tasks--completed (task)
+  "When TASK was completed: verified, else finished, else 0."
+  (or (plist-get task :verified-at) (plist-get task :finished) 0))
+
 (defun harness-ui-tasks--visible ()
   "Return the tasks shown, as an alist COLUMN -> tasks in display order.
-In progress is newest first by when each task started and completed by
-when it finished, so a task arriving in either shows at the top; the
-other columns are oldest first, pending in the order its tasks start."
+In progress is newest first by when each task started, review by when
+it finished and completed by when it was completed, so a task arriving
+in any of them shows at the top; the other columns are oldest first,
+pending in the order its tasks start."
   (let ((groups (mapcar (lambda (c) (list (car c))) harness-ui-tasks--columns)))
     (dolist (task harness-ui-tasks--tasks)
       (unless (and (harness-ui-tasks--archived-p task) (not harness-ui-tasks--show-archived))
@@ -176,7 +195,8 @@ other columns are oldest first, pending in the order its tasks start."
       (setcdr g (sort (cdr g)
                       (pcase (car g)
                         ('active (lambda (a b) (> (harness-ui-tasks--started a) (harness-ui-tasks--started b))))
-                        ('done (lambda (a b) (> (or (plist-get a :finished) 0) (or (plist-get b :finished) 0))))
+                        ('review (lambda (a b) (> (or (plist-get a :finished) 0) (or (plist-get b :finished) 0))))
+                        ('done (lambda (a b) (> (harness-ui-tasks--completed a) (harness-ui-tasks--completed b))))
                         (_ (lambda (a b) (< (or (plist-get a :created) 0) (or (plist-get b :created) 0))))))))))
 
 ;;;; What a card says
@@ -215,6 +235,7 @@ Only the kind: the request itself is read in the session."
                      (propertize (harness-ui-icon 'harness-icon-agent) 'face 'harness-dim-face))
                     (t (propertize (harness-ui-icon 'harness-icon-task-pending) 'face 'harness-dim-face))))
     ('done (propertize (harness-ui-icon 'harness-icon-task-done) 'face 'harness-task-done-face))
+    ('review (propertize (harness-ui-icon 'harness-icon-task-review) 'face 'harness-task-review-face))
     ('needs-input (if (plist-get session :pending)
                       (harness-ui-status-icon "blocked")
                     (propertize (harness-ui-icon 'harness-icon-task-stopped) 'face 'harness-task-attention-face)))
@@ -255,6 +276,7 @@ Only the kind: the request itself is read in the session."
                            'face 'harness-dim-face))
       ('pending (propertize (harness-ui-tasks--pending-detail task position todos)
                             'face 'harness-dim-face))
+      ('review (propertize (harness-ui-tasks--review-detail task named) 'face 'harness-dim-face))
       ('done (propertize (let ((took (and (plist-get task :started) (plist-get task :finished)
                                           (format "took %s" (harness-ui-tasks--elapsed
                                                              (- (plist-get task :finished) (plist-get task :started)))))))
@@ -301,6 +323,31 @@ POSITION is its place in line among queued tasks; TODOS its session's."
               (if body (concat sep body) "")))
      (t (format "#%d in line%s" (or position 1) (if body (concat sep body) ""))))))
 
+(defun harness-ui-tasks--took (task)
+  "How long TASK worked until it finished, as \"took 12m\"; nil if unknown."
+  (let ((started (plist-get task :started))
+        (finished (plist-get task :finished)))
+    (and started finished (format "took %s" (harness-ui-tasks--elapsed (- finished started))))))
+
+(defun harness-ui-tasks--times (n)
+  "N as a number of times: once, twice, 3 times."
+  (pcase n (1 "once") (2 "twice") (_ (format "%d times" n))))
+
+(defun harness-ui-tasks--review-detail (task named)
+  "The second line of TASK's card in review: what verifying it does.
+NAMED is non-nil when its session has a name, which then is the
+card's title, so the prompt shows here."
+  (let ((rounds (length (plist-get task :feedback))))
+    (string-join
+     (delq nil (list (and named (harness-first-line (plist-get task :prompt) 70))
+                     (cond ((harness-json-true-p (plist-get task :merged))
+                            (format "merged into %s" (harness-ui-tasks--base task)))
+                           ((plist-get task :worktree)
+                            (format "merges into %s once verified" (harness-ui-tasks--base task))))
+                     (harness-ui-tasks--took task)
+                     (and (> rounds 0) (format "sent back %s" (harness-ui-tasks--times rounds)))))
+     (concat " " harness-ui-tasks--dot " "))))
+
 (defun harness-ui-tasks--base (task)
   "The branch TASK merges into."
   (or (plist-get task :base) "main"))
@@ -312,7 +359,7 @@ POSITION is its place in line among queued tasks; TODOS its session's."
          (usage (plist-get session :usage))
          (parts
           (delq nil
-                (list (and todos (not (eq column 'done)) (format "%d/%d" (nth 0 todos) (nth 1 todos)))
+                (list (and todos (not (memq column '(done review))) (format "%d/%d" (nth 0 todos) (nth 1 todos)))
                       (pcase column
                         ('pending (cond ((harness-ui-tasks--refining-p task) nil)
                                         ((plist-get task :refined)
@@ -320,8 +367,10 @@ POSITION is its place in line among queued tasks; TODOS its session's."
                                         ((harness-ui-tasks--backlog-p task)
                                          (format "added %s" (harness-relative-time (plist-get task :created))))
                                         (t (format "queued %s" (harness-relative-time (plist-get task :created))))))
-                        ('done (and (plist-get task :finished)
-                                    (format "done %s" (harness-relative-time (plist-get task :finished)))))
+                        ('review (and (plist-get task :finished)
+                                      (format "ready %s" (harness-relative-time (plist-get task :finished)))))
+                        ('done (let ((completed (harness-ui-tasks--completed task)))
+                                 (and (> completed 0) (format "done %s" (harness-relative-time completed)))))
                         (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))
                       (and session (> (harness-usage-list-cost usage) 0)
                            (harness-ui-format-spend session))))))
@@ -368,6 +417,12 @@ POSITION is its place in line among queued tasks; TODOS its session's."
                  ("Mark done" harness-ui-tasks-complete))))))
        ('active '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
                   ("Stop" harness-ui-tasks-cancel)))
+       ('review (if (harness-ui-tasks--archived-p task)
+                    '(("Unarchive" harness-ui-tasks-archive) ("Verify" harness-ui-tasks-verify)
+                      ("Open" harness-ui-tasks-open))
+                  '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
+                    ("Open" harness-ui-tasks-open) ("Reply" harness-ui-tasks-reply)
+                    ("Archive" harness-ui-tasks-archive))))
        ('done (if (harness-ui-tasks--archived-p task)
                   '(("Unarchive" harness-ui-tasks-archive) ("Open" harness-ui-tasks-open))
                 '(("Archive" harness-ui-tasks-archive) ("Reply" harness-ui-tasks-reply)
@@ -437,9 +492,10 @@ POSITION is its place in line among queued tasks; TODOS its session's."
         (start (point)))
     (insert (propertize (harness-ui-icon (if folded 'harness-icon-collapsed 'harness-icon-expanded))
                         'face 'harness-dim-face)
-            " " (propertize heading 'face (if (and (eq column 'needs-input) tasks)
-                                             '(harness-task-attention-face harness-task-section-face)
-                                           'harness-task-section-face))
+            " " (propertize heading 'face (pcase (and tasks column)
+                                            ('needs-input '(harness-task-attention-face harness-task-section-face))
+                                            ('review '(harness-task-review-face harness-task-section-face))
+                                            (_ 'harness-task-section-face)))
             (propertize (format "  %d" (length tasks)) 'face 'harness-dim-face))
     (when (and (eq column 'done) tasks (not folded))
       (let ((b (harness-ui-tasks--button "[Archive all]" #'harness-ui-tasks-archive-done
@@ -461,6 +517,7 @@ POSITION is its place in line among queued tasks; TODOS its session's."
       (if (and (null tasks) (not (and (eq column 'pending) harness-ui-tasks--submitting)))
           (insert (propertize (pcase column
                                 ('needs-input "    nothing needs you\n")
+                                ('review "    nothing to review\n")
                                 ('active "    nothing working\n")
                                 ('pending "    no tasks waiting\n")
                                 (_ "    none yet\n"))
@@ -556,6 +613,10 @@ Point and every window showing the board stay on the same task."
     (`(refine . ,id) (concat "Refine "
                              (harness-ui-tasks--quote
                               (let ((task (harness-ui-tasks--find id))) (if task (harness-ui-tasks--title task) id)))))
+    (`(reject . ,id) (concat "Send back "
+                             (harness-ui-tasks--quote
+                              (let ((task (harness-ui-tasks--find id))) (if task (harness-ui-tasks--title task) id)))
+                             " with feedback"))
     (_ "New task")))
 
 (defun harness-ui-tasks--setting-button (label command help)
@@ -727,6 +788,7 @@ TEXT replaces the compose contents; without it they are kept."
   "Return the hint for the empty compose box."
   (pcase harness-ui-tasks--target
     (`(refine . ,_) (concat "What should change in the write-up" harness-ui-tasks--ellipsis))
+    (`(reject . ,_) (concat "What should change in the work" harness-ui-tasks--ellipsis))
     ((guard (and (null harness-ui-tasks--target) harness-ui-tasks--refine))
      (concat "Jot a task down: an agent writes it up for later" harness-ui-tasks--ellipsis))
     (`(edit . ,_) "New prompt…")
@@ -749,7 +811,8 @@ TEXT replaces the compose contents; without it they are kept."
 
 (defun harness-ui-tasks--header ()
   (let* ((counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) (harness-ui-tasks--visible)))
-         (needs (alist-get 'needs-input counts)))
+         (needs (alist-get 'needs-input counts))
+         (review (alist-get 'review counts)))
     (concat
      " " (propertize "Tasks" 'face 'bold) " "
      (propertize (if harness-ui-tasks--project
@@ -760,6 +823,10 @@ TEXT replaces the compose contents; without it they are kept."
      (if (> needs 0)
          (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
                      'face 'harness-status-blocked-face)
+       "")
+     (if (> review 0)
+         (propertize (format "  %s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
+                     'face 'harness-task-review-face)
        "")
      (format "  %s %d  %s %d  %s %d"
              (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)
@@ -872,6 +939,10 @@ anything that moves a task without one, so a board never drifts.")
                    (cons task (cl-remove (plist-get task :id) harness-ui-tasks--tasks
                                          :key (lambda (x) (plist-get x :id)) :test #'equal)))
              (harness-ui-tasks--schedule-render b))))))
+    ("task/review"
+     (when harness-ui-tasks-notify-review
+       (message "Task %s is ready for your review"
+                (harness-ui-tasks--quote (harness-ui-tasks--title (car args))))))
     ("task/deleted"
      (let ((id (car args)))
        (dolist (b (harness-ui-tasks--buffers))
@@ -921,6 +992,8 @@ anything that moves a task without one, so a board never drifts.")
   (define-key map (kbd "n") #'harness-ui-tasks-deny)
   (define-key map (kbd "k") #'harness-ui-tasks-cancel)
   (define-key map (kbd "d") #'harness-ui-tasks-complete)
+  (define-key map (kbd "v") #'harness-ui-tasks-verify)
+  (define-key map (kbd "R") #'harness-ui-tasks-reject)
   (define-key map (kbd "M") #'harness-ui-tasks-merge)
   (define-key map (kbd "x") #'harness-ui-tasks-archive)
   (define-key map (kbd "X") #'harness-ui-tasks-archive-done)
@@ -983,6 +1056,8 @@ anything that moves a task without one, so a board never drifts.")
         (". n" "Deny tool call" harness-ui-tasks-deny)]
        ["Finish"
         (". k" "Stop or drop" harness-ui-tasks-cancel)
+        (". v" "Verify (accept)" harness-ui-tasks-verify)
+        (". R" "Send back with feedback" harness-ui-tasks-reject)
         (". d" "Mark completed" harness-ui-tasks-complete)
         (". M" "Merge again" harness-ui-tasks-merge)
         (". x" "Archive or restore" harness-ui-tasks-archive)
@@ -1214,6 +1289,10 @@ A new task is refined for the backlog when REFINE is non-nil."
        (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
                                        "Sending the feedback")
        (message "Sent: the task is being written up again"))
+      (`(reject . ,id)
+       (harness-ui-tasks--request-then "_harness/task/reject" (list :id id :feedback expanded :attachments atts)
+                                       "Sending the task back")
+       (message "Sent back: its session works on your feedback"))
       (_
        (harness-ui-call
         "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt expanded
@@ -1339,8 +1418,44 @@ and with a backlog task the session that wrote it up."
   (harness-ui-tasks--request-then "_harness/task/complete" (list :id (plist-get (harness-ui-tasks--task) :id))
                                   "Completing the task"))
 
+(defun harness-ui-tasks--review-task ()
+  "Return the task at point, which has to wait for your review."
+  (let ((task (harness-ui-tasks--task)))
+    (unless (equal (plist-get task :state) "review")
+      (user-error "This task is not waiting for your review"))
+    task))
+
+(defun harness-ui-tasks-verify ()
+  "Accept the work of the task at point, which waits for your review.
+In a git project its branch then goes through the merge queue, and the
+task is completed once merged; otherwise it is completed at once."
+  (interactive)
+  (let ((task (harness-ui-tasks--review-task)))
+    (harness-ui-tasks--request-then "_harness/task/verify" (list :id (plist-get task :id))
+                                    "Verifying the task")
+    (message (if (and (plist-get task :worktree) (not (harness-json-true-p (plist-get task :merged))))
+                 "Verified: merging it"
+               "Verified"))))
+
+(defun harness-ui-tasks-reject (&optional feedback)
+  "Send the task at point back from review with feedback.
+The compose box takes the feedback, which \\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-submit] sends to the task's
+session: it works on the task again, in its own worktree, and the task
+comes back for your review once that is done.  With a prefix argument
+the feedback is read in the minibuffer instead; from Lisp, FEEDBACK is
+sent at once."
+  (interactive (list (and current-prefix-arg
+                          (progn (harness-ui-tasks--review-task) (read-string "Feedback: ")))))
+  (let ((task (harness-ui-tasks--review-task)))
+    (cond
+     ((null feedback) (harness-ui-tasks--set-compose "" (cons 'reject (plist-get task :id))))
+     ((harness-string-blank-p feedback) (user-error "Sending a task back needs feedback"))
+     (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
+                                        "Sending the task back")
+        (message "Sent back: its session works on your feedback")))))
+
 (defun harness-ui-tasks-archive ()
-  "Archive the completed task at point, or restore it when archived."
+  "Archive the task at point, completed or in review, or restore it when archived."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (harness-ui-tasks--request-then "_harness/task/archive"
