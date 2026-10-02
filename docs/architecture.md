@@ -326,7 +326,9 @@ gone.
   Event `session/usage ID USAGE-TOTAL RECORD`.
 - `session/set-todos ID TODOS`, `session/set-plan ID TEXT`.
 - `session/messages ID` → provider messages (content blocks) built
-  from the path, tool calls paired with results.
+  from the path, tool calls paired with results.  A steering message
+  marked `:delivered-after NODE-ID` stands after that node (and the
+  tool results right after it), where the model got it.
 - `session/transcript-text ID` → searchable plain text.
 - Event `session/changed ID SESSION` fires after any of the above (for UIs
   that just want to redraw).
@@ -543,9 +545,10 @@ request and resolves when answered).
   `(:stop-reason …)`.  Idle session: starts a turn.  Running session:
   steering — the text is queued and injected at the next step boundary
   (appended to the next tool result, or sent as the next user turn if
-  the model stops first).  OPTS `:queue t` only queues.  An inactive
-  session is resumed first (`session/resume`), so a message sent to a
-  closed session brings it back; queueing leaves it closed.
+  the model stops first), and only once.  OPTS `:queue` true only
+  queues, even while a turn runs.  An empty message is refused.  An
+  inactive session is resumed first (`session/resume`), so a message
+  sent to a closed session brings it back; queueing leaves it closed.
 - `agent/cancel SESSION-ID`.
 - `agent/send-queue SESSION-ID` — sends every queued item as one turn.
 - Sync filter `agent/system-prompt` (value string, args session); sync
@@ -561,8 +564,10 @@ request and resolves when answered).
   delta, updated in place); on `tool-call` append a tool-call node, run
   `tools/execute`, append the tool-result node; native loops re-call the
   provider until `end-turn`; hosted loops respond through `:respond`.
-  Steering text is drained at every boundary.  `max-turns`
-  (`harness-agent-max-steps`, 200) ends runaway loops.
+  Steering is drained at every boundary (each tool result and each
+  step), so it is delivered once; a model that stops with steering
+  waiting gets one more step with it as the newest user message.
+  `max-turns` (`harness-agent-max-steps`, 200) ends runaway loops.
 - Streaming updates of the live node are not persisted one by one; on
   exit (`kill-emacs-hook`) and shutdown the text streamed so far is.
 

@@ -681,26 +681,55 @@ is the cost, or priced when a subscription paid.  Return the totals."
   (or (plist-get node :blocks)
       (list (list :type "text" :text (or (plist-get node :content) "")))))
 
+(defun harness-session--delivered (path)
+  "Return (MOVED . AFTER) for the steering messages PATH shows later.
+A steering message (a user node) whose `:delivered-after' node comes
+after it on PATH reached the model there.  MOVED holds the ids of those
+messages; AFTER maps each such node's id to its messages, oldest first.
+A message delivered after a node missing from PATH stays where it is."
+  (let ((pos (make-hash-table :test 'equal))
+        (moved (make-hash-table :test 'equal))
+        (after (make-hash-table :test 'equal))
+        (i 0))
+    (dolist (n path) (puthash (plist-get n :id) (cl-incf i) pos))
+    (dolist (n path)
+      (let ((anchor (and (eq (plist-get n :kind) 'user)
+                         (plist-get (plist-get n :meta) :delivered-after))))
+        (when (and anchor (> (gethash anchor pos 0) (gethash (plist-get n :id) pos)))
+          (puthash (plist-get n :id) t moved)
+          (puthash anchor (append (gethash anchor after) (list n)) after))))
+    (cons moved after)))
+
 (harness-defmethod session/messages (id)
   "Return provider messages (:role :content BLOCKS) for the transcript of ID.
 Adjacent assistant-side nodes merge into one assistant message; tool
 results become user messages with tool_result blocks; the transcript
-starts at the last compaction node when one exists."
+starts at the last compaction node when one exists.  A steering message
+stands where the model got it, after its `:delivered-after' node and
+the tool results right after that, not where it was sent mid-step."
   (let* ((s (harness-session--get id))
          (path (harness-session--path s))
          (start (cl-position-if (lambda (n) (eq (plist-get n :kind) 'compaction)) path :from-end t))
          (path (if start (nthcdr start path) path))
+         (delivered (harness-session--delivered path))
+         (ready nil)
          (messages nil) (cur nil) (cur-role nil))
-    (cl-flet ((flush () (when cur
-                          (push (list :role cur-role :content (nreverse cur)) messages)
-                          (setq cur nil cur-role nil)))
-              (add (role block)
-                (unless (eq role cur-role) (setq cur nil cur-role role))
-                (push block cur)))
+    (cl-labels ((flush () (when cur
+                            (push (list :role cur-role :content (nreverse cur)) messages)
+                            (setq cur nil cur-role nil)))
+                (add (role block)
+                  (unless (eq role cur-role) (setq cur nil cur-role role))
+                  (push block cur))
+                (user (n) (unless (eq cur-role 'user) (flush))
+                      (dolist (b (harness-session--text-blocks n)) (add 'user b))))
       (dolist (n path)
-        (pcase (plist-get n :kind)
-          ('user (unless (eq cur-role 'user) (flush))
-                 (dolist (b (harness-session--text-blocks n)) (add 'user b)))
+        ;; Delivered steering goes in before the next node that is not a
+        ;; tool result: tool results come first in the user message.
+        (when (and ready (memq (plist-get n :kind) '(user assistant thinking tool-call plan compaction)))
+          (mapc #'user ready)
+          (setq ready nil))
+        (pcase (and (not (gethash (plist-get n :id) (car delivered))) (plist-get n :kind))
+          ('user (user n))
           ('compaction (flush)
                        (add 'user (list :type "text"
                                         :text (concat "Summary of the conversation so far:\n\n"
@@ -721,7 +750,9 @@ starts at the last compaction node when one exists."
                                          :is_error (and (plist-get n :is-error) t))))
           ('plan (unless (eq cur-role 'assistant) (flush))
                  (add 'assistant (list :type "text" :text (concat "Plan:\n" (plist-get n :content)))))
-          (_ nil)))
+          (_ nil))
+        (setq ready (append ready (gethash (plist-get n :id) (cdr delivered)))))
+      (mapc #'user ready)
       (flush))
     (nreverse messages)))
 

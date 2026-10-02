@@ -138,6 +138,58 @@
         (should-not (harness-acp-connected-p conn))
         (harness-test-wait (lambda () (= 0 (plist-get (harness-call 'acp/status) :tcp-clients))) 5 "client dropped")))))
 
+(defvar harness-provider-demo-script-override)
+
+(ert-deftest harness-acp-tcp-queue-while-running ()
+  "What `harness-chat-queue' sends survives JSON: during a turn it only queues."
+  (harness-acp-tcp-test-with
+    (let* ((gate (harness-make-promise))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "w1" :name "hold" :input (:n 1))
+              (:type text :delta "Done.")
+              (:type done :stop-reason end-turn)))
+           (conn (harness-acp-tcp-test-connect port))
+           (sid (progn (harness-test-await (harness-acp-initialize conn))
+                       (plist-get (harness-acp-tcp-test-request conn "session/new"
+                                                                (list :cwd (harness-test-temp-dir)
+                                                                      :_harness (list :model "demo:scripted")))
+                                  :sessionId)))
+           (p (progn
+                ;; The turn waits in this tool until the test lets it go.
+                (harness-define-tool "hold" :description "hold" :kind 'read
+                                     :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
+                (harness-acp-request conn "session/prompt"
+                                     (list :sessionId sid :prompt (list (list :type "text" :text "tour")))))))
+      (harness-test-wait (lambda () (memq 'tool-call (mapcar (lambda (n) (plist-get n :kind))
+                                                             (harness-call 'session/nodes sid))))
+                         5 "the turn in its tool")
+      (should (eq t (plist-get (harness-acp-tcp-test-request
+                                conn "_harness/agent/prompt"
+                                (list :session-id sid :blocks (list (list :type "text" :text "for later"))
+                                      :opts (list :queue t :attachments nil)))
+                               :queued)))
+      (should (equal '("for later") (mapcar (lambda (it) (plist-get it :text))
+                                            (plist-get (harness-call 'session/get sid) :queue))))
+      (should-not (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering)) (harness-call 'session/nodes sid)))
+      ;; A JSON false sends instead: the message steers the running turn
+      ;; (and the answer, the turn's result, comes when the turn ends).
+      (let ((steered (harness-acp-request conn "_harness/agent/prompt"
+                                          (list :session-id sid :blocks "steer now" :opts (list :queue :false)))))
+        (harness-test-wait (lambda () (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering))
+                                                  (harness-call 'session/nodes sid)))
+                           5 "the steering message")
+        (should (= 1 (length (plist-get (harness-call 'session/get sid) :queue))))
+        (should (harness-agent-running-p sid))
+        (harness-resolve gate t)
+        (should (equal "end_turn" (plist-get (harness-test-await p) :stopReason)))
+        (should (equal "end-turn" (plist-get (harness-test-await steered) :stop-reason))))
+      (harness-test-wait (lambda () (and (null (plist-get (harness-call 'session/get sid) :queue))
+                                         (not (harness-agent-running-p sid))))
+                         10 "the queued turn")
+      (let ((users (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes sid))))
+        (should (equal '("tour" "steer now" "for later") (mapcar (lambda (n) (plist-get n :content)) users)))
+        (should (equal '(nil t nil) (mapcar (lambda (n) (and (plist-get (plist-get n :meta) :steering) t)) users)))))))
+
 (ert-deftest harness-acp-tcp-server-closes-connections ()
   (harness-acp-tcp-test-with
     (let* ((conn (harness-acp-tcp-test-connect port))
