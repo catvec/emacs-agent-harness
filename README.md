@@ -213,6 +213,7 @@ the `[menu]` button in the header line.
 | `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
 | `C-c C-v` | Attach the image in the clipboard |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
+| `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
 | `TAB` | Complete in the compose box; elsewhere, fold or unfold the block at point |
 | `C-c C-s` | Search the transcript |
@@ -224,6 +225,14 @@ Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list, or the waiting session itself when only one needs you.
+
+A digit answers a question with that option; any other answer goes in
+the compose box. When the options are easier to compare by sight, such
+as layouts or architectures, the agent can give each one a diagram,
+ASCII art or an image. The diagrams share one area under the options
+and show one at a time. Switch between them with the tabs above the
+area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
+buffer, or by moving point onto an option.
 
 The header line shows the session's status, name, model, permission
 mode, whether it is `non-interactive` or `interactive`, thinking level,

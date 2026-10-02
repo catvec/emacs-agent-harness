@@ -810,14 +810,17 @@ an agent's own directory request has no \"Allow once\"."
          (harness-acp--call-safely 'permission/answer sid pid answer))))))
 
 (defun harness-acp--on-question-asked (sid pending)
-  "Ask the connected clients to answer PENDING question of session SID."
+  "Ask the connected clients to answer PENDING question of session SID.
+`diagrams', when the options have them, holds one per option:
+{type: \"ascii\", text} or {type: \"image\", path, mime}."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
      "_harness/ask_user"
-     (list :sessionId sid :requestId pid
-           :question (plist-get payload :question)
-           :options (plist-get payload :options))
+     (append (list :sessionId sid :requestId pid
+                   :question (plist-get payload :question)
+                   :options (plist-get payload :options))
+             (and (plist-get payload :diagrams) (list :diagrams (plist-get payload :diagrams))))
      (lambda (result)
        (harness-acp--call-safely 'question/answer sid pid (plist-get result :answer))))))
 

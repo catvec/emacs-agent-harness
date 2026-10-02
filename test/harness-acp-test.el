@@ -470,9 +470,21 @@ Once the turn ends the message runs as a turn of its own."
         (should (equal "q1" (plist-get params :requestId)))
         (should (equal "Which colour?" (plist-get params :question)))
         (should (equal '("red" "green") (plist-get params :options)))
+        (should-not (plist-member params :diagrams))
         (funcall (nth 2 m) (list :answer "green")))
       (harness-test-wait (lambda () recorded))
-      (should (equal (list (list sid "q1" "green")) recorded)))))
+      (should (equal (list (list sid "q1" "green")) recorded))
+      ;; Diagrams of the options go along, one per option.
+      (let ((diagrams '((:type "ascii" :text "[A]") (:type "image" :path "/tmp/b.png" :mime "image/png"))))
+        (harness-emit 'question/asked sid
+                      (list :id "q2" :kind 'question
+                            :payload (list :question "Which layout?" :options '("A" "B") :diagrams diagrams)))
+        (harness-test-wait (lambda () (cl-find-if (lambda (m) (equal "q2" (plist-get (nth 1 m) :requestId)))
+                                                  harness-acp-test-messages)))
+        (let ((params (nth 1 (cl-find-if (lambda (m) (equal "q2" (plist-get (nth 1 m) :requestId)))
+                                         harness-acp-test-messages))))
+          (should (equal '("A" "B") (plist-get params :options)))
+          (should (equal diagrams (plist-get params :diagrams))))))))
 
 (ert-deftest harness-acp-local-request-without-client-stays-pending ()
   (harness-acp-test-with

@@ -12,6 +12,7 @@
 ;;   "work"        a todo list worked through with tool calls (task mode);
 ;;                 in a worktree it also writes and commits notes/ID.md
 ;;   "ask"         calls ask_user
+;;   "diagram"     calls ask_user with an ASCII diagram for each option
 ;;   "status"      looks at the task board with task_list (a BTW over it)
 ;;   anything else echo the prompt back as markdown
 ;;
@@ -31,6 +32,36 @@
 
 (defvar harness-provider-demo-script-override nil
   "When non-nil, a list of events used instead of the built-in scripts.")
+
+(defconst harness-provider-demo--layouts
+  '(("Sidebar on the left"
+     . "+----------+---------------------------+
+| Settings |  General                  |
+|----------|                           |
+| General  |  Name    [_____________]  |
+| Account  |  Theme   [Dark        v]  |
+| Privacy  |                           |
+|          |               [ Save ]    |
++----------+---------------------------+")
+    ("Sidebar on the right"
+     . "+---------------------------+----------+
+|  General                  | Settings |
+|                           |----------|
+|  Name    [_____________]  | General  |
+|  Theme   [Dark        v]  | Account  |
+|                           | Privacy  |
+|               [ Save ]    |          |
++---------------------------+----------+")
+    ("Tabs across the top"
+     . "+--------------------------------------+
+| [General]   Account   Privacy        |
+|--------------------------------------|
+|  Name    [_____________]             |
+|  Theme   [Dark        v]             |
+|                                      |
+|               [ Save ]               |
++--------------------------------------+"))
+  "Options of the demo `diagram' question: (LABEL . ASCII-DIAGRAM).")
 
 (defun harness-provider-demo--last-user-text (request)
   (let ((msgs (plist-get request :messages)) text)
@@ -90,6 +121,15 @@
           (:type text :delta "Done: surveyed the project, made the change and checked it.")
           (:type usage :input 2400 :output 220 :cache-read 1800 :cost 0.006 :context 2600)
           (:type done :stop-reason end-turn))))
+     ((string-match-p "\\bdiagrams?\\b" text)
+      `((:type text :delta "A few layouts would work; have a look at each.\n")
+        (:type tool-call :id "demo-d" :name "ask_user"
+               :input (:question "Which layout should the settings page use?"
+                       :options ,(mapcar (lambda (layout) (list :label (car layout) :diagram (cdr layout)))
+                                         harness-provider-demo--layouts)))
+        (:type text :delta "Thanks, noted.")
+        (:type usage :input 700 :output 160 :cost 0.0015 :context 900)
+        (:type done :stop-reason end-turn)))
      ((string-match-p "\\bask\\b" text)
       `((:type text :delta "I need to check something with you.\n")
         (:type tool-call :id "demo-q" :name "ask_user" :input (:question "Which colour?" :options ("red" "green" "blue")))
@@ -103,7 +143,7 @@
         (:type usage :input 700 :output 45 :cost 0.0012 :context 900)
         (:type done :stop-reason end-turn)))
      (t
-      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools` or `ask`." text))
+      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask` or `diagram`." text))
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
 

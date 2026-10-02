@@ -798,6 +798,120 @@ It is never added to the running turn."
         (should (null harness-chat--pending))
         (should (equal "" (harness-compose-text)))))))
 
+(defun harness-ui-chat-test-nav (nav)
+  "Return the position of the diagram tab or arrow NAV in the current buffer."
+  (text-property-any (point-min) (point-max) 'harness-chat-diagram-nav nav))
+
+(ert-deftest harness-ui-chat-question-diagrams ()
+  "Options with diagrams show one diagram at a time, in one area under the
+options; tabs, arrows, n and p, C-c C-f and C-c C-b and point moving
+onto an option switch it, and answering works as without diagrams."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (answers nil)
+           (shown (lambda ()
+                    (let ((seen (cl-loop for art in '("[left|main]" "[main|right]" "[tabs/main]") for i from 0
+                                         when (harness-ui-chat-test-find buf art) collect i)))
+                      (should (= 1 (length seen)))
+                      (car seen)))))
+      (should (harness-chat--on-question
+               (list :sessionId sid :requestId "qd" :question "Which layout?"
+                     :options '("Sidebar left" "Sidebar right" "Tabs")
+                     :diagrams '((:type "ascii" :text "+-----------+\n[left|main]\n+-----------+")
+                                 (:type "ascii" :text "[main|right]")
+                                 (:type "ascii" :text "[tabs/main]")))
+               (lambda (r) (push r answers))))
+      (with-current-buffer buf
+        ;; The first option's diagram, fixed width, its label bold in the list.
+        (should (harness-ui-chat-test-find buf "Diagram"))
+        (should (= 0 (funcall shown)))
+        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "[left|main]")) 'harness-chat-output-face))
+        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "Sidebar left")) 'bold))
+        (should-not (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "Sidebar right")) 'bold))
+        (should (harness-ui-chat-test-find buf "next diagram"))
+        ;; From the compose box, which keeps its text and point.
+        (harness-ui-chat-test-type buf "draft")
+        (backward-char 2)
+        (call-interactively (key-binding (kbd "C-c C-f")))
+        (should (= 1 (funcall shown)))
+        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "Sidebar right")) 'bold))
+        (should (equal "draft" (harness-compose-text)))
+        (should (= (point) (- harness-compose-end 2)))
+        (call-interactively (key-binding (kbd "C-c C-b")))
+        (call-interactively (key-binding (kbd "C-c C-b")))
+        (should (= 2 (funcall shown)))          ; round from the first to the last
+        ;; A tab shows its option's diagram, an arrow the next; point stays on it.
+        (goto-char (harness-ui-chat-test-nav 1))
+        (harness-chat-push)
+        (should (= 1 (funcall shown)))
+        (should (eql 1 (get-text-property (point) 'harness-chat-diagram-nav)))
+        (goto-char (harness-ui-chat-test-nav 'next))
+        (harness-chat-push)
+        (harness-chat-push)
+        (should (= 0 (funcall shown)))
+        (should (eq 'next (get-text-property (point) 'harness-chat-diagram-nav)))
+        ;; n and p on the panel.
+        (goto-char (harness-ui-chat-test-find buf "Which layout?"))
+        (call-interactively (lookup-key (get-text-property (point) 'keymap) "n"))
+        (should (= 1 (funcall shown)))
+        (call-interactively (lookup-key (get-text-property (point) 'keymap) "p"))
+        (should (= 0 (funcall shown)))
+        ;; Point moving onto an option shows its diagram, and stays on it.
+        (goto-char (harness-ui-chat-test-find buf "Tabs"))
+        (harness-chat--post-command)
+        (should (= 2 (funcall shown)))
+        (should (eql 2 (get-text-property (point) 'harness-chat-option)))
+        ;; Switched there, it stays switched: only a move counts.
+        (call-interactively (lookup-key (get-text-property (point) 'keymap) "n"))
+        (harness-chat--post-command)
+        (should (= 0 (funcall shown)))
+        (should (eql 2 (get-text-property (point) 'harness-chat-option)))
+        ;; A redraw of the whole tail keeps the diagram shown.
+        (harness-chat--render-tail)
+        (should (= 0 (funcall shown)))
+        ;; A digit answers, with the label.
+        (goto-char (harness-ui-chat-test-find buf "Which layout?"))
+        (call-interactively (lookup-key (get-text-property (point) 'keymap) "2"))
+        (should (equal '((:answer "Sidebar right")) answers))
+        (should (null harness-chat--pending))
+        (should (null harness-chat--diagram-shown))
+        (should-not (harness-ui-chat-test-find buf "Diagram"))
+        (should-error (harness-chat-next-diagram) :type 'user-error)
+        ;; A question without diagrams has no area and no n, p.
+        (harness-chat--on-question (list :sessionId sid :requestId "qp" :question "Which colour?"
+                                         :options '("red" "green"))
+                                   #'ignore)
+        (should-not (harness-ui-chat-test-find buf "Diagram"))
+        (goto-char (harness-ui-chat-test-find buf "Which colour?"))
+        (should-not (lookup-key (get-text-property (point) 'keymap) "n"))
+        (should-error (harness-chat-next-diagram) :type 'user-error)))))
+
+(ert-deftest harness-ui-chat-question-diagrams-from-the-session ()
+  "A question waiting when the buffer opens shows its diagrams from the
+session's pending item; an image diagram shows the image, or a button
+opening it where images cannot show or the file is remote."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (image (expand-file-name "layout.png" (harness-test-temp-dir))))
+      (write-region "not really a png" nil image nil 'silent)
+      (harness-call 'session/pending-add sid
+                    (list :id "pq" :kind 'question
+                          :payload (list :question "Which layout?" :options '("Drawn" "Remote" "Ascii")
+                                         :diagrams (list (list :type "image" :path image :mime "image/png")
+                                                         '(:type "image" :path "/ssh:far:/srv/x.png" :mime "image/png")
+                                                         '(:type "ascii" :text "[ascii art]")))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-find buf "Which layout?"))
+          (should (harness-ui-chat-test-find buf (format "[image %s]" (abbreviate-file-name image))))
+          (harness-chat-next-diagram)
+          (should (harness-ui-chat-test-find buf "[image /ssh:far:/srv/x.png]"))
+          (harness-chat-next-diagram)
+          (should (harness-ui-chat-test-find buf "[ascii art]"))
+          (should-not (harness-ui-chat-test-find buf "[image ")))))))
+
 ;;;; Coalescing
 
 (ert-deftest harness-ui-chat-coalesces-runs-of-tools ()
@@ -1381,9 +1495,25 @@ It is never added to the running turn."
                  "glob: *.el"))
   (should (equal (harness-chat--input-summary '(:question "Which?" :options ("A" "B")) "ask_user Which?")
                  "options: A, B"))
+  ;; Options with diagrams read as their labels.
+  (should (equal (harness-chat--input-summary '(:question "Which?" :options ((:label "A" :diagram "+-+\n|A|")
+                                                                            (:label "B" :image "b.png")))
+                                              "ask_user Which?")
+                 "options: A, B"))
   (let ((long "/home/someone/projects/a-rather-long-directory-name/sub"))
     (should-not (harness-chat--input-summary (list :path long) (concat "glob *.el in " long "/"))))
   (should (equal (harness-chat--input-summary '(:path "a.el")) "path: a.el")))
+
+(ert-deftest harness-ui-chat-input-listing-of-objects ()
+  "A list of objects in a tool's input, such as options with diagrams or
+todos, lists one key per line rather than as a Lisp form."
+  (harness-ui-chat-test-with
+    (should (equal (harness-chat--format-objects '((:label "A" :diagram "+-+\n|A|\n+-+\n") "B" (:id "t1" :text "Read")))
+                   "- label: A\n  diagram:\n    +-+\n    |A|\n    +-+\n- B\n- id: t1\n  text: Read\n"))
+    (let ((listing (harness-chat--input-listing '(:question "Which?" :options ((:label "A" :image "a.png"))))))
+      (should (string-match-p "^question: Which\\?\noptions:\n- label: A\n  image: a.png\n\\'" listing)))
+    ;; Lists of plain values stay as they were.
+    (should (equal (harness-chat--input-listing '(:options ("red" "green"))) "options: (\"red\" \"green\")\n"))))
 
 (ert-deftest harness-ui-chat-reopens-shown-sessions-on-connect ()
   "A harness that starts again has every session closed; chat buffers reopen theirs."
