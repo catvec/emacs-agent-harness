@@ -151,14 +151,10 @@
             "\n")
     (put-text-property start (point) 'harness-ui-remote-qr t)
     (when (and harness-ui-remote--expanded harness-ui-remote--pairing)
-      (let ((pairing harness-ui-remote--pairing)
-            (code-start nil))
+      (let ((pairing harness-ui-remote--pairing))
         (insert "\n")
-        (setq code-start (point))
-        (harness-qr-insert (plist-get pairing :url))
+        (harness-qr-insert (plist-get pairing :url) :indent 5)
         (unless (bolp) (insert "\n"))
-        ;; The image is one line, the text form many: indent them all.
-        (indent-rigidly code-start (point) 5)
         (insert "\n     "
                 (format "Scan it with the device's camera and open the link. It works once, until %s."
                         (harness-ui-remote--time (plist-get pairing :expires)))

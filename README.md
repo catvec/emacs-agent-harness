@@ -32,7 +32,8 @@ APIs and AWS Bedrock.
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
 - **Remote control.** The harness speaks the Agent Client Protocol
-  (ACP), so another Emacs or any ACP client can drive it.
+  (ACP), so another Emacs or any ACP client can drive it, including one
+  on your phone, paired by scanning a QR code.
 - **Modular and reloadable.** Every feature is a module, and the whole
   harness reloads in place without losing running sessions.
 
@@ -186,6 +187,7 @@ named by `harness-server-init-file`.
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
+| `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |
@@ -470,6 +472,57 @@ the token yourself.
 - `scripts/harness-acp-stdio` bridges ACP to standard input and output,
   for editors that start ACP agents as subprocesses.
 
+### Pairing a phone
+
+A phone (or any other device on the network) can drive the harness
+with an ACP client of its own, such as ACP UI, Agmente or Ferngeist.
+ACP defines no way to pair a device, so the harness pairs it with a web
+link, which works whatever client the phone uses:
+
+1. Press `C-c h P` to open the remote control page, then `[start
+   serving]` (`s`). The harness listens on port 4276 of every network
+   interface, for ACP over WebSocket and for ACP's own line framing
+   (plain TCP clients such as VACP).
+2. Unfold the pairing QR code (`TAB` or a click on its heading). It
+   starts folded because the code it carries pairs whichever device
+   scans it.
+3. Scan the code with the phone's camera and open the link. The page
+   that opens says the phone is paired and gives the address to add in
+   its ACP client, `ws://ADDRESS:4276/acp`.
+4. Add a remote agent with that address in the phone's ACP client and
+   connect.
+
+A client that supports ACP authentication can also connect first: the
+harness offers it the method "Pair with a QR code", whose answer waits
+until the QR code is opened on that device.
+
+Each code works once and expires after ten minutes; unfolding the QR
+code again or pressing `n` makes a new one, and hiding it drops it. A
+pairing belongs to the device's network address. It lasts while the
+device uses it, ends once it goes unused for eight hours, ends when the
+harness stops serving, and is never saved. The page lists the paired
+devices, and `k` or `[unpair]` unpairs one at once. A WebSocket that a
+web page opens is never let in by a pairing, since any page the phone
+shows could open one. Clients can authenticate with
+`harness-acp-token` instead, as the subprotocol `bearer.TOKEN`, an
+`Authorization: Bearer TOKEN` header or `?token=TOKEN` in the address.
+
+The connection is not encrypted. Pair on a network you trust, or over a
+VPN such as Tailscale, whose addresses also stay fixed per device. The
+page shows the address of this machine that QR codes carry, chosen
+among its network interfaces (local network first); `a` picks another.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `harness-acp-remote` | `nil` | Serve other devices; the page turns it on and off |
+| `harness-acp-remote-host` | `"0.0.0.0"` | Address the listener binds |
+| `harness-acp-remote-port` | `4276` | Port of the listener |
+| `harness-acp-remote-address` | `nil` (detect) | Address of this machine in pairing links |
+| `harness-acp-remote-code-lifetime` | `600` | Seconds a pairing code is valid |
+| `harness-acp-remote-idle-timeout` | `28800` | Seconds unused before a pairing ends |
+
+Corporate mode turns all of this off.
+
 ## Architecture
 
 The core only loads modules and passes messages between them. Every
@@ -478,10 +531,10 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `acp` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 
 Further documentation:
 

@@ -1346,7 +1346,7 @@ and `_harness/ask_user {sessionId, requestId, question, options}` → `{answer}`
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
-`sandbox/status`, `harness/api`, `harness/version`, `harness/reload` is callable as `_harness/NAME` with a
+`sandbox/status`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
@@ -1396,6 +1396,54 @@ back to 127.0.0.1.
 The local transport dispatches lisp objects directly, no JSON, and
 delivers notifications through `harness-run-soon` so callers are never
 re-entered.
+
+### acp-remote
+
+ACP for phones and other devices on the network, off until
+`harness-acp-remote`.  One listener (`harness-acp-remote-host`
+0.0.0.0, `harness-acp-remote-port` 4276, binary sockets) reads the
+first bytes of each connection: `{` hands it to ACP's line framing
+(client kind `remote-tcp`), anything else is an HTTP request.  A
+WebSocket upgrade (RFC 6455, implemented in the module: handshake,
+streaming frame decoder over a unibyte buffer, ping/pong, close codes
+1002/1009) on any path, `/acp` documented, becomes a client of kind
+`websocket`; the subprotocol `acp.v1` is chosen when offered, and
+`Acp-Connection-Id` is sent, as ACP's draft transport asks.  A text
+message may carry several newline-separated JSON-RPC messages.
+`GET /pair?code=C` pairs, `GET /` explains; every answer is
+`Connection: close`, `Cache-Control: no-store`, `Referrer-Policy:
+no-referrer`.
+
+Pairing: `acp/remote-pair` → `(:url "http://ADDR:PORT/pair?code=C"
+:ws-url "ws://ADDR:PORT/acp" :address :port :expires :lifetime)` makes
+the one code in force (100 random bits, `harness-acp-remote-code-lifetime`).
+Opening the link from an address other than this machine's consumes
+it and pairs that address (devices `(:id :address :agent :paired
+:seen)`, in memory only, dropped after `harness-acp-remote-idle-timeout`
+without a connection), answers the waiting `authenticate` requests of
+that address and emits `acp/remote-changed`.  Every client the
+listener registers carries `:remote (:address A :transport T [:agent
+UA :origin O :web BOOL])`; `harness-acp-authorize-functions` lets in a
+paired address unless `:web` (an Origin naming a web page, not an
+app's own), `harness-acp-auth-methods-functions` offers `pair`, and
+`harness-acp-authenticate-functions` answers `authenticate pair` with a
+promise settled by the pairing or rejected (-32000) after the code
+lifetime.  A bearer token equal to `harness-acp-token` (subprotocol
+`bearer.T`, `Authorization: Bearer T`, `?token=T`) authenticates too.
+
+Methods (callable as `_harness/acp/remote-*`): `acp/remote-status` →
+`(:running :enabled :corporate :host :port :address :address-set
+:addresses ((:address :interface :kind lan|vpn|other) ...) :ws-url
+:code-expires :devices (... :connected N) :clients)`,
+`acp/remote-start` and `acp/remote-stop` (save `harness-acp-remote`;
+stopping drops the clients, the code and every pairing),
+`acp/remote-pair`, `acp/remote-forget-code`, `acp/remote-revoke ID`,
+`acp/remote-set-address ADDRESS` (saves `harness-acp-remote-address`,
+"" detects; drops the code).  Event `acp/remote-changed (:what
+started|stopped|connected|disconnected|paired|revoked|address|corporate
+:address A)`, forwarded to UIs.  Corporate mode refuses start and pair,
+closes connections as they are accepted, and its change hook stops the
+listener.
 
 ## Presentation contracts
 
@@ -1518,6 +1566,20 @@ id, or a settings plist with its setter -- and otherwise the current
 session.  The menu's `i` entry says whether that is non-interactive
 ("Non-interactive: on"), and has no state where the command would
 ask for a session.
+
+Remote control page (`harness-ui-remote`, `C-c h P`,
+`harness-remote-control`): whether the harness serves other devices
+(start or stop), the ACP address their clients connect to, the address
+of this machine that QR codes carry (chosen among the interfaces), the
+pairing QR code and the paired devices (unpair at point).  The QR code
+starts folded and unfolds with a fresh code (`acp/remote-pair`); it
+folds again once `acp/remote-changed` says a device paired, when its
+code expires, and when hidden, which drops the code
+(`acp/remote-forget-code`).  It is drawn by `harness-ui-qr`
+(`harness-qr-encode TEXT &optional LEVEL MASK` → `(:size :version
+:level :mask :modules)`, byte mode, versions 1–40; `harness-qr-image`
+one SVG path, black on white; `harness-qr-insert`, half blocks without
+images).  In corporate mode the page shows a notice only.
 
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in five
 sections -- requires your input, ready for review, in progress, pending,

@@ -153,7 +153,18 @@
         (should (eq 'harness-qr-text-face (get-text-property 1 'face)))
         ;; The quiet zone is light, the finder's corner dark.
         (should (string-match-p "\\` +\\'" (car lines)))
-        (should (memq (aref (nth 2 lines) 4) '(?█ ?▀ ?▄))))))
+        (should (memq (aref (nth 2 lines) 4) '(?█ ?▀ ?▄)))))
+    ;; Indented, the quiet zone keeps its light face: only the indent is plain.
+    (erase-buffer)
+    (let ((harness-qr-force-text t))
+      (harness-qr-insert "hello" :indent 3)
+      (goto-char (point-min))
+      (dotimes (_ 3)
+        (should (null (get-text-property (point) 'face)))
+        (should (= (+ 3 29) (- (line-end-position) (line-beginning-position))))
+        (should (eq 'harness-qr-text-face (get-text-property (+ (point) 3) 'face)))
+        (should (eq 'harness-qr-text-face (get-text-property (+ (point) 31) 'face)))
+        (forward-line 1))))
   (with-temp-buffer
     (let ((harness-qr-force-text nil))
       (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))

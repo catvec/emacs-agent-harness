@@ -455,8 +455,9 @@ SCALE pixels per module (default from the frame's line height)."
   "QR codes drawn with text characters: dark on light whatever the theme."
   :group 'harness-ui)
 
-(defun harness-qr--insert-text (qr margin)
-  "Insert QR drawn with half blocks, MARGIN modules of quiet zone around it."
+(defun harness-qr--insert-text (qr margin &optional indent)
+  "Insert QR drawn with half blocks, MARGIN modules of quiet zone around it.
+Each line starts with INDENT spaces, outside the code."
   (let* ((rows (plist-get qr :modules))
          (size (plist-get qr :size))
          (width (+ size (* 2 margin)))
@@ -464,6 +465,7 @@ SCALE pixels per module (default from the frame's line height)."
                  (let ((x (- x margin)) (y (- y margin)))
                    (and (<= 0 x (1- size)) (<= 0 y (1- size)) (aref (aref rows y) x))))))
     (cl-loop for y from 0 below width by 2 do
+             (insert (make-string (or indent 0) ?\s))
              (insert (propertize
                       (apply #'string
                              (cl-loop for x from 0 below width
@@ -476,16 +478,19 @@ SCALE pixels per module (default from the frame's line height)."
                       'face 'harness-qr-text-face)
                      "\n"))))
 
-(cl-defun harness-qr-insert (text &key (level 'M) scale margin)
+(cl-defun harness-qr-insert (text &key (level 'M) scale margin indent)
   "Insert at point the QR code of TEXT; return the position after it.
 An SVG image where this frame shows one, else half-block characters
 \(always so with `harness-qr-force-text').  LEVEL is the error
 correction level, SCALE pixels per module and MARGIN modules of quiet
-zone, as for `harness-qr-image'."
+zone, as for `harness-qr-image'.  INDENT spaces start every line the
+code takes, outside it: indenting the code afterwards would turn the
+light spaces of its quiet zone into plain whitespace."
   (let ((qr (harness-qr-encode text level)))
     (if (and (not harness-qr-force-text) (display-images-p) (image-type-available-p 'svg))
-        (insert-image (harness-qr-image qr scale margin) "[QR code]")
-      (harness-qr--insert-text qr (or margin 4)))
+        (progn (insert (make-string (or indent 0) ?\s))
+               (insert-image (harness-qr-image qr scale margin) "[QR code]"))
+      (harness-qr--insert-text qr (or margin 4) indent))
     (point)))
 
 (harness-define-module 'ui-qr

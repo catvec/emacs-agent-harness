@@ -1548,6 +1548,32 @@ Return the chat's buffer."
     (harness-media--capture "menu")
     (ignore-errors (transient-quit-all))))
 
+(defvar harness-acp-remote-host)
+(defvar harness-acp-remote-port)
+(defvar harness-acp-remote-address)
+(declare-function harness-acp-remote--grant "harness-acp-remote")
+(declare-function harness-ui-remote-toggle-qr "harness-ui-remote")
+
+(defun harness-media-shot-remote ()
+  "The remote control page: serving, a paired phone, the QR code unfolded."
+  ;; Loopback only, on the usual port when it is free; the page shows
+  ;; a local network address, as on a laptop at home.
+  (setq harness-acp-remote-host "127.0.0.1"
+        harness-acp-remote-address "192.168.1.150")
+  (condition-case nil
+      (let ((harness-acp-remote-port 4276)) (harness-call 'acp/remote-start))
+    (error (let ((harness-acp-remote-port 0)) (harness-call 'acp/remote-start))))
+  (harness-acp-remote--grant
+   "192.168.1.23" "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36")
+  (harness-media--view #'harness-remote-control
+                       (lambda ()
+                         (harness-media--settle 0.5)
+                         (harness-ui-remote-toggle-qr)
+                         (harness-media--settle 1)
+                         (goto-char (point-min))))
+  (harness-media--capture "remote")
+  (harness-call 'acp/remote-stop))
+
 (defconst harness-media-shots
   '(("chat" . harness-media-shot-chat)
     ("chat-permission" . harness-media-shot-chat-permission)
@@ -1559,7 +1585,8 @@ Return the chat's buffer."
     ("worktrees" . harness-media-shot-worktrees)
     ("settings" . harness-media-shot-settings)
     ("btw" . harness-media-shot-btw)
-    ("menu" . harness-media-shot-menu))
+    ("menu" . harness-media-shot-menu)
+    ("remote" . harness-media-shot-remote))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point
