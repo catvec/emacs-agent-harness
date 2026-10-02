@@ -168,6 +168,45 @@
                                harness-acp-test-messages)))
         (should (equal (list sid "end-turn") (plist-get (cadr ended) :args)))))))
 
+(defvar harness-provider-demo-script-override)
+(defvar harness-provider-demo-delay)
+
+(ert-deftest harness-acp-local-activity-updates ()
+  "What a running turn does reaches clients as it changes, and can be asked."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (harness-provider-demo-delay 0.2)
+           (harness-provider-demo-script-override
+            '((:type activity :phase thinking)
+              (:type text :delta "Looking.")
+              (:type tool-call :id "a1" :name "list_dir" :input (:path "/tmp"))
+              (:type text :delta "Done.")
+              (:type done :stop-reason end-turn)))
+           (activities (lambda ()
+                         (mapcar (lambda (u) (plist-get u :activity))
+                                 (cl-remove-if-not (lambda (u) (equal (plist-get u :sessionUpdate) "_harness/activity"))
+                                                   (harness-acp-test-updates))))))
+      (harness-acp-request conn "session/prompt" (list :sessionId sid :prompt '((:type "text" :text "go"))))
+      (harness-test-wait (lambda () (cl-find "thinking" (funcall activities) :key (lambda (a) (plist-get a :phase))
+                                             :test #'equal))
+                         5 "thinking")
+      ;; A client that opens now asks what the turn does.
+      (let ((now (harness-acp-test-request conn "_harness/agent/activity" (list :session-id sid))))
+        (should (equal "thinking" (plist-get now :phase)))
+        (should (numberp (plist-get now :since))))
+      (harness-test-wait (lambda () (let ((all (funcall activities))) (and all (null (car (last all))))))
+                         10 "the turn's end")
+      (let* ((all (funcall activities))
+             (phases (mapcar (lambda (a) (plist-get a :phase)) all))
+             (tool (cl-find "tool" all :key (lambda (a) (plist-get a :phase)) :test #'equal)))
+        ;; Wire shape: phases are strings, the tool is named.
+        (should (equal "waiting" (car phases)))
+        (dolist (p '("thinking" "writing" "tool"))
+          (should (member p phases)))
+        (should (equal "list_dir" (plist-get tool :tool))))
+      (should-not (harness-acp-test-request conn "_harness/agent/activity" (list :session-id sid))))))
+
 (ert-deftest harness-acp-local-cancel ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))

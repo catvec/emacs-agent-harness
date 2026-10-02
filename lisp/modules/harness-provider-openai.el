@@ -38,6 +38,10 @@
   "Maximum seconds a completion request may take, including streaming."
   :type 'integer :group 'harness)
 
+(defcustom harness-openai-progress-interval 0.25
+  "Seconds between reports of how much of a tool call's arguments has streamed."
+  :type 'number :group 'harness)
+
 (defvar harness-openai--registered nil
   "Provider ids registered from `harness-openai-endpoints'.")
 
@@ -466,7 +470,23 @@ hides the others."
       (unless (string-empty-p name) (setcdr slot (plist-put (cdr slot) :name name))))
     (when-let* ((args (plist-get fn :arguments)))
       (setcdr slot (plist-put (cdr slot) :arguments
-                              (concat (plist-get (cdr slot) :arguments) args))))))
+                              (concat (plist-get (cdr slot) :arguments) args))))
+    (harness-openai--tool-input-progress stream slot)))
+
+(defun harness-openai--tool-input-progress (stream slot)
+  "Report the size of the arguments STREAM has received for the call in SLOT.
+The calls themselves go out once the response ends, so this is all that
+shows a model writing a large input.  At most one report every
+`harness-openai-progress-interval' seconds per call."
+  (let ((call (cdr slot))
+        (now (float-time)))
+    (when (and (plist-get call :name)
+               (let ((sent (plist-get call :sent-at)))
+                 (or (null sent) (>= (- now sent) harness-openai-progress-interval))))
+      (setcdr slot (plist-put call :sent-at now))
+      (funcall (harness-openai--stream-on-event stream)
+               (list :type 'activity :phase 'tool-input :tool (plist-get call :name)
+                     :chars (length (plist-get call :arguments)))))))
 
 (defun harness-openai--stream-chunk (stream data)
   "Handle one SSE DATA payload for STREAM."

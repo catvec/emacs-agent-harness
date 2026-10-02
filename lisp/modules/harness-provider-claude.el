@@ -20,6 +20,10 @@
 ;; - Streaming deltas arrive as `stream_event' messages carrying
 ;;   Anthropic streaming events; `assistant' messages are authoritative
 ;;   and are used to remember tool_use ids; `result' ends the turn.
+;;   The start of each content block, the size of a tool call's input
+;;   as it streams and the CLI's compacting notice become `activity'
+;;   events: thinking arrives without its text, so they are all that
+;;   shows the model is busy.
 ;; - `--resume ID' recreates a session after a restart and `--resume ID
 ;;   --fork-session' implements `:fork': the new session starts from
 ;;   the parent's cached prefix.
@@ -85,6 +89,10 @@ model call.  nil fetches it only when nothing is known yet."
 
 (defcustom harness-provider-claude-probe-timeout 20
   "Seconds to wait for a usage report before answering with what is known."
+  :type 'number :group 'harness)
+
+(defcustom harness-provider-claude-progress-interval 0.25
+  "Seconds between reports of how much of a tool call's input has streamed."
   :type 'number :group 'harness)
 
 ;;;; Constants
@@ -174,6 +182,11 @@ model call.  nil fetches it only when nothing is known yet."
 (defvar harness-provider-claude--asked nil
   "When a usage report was last asked for, as a float time.")
 
+(defvar harness-provider-claude--blocks (make-hash-table :test 'equal)
+  "Harness session id -> the tool_use block streaming now, as a plist.
+Kept beside the session records rather than in them, so reloading this
+file leaves the running CLI processes alone.")
+
 (defun harness-provider-claude--drop-stale-entries ()
   "Stop the CLI processes of records older than the current record layout.
 A reload keeps live records; one made before slots were added has no
@@ -218,6 +231,7 @@ resumes the CLI session in a new one."
   (when (harness-provider-claude-session-active entry)
     (when-let* ((timer (harness-provider-claude-session-cancel-timer entry)))
       (cancel-timer timer))
+    (harness-provider-claude--end-block entry)
     (let ((fn (harness-provider-claude-session-on-event entry)))
       (setf (harness-provider-claude-session-active entry) nil
             (harness-provider-claude-session-cancel-timer entry) nil
@@ -324,6 +338,7 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
       (set-process-sentinel proc #'ignore)
       (delete-process proc))
     (when (buffer-live-p buf) (kill-buffer buf))
+    (harness-provider-claude--end-block entry)
     (setf (harness-provider-claude-session-process entry) nil
           (harness-provider-claude-session-stderr entry) nil)))
 
@@ -495,6 +510,56 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
        (or (plist-get usage :cache_read_input_tokens) 0)
        (or (plist-get usage :cache_creation_input_tokens) 0))))
 
+;; What the model is producing, as `activity' events.  The CLI streams a
+;; thinking block without its text (only a signature arrives, at its
+;; end) and a tool call's input as JSON fragments nobody reads before
+;; the call itself, so without these a turn shows nothing for as long
+;; as the model thinks or writes a large input.
+
+(defun harness-provider-claude--start-tool-input (entry name)
+  "Begin reporting the input of a call to tool NAME streaming on ENTRY."
+  (puthash (harness-provider-claude-session-id entry)
+           (list :tool name :chars 0 :sent-at (float-time) :timer nil)
+           harness-provider-claude--blocks)
+  (harness-provider-claude--emit entry (list :type 'activity :phase 'tool-input :tool name :chars 0)))
+
+(defun harness-provider-claude--report-input (entry block)
+  "Report how much of BLOCK's tool input has streamed on ENTRY.
+BLOCK's keys all exist from the start, so it is updated in place."
+  (when-let* ((timer (plist-get block :timer)))
+    (cancel-timer timer))
+  (setf (plist-get block :timer) nil
+        (plist-get block :sent-at) (float-time))
+  (harness-provider-claude--emit entry (list :type 'activity :phase 'tool-input
+                                             :tool (plist-get block :tool)
+                                             :chars (plist-get block :chars))))
+
+(defun harness-provider-claude--input-progress (entry chars)
+  "Count CHARS more characters of the tool input streaming on ENTRY.
+Reports go out at most every `harness-provider-claude-progress-interval'
+seconds; one held back goes out when the interval is up, unless the
+block has ended by then, so a report never follows the call it is about."
+  (when-let* ((block (gethash (harness-provider-claude-session-id entry) harness-provider-claude--blocks)))
+    (setf (plist-get block :chars) (+ chars (plist-get block :chars)))
+    (let ((wait (- (+ (plist-get block :sent-at) harness-provider-claude-progress-interval) (float-time))))
+      (cond ((<= wait 0) (harness-provider-claude--report-input entry block))
+            ((null (plist-get block :timer))
+             (setf (plist-get block :timer)
+                   (run-at-time wait nil
+                                (lambda ()
+                                  (setf (plist-get block :timer) nil)
+                                  (when (eq block (gethash (harness-provider-claude-session-id entry)
+                                                           harness-provider-claude--blocks))
+                                    (harness-provider-claude--report-input entry block))))))))))
+
+(defun harness-provider-claude--end-block (entry)
+  "Forget the tool input streaming on ENTRY, if any."
+  (let ((sid (harness-provider-claude-session-id entry)))
+    (when-let* ((block (gethash sid harness-provider-claude--blocks)))
+      (when-let* ((timer (plist-get block :timer)))
+        (cancel-timer timer))
+      (remhash sid harness-provider-claude--blocks))))
+
 (defun harness-provider-claude--handle-stream (entry event)
   "Handle an Anthropic streaming EVENT on ENTRY."
   (pcase (plist-get event :type)
@@ -507,21 +572,36 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
        (setf (harness-provider-claude-session-context entry) ctx)))
     ("content_block_start"
      (let ((block (plist-get event :content_block)))
-       (when (equal (plist-get block :type) "tool_use")
-         (harness-provider-claude--remember-tool-use
-          entry (plist-get block :id) (plist-get block :name)))))
+       (harness-provider-claude--end-block entry)
+       (pcase (plist-get block :type)
+         ("tool_use"
+          (harness-provider-claude--remember-tool-use
+           entry (plist-get block :id) (plist-get block :name))
+          (harness-provider-claude--start-tool-input
+           entry (harness-provider-claude--strip-prefix (plist-get block :name))))
+         ((or "thinking" "redacted_thinking")
+          (harness-provider-claude--emit entry '(:type activity :phase thinking)))
+         ("text"
+          (harness-provider-claude--emit entry '(:type activity :phase writing))))))
+    ("content_block_stop" (harness-provider-claude--end-block entry))
     ("content_block_delta"
      (let* ((delta (plist-get event :delta))
             (kind (plist-get delta :type)))
        (pcase kind
+         ;; Whitespace counts: a delta of "\n\n" separates paragraphs.
+         ;; The agent keeps whitespace from opening a message by itself.
          ("text_delta"
           (let ((text (plist-get delta :text)))
-            (unless (harness-string-blank-p text)
+            (unless (or (not (stringp text)) (string-empty-p text))
               (harness-provider-claude--emit entry (list :type 'text :delta text)))))
          ("thinking_delta"
           (let ((text (plist-get delta :thinking)))
-            (unless (or (null text) (string-empty-p text))
-              (harness-provider-claude--emit entry (list :type 'thinking :delta text))))))))))
+            (unless (or (not (stringp text)) (string-empty-p text))
+              (harness-provider-claude--emit entry (list :type 'thinking :delta text)))))
+         ("input_json_delta"
+          (let ((json (plist-get delta :partial_json)))
+            (when (stringp json)
+              (harness-provider-claude--input-progress entry (length json))))))))))
 
 (defun harness-provider-claude--handle-assistant (entry message)
   "Remember tool_use ids from the authoritative assistant MESSAGE on ENTRY."
@@ -1031,6 +1111,15 @@ its usage report has arrived."
       ("system"
        (pcase (plist-get msg :subtype)
          ("init" (harness-provider-claude--handle-init entry msg))
+         ;; Compacting takes a while and streams nothing; a null status
+         ;; ends it and the CLI waits for the model again.
+         ("status"
+          (let ((status (plist-get msg :status)))
+            (cond ((equal status "compacting")
+                   (harness-provider-claude--emit entry '(:type activity :phase compacting)))
+                  ((null status)
+                   (harness-provider-claude--emit entry '(:type activity :phase waiting)))
+                  (t (harness-log 'debug "provider-claude: status %s" status)))))
          ("compact_boundary"
           (harness-provider-claude--emit
            entry '(:type hint :text "Context compacted by Claude Code")))

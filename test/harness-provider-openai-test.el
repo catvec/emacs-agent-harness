@@ -276,9 +276,17 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
                '(:choices ((:index 0 :delta () :finish_reason "tool_calls")))
                '(:choices () :usage (:prompt_tokens 50 :completion_tokens 9))
                "[DONE]")))))
-    (let ((events (car (harness-openai-test--complete
-                        harness-openai-test-endpoint
-                        '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "go")))))))))
+    (let* ((all (car (harness-openai-test--complete
+                      harness-openai-test-endpoint
+                      '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "go"))))))))
+           (activity (cl-remove-if-not (lambda (e) (eq (plist-get e :type) 'activity)) all))
+           (events (cl-remove 'activity all :key (lambda (e) (plist-get e :type)))))
+      ;; Each call is announced, with the size of its arguments so far, as
+      ;; soon as its name streams; later fragments within the interval are not.
+      (should (equal '((tool-input "echo" 0) (tool-input "noop" 2))
+                     (mapcar (lambda (e) (list (plist-get e :phase) (plist-get e :tool) (plist-get e :chars)))
+                             activity)))
+      (should (< (cl-position (car activity) all) (cl-position 'usage all :key (lambda (e) (plist-get e :type)))))
       (should (equal '(start usage tool-call tool-call done) (harness-openai-test--types events)))
       (should (equal '(:type tool-call :id "call_abc" :name "echo" :input (:value "x y") :respond nil) (nth 2 events)))
       (should (equal '(:type tool-call :id "call_def" :name "noop" :input nil :respond nil) (nth 3 events)))

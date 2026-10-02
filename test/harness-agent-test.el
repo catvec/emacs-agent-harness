@@ -142,6 +142,121 @@
       (harness-call 'agent/cancel id)
       (harness-test-wait (lambda () (not (harness-agent-running-p id))) 5 "the turn to stop"))))
 
+(defun harness-agent-test-record-activity (id)
+  "Return a cell whose car collects ID's activity changes, oldest first."
+  (let ((cell (list nil)))
+    (harness-on 'agent/activity-changed
+                (lambda (sid activity)
+                  (when (equal sid id) (setcar cell (append (car cell) (list activity))))))
+    cell))
+
+(defun harness-agent-test-phases (activities)
+  "Return the phases of ACTIVITIES with repeats of one phase merged."
+  (let (out)
+    (dolist (a activities (nreverse out))
+      (let ((phase (plist-get a :phase)))
+        (unless (and out (eq phase (car out)))
+          (push phase out))))))
+
+(ert-deftest harness-agent-activity-follows-the-turn ()
+  "Every gap of a turn says what the agent is doing, and nothing is left after."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (seen (harness-agent-test-record-activity id))
+           (harness-provider-demo-script-override
+            '((:type activity :phase thinking)
+              (:type thinking :delta "Let me look.")
+              (:type activity :phase writing)
+              (:type text :delta "\n\n")
+              (:type activity :phase tool-input :tool "list_dir" :chars 0)
+              (:type activity :phase tool-input :tool "list_dir" :chars 12)
+              (:type tool-call :id "t1" :name "list_dir" :input (:path "/tmp"))
+              (:type text :delta "\n\n")
+              (:type text :delta "Done.")
+              (:type done :stop-reason end-turn))))
+      (harness-await (harness-call 'agent/prompt id "go"))
+      (let ((activities (car seen)))
+        (should (equal '(waiting thinking writing tool-input tool waiting writing nil)
+                       (harness-agent-test-phases activities)))
+        ;; A tool-input phase grows in place: it keeps when it began.
+        (let ((inputs (cl-remove-if-not (lambda (a) (eq (plist-get a :phase) 'tool-input)) activities)))
+          (should (equal '(0 12) (mapcar (lambda (a) (plist-get a :chars)) inputs)))
+          (should (equal "list_dir" (plist-get (car inputs) :tool)))
+          (should (= (plist-get (car inputs) :since) (plist-get (cadr inputs) :since))))
+        ;; The call shows with its title while it runs.
+        (let ((tool (cl-find 'tool activities :key (lambda (a) (plist-get a :phase)))))
+          (should (equal "list_dir" (plist-get tool :tool)))
+          (should (stringp (plist-get tool :title)))
+          (should (numberp (plist-get tool :since))))
+        (should (null (car (last activities)))))
+      (should-not (harness-call 'agent/activity id))
+      ;; The whitespace before the call opened no message; the one after
+      ;; leads the message it belongs to.
+      (should (equal '(user thinking tool-call tool-result assistant) (harness-agent-test-kinds id)))
+      (should (equal "\n\nDone." (plist-get (car (last (harness-call 'session/nodes id))) :content))))))
+
+(ert-deftest harness-agent-activity-shows-tool-progress ()
+  "A running tool's progress and its permission decision show in the activity."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (seen (harness-agent-test-record-activity id))
+           (harness-agent-progress-interval 0.2)
+           (finish nil)
+           (decide nil)
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "s1" :name "slow" :input (:what "tests"))
+              (:type text :delta "ok")
+              (:type done :stop-reason end-turn))))
+      (harness-add-filter 'permission/decide
+                          (lambda (_d next &rest _) (setq decide (lambda () (funcall next '(:behavior allow))))) 5)
+      (harness-define-tool "slow" :description "slow" :kind 'exec
+                           :title (lambda (input) (format "slow %s" (plist-get input :what)))
+                           :handler (lambda (_input ctx)
+                                      (let ((report (plist-get ctx :report)))
+                                        (funcall report "compiling\n")
+                                        (funcall report "\e[32mPASS\e[0m a.test\nPASS b.test\n")
+                                        (harness-with-promise (resolve reject)
+                                          (ignore reject)
+                                          (setq finish (lambda () (funcall resolve "done")))))))
+      (let ((p (harness-call 'agent/prompt id "go")))
+        ;; While the permission chain decides, the call is being checked.
+        (harness-test-wait (lambda () decide) 5 "the permission check")
+        (let ((a (harness-call 'agent/activity id)))
+          (should (eq 'tool (plist-get a :phase)))
+          (should (equal "slow tests" (plist-get a :title)))
+          (should (plist-get a :checking)))
+        (let ((asked (plist-get (harness-call 'agent/activity id) :since)))
+          (sleep-for 0.05)
+          (funcall decide)
+          ;; From the decision on it runs; its time counts from then.
+          (harness-test-wait (lambda () finish) 5 "the tool to start")
+          (harness-test-wait (lambda () (equal "PASS b.test" (plist-get (harness-call 'agent/activity id) :detail)))
+                             5 "the latest progress line")
+          (let ((a (harness-call 'agent/activity id)))
+            (should-not (plist-get a :checking))
+            (should (> (plist-get a :since) asked))))
+        (funcall finish)
+        (harness-await p))
+      (should (null (car (last (car seen)))))
+      (should-not (harness-call 'agent/activity id)))))
+
+(ert-deftest harness-agent-reload-subscribes-new-handlers ()
+  "A reload does not initialise a running module again, yet its new handlers run."
+  (harness-agent-test-with
+    (let ((subscribed (lambda (event fn) (cl-find fn (gethash event harness--subscribers) :key #'cdr))))
+      (should (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
+      ;; As if the running harness predated them.
+      (harness-off (cons 'tools/progress #'harness-agent--on-tool-progress))
+      (harness-off (cons 'permission/decided #'harness-agent--on-permission-decided))
+      (should-not (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
+      (let ((harness--defining-module 'agent))
+        (harness-load-compiled (expand-file-name "lisp/modules/harness-agent.el" harness-test-root)))
+      (should (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
+      (should (funcall subscribed 'permission/decided #'harness-agent--on-permission-decided))
+      ;; Subscribing is idempotent: one handler, however often loaded.
+      (should (= 1 (cl-count #'harness-agent--on-tool-progress (gethash 'tools/progress harness--subscribers)
+                             :key #'cdr))))))
+
 (ert-deftest harness-agent-before-turn-gate ()
   (harness-agent-test-with
     (let ((id (harness-agent-test-session)))

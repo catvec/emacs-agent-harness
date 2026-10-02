@@ -15,6 +15,24 @@ Behaviour is chosen by the prompt text:
   "die"        -> exits mid-turn without a result
 Anything else streams the text "hello" and finishes.
 
+These words add the gaps a real turn has, each as a pause (below) and
+in this order, so one prompt can combine them:
+  "compacting"  -> the CLI compacts first: a system/status message,
+                   a pause, then the compact boundary
+  "slow-start"  -> a pause before the model's first event
+  "slow-tool"   -> the echo tool call's input streams in pieces, with a
+                   pause in the middle (implies "call echo")
+  "slow-think"  -> a pause inside the thinking block, which carries no
+                   text: only a signature, as the real CLI sends it
+  "slow-text"   -> the text streams as "Hel", a pause, then "lo"
+  "paragraphs"  -> the text is "One." "\\n\\n" "Two.", the middle delta
+                   being whitespace only
+
+A pause waits for the file GATE.N when HARNESS_FAKE_CLAUDE_GATE=GATE,
+N counting the process's pauses from 1, so a test can look at what the
+harness shows during each gap and then release it; otherwise it sleeps
+HARNESS_FAKE_CLAUDE_PAUSE seconds (default 1.5).
+
 Like the real CLI, each result's total_cost_usd is the running total
 of the process: every turn adds 0.01, and --resume or --fork-session
 starts from 0.05, the spend the session restores.
@@ -40,10 +58,14 @@ written there.
 import json
 import os
 import sys
+import time
 import uuid
 
 AUTH = os.environ.get("HARNESS_FAKE_CLAUDE_AUTH", "")
 OVERAGE = bool(os.environ.get("HARNESS_FAKE_CLAUDE_OVERAGE"))
+GATE = os.environ.get("HARNESS_FAKE_CLAUDE_GATE")
+PAUSE = float(os.environ.get("HARNESS_FAKE_CLAUDE_PAUSE", "1.5"))
+GATE_TIMEOUT = 60
 TURN_COST = 0.01
 RESTORED_COST = 0.05
 
@@ -134,6 +156,7 @@ class Fake:
         self.model = arg_value(argv, "--model") or "fake-model"
         self.total = RESTORED_COST if resume else 0.0
         self.needs_handshake = "--mcp-config" in argv
+        self.pauses = 0
 
     # -- plumbing ---------------------------------------------------------
 
@@ -227,6 +250,21 @@ class Fake:
 
     # -- turns --------------------------------------------------------------
 
+    def pause(self):
+        """Wait out one gap of a turn: for the next gate file, or a while."""
+        self.pauses += 1
+        if not GATE:
+            time.sleep(PAUSE)
+            return
+        path = "%s.%d" % (GATE, self.pauses)
+        deadline = time.time() + GATE_TIMEOUT
+        while not os.path.exists(path):
+            if time.time() > deadline:
+                sys.stderr.write("fake-claude: gave up waiting for %s\n" % path)
+                sys.stderr.flush()
+                return
+            time.sleep(0.01)
+
     def stream(self, event):
         emit({"type": "stream_event", "event": event, "session_id": self.session_id})
 
@@ -255,6 +293,52 @@ class Fake:
                       "seven_day": {"utilization": 0.42, "resetsAt": 1800500000}}},
               "session_id": self.session_id})
 
+    def compact(self):
+        """Compact the conversation the way the CLI announces it."""
+        emit({"type": "system", "subtype": "status", "status": "compacting",
+              "session_id": self.session_id})
+        self.pause()
+        emit({"type": "system", "subtype": "status", "status": None,
+              "session_id": self.session_id})
+        emit({"type": "system", "subtype": "compact_boundary", "session_id": self.session_id,
+              "compact_metadata": {"trigger": "auto", "pre_tokens": 1000}})
+
+    def tool_call(self, slow):
+        """Ask the harness to run echo; return False when interrupted."""
+        self.stream({"type": "content_block_start", "index": 0,
+                     "content_block": {"type": "tool_use", "id": "toolu_fake_1",
+                                       "name": "mcp__harness__echo", "input": {}}})
+        pieces = ["{\"text\":", "\"pi", "ng\"}"] if slow else ["{\"text\":\"ping\"}"]
+        for i, piece in enumerate(pieces):
+            if slow and i == 1:
+                self.pause()
+            self.stream({"type": "content_block_delta", "index": 0,
+                         "delta": {"type": "input_json_delta", "partial_json": piece}})
+        self.stream({"type": "content_block_stop", "index": 0})
+        emit({"type": "assistant", "session_id": self.session_id,
+              "message": {"id": "msg_1", "role": "assistant", "model": self.model,
+                          "content": [{"type": "tool_use", "id": "toolu_fake_1",
+                                       "name": "mcp__harness__echo",
+                                       "input": {"text": "ping"}}],
+                          "stop_reason": "tool_use", "usage": self.usage()}})
+        self.rpc_id += 1
+        reply = self.mcp({"jsonrpc": "2.0", "id": self.rpc_id, "method": "tools/call",
+                          "params": {"name": "mcp__harness__echo",
+                                     "arguments": {"text": "ping"}}})
+        if self.interrupted:
+            self.result(subtype="error_during_execution", is_error=True,
+                        text="Request was aborted")
+            return False
+        content = reply.get("result", {}).get("content", [])
+        is_error = bool(reply.get("result", {}).get("isError"))
+        emit({"type": "user", "session_id": self.session_id,
+              "message": {"role": "user",
+                          "content": [{"type": "tool_result",
+                                       "tool_use_id": "toolu_fake_1",
+                                       "content": content,
+                                       "is_error": is_error}]}})
+        return True
+
     def turn(self, message):
         self.interrupted = False
         blocks = message.get("message", {}).get("content", [])
@@ -267,6 +351,10 @@ class Fake:
               "mcp_servers": [{"name": "harness", "status": "connected"}],
               "apiKeySource": "ANTHROPIC_API_KEY" if AUTH == "api" else "none",
               "permissionMode": "bypassPermissions"})
+        if "compacting" in text:
+            self.compact()
+        if "slow-start" in text:
+            self.pause()
         self.stream({"type": "message_start",
                      "message": {"id": "msg_1", "type": "message", "role": "assistant",
                                  "model": self.model, "content": [],
@@ -300,48 +388,33 @@ class Fake:
                                 text="Request was aborted")
                     return
                 self.queue.append(msg)
-        if "call echo" in text:
-            self.stream({"type": "content_block_start", "index": 0,
-                         "content_block": {"type": "tool_use", "id": "toolu_fake_1",
-                                           "name": "mcp__harness__echo", "input": {}}})
-            self.stream({"type": "content_block_delta", "index": 0,
-                         "delta": {"type": "input_json_delta",
-                                   "partial_json": "{\"text\":\"ping\"}"}})
-            self.stream({"type": "content_block_stop", "index": 0})
-            emit({"type": "assistant", "session_id": self.session_id,
-                  "message": {"id": "msg_1", "role": "assistant", "model": self.model,
-                              "content": [{"type": "tool_use", "id": "toolu_fake_1",
-                                           "name": "mcp__harness__echo",
-                                           "input": {"text": "ping"}}],
-                              "stop_reason": "tool_use", "usage": self.usage()}})
-            self.rpc_id += 1
-            reply = self.mcp({"jsonrpc": "2.0", "id": self.rpc_id, "method": "tools/call",
-                              "params": {"name": "mcp__harness__echo",
-                                         "arguments": {"text": "ping"}}})
-            if self.interrupted:
-                self.result(subtype="error_during_execution", is_error=True,
-                            text="Request was aborted")
+        if "call echo" in text or "slow-tool" in text:
+            if not self.tool_call("slow-tool" in text):
                 return
-            content = reply.get("result", {}).get("content", [])
-            is_error = bool(reply.get("result", {}).get("isError"))
-            emit({"type": "user", "session_id": self.session_id,
-                  "message": {"role": "user",
-                              "content": [{"type": "tool_result",
-                                           "tool_use_id": "toolu_fake_1",
-                                           "content": content,
-                                           "is_error": is_error}]}})
         # Thinking block with empty text and only a signature, as the CLI sends.
         self.stream({"type": "content_block_start", "index": 1,
                      "content_block": {"type": "thinking", "thinking": "", "signature": ""}})
+        if "slow-think" in text:
+            self.pause()
         self.stream({"type": "content_block_delta", "index": 1,
                      "delta": {"type": "signature_delta", "signature": "sig"}})
         self.stream({"type": "content_block_stop", "index": 1})
+        if "paragraphs" in text:
+            pieces = ["One.", "\n\n", "Two."]
+        elif "slow-text" in text:
+            pieces = ["Hel", None, "lo"]
+        else:
+            pieces = ["hel", "lo"]
         self.stream({"type": "content_block_start", "index": 2,
                      "content_block": {"type": "text", "text": ""}})
-        for piece in ("hel", "lo"):
+        for piece in pieces:
+            if piece is None:
+                self.pause()
+                continue
             self.stream({"type": "content_block_delta", "index": 2,
                          "delta": {"type": "text_delta", "text": piece}})
         self.stream({"type": "content_block_stop", "index": 2})
+        reply = "".join(p for p in pieces if p is not None)
         self.stream({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
                      "usage": {"input_tokens": 12, "cache_creation_input_tokens": 100,
                                "cache_read_input_tokens": 2000, "output_tokens": 7}})
@@ -349,10 +422,10 @@ class Fake:
         emit({"type": "assistant", "session_id": self.session_id,
               "message": {"id": "msg_2", "role": "assistant", "model": self.model,
                           "content": [{"type": "thinking", "thinking": "", "signature": "sig"},
-                                      {"type": "text", "text": "hello"}],
+                                      {"type": "text", "text": reply}],
                           "stop_reason": "end_turn", "usage": self.usage()}})
         self.rate_limit_event()
-        self.result()
+        self.result(text=reply)
 
     # -- main loop ----------------------------------------------------------
 

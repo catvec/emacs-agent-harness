@@ -696,6 +696,12 @@ during a replay the full content is sent as one chunk."
                :content (list :type "text" :text delta)
                :_harness (list :nodeId node-id)))))
 
+(defun harness-acp--on-activity (sid activity)
+  "Forward what the running turn of session SID does now, ACTIVITY.
+Nil means the turn ended; see `agent/activity' for the shape."
+  (when harness-acp--clients
+    (harness-acp--broadcast-update sid (list :sessionUpdate "_harness/activity" :activity activity))))
+
 (defun harness-acp--on-node-added (sid node)
   "Announce NODE appended to session SID."
   (when harness-acp--clients
@@ -818,6 +824,7 @@ an agent's own directory request has no \"Allow once\"."
 (defun harness-acp--subscribe ()
   "Subscribe the named event handlers; safe to call repeatedly."
   (harness-on 'agent/stream #'harness-acp--on-stream)
+  (harness-on 'agent/activity-changed #'harness-acp--on-activity)
   (harness-on 'session/node-added #'harness-acp--on-node-added)
   (harness-on 'session/node-updated #'harness-acp--on-node-updated)
   (harness-on 'session/changed #'harness-acp--on-session-changed)
@@ -1184,6 +1191,11 @@ Return a promise of the initialize result."
   :requires nil
   :init #'harness-acp--init
   :shutdown #'harness-acp--shutdown)
+
+;; A reload does not initialise a running module again: subscribe the
+;; handlers this version adds now.
+(when (harness-module-ready-p 'acp)
+  (harness-acp--subscribe))
 
 (provide 'harness-acp)
 ;;; harness-acp.el ends here
