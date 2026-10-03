@@ -280,7 +280,10 @@ box stays available, and the first message you send resumes it.
 ### Forks and side conversations
 
 `C-c h f` forks the current session. The fork starts from the
-conversation so far and continues independently.
+conversation so far and continues independently. A session can be
+forked while it works: the tool calls still running finish in the
+original session only, so the fork records that they have no result
+there.
 
 `C-c h b` opens a BTW ("by the way") side conversation in a window
 below the session. A BTW is a new, empty session that shares nothing

@@ -345,10 +345,12 @@ Replace the todos of the session in CTX with those in INPUT."
             (or (plist-get last-assistant :content) "(the sub-agent produced no answer)")
             child-id calls (harness-format-spend (plist-get child :usage)))))
 
-(defun harness-tools-agent--create-child (parent input child-id cwd worktree)
+(defun harness-tools-agent--create-child (parent input child-id cwd worktree call-id)
   "Return a promise of the child session plist for PARENT from INPUT.
 CHILD-ID is the id to use, CWD its working directory and WORKTREE
-its worktree path (or nil)."
+its worktree path (or nil).  CALL-ID is the spawn_agent call's: a fork
+copies it among the parent's calls still running, and answers it with
+a result saying the fork is the sub-agent it started."
   (let ((fork (harness-json-true-p (plist-get input :fork)))
         (name (plist-get input :name))
         (model (or (plist-get input :model) (plist-get parent :model))))
@@ -356,7 +358,7 @@ its worktree path (or nil)."
         (harness-as-promise
          (harness-call 'session/fork (plist-get parent :id)
                        :id child-id :kind 'subagent :name name :model model
-                       :cwd cwd :worktree worktree))
+                       :cwd cwd :worktree worktree :call-id call-id))
       (harness-as-promise
        (harness-call 'session/create
                      :id child-id :cwd cwd :worktree worktree :kind 'subagent
@@ -388,7 +390,8 @@ Run INPUT's prompt in a child of the session in CTX."
        (harness-resolved nil))
      (lambda (worktree)
        (harness-then
-        (harness-tools-agent--create-child parent input child-id (or worktree cwd) worktree)
+        (harness-tools-agent--create-child parent input child-id (or worktree cwd) worktree
+                                           (plist-get ctx :call-id))
         (lambda (child)
           (let ((cid (plist-get child :id)))
             (puthash cid (list :report (plist-get ctx :report) :calls 0) harness-tools-agent--children)
