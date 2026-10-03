@@ -46,6 +46,7 @@
 (declare-function harness-ui-tasks-toggle-subtitle "harness-ui-tasks")
 (declare-function harness-ui-tasks-tab "harness-ui-tasks")
 (declare-function harness-acp--drop-client "harness-acp")
+(declare-function harness-tasks--set "harness-tasks")
 
 (defmacro harness-ui-tasks-test-with (&rest body)
   "Load the state layer, tasks, ACP and the board UI; run BODY with `board' open.
@@ -1097,6 +1098,37 @@ tests that check a card's detail line show it first."
       (with-current-buffer board
         (should-error (harness-ui-tasks-verify) :type 'user-error)
         (should-error (harness-ui-tasks-reject) :type 'user-error)))))
+
+(ert-deftest harness-ui-tasks-review-offers-the-worktree-harness ()
+  "A review card whose worktree is a harness checkout offers [Open harness]."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (checkout nil))
+      (harness-ui-tasks-test--type-and-submit board "Try the harness")
+      (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Try the harness")
+      ;; Without a checkout of its own the card has no such button.
+      (harness-ui-tasks-test--goto-card board "Try the harness")
+      (with-current-buffer board
+        (should-not (harness-ui-tasks--open-harness-p (harness-ui-tasks--task)))
+        (should-not (string-match-p "\\[Open harness\\]" (harness-ui-tasks-test--board-text board))))
+      ;; A worktree that is a checkout of the harness gets one.
+      (setq checkout (harness-test-harness-checkout))
+      (harness-test-load-module 'tools-dev)
+      (harness-tasks--set (plist-get (car (harness-call 'task/list default-directory)) :id)
+                          :worktree checkout)
+      (harness-ui-tasks-refresh)
+      (harness-ui-tasks-test--wait-text board "\\[Open harness\\]")
+      (harness-ui-tasks-test--goto-card board "Try the harness")
+      (with-current-buffer board
+        (should (member "Open harness"
+                        (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task)))))
+        (let ((button (harness-ui-tasks--find-button "open-harness" (point-min) (point-max))))
+          (should button)
+          (push-button (nth 1 button))))
+      ;; The click starts the worktree's own live loop.
+      (harness-test-wait (lambda () (harness-test-dev-invocations checkout)) 5
+                         "the worktree's dev loop to run")
+      (should (equal "start" (cdr (assoc "args" (car (harness-test-dev-invocations checkout)))))))))
 
 ;;;; Review: the switch that turns it off
 

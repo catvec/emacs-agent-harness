@@ -79,7 +79,7 @@
 (defconst harness-perms--auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
     "emacs_buffers" "emacs_describe" "emacs_messages" "web_search" "notify"
-    "hand_in")
+    "hand_in" "open_harness")
   "Tools that never need approval, in every permission mode.
 `web_search' is included because it only sends its query to the
 configured `harness-websearch-provider', so even unattended task
@@ -88,9 +88,11 @@ whatever URL the agent names.  `notify' only reaches the user, through
 the notification providers they set up, so unattended sessions can
 tell them when they are needed.  `hand_in' only records a task's
 report and ends the turn: whether the work is ready is the user's
-call when they review it, never the judge's.  Standing rules in
-`harness-perms-rules' are checked first and can still deny any of
-these tools.")
+call when they review it, never the judge's.  `open_harness' only
+starts an Emacs running a checkout of this project's harness, in a
+state directory of its own, so verifying harness work live needs no
+prompt.  Standing rules in `harness-perms-rules' are checked first
+and can still deny any of these tools.")
 
 (defcustom harness-perms-rules nil
   "Standing permission rules that apply to every session.
