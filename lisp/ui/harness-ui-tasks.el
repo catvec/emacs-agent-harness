@@ -1385,7 +1385,6 @@ anything that moves a task without one, so a board never drifts.")
   (define-key map (kbd "D") #'harness-ui-tasks-delete)
   (define-key map (kbd "A") #'harness-ui-tasks-toggle-archived)
   (define-key map (kbd "V") #'harness-ui-tasks-toggle-review)
-  (define-key map (kbd "SPC") #'harness-ui-tasks-popout-at-point)
   (define-key map (kbd "B") #'harness-ui-tasks-toggle-bulk)
   (define-key map (kbd "I") #'harness-ui-tasks-adopt)
   (define-key map (kbd "b") #'harness-ui-tasks-btw)
@@ -1456,7 +1455,6 @@ anything that moves a task without one, so a board never drifts.")
         (". X" "Archive completed" harness-ui-tasks-archive-done)
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
         (". V" "Review on or off" harness-ui-tasks-toggle-review)
-        (". SPC" "Pop out at point" harness-ui-tasks-popout-at-point)
         (". B" "Bulk edit current tasks" harness-ui-tasks-toggle-bulk)
         (". g" "Refresh" harness-ui-tasks-refresh)]
        ["Compose box"
@@ -1864,14 +1862,6 @@ sent at once."
      (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
                                         "Sending the task back")
         (message "Sent back: its session works on your feedback")))))
-
-(defun harness-ui-tasks-popout-at-point ()
-  "Pop out what the task at point has: its report, or what it waits on.
-In the compose box it types a space, as SPC should."
-  (interactive)
-  (if (harness-compose-in-p)
-      (insert " ")
-    (harness-ui-popout-at-point)))
 
 (defun harness-ui-tasks--count-tasks (n)
   "N tasks in words: \"task\" for one, \"3 tasks\" for more."

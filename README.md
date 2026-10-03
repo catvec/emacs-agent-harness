@@ -321,10 +321,11 @@ so several tasks can work in parallel.
   `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-R`; type the feedback
   in the box, `C-c C-c` sends it) and `[Report]`, so you can accept the
   work without going back to the board.
-- `[Report]` on a card, or `SPC` over it, pops the handed-in summary and
+- `[Report]` on a card that has one pops the handed-in summary and
   evidence out beside the board: images inline, videos as thumbnails,
   files as buttons, and each referenced tool call as the call it links
-  to, with `[Open in the session]`.
+  to, with `[Open in the session]`. The board's item-at-point key
+  (`SPC`) opens it too, along with whatever else the task has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `RET` opens the session of the task at point. From that session,

@@ -1918,8 +1918,8 @@ never cancelled).  A task in review shows [Verify] and [Send back]: `v`
 accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
 in the minibuffer).  A card of a task that handed a report in also
-shows [Report], and SPC (`harness-ui-tasks-popout-at-point'; a space in
-the compose box) pops out what the task has.  The header counts the
+shows [Report]; the board's item-at-point key (SPC) pops out what the
+task has, the report or what it waits on.  The header counts the
 tasks to review, and `task/review` says in the echo area that one is
 ready (`harness-ui-tasks-notify-review`).  The header's Review switch
 ([Review: on], `V`) turns review off and on again for every project

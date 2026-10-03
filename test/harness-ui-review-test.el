@@ -171,7 +171,7 @@ review with a report; BODY gets `board', `id' and `sid'."
         (should-error (harness-ui-review--send "  " nil) :type 'user-error)))))
 
 (ert-deftest harness-ui-review-report-popout ()
-  "[Report] in the banner, and SPC on the board, show the report: the summary and the evidence."
+  "[Report], and the board's item at point, show the report: the summary and the evidence."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
@@ -192,13 +192,16 @@ review with a report; BODY gets `board', `id' and `sid'."
           (should (string-match-p "\[tool call\]" text))
           (should (string-match-p "\[Open in the session\]" text))
           (should (string-match-p "Hand in the finished work" text)))
-        ;; SPC on the board over the card pops the same report out again.
+        ;; The board offers it: a [Report] button on the card that has a
+        ;; report, and the item at point -- the shared command a view's
+        ;; SPC delegates to -- popping the same report out again.
         (harness-ui-popout-close key)
         (with-current-buffer board
           (harness-ui-tasks--render)
+          (should (string-search "[Report]" (buffer-string)))
           (goto-char (point-min))
           (search-forward "Fix the flaky test")
-          (call-interactively (key-binding (kbd "SPC"))))
+          (call-interactively #'harness-ui-popout-at-point))
         (should (harness-ui-popout-buffer key))))))
 
 (provide 'harness-ui-review-test)

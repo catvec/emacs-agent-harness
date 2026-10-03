@@ -8,8 +8,9 @@
 ;; in a popout (`harness-ui-popout'), so it can be read without opening
 ;; the session, from
 ;;
-;;   the board  [Report] on a card that has one, and SPC over it
-;;              (`harness-ui-popout-at-point-functions');
+;;   the board  [Report] on a card that has one; the board's item at
+;;              point (`SPC', through the shared
+;;              `harness-ui-popout-at-point-functions') too;
 ;;   the chat   the review banner's [Report] button.
 ;;
 ;; The report is drawn from the task record the harness holds: the board
