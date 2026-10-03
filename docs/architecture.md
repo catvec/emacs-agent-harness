@@ -1385,6 +1385,14 @@ Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
 asynchronous process started with `start-file-process` so TRAMP works.
 
+`read_file` returns an image or a video as an `:attachments` entry the
+chat shows the user: the picture of an image (an SVG is read as text
+from its top and also shown), and a video as a poster, its thumbnail
+under a play button, which plays it.  A video is something the model
+cannot see: it is told what the file is and to inspect it with
+`ffmpeg`.  Text behind a video's extension (TypeScript's `.ts`) is
+still read as text.
+
 `web_search` asks the search provider `harness-websearch-provider`
 (Brave, whose key comes from `harness-brave-api-key`, `BRAVE_API_KEY` or
 auth-source).  `harness-websearch-register-provider NAME FN &optional
@@ -1731,4 +1739,5 @@ its buffer, once the harness confirms it holds no node of its own,
 and an idle one is closed.  Keeping it makes it a normal session
 window in that place, with nothing of the BTW left in its header), media
 (`harness-ui-media`: inline images, audio record/playback with svg
-meters, video thumbnails/open).
+meters, video posters that play the video, and the attachments a tool
+result or a message carries).

@@ -47,6 +47,7 @@
 (require 'button)
 (require 'icons)
 (require 'mailcap)
+(require 'text-property-search)
 (require 'dnd)
 (require 'harness-core)
 (require 'harness-util)
@@ -296,7 +297,7 @@ PROPS may hold `:help' and `:face'."
     (add-text-properties
      0 (length s)
      (list 'face (or (plist-get props :face) 'button)
-           'mouse-face 'highlight 'follow-link t
+           'mouse-face 'highlight 'follow-link t 'pointer 'hand
            'help-echo (plist-get props :help)
            'harness-chat-action action
            'keymap (harness-chat--mouse-map #'harness-chat-push))
@@ -459,32 +460,65 @@ found again after the transcript is rebuilt."
 
 (defun harness-chat--image-string (source &optional mime)
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
-MIME is a hint for the image type.  Without image support a button
+MIME is a hint for the image type.  Without image support, and for a
+path on a remote host, which reading here would block on, a button
 opening the file is returned instead."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
-         (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]")))
-    (if (and (display-images-p) (or data (and path (file-readable-p path))))
-        (let* ((w (car (harness-chat--windows)))
-               (width (floor (* 0.6 (if w (window-body-width w t) 800))))
-               (img (condition-case nil
-                        (if data
-                            (create-image (base64-decode-string data) nil t
-                                          :max-width width :max-height harness-chat-image-max-height)
-                          (create-image path nil nil
-                                        :max-width width :max-height harness-chat-image-max-height))
-                      (error nil))))
-          (if img
-              (concat (propertize label 'display img 'help-echo (or path mime "image")
-                                  'keymap (and path (harness-chat--mouse-map
-                                                     (lambda () (interactive) (find-file-other-window path)))))
-                      "\n")
-            (concat label "\n")))
-      (if path
-          (concat (harness-chat--button label (lambda () (find-file-other-window path))
-                                        :help "Open the image")
-                  "\n")
-        (concat (propertize label 'face 'harness-dim-face) "\n")))))
+         (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
+         (local (and path (not (file-remote-p path))))
+         (open (and path (lambda () (interactive) (find-file-other-window path))))
+         (img (and (display-images-p) (or data (and local (file-readable-p path)))
+                   (let* ((w (car (harness-chat--windows)))
+                          (width (floor (* 0.6 (if w (window-body-width w t) 800)))))
+                     (condition-case nil
+                         (if data
+                             (create-image (base64-decode-string data) nil t
+                                           :max-width width :max-height harness-chat-image-max-height)
+                           (create-image path nil nil
+                                         :max-width width :max-height harness-chat-image-max-height))
+                       (error nil))))))
+    (cond
+     (img (concat (propertize label 'display img 'pointer 'hand
+                              'help-echo (format "mouse-1 or RET: open %s" (or path mime "the image"))
+                              'keymap (and open (harness-chat--mouse-map open)))
+                  "\n"))
+     (open (concat (harness-chat--button label open :help (format "Open %s" path)) "\n"))
+     (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
+
+(defun harness-chat--attachment-mime (att)
+  "Return the MIME type of the attachment plist ATT.
+Guessed from the file name when ATT carries none, as the media module
+does, so an attachment without one still shows as what it is."
+  (or (plist-get att :mime)
+      (let ((ext (file-name-extension (or (plist-get att :path) (plist-get att :name) ""))))
+        (and ext (not (string-empty-p ext)) (mailcap-extension-to-mime (concat "." ext))))
+      ""))
+
+(defun harness-chat--media-mime-p (mime)
+  "Non-nil when MIME is an image or a video, which the chat shows itself."
+  (or (string-prefix-p "image/" mime) (string-prefix-p "video/" mime)))
+
+(defun harness-chat--attachment-shows-media-p (att)
+  "Non-nil when ATT is an image or a video, drawn in the transcript."
+  (harness-chat--media-mime-p (harness-chat--attachment-mime att)))
+
+(defun harness-chat--show-media (att)
+  "Return the transcript string for media attachment ATT, or nil.
+Images go through `harness-chat--image-string'; videos and audio
+through the media module, so a video shows its poster and plays from
+here.  Nil when ATT is not media, or the media module is not loaded."
+  (let* ((mime (harness-chat--attachment-mime att))
+         (path (plist-get att :path))
+         (kind (cond ((string-prefix-p "image/" mime) 'image)
+                     ((string-prefix-p "video/" mime) 'av)
+                     ((string-prefix-p "audio/" mime) 'av))))
+    (pcase kind
+      ('image (harness-chat--image-string (or path (list :data (plist-get att :data))) mime))
+      ('av (when (and path (fboundp 'harness-ui-media-render-attachment))
+             (let ((s (ignore-errors (harness-ui-media-render-attachment att))))
+               (and (stringp s) (not (string-blank-p s)) (harness-chat--ensure-newline s)))))
+      (_ nil))))
 
 (defun harness-chat--file-button (path name size)
   "Return a button line opening PATH, labelled NAME with SIZE bytes."
@@ -497,26 +531,36 @@ opening the file is returned instead."
           "\n"))
 
 (defun harness-chat--attachment-string (att)
-  "Return a string showing tool-result attachment ATT."
-  (let* ((mime (or (plist-get att :mime) ""))
+  "Return a string showing tool-result attachment ATT.
+An image shows its picture, a video its poster (which plays), audio
+its player, anything else a file button."
+  (let* ((mime (harness-chat--attachment-mime att))
          (path (plist-get att :path))
          (media (and (not (string-prefix-p "image/" mime))
                      (fboundp 'harness-ui-media-render-attachment)
                      (ignore-errors (harness-ui-media-render-attachment att)))))
     (cond
-     ((and path (string-prefix-p "image/" mime)) (harness-chat--image-string path mime))
+     ((string-prefix-p "image/" mime) (harness-chat--image-string path mime))
      ((and (stringp media) (not (string-blank-p media))) (harness-chat--ensure-newline media))
      (path (harness-chat--file-button path (plist-get att :name) (plist-get att :size)))
+     ((plist-get att :data) (harness-chat--image-string (list :data (plist-get att :data)) mime))
      (t ""))))
 
 (defun harness-chat--blocks-string (blocks)
   "Return the non-text content BLOCKS of a node as a string."
   (mapconcat (lambda (b)
-               (pcase (plist-get b :type)
+               (pcase (harness-chat--str (plist-get b :type))
                  ("image" (harness-chat--image-string (or (plist-get b :path) (list :data (plist-get b :data)))
                                                       (plist-get b :mime)))
-                 ("file" (harness-chat--file-button (plist-get b :path) (plist-get b :name) (plist-get b :size)))
-                 ("audio" (concat (propertize "[audio]" 'face 'harness-dim-face) "\n"))
+                 ((or "video" "audio")
+                  (or (harness-chat--show-media b)
+                      (concat (propertize (format "[%s]" (harness-chat--str (plist-get b :type))) 'face 'harness-dim-face)
+                              "\n")))
+                 ;; A file a person attached is shown as what it is: a
+                 ;; video plays from the transcript like one an agent
+                 ;; read, which read_file itself returns.
+                 ("file" (or (harness-chat--show-media b)
+                             (harness-chat--file-button (plist-get b :path) (plist-get b :name) (plist-get b :size))))
                  (_ "")))
              blocks ""))
 
@@ -702,6 +746,11 @@ A call that was refused reads apart from one that ran and failed."
                          "  " (harness-chat--tool-status result) "\n"))
          (line (and input (harness-chat--input-summary input title)))
          (summary (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") ""))
+         ;; What the user is shown of the result -- an image, a video
+         ;; poster, an audio player -- stays above the fold: a folded
+         ;; tool call still shows the picture it read.
+         (media (and result (mapconcat #'harness-chat--attachment-string
+                                       (plist-get result :attachments) "")))
          (details
           (concat
            (if input (concat (propertize "  input\n" 'face 'harness-label-face)
@@ -723,11 +772,29 @@ A call that was refused reads apart from one that ran and failed."
                                          (format "show all (%d more chars)" (- (length output) limit))
                                          (lambda () (harness-chat--show-all id)))
                                    "\n")
-                         ""))))
-           (mapconcat #'harness-chat--attachment-string (plist-get result :attachments) ""))))
+                         "")))))))
     (harness-chat--margin
-     (harness-chat--face (concat header summary (harness-chat--foldable details)) bg)
+     (harness-chat--face (concat header summary media (harness-chat--foldable details)) bg)
      bg)))
+
+(defun harness-chat--rerender-media (id)
+  "Redraw the chat block whose rendering shows the media ID, if any.
+Return non-nil when a chat buffer showed it.  A block is redrawn whole,
+so its fold overlay follows the new rendering; editing the media in
+place would leave the fold covering the picture or the player."
+  (let (handled)
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and harness-chat--blocks (not harness-chat--loading))
+            (save-excursion
+              (goto-char (point-min))
+              (when-let* ((m (text-property-search-forward 'harness-ui-media-id id t))
+                          (node (get-text-property (prop-match-beginning m) 'harness-chat-node))
+                          (block (gethash node harness-chat--blocks)))
+                (setq handled t)
+                (harness-chat--rerender block)))))))
+    handled))
 
 (defun harness-chat--render-hint (block)
   "Return the body of hint BLOCK."
@@ -1014,10 +1081,20 @@ draws it, so carrying that over would keep drawing the old image."
 
 ;;;; Coalescing
 
+(defun harness-chat--block-shows-media-p (block)
+  "Non-nil when BLOCK's result carries an image or a video to show.
+Such a block is never folded into a coalesced group: the group would
+hide the picture the read brought."
+  (and (harness-chat-block-p block)
+       (cl-some #'harness-chat--attachment-shows-media-p
+                (plist-get (harness-chat-block-result block) :attachments))))
+
 (defun harness-chat--coalescable-block-p (id)
-  "Non-nil when block ID is a tool call of a coalescable tool."
+  "Non-nil when block ID is a tool call of a coalescable tool.
+A block whose result shows media is not coalescable."
   (when-let* ((b (gethash id harness-chat--blocks)))
     (and (equal (harness-chat-block-kind b) "tool-call")
+         (not (harness-chat--block-shows-media-p b))
          (member (plist-get (harness-chat-block-node b) :tool) harness-chat--coalescable))))
 
 (defun harness-chat--group-text (group)
@@ -1081,31 +1158,56 @@ arriving for one of them changes it."
     (harness-chat--update-group-summary group)))
 
 (defun harness-chat--maybe-coalesce (id)
-  "Fold block ID into a run of coalescable tool calls when there is one."
-  (when (harness-chat--coalescable-block-p id)
-    (let* ((previous (cadr harness-chat--order))
-           (prev-block (and previous (gethash previous harness-chat--blocks)))
-           (gid (and prev-block (harness-chat-block-group prev-block))))
-      (if gid
-          (harness-chat--extend-group (gethash gid harness-chat--groups) id)
-        (let ((run (list id)) (rest (cdr harness-chat--order)))
-          (while (and rest (harness-chat--coalescable-block-p (car rest)))
-            (push (car rest) run)
-            (setq rest (cdr rest)))
-          (when (>= (length run) harness-chat-coalesce-threshold)
-            (harness-chat--make-group run)))))))
+  "Fold block ID into a run of coalescable tool calls when there is one.
+A block whose result shows media is not folded, and one that was
+folded before its result arrived is taken out of its group again, so
+the picture stays visible."
+  (let ((block (gethash id harness-chat--blocks)))
+    (cond
+     ((harness-chat--block-shows-media-p block) (harness-chat--uncoalesce block))
+     ((and (harness-chat--coalescable-block-p id) (not (harness-chat-block-group block)))
+      (let* ((previous (cadr harness-chat--order))
+             (prev-block (and previous (gethash previous harness-chat--blocks)))
+             (gid (and prev-block (harness-chat-block-group prev-block))))
+        (if gid
+            (harness-chat--extend-group (gethash gid harness-chat--groups) id)
+          (let ((run (list id)) (rest (cdr harness-chat--order)))
+            (while (and rest (harness-chat--coalescable-block-p (car rest)))
+              (push (car rest) run)
+              (setq rest (cdr rest)))
+            (when (>= (length run) harness-chat-coalesce-threshold)
+              (harness-chat--make-group run)))))))))
+
+(defun harness-chat--remove-group (group)
+  "Remove GROUP: its summary block, its overlay and its membership."
+  (delete-overlay (harness-chat-group-overlay group))
+  (let ((inhibit-read-only t) (buffer-undo-list t))
+    (delete-region (harness-chat-group-start group) (harness-chat-group-end group)))
+  (dolist (m (harness-chat-group-members group))
+    (when-let* ((b (gethash m harness-chat--blocks)))
+      (setf (harness-chat-block-group b) nil)
+      (when (harness-chat-block-head b) (harness-chat--rerender b))))
+  (remhash (harness-chat-group-id group) harness-chat--groups))
+
+(defun harness-chat--uncoalesce (block)
+  "Take BLOCK out of the group it is folded into, splitting the group.
+The runs before and after it are grouped anew, keeping the expanded
+state the group had."
+  (when-let* ((gid (harness-chat-block-group block))
+              (group (gethash gid harness-chat--groups)))
+    (let ((expanded (harness-chat-group-expanded group)))
+      (harness-chat--remove-group group)
+      (harness-chat--regroup)
+      (when expanded
+        (maphash (lambda (_ g)
+                   (setf (harness-chat-group-expanded g) t)
+                   (overlay-put (harness-chat-group-overlay g) 'invisible nil))
+                 harness-chat--groups)))))
 
 (defun harness-chat--clear-groups ()
   "Remove every group: summary blocks and overlays."
-  (maphash (lambda (_ g)
-             (delete-overlay (harness-chat-group-overlay g))
-             (let ((inhibit-read-only t) (buffer-undo-list t))
-               (delete-region (harness-chat-group-start g) (harness-chat-group-end g)))
-             (dolist (m (harness-chat-group-members g))
-               (when-let* ((b (gethash m harness-chat--blocks)))
-                 (setf (harness-chat-block-group b) nil)
-                 (when (harness-chat-block-head b) (harness-chat--rerender b)))))
-           harness-chat--groups)
+  (dolist (g (let (gs) (maphash (lambda (_ g) (push g gs)) harness-chat--groups) gs))
+    (harness-chat--remove-group g))
   (clrhash harness-chat--groups))
 
 (defun harness-chat--regroup ()
@@ -1171,11 +1273,14 @@ arriving for one of them changes it."
       (setq harness-chat--unfinished (delete (harness-chat-block-id call) harness-chat--unfinished))
       (puthash id call harness-chat--blocks)
       (harness-chat--rerender call)
+      ;; A result that brings a picture must not stay hidden in a group.
+      (harness-chat--maybe-coalesce (harness-chat-block-id call))
       (harness-chat--refresh-group-of call))
      ;; An update of a result already merged into its call block.
      ((and block (not (equal (harness-chat-block-id block) id)))
       (setf (harness-chat-block-result block) node)
       (harness-chat--rerender block)
+      (harness-chat--maybe-coalesce (harness-chat-block-id block))
       (harness-chat--refresh-group-of block))
      (block
       (setf (harness-chat-block-node block) node
@@ -2688,6 +2793,8 @@ Point moved onto an option of a question with diagrams shows its diagram."
 (defun harness-chat--init ()
   "Hook the chat into the UI foundation."
   (setq harness-ui-open-session-function #'harness-chat-buffer)
+  ;; Media the transcript shows redraws through its block, not in place.
+  (add-hook 'harness-ui-media-rerender-functions #'harness-chat--rerender-media)
   (add-hook 'harness-ui-update-functions #'harness-chat--on-update)
   (add-hook 'harness-ui-event-functions #'harness-chat--on-event)
   (add-hook 'harness-ui-quota-functions #'harness-chat--on-quota)

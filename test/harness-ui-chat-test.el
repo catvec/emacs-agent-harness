@@ -51,6 +51,8 @@
                             :handler (lambda (input _ctx) (format "answer to %s: red" (plist-get input :question))))
        (harness-test-load-module 'ui)
        (harness-test-load-module 'ui-chat)
+       ;; Images, videos and audio the transcript shows.
+       (harness-test-load-module 'ui-media)
        (clrhash harness-ui--sessions)
        (add-hook 'harness-ui-event-functions #'harness-ui-chat-test-record-event)
        (unwind-protect
@@ -997,6 +999,180 @@ opening it where images cannot show or the file is remote."
         (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn")
         (should (= 1 (hash-table-count harness-chat--groups)))
         (should (harness-ui-chat-test-find buf "5 tool calls: Read file ×3, Search files, Find files"))))))
+
+;;;; Images and videos in the transcript
+
+(defun harness-ui-chat-test--video (dir name seconds)
+  "Write a file that looks like a video at DIR/NAME, in the media module's
+eyes: a real thumbnail and a known duration, so no ffmpeg or ffprobe runs."
+  (let* ((path (expand-file-name name dir))
+         (thumb (harness-ui-media-thumbnail-path path)))
+    (with-temp-file path (insert "not really a video"))
+    (write-region "thumb" nil thumb nil 'silent)
+    (puthash path seconds harness-ui-media--durations)
+    path))
+
+(defun harness-ui-chat-test--png (dir name)
+  "Write a file that looks like a PNG at DIR/NAME."
+  (let ((path (expand-file-name name dir)))
+    (write-region "not really a png" nil path nil 'silent)
+    path))
+
+(defun harness-ui-chat-test--media-pos (mime)
+  "Return the first position in the current buffer carrying media MIME."
+  (save-excursion
+    (goto-char (point-min))
+    (when-let* ((m (text-property-search-forward 'harness-ui-media-mime mime t)))
+      (prop-match-beginning m))))
+
+(ert-deftest harness-ui-chat-shows-what-a-read-brought ()
+  "An image a tool read shows in the transcript, and so does a video,
+each above the fold: they are visible while the call is collapsed, and
+the call's text stays folded."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (image (harness-ui-chat-test--png (harness-test-temp-dir) "shot.png"))
+           (video (harness-ui-chat-test--video (harness-test-temp-dir) "clip.mp4" 42)))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "read_file" :call-id "m1"
+                                              :input '(:path "shot.png") :title "Read file: shot.png"))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "m1"
+                                              :output "Image shot.png (image/png, 17 B) attached."
+                                              :attachments (list (list :path image :mime "image/png"
+                                                                       :size 17 :name "shot.png"))))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "read_file" :call-id "m2"
+                                              :input '(:path "clip.mp4") :title "Read file: clip.mp4"))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "m2"
+                                              :output "Video clip.mp4 (video/mp4, 76 B) is shown to the user in the chat."
+                                              :attachments (list (list :path video :mime "video/mp4"
+                                                                       :size 76 :name "clip.mp4"))))
+      (let* ((buf (harness-ui-chat-test-open sid))
+             (blocks (with-current-buffer buf (harness-ui-chat-test-blocks buf "tool-call")))
+             (image-block (car blocks))
+             (video-block (cadr blocks)))
+        (with-current-buffer buf
+          (should (equal 2 (length blocks)))
+          ;; The image is drawn, before the fold, so a collapsed call still
+          ;; shows it; the call's text output stays hidden under the fold.
+          (let ((pos (harness-ui-chat-test-find buf "[image ")))
+            (should pos)
+            (should-not (invisible-p (1- pos)))
+            (should (< (1- pos) (overlay-start (harness-chat-block-fold image-block)))))
+          ;; The video, likewise: its rendering (its name and Play button,
+          ;; here with no graphic display) sits above the fold.
+          (let ((pos (harness-ui-chat-test--media-pos "video/mp4")))
+            (should pos)
+            (should-not (invisible-p pos))
+            (should (< pos (overlay-start (harness-chat-block-fold video-block)))))
+          (should (harness-ui-chat-test-find buf "Play"))
+          (should (harness-ui-chat-test-find buf "0:42"))
+          (should (harness-chat-block-collapsed image-block))
+          ;; The call's own output, which the fold hides, is there for search.
+          (should (invisible-p (1- (harness-ui-chat-test-find buf "Image shot.png (image/png, 17 B) attached.")))))))))
+
+(ert-deftest harness-ui-chat-media-rerender-keeps-it-visible ()
+  "When the media module redraws a video (a thumbnail landing, or a
+player advancing), the chat redraws the block, so the fold never
+collapses onto the picture and hides it."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (video (harness-ui-chat-test--video (harness-test-temp-dir) "clip.mp4" 42)))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "read_file" :call-id "m1"
+                                              :input '(:path "clip.mp4") :title "Read file: clip.mp4"))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "m1"
+                                              :output "Video clip.mp4 (video/mp4, 76 B) is shown to the user."
+                                              :attachments (list (list :path video :mime "video/mp4"
+                                                                       :size 76 :name "clip.mp4"))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (let* ((block (car (harness-ui-chat-test-blocks buf "tool-call")))
+                 (before (harness-ui-chat-test--media-pos "video/mp4")))
+            (should before)
+            (should-not (invisible-p before))
+            ;; The chat claims the redraw.
+            (should (harness-chat--rerender-media video))
+            (let ((after (harness-ui-chat-test--media-pos "video/mp4")))
+              (should after)
+              (should-not (invisible-p after))
+              (should (< after (overlay-start (harness-chat-block-fold block))))
+              (should (harness-ui-chat-test-find buf "Play")))
+            ;; Without a chat block showing it, the module edits in place.
+            (should-not (harness-chat--rerender-media "/tmp/nowhere.mp4"))))))))
+
+(ert-deftest harness-ui-chat-media-reads-stay-out-of-groups ()
+  "A read whose result carries a picture is not folded into a coalesced
+group, even when its call arrived while the group was forming; the
+calls around it regroup."
+  (harness-ui-chat-test-with
+    (let* ((harness-chat-coalesce-threshold 2)
+           (image (harness-ui-chat-test--png (harness-test-temp-dir) "shot.png"))
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      ;; read_file brings an image for shot.png, text for anything else.
+      (harness-define-tool "read_file" :label "Read file" :description "read" :kind 'read :coalescable t
+                           :subject (lambda (input) (plist-get input :path))
+                           :handler (lambda (input _ctx)
+                                      (if (equal (plist-get input :path) "shot.png")
+                                          (harness-tool-ok "Image shot.png (image/png, 17 B) attached."
+                                                           :attachments (list (list :path image :mime "image/png"
+                                                                                    :size 17 :name "shot.png")))
+                                        (format "read_file of %s" (plist-get input :path)))))
+      (let ((harness-provider-demo-script-override
+             '((:type tool-call :id "r1" :name "read_file" :input (:path "a.el"))
+               (:type tool-call :id "r2" :name "read_file" :input (:path "b.el"))
+               (:type tool-call :id "r3" :name "read_file" :input (:path "shot.png"))
+               (:type tool-call :id "r4" :name "read_file" :input (:path "c.el"))
+               (:type tool-call :id "r5" :name "read_file" :input (:path "d.el"))
+               (:type text :delta "Done.")
+               (:type done :stop-reason end-turn))))
+        (harness-ui-chat-test-prompt buf "read them"))
+      (with-current-buffer buf
+        ;; Two groups: r1 with r2 before the image, r4 with r5 after it.
+        (should (= 2 (hash-table-count harness-chat--groups)))
+        (let* ((shot (cl-find-if (lambda (b) (string-match-p "shot.png"
+                                                             (plist-get (harness-chat-block-node b) :title)))
+                                 (harness-ui-chat-test-blocks buf "tool-call")))
+               (pos (save-excursion (goto-char (harness-chat-block-start shot))
+                                    (search-forward "[image " (harness-chat-block-end shot)))))
+          (should shot)
+          ;; It is not in a group, and its picture shows.
+          (should-not (harness-chat-block-group shot))
+          (should-not (invisible-p (1- pos)))
+          (should-not (invisible-p (harness-chat-block-start shot)))
+          ;; The picture stays visible when the groups are expanded, and
+          ;; neither group holds it.
+          (dolist (g (hash-table-values harness-chat--groups))
+            (harness-chat-toggle-group (harness-chat-group-id g))
+            (should-not (member (harness-chat-block-id shot) (harness-chat-group-members g))))
+          (should-not (invisible-p (1- pos)))
+          (should (= 2 (hash-table-count harness-chat--groups)))
+          (should (harness-ui-chat-test-find buf "2 tool calls: Read file ×2")))
+        ;; A redraw from the fetched history keeps the same shape.
+        (harness-chat-redraw)
+        (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn")
+        (should (= 2 (hash-table-count harness-chat--groups)))
+        (let ((shot (cl-find-if (lambda (b) (string-match-p "shot.png"
+                                                            (plist-get (harness-chat-block-node b) :title)))
+                                (harness-ui-chat-test-blocks buf "tool-call"))))
+          (should-not (harness-chat-block-group shot))
+          (should-not (invisible-p (1- (save-excursion (goto-char (harness-chat-block-start shot))
+                                                       (search-forward "[image " (harness-chat-block-end shot)))))))))))
+
+(ert-deftest harness-ui-chat-shows-a-video-a-person-attached ()
+  "A video attached to a user message shows the video UI in the message."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (video (harness-ui-chat-test--video (harness-test-temp-dir) "trip.mp4" 90)))
+      (harness-call 'session/append sid
+                    (list :kind 'user :content "watch this"
+                          :blocks (list (list :type "file" :path video :mime "video/mp4"
+                                              :size 76 :name "trip.mp4"))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (let ((pos (harness-ui-chat-test-find buf "trip.mp4")))
+            (should pos)
+            (should-not (invisible-p (1- pos)))
+            (should (harness-ui-chat-test-find buf "Play"))
+            (should (harness-ui-chat-test-find buf "1:30"))))))))
 
 ;;;; Failed and denied tool calls
 
