@@ -111,7 +111,7 @@ A model of the plan's catalogue matching the value is used: the
 cheapest `haiku', say, for `cheap'.  The auto-mode judge runs on the
 `cheap' one.  A tier nothing matches falls back to the catalogue's
 prices."
-  :type '(plist :key-type symbol :value-type string) :group 'harness)
+  :type harness-provider-tiers-type :group 'harness)
 
 (defcustom harness-provider-copilot-extra-args nil
   "Extra command line arguments appended to every `copilot' invocation."

@@ -167,5 +167,14 @@ family names rather than whole ids."
     (should (equal "test-regexp:us.anthropic.claude-opus-5"
                    (harness-call 'provider/tier-model "test-regexp:x" :frontier)))))
 
+(ert-deftest harness-provider-tiers-type-names-the-tiers ()
+  "The settings page offers each tier of a provider by name."
+  (let ((type harness-provider-tiers-type))
+    (should (equal '(:cheap :balanced :frontier) (harness-test-option-keys type)))
+    (harness-test-check-record-type type)
+    (should (harness-test-fits-p type (plist-get (cdr type) :value)))
+    ;; A tier with no name of its own still fits, as a key it does not name.
+    (should (harness-test-fits-p type '(:cheap "haiku" :my-tier "other")))))
+
 (provide 'harness-provider-test)
 ;;; harness-provider-test.el ends here

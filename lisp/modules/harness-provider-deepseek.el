@@ -121,7 +121,7 @@ limit filled in.  The tier names the rates in
   '(:cheap "deepseek-flash" :balanced "deepseek-flash" :frontier "deepseek-v4-pro")
   "DeepSeek models named for the common tiers.
 The auto-mode judge, for one, runs on the `cheap' one."
-  :type '(plist :key-type symbol :value-type string)
+  :type harness-provider-tiers-type
   :set #'harness-deepseek--custom-set :group 'harness)
 
 (defconst harness-deepseek-host "api.deepseek.com"

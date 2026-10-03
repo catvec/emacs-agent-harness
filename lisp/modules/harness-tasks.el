@@ -161,13 +161,19 @@ permission waits for you, and the task needs input meanwhile.  A task's
 own setting, from the board or `task/submit', wins over both."
   :type 'boolean :group 'harness)
 
+(defconst harness-tasks--thinking-levels
+  '((const :tag "Low" "low") (const :tag "Medium" "medium") (const :tag "High" "high")
+    (const :tag "Extra high" "xhigh") (const :tag "Max" "max") (string :tag "Other level"))
+  "Customize types of the thinking levels a task setting may name.")
+
 (defcustom harness-tasks-model nil
   "Model of task sessions, or nil for the configured default."
-  :type '(choice (const :tag "Configured default" nil) string) :group 'harness)
+  :type '(choice (const :tag "Configured default" nil) (string :tag "Model")) :group 'harness)
 
 (defcustom harness-tasks-thinking nil
   "Thinking level of task sessions, or nil for the configured default."
-  :type '(choice (const :tag "Configured default" nil) string) :group 'harness)
+  :type `(choice (const :tag "Configured default" nil) ,@harness-tasks--thinking-levels)
+  :group 'harness)
 
 (defcustom harness-tasks-naming-prompt
   "This conversation is a task the engineer handed to the agent to do unattended, tracked on a task board.  Title it like a ticket on that board: an imperative summary of the work to be done, such as \"Fix login redirect loop\" or \"Add CSV export to reports\"."
@@ -196,12 +202,13 @@ how to coordinate with their sessions."
 
 (defcustom harness-tasks-refine-model nil
   "Model that writes backlog tasks up, or nil for the task's own model."
-  :type '(choice (const :tag "The task's model" nil) string) :group 'harness)
+  :type '(choice (const :tag "The task's model" nil) (string :tag "Model")) :group 'harness)
 
 (defcustom harness-tasks-refine-thinking "low"
   "Thinking level of refining a backlog task, or nil for the task's own.
 A write-up should be quick, so the default thinks little."
-  :type '(choice (const :tag "The task's thinking level" nil) string) :group 'harness)
+  :type `(choice (const :tag "The task's thinking level" nil) ,@harness-tasks--thinking-levels)
+  :group 'harness)
 
 (defcustom harness-tasks-refine-tool-calls 8
   "Tool calls a write-up may make before the agent is told to finish it.
