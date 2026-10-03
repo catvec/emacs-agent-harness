@@ -19,6 +19,12 @@
 ;;   plan          how each provider bills (per token, or a plan such as
 ;;                 Claude Max) and the plan's quota windows as meters
 ;;                 with their reset times, plus its extra usage
+;;   fallback      the providers and models to carry on with when one
+;;                 runs out of quota or money, in order, each with its
+;;                 state and [up] [down] [try now] [remove], and [add];
+;;                 edits `harness-fallback-models' (see the fallback
+;;                 module), saved through `config/set' at the global
+;;                 scope
 ;;   budgets       every budget with a meter coloured by how much of it
 ;;                 is spent, including any baseline (what was spent
 ;;                 outside the harness, set by hand), plus [Add budget]
@@ -192,9 +198,13 @@ The answer of `_harness/usage/fetch-api-cost' plus :budget-id, or nil.")
        (harness-all (list (harness-ui-request "_harness/usage/totals" filters)
                           (harness-ui-request "_harness/usage/series" (append (list :bucket bucket) filters))
                           (harness-ui-request "_harness/usage/summary" (append (list :group-by group) filters))
-                          (harness-ui-request "_harness/usage/budgets" nil)))
+                          (harness-ui-request "_harness/usage/budgets" nil)
+                          ;; The fallback module may not be loaded; its
+                          ;; section is then left out.
+                          (harness-catch (harness-ui-request "_harness/fallback/status" nil)
+                                         (lambda (_) nil))))
        (lambda (results)
-         (pcase-let ((`(,totals ,series ,summary ,budgets) results))
+         (pcase-let ((`(,totals ,series ,summary ,budgets ,fallback) results))
            (let ((ids (append (mapcar (lambda (b) (plist-get b :id)) budgets)
                               (harness-ui-usage--implicit-budget-ids))))
              (harness-then
@@ -208,7 +218,8 @@ The answer of `_harness/usage/fetch-api-cost' plus :budget-id, or nil.")
                     (when (= gen harness-ui-usage--generation)
                       (setq harness-ui-usage--data
                             (list :totals totals :series series :summary summary
-                                  :budgets budgets :statuses (delq nil statuses))
+                                  :budgets budgets :statuses (delq nil statuses)
+                                  :fallback fallback)
                             harness-ui-usage--loading nil)
                       (harness-ui-usage--render)))))
               fail))))
@@ -565,6 +576,104 @@ prices; rows sort by, and Share divides, their value at API prices."
     (dolist (q quotas) (harness-ui-usage--insert-plan (car q) (cdr q)))
     (insert "\n")))
 
+;;;; Fallback list
+
+(defun harness-ui-usage--fallback-entry-label (entry)
+  "Return how fallback ENTRY reads: its model, or its provider and tiers."
+  (let ((label (or (plist-get entry :label) (plist-get entry :entry))))
+    (if (plist-get entry :model)
+        (format "%s (%s)" label (or (plist-get entry :provider-label) (plist-get entry :provider)))
+      (let ((tiers (delq nil (mapcar (lambda (tier)
+                                       (let ((m (plist-get tier :model)))
+                                         (and m (format "%s %s" (plist-get tier :tier)
+                                                        (or (plist-get tier :label) m)))))
+                                     (plist-get entry :tiers)))))
+        (concat label (if tiers (concat "  " (string-join tiers " · ")) ""))))))
+
+(defun harness-ui-usage--fallback-mark-text (mark)
+  "Describe MARK, what ran out and until when, as the fallback would."
+  (let ((kind (format "%s" (plist-get mark :kind)))
+        (until (plist-get mark :until))
+        (guess (harness-json-true-p (plist-get mark :guess))))
+    (concat (if (equal kind "billing") "out of money" "out of quota")
+            (cond ((and (numberp until) (not guess))
+                   (format " until %s"
+                           (if (< (- until (float-time)) 72000)
+                               (format-time-string "%H:%M" until)
+                             (format-time-string "%a %b %-d, %H:%M" until))))
+                  (guess " — trying again soon")
+                  (t "")))))
+
+(defun harness-ui-usage--fallback-state (entry)
+  "Return (TEXT . HELP) saying how fallback ENTRY stands."
+  (let ((mark (plist-get entry :mark)))
+    (cond
+     (mark (cons (harness-ui-usage--fallback-mark-text mark)
+                 (or (plist-get mark :reason) "ran out of quota or money")))
+     ((not (harness-json-true-p (plist-get entry :registered)))
+      (cons "provider not set up" nil))
+     ((and (plist-get entry :model) (not (harness-json-true-p (plist-get entry :known))))
+      (cons "not in the provider's catalogue" nil))
+     (t (cons "available" nil)))))
+
+(defun harness-ui-usage--insert-fallback (fallback)
+  "Insert the fallback section for FALLBACK, the `fallback/status' answer.
+Nothing is inserted when FALLBACK is nil, the fallback module being
+absent."
+  (when fallback
+    (insert " " (propertize "Fallback" 'face 'harness-usage-heading-face) "  ")
+    (harness-ui-button "[add]" #'harness-ui-usage-add-fallback
+                       :help "Add a provider or model to fall back to (f)")
+    (insert " ")
+    (harness-ui-button "[refresh]" #'harness-ui-usage-refresh :help "Reload the dashboard (g)")
+    (insert "\n")
+    (let ((entries (plist-get fallback :models))
+          (number 0))
+      (insert (propertize
+               (if entries
+                   "  sessions carry on with the first entry that has not run out; their own model comes first\n"
+                 "  sessions stop when their provider runs out — add where to carry on\n")
+               'face 'harness-dim-face))
+      (dolist (entry entries)
+        (let* ((start (point))
+               (state (harness-ui-usage--fallback-state entry)))
+          (insert (format "  %2d. " (cl-incf number)))
+          (insert (format "%-36s " (harness-truncate-end (harness-ui-usage--fallback-entry-label entry) 36)))
+          (insert (propertize (car state)
+                              'face (if (plist-get entry :mark) 'warning 'harness-dim-face)
+                              'help-echo (or (cdr state) nil)))
+          (insert "  ")
+          (harness-ui-usage--fallback-button "[up]" entry #'harness-ui-usage--fallback-move-one -1
+                                             :help "Use this entry earlier in the list (M-<up>)")
+          (insert " ")
+          (harness-ui-usage--fallback-button "[down]" entry #'harness-ui-usage--fallback-move-one 1
+                                             :help "Use this entry later in the list (M-<down>)")
+          (insert " ")
+          (when (plist-get entry :mark)
+            (harness-ui-usage--fallback-button "[try now]" entry #'harness-ui-usage--fallback-try-entry
+                                               :help "Forget that it ran out and try it again (c)")
+            (insert " "))
+          (harness-ui-usage--fallback-button "[remove]" entry #'harness-ui-usage--fallback-remove-entry
+                                             :help "Remove this entry (d)")
+          (insert "\n")
+          (add-text-properties start (point) (list 'harness-ui-usage-fallback entry)))))
+    ;; What ran out without being in the list still says why sessions move.
+    (let* ((covered (mapcar (lambda (e) (or (plist-get e :model) (plist-get e :entry)))
+                            (plist-get fallback :models)))
+           (extra (cl-remove-if (lambda (m) (member (plist-get m :key) covered))
+                                (plist-get fallback :marks))))
+      (dolist (mark extra)
+        (insert "  " (propertize (format "%s — %s" (or (plist-get mark :label) (plist-get mark :key))
+                                          (harness-ui-usage--fallback-mark-text mark))
+                                 'face 'warning)
+                (propertize "  (not in the list)\n" 'face 'harness-dim-face))))
+    (when-let* ((moved (plist-get fallback :moved)))
+      (insert (propertize (format "  %d session%s now on another model\n"
+                                  (length moved) (if (eql 1 (length moved)) "" "s"))
+                          'face 'harness-dim-face)))
+    (insert "\n")))
+
+
 (defun harness-ui-usage--budget-label (budget)
   "Return a label for BUDGET."
   (or (plist-get budget :label)
@@ -685,6 +794,7 @@ prices; rows sort by, and Share divides, their value at API prices."
           (harness-ui-usage--insert-chart (plist-get data :series))
           (harness-ui-usage--insert-table (plist-get data :summary))))
       (harness-ui-usage--insert-plans)
+      (harness-ui-usage--insert-fallback (plist-get data :fallback))
       (harness-ui-usage--insert-budgets (plist-get data :statuses))))
     (goto-char (point-min))
     (forward-line (1- line))))
@@ -698,7 +808,11 @@ prices; rows sort by, and Share divides, their value at API prices."
     (define-key map (kbd "t") #'harness-ui-usage-cycle-period)
     (define-key map (kbd "b") #'harness-ui-usage-cycle-group)
     (define-key map (kbd "a") #'harness-ui-usage-add-budget)
-    (define-key map (kbd "d") #'harness-ui-usage-remove-budget)
+    (define-key map (kbd "d") #'harness-ui-usage-remove)
+    (define-key map (kbd "f") #'harness-ui-usage-add-fallback)
+    (define-key map (kbd "c") #'harness-ui-usage-fallback-try)
+    (define-key map (kbd "M-<up>") #'harness-ui-usage-fallback-up)
+    (define-key map (kbd "M-<down>") #'harness-ui-usage-fallback-down)
     (define-key map (kbd "s") #'harness-ui-usage-set-baseline)
     (define-key map (kbd "I") #'harness-ui-usage-import-api-cost)
     (define-key map (kbd "P") #'harness-ui-usage-plan)
@@ -729,9 +843,14 @@ prices; rows sort by, and Share divides, their value at API prices."
         (". a" "Add budget" harness-ui-usage-add-budget)
         (". s" "Already spent (baseline)" harness-ui-usage-set-baseline)
         (". I" "Import API cost (Anthropic)" harness-ui-usage-import-api-cost)
-        (". d" "Remove budget" harness-ui-usage-remove-budget)
+        (". d" "Remove fallback entry or budget" harness-ui-usage-remove)
         (". P" "Plan a budget" harness-ui-usage-plan)
-        (". r" "Refresh plan quota" harness-ui-usage-refresh-plan)]))
+        (". r" "Refresh plan quota" harness-ui-usage-refresh-plan)]
+       ["Fallback"
+        (". f" "Add fallback model" harness-ui-usage-add-fallback)
+        (". c" "Try the fallback at point again" harness-ui-usage-fallback-try)
+        (". M-<up>" "Move it earlier" harness-ui-usage-fallback-up)
+        (". M-<down>" "Move it later" harness-ui-usage-fallback-down)]))
 
 (defun harness-ui-usage--on-resize ()
   "Redraw so the chart fits the new window width."
@@ -816,6 +935,136 @@ Usage outlives deleted sessions, so the session is looked up first."
   (interactive "e")
   (mouse-set-point event)
   (harness-ui-usage-open))
+
+;;;; Fallback commands
+;;
+;; The list lives in the harness (a defcustom the settings page also
+;; shows), so every edit goes through `config/set' at the global scope
+;; and the dashboard redraws from `fallback/status' afterwards.
+
+(defun harness-ui-usage--fallback-button (label entry function &rest props)
+  "Insert a button LABEL that calls FUNCTION on fallback ENTRY."
+  (apply #'harness-ui-button label (lambda (_button) (funcall function entry)) props))
+
+(defun harness-ui-usage--fallback-at-point ()
+  "Return the fallback entry plist on the current line, or nil."
+  (get-text-property (point) 'harness-ui-usage-fallback))
+
+(defun harness-ui-usage--fallback-status ()
+  "Return the last `fallback/status' answer, or nil when there was none."
+  (plist-get harness-ui-usage--data :fallback))
+
+(defun harness-ui-usage--fallback-models ()
+  "Return the fallback list as entries (strings) in order."
+  (mapcar (lambda (e) (plist-get e :entry)) (plist-get (harness-ui-usage--fallback-status) :models)))
+
+(defun harness-ui-usage--fallback-save (models &optional done)
+  "Save MODELS as `harness-fallback-models' and reload the dashboard.
+DONE is a message shown once the save arrived."
+  (let ((buf (current-buffer)))
+    (harness-ui-call
+     "_harness/config/set"
+     (list :key "harness-fallback-models"
+           :value (let ((print-length nil) (print-level nil)) (prin1-to-string models))
+           :printed t :scope "global")
+     (lambda (_)
+       (when done (message "%s" done))
+       (when (buffer-live-p buf) (with-current-buffer buf (harness-ui-usage--load buf))))
+     (lambda (e) (message "Could not save the fallback list: %s" (harness-error-message e))))))
+
+(defun harness-ui-usage--fallback-candidates (models)
+  "Return completion candidates (LABEL . ENTRY) for adding to the fallback list.
+MODELS are the entries already in it, left out.  Providers come from
+the quota cache and the model catalogue; models from the catalogue."
+  (let (ids)
+    (maphash (lambda (id _) (push id ids)) harness-ui--models)
+    (let ((providers (delete-dups
+                      (append (mapcar #'car (harness-ui-quotas))
+                              (delq nil (mapcar (lambda (id)
+                                                  (and (string-match "\\`\\([^:]+\\):" id)
+                                                       (match-string 1 id)))
+                                                ids))
+                              (mapcar (lambda (e) (plist-get e :provider))
+                                      (plist-get (harness-ui-usage--fallback-status) :models))))))
+      (append
+       (cl-loop for pid in (sort (delete-dups providers) #'string<)
+                unless (member pid models)
+                collect (cons (format "%s  (its model of similar ability)" pid) pid))
+       (cl-loop for id in (sort (delete-dups ids) #'string<)
+                unless (member id models)
+                collect (cons (format "%s  (%s)" (harness-ui-model-label id) id) id))))))
+
+(defun harness-ui-usage-add-fallback ()
+  "Add a provider or model to the end of the fallback list."
+  (interactive)
+  (let* ((models (harness-ui-usage--fallback-models))
+         (candidates (harness-ui-usage--fallback-candidates models))
+         (input (if candidates
+                    (completing-read "Fall back to: " candidates nil nil)
+                  (read-string "Fall back to (provider or provider:model): ")))
+         (cell (assoc input candidates))
+         (entry (or (cdr cell) input)))
+    (when (or (null entry) (string-blank-p entry)) (user-error "No provider or model given"))
+    (when (member entry models) (user-error "%s is already in the fallback list" entry))
+    (harness-ui-usage--fallback-save (append models (list entry))
+                                     (format "%s is now where sessions carry on" entry))))
+
+(defun harness-ui-usage--fallback-move-one (entry delta)
+  "Move fallback ENTRY DELTA places in the list, then save it."
+  (let* ((models (harness-ui-usage--fallback-models))
+         (key (plist-get entry :entry))
+         (pos (cl-position key models :test #'equal))
+         (new (and pos (+ pos delta))))
+    (unless pos (user-error "That entry is no longer in the fallback list"))
+    (when (or (< new 0) (>= new (length models)))
+      (user-error "%s is already %s in the fallback list" key (if (< delta 0) "first" "last")))
+    (let ((moved (copy-sequence models)))
+      (cl-rotatef (nth pos moved) (nth new moved))
+      (harness-ui-usage--fallback-save moved (format "%s is now %d in the fallback list" key (1+ new))))))
+
+(defun harness-ui-usage-fallback-up ()
+  "Move the fallback entry on the current line earlier in the list."
+  (interactive)
+  (harness-ui-usage--fallback-move-one
+   (or (harness-ui-usage--fallback-at-point) (user-error "No fallback entry on this line")) -1))
+
+(defun harness-ui-usage-fallback-down ()
+  "Move the fallback entry on the current line later in the list."
+  (interactive)
+  (harness-ui-usage--fallback-move-one
+   (or (harness-ui-usage--fallback-at-point) (user-error "No fallback entry on this line")) 1))
+
+(defun harness-ui-usage--fallback-try-entry (entry)
+  "Forget that fallback ENTRY ran out, so it is tried again."
+  (let ((key (or (plist-get entry :model) (plist-get entry :entry)))
+        (label (harness-ui-usage--fallback-entry-label entry))
+        (buf (current-buffer)))
+    (harness-ui-call "_harness/fallback/clear" (list :key key)
+                     (lambda (_)
+                       (message "%s will be tried again" label)
+                       (when (buffer-live-p buf) (with-current-buffer buf (harness-ui-usage--load buf))))
+                     (lambda (e) (message "Could not clear the mark: %s" (harness-error-message e))))))
+
+(defun harness-ui-usage-fallback-try ()
+  "Forget that the fallback entry on the current line ran out."
+  (interactive)
+  (harness-ui-usage--fallback-try-entry
+   (or (harness-ui-usage--fallback-at-point) (user-error "No fallback entry on this line"))))
+
+(defun harness-ui-usage--fallback-remove-entry (entry)
+  "Remove fallback ENTRY from the list."
+  (let ((key (plist-get entry :entry)))
+    (harness-ui-usage--fallback-save (delete key (harness-ui-usage--fallback-models))
+                                     (format "%s removed from the fallback list" key))))
+
+(defun harness-ui-usage-remove ()
+  "Remove the fallback entry or the budget on the current line."
+  (interactive)
+  (cond
+   ((harness-ui-usage--fallback-at-point)
+    (harness-ui-usage--fallback-remove-entry (harness-ui-usage--fallback-at-point)))
+   ((harness-ui-usage--budget-at-point) (harness-ui-usage-remove-budget))
+   (t (user-error "No fallback entry or budget on this line"))))
 
 (defun harness-ui-usage--budget-at-point ()
   "Return the budget status plist on the current line, or nil."
@@ -1009,10 +1258,15 @@ Defaults come from the budget on the current line when there is one."
     (harness-debounce 'harness-ui-usage 1.0
                       (lambda () (when (buffer-live-p buf) (harness-ui-usage--load buf))))))
 
-(defun harness-ui-usage--on-event (event _args)
-  "Refresh after EVENT changed spending or budgets."
-  (when (member event '("usage/budget-warning" "agent/turn-ended" "usage/budgets-changed" "usage/recorded"))
-    (harness-ui-usage--refresh-soon)))
+(defun harness-ui-usage--on-event (event args)
+  "Refresh after EVENT changed spending, budgets or the fallback list."
+  (cond
+   ((member event '("usage/budget-warning" "agent/turn-ended" "usage/budgets-changed" "usage/recorded"
+                    "fallback/changed" "fallback/switched"))
+    (harness-ui-usage--refresh-soon))
+   ((and (equal event "config/changed")
+         (equal (format "%s" (car args)) "harness-fallback-models"))
+    (harness-ui-usage--refresh-soon))))
 
 (defun harness-ui-usage--on-quota (_provider _quota)
   "Redraw the dashboard, whose plan section shows the providers' quota."
