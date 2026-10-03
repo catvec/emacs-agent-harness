@@ -82,8 +82,8 @@ The environment picks the account:
 The MCP handshake only runs when --mcp-config is given, so the
 provider's quota probe (initialize and get_usage, then end of input)
 works too.  If HARNESS_FAKE_CLAUDE_ARGV names a file, a JSON object
-with the argv, the cwd and the CLAUDECODE environment variable is
-written there.
+with the argv, the cwd, the CLAUDECODE environment variable and the
+CLAUDE_CODE_* ones (under "env") is written there.
 """
 
 import json
@@ -634,7 +634,8 @@ class Fake:
         path = os.environ.get("HARNESS_FAKE_CLAUDE_ARGV")
         if path:
             with open(path, "w") as f:
-                json.dump({"argv": self.argv,
+                json.dump({"env": {k: v for k, v in os.environ.items() if k.startswith("CLAUDE_CODE_")},
+                           "argv": self.argv,
                            "cwd": os.getcwd(),
                            "claudecode": os.environ.get("CLAUDECODE")}, f)
         while True:

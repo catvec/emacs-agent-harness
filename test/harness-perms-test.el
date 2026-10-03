@@ -186,6 +186,21 @@
   (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'auto))
   (should (eq 'allow (harness-perms-test--behavior "notify" 'meta))))
 
+(ert-deftest harness-perms-hand-in-needs-no-approval ()
+  "hand_in only records a task's report and ends the turn: no judge decides it.
+The judge used to decide it.  It read in the tool's description that
+the task then waits for review, and refused the edits the user's
+feedback asked for afterwards; it also refused a hand-in over a
+project's rule about landing work first."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (should (member "hand_in" harness-perms--auto-allow-tools))
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"land the work first\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-perms-auto-model "judge:x"))
+    (should (eq 'allow (harness-perms-test--behavior "hand_in" 'meta)))
+    (should (null (funcall probe 'requests)))))
+
 (ert-deftest harness-perms-rules-beat-auto-allow ()
   ;; web_search used to ask, so a user may have answered deny-always: the
   ;; rule must still hold now that the tool needs no approval.
@@ -291,6 +306,64 @@ Return a function giving the requests it received, newest first."
     (let ((d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
       (should (eq 'allow (plist-get d :behavior)))
       (should (equal "harmless" (plist-get d :reason))))))
+
+(ert-deftest harness-perms-judge-sees-the-call-alone ()
+  "The judge rules on the safety of one call, with nothing else to go on.
+Its request is one-off (`:ephemeral'), so the provider brings no
+earlier verdicts and no project instructions.  Its prompt keeps it off
+the task, the review and the workflow and has it lean to allowing.  Of
+the tool's description it gets what the tool does, not how the agent
+should use it.  A judge that remembered a hand-in, or read a project's
+CLAUDE.md, refused a task's edits after the user sent it back."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec
+                       :description "Runs a thing in the shell. Prefer t_other over it, and hand the work in once done."
+                       :handler #'ignore)
+  (let* ((requests (harness-perms-test--scripted-judge
+                    '(((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it wipes the disk\"}")
+                       (:type done :stop-reason end-turn))
+                      ((:type text :delta "{\"decision\":\"allow\",\"reason\":\"ordinary work\"}")
+                       (:type done :stop-reason end-turn)))))
+         (harness-perms-auto-model "judge:x")
+         (call (lambda (command)
+                 (harness-perms-test--decide (list :session harness-perms-test--session :tool "t_exec" :kind 'exec
+                                                   :input (list :command command) :call-id (harness-short-id)))))
+         (denied (funcall call "dd if=/dev/zero of=/dev/sda"))
+         (allowed (funcall call "make test"))
+         (text-of (lambda (req) (plist-get (car (plist-get (car (plist-get req :messages)) :content)) :text))))
+    (should (eq 'deny (plist-get denied :behavior)))
+    (should (equal "it wipes the disk" (plist-get denied :reason)))
+    (should (equal harness-perms-judge-deny-hint (plist-get denied :hint)))
+    (should (eq 'allow (plist-get allowed :behavior)))
+    ;; Newest first: each call was judged on its own command.
+    (should (equal '("make test" "dd if=/dev/zero")
+                   (mapcar (lambda (req) (if (string-search "make test" (funcall text-of req)) "make test"
+                                           (and (string-search "dd if=/dev/zero" (funcall text-of req))
+                                                "dd if=/dev/zero")))
+                           (funcall requests))))
+    (dolist (req (funcall requests))
+      ;; One-off: the provider answers from this request alone.
+      (should (eq t (plist-get req :ephemeral)))
+      (should (= 1 (length (plist-get req :messages))))
+      (should (null (plist-get req :provider-state)))
+      ;; Safety only, leaning to allow; never the task or the workflow.
+      (let ((system (plist-get req :system)))
+        (should (string-search "never deny a call for such reasons" system))
+        (should (string-search "handing work in" system))
+        (should (string-search "temporary directories included" system))
+        (should (string-search "When in doubt, allow" system)))
+      ;; What the tool does, not how to use it.
+      (let ((text (funcall text-of req)))
+        (should (string-search "What it does: Runs a thing in the shell.\n" text))
+        (should-not (string-search "Prefer t_other" text))
+        (should-not (string-search "hand the work in" text)))))
+  ;; The first sentence of a description, whatever it holds.
+  (should (equal "(no description)" (harness-perms--what-it-does nil)))
+  (should (equal "(no description)" (harness-perms--what-it-does "  ")))
+  (should (equal "Runs a thing." (harness-perms--what-it-does "Runs a thing.")))
+  (should (equal "Find files (e.g. \"*.el\")." (harness-perms--what-it-does "Find files (e.g. \"*.el\"). Results are capped.")))
+  (should (equal "Run it." (harness-perms--what-it-does "Run it.  Then stop.\nMore.")))
+  (should (equal "a lower-case start. no sentence break" (harness-perms--what-it-does "a lower-case start. no sentence break"))))
 
 (ert-deftest harness-perms-auto-model-takes-the-providers-cheap-tier ()
   "`harness-perms-auto-model' `auto' judges with the session provider's cheap tier.
