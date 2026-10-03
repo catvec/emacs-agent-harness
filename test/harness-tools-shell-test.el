@@ -279,33 +279,28 @@ a child never yields, so nothing in the evaluating Emacs can end it."
             (sleep-for 0.1)))
         (should-not (eql 0 (signal-process pid 0)))))))
 
-(ert-deftest harness-tools-shell-elisp-in-the-users-emacs-is-opt-in ()
-  "A call that asks for the user's Emacs evaluates there only when that
-Emacs allows it; every other call stays in the background, allowed or not."
+(ert-deftest harness-tools-shell-elisp-never-runs-in-the-users-emacs ()
+  "The elisp tool always evaluates in the background Emacs.
+There is no option to put it in the user's Emacs, its schema has no
+place to ask for one, and a call that asks anyway is refused."
   (harness-tools-shell-test--setup)
   (harness-test-with-temp-state
-    (should-not harness-elisp-allow-ui-eval)
+    ;; The option that used to allow it is gone, not just off.
+    (should-not (boundp 'harness-elisp-allow-ui-eval))
     (let ((r (harness-tools-shell-test--call "elisp" :code "(emacs-pid)" :emacs "user")))
       (should (plist-get r :is-error))
-      (should (string-search "harness-elisp-allow-ui-eval" (plist-get r :content)))
-      (should (string-search "background Emacs instead" (plist-get r :content))))
-    (let ((harness-elisp-allow-ui-eval t))
-      ;; Asked for: this Emacs, which the test's UI client lends the harness.
-      (let ((r (harness-tools-shell-test--call "elisp" :code "(emacs-pid)" :emacs "user")))
-        (should (equal (format "=> %d" (emacs-pid)) (plist-get r :content)))
-        (should (equal "user" (plist-get (plist-get r :meta) :emacs))))
-      ;; Not asked for: the background, even with the user's Emacs allowed.
-      (should-not (equal (format "=> %d" (emacs-pid))
-                         (plist-get (harness-tools-shell-test--call "elisp" :code "(emacs-pid)") :content)))
-      (let ((r (harness-tools-shell-test--call "elisp" :code "(error \"boom %d\" 7)" :emacs "user")))
-        (should (plist-get r :is-error))
-        (should (equal "Error: boom 7" (plist-get r :content)))))
-    (should (string-search "Unknown emacs" (plist-get (harness-tools-shell-test--call "elisp" :code "1" :emacs "elsewhere")
-                                                      :content)))
-    ;; The title says when a call can change the user's Emacs.
-    (should (equal "Emacs Lisp: (switch-to-buffer \"x\") (in your Emacs)"
-                   (harness-tool-title "elisp" '(:code "(switch-to-buffer \"x\")" :emacs "user"))))
-    (should (equal "Emacs Lisp: (+ 1 2)" (harness-tool-title "elisp" '(:code "(+ 1 2)" :emacs "background"))))))
+      (should (string-search "never evaluates in the user's Emacs" (plist-get r :content)))
+      (should (string-search "emacs_* tools" (plist-get r :content))))
+    (should-not (plist-get (plist-get (plist-get (harness-tool-spec (harness-tool-get "elisp")) :schema)
+                                      :properties)
+                           :emacs))
+    ;; A call without a target evaluates in the background, not here.
+    (let* ((r (harness-tools-shell-test--call "elisp" :code "(emacs-pid)"))
+           (content (plist-get r :content)))
+      (should (string-prefix-p "=> " content))
+      (should-not (equal (format "=> %d" (emacs-pid)) content))
+      (should (equal "background" (plist-get (plist-get r :meta) :emacs))))
+    (should (equal "Emacs Lisp: (+ 1 2)" (harness-tool-title "elisp" '(:code "(+ 1 2)"))))))
 
 (provide 'harness-tools-shell-test)
 ;;; harness-tools-shell-test.el ends here

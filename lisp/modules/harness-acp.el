@@ -448,14 +448,15 @@ callable over ACP."
 ;;;; Server: an Emacs lent to the harness
 
 ;; Every tool runs here, in the harness.  The tools about the user's
-;; Emacs (its buffers, its symbols, evaluating Lisp in it when the user
-;; allows it) reach that Emacs as a resource, the way the file tools
-;; reach a TRAMP host; it is never where a tool runs.  An Emacs lends
-;; itself by advertising `_harness.emacs' among the `clientCapabilities'
-;; of `initialize' (lisp/harness-emacs-endpoint.el), the way ACP clients
-;; offer an agent their files with `fs'.  A client that lends nothing,
-;; such as a phone, is never asked; a harness no Emacs is attached to
-;; (headless) runs every other tool as usual.
+;; Emacs (its buffers, its windows, its symbols) reach that Emacs as a
+;; resource, the way the file tools reach a TRAMP host; it is never
+;; where a tool runs, and no request evaluates code in it.  An Emacs
+;; lends itself by advertising `_harness.emacs' among the
+;; `clientCapabilities' of `initialize'
+;; (lisp/harness-emacs-endpoint.el), the way ACP clients offer an agent
+;; their files with `fs'.  A client that lends nothing, such as a phone,
+;; is never asked; a harness no Emacs is attached to (headless) runs
+;; every other tool as usual.
 
 (defun harness-acp--emacs-info (client)
   "Return the plist CLIENT advertised for the Emacs it lends, or nil."
@@ -465,7 +466,7 @@ callable over ACP."
 (defun harness-acp--emacs-clients ()
   "Return the clients that lend an Emacs, the most recently active first.
 Only clients that may call methods count: one that lent an Emacs but
-never authenticated would otherwise be sent model-written code, or
+never authenticated would otherwise be asked for the user's buffers, or
 answer for the user's Emacs with what it likes."
   ;; A copy: `cl-remove-if-not' may return the list itself, and `sort'
   ;; reorders the list it is given.
@@ -496,8 +497,8 @@ Return a promise of its answer.  Exactly one Emacs is asked, never every
 client: the most recently active of those that lend one, which is where
 the user is.  The promise rejects at once when none is attached, with
 the Emacs's message when it refuses, and when it disconnects first.
-The tools of tools-emacs and the elisp tool use it; see
-lisp/harness-emacs-endpoint.el for the methods.  Not callable over ACP."
+The tools of tools-emacs use it; see lisp/harness-emacs-endpoint.el for
+the methods.  Not callable over ACP."
   (harness-with-promise (resolve reject)
     (let ((client (car (harness-acp--emacs-clients))))
       (if (null client)

@@ -19,15 +19,14 @@
 ;;
 ;; - `elisp' evaluates Emacs Lisp, the Emacs-native alternative to a
 ;;   shell: the value of the last form, anything printed to
-;;   `standard-output' and any `message' calls come back.  By default
-;;   it evaluates in a child `emacs --batch' process, never the user's
-;;   Emacs, where model-written code could block the UI beyond recovery
-;;   (see harness-elisp.el); a timeout kills the child, its whole
-;;   process group included.  A call may ask for the user's Emacs
-;;   instead (`emacs' "user"), to drive it: the Emacs a client lent to
-;;   the harness evaluates it only when the user turned on
-;;   `harness-elisp-allow-ui-eval' there.  Either way the tool itself
-;;   runs here, in the harness.
+;;   `standard-output' and any `message' calls come back.  It evaluates
+;;   in a child `emacs --batch' process, never the user's Emacs, where
+;;   model-written code could block the UI beyond recovery (see
+;;   harness-elisp.el); a timeout kills the child, its whole process
+;;   group included.  The user's Emacs answers no request that
+;;   evaluates code, whatever anyone configures; it is read and driven
+;;   with the bounded `emacs_*' tools (tools-emacs).  The tool itself
+;;   runs here, in the harness, like every tool.
 
 ;;; Code:
 
@@ -145,26 +144,14 @@ WRITABLE lists other directories the command may write to."
 
 ;;;; elisp
 
-;; The tool runs here, in the harness, like every tool, and evaluates in
-;; an Emacs it picks per call: a fresh background Emacs, by default,
-;; apart from the user's, so code that blocks cannot freeze theirs; or,
-;; when the call asks for it, the user's own Emacs, which a client lent
-;; to the harness and which evaluates only if its
-;; `harness-elisp-allow-ui-eval' is on (lisp/harness-emacs-endpoint.el).  Both report the same
-;; payload (`harness-elisp-payload'), so one function words the result.
-
-(defconst harness-tools-shell--elisp-user-hint
-  "Evaluate in the background Emacs instead (leave emacs unset), read the user's Emacs with the emacs_* tools, or ask the user."
-  "What the model is told when the user's Emacs did not evaluate a call.")
-
-(defun harness-tools-shell--elisp-target (input)
-  "Return the Emacs a call of the elisp tool with INPUT evaluates in.
-That is `background' (the default) or `user'; `invalid' when INPUT names
-another."
-  (pcase (plist-get input :emacs)
-    ((or 'nil "" "background") 'background)
-    ("user" 'user)
-    (_ 'invalid)))
+;; The tool runs here, in the harness, like every tool, and always
+;; evaluates in a fresh background Emacs, apart from the user's, so code
+;; that blocks cannot freeze theirs.  The Emacs a client lent the
+;; harness answers no evaluation request at all
+;; (lisp/harness-emacs-endpoint.el): the `emacs_*' tools are the whole
+;; of what a model may do to the live Emacs.  The background child
+;; reports its result with `harness-elisp-payload', which one function
+;; words.
 
 (defun harness-tools-shell--elisp-timeout (input)
   "Return the seconds a call of the elisp tool with INPUT may evaluate for."
@@ -252,57 +239,34 @@ is killed, tree and all, when it overruns."
          (lambda (e) (funcall finish (harness-tool-error
                                       (format "elisp failed: %s" (harness-error-message e))))))))))
 
-(defun harness-tools-shell--elisp-user (code input)
-  "Evaluate CODE in the user's Emacs for the elisp tool; return a promise.
-The Emacs a client lent to the harness evaluates it, if it allows that
-\(`harness-elisp-allow-ui-eval' there).  The timeout of INPUT stops code
-that yields; code that blocks keeps that Emacs frozen, and the call
-fails a few seconds after the timeout, saying the Emacs did not answer."
-  (let ((timeout (harness-tools-shell--elisp-timeout input)))
-    (harness-then
-     (harness-tools-ask-emacs "eval" (list :code code :timeout timeout) (+ timeout 5))
-     (lambda (payload) (harness-tools-shell--elisp-payload-result payload (list :emacs "user")))
-     (lambda (err)
-       (harness-tool-error (concat (harness-tools-sentence (harness-tools-reason err))
-                                   " " harness-tools-shell--elisp-user-hint)
-                           :meta (list :emacs "user"))))))
-
 (defun harness-tools-shell--elisp (input ctx)
   "Handler for the elisp tool with INPUT under CTX; returns a promise.
-The code evaluates in a background Emacs, unless the call asks for the
-user's (`:emacs' \"user\"), which evaluates it only when it allows that."
-  (let ((code (plist-get input :code)))
+The code always evaluates in a background Emacs; the user's Emacs
+answers no request that evaluates code, so a call that asks for it is
+refused with that explanation."
+  (let ((code (plist-get input :code))
+        (where (plist-get input :emacs)))
     (cond
      ((or (not (stringp code)) (string-blank-p code))
       (harness-tool-error "Missing code"))
-     (t
-      (pcase (harness-tools-shell--elisp-target input)
-        ('background (harness-tools-shell--elisp-batch code input ctx))
-        ('user (harness-tools-shell--elisp-user code input))
-        (_ (harness-tool-error
-            (format "Unknown emacs %S: use \"background\" (the default) or \"user\""
-                    (plist-get input :emacs)))))))))
-
-(defun harness-tools-shell--elisp-subject (input)
-  "Return what a call of the elisp tool with INPUT is about: its code's first line.
-A call that evaluates in the user's Emacs says so, as it can change it."
-  (let ((line (harness-first-line (plist-get input :code) 70)))
-    (if (eq (harness-tools-shell--elisp-target input) 'user)
-        (concat line " (in your Emacs)")
-      line)))
+     ((and (stringp where)
+           (not (string-empty-p where))
+           (not (equal where "background")))
+      (harness-tool-error
+       (format "The elisp tool never evaluates in the user's Emacs (%S): it always evaluates in a background Emacs. Read or drive the user's Emacs with the emacs_* tools instead."
+               where)))
+     (t (harness-tools-shell--elisp-batch code input ctx)))))
 
 (harness-define-tool "elisp"
   :label "Emacs Lisp"
-  :description "Evaluate Emacs Lisp with lexical binding. By default it runs in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work; the emacs_* tools read the user's live Emacs. With emacs set to user it evaluates in the user's running Emacs instead, to drive it: that works only when the user has allowed it, and code that blocks there (waiting on a process, a loop that never yields) freezes their Emacs past any timeout, so keep such code short. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation."
+  :description "Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename. Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation."
   :schema '(:type "object"
             :properties (:code (:type "string" :description "One or more Emacs Lisp forms")
-                         :timeout (:type "integer" :description "Seconds before the evaluation is stopped. Default 30")
-                         :emacs (:type "string" :enum ("background" "user")
-                                 :description "Where to evaluate. background (default): a fresh Emacs process that cannot affect the user. user: the user's running Emacs, to drive it; only when the user has allowed it, and dangerous, since code that blocks freezes their Emacs."))
+                         :timeout (:type "integer" :description "Seconds before the evaluation is stopped. Default 30"))
             :required ("code"))
   :kind 'exec
   :timeout 3700
-  :subject #'harness-tools-shell--elisp-subject
+  :subject (lambda (input) (harness-first-line (plist-get input :code) 70))
   :handler #'harness-tools-shell--elisp)
 
 (harness-define-module 'tools-shell

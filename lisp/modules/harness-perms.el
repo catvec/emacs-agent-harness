@@ -61,7 +61,7 @@
 
 (defconst harness-perms--auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
-    "emacs_buffers" "emacs_describe" "emacs_messages" "web_search" "notify")
+    "emacs_buffers" "emacs_windows" "emacs_describe" "emacs_messages" "web_search" "notify")
   "Tools that never need approval, in every permission mode.
 `web_search' is included because it only sends its query to the
 configured `harness-websearch-provider', so even unattended task

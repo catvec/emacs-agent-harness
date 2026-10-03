@@ -14,7 +14,6 @@
 (defvar harness-model)
 (defvar harness-acp-token)
 (defvar harness-acp--server-enabled)
-(defvar harness-elisp-allow-ui-eval)
 (declare-function harness-ui-request "harness-ui")
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-request "harness-acp")
@@ -83,8 +82,8 @@ The harness process loads `harness-server-test--init'."
 
 (ert-deftest harness-server-emacs-tools-reach-the-emacs-the-ui-lends ()
   "The tools run in the harness process and reach the UI's Emacs, which
-lent itself when it connected: its buffers, and evaluation in it when
-it allows that."
+lent itself when it connected: its buffers and windows, never an
+evaluation, which it never runs."
   (harness-server-test-with-process
     (let ((buf (generate-new-buffer "harness-only-in-the-ui")))
       (unwind-protect
@@ -96,15 +95,12 @@ it allows that."
                                      (plist-get (harness-server-test--tool #'harness-ui-request "emacs_buffer"
                                                                            :name "harness-only-in-the-ui" :offset 2)
                                                 :content)))
-            ;; Model code stays out of the UI unless this Emacs allows it.
+            ;; Model code never runs in the UI: a call that asks for it
+            ;; is refused, whatever anyone sets.
             (let ((r (harness-server-test--tool #'harness-ui-request "elisp" :code "(emacs-pid)" :emacs "user")))
               (should (harness-json-true-p (plist-get r :is-error)))
-              (should (string-search "harness-elisp-allow-ui-eval" (plist-get r :content))))
-            (let ((harness-elisp-allow-ui-eval t))
-              (should (equal (format "=> %d" (emacs-pid))
-                             (plist-get (harness-server-test--tool #'harness-ui-request "elisp"
-                                                                   :code "(emacs-pid)" :emacs "user")
-                                        :content))))
+              (should (string-search "never evaluates in the user's Emacs" (plist-get r :content)))
+              (should (string-search "emacs_* tools" (plist-get r :content))))
             ;; The background Emacs is neither the UI's nor the harness's.
             (let ((c (plist-get (harness-server-test--tool #'harness-ui-request "elisp" :code "(emacs-pid)") :content)))
               (should (string-prefix-p "=> " c))
@@ -115,8 +111,9 @@ it allows that."
 (ert-deftest harness-server-headless-runs-tools-with-no-emacs-lent ()
   "A harness process no Emacs is attached to -- headless, driven by a
 client that is not an Emacs, such as a phone -- runs its tools: elisp
-evaluates in the background, the tools about the user's Emacs say none
-is attached, and the client is never sent a tool's request."
+evaluates in the background (never in a client, and a call that asks
+for one is refused), the tools about the user's Emacs say none is
+attached, and the client is never sent a tool's request."
   (harness-test-with-temp-state
     (harness-test-reset-bus)
     (setq harness-acp--server-enabled nil)
@@ -144,9 +141,11 @@ is attached, and the client is never sent a tool's request."
               (let ((r (harness-server-test--tool request "elisp" :code "(+ 1 2)")))
                 (should-not (harness-json-true-p (plist-get r :is-error)))
                 (should (equal "=> 3" (plist-get r :content))))
+              ;; A call that asks for the user's Emacs is refused for
+              ;; that reason, headless or not: no request evaluates code.
               (let ((r (harness-server-test--tool request "elisp" :code "(+ 1 2)" :emacs "user")))
                 (should (harness-json-true-p (plist-get r :is-error)))
-                (should (string-prefix-p "No Emacs is attached to the harness" (plist-get r :content)))))
+                (should (string-search "never evaluates in the user's Emacs" (plist-get r :content)))))
             (should-not (cl-some (lambda (m) (or (string-prefix-p "_harness/emacs/" m)
                                                  (equal m "_harness/client/tool")))
                                  seen)))
