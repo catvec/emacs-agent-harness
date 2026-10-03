@@ -416,6 +416,25 @@ not refused carries `:denied' null (nil) or false."
   (should (eq 'failed (harness-ui-tool-outcome '(:output "exit 1" :is-error t :meta (:denied nil :duration 0.1)))))
   (should (eq 'denied (harness-ui-tool-outcome '(:output "Denied: no" :is-error t :meta (:denied t))))))
 
+(defvar harness-ui--sessions)
+
+(ert-deftest harness-ui-task-title-is-the-session-name-else-the-prompt ()
+  "A task's title, on the board and in the session list, is its session's
+name once it has one, else its prompt's first line: a session is named
+after its first turn, so a task at work has none yet."
+  (let ((task '(:id "t-1" :session "s-1" :prompt "\n  Add CSV export to reports  \n\nFinance wants it.")))
+    (should (equal "Add CSV export to reports" (harness-ui-task-title task '(:id "s-1" :name nil))))
+    (should (equal "Add CSV export to reports" (harness-ui-task-title task '(:id "s-1" :name "  "))))
+    (should (equal "Export orders as CSV" (harness-ui-task-title task '(:id "s-1" :name "Export orders as CSV"))))
+    ;; Without SESSION: the task's session in the cache, if any.
+    (let ((harness-ui--sessions (make-hash-table :test 'equal)))
+      (should (equal "Add CSV export to reports" (harness-ui-task-title task)))
+      (puthash "s-1" '(:id "s-1" :name "Export orders as CSV") harness-ui--sessions)
+      (should (equal "Export orders as CSV" (harness-ui-task-title task)))
+      (should (equal "Add CSV export to reports" (harness-ui-task-title (plist-put (copy-sequence task) :session nil)))))
+    ;; A long first line is shortened.
+    (should (= 72 (length (harness-ui-task-title (list :prompt (make-string 100 ?x))))))))
+
 ;;;; The prefix key
 
 (ert-deftest harness-ui-prefix-key-moves-the-keys ()

@@ -1914,7 +1914,11 @@ The UI keeps each provider's QUOTA from `provider/quota` and
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; scoped to the current project, its
 git worktrees and so its tasks' sessions included, each session's root
-resolved to its main checkout once with `harness-files-main-checkout`),
+resolved to its main checkout once with `harness-files-main-checkout`;
+a task's session is of kind task and goes by its task's title, as on the
+board, until the model names it after its first turn — the list loads
+the tasks with `_harness/task/list` and follows `task/changed' and
+`task/deleted'),
 conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
 svg charts via svg.el), worktrees (`harness-ui-worktree`), notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle

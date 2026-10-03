@@ -11,6 +11,14 @@
 ;; A project includes its linked git worktrees: a session there (a
 ;; task's, a sub-agent's) has the worktree as its `:project', and is
 ;; listed with the main checkout that worktree belongs to.
+;;
+;; A session that works on a task is of kind task, and is called by its
+;; task's title, as on the board, until it has a name of its own.  A
+;; session is named after its first turn, and a task does its work in
+;; that turn, so without the title every task at work would read
+;; "unnamed".  The list asks the harness for the tasks when it opens, on
+;; `g' and after a reload or reconnect (`_harness/task/list'), and
+;; follows `task/changed' and `task/deleted' in between.
 
 ;;; Code:
 
@@ -37,6 +45,10 @@
   "Hash table: session project root -> the main checkout it belongs to.
 Which checkout a root belongs to does not change, and the list redraws
 on every session change, so each root is resolved once; `g' forgets them.")
+(defvar-local harness-ui-sessions--tasks nil
+  "Hash table: session id -> the task (wire plist) that session works on.
+Nil until the harness has said which tasks there are; a harness without
+tasks never does.")
 
 (defun harness-ui-sessions--main-root (root)
   "Return the main checkout session project ROOT belongs to.
@@ -53,8 +65,26 @@ Remote roots are not looked at."
                          (t (harness-files-main-root root)))
                    memo)))))
 
+(defun harness-ui-sessions--task (s)
+  "Return the task session S works on, or nil."
+  (and harness-ui-sessions--tasks
+       (gethash (plist-get s :id) harness-ui-sessions--tasks)))
+
+(defun harness-ui-sessions--name (s)
+  "Return what the list calls session S, or nil when it has no name.
+A task's session is called by its task's title until it is named."
+  (let* ((task (harness-ui-sessions--task s))
+         (name (if task (harness-ui-task-title task s) (plist-get s :name))))
+    (and (not (harness-string-blank-p name)) name)))
+
+(defun harness-ui-sessions--kind (s)
+  "Return the kind the list shows for session S: task for a task's session."
+  (if (harness-ui-sessions--task s) "task" (or (plist-get s :kind) "main")))
+
 (defun harness-ui-sessions--matches-p (s)
-  "Non-nil when session S belongs in the list: scope, status and filter."
+  "Non-nil when session S belongs in the list: scope, status and filter.
+The filter matches what the list shows of S: its name or task title,
+model, status, kind and permission mode."
   (and (or (null harness-ui-sessions--project)
            (equal (harness-ui-sessions--main-root (plist-get s :project))
                   harness-ui-sessions--project))
@@ -62,8 +92,8 @@ Remote roots are not looked at."
            (not (equal (plist-get s :status) "inactive")))
        (or (string-empty-p harness-ui-sessions--filter)
            (harness-fuzzy-score harness-ui-sessions--filter
-                                (format "%s %s %s %s %s" (or (plist-get s :name) "") (plist-get s :model)
-                                        (plist-get s :status) (plist-get s :kind)
+                                (format "%s %s %s %s %s" (or (harness-ui-sessions--name s) "") (plist-get s :model)
+                                        (plist-get s :status) (harness-ui-sessions--kind s)
                                         (plist-get s :permission-mode))))))
 
 (defun harness-ui-sessions--ordered ()
@@ -90,9 +120,9 @@ Remote roots are not looked at."
     (nreverse out)))
 
 (defun harness-ui-sessions--entry (depth s)
-  (let* ((name (or (plist-get s :name) (propertize "unnamed" 'face 'harness-dim-face)))
+  (let* ((name (or (harness-ui-sessions--name s) (propertize "unnamed" 'face 'harness-dim-face)))
          (status (plist-get s :status))
-         (kind (or (plist-get s :kind) "main")))
+         (kind (harness-ui-sessions--kind s)))
     (list (plist-get s :id)
           (vector
            (harness-ui-status-icon status)
@@ -200,11 +230,55 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
 (defun harness-ui-sessions--on-changed ()
   (harness-debounce 'harness-ui-sessions 0.15 #'harness-ui-sessions--redraw))
 
+;;;; Tasks
+
+(defun harness-ui-sessions--fetch-tasks ()
+  "Ask the harness for every project's tasks, then redraw the list.
+The list keeps those that have a session, by session.  When the request
+fails, as on a harness without tasks, the list names no task."
+  (when (get-buffer harness-ui-sessions-buffer-name)
+    (cl-flet ((keep (table)
+                (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))
+                  (with-current-buffer buf (setq harness-ui-sessions--tasks table))
+                  (harness-ui-sessions--redraw))))
+      (harness-ui-call
+       "_harness/task/list" nil
+       (lambda (tasks)
+         (let ((table (make-hash-table :test 'equal)))
+           (dolist (task tasks)
+             (when-let* ((sid (plist-get task :session)))
+               (puthash sid task table)))
+           (keep table)))
+       (lambda (_) (keep nil))))))
+
+(defun harness-ui-sessions--forget-task (id)
+  "Drop task ID from the list's tasks."
+  (when harness-ui-sessions--tasks
+    (maphash (lambda (sid task)
+               (when (equal (plist-get task :id) id) (remhash sid harness-ui-sessions--tasks)))
+             harness-ui-sessions--tasks)))
+
+(defun harness-ui-sessions--on-event (event args)
+  "Follow the tasks in the list: `task/changed' (TASK) and `task/deleted' (ID).
+A task changes session when it starts, so it is looked up by its id."
+  (when-let* ((buf (and (member event '("task/changed" "task/deleted"))
+                        (get-buffer harness-ui-sessions-buffer-name))))
+    (with-current-buffer buf
+      (pcase event
+        ("task/deleted" (harness-ui-sessions--forget-task (car args)))
+        (_ (let ((task (car args)))
+             (harness-ui-sessions--forget-task (plist-get task :id))
+             (when-let* ((sid (plist-get task :session)))
+               (puthash sid task (or harness-ui-sessions--tasks
+                                     (setq harness-ui-sessions--tasks (make-hash-table :test 'equal)))))))))
+    (harness-ui-sessions--on-changed)))
+
 ;;;###autoload
 (defun harness-sessions (&optional all-projects)
   "Show the session list, scoped to the current project unless ALL-PROJECTS.
 The project includes its git worktrees, so its tasks' sessions are
-listed, and from a task's worktree the list shows the whole project."
+listed, and from a task's worktree the list shows the whole project.
+A task's session shows its task's title until it is named."
   (interactive "P")
   (let ((project (unless all-projects
                    (harness-files-main-root default-directory)))
@@ -215,6 +289,7 @@ listed, and from a task's worktree the list shows the whole project."
       (harness-ui-sessions--refresh)
       (tabulated-list-print t))
     (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw)))
+    (harness-ui-sessions--fetch-tasks)
     (harness-ui-display-view buf)))
 
 (defun harness-ui-sessions--id ()
@@ -271,7 +346,8 @@ listed, and from a task's worktree the list shows the whole project."
   (harness-ui-call "_harness/session/deactivate" (list :id (harness-ui-sessions--id)) #'ignore))
 
 (defun harness-ui-sessions-filter (text)
-  "Filter the list by TEXT (fuzzy over name, model, status, kind, mode)."
+  "Filter the list by TEXT (fuzzy over name, model, status, kind, mode).
+A task's session matches its task's title and the kind task."
   (interactive (list (read-string "Filter: " harness-ui-sessions--filter)))
   (setq harness-ui-sessions--filter text)
   (harness-ui-sessions--redraw))
@@ -291,15 +367,19 @@ listed, and from a task's worktree the list shows the whole project."
   (harness-ui-sessions--redraw))
 
 (defun harness-ui-sessions-reload ()
-  "Reload sessions from the harness and resolve their projects again."
+  "Reload sessions and tasks from the harness and resolve their projects again."
   (interactive)
   (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))
     (with-current-buffer buf (setq harness-ui-sessions--main-roots nil)))
-  (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw))))
+  (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw)))
+  (harness-ui-sessions--fetch-tasks))
 
 (defun harness-ui-sessions--init ()
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--redraw)
+  ;; After a reload or reconnect the tasks may be another harness's.
+  (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--fetch-tasks)
+  (add-hook 'harness-ui-event-functions #'harness-ui-sessions--on-event)
   (define-key harness-ui-map (kbd "l") #'harness-sessions))
 
 (harness-define-module 'ui-sessions
