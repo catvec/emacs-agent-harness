@@ -2021,5 +2021,16 @@ connection let go of is never reported as closed."
         (should (= (- (window-body-height window t) (frame-char-height))
                    (cdr (window-text-pixel-size window (window-start window) harness-compose-end))))))))
 
+(ert-deftest harness-ui-chat-box-grows-past-a-short-window ()
+  "A box grown past the window stays above its spare line, point in it.
+Measured as on a graphical frame, a transcript whose line at the
+window's bottom is tall, an image say, once seemed to fit: the window
+was forced back to the top, and redisplay moved point out of the box."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (window (selected-window)))
+      (set-window-buffer window buf)
+      (harness-test-compose-grows-past-the-window buf window 1))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
