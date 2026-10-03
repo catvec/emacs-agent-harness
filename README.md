@@ -226,6 +226,7 @@ the `[menu]` button in the header line.
 | `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
 | `C-c C-v` | Attach the image in the clipboard |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
+| `C-c C-p` | Edit the pattern the newest permission request about paths is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
 | `TAB` | Complete in the compose box; elsewhere, fold or unfold the block at point |
@@ -255,6 +256,21 @@ there even in the sandbox, where the rest of `/tmp` is private to each
 command. The directory is made with the session, made again if it went
 missing, and deleted with the session. `C-c h d` lists all of these
 directories. Remote sessions have no temporary directory.
+
+A permission request about paths is answered for a glob pattern, not
+for a single file. By default the pattern covers everything in the
+directory: the directory that holds the file, or the directory itself,
+such as `~/notes/**`. The panel shows the pattern on its own line.
+Press `e` on the panel, `C-c C-p`, or click `[Edit]` to change it in
+the minibuffer, either more specific (`~/notes/*.org`, a subdirectory,
+one file) or less (`~/**`). `*` matches within a name and `**` across
+directories, and `M-n` offers patterns around the request's own.
+Access outside the session's directories grants or denies the
+pattern: once, for the session, or always (as an entry of
+`harness-allowed-directories`, or a rule in `harness-perms-rules` for
+*Always deny*). For a tool call such as a file edit or a command, *Allow
+for session*, *Always allow* and *Always deny* hold for that tool on the
+pattern only, not for every call of the tool.
 
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows

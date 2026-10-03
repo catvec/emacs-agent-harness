@@ -117,8 +117,11 @@ is never used for any other failure.")
   '((:optionId "allow-once" :name "Allow once" :kind "allow_once")
     (:optionId "allow-session" :name "Allow directory for this session" :kind "allow_always")
     (:optionId "allow-always" :name "Always allow directory" :kind "allow_always")
-    (:optionId "deny-once" :name "Deny" :kind "reject_once"))
-  "Options offered when a tool call reaches outside the allowed directories.")
+    (:optionId "deny-once" :name "Deny" :kind "reject_once")
+    (:optionId "deny-always" :name "Always deny directory" :kind "reject_always"))
+  "Options offered when a tool call reaches outside the allowed directories.
+A client that shows the request's `_harness.pattern' can answer for
+another pattern; the names speak of the directory, the default.")
 
 (defconst harness-acp--forwarded-events
   '(session/created session/deleted session/queue-changed session/pending-changed
@@ -849,12 +852,15 @@ Nil means the turn ended; see `agent/activity' for the shape."
         (error (harness-log 'warn "acp: %s failed: %S" method err)))
     (harness-log 'warn "acp: no %s method to deliver the answer to" method)))
 
-(defun harness-acp--option-answer (option)
-  "Turn a permission OPTION id like \"allow-session\" into an answer plist."
+(defun harness-acp--option-answer (option &optional pattern)
+  "Turn a permission OPTION id like \"allow-session\" into an answer plist.
+PATTERN, a string, is the pattern the client answered for, when it
+edited the request's."
   (let* ((parts (split-string (format "%s" (or option "deny-once")) "-"))
          (behavior (if (equal (car parts) "allow") 'allow 'deny))
          (scope (intern (or (cadr parts) "once"))))
-    (list :behavior behavior :scope (if (memq scope '(once session always)) scope 'once))))
+    (append (list :behavior behavior :scope (if (memq scope '(once session always)) scope 'once))
+            (and (stringp pattern) (not (string-blank-p pattern)) (list :pattern pattern)))))
 
 (defun harness-acp--offered-options (payload)
   "Return the ACP options for a permission request with PAYLOAD.
@@ -868,7 +874,10 @@ an agent's own directory request has no \"Allow once\"."
         all)))
 
 (defun harness-acp--on-permission-requested (sid pending)
-  "Ask the connected clients to decide PENDING permission request of SID."
+  "Ask the connected clients to decide PENDING permission request of SID.
+A request about paths carries the glob pattern it is answered for in
+`_harness.pattern'; a client may answer for another one with
+`_harness.pattern' in its result, next to the outcome."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -883,12 +892,14 @@ an agent's own directory request has no \"Allow once\"."
                            :tool (plist-get payload :tool)
                            :paths (plist-get payload :paths)
                            :dir (plist-get payload :dir)
+                           :pattern (plist-get payload :pattern)
                            :reason (plist-get payload :reason)))
      (lambda (result)
        (let* ((outcome (plist-get result :outcome))
               (selected (equal (format "%s" (plist-get outcome :outcome)) "selected"))
               (answer (if selected
-                          (harness-acp--option-answer (plist-get outcome :optionId))
+                          (harness-acp--option-answer (plist-get outcome :optionId)
+                                                      (plist-get (plist-get result :_harness) :pattern))
                         (list :behavior 'deny :scope 'once))))
          (harness-acp--call-safely 'permission/answer sid pid answer))))))
 

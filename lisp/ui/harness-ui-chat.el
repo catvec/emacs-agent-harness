@@ -1441,6 +1441,14 @@ continues, not the branch left behind."
   (interactive)
   (harness-ui-pending-deny-newest))
 
+(defun harness-chat-edit-permission-pattern (&optional pid)
+  "Edit the glob pattern the permission request PID is answered for.
+PID defaults to the request at point, or else the newest one.  The
+pattern, and editing it, belong to the pending module, so a popout
+edits the same request the same way."
+  (interactive)
+  (harness-ui-pending-edit-pattern pid))
+
 (defun harness-chat-next-diagram (&optional n)
   "Show the diagram of the next option of the question waiting with diagrams."
   (interactive "p")
@@ -2568,6 +2576,7 @@ message sent from it resumes it."
   (define-key map (kbd "C-c C-s") #'harness-chat-search)
   (define-key map (kbd "C-c C-y") #'harness-chat-allow-newest)
   (define-key map (kbd "C-c C-n") #'harness-chat-deny-newest)
+  (define-key map (kbd "C-c C-p") #'harness-chat-edit-permission-pattern)
   (define-key map (kbd "C-c C-f") #'harness-chat-next-diagram)
   (define-key map (kbd "C-c C-b") #'harness-chat-previous-diagram)
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
@@ -2609,6 +2618,7 @@ on \\[harness-menu] here, or the [menu] button in the header line.
        ["Agent"
         ("C-c C-y" "Allow request" harness-chat-allow-newest)
         ("C-c C-n" "Deny request" harness-chat-deny-newest)
+        ("C-c C-p" "Edit request's pattern" harness-chat-edit-permission-pattern)
         ("C-c C-f" "Next diagram" harness-chat-next-diagram)
         ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
         ("C-c C-t" "Show or hide the todo list" harness-chat-toggle-todos)

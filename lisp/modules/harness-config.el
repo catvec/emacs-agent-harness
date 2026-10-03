@@ -80,7 +80,10 @@ session."
   :group 'harness)
 
 (defcustom harness-allowed-directories nil
-  "Extra directories sessions may touch besides their working directory."
+  "Extra directories sessions may touch besides their working directory.
+An entry may also be a glob pattern, such as ~/notes/*.org, to allow
+only the paths it matches: `*' matches within a name, `**' across
+directories."
   :type '(repeat directory)
   :safe (lambda (v) (and (listp v) (cl-every #'stringp v)))
   :group 'harness)

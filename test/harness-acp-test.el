@@ -502,6 +502,36 @@ Once the turn ends the message runs as a turn of its own."
         (should (equal "/srv/data/" (plist-get (plist-get (nth 1 m) :_harness) :dir)))
         (should (string-match-p "read the data" (plist-get (plist-get (nth 1 m) :_harness) :reason)))))))
 
+(ert-deftest harness-acp-local-permission-pattern-round-trip ()
+  "A request about paths carries its pattern; an answer for another one passes it on."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (recorded nil)
+           (request (lambda (pid)
+                      (harness-emit 'permission/requested sid
+                                    (list :id pid :kind 'permission
+                                          :payload (list :tool "read_file" :kind 'read :dir "/srv/data/"
+                                                         :pattern "/srv/data/**" :paths '("/srv/data/a.csv")
+                                                         :options '(allow-once allow-session allow-always
+                                                                    deny-once deny-always))))
+                      (harness-test-wait
+                       (lambda () (cl-find-if (lambda (m) (equal pid (plist-get (plist-get (nth 1 m) :_harness) :pendingId)))
+                                              harness-acp-test-messages))))))
+      (harness-register-method 'permission/answer
+                               (lambda (s pid answer) (push (list s pid answer) recorded) answer))
+      (let ((m (funcall request "j1")))
+        (should (equal "/srv/data/**" (plist-get (plist-get (nth 1 m) :_harness) :pattern)))
+        (should (equal "Always deny directory" (plist-get (car (last (plist-get (nth 1 m) :options))) :name)))
+        (funcall (nth 2 m) (list :outcome (list :outcome "selected" :optionId "allow-session")
+                                 :_harness (list :pattern "/srv/data/*.csv"))))
+      (harness-test-wait (lambda () recorded))
+      (should (equal (list sid "j1" '(:behavior allow :scope session :pattern "/srv/data/*.csv")) (car recorded)))
+      ;; A client that does not edit it answers for the request's own.
+      (funcall (nth 2 (funcall request "j2")) (list :outcome (list :outcome "selected" :optionId "deny-always")))
+      (harness-test-wait (lambda () (= 2 (length recorded))))
+      (should (equal (list sid "j2" '(:behavior deny :scope always)) (car recorded))))))
+
 (ert-deftest harness-acp-local-ask-user-round-trip ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))
