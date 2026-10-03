@@ -365,6 +365,72 @@ CLAUDE.md, refused a task's edits after the user sent it back."
   (should (equal "Run it." (harness-perms--what-it-does "Run it.  Then stop.\nMore.")))
   (should (equal "a lower-case start. no sentence break" (harness-perms--what-it-does "a lower-case start. no sentence break"))))
 
+(ert-deftest harness-perms-judge-deny-asks-the-user-in-auto-mode ()
+  "A judge denial in an interactive auto session is put to the user.
+The judge is a cheap model and can be wrong: the user, who is present,
+is asked about the call and can allow it.  Switching to yolo used to be
+the only way past a denial."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_edit" :label "Edit" :kind 'write :description "Edits a file." :handler #'ignore)
+  (harness-perms-test--judge-provider
+   '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it rewrites the project settings\"}")
+     (:type done :stop-reason end-turn)))
+  (let* ((harness-perms-auto-model "judge:x")
+         (p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                      (harness-perms-test--request "t_edit" 'write)))
+         (pending nil))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the judge's prompt")
+    (setq pending (car harness-perms-test--pending))
+    (should (eq 'permission (plist-get pending :kind)))
+    (should (equal "t_edit" (plist-get (plist-get pending :payload) :tool)))
+    (should (equal harness-perms-options (plist-get (plist-get pending :payload) :options)))
+    (should (string-match-p "The permission judge would deny this call: it rewrites the project settings"
+                            (plist-get (plist-get pending :payload) :reason)))
+    ;; The user allows it: the call runs.
+    (let ((d (harness-call 'permission/answer "s1" (plist-get pending :id) "allow-once")))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (string-match-p "allowed by the user" (plist-get d :reason))))
+    (should (eq 'allow (plist-get (harness-test-await p) :behavior)))))
+
+(ert-deftest harness-perms-judge-deny-stands-when-nobody-can-answer ()
+  "Without a user to ask, the judge's denial is the decision.
+A non-interactive session takes it and is steered to another approach;
+an interactive one with nobody able to answer is denied too."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec2" :label "Run" :kind 'exec :handler (lambda (_in _ctx) "ran"))
+  (let ((prompts (harness-perms-test--prompts)))
+    (harness-perms-test--judge-provider
+     '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it force pushes to the shared remote\"}")
+       (:type done :stop-reason end-turn)))
+    (let* ((harness-perms-auto-model "judge:x")
+           (r (harness-test-await (harness-call 'tools/execute "s1"
+                                                (list :id "c1" :name "t_exec2" :input '(:command "x"))))))
+      (should (plist-get r :denied))
+      (should (string-match-p "\\`Denied: it force pushes to the shared remote" (plist-get r :content))))
+    ;; The agent was told to find another way.
+    (should (equal (list (cons "s1" (format harness-perms-steering-text "t_exec2"))) (funcall prompts)))
+    ;; An interactive session is asked instead, and nobody else's business.
+    (let ((verdict (list :behavior 'deny :reason "it force pushes to the shared remote"
+                         :hint harness-perms-judge-deny-hint)))
+      (should (eq 'deny (plist-get (harness-perms--judge-decision verdict harness-perms-test--session)
+                                   :behavior)))
+      (harness-perms-test--install-pending)
+      (let* ((d (harness-perms--judge-decision
+                 verdict (plist-put (copy-sequence harness-perms-test--session) :non-interactive nil)))
+             (prompt (harness-perms--judge-prompt-reason d)))
+        (should (eq 'ask (plist-get d :behavior)))
+        (should (plist-get d :judge-deny))
+        (should (equal "it force pushes to the shared remote" (plist-get d :reason)))
+        (should (equal (concat "The permission judge would deny this call: it force pushes to the shared remote")
+                       prompt)))
+      ;; A call the judge allowed is never put to the user; one denied
+      ;; while the user is away is not either.
+      (should (eq 'allow (plist-get (harness-perms--judge-decision
+                                     (list :behavior 'allow :reason "fine") harness-perms-test--session)
+                                    :behavior)))
+      (should-not (harness-perms--judge-prompt-reason (list :behavior 'ask))))))
+
 (ert-deftest harness-perms-auto-model-takes-the-providers-cheap-tier ()
   "`harness-perms-auto-model' `auto' judges with the session provider's cheap tier.
 A model named by the provider's `:tiers' is used; an explicit model wins."
@@ -486,6 +552,33 @@ function giving the judge prompts they encoded, newest first."
                                             (funcall cb '(:type done :stop-reason end-turn)))))
                   (list :cancel #'ignore)))
     (lambda () sent)))
+
+(ert-deftest harness-perms-judge-sees-a-cut-input-as-cut ()
+  "A long input is cut, and the judge is told the harness cut it.
+It used to be cut with a trailing ellipsis and nothing else, and the
+judge read that as the agent's own incomplete value: \"the replacement
+string is truncated ... that would corrupt the file\".  A judge must
+weigh what the call would do, never whether a value looks complete."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (let* ((short (harness-perms--judge-input (list :path "a.el" :new_string "x")))
+         (long-text (make-string (1+ harness-perms--judge-input-chars) ?x))
+         (long (harness-perms--judge-input (list :path "a.el" :new_string long-text))))
+    ;; A short input goes in whole and says nothing about cutting.
+    (should (string-prefix-p "Input (JSON):\n" short))
+    (should-not (string-search "cut the rest" short))
+    (should-not (string-search "…" short))
+    ;; A long one is marked as cut, and its value is not elided to look
+    ;; like the agent's own text.
+    (should (string-search "the harness shows its first" long))
+    (should (string-search "cut the rest" long))
+    (should-not (string-search "…" long))
+    (should (string-search "the call is not missing anything" long))
+    ;; What is shown is the first characters of the input, not an
+    ;; ellipsis standing for the rest.
+    (should (string-suffix-p (substring (harness-json-encode-text
+                                         (list :path "a.el" :new_string long-text))
+                                        0 harness-perms--judge-input-chars)
+                             long))))
 
 (ert-deftest harness-perms-judge-text-of-non-ascii-input-encodes-again ()
   ;; A provider sends the judge text as JSON.  The input used to go in as

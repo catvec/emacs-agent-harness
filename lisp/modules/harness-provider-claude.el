@@ -1833,12 +1833,14 @@ left alone."
 
 (defun harness-provider-claude--on-session-gone (session-id &rest _)
   "Close the process for SESSION-ID when its session is deleted or deactivated.
-The processes of its side requests go too."
+The processes of its side requests and of its one-off requests go too:
+a side one is SESSION-ID#side-N, a one-off one the permission judge's,
+SESSION-ID-perms~N (`harness-perms--auto' names its session so)."
   (harness-provider-claude-close session-id)
-  (let ((prefix (concat session-id "#side-")))
-    (dolist (id (hash-table-keys harness-provider-claude--sessions))
-      (when (string-prefix-p prefix id)
-        (harness-provider-claude-close id)))))
+  (dolist (id (hash-table-keys harness-provider-claude--sessions))
+    (when (or (string-prefix-p (concat session-id "#side-") id)
+              (string-prefix-p (concat session-id "-perms") id))
+      (harness-provider-claude-close id))))
 
 (defun harness-provider-claude--on-state-changed (session-id state)
   "Close the process of SESSION-ID when its provider STATE is another conversation.

@@ -928,7 +928,9 @@ args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
 :paths (…))`.  Chain (priority): 5 dir-request, 7 sandbox-guard, 10 jail,
 20 mode, 25 write-up (the tasks module: a backlog write-up only reads),
 30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a
-pending request and resolves when answered).
+pending request and resolves when answered).  A judge denial reaches 90
+as an `ask` in an interactive session, so the user answers it; in a
+non-interactive session it stays a denial.
 
 - The sandbox guard asks `sandbox/check-command` about every `exec` call
   whose input has a `:command` (the bash tool), passing the directory it
@@ -1023,6 +1025,23 @@ pending request and resolves when answered).
   directory and the allowed roots.  The request is `:ephemeral`, so the
   provider brings no earlier verdicts and no project instructions
   (CLAUDE.md).  A judge's denial carries `harness-perms-judge-deny-hint`.
+  A long input is cut (`harness-perms--judge-input-chars') and the block
+  above it says so; the judge is told to weigh what the call would do,
+  never whether a value looks complete, since a cut input once read as
+  the agent's own truncated edit ("the replacement string is
+  truncated ... that would corrupt the file").
+- A judge denial is a verdict on one call, not on the work, so an
+  interactive session puts it to the user instead of enforcing it
+  (`harness-perms--judge-decision`): stage 30 hands on an `ask` that
+  keeps the judge's reason and `:judge-deny', stage 90 opens the
+  permission prompt (`harness-perms--judge-prompt-reason` words it as
+  "The permission judge would deny this call: …"), and the user answers
+  it like any other permission request: allow once, for the session, or
+  always.  Switching the session to yolo used to be the only way past a
+  denial the user disagreed with.  A non-interactive session has nobody
+  to ask: the denial stands and the agent is steered to another
+  approach.  A judge that gives no verdict at all leaves the call `ask`
+  as before, which the user is asked about in an interactive session.
 - Jail denials are final and carry a constructive hint listing the
   allowed roots and how to widen them.  A path elsewhere in the
   system's temporary directory (and the agent's own request for one)
