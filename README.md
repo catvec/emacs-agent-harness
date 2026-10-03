@@ -52,6 +52,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | Usage: cost per day and model, plan quota, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
 | The session list | The worktrees of a project and their sessions |
+| ![The session list with a permission request popped out, its allow and deny buttons under it](docs/media/popout-permission.png) | ![The task board with a question popped out, its options and a box to type another answer under it](docs/media/popout-question.png) |
+| A request popped out of the session list, answered there | A question popped out of the task board, answered there |
 | ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
 | A BTW side conversation under its session | The menu, with the chat's own commands |
 
@@ -177,6 +179,7 @@ named by `harness-server-init-file`.
 | `C-c h o` | `harness-open-latest-session` | Open the newest session of the current project |
 | `C-c h O` | `harness-open-session` | Open a session chosen by name |
 | `C-c h l` | `harness-sessions` | Show the session list |
+| `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
@@ -262,6 +265,13 @@ and show one at a time. Switch between them with the tabs above the
 area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
 buffer, or by moving point onto an option.
 
+The same request can be read and answered without opening the session:
+`SPC` in the session list, or on the task board, pops out
+what the session at point waits on, in a small window with the same
+panel -- the permission prompt or the question in full, its options,
+diagrams and keys, and a box for a typed answer. It closes itself once
+the request is settled, and the session's own view stays where it was.
+
 The header line shows the session's status, name, todo progress while
 it has one, model, permission mode, whether it is `non-interactive` or
 `interactive`, thinking level, context and cost. Click the model, the
@@ -294,13 +304,19 @@ conversation so far and continues independently.
 below the session. A BTW is a new, empty session that shares nothing
 with the session or with other BTWs, which makes it a good place for
 quick questions. It has the full chat interface, including the header
-line with the model, permission mode and thinking level, which start
-from the session's, and whether it is non-interactive. Two extra
-controls appear at the front of its header line:
+line with the model and permission mode, which start from the
+session's, the thinking level and whether it is non-interactive. Two
+extra controls appear at the front of its header line:
 
 - `[close]` (`C-c C-k`) closes the BTW. A BTW in which nothing was
   asked is deleted.
 - `[keep]` (`C-c C-o`) keeps it as a normal session.
+
+So that quick questions get quick answers, a BTW starts at the `low`
+thinking level, whatever the session's level is. Set
+`harness-btw-thinking` to choose another level, or to nil to start
+from the session's level. A BTW whose model does not offer that level
+starts at the session's.
 
 ### Task board
 
@@ -353,6 +369,10 @@ so several tasks can work in parallel.
   (`SPC`) opens it too, along with whatever else the task has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
+- `SPC` on a task that needs input pops out what it waits on -- the
+  permission prompt or the question, with its options and diagrams --
+  and answers it there. The card offers the same as [Answer…] or
+  [Request…] next to [Allow] and [Deny].
 - `RET` opens the session of the task at point. From that session,
   `C-c h a` leads back to the board.
 - A task's session shows in the session list (`C-c h l`) under the
@@ -424,6 +444,7 @@ project's, and a project's over the global value.
 
 - `harness-model`
 - `harness-thinking`
+- `harness-btw-thinking`
 - `harness-permission-mode`
 - `harness-allowed-directories`
 - `harness-budget`

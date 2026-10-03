@@ -48,6 +48,8 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
+| `popout-permission` | The session list with a session's permission request popped out under it | `harness-media-shot-popout-permission` |
+| `popout-question` | The task board with a task's question popped out under it | `harness-media-shot-popout-question` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
 | `usage` | The usage dashboard over 30 days, by model | `harness-media-shot-usage` |
 | `worktrees` | The worktrees of the demo project | `harness-media-shot-worktrees` |

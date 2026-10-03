@@ -1586,7 +1586,9 @@ Return its session, where the user asks how the tasks are going: a new
 nothing with earlier ones, and without a parent (a BTW over a session is
 listed under it instead, see `session/btw'), which
 `harness-tasks--btw-prompt' tells to answer with the task and session
-tools.  The caller sends the first question."
+tools.  Like every BTW it thinks at `harness-btw-thinking' when its
+model offers that level (see `session/create').  The caller sends the
+first question."
   (harness-call 'session/create :cwd (harness-tasks--project cwd) :kind 'btw :name name))
 
 (harness-defmethod task/list (&optional cwd)

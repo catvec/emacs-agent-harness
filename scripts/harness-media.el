@@ -91,7 +91,9 @@
 (declare-function harness-compose-set "harness-ui-compose")
 (declare-function harness-compose-repad "harness-ui-compose")
 (declare-function harness-tasks "harness-ui-tasks")
+(declare-function harness-ui-tasks-requests "harness-ui-tasks")
 (declare-function harness-sessions "harness-ui-sessions")
+(declare-function harness-ui-sessions-requests "harness-ui-sessions")
 (declare-function harness-tree "harness-ui-tree")
 (declare-function harness-usage "harness-ui-usage")
 (declare-function harness-ui-usage-set-period "harness-ui-usage")
@@ -1510,6 +1512,48 @@ Return the chat's buffer."
   (harness-media--view #'harness-sessions)
   (harness-media--capture "sessions"))
 
+(defun harness-media--goto-session-row (id)
+  "Move point to the session list row of session ID and show it."
+  (goto-char (point-min))
+  (while (and (not (eobp)) (not (equal (tabulated-list-get-id) id)))
+    (forward-line 1))
+  (unless (equal (tabulated-list-get-id) id) (error "No row for session %s" id))
+  (recenter 4))
+
+(defun harness-media--goto-task-card (id)
+  "Move point to the card of task ID on the board and show it."
+  (goto-char (point-min))
+  (let ((match (text-property-search-forward 'harness-task-id id #'equal)))
+    (unless match (error "No card for task %s" id))
+    (goto-char (prop-match-beginning match))
+    (recenter 4)))
+
+(defun harness-media--fit-popout-shot (most)
+  "Size the frame for a view with a popout under it, at most MOST lines.
+The frame is fitted to the text of every window, so the view and the
+popout both show; the popout is a side window and keeps its height."
+  (set-frame-size nil harness-media-columns
+                  (min (or most harness-media-lines)
+                       (max 24 (+ 6 (cl-loop for w in (window-list nil 'nomini)
+                                             sum (harness-media--text-lines w))))))
+  (harness-media--settle 1))
+
+(defun harness-media-shot-popout-permission ()
+  "The session list, with the permission a blocked session waits for popped out."
+  (harness-media--view #'harness-sessions)
+  (harness-media--goto-session-row (plist-get harness-media--world :permission))
+  (harness-ui-sessions-requests)
+  (harness-media--fit-popout-shot 32)
+  (harness-media--capture "popout-permission"))
+
+(defun harness-media-shot-popout-question ()
+  "The task board, with the question a task's session waits on popped out."
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  (harness-media--goto-task-card (plist-get (plist-get harness-media--world :tasks) :health))
+  (harness-ui-tasks-requests)
+  (harness-media--fit-popout-shot 32)
+  (harness-media--capture "popout-question"))
+
 (defun harness-media-shot-tree ()
   "The conversation tree of the hero's session."
   (harness-media--view (lambda () (harness-tree (plist-get harness-media--world :hero))))
@@ -1583,6 +1627,8 @@ Return the chat's buffer."
     ("chat-question" . harness-media-shot-chat-question)
     ("tasks" . harness-media-shot-tasks)
     ("sessions" . harness-media-shot-sessions)
+    ("popout-permission" . harness-media-shot-popout-permission)
+    ("popout-question" . harness-media-shot-popout-question)
     ("tree" . harness-media-shot-tree)
     ("usage" . harness-media-shot-usage)
     ("worktrees" . harness-media-shot-worktrees)

@@ -65,6 +65,20 @@
   :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
   :group 'harness)
 
+(defcustom harness-btw-thinking "low"
+  "Thinking level BTW side conversations start at, or nil for the usual one.
+A BTW is for quick questions on the side, so by default it thinks
+little.  It starts at this level only when its model offers it.
+Otherwise, and always with nil, it starts at the level of the session
+it is opened over; a BTW about a task board starts at
+`harness-thinking'.  The level can be changed in the BTW like in any
+session."
+  :type '(choice (const :tag "Same as the session" nil) (const :tag "Low" "low")
+                 (const :tag "Medium" "medium") (const :tag "High" "high")
+                 (const :tag "Extra high" "xhigh") (const :tag "Max" "max"))
+  :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
+  :group 'harness)
+
 (defcustom harness-allowed-directories nil
   "Extra directories sessions may touch besides their working directory."
   :type '(repeat directory)
@@ -103,8 +117,8 @@ non-interactive anyway."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defconst harness-config-keys
-  '(harness-model harness-permission-mode harness-thinking harness-allowed-directories
-    harness-budget harness-sandbox-policy harness-non-interactive)
+  '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
+    harness-allowed-directories harness-budget harness-sandbox-policy harness-non-interactive)
   "Settings that take part in layering.")
 
 (defconst harness-config-sections

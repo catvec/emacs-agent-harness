@@ -245,7 +245,8 @@ Layered settings: directory `.dir-locals.el` (most specific) →
 project-root `.dir-locals.el` → customize default.  Variables are
 `defcustom`s with `:safe` predicates so dir-locals never prompt:
 `harness-model` (default "claude:claude-fable-5-1"),
-`harness-permission-mode`, `harness-thinking`,
+`harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
+(the level BTWs start at, default "low"; nil for the session's),
 `harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
 `harness-non-interactive`.
 
@@ -347,7 +348,10 @@ gone.
 - `session/create &rest PLIST` — `:cwd` required; `:name :model
   :permission-mode :thinking :kind :parent-id :host :worktree`, and
   `:context-window` to set the session's own window.  Fills
-  project, defaults from `config/get`.  → session.  Event `session/created`.
+  project, defaults from `config/get`.  A `btw` session without
+  `:thinking` takes `harness-btw-thinking` when its model offers that
+  level (the catalogue lists it in `:thinking-levels`), else
+  `harness-thinking`.  → session.  Event `session/created`.
 - `session/get ID`, `session/list &optional FILTER` (`:project :status
   :kind :parent-id :active`), `session/delete ID`.
 - `session/update ID &rest PLIST` — settings and name; appends a `hint`
@@ -372,9 +376,11 @@ gone.
 - `session/btw ID &optional NAME`: a BTW side conversation over ID, a
   new, empty `btw` session sharing nothing with ID or with any other
   BTW (no nodes, no fork node, no provider state, no directory grants).
-  It takes ID's cwd, project, host, worktree, model, thinking and
-  permission mode; `:parent-id` is ID only so lists show it under ID.
-  Returns the new session.
+  It takes ID's cwd, project, host, worktree, model and permission
+  mode; `:parent-id` is ID only so lists show it under ID.  It thinks
+  at `harness-btw-thinking` as configured at ID's cwd ("low" by
+  default, so quick questions get quick answers) when the model offers
+  that level, else at ID's level.  Returns the new session.
 - `session/nodes ID &optional (:limit N :before NODE-ID)` → path nodes,
   oldest first; `session/node ID NODE-ID`; `session/tree ID` → every
   node of the family (session + ancestors + forks) as a list with
@@ -1707,6 +1713,22 @@ and icons via `icons.el` (`define-icon`) with text fallbacks.  Every
 command has a mouse target: buttons, header-line segments, or mode-line
 segments.
 
+Pending requests (`harness-ui-pending`): the permission prompts and
+questions a session waits on, held per session -- fed both by the ACP
+requests that block a client and by the session's pending list, so a
+view that is not watching a session can still answer it -- and drawn,
+answered and keyed by this module wherever they show: the chat's tail
+panels and a popout of their own.  The request records and the diagram
+each question shows belong to the session, not to the buffer drawing
+them, so the chat and a popout of the same request agree.  Views get one
+line about a session with `harness-ui-pending-summary` ("has a question
+for you"), a kind with `harness-ui-pending-status`, and the full request
+with `harness-ui-pending-popout` (from the session list and the task
+board, SPC, through `harness-ui-popout-at-point-functions`).  Opening a
+popout brings the session's cached pending list into the store first
+(`harness-ui-pending-sync-session`), which is how a request a view
+already shows becomes answerable there when no chat has synced it.
+
 Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
 list + attachments row + compose region at the bottom.  Rendering is
 incremental (append and in-place update by node id using markers);
@@ -1731,8 +1753,11 @@ folds, and the tree starts each tool result's row with the same icon.
 The panel of a question whose options have diagrams shows one diagram
 at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
-it.  Switching redraws the options and that area alone, in place, so
-point, the windows and the compose box stay put.
+it (all of it in `harness-ui-pending`).  Switching redraws the options
+and that area alone, in place, so point, the windows and the compose box
+stay put.  A module hosted by a chat buffer can put a read-only panel of
+its own above the box with `harness-chat-panel-functions` and take the
+box's message with `harness-chat-send-function`.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
@@ -1910,7 +1935,13 @@ writes it up anyway, `m` takes what makes it another task than the one
 it duplicates.  `I` or
 [Add session] makes an ongoing session a task.  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
-its tasks (`task/btw`).  Boards reload after any
+its tasks (`task/btw`).  `SPC` over a card, or [Answer…] / [Request…]
+on it, pops out what the task at point needs -- the permission prompt or
+question its session waits on, a task's report -- through the shared
+`harness-ui-popout-at-point`, which runs whichever view of the item
+registered for it.  The board reads what a session waits on through
+`harness-ui-pending`, its shared notion of it.
+Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
 finished first and completed the latest completed (verified, else
@@ -1931,7 +1962,10 @@ The UI keeps each provider's QUOTA from `provider/quota` and
 `provider/quota-updated` (`harness-ui-quota`).
 
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
-children, filter/sort by any column; scoped to the current project, its
+children, filter/sort by any column; SPC on a session pops out what it
+waits on (a session that waits on nothing leaves SPC scrolling), its
+status cell's tooltip says so (`harness-ui-sessions-requests`);
+scoped to the current project, its
 git worktrees and so its tasks' sessions included, each session's root
 resolved to its main checkout once with `harness-files-main-checkout`;
 a task's session is of kind task and goes by its task's title, as on the
@@ -1952,12 +1986,22 @@ permission mode, non-interactive, thinking, context, cost, [menu]),
 keys and menu are a session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
 front of the header through `harness-chat-header-functions` (what it
 is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep
-it; one over a session starts in that session's permission mode.  The
+it; one over a session starts in that session's permission mode, and
+every one at the BTW thinking level (`harness-btw-thinking`).  The
 first message names it `btw: ...`, unless it was named by hand.
 Closing it returns there; a BTW nothing was asked in is deleted with
 its buffer, once the harness confirms it holds no node of its own,
 and an idle one is closed.  Keeping it makes it a normal session
-window in that place, with nothing of the BTW left in its header), media
+window in that place, with nothing of the BTW left in its header),
+popout (`harness-ui-popout`: one item of a session or task -- the request
+it waits on, a task's report -- in a selected bottom side window fitted
+to it; a KEY names the item and reusing it reuses the buffer, so state
+the owner keeps there survives: whoever owns the item passes a TITLE and
+a RENDER, and with `:compose' the shared compose box under the content,
+whose C-c C-c gives the owner the text and attachments.  `q' closes it,
+`g' draws it again, and C-g closes it once there is nothing else to
+quit; `harness-ui-popout-at-point-functions' lets a view pop out the item
+at point with one key), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video posters that play the video, and the attachments a tool
 result or a message carries), popouts (`harness-ui-popout`: one item of

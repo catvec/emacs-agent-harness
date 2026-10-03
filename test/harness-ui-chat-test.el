@@ -789,7 +789,7 @@ It is never added to the running turn."
         (should (harness-ui-chat-test-find buf "/tmp"))
         (should (harness-ui-chat-test-find buf "exec asks"))
         (let ((pos (harness-ui-chat-test-find buf "[Allow]")))
-          (should (harness-ui-chat-test-face-at (1- pos) 'harness-chat-panel-face))
+          (should (harness-ui-chat-test-face-at (1- pos) 'harness-ui-panel-face))
           (goto-char (1- pos))
           (harness-chat-push))
         (should (equal '((:outcome (:outcome "selected" :optionId "allow-once"))) answers))
@@ -928,7 +928,7 @@ It is never added to the running turn."
 
 (defun harness-ui-chat-test-nav (nav)
   "Return the position of the diagram tab or arrow NAV in the current buffer."
-  (text-property-any (point-min) (point-max) 'harness-chat-diagram-nav nav))
+  (text-property-any (point-min) (point-max) 'harness-ui-pending-diagram-nav nav))
 
 (ert-deftest harness-ui-chat-question-diagrams ()
   "Options with diagrams show one diagram at a time, in one area under the
@@ -954,7 +954,7 @@ onto an option switch it, and answering works as without diagrams."
         ;; The first option's diagram, fixed width, its label bold in the list.
         (should (harness-ui-chat-test-find buf "Diagram"))
         (should (= 0 (funcall shown)))
-        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "[left|main]")) 'harness-chat-output-face))
+        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "[left|main]")) 'harness-ui-output-face))
         (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "Sidebar left")) 'bold))
         (should-not (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "Sidebar right")) 'bold))
         (should (harness-ui-chat-test-find buf "next diagram"))
@@ -973,12 +973,12 @@ onto an option switch it, and answering works as without diagrams."
         (goto-char (harness-ui-chat-test-nav 1))
         (harness-chat-push)
         (should (= 1 (funcall shown)))
-        (should (eql 1 (get-text-property (point) 'harness-chat-diagram-nav)))
+        (should (eql 1 (get-text-property (point) 'harness-ui-pending-diagram-nav)))
         (goto-char (harness-ui-chat-test-nav 'next))
         (harness-chat-push)
         (harness-chat-push)
         (should (= 0 (funcall shown)))
-        (should (eq 'next (get-text-property (point) 'harness-chat-diagram-nav)))
+        (should (eq 'next (get-text-property (point) 'harness-ui-pending-diagram-nav)))
         ;; n and p on the panel.
         (goto-char (harness-ui-chat-test-find buf "Which layout?"))
         (call-interactively (lookup-key (get-text-property (point) 'keymap) "n"))
@@ -989,12 +989,12 @@ onto an option switch it, and answering works as without diagrams."
         (goto-char (harness-ui-chat-test-find buf "Tabs"))
         (harness-chat--post-command)
         (should (= 2 (funcall shown)))
-        (should (eql 2 (get-text-property (point) 'harness-chat-option)))
+        (should (eql 2 (get-text-property (point) 'harness-ui-pending-option)))
         ;; Switched there, it stays switched: only a move counts.
         (call-interactively (lookup-key (get-text-property (point) 'keymap) "n"))
         (harness-chat--post-command)
         (should (= 0 (funcall shown)))
-        (should (eql 2 (get-text-property (point) 'harness-chat-option)))
+        (should (eql 2 (get-text-property (point) 'harness-ui-pending-option)))
         ;; A redraw of the whole tail keeps the diagram shown.
         (harness-chat--render-tail)
         (should (= 0 (funcall shown)))
@@ -1003,7 +1003,7 @@ onto an option switch it, and answering works as without diagrams."
         (call-interactively (lookup-key (get-text-property (point) 'keymap) "2"))
         (should (equal '((:answer "Sidebar right")) answers))
         (should (null harness-chat--pending))
-        (should (null harness-chat--diagram-shown))
+        (should-not (harness-ui-pending--diagrams (car (harness-ui-pending-items sid))))
         (should-not (harness-ui-chat-test-find buf "Diagram"))
         (should-error (harness-chat-next-diagram) :type 'user-error)
         ;; A question without diagrams has no area and no n, p.

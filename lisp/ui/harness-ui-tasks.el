@@ -58,6 +58,7 @@
 (require 'harness-files)
 (require 'harness-ui)
 (require 'harness-ui-compose)
+(require 'harness-ui-pending)
 
 (defgroup harness-ui-tasks nil
   "Task mode." :group 'harness-ui)
@@ -113,6 +114,8 @@ Either way the toggle above the compose box switches it per board."
 (defvar harness-ui-btw-start-function)
 (defvar harness-ui-btw-about)
 (declare-function harness-btw "harness-ui-btw")
+(declare-function harness-ui-popout-at-point "harness-ui-popout")
+(declare-function harness-ui-popout-try-at-point "harness-ui-popout")
 
 (defmacro harness-ui-tasks--with-task (id &rest body)
   "Run BODY with point on task ID's card.
@@ -249,11 +252,9 @@ The session list names a task's session the same way."
 
 (defun harness-ui-tasks--request (session)
   "Say what kind of input the first pending request of SESSION needs.
-Only the kind: the request itself is read in the session."
-  (when-let* ((item (car (plist-get session :pending))))
-    (if (equal (plist-get item :kind) "question")
-        "has a question for you"
-      "needs your permission")))
+Only the kind: the full request is shown by `harness-ui-tasks-requests',
+or read in the session."
+  (harness-ui-pending-summary session))
 
 (defun harness-ui-tasks--icon (task column session)
   (pcase column
@@ -445,8 +446,10 @@ card's title, so the prompt shows here."
        ('needs-input
         (pcase (plist-get (harness-ui-tasks--pending task) :kind)
           ("permission" '(("Allow" harness-ui-tasks-allow) ("Deny" harness-ui-tasks-deny)
+                          ("Request…" harness-ui-tasks-requests)
                           ("Open" harness-ui-tasks-open) ("Stop" harness-ui-tasks-cancel)))
-          ("question" '(("Answer" harness-ui-tasks-reply) ("Open" harness-ui-tasks-open)
+          ("question" '(("Answer…" harness-ui-tasks-requests) ("Reply" harness-ui-tasks-reply)
+                        ("Open" harness-ui-tasks-open)
                         ("Stop" harness-ui-tasks-cancel)))
           ;; The agent found the board has it already: you decide.
           ((guard (harness-ui-tasks--duplicate-p task))
@@ -508,8 +511,11 @@ a button whose label changes, a setting's value say, needs one."
               'harness-task-button (or id label)))
 
 (defun harness-ui-tasks--pending (task)
-  "Return the first pending request of TASK's session, or nil."
-  (car (plist-get (harness-ui-tasks--session task) :pending)))
+  "Return the request TASK's session waits on, or nil.
+The pending module knows it as soon as it arrives; the session cache
+may lag, so it is asked first."
+  (or (car (harness-ui-pending-items (plist-get task :session)))
+      (car (plist-get (harness-ui-tasks--session task) :pending))))
 
 (defun harness-ui-tasks--card-buttons (task)
   "Buttons for TASK's two most useful actions besides opening it.
@@ -1370,6 +1376,7 @@ anything that moves a task without one, so a board never drifts.")
   (define-key map (kbd "s") #'harness-ui-tasks-start)
   (define-key map (kbd "e") #'harness-ui-tasks-edit)
   (define-key map (kbd "m") #'harness-ui-tasks-reply)
+  (define-key map (kbd "SPC") #'harness-ui-tasks-requests)
   (define-key map (kbd "r") #'harness-ui-tasks-refine)
   (define-key map (kbd "y") #'harness-ui-tasks-allow)
   (define-key map (kbd "n") #'harness-ui-tasks-deny)
@@ -1417,6 +1424,11 @@ anything that moves a task without one, so a board never drifts.")
   (add-hook 'window-buffer-change-functions #'harness-ui-tasks--on-window-change nil t)
   (add-hook 'window-size-change-functions #'harness-ui-tasks--on-resize nil t)
   (setq harness-ui-setting-target-function #'harness-ui-tasks--setting-target)
+  ;; What the session at point waits on (the popout), from the card at point.
+  (setq-local harness-ui-session-at-point-function
+              (lambda ()
+                (and (harness-ui-tasks--board-p (current-buffer))
+                     (plist-get (harness-ui-tasks--task t) :session))))
   ;; A BTW over the board (b, [BTW], or the usual BTW command) asks about its tasks.
   (setq-local harness-ui-btw-start-function #'harness-ui-tasks--start-btw
               harness-ui-btw-about "the tasks")
@@ -1436,6 +1448,7 @@ anything that moves a task without one, so a board never drifts.")
         (". s" "Start now" harness-ui-tasks-start)
         (". e" "Edit prompt" harness-ui-tasks-edit)
         (". m" "Message session" harness-ui-tasks-reply)
+        (". SPC" "View what point needs" harness-ui-tasks-requests)
         (". r" "Refine" harness-ui-tasks-refine)
         (". y" "Allow tool call" harness-ui-tasks-allow)
         (". n" "Deny tool call" harness-ui-tasks-deny)]
@@ -1770,6 +1783,25 @@ whose write-up refused it as a duplicate is written up all the same."
      (t (harness-ui-tasks--request-then "_harness/task/refine" (list :id (plist-get task :id))
                                         "Refining the task")
         (message "An agent is writing the task up")))))
+
+(defun harness-ui-tasks-requests ()
+  "Pop out what the task at point needs, to read and act on it.
+That is the permission prompt or question its session waits on, shown in
+full -- buttons, keys and diagrams -- and answered there; the board's
+compose box takes a typed answer too (m).  A task that handed work in
+shows its report instead, through the shared
+`harness-ui-popout-at-point-functions'.  The card offers the request as
+[Answer…] / [Request…]; SPC does this."
+  (interactive)
+  (let* ((task (harness-ui-tasks--task))
+         (sid (plist-get task :session)))
+    (unless sid (user-error "This task has not started yet"))
+    (unless (fboundp 'harness-ui-popout-at-point)
+      (user-error "The popout module is not loaded"))
+    ;; The request is the pending module's and a report the review module's;
+    ;; both register with the shared hook, which knows the task at point.
+    (unless (harness-ui-popout-try-at-point)
+      (user-error "This task is not waiting on anything"))))
 
 (defun harness-ui-tasks--answer (task answer)
   "Answer the question TASK's session is waiting on with ANSWER."

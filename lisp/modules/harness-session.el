@@ -229,20 +229,43 @@ HEAD defaults to the session head."
   (or (harness-session-context-window s)
       (harness-session--model-window (harness-session-model s))))
 
+(defun harness-session--model-levels (model)
+  "Return the thinking levels the provider catalogue gives MODEL, or nil."
+  (and model (harness-method-exists-p 'provider/model)
+       (condition-case err
+           (plist-get (harness-call 'provider/model model) :thinking-levels)
+         (error (harness-log 'debug "session: no thinking levels for %s: %S" model err)
+                nil))))
+
+(defun harness-session--btw-thinking (model cwd)
+  "Return the thinking level a BTW with MODEL at CWD starts at, or nil.
+That is `harness-btw-thinking' as configured at CWD, provided the
+provider catalogue lists it among MODEL's thinking levels: a model
+without levels may refuse a request that asks for one.  nil leaves the
+BTW the level it would have otherwise."
+  (let ((level (harness-session--config 'harness-btw-thinking cwd)))
+    (and (stringp level)
+         (member level (harness-session--model-levels model))
+         level)))
+
 ;;;; Methods: lifecycle
 
 (harness-defmethod session/create (&rest plist)
-  "Create a session.  PLIST needs `:cwd'; see docs/architecture.md for the rest."
+  "Create a session.  PLIST needs `:cwd'; see docs/architecture.md for the rest.
+A `btw' session without `:thinking' thinks at `harness-btw-thinking'
+when its model offers that level, else at `harness-thinking', as
+configured at `:cwd'."
   (let* ((cwd (or (plist-get plist :cwd) (error "session/create needs :cwd")))
          (host (or (plist-get plist :host) (file-remote-p cwd)))
          (cwd (file-name-as-directory (expand-file-name cwd)))
+         (kind (or (plist-get plist :kind) 'main))
          (project (or (plist-get plist :project)
                       (if (harness-method-exists-p 'project/root) (harness-call 'project/root cwd) cwd)))
          (model (or (plist-get plist :model) (harness-session--config 'harness-model cwd)))
          (s (make-harness-session)))
     (setf (harness-session-id s) (or (plist-get plist :id) (harness-uuid))
           (harness-session-name s) (plist-get plist :name)
-          (harness-session-kind s) (or (plist-get plist :kind) 'main)
+          (harness-session-kind s) kind
           (harness-session-project s) project
           (harness-session-cwd s) cwd
           (harness-session-host s) host
@@ -250,7 +273,9 @@ HEAD defaults to the session head."
           (harness-session-model s) model
           (harness-session-permission-mode s) (or (plist-get plist :permission-mode)
                                                   (harness-session--config 'harness-permission-mode cwd) 'ask)
-          (harness-session-thinking s) (or (plist-get plist :thinking) (harness-session--config 'harness-thinking cwd))
+          (harness-session-thinking s) (or (plist-get plist :thinking)
+                                           (and (eq kind 'btw) (harness-session--btw-thinking model cwd))
+                                           (harness-session--config 'harness-thinking cwd))
           ;; Its own switch from now on: t or nil.  An explicit false
           ;; (`:false') turns it off whatever the setting says.
           (harness-session-non-interactive s) (harness-json-true-p
@@ -496,19 +521,24 @@ with ID or with any other BTW, even one opened over ID before.  It has
 no transcript and no fork node.  It has no provider state either, so
 its first turn starts a provider conversation of its own (a new CLI
 session for Claude Code).  It has no directory grants.  It works where
-ID does, with ID's model: cwd, project, host, worktree, model,
-thinking level and permission mode are ID's, everything else is the
-configured default, as for any new session.  Its `:parent-id' is ID
-only so that the session list and the tree show it under ID."
-  (let ((parent (harness-session--get id)))
+ID does, with ID's model: cwd, project, host, worktree, model and
+permission mode are ID's, everything else is the configured default,
+as for any new session.  It thinks at `harness-btw-thinking' as
+configured there, a low level for quick questions, when the model
+offers that level, else at ID's level.  Its `:parent-id' is ID only so
+that the session list and the tree show it under ID."
+  (let* ((parent (harness-session--get id))
+         (cwd (harness-session-cwd parent))
+         (model (harness-session-model parent)))
     (harness-call 'session/create
                   :kind 'btw :parent-id id :name name
-                  :cwd (harness-session-cwd parent)
+                  :cwd cwd
                   :project (harness-session-project parent)
                   :host (harness-session-host parent)
                   :worktree (harness-session-worktree parent)
-                  :model (harness-session-model parent)
-                  :thinking (harness-session-thinking parent)
+                  :model model
+                  :thinking (or (harness-session--btw-thinking model cwd)
+                                (harness-session-thinking parent))
                   :permission-mode (harness-session-permission-mode parent))))
 
 (defun harness-session--family (s)
