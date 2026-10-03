@@ -78,6 +78,11 @@ RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
     :api-key "sk-test-deepseek" :flavor deepseek)
   "A DeepSeek-flavoured endpoint.")
 
+(defvar harness-openai-test-deepseek-host-endpoint
+  '(:id testdshost :label "DeepSeek as OpenAI" :base-url "https://api.deepseek.com"
+    :api-key "sk-test-deepseek-host" :flavor openai)
+  "An official DeepSeek host declared as a plain OpenAI endpoint.")
+
 (defun harness-openai-test--complete (endpoint request)
   "Run REQUEST directly against ENDPOINT's complete function, collecting events.
 Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
@@ -270,6 +275,31 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
     (should (equal '(:thinking t)
                    (harness-openai--capabilities harness-openai-test-deepseek-endpoint)))))
 
+(ert-deftest harness-provider-openai-deepseek-host-dialect ()
+  ;; An endpoint at an official DeepSeek host speaks DeepSeek whatever its
+  ;; flavor says, so its reasoning replays and its cached input splits.
+  (should (harness-openai--deepseek-p harness-openai-test-deepseek-host-endpoint))
+  (should (harness-openai--deepseek-p harness-openai-test-deepseek-endpoint))
+  ;; A look-alike host and plain OpenAI are not DeepSeek.
+  (should-not (harness-openai--deepseek-p
+               '(:base-url "https://api.deepseek.example/v1" :flavor openai)))
+  (should-not (harness-openai--deepseek-p
+               '(:base-url "https://deepseek.com.evil.example/v1" :flavor openai)))
+  (should-not (harness-openai--deepseek-p harness-openai-test-openai-endpoint))
+  ;; The request body follows the host: DeepSeek's max_tokens and efforts.
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (harness-openai-test--complete harness-openai-test-deepseek-host-endpoint
+                                   '(:model "testdshost:deepseek-flash" :thinking "max" :max-tokens 321
+                                     :messages ((:role user :content ((:type "text" :text "hi"))))))
+    (let ((body (harness-openai-test--last-request-json)))
+      (should (= 321 (plist-get body :max_tokens)))
+      (should-not (plist-get body :max_completion_tokens))
+      (should (equal "max" (plist-get body :reasoning_effort)))
+      (should-not (plist-get body :usage)))))
+
 (ert-deftest harness-provider-openai-deepseek-replays-reasoning-content ()
   ;; DeepSeek's thinking mode rejects a tool-using history whose assistant
   ;; messages omit reasoning_content, so the recorded thinking goes back.
@@ -343,6 +373,33 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
                        :cost nil :billing api :context 100)
                      usage)))))
+
+(ert-deftest harness-provider-openai-deepseek-usage-splits-on-a-custom-host ()
+  ;; DeepSeek's cache fields say prompt_tokens is hit + miss; billing must
+  ;; split them even when the endpoint is not labelled DeepSeek, or the
+  ;; cached input is charged at the cache-miss price.
+  (harness-openai-test-with-fake
+      `(("chat/completions"
+         . (:chunks (,(harness-openai-test--sse
+                      '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                      '(:choices () :usage (:prompt_tokens 1000 :completion_tokens 100
+                                            :prompt_cache_hit_tokens 900 :prompt_cache_miss_tokens 100))
+                      "[DONE]")))))
+    (let* ((events (car (harness-openai-test--complete
+                         harness-openai-test-deepseek-host-endpoint
+                         '(:model "testdshost:deepseek-flash" :max-tokens 10
+                           :messages ((:role user :content ((:type "text" :text "hi"))))))))
+           (usage (cl-find 'usage events :key (lambda (e) (plist-get e :type)))))
+      (should (equal '(:type usage :input 100 :output 100 :cache-read 900 :cache-write 0
+                       :cost nil :billing api :context 1000)
+                     usage))))
+  ;; A server that reports only the hits still splits: the misses are the rest.
+  (let ((usage (harness-openai--usage-event
+                '(:prompt_tokens 100 :completion_tokens 7 :prompt_cache_hit_tokens 80)
+                '(:id proxy :base-url "https://llm.example/v1" :flavor openai))))
+    (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
+                     :cost nil :billing api :context 100)
+                   usage))))
 
 (ert-deftest harness-provider-openai-text-answer-with-usage ()
   (harness-openai-test-with-fake

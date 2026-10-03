@@ -181,6 +181,28 @@
       (harness-provider-unregister 'deepseek)
       (setq harness-deepseek--registered nil))))
 
+(ert-deftest harness-deepseek-custom-host-prices-cached-input ()
+  ;; An official DeepSeek host added as a plain OpenAI-compatible endpoint
+  ;; is priced like DeepSeek: cached input at the cache-hit rate, not the
+  ;; cache-miss rate.  This is the path the cost page prices a call with.
+  (let ((endpoint (list :id 'testdshost :label "DeepSeek as OpenAI"
+                        :base-url "https://api.deepseek.com" :api-key "sk-test"
+                        :flavor 'openai
+                        :models (list (harness-deepseek--model '(:name "deepseek-flash" :tier flash))))))
+    (unwind-protect
+        (progn
+          (harness-openai-register-endpoint endpoint)
+          (let* ((raw '(:prompt_tokens 1000 :completion_tokens 100
+                        :prompt_cache_hit_tokens 900 :prompt_cache_miss_tokens 100))
+                 (record (harness-openai--usage-event raw endpoint))
+                 (off (harness-deepseek-test-time "2026-10-12T05:00:00Z")))
+            (should (equal 100 (plist-get record :input)))
+            (should (equal 900 (plist-get record :cache-read)))
+            (should (harness-deepseek-test-near
+                     (/ (+ (* 100 0.15) (* 900 0.003) (* 100 0.60)) 1000000.0)
+                     (harness-call 'usage/price "testdshost:deepseek-flash" record off)))))
+      (harness-provider-unregister 'testdshost))))
+
 ;;;; The peak-pricing notice
 
 (ert-deftest harness-deepseek-peak-notice ()

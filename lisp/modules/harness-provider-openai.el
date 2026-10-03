@@ -115,8 +115,9 @@ Every entry is a plist with these keys:
                    without a /models route
   :default-context context window used for models that do not report one
   :flavor          `openrouter', `openai' or `deepseek'; guessed from
-                   the URL when absent (`deepseek' is never guessed, so
-                   name it for an endpoint that needs its handling)
+                   the URL when absent (`deepseek' is never guessed, but
+                   an official DeepSeek host gets its handling anyway;
+                   see `harness-openai--deepseek-p')
   :capabilities    static capability plist overriding the flavor default
   :tiers           model names per tier (:cheap :balanced :frontier), as
                    `harness-define-provider' takes them; without one the
@@ -156,8 +157,10 @@ DeepSeek differs from plain OpenAI in how it reports cached input (its
 `prompt_tokens' includes the cached tokens, which are billed apart), in
 the reasoning efforts it accepts, and in requiring a tool-using
 history to carry the thinking of earlier assistant turns back as
-`reasoning_content'."
-  (eq (harness-openai--flavor endpoint) 'deepseek))
+`reasoning_content'.  The dialect follows the host, so an official
+DeepSeek host counts even when the endpoint names another flavor."
+  (or (eq (harness-openai--flavor endpoint) 'deepseek)
+      (harness-openai--deepseek-host-p endpoint)))
 
 (defun harness-openai--capabilities (endpoint)
   "Return the static capability plist for ENDPOINT."
@@ -171,6 +174,21 @@ history to carry the thinking of earlier assistant turns back as
 (defun harness-openai--host (endpoint)
   "Return the host part of ENDPOINT's base URL."
   (url-host (url-generic-parse-url (harness-openai--base-url endpoint))))
+
+(defconst harness-openai--deepseek-host-regexp
+  "\\`\\(.*\\.\\)?deepseek\\.com\\'"
+  "Hosts that speak the DeepSeek dialect, whatever an endpoint calls itself.")
+
+(defun harness-openai--deepseek-host-p (endpoint)
+  "Non-nil when ENDPOINT's base URL points at an official DeepSeek host.
+DeepSeek's rules (the reasoning replay, the reasoning efforts and how
+cached input is reported) follow the server rather than the endpoint's
+label, so an endpoint that declares another flavor but talks to
+DeepSeek still gets them."
+  (let ((host (harness-openai--host endpoint)))
+    (and (stringp host)
+         (not (string-empty-p host))
+         (and (string-match-p harness-openai--deepseek-host-regexp host) t))))
 
 (defun harness-openai--auth-source-key (host)
   "Look HOST up in auth-source with user \"apikey\"; return the secret or nil."
@@ -603,12 +621,24 @@ shows a model writing a large input.  At most one report every
         (when (and finish (stringp finish))
           (setf (harness-openai--stream-finish-reason stream) finish))))))
 
+(defun harness-openai--deepseek-usage-p (usage)
+  "Non-nil when USAGE carries DeepSeek's own cache-token fields.
+DeepSeek reports `prompt_tokens' as the sum of
+`prompt_cache_hit_tokens' and `prompt_cache_miss_tokens' and bills the
+two apart.  A server that reports those fields is billed that way
+whatever the endpoint calls itself, so the split must not depend on
+the endpoint's label alone."
+  (and (listp usage)
+       (or (plist-member usage :prompt_cache_miss_tokens)
+           (plist-member usage :prompt_cache_hit_tokens))))
+
 (defun harness-openai--usage-event (usage endpoint)
   "Build the usage event from an OpenAI USAGE object for ENDPOINT.
 OpenAI-compatible endpoints bill per token, so the event says `api'.
 DeepSeek's `prompt_tokens' includes the cached tokens, so they are
 split: `:input' counts the cache misses, `:cache-read' the hits, and
-`:context' both."
+`:context' both.  A DeepSeek endpoint is recognized by its flavor, by
+an official host, or by the cache fields the server reports."
   (let* ((input (or (plist-get usage :prompt_tokens) 0))
          (hit (or (plist-get usage :prompt_cache_hit_tokens)
                   (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens))
@@ -616,7 +646,8 @@ split: `:input' counts the cache misses, `:cache-read' the hits, and
          (miss (or (plist-get usage :prompt_cache_miss_tokens)
                    (max 0 (- input hit))))
          (cost (plist-get usage :cost))
-         (deepseek (harness-openai--deepseek-p endpoint)))
+         (deepseek (or (harness-openai--deepseek-p endpoint)
+                       (harness-openai--deepseek-usage-p usage))))
     (list :type 'usage
           :input (if deepseek miss input)
           :output (or (plist-get usage :completion_tokens) 0)
