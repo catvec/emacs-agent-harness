@@ -417,11 +417,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   video of what it built whenever there is anything to see, a file, a
   code block, a note, or a link to an earlier tool call, the tests or a
   command it ran. The turn ends there and the task waits for your
-  review. In the session itself a banner above the compose box offers
+  review. In the session itself a banner above the compose box shows
+  that report in full, already expanded -- the summary, then every piece
+  of evidence, a referenced call with its whole output -- and offers
   `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-x`; type the feedback
-  in the box, `C-c C-c` sends it) and `[Report]`, so you can accept the
-  work without going back to the board. The two keys work only while
-  the banner shows; otherwise `C-c C-v` attaches the clipboard as usual.
+  in the box, `C-c C-c` sends it) and `[Report]`, which pops it out, so
+  you can read the work and accept it without going back to the board.
+  The two keys work only while the banner shows; otherwise `C-c C-v`
+  attaches the clipboard as usual.
 - `[Report]` on a card that has one pops the handed-in summary and
   evidence out beside the board: images inline, videos as thumbnails,
   files as buttons, and each referenced tool call as the call it links

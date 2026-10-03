@@ -103,6 +103,12 @@ Signal an error mentioning MESSAGE on timeout.  Return PRED's value."
   "Create and return a fresh temporary directory."
   (file-name-as-directory (make-temp-file "harness-tmp-" t)))
 
+(defun harness-test-real-home ()
+  "Return the user's home directory as the password database has it.
+Not $HOME: a suite run from a harness session's shell runs in that
+session's sandbox, where $HOME is the sandbox's own empty home."
+  (directory-file-name (expand-file-name (concat "~" (user-real-login-name)))))
+
 ;;;; Customize types
 
 (defun harness-test-fits-p (type value)

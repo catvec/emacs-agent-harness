@@ -16,6 +16,39 @@
 (declare-function harness-ui-request "harness-ui")
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-request "harness-acp")
+(declare-function harness-acp-close "harness-acp")
+(declare-function harness-acp-connection-pending "harness-acp")
+
+;; A batch Emacs, as the tests run in, dies of a broken pipe: a request
+;; written to a harness process that is exiting, or was just killed,
+;; takes the whole run down (exit 141).  What the UI asks on connecting
+;; goes out in steps -- the providers, then each one's quota as their
+;; list comes back -- so a test lets it settle before it kills the
+;; process, and lets go of the connection before it stops it.
+
+(defun harness-server-test--settle ()
+  "Wait until nothing goes between the UI and the harness process.
+Nothing awaited for several turns of the event loop in a row means
+every answer's follow-up has gone out and come back."
+  (let ((idle 0))
+    (harness-test-wait
+     (lambda ()
+       (setq idle (if (zerop (hash-table-count (harness-acp-connection-pending harness-ui-connection)))
+                      (1+ idle)
+                    0))
+       (>= idle 10))
+     30 "the UI's requests to settle")))
+
+(defun harness-server-test--stop ()
+  "Stop the harness process and wait until it has exited.
+The UI lets go of its connection first, so nothing it still sends on
+its way out is written to a process that is exiting."
+  (let ((proc harness-ui--server)
+        (conn harness-ui-connection))
+    (setq harness-ui-connection-address nil harness-ui-connection nil)
+    (when conn (ignore-errors (harness-acp-close conn)))
+    (harness-stop)
+    (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit"))))
 
 (defmacro harness-server-test-with-process (&rest body)
   "Run BODY after `harness-start' in process mode against a temp state dir.
@@ -39,10 +72,7 @@ thread for 2 seconds."
                  "                   (lambda (r) (plist-get r :content)))) t))\n"))
        (unwind-protect
            (progn (harness-start) ,@body)
-         (let ((proc harness-ui--server))
-           (harness-stop)
-           (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit")))
-         (setq harness-ui-connection-address nil harness-ui-connection nil)))))
+         (harness-server-test--stop)))))
 
 (ert-deftest harness-server-runs-the-harness-out-of-process ()
   (harness-server-test-with-process
@@ -132,10 +162,7 @@ so settings made later in the init file are forwarded."
             (should (string-search "demo:later"
                                    (harness-read-file (expand-file-name "server-config.el" harness-state-directory))))
             (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30))))
-        (let ((proc harness-ui--server))
-          (harness-stop)
-          (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit")))
-        (setq harness-ui-connection-address nil harness-ui-connection nil)))))
+        (harness-server-test--stop)))))
 
 (ert-deftest harness-server-forwards-corporate-mode ()
   "`harness-corporate-mode' turned on reaches the harness process.
@@ -155,6 +182,7 @@ forwarded as every `harness-' option the user sets."
 (ert-deftest harness-server-restarts-after-a-crash ()
   (harness-server-test-with-process
     (harness-test-await (harness-ui-request "_harness/session/list") 30)
+    (harness-server-test--settle)
     (let ((old harness-ui--server))
       (signal-process old 'kill)
       (harness-test-wait (lambda () (and harness-ui--server (not (eq old harness-ui--server))

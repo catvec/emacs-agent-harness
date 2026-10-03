@@ -2052,18 +2052,28 @@ todos, lists one key per line rather than as a Lisp form."
     (should (equal (harness-chat--input-listing '(:options ("red" "green"))) "options: (\"red\" \"green\")\n"))))
 
 (ert-deftest harness-ui-chat-reopens-shown-sessions-on-connect ()
-  "A harness that starts again has every session closed; chat buffers reopen theirs."
+  "A harness that starts again has every session closed; chat buffers
+reopen the ones they showed open, and leave closed one they showed closed."
   (harness-ui-chat-test-with
     (let ((shown (harness-ui-chat-test-session "shown"))
-          (hidden (harness-ui-chat-test-session "hidden")))
+          (hidden (harness-ui-chat-test-session "hidden"))
+          (closed (harness-ui-chat-test-session "closed")))
       (harness-ui-chat-test-open shown)
-      ;; How a restarted harness loads them.
+      ;; Opened as it is: inactive until a message resumes it.
+      (harness-call 'session/deactivate closed)
+      (let ((buf (harness-ui-chat-test-open closed)))
+        (harness-test-wait (lambda () (buffer-local-value 'harness-chat--inactive buf))
+                           5 "the closed session shown closed"))
+      ;; The harness goes away and starts again with every session closed,
+      ;; as it loads them; the UI hears of it only as it connects again.
+      (harness-acp-close harness-ui-connection)
       (harness-call 'session/deactivate shown)
       (harness-call 'session/deactivate hidden)
       (harness-ui-connect nil)
       (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get shown) :status)))
                          5 "the shown session to reopen")
-      (should (eq 'inactive (plist-get (harness-call 'session/get hidden) :status))))))
+      (should (eq 'inactive (plist-get (harness-call 'session/get hidden) :status)))
+      (should (eq 'inactive (plist-get (harness-call 'session/get closed) :status))))))
 
 (ert-deftest harness-ui-chat-connect-remote-and-back ()
   "Switching to a harness over TCP with a chat buffer open opens one

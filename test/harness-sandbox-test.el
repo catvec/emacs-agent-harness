@@ -56,7 +56,7 @@ re-detected before BODY and restored afterwards."
         ;; Network stays on by default.
         (should-not (member "--unshare-net" cmd))
         ;; The real home is never bound.
-        (should-not (member (directory-file-name (getenv "HOME")) cmd))
+        (should-not (member (harness-test-real-home) cmd))
         ;; The command follows the separator untouched.
         (should (equal command (cdr (member "--" cmd)))))
       ;; Options: network off and extra writable/readable directories.

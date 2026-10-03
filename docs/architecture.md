@@ -2317,11 +2317,13 @@ box, `C-g` closes it, and `harness-ui-popout-at-point` runs the first
 `harness-ui-popout-at-point-functions` that knows the item at point),
 the review of a task in its session (`harness-ui-review`: a chat panel
 -- `harness-chat-panel-functions` -- that shows the board's Ready for
-review above the box, with [Verify] (`C-c C-v`), [Send back]
-(`C-c C-x`) and [Report]; while it shows, `harness-chat-send-function`
-gives the box's text to `task/reject` as the feedback, and
+review above the box: the heading, the handed-in report in full and
+always expanded, then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`)
+and [Report]; while it shows, `harness-chat-send-function` gives the
+box's text to `task/reject` as the feedback, and
 `harness-ui-review-minor-mode` puts those two keys over the chat's own,
-only for as long as it shows), and the
+only for as long as it shows; it follows the task events of its session
+and draws again only when what it shows changes), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images inline, videos and files through ui-media, code as a
 block, notes, and a referenced tool call drawn as the call it links to,
