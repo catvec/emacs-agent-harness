@@ -683,13 +683,16 @@ told from, like a worktree git lost track of, still leads back."
       ;; A git project, where the switch applies; this test's dir is not one.
       (setq harness-ui-tasks--settings (plist-put (copy-sequence harness-ui-tasks--settings) :worktrees t))
       (harness-ui-tasks--render-tail)
-      (should (string-match-p "own worktree" (harness-ui-tasks-test--tail-text board)))
+      (let ((tail (harness-ui-tasks-test--tail-text board)))
+        ;; The switch's label is the only word on where the task works:
+        ;; no explainer repeats it.
+        (should (= 1 (1- (length (split-string tail "own worktree"))))))
       (harness-ui-tasks-toggle-main-tree)
       (should (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree)))
       (let ((tail (harness-ui-tasks-test--tail-text board)))
         (should (string-match-p "main tree" tail))
-        ;; The line is fitted to the window, so only its start shows.
-        (should (string-match-p "no worktree" tail))))
+        (should (= 1 (1- (length (split-string tail "main tree")))))
+        (should-not (string-match-p "no worktree" tail))))
     (harness-ui-tasks-test--type-and-submit board "Clean the checkout")
     (harness-ui-tasks-test--wait-text board "main tree")
     (let ((task (car (harness-call 'task/list default-directory))))
@@ -952,12 +955,6 @@ HELP is its tooltip, CLICK what a click on it runs."
                 (if (functionp help) (funcall help (get-buffer-window board t) nil nil) help))
               (lookup-key (get-text-property start 'keymap header) [header-line mouse-1]))))))
 
-(defun harness-ui-tasks-test--worktree-note (board)
-  "The settings line BOARD shows above its compose box in a git project."
-  (with-current-buffer board
-    (let ((harness-ui-tasks--settings (append '(:worktrees t) harness-ui-tasks--settings)))
-      (substring-no-properties (harness-ui-tasks--new-settings-line)))))
-
 (ert-deftest harness-ui-tasks-review-switch ()
   "The Review switch turns review off and on again: an option, saved for every project.
 Off, finished work completes by itself and Ready for review goes away."
@@ -974,7 +971,6 @@ Off, finished work completes by itself and Ready for review goes away."
           (should (equal "[Review: on]" text))
           (should (string-search "Review is on" help))
           (should (string-search "V to turn it off, for every project" help)))
-        (should (string-search "merged once you verify it" (harness-ui-tasks-test--worktree-note board)))
         ;; V on the board turns it off.
         (with-current-buffer board
           (goto-char (point-min))
@@ -986,7 +982,6 @@ Off, finished work completes by itself and Ready for review goes away."
         (should (equal '((harness-tasks-require-verification)) saved))
         (should-not harness-tasks-require-verification)
         (should (string-search "Review is off" (nth 1 (harness-ui-tasks-test--switch board))))
-        (should (string-search "merged when done" (harness-ui-tasks-test--worktree-note board)))
         ;; Finished work is done without waiting for anyone, and the board
         ;; has no column for review.
         (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")

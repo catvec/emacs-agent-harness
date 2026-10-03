@@ -981,15 +981,8 @@ them all; otherwise they are the new task's."
        (if bulk
            (propertize "   new tasks keep their own settings" 'face 'harness-dim-face)
          (let ((notes (if harness-ui-tasks--refine
-                          (delq nil (list "an agent writes it up; you start it"
-                                          (and main-tree "no worktree: works in the main tree")))
-                        (delq nil (list (and (harness-json-true-p (plist-get s :worktrees))
-                                             (if main-tree
-                                                 "no worktree: works in the main tree"
-                                               (if (harness-ui-tasks--review-p)
-                                                   "own worktree, merged once you verify it"
-                                                 "own worktree, merged when done")))
-                                        (and (plist-get s :max-running)
+                          (list "an agent writes it up; you start it")
+                        (delq nil (list (and (plist-get s :max-running)
                                              (format "%s at a time" (plist-get s :max-running))))))))
            (if notes
                (propertize (concat "   " (string-join notes " · ")) 'face 'harness-dim-face)
