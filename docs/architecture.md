@@ -12,9 +12,9 @@ module needs something more, add it here first.
                                  the harness process (see Processes).
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
- State          session, agent, config, project, store, usage, naming, compaction,
-                worktree, merge, tasks, tasks-notify, skills, perms, sandbox,
-                notifications
+ State          session, agent, config, project, store, usage, fallback, naming,
+                compaction, worktree, merge, tasks, tasks-notify, skills, perms,
+                sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
@@ -434,9 +434,18 @@ without the user naming one.  A tier the provider does not name, and a
 provider that declares none, falls back to its own catalogue sorted by
 price: `provider/tier-model MODEL-ID &optional TIER' returns the `:cheap'
 one by default, or nil when the provider is unknown or lists nothing
-(the caller then uses what it has).  This is what ties the judge to the
+(the caller then uses what it has).  MODEL-ID may also be a provider id
+alone.  This is what ties the judge to the
 session's provider.  Claude, DeepSeek, Bedrock and Copilot name their
 tiers; the dynamic OpenAI-compatible catalogues fall back to price.
+The other way round, `provider/model-tier MODEL-ID` says which tier a
+model is in its provider: the one `:tiers' names it for (`:balanced'
+first, then `:frontier', then `:cheap', when several do), else its
+place in the catalogue by price (cheapest third `:cheap', dearest third
+`:frontier'), else `:balanced'.  So Claude's Fable 5.1, which no tier
+names and which costs the most, is `:frontier'.  The fallback module
+maps a model to "its model of similar ability" at another provider
+through the two.
 
 The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
@@ -484,8 +493,25 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type activity :phase PHASE :tool NAME :chars N)  ; what the model is busy with, see below
 (:type quota :windows (…))
 (:type hint :text "…")                  ; provider-side notices (compaction, retries)
-(:type done :stop-reason end-turn|tool-use|max-tokens|cancelled|error :error "…")
+(:type done :stop-reason end-turn|tool-use|max-tokens|cancelled|error :error "…"
+       :error-kind quota|billing|rate-limit|auth|… :resets FLOAT)  ; the last two optional
 ```
+
+A `done` with `:stop-reason error` may say what kind of failure it was,
+when the provider knows: `:error-kind` `quota` (a plan's usage limit is
+used up: Claude Max's 5-hour or weekly window, Copilot's monthly
+allowance), `billing` (out of money: a prepaid balance or credit spent,
+an account on hold), `rate-limit` (a short-term limit; the provider
+works again in a moment), or another symbol for anything else (`auth`).
+`:resets` is when a quota comes back, as a float time, when the
+provider was told.  The Claude provider reads the CLI's assistant
+`error` field (`rate_limit` while a usage window is `rejected`,
+`billing_error`, `account_on_hold`) and the `resetsAt` of the
+`rate_limit_event` that rejected the call; the OpenAI-compatible one
+HTTP 402 (DeepSeek's "Insufficient Balance") and a 429 whose code is
+`insufficient_quota`; Copilot a `session.error` of type `quota` or
+status 402.  The fallback module (below) classifies failures that come
+without a kind from their text.
 
 A provider that runs one of its own tools in place of a harness tool
 (one the request's `:builtin-tools` names) reports its calls with three
@@ -527,7 +553,10 @@ fails, the fork starts without provider state: copied as is, the
 parent's would make the fork resume the parent's own CLI session.
 
 Methods: `provider/list`, `provider/models &optional REFRESH` (cached union
-across providers), `provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
+across providers), `provider/cached-models PROVIDER-ID` (one provider's
+cached models, at once: a provider not listed yet is asked, and gives
+nil until it answers; no other provider holds it up),
+`provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
 `provider/complete REQUEST` → HANDLE, `provider/fork MODEL-ID STATE` → promise,
 `provider/quota PROVIDER-ID &optional REFRESH`.  The model used when nothing
 more specific is configured is `harness-model`.
@@ -938,7 +967,15 @@ pending request and resolves when answered).
   `tools/builtin`); async filter `agent/before-turn` (value
   `(:proceed t :reason)`, args session) — budgets, merge holds and
   compaction hook in here; async filter `agent/step` at every step
-  boundary (same value shape) — merge holds pause here.
+  boundary (same value shape) — merge holds pause here; async filter
+  `agent/step-error` when a provider request fails (value `(:retry
+  nil)`, args session and FAILURE `(:error TEXT :error-kind KIND
+  :resets FLOAT :model MODEL-ID :step N)`, the `done` event's keys plus
+  the model the step ran on) — a handler that returns `(:retry t)`
+  has the step run again, on the session's model as it is then: the
+  fallback module switches the model and retries.  A turn retries at
+  most `harness-agent--max-error-retries` (8) times; otherwise, and
+  without a handler, the turn ends with `error` as before.
 - Events `agent/turn-started SID`, `agent/turn-ended SID REASON`,
   `agent/stream SID NODE-ID KIND DELTA` (kind text|thinking),
   `agent/tool-call SID NODE`, `agent/tool-result SID NODE`,
@@ -954,6 +991,20 @@ pending request and resolves when answered).
   step), so it is delivered once; a model that stops with steering
   waiting gets one more step with it as the newest user message.
   `max-turns` (`harness-agent-max-steps`, 200) ends runaway loops.
+- Every node a model produces (assistant, thinking, tool-call) records
+  that model in `:meta :model`.
+- Handoff to a hosted loop: a hosted provider only gets the trailing
+  user message, its own conversation being the rest.  When the
+  transcript holds output of another provider's model after this
+  provider's last (a fallback, or a model switched by hand), what that
+  conversation missed -- from there, or from the last compaction --
+  is rendered as text at the head of the trailing user message:
+  messages, tool calls and results, each cut to
+  `harness-agent--handoff-item-chars`, the oldest left out beyond
+  `harness-agent--handoff-max-chars`; thinking is left out.  A request
+  that ends in tool results (a step retried mid-turn) closes the text
+  by asking the model to carry on, since a hosted provider drops tool
+  results it did not ask for.
 - Streaming updates of the live node are not persisted one by one; on
   exit (`kill-emacs-hook`) and shutdown the text streamed so far is.
 - Activity: `agent/activity SID` returns what the running turn does now,
@@ -1015,6 +1066,63 @@ pending request and resolves when answered).
   baseline counts toward both.
 - Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
 
+### fallback
+
+When a provider runs out of quota or money, its sessions carry on with
+another.  `harness-fallback-models` (global, *Models and services*) is
+the order of preference, first used to last: each entry a provider id,
+standing for that provider's model of similar ability (the tier of the
+session's model, see `provider/model-tier`), or a model id used as it
+is.  nil turns the switching off; running out is still noticed, shown
+and hinted.
+
+- Marks: a provider that ran out is marked, the whole provider (key
+  `"deepseek"`) or one model (key `"claude:claude-fable-5-1"`, when only
+  a window scoped to a model is used up).  MARK = `(:key :provider
+  :model :kind quota|billing :reason TEXT :since F :until F :source
+  error|quota)`.  `:until` is when the limit resets, when known, else
+  an hour on (`harness-fallback--retry-after`); a mark ends then, or
+  when the user clears it, and a timer announces it.  Marks persist in
+  fallback.json.
+- What counts: a failed step whose FAILURE (see `agent/step-error`)
+  has `:error-kind` `quota` or `billing`, or, without a kind, whose
+  error text reads as running out of quota or money (HTTP 402,
+  "insufficient balance", "usage limit", "hit your limit",
+  `insufficient_quota`...; `harness-fallback-error-kind`).  A
+  rate limit, an outage or a refused login never does.  Also
+  `provider/quota-updated`: a plan window used up (used >= 1, resetting
+  later), unless the plan's extra usage pays for calls, marks the
+  provider until it resets (a window scoped to a model, that model);
+  such marks follow the quota and go when it says calls work again.
+- Choosing: a session's own model comes first; a session moved by the
+  fallback remembers its own (`:original`).  When it is out, the first
+  entry of `harness-fallback-models` whose model is neither marked nor
+  that of an unregistered provider wins.  `harness-fallback-choose
+  SESSION` returns `(:model ID :entry ENTRY :reason …)`, or nil.
+- Switching: `agent/before-turn` (priority 10, before compaction)
+  moves a session whose model is out to the chosen one, and back to its
+  own once that works again; `agent/step-error` marks what ran out,
+  moves the session and retries the step, so a turn, and a task, carry
+  on.  The model changes through `session/update` (`:silent`) with a
+  hint of its own ("Claude Code is out of quota until 19:00: carrying
+  on with DeepSeek-V4-Pro"), and `fallback/switched SID FROM TO WHY`
+  (WHY `out` or `back`).  A model changed by anyone else forgets the
+  session's own; a fork takes over its parent's.  With nothing left the
+  turn ends with its error and a hint naming every provider that is
+  out and when it resets.
+- Notifications (`notification/send`, source "fallback"): low urgency
+  when a provider runs out and sessions move on, normal when nothing is
+  left.
+- `fallback/status` → `(:models (ENTRY …) :marks (MARK …) :moved
+  ((:session SID :original MODEL :model MODEL) …) :enabled BOOL)`,
+  ENTRY = `(:entry STRING :provider ID :model MODEL-OR-NIL :label
+  :provider-label :registered BOOL :mark MARK-OR-NIL :tiers
+  ((:tier "cheap" :model ID :label …) …))`, `:tiers` for a provider
+  entry only.  `fallback/clear KEY` forgets the mark KEY (a provider's
+  forgets its models' marks too); → non-nil when one went.
+  `fallback/mark KEY &rest (:kind :until :reason)` marks by hand.
+  Event `fallback/changed` after any mark or session record changes.
+
 ### compaction
 
 - `compaction/compact SESSION-ID` → promise; summarises the transcript
@@ -1022,7 +1130,9 @@ pending request and resolves when answered).
   points at the compacted head, sets it as head, hints before/after.
 - Auto: `agent/before-turn` compacts when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
-  reports `:compaction hosted`.
+  reports `:compaction hosted`.  It judges the session as it is then,
+  read again: the fallback, earlier in the chain, may have moved it to
+  another model.
 
 ### naming
 
@@ -1576,7 +1686,7 @@ options have them, holds one per option, `{type: "ascii", text}` or
 the image data, since the pending question is saved with the session.
 
 Extension methods: any bus method whose name starts with `session/`,
-`agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
+`agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
 `notification/`, `sandbox/status`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
@@ -1928,7 +2038,15 @@ and opens the usage dashboard.  The dashboard's Plan section shows
 every quota window with its reset time and the plan's extra usage,
 and its chart stacks what a plan covered on top of the billed cost.
 The UI keeps each provider's QUOTA from `provider/quota` and
-`provider/quota-updated` (`harness-ui-quota`).
+`provider/quota-updated` (`harness-ui-quota`).  Under the Plan section
+the dashboard's Fallback section edits `harness-fallback-models` (from
+`fallback/status`, saved with `config/set`, global): the entries in
+order, each with whether it is available, out of quota until when, out
+of money, or not set up, and [try now] (`fallback/clear`), [up],
+[down] and [remove]; [add] (`f`) offers each provider ("model of
+similar ability") and each model.  `M-<up>`/`M-<down>` move the entry
+at point, `d` removes it (or the budget at point), `c` clears its mark.
+It follows `fallback/changed` and `config/changed`.
 
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; scoped to the current project, its
