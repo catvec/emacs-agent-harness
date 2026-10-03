@@ -6,7 +6,6 @@
 (defvar harness-model)
 (defvar harness-permission-mode)
 (defvar harness-thinking)
-(defvar harness-tasks-directory)
 (defvar harness-log-level)
 (defvar harness-acp--server-enabled)
 (declare-function harness-acp-request "harness-acp")
@@ -55,7 +54,6 @@ reaching a custom file."
             (harness-model harness-model)
             (harness-permission-mode harness-permission-mode)
             (harness-thinking harness-thinking)
-            (harness-tasks-directory harness-tasks-directory)
             (harness-config-test-api-key nil))
        (ignore root sub)
        (cl-letf (((symbol-function 'harness-save-user-option)
@@ -67,15 +65,15 @@ reaching a custom file."
   (skip-unless (executable-find "git"))
   (harness-config-test-with
     (harness-config-test--write root '((nil . ((harness-permission-mode . yolo) (harness-thinking . nil)
-                                               (harness-tasks-directory . 5)))))
+                                               (harness-budget . 5)))))
     (harness-config-test--write sub '((nil . ((harness-permission-mode . auto)))))
     (let* ((d (harness-call 'config/describe sub))
            (mode (harness-config-test--setting d "harness-permission-mode"))
            (thinking (harness-config-test--setting d "harness-thinking"))
            (model (harness-config-test--setting d "harness-model"))
-           (folder (harness-config-test--setting d "harness-tasks-directory")))
+           (budget (harness-config-test--setting d "harness-budget")))
       ;; A value that does not fit its type is flagged by layer.
-      (should (equal '("project") (plist-get folder :invalid)))
+      (should (equal '("project") (plist-get budget :invalid)))
       (should (null (plist-get mode :invalid)))
       (should (equal root (plist-get d :root)))
       (should (equal sub (plist-get d :cwd)))
@@ -154,7 +152,7 @@ reaching a custom file."
   (harness-config-test-with
     (dolist (call `((harness-permission-mode bogus :scope project)
                     (harness-model 42 :scope global)
-                    (harness-tasks-directory 12 :scope project)
+                    (harness-budget 12 :scope project)
                     (harness-log-level debug :scope project)
                     (harness-config-test-api-key "sk" :scope project)
                     (harness-model "x" :scope nowhere)
@@ -218,11 +216,11 @@ reaching a custom file."
     (harness-call 'config/unset 'harness-model :scope 'project :cwd sub)
     (should (equal '((python-mode . ((fill-column . 79)))) (harness-config-test--read root)))
     ;; The directory layer is removed from its own file.
-    (harness-config-test--write sub '((nil . ((harness-tasks-directory . "notes/tasks")))))
-    (should (equal "notes/tasks" (harness-call 'config/get 'harness-tasks-directory sub)))
-    (harness-call 'config/unset 'harness-tasks-directory :scope 'directory :cwd sub)
+    (harness-config-test--write sub '((nil . ((harness-model . "demo:notes")))))
+    (should (equal "demo:notes" (harness-call 'config/get 'harness-model sub)))
+    (harness-call 'config/unset 'harness-model :scope 'directory :cwd sub)
     (should (eq 'none (harness-config-test--read sub)))
-    (should (equal harness-tasks-directory (harness-call 'config/get 'harness-tasks-directory sub)))))
+    (should (equal harness-model (harness-call 'config/get 'harness-model sub)))))
 
 (ert-deftest harness-config-unset-global-restores-the-default ()
   (harness-config-test-with
@@ -251,13 +249,14 @@ reaching a custom file."
            (settings (plist-get d :settings))
            (section (lambda (key) (plist-get (harness-config-test--setting d key) :section))))
       ;; Sections with settings, in order; one whose module is not loaded is left out.
-      (should (equal '("sessions" "safety" "tasks")
+      (should (equal '("sessions" "safety")
                      (mapcar (lambda (s) (plist-get s :name)) (plist-get d :sections))))
       (should (equal "New sessions" (plist-get (car (plist-get d :sections)) :title)))
       (should (string-match-p "dir-locals" (plist-get (car (plist-get d :sections)) :doc)))
       (should (equal "sessions" (funcall section "harness-model")))
       (should (equal "safety" (funcall section "harness-sandbox-policy")))
-      (should (equal "tasks" (funcall section "harness-tasks-directory")))
+      ;; The tasks module is not loaded, so its settings and section are absent.
+      (should (null (funcall section "harness-tasks-model")))
       ;; Everything else is advanced: no section, after every sectioned one.
       (should (null (funcall section "harness-log-level")))
       (should (null (funcall section "harness-config-test-api-key")))

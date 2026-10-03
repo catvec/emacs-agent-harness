@@ -352,26 +352,6 @@ tell it from the user's messages."
           (should (string-match-p (concat "state refining (duplicate), duplicate of " (regexp-quote first)) listing))
           (should (string-match-p (regexp-quote first) listing)))))))
 
-(defvar harness-tasks-store-in-repository)
-(defvar harness-tasks-directory)
-
-(ert-deftest harness-tools-sessions-task-list-shows-task-files ()
-  "A task file written by hand in the project's docs/tasks shows in task_list."
-  (harness-tools-sessions-test-with
-    (let* ((harness-tasks-store-in-repository t)
-           (harness-tasks-directory "docs/tasks")
-           (root (file-name-as-directory (expand-file-name "repo" (harness-test-temp-dir))))
-           (file (expand-file-name "docs/tasks/csv-export.md" root)))
-      (make-directory (file-name-directory file) t)
-      (let ((default-directory root))
-        (should (zerop (call-process "git" nil nil nil "init" "-q" "-b" "main"))))
-      (with-temp-file file
-        (insert "---\ntitle: Add CSV export\n---\n\nReports should be exportable as CSV.\n"))
-      (let* ((me (let ((default-directory root)) (harness-tools-sessions-test-session)))
-             (listing (harness-tools-sessions-test-ok me "task_list" nil)))
-        (should (string-match-p "t-[a-z0-9]+ +pending +Add CSV export" listing))
-        (should (string-match-p "No tasks match" (harness-tools-sessions-test-ok me "task_list" '(:column "active"))))))))
-
 (ert-deftest harness-tools-sessions-pending-task-message-edits-prompt ()
   (harness-tools-sessions-test-with
     (let* ((harness-tasks-max-running 0)

@@ -421,7 +421,6 @@ project's, and a project's over the global value.
 - `harness-budget`
 - `harness-sandbox-policy`
 - `harness-non-interactive`
-- `harness-tasks-directory`
 
 The rest of the settings have a global value only.
 
@@ -613,32 +612,6 @@ directory instead.
 Tasks saved by earlier versions move into their repositories
 automatically. A copy of the file they came from is kept as
 `tasks.json.bak` in the state directory.
-
-### Task files
-
-The board of a git project is also a folder of Markdown files, one per
-task, in `docs/tasks/` of the main checkout. Set
-`harness-tasks-directory` to use another folder; a project's
-`.dir-locals.el` may name its own folder, or nil for none.
-
-Each file starts with YAML front matter (`id`, `title`, `state`,
-`column`, `session`, `branch`, `merge`, `model`, `created`, `verified`
-and so on), followed by the task's prompt, the request it was written
-from, the feedback from each time it was sent back from review, and its
-plan.
-
-- The harness writes a file whenever its task changes. It reads back
-  edits to the prompt, the request, the title, the model, the thinking
-  level, and `state: done`.
-- Adding a file creates a backlog task. Deleting a file, or moving it
-  into `docs/tasks/archive/`, archives its task, and archiving a task on
-  the board moves its file there.
-- Front matter keys that the harness does not know are preserved.
-- Files are written only in the main checkout, never in a task's
-  worktree, and the harness does not commit them.
-
-See the tasks section of [docs/architecture.md](docs/architecture.md)
-for the file format.
 
 ## Remote control
 
