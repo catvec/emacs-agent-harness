@@ -56,6 +56,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A request popped out of the session list, answered there | A question popped out of the task board, answered there |
 | ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
 | A BTW side conversation under its session | The menu, with the chat's own commands |
+| ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) | |
+| Messaging a task's session: the box says so, in its colours | |
 
 ## Requirements
 
@@ -440,6 +442,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   files as buttons, and each referenced tool call as the call it links
   to, with `[Open in the session]`. The board's item-at-point key
   (`SPC`) opens it too, along with whatever else the task has to show.
+- `m` on a task writes a message to its session without leaving the
+  board; when its session asks a question, `m` answers that instead.
+  The compose box then turns amber, bar and all, and names the session
+  it sends to, so it cannot be taken for the box that writes a new
+  task; `C-g` returns to that one.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `SPC` on a task that needs input pops out what it waits on -- the

@@ -48,6 +48,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
 | `tasks-long` | That board after weeks of merges, its completed list held back to keep the box in the window | `harness-media-shot-tasks-long` |
+| `tasks-message` | The task board writing a message to a task's session: the box in its message colours | `harness-media-shot-tasks-message` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
 | `popout-permission` | The session list with a session's permission request popped out under it | `harness-media-shot-popout-permission` |
 | `popout-question` | The task board with a task's question popped out under it | `harness-media-shot-popout-question` |

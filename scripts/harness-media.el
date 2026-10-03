@@ -67,6 +67,7 @@
 (defvar harness-ui-positions)
 (defvar harness-ui-default-position)
 (defvar harness-ui--position-buffers)
+(defvar harness-ui-tasks--target)
 (defvar harness-chat--blocks)
 (defvar harness-chat--loading)
 (defvar harness-chat--order)
@@ -93,6 +94,7 @@
 (declare-function harness-compose-repad "harness-ui-compose")
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-requests "harness-ui-tasks")
+(declare-function harness-ui-tasks-reply "harness-ui-tasks")
 (declare-function harness-sessions "harness-ui-sessions")
 (declare-function harness-ui-sessions-requests "harness-ui-sessions")
 (declare-function harness-tree "harness-ui-tree")
@@ -1608,6 +1610,27 @@ the last line."
     (harness-media--settle 1))
   (harness-media--capture "tasks-long"))
 
+(defun harness-media-shot-tasks-message ()
+  "The task board writing a message to the session of a task at work.
+The compose box wears the message colours and names the session it
+sends to, so it cannot be taken for the one that writes a new task."
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :settings))
+         (window (selected-window)))
+    (with-current-buffer (window-buffer window)
+      ;; The board draws its cards as they arrive and the shared helper
+      ;; errors on a card that is not there yet.
+      (harness-media--wait (lambda () (ignore-errors (harness-media--goto-task-card id) t))
+                           15 "the task's card")
+      (harness-ui-tasks-reply)
+      (unless (eq 'reply (car harness-ui-tasks--target))
+        (error "The board did not open a message box (target %S)" harness-ui-tasks--target))
+      (harness-compose-set "Keep the old settings module as a thin wrapper for one release, so the deploy can roll back.")
+      (set-window-point window (point-max))
+      (harness-media--settle 1)
+      (set-window-start window (point-min))))
+  (harness-media--capture "tasks-message"))
+
 (defun harness-media-shot-sessions ()
   "The session list."
   (harness-media--view #'harness-sessions)
@@ -1728,6 +1751,7 @@ popout both show; the popout is a side window and keeps its height."
     ("chat-question" . harness-media-shot-chat-question)
     ("tasks" . harness-media-shot-tasks)
     ("tasks-long" . harness-media-shot-tasks-long)
+    ("tasks-message" . harness-media-shot-tasks-message)
     ("sessions" . harness-media-shot-sessions)
     ("popout-permission" . harness-media-shot-popout-permission)
     ("popout-question" . harness-media-shot-popout-question)

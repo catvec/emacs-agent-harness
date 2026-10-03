@@ -2158,7 +2158,13 @@ field of its own (`C-a` stops after it, so
 `C-a C-k` clears the line), the placeholder, @file and /skill
 completion, attachments (`C-c C-a`, clipboard `C-c C-v`, drag and
 drop), skill expansion (`harness-compose-with-expanded-text`) and ACP
-attachment blocks.
+attachment blocks.  `harness-compose-insert` takes `:face`, the box's
+background (`harness-compose-face` by default) and `:accent`, the face
+of the prompt and of the bar down the box's left edge, through which a
+host whose box does something else than compose -- the task board's,
+which sends to a session -- marks it; `harness-compose-bar` draws that
+same bar on the host's own lines around the box.  Without either
+argument the box is the plain one.
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
@@ -2248,7 +2254,17 @@ permission, and a compose box that submits a task, edits a pending one,
 messages a task's session, answers its question or takes the feedback
 that sends a task back from review (`C-g` leaves an edit, message,
 answer or feedback for a new task again: a question stays waiting,
-never cancelled).  A task in review shows [Verify] and [Send back]: `v`
+never cancelled).  The same box does all of these, so what `C-c C-c`
+will do is made plain: a box that sends to an existing session -- a
+message, an answer, feedback on a write-up, or feedback that sends a
+task back from review -- wears the message colours
+(`harness-compose-message-face`, with the prompt and a bar in
+`harness-compose-message-accent-face`, carried onto the label line and
+the [cancel] beside it), shows the message icon and names where it
+sends ("Message to session “X”", "Refine “X” with feedback",
+"Answer the session's question “…”", "Send back “X” with feedback");
+composing a task, new or edited, keeps the plain box.  A task in
+review shows [Verify] and [Send back]: `v`
 accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
 in the minibuffer).  A verified task waits in merging -- queued for the

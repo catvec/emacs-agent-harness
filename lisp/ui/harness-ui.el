@@ -161,6 +161,16 @@ A tool call that is running, or that the permission system refused."
     (((background dark)) :background "#1e2127" :extend t))
   "The message composition area." :group 'harness-ui)
 
+(defface harness-compose-message-face
+  '((((background light)) :background "#fdf0d5" :extend t)
+    (((background dark)) :background "#3a3222" :extend t))
+  "The composition area of a message to an existing session.
+A colour of its own, so a box that sends to a session cannot be taken
+for the one that composes a new task." :group 'harness-ui)
+
+(defface harness-compose-message-accent-face '((t :inherit warning))
+  "The prompt and bar of a compose box that sends to an existing session." :group 'harness-ui)
+
 (defface harness-header-face '((t :inherit header-line))
   "Session header line." :group 'harness-ui)
 
