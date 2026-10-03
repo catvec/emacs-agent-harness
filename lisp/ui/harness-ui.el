@@ -59,6 +59,22 @@
 (defface harness-user-bar-face '((t :inherit font-lock-keyword-face))
   "Bar down the left edge of the user's messages (foreground only)." :group 'harness-ui)
 
+(defface harness-system-face
+  '((((background light)) :inherit shadow :background "#eeeeee" :extend t)
+    (((background dark)) :inherit shadow :background "#2b2b2b" :extend t))
+  "Messages the user did not write, on a background of their own.
+The harness sent them on its own (a task carrying on after a restart,
+non-interactive mode after a denied call, the merge queue), or the
+agent of another session did.  Their text is muted, like a hint's."
+  :group 'harness-ui)
+
+(defface harness-system-label-face '((t :inherit (bold shadow)))
+  "Sender name above messages the user did not write." :group 'harness-ui)
+
+(defface harness-system-bar-face '((t :inherit shadow))
+  "Bar down the left edge of messages the user did not write (foreground only)."
+  :group 'harness-ui)
+
 (defface harness-agent-face '((t :inherit default))
   "Face of the agent's text." :group 'harness-ui)
 
@@ -181,6 +197,7 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-inactive "inactive" "○" "off" "Inactive session.")
 (harness-ui-define-icon harness-icon-user "user" "◆" "you" "The user.")
 (harness-ui-define-icon harness-icon-agent "agent" "◇" "agent" "The agent.")
+(harness-ui-define-icon harness-icon-system "system" "⚙" "sys" "The harness, sending a message on its own.")
 (harness-ui-define-icon harness-icon-tool "tool" "◈" "tool" "A tool call.")
 (harness-ui-define-icon harness-icon-thinking "thinking" "…" "think" "Thinking.")
 (harness-ui-define-icon harness-icon-collapsed "collapsed" "▸" "+" "Collapsed block.")
@@ -960,33 +977,35 @@ and any other that is at least 70% used."
       "the subscription"))
 
 (defun harness-ui-spend-help (session)
-  "Return the tooltip that explains what SESSION cost and who pays for it."
+  "Return the tooltip that explains what SESSION cost and who pays for it.
+One line, so showing it in the echo area moves nothing."
   (let* ((usage (plist-get session :usage))
          (quota (harness-ui-session-quota session))
          (billing (harness-ui-session-billing session))
          (cost (float (or (plist-get usage :cost) 0)))
          (covered (harness-usage-covered usage))
          (payer (harness-ui-plan-title quota (plist-get usage :plan))))
-    (string-join
-     (delq nil
-           (append
-            (list
-             (cond ((and (> covered 0) (> cost 0))
-                    (format "%s billed as extra usage; %s more at API prices covered by %s."
-                            (harness-format-cost cost) (harness-format-cost covered) payer))
-                   ((or (> covered 0) (memq billing '(subscription extra-usage)))
-                    (format "Covered by %s, not billed per token.\nThis session at API prices: %s."
-                            payer (harness-format-cost covered)))
-                   ((eq billing 'api)
-                    (format "Session cost: %s, billed per token%s."
-                            (harness-format-cost cost)
-                            (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) "")))
-                   (t (format "Session cost: %s." (harness-format-cost cost)))))
-            (when (memq billing '(subscription extra-usage))
-              (append (mapcar #'harness-ui-describe-window (plist-get quota :windows))
-                      (list (harness-ui-describe-extra (plist-get quota :extra)))))
-            (list "mouse-1: usage and plan quota")))
-     "\n")))
+    (harness-ui-one-line
+     (string-join
+      (delq nil
+            (append
+             (list
+              (cond ((and (> covered 0) (> cost 0))
+                     (format "%s billed as extra usage; %s more at API prices covered by %s."
+                             (harness-format-cost cost) (harness-format-cost covered) payer))
+                    ((or (> covered 0) (memq billing '(subscription extra-usage)))
+                     (format "Covered by %s, not billed per token. This session at API prices: %s."
+                             payer (harness-format-cost covered)))
+                    ((eq billing 'api)
+                     (format "Session cost: %s, billed per token%s."
+                             (harness-format-cost cost)
+                             (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) "")))
+                    (t (format "Session cost: %s." (harness-format-cost cost)))))
+             (when (memq billing '(subscription extra-usage))
+               (append (mapcar #'harness-ui-describe-window (plist-get quota :windows))
+                       (list (harness-ui-describe-extra (plist-get quota :extra)))))
+             (list "mouse-1: usage and plan quota")))
+      "\n"))))
 
 (defun harness-ui-format-spend (session &optional with-quota)
   "Return what SESSION cost, saying when a subscription pays for it.
@@ -1054,6 +1073,14 @@ Those lines read % as the start of a construct such as %b, so a literal
 one -- a quota window's \"23%\" -- would vanish together with the
 character after it.  Text properties are kept."
   (replace-regexp-in-string "%" (lambda (match) (concat match match)) string t t))
+
+(defun harness-ui-one-line (text)
+  "Return TEXT on one line, its runs of whitespace collapsed to a space.
+Hover text belongs on one line: shown in the echo area where tooltips
+are off, a second line grows the mini window, which shrinks every other
+window in the frame and moves the button under the mouse until it is
+hard to click.  Build `help-echo' text from parts through this."
+  (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim (or text ""))))
 
 (defun harness-ui-format-context (session)
   "Return \"12.3k/200k\" for SESSION with the warning face applied."
@@ -1373,13 +1400,38 @@ so switching back can still resume it."
                                  label (length ids) (if (= 1 (length ids)) "" "s")
                                  (if no-default "" ", and for new sessions")))))))
 
+(defconst harness-ui--thinking-level-order
+  '("none" "minimal" "low" "medium" "high" "xhigh" "max")
+  "Thinking levels from weakest to strongest, for ordering the menu.")
+
+(defconst harness-ui--thinking-levels '("low" "medium" "high" "xhigh" "max")
+  "The common thinking levels, weakest first.
+The menu offers them to a model that names no levels of its own.")
+
+(defun harness-ui--thinking-levels-for (levels)
+  "Return the levels the thinking menu offers for a model's LEVELS.
+A model that names its own levels offers exactly those, weakest first,
+so it is never offered a level it cannot act on; one that names none
+offers the common levels."
+  (let ((rank (lambda (l) (or (cl-position l harness-ui--thinking-level-order
+                                               :test #'equal)
+                              most-positive-fixnum))))
+    (sort (delete-dups (copy-sequence (or levels harness-ui--thinking-levels)))
+          (lambda (a b) (< (funcall rank a) (funcall rank b))))))
+
 (defun harness-ui-choose-thinking (callback &optional model)
   "Prompt for a thinking level and call CALLBACK with (VALUE LABEL).
 VALUE is nil for the model default.  MODEL names the levels offered;
 without one the common levels are."
   (let ((choose (lambda (levels)
-                  (let* ((levels (delete-dups (append levels '("low" "medium" "high" "xhigh" "max"))))
-                         (choice (completing-read "Thinking: " (cons "default" levels) nil t)))
+                  (let* ((levels (cons "default" (harness-ui--thinking-levels-for levels)))
+                         (collection (lambda (string pred action)
+                                       ;; Keep the weakest-first order.
+                                       (if (eq action 'metadata)
+                                           '(metadata (display-sort-function . identity)
+                                                      (cycle-sort-function . identity))
+                                         (complete-with-action action levels string pred))))
+                         (choice (completing-read "Thinking: " collection nil t)))
                     (funcall callback (unless (equal choice "default") choice) choice)))))
     (if (null model)
         (funcall choose nil)

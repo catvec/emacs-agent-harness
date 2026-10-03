@@ -64,12 +64,15 @@ default) the layers above are split across two Emacs processes:
   `M-x harness-restart` restarts it with fresh configuration;
   `harness-reload` reloads both sides.
 - Work about the user's Emacs runs there, asked for by the harness with
-  `client/request` (below): the `emacs_*` and `elisp` tools
+  `client/request` (below): the `emacs_*` tools
   (lisp/harness-client-tools.el), saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
   writes a file (event `tools/file-written`), and desktop notifications
   (lisp/harness-notifications-desktop.el, see notifications), so they
   show where the user is and a click on one opens what it is about.
+  The `elisp` tool is not one of them: model-written code runs in a
+  child `emacs --batch' (lisp/harness-elisp.el), never in the UI, where
+  a blocking call could freeze it beyond recovery.
 - Project roots and file lists (lisp/harness-files.el) are computed on
   both sides with the same code; the UI lists files itself so `@`
   completion uses the user's projectile cache.
@@ -185,6 +188,15 @@ catalogue changes, the sessions whose window moved get `session/changed`.
  :meta PLIST)        ; anything else (model, duration, cost …)
 ```
 
+A user message the user did not write says who sent it in its `:meta`
+`:from`: `(:kind system :source "tasks")` for the harness itself, from
+`harness-sender-system', or `(:kind session :id "uuid" :name "…")` for
+another session's agent, from `harness-sender-session' (name as it was
+then).  No `:from` means the user; read it with `harness-node-sender'
+and `harness-sender-kind' (harness-util, both sides of ACP), which
+tolerate a kind that travelled as a string.  The model still gets the
+message as a user message; UIs show the sender instead of "You".
+
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
 `:parent-id` / `:fork-node`, so the tree view can merge families by id.
@@ -235,8 +247,7 @@ project-root `.dir-locals.el` → customize default.  Variables are
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`,
 `harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
-`harness-non-interactive`, `harness-tasks-directory` (the tasks
-module's folder of task files).
+`harness-non-interactive`.
 
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
@@ -374,7 +385,9 @@ gone.
   Event `session/node-updated ID NODE`.
 - `session/set-head ID NODE-ID`.
 - `session/hint ID TEXT` → appends hint node.
-- `session/queue ID TEXT &optional ATTACHMENTS`, `session/queue-update ID QID TEXT`,
+- `session/queue ID TEXT &optional ATTACHMENTS FROM` (FROM, when
+  non-nil, is who sent it, not the user: the item keeps it as `:from'),
+  `session/queue-update ID QID TEXT`,
   `session/queue-remove ID QID`, `session/queue-take ID` → items, cleared.
   Event `session/queue-changed ID ITEMS`.
 - `session/pending-add ID REQUEST` → id; `session/pending-resolve ID PID ANSWER`;
@@ -602,11 +615,21 @@ harness-provider-openai.el, which splits DeepSeek's cached input out of
 `prompt_tokens` (its `:input` bills the cache misses, `:cache-read` the
 hits), sends the reasoning efforts DeepSeek accepts, and rebuilds
 `reasoning_content` on assistant messages from their recorded thinking
-(empty when there is none).  DeepSeek's thinking mode, on by default,
+(empty when there is none).  DeepSeek acts on three efforts only — low,
+high and max (`harness-openai--deepseek-efforts`) — and collapses the
+levels in between the way its own API does (minimal is low; medium and
+xhigh are high), so a model advertises that three-step ladder and the
+thinking menu offers no level DeepSeek cannot tell apart.  Its /models
+route reports the ladder (`effort.supported_levels'), which the
+catalogue takes as the model's `:thinking-levels'.  DeepSeek's thinking
+mode, on by default,
 rejects a tool-using history whose assistant messages omit that field,
 so the whole conversation goes back to it, not just the model's own
-call; the pass-back is gated on this flavor, and OpenAI and OpenRouter
-still drop thinking.  `harness-deepseek-*` adds registration and prices.
+call.  The handling follows an official DeepSeek host, not only the
+flavor: a hand-written OpenAI-compatible endpoint at `api.deepseek.com`
+still gets it (even when it names `:flavor openai'), so its tool loops
+do not 400, while OpenAI and OpenRouter hosts still drop thinking.
+`harness-deepseek-*` adds registration and prices.
 The provider is created only while a key is found
 (`harness-deepseek-api-key`, DEEPSEEK_API_KEY, or auth-source), so
 nothing uncallable is listed; see `harness-deepseek-always-register`.
@@ -839,7 +862,13 @@ pending request and resolves when answered).
 - Non-interactive (the user is away) is no permission policy of its
   own and refuses nothing for being unattended: the auto judge
   (stage 30, `harness-perms--judge-p`) decides what would ask the user,
-  in every mode, and its verdict stands.  A call it gives no verdict on
+  in every mode, and its verdict stands.  The judge gets two calls:
+  when the first ends at its output limit (`max-tokens`) without a
+  verdict, which a reasoning model does after spending the small first
+  budget thinking, stage 30 asks again with more room
+  (`harness-perms--judge-retry-max-tokens') before it gives the call
+  up; a verdict written before the cap is taken as it stands.  A call
+  it gives no verdict on
   (it failed, timed out or answered without one; stage 30 passes the
   `ask` on with `:no-verdict` saying why) nobody can approve, so stage
   40 denies it, with that cause as the reason and a hint that this was
@@ -848,8 +877,9 @@ pending request and resolves when answered).
   deny.  After every denial in a non-interactive session, whoever made
   it, the `permission/decided` handler sends the agent a steering
   message (`harness-perms-steering-text`), once per call and only while
-  a turn runs to take it: the user is away, so respect the denial and
-  reach the goal another way.
+  a turn runs to take it, marked as from
+  `harness-sender-system "non-interactive mode"`: the user is away, so
+  respect the denial and reach the goal another way.
   The session's own `:non-interactive` switch decides, off as much as
   on.  It starts from `harness-non-interactive` when the session is
   created (an explicit false turns it off whatever the setting says);
@@ -894,11 +924,15 @@ pending request and resolves when answered).
   steering — the text is queued and injected at the next step boundary
   (appended to the next tool result, or sent as the next user turn if
   the model stops first), and only once.  OPTS `:queue` true only
-  queues, even while a turn runs.  An empty message is refused.  An
+  queues, even while a turn runs.  OPTS `:from`, when the user is not
+  the sender, is the sender plist (see "Node") kept on the message's
+  node (and on a queued item).  An empty message is refused.  An
   inactive session is resumed first (`session/resume`), so a message
   sent to a closed session brings it back; queueing leaves it closed.
 - `agent/cancel SESSION-ID`.
-- `agent/send-queue SESSION-ID` — sends every queued item as one turn.
+- `agent/send-queue SESSION-ID` — sends every queued item as one turn;
+  the message is the user's when any item is, else from the first
+  item's sender.
 - Sync filter `agent/system-prompt` (value string, args session); sync
   filter `agent/tools`; sync filter `agent/builtin-tools` (see
   `tools/builtin`); async filter `agent/before-turn` (value
@@ -1076,7 +1110,8 @@ pending request and resolves when answered).
   (`agent/step` filter) or is idle, the head of the queue gets the lock:
   the harness runs `git merge --no-ff` of the child's branch in the
   parent's cwd; on conflict the child session receives a steering
-  message describing the conflicts and its jail is widened to the
+  message describing the conflicts (from
+  `harness-sender-system "merge queue"`) and its jail is widened to the
   parent's cwd until it resolves; then the lock passes on.  A merged
   child's worktree loses the harness's lock (`worktree/unlock`; see
   worktree).
@@ -1095,15 +1130,10 @@ Task mode: one session per task.  TASK =
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
 :error "…" :duplicate-of ID :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
-:verified BOOL :verified-at F :feedback ((:text "..." :at F) ...)
-:file "docs/tasks/ID-SLUG.md" :updated F :extra (RAW-ENTRY ...))`.
+:verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`.
 `:column` is derived on every read: `needs-input` when the session is
 blocked on a request or the task stopped part way, `review` while its
-finished work waits for the user's verdict.  `:file` (relative
-to `:project`), `:updated` (when the harness last wrote the file) and
-`:extra` (the raw frontmatter entries the harness does not know) belong
-to the task's file (below); the record also keeps `:file-base` and
-`:file-synced` for it, which methods and events leave out.
+finished work waits for the user's verdict.
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
   :thinking :non-interactive)` → task; it starts when one of
@@ -1160,6 +1190,10 @@ to the task's file (below); the record also keeps `:file-base` and
   conversations per directory) and it is prompted with
   `harness-tasks--start-message`, the write-up and the quoted note, under the
   task's own settings.  Dropping a backlog task deletes its session.
+  The messages task mode composes itself (starting a written-up task,
+  the restart resume, the nudge to finish a write-up) are marked as
+  from `harness-sender-system "tasks"`; the task's prompt, a
+  `task/prompt` follow-up and `task/reject` feedback are the user's.
 - `task/adoptable &optional CWD` lists the project's open sessions that
   are not tasks; `task/adopt SESSION-ID` makes one a task (its first
   message is the prompt; a worktree session keeps its worktree and merges
@@ -1263,123 +1297,6 @@ to the task's file (below); the record also keeps `:file-base` and
   first, and turning the option off brings them back.  A repository
   store left without records is deleted; one that cannot be written
   leaves its records in `tasks.json`.
-- Task files: a git project whose tasks this harness keeps in its own
-  repository store also has a markdown file per unarchived task in
-  `harness-tasks-directory` (default `docs/tasks`, relative to the main
-  checkout; a layered config key, so a project's `.dir-locals.el` can
-  name another folder, or nil for none).  Other projects, a repository
-  another harness owns, and `harness-tasks-store-in-repository` nil (the
-  tests and the dev daemon) get none.  Files go only into the main
-  checkout, never into a task's worktree, and the harness never commits
-  them.  The store keeps the whole record; the files show what people
-  read, and take their edits.  A file:
-
-  ```markdown
-  ---
-  id: t-k3j9x2ab
-  title: Add CSV export to reports
-  state: pending
-  column: pending
-  backlog: true
-  session: 5b3e8a0c-6d1f-4a7e-9c2b-0f1e2d3c4b5a
-  model: claude:claude-fable-5-1
-  created: 2026-10-01T13:20:01Z
-  refined: 2026-10-01T13:22:40Z
-  updated: 2026-10-01T13:22:40Z
-  labels: [reports]
-  ---
-
-  # Add CSV export to reports
-
-  Reports should be exportable as CSV ...
-
-  <!-- harness:request -->
-  ## Request
-
-  > csv export for the reports page
-
-  <!-- harness:report -->
-  ## Report
-
-  ```json
-  {"summary": "Added CSV export...", "evidence": [{"kind": "image", ...}]}
-  ```
-
-  <!-- harness:plan -->
-  ## Plan
-
-  1. ...
-  ```
-
-  - Frontmatter, in this order and only when set: `id`, `title` (the
-    session's name, else the prompt's first line), `state`, `column`,
-    `backlog`, `outcome`, `error` (300 characters at most), `duplicate-of`
-    (the task a write-up refused this one as a duplicate of), `session`,
-    `branch`, `base`, `merge` (the merge status, or `merged`), `model`,
-    `thinking`, `created`, `started`, `refined`, `finished`, `verified`
-    (when the user verified the work), `updated` (times in ISO 8601 UTC,
-    to the second).  Keys the harness does not know follow, as written.
-    It is a YAML subset the module reads and writes itself: `key: value`
-    lines whose values are plain, single- or double-quoted or `|` / `>`
-    block scalars, or lists (`[a, b]`, `- a` lines).  Strings are written
-    plain when that reads back the same, else double-quoted.
-  - Body: the prompt, its first line a level-1 heading when it reads as
-    a title (short, and no markdown of its own); then, each behind a
-    `<!-- harness:NAME -->` marker line, the sections the harness keeps:
-    `request` (`:note` quoted, once a write-up replaced it), `report`
-    (the JSON the work was handed in with: `summary` and `evidence`,
-    which comes back with it) and `review`
-    (each round of `:feedback`, quoted under a `### Sent back TIME`
-    heading, oldest first; read back only when the file brings a lost
-    task back) and `plan` (the session's plan, never read back).
-    Reading takes the text before the first marker outside a code fence
-    as the prompt, a leading `# Title` (or a setext `===` title)
-    becoming its plain first line.
-  - Names: `ID-SLUG.md` (a slug of the title) for the files the harness
-    makes.  A file keeps its name, and `:file` follows a file renamed by
-    hand.  `README.md`, `index.md`, `template.md` and names starting
-    with `.`, `_`, `#` or `~` are no tasks
-    (`harness-tasks--directory-ignore`); subfolders are not read.
-  - Writing: each save first reads what changed in the folder, then
-    writes the file of every task whose rendering (without `updated`)
-    changed since its file was last in step (`:file-synced`), before the
-    stores.  Archiving a task moves its file into the folder's
-    `harness-tasks-directory-archive` subfolder (`archive`; nil deletes
-    it instead) and restoring the task moves it back; deleting or
-    cancelling a task deletes its file; a project that picks another
-    folder gets its files moved there.
-  - Reading: the files whose mtime or size changed are read on load (the
-    folders of the loaded tasks' projects), by `task/list` (its
-    project's folder; every known one without CWD), before each save,
-    and every `harness-tasks--directory-poll` seconds (default 2; nil for
-    none, as file notifications never reach the batch harness process).
-    An edit is what differs from what the file said last (`:file-base`),
-    so a file the harness has yet to write again is no edit.  Taken are
-    the prompt and the request; `title`, which renames the task's
-    session; `model` and `thinking` of a task that has not started; and
-    `state: done`, which completes the task (`task/complete`; a task in
-    review is verified, `task/verify`).  The other known fields, and the
-    review and plan sections, are the harness's: a file that contradicts
-    them is written again, and one that contradicts nothing is left as
-    written until its task changes.
-  - A file no task has becomes one, with its `id` when that is free,
-    else a fresh one: `pending` in the backlog (only `task/start` starts
-    it, and no permission mode is read from a file), or `review` or
-    `done` as written, with its rounds of feedback and its verification.
-    Without a heading, a frontmatter `title` becomes the prompt's first
-    line.  Its `session`, when that still exists, works in the project
-    and is no other task's, makes it the task it was (state, outcome,
-    worktree from the session), except that nothing carries on by
-    itself: a task that was at work waits with `:outcome interrupted`,
-    and `merging` comes back `active`.  So a lost store comes back from
-    the files, at load or when the board is opened.  A file without
-    frontmatter is a task all the same; an empty one, or one whose `---`
-    frontmatter never closes, is not (yet).
-  - A file deleted by hand, or moved out of the folder (into `archive/`,
-    say), archives its task when the task is `pending`, `review` or
-    `done` and nothing works on it; a task in progress gets its file
-    back.  A file that comes back to the folder (found by its `id`)
-    brings its archived task back.
 - Restarts: when the module starts, an active task without an outcome
   that nothing in this process works on was interrupted.  Without a
   session it starts over (as pending, or in its worktree when it has
@@ -1500,7 +1417,7 @@ TRAMP prefixes come from the session host):
 | `glob` | Find files | pattern, path | read |
 | `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
 | `bash` | Bash | command, timeout, cwd | exec |
-| `elisp` | Emacs Lisp | code | exec |
+| `elisp` | Emacs Lisp | code, timeout | exec |
 | `emacs_buffers` | List buffers | filter, all | read |
 | `emacs_buffer` | Read buffer | name, offset, limit | read |
 | `emacs_describe` | Describe symbol | symbol | read |
@@ -1573,7 +1490,10 @@ Listing and search default to the current project (worktrees included).
 `session_search` greps the `sessions/*.nodes.jsonl` logs in a subprocess,
 so transcripts are not loaded into memory to be searched.  `session_send`
 prefixes the message with `[Message from session ID "NAME"]` and goes
-through `agent/prompt` (a turn, steering, or the queue).  Waits are
+through `agent/prompt` (a turn, steering, or the queue) with
+`:from` naming the calling session, so that session's chat shows the
+message as coming from here rather than from the user; `session_read`
+and `session_search` tag such nodes the same way.  Waits are
 entries re-checked on session and task events, settled by their
 condition, their timeout (`harness-tools-sessions--wait-default`, at most
 `-wait-max`) or the end of the waiting turn; a timeout is a report, not
@@ -1592,11 +1512,24 @@ how providers are set up.  A session sends at most
 past that it is told when it can send again.  `notification_providers`
 lists `notification/providers`: set up or not, used by default or not.
 
-`elisp` and the `emacs_*` tools are about the user's Emacs, so their
-handlers (`harness-tools-in-client NAME`) forward the call to the UI as
+The `emacs_*` tools are about the user's Emacs, so their handlers
+(`harness-tools-in-client NAME`) forward the call to the UI as
 `_harness/client/tool {name, input}`; `harness-client-tools-run` answers
-it there.  `write_file`/`edit_file` emit `tools/file-written PATH`; the UI
-reverts unmodified buffers visiting PATH.
+it there, under a deadline (`harness-tools--client-timeout'): a UI that
+cannot answer fails the call, logs, and shows a desktop notice, rather
+than leaving the turn pending.  `write_file`/`edit_file` emit
+`tools/file-written PATH`; the UI reverts unmodified buffers visiting
+PATH.
+
+The `elisp` tool evaluates in a child `emacs --batch' process, never in
+the UI: Emacs runs Lisp on one thread, so model-written code that blocks
+(a `call-process' waiting on a child, a loop that never yields) freezes
+typing and redisplay, and neither a timer nor a signal can end it.  The
+child gets the harness on its `load-path', the working directory as its
+`default-directory', a timeout, and the process tree killed when it
+overruns (lisp/harness-elisp.el); its result comes back as JSON.
+`harness-elisp-allow-ui-eval', off by default, restores in-UI
+evaluation for a user who asks for it and accepts that hazard.
 
 ### acp
 

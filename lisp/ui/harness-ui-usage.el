@@ -247,6 +247,17 @@ PROPS are passed to `svg-node'."
                 (harness-format-cost (plist-get point :cost)) (harness-format-cost covered))
       (harness-format-cost (plist-get point :cost)))))
 
+(defun harness-ui-usage--bar-help (point bucket)
+  "Return the tooltip of POINT's chart column for BUCKET.
+One line: hovering a column must not grow the echo area, or the chart
+would move under the mouse."
+  (harness-ui-one-line
+   (format "%s\n%s, %d calls, %s in / %s out"
+           (harness-ui-usage--bucket-label (plist-get point :key) bucket t)
+           (harness-ui-usage--money-text point) (or (plist-get point :calls) 0)
+           (harness-format-tokens (plist-get point :input))
+           (harness-format-tokens (plist-get point :output)))))
+
 (defun harness-ui-usage--nice-max (value)
   "Return a round number at or above VALUE for the top of the y axis."
   (if (<= value 0) 1.0
@@ -293,11 +304,7 @@ covered stacked on top in the lighter plan colour."
                     (by (+ top (- plot-h bh)))
                     (ch (if (> top-value 0) (* plot-h (/ cost top-value)) 0))
                     (label (harness-ui-usage--bucket-label (plist-get p :key) bucket))
-                    (tip (format "%s\n%s, %d calls, %s in / %s out"
-                                 (harness-ui-usage--bucket-label (plist-get p :key) bucket t)
-                                 (harness-ui-usage--money-text p) (or (plist-get p :calls) 0)
-                                 (harness-format-tokens (plist-get p :input))
-                                 (harness-format-tokens (plist-get p :output)))))
+                    (tip (harness-ui-usage--bar-help p bucket)))
                (cond
                 ((<= bh 0))
                 ((> value cost)

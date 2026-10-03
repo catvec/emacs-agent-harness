@@ -58,6 +58,23 @@
     (forward-line 1))
   (should-not (eobp)))
 
+(ert-deftest harness-ui-tree-shows-who-sent-a-message ()
+  "A user message the harness or another session sent shows their icon, not the user's."
+  (harness-ui-tree-test-with
+    (let ((mine '(:kind "user" :content "mine"))
+          (system '(:kind "user" :content "carry on" :meta (:from (:kind "system" :source "tasks"))))
+          (session '(:kind "user" :content "rebase" :meta (:steering t :from (:kind session :id "s2")))))
+      (cl-flet ((icon (node) (substring-no-properties (harness-ui-tree--kind-icon node)))
+                (plain (name) (substring-no-properties (harness-ui-icon name))))
+        (should (equal (plain 'harness-icon-user) (icon mine)))
+        (should (equal (plain 'harness-icon-system) (icon system)))
+        (should (equal (plain 'harness-icon-agent) (icon session)))
+        (should-not (equal (icon mine) (icon system))))
+      (should (eq 'harness-system-label-face (get-text-property 0 'face (harness-ui-tree--kind-icon system))))
+      (should (eq 'default (harness-ui-tree--excerpt-face mine)))
+      (should (eq 'harness-dim-face (harness-ui-tree--excerpt-face system)))
+      (should (eq 'harness-dim-face (harness-ui-tree--excerpt-face session))))))
+
 (ert-deftest harness-ui-tree-layout-lanes-and-joins ()
   (let* ((data (list :sessions (list (list :id "A" :name "main" :kind "main" :head "a3" :parent-id nil :fork-node nil)
                                      (list :id "B" :name "side" :kind "fork" :head "b1" :parent-id "A" :fork-node "a2"))

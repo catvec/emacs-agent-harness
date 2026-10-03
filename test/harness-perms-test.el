@@ -247,6 +247,21 @@
                   (list :cancel (lambda () (setq cancelled t)))))
     (lambda (what) (pcase what ('cancelled cancelled) ('requests requests)))))
 
+(defun harness-perms-test--scripted-judge (scripts)
+  "Register provider `judge' replaying SCRIPTS, one per call, then a clean end.
+Return a function giving the requests it received, newest first."
+  (let ((requests nil) (left scripts))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (req)
+                  (push req requests)
+                  (let ((cb (plist-get req :on-event))
+                        (script (or (pop left) '((:type done :stop-reason end-turn)))))
+                    (dolist (ev script)
+                      (let ((ev ev)) (run-at-time 0.01 nil (lambda () (funcall cb ev))))))
+                  (list :cancel #'ignore)))
+    (lambda () requests)))
+
 (ert-deftest harness-perms-auto-mode-uses-the-judge ()
   (harness-perms-test--setup :permission-mode 'auto :model "judge:big")
   (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
@@ -340,6 +355,40 @@ A model named by the provider's `:tiers' is used; an explicit model wins."
     (should (eq 'allow (harness-perms-test--behavior "read_file" 'read
                                                      (expand-file-name "f" (plist-get harness-perms-test--session :cwd)))))
     (should (null (funcall probe 'requests)))))
+
+(ert-deftest harness-perms-auto-mode-asks-again-when-the-judge-ran-out-of-tokens ()
+  "A judge that spends its whole output budget thinking is asked again.
+A reasoning model writes no verdict before `max-tokens'; the second call
+gets `harness-perms--judge-retry-max-tokens', and its verdict decides the
+call, so a non-interactive session is not refused one nobody judged."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let* ((requests (harness-perms-test--scripted-judge
+                    '(((:type text :delta "{\"decision\":")
+                       (:type done :stop-reason max-tokens))
+                      ((:type text :delta "{\"decision\":\"allow\",\"reason\":\"ordinary work\"}")
+                       (:type done :stop-reason end-turn)))))
+         (harness-perms-auto-model "judge:x")
+         (d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
+    (should (eq 'allow (plist-get d :behavior)))
+    (should (equal "ordinary work" (plist-get d :reason)))
+    (should (= 2 (length (funcall requests))))
+    ;; Newest first: the first call kept the small budget, the retry the large one.
+    (should (equal harness-perms--judge-max-tokens
+                   (plist-get (cadr (funcall requests)) :max-tokens)))
+    (should (equal harness-perms--judge-retry-max-tokens
+                   (plist-get (car (funcall requests)) :max-tokens)))))
+
+(ert-deftest harness-perms-auto-mode-takes-a-verdict-written-before-the-cap ()
+  "A complete JSON verdict stands even when the model talks on to `max-tokens'."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let* ((requests (harness-perms-test--scripted-judge
+                    '(((:type text :delta "{\"decision\":\"allow\",\"reason\":\"fine\"} and more")
+                       (:type done :stop-reason max-tokens)))))
+         (harness-perms-auto-model "judge:x")
+         (d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
+    (should (eq 'allow (plist-get d :behavior)))
+    (should (equal "fine" (plist-get d :reason)))
+    (should (= 1 (length (funcall requests))))))
 
 (defconst harness-perms-test--non-ascii "\N{U+2717} caf\N{U+E9} 3 \N{U+D7} 4 \N{U+2026}"
   "Text with a ballot X, an accented letter, a multiplication sign and an ellipsis.")
@@ -494,9 +543,12 @@ is away, so it is denied; the reason says why there was no verdict."
     (harness-define-provider 'judge :label "Judge" :complete (lambda (_req) (error "Cannot encode the request")))
     (let ((harness-perms-auto-model "judge:x"))
       (should (string-match-p "no verdict (it failed: Cannot encode the request)" (funcall reason))))
-    (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":") (:type done :stop-reason max-tokens)))
-    (let ((harness-perms-auto-model "judge:x"))
-      (should (string-match-p "no verdict (it stopped: max-tokens)" (funcall reason))))
+    (let* ((probe (harness-perms-test--judge-provider
+                   '((:type text :delta "{\"decision\":") (:type done :stop-reason max-tokens))))
+           (harness-perms-auto-model "judge:x"))
+      (should (string-match-p "no verdict (it stopped: max-tokens)" (funcall reason)))
+      ;; Truncation once is retried at the larger budget; twice is a denial.
+      (should (= 2 (length (funcall probe 'requests)))))
     (let ((probe (harness-perms-test--judge-provider '((:type start))))
           (harness-perms-auto-model "judge:x")
           (harness-perms--auto-timeout 0.2))
@@ -563,6 +615,26 @@ once per call, whoever made it: the judge, the jail or a rule."
     (should (plist-get (funcall run "c7" "t_exec" '(:command "z")) :denied))
     (should (= 4 (funcall count)))))
 
+(ert-deftest harness-perms-non-interactive-steering-comes-from-the-harness ()
+  "The steering after a denial is marked as the harness's, not the user's:
+the chat shows it as a system message, never as the user's own words."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler (lambda (_in _ctx) "ran"))
+  (let ((sent nil)
+        (harness-perms-auto-model "judge:small"))
+    (harness-register-method 'agent/prompt
+                             (lambda (sid blocks &optional opts)
+                               (push (list sid blocks opts) sent)
+                               (harness-resolved nil)))
+    (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"not that\"}")
+                                          (:type done :stop-reason end-turn)))
+    (should (plist-get (harness-test-await (harness-call 'tools/execute "s1" (list :id "c1" :name "t_exec"
+                                                                                   :input '(:command "x"))))
+                       :denied))
+    (should (= 1 (length sent)))
+    (should (equal (harness-sender-system "non-interactive mode")
+                   (plist-get (nth 2 (car sent)) :from)))))
+
 (ert-deftest harness-perms-non-interactive-is-the-sessions-own-switch ()
   "A session record's switch decides, off as much as on; the setting
 `harness-non-interactive' only starts new sessions, and decides alone
@@ -602,7 +674,7 @@ for a request without a session record."
          (harness-websearch-providers nil)
          (harness-websearch-provider 'fake)
          (prompts nil))
-    (harness-register-method 'agent/prompt (lambda (sid blocks) (push (cons sid blocks) prompts) (harness-resolved nil)))
+    (harness-register-method 'agent/prompt (lambda (sid blocks &rest _) (push (cons sid blocks) prompts) (harness-resolved nil)))
     (harness-websearch-register-provider
      'fake (lambda (query _count) (list (list :title (concat "About " query) :url "https://example.org/"))))
     (let ((r (harness-test-await (harness-call 'tools/execute "s1"

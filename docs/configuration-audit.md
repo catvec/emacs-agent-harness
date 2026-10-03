@@ -163,8 +163,6 @@ simply pushed the implementation detail across that line.
 | `harness-tasks-merge-attempts` | `harness-tasks--merge-attempts` |
 | `harness-tasks-merge-session-name` | `harness-tasks--merge-session-name` |
 | `harness-tasks-resume-prompt` | `harness-tasks--resume-prompt` |
-| `harness-tasks-directory-poll` | `harness-tasks--directory-poll` |
-| `harness-tasks-directory-ignore` | `harness-tasks--directory-ignore` |
 | `harness-tools-timeout` | `harness-tools--timeout` |
 | `harness-tools-fs-glob-limit` | `harness-tools-fs--glob-limit` |
 | `harness-tools-fs-list-limit` | `harness-tools-fs--list-limit` |
@@ -256,7 +254,7 @@ together by user story, in the order the story is told:
 |---|---|
 | New sessions | `harness-model`, `harness-thinking`, `harness-permission-mode`, `harness-non-interactive`, `harness-budget` |
 | Files and safety | `harness-allowed-directories`, `harness-sandbox-policy`, `harness-perms-rules`, `harness-perms-auto-model` |
-| Task board | `harness-tasks-model`, `harness-tasks-thinking`, `harness-tasks-permission-mode`, `harness-tasks-non-interactive`, `harness-tasks-require-verification`, `harness-tasks-max-running`, `harness-tasks-worktrees`, `harness-tasks-directory` |
+| Task board | `harness-tasks-model`, `harness-tasks-thinking`, `harness-tasks-permission-mode`, `harness-tasks-non-interactive`, `harness-tasks-require-verification`, `harness-tasks-max-running`, `harness-tasks-worktrees` |
 | Notifications | `harness-tasks-notify-events`, `harness-notifications-providers`, `harness-gotify-url`, `harness-gotify-token` |
 | Models and services | `harness-openai-endpoints`, `harness-bedrock-endpoints`, `harness-websearch-provider`, `harness-websearch-builtin`, `harness-brave-api-key` |
 
@@ -272,7 +270,7 @@ setting.  A harness whose modules are all disabled, and therefore names
 no sections, lists its layered settings in one *Session defaults*
 section.
 
-## Advanced options kept (26)
+## Advanced options kept (25)
 
 These stayed options because they are real choices, just not common
 ones: `harness-log-level`, `harness-agent-max-steps`,
@@ -285,7 +283,7 @@ ones: `harness-log-level`, `harness-agent-max-steps`,
 `harness-sandbox-extra-read-only-dirs`, `harness-skills-directories`,
 `harness-tasks-refine-model`, `harness-tasks-refine-thinking`,
 `harness-tasks-branch-prefix`, `harness-tasks-resume-interrupted`,
-`harness-tasks-store-in-repository`, `harness-tasks-directory-archive`,
+`harness-tasks-store-in-repository`,
 `harness-tasks-notify-providers`, `harness-tools-max-output-chars`,
 `harness-usage-warn-fraction`, `harness-anthropic-admin-api-key`,
 `harness-worktree-directory-function`, `harness-worktree-branch-prefix`.

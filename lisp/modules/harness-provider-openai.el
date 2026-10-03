@@ -115,8 +115,9 @@ Every entry is a plist with these keys:
                    without a /models route
   :default-context context window used for models that do not report one
   :flavor          `openrouter', `openai' or `deepseek'; guessed from
-                   the URL when absent (`deepseek' is never guessed, so
-                   name it for an endpoint that needs its handling)
+                   the URL when absent (`deepseek' is never guessed, but
+                   an official DeepSeek host gets its handling anyway;
+                   see `harness-openai--deepseek-p')
   :capabilities    static capability plist overriding the flavor default
   :tiers           model names per tier (:cheap :balanced :frontier), as
                    `harness-define-provider' takes them; without one the
@@ -140,7 +141,10 @@ variable through customize re-registers the providers."
   (string-remove-suffix "/" (or (plist-get endpoint :base-url) "")))
 
 (defun harness-openai--flavor (endpoint)
-  "Return `openrouter' or `openai' for ENDPOINT."
+  "Return `openrouter' or `openai' for ENDPOINT.
+An explicit `:flavor' of `deepseek' is possible too, but the DeepSeek
+handling does not depend on it: an official DeepSeek host is recognized
+by its URL (see `harness-openai--deepseek-p')."
   (or (plist-get endpoint :flavor)
       (if (string-match-p "openrouter" (harness-openai--base-url endpoint))
           'openrouter
@@ -156,8 +160,10 @@ DeepSeek differs from plain OpenAI in how it reports cached input (its
 `prompt_tokens' includes the cached tokens, which are billed apart), in
 the reasoning efforts it accepts, and in requiring a tool-using
 history to carry the thinking of earlier assistant turns back as
-`reasoning_content'."
-  (eq (harness-openai--flavor endpoint) 'deepseek))
+`reasoning_content'.  The dialect follows the host, so an official
+DeepSeek host counts even when the endpoint names another flavor."
+  (or (eq (harness-openai--flavor endpoint) 'deepseek)
+      (harness-openai--deepseek-host-p endpoint)))
 
 (defun harness-openai--capabilities (endpoint)
   "Return the static capability plist for ENDPOINT."
@@ -171,6 +177,21 @@ history to carry the thinking of earlier assistant turns back as
 (defun harness-openai--host (endpoint)
   "Return the host part of ENDPOINT's base URL."
   (url-host (url-generic-parse-url (harness-openai--base-url endpoint))))
+
+(defconst harness-openai--deepseek-host-regexp
+  "\\`\\(.*\\.\\)?deepseek\\.com\\'"
+  "Hosts that speak the DeepSeek dialect, whatever an endpoint calls itself.")
+
+(defun harness-openai--deepseek-host-p (endpoint)
+  "Non-nil when ENDPOINT's base URL points at an official DeepSeek host.
+DeepSeek's rules (the reasoning replay, the reasoning efforts and how
+cached input is reported) follow the server rather than the endpoint's
+label, so an endpoint that declares another flavor but talks to
+DeepSeek still gets them."
+  (let ((host (harness-openai--host endpoint)))
+    (and (stringp host)
+         (not (string-empty-p host))
+         (and (string-match-p harness-openai--deepseek-host-regexp host) t))))
 
 (defun harness-openai--auth-source-key (host)
   "Look HOST up in auth-source with user \"apikey\"; return the secret or nil."
@@ -230,6 +251,23 @@ registered immediately."
           :cache-read (or (harness-openai--price (plist-get pricing :input_cache_read)) input)
           :cache-write (or (harness-openai--price (plist-get pricing :input_cache_write)) input))))
 
+(defun harness-openai--entry-efforts (endpoint entry)
+  "Return the reasoning levels ENTRY advertises for ENDPOINT, or nil.
+DeepSeek lists them in `effort.supported_levels', the ladder its
+`reasoning_effort' really acts on.  An entry that reasons but does not
+list any gets its host's ladder: DeepSeek's low/high/max on a DeepSeek
+host, the levels a plain OpenAI reasoning model has otherwise.  A
+DeepSeek model that says nothing about reasoning still gets that ladder,
+since its thinking mode is on by default."
+  (let ((levels (plist-get (plist-get entry :effort) :supported_levels)))
+    (cond ((and (listp levels) levels (cl-every #'stringp levels))
+           (copy-sequence levels))
+          ((harness-openai--deepseek-p endpoint)
+           (copy-sequence harness-openai--deepseek-efforts))
+          ((member "reasoning" (plist-get entry :supported_parameters))
+           '("low" "medium" "high"))
+          (t nil))))
+
 (defun harness-openai--model-from-entry (endpoint entry)
   "Build a model plist from a /models ENTRY of ENDPOINT.
 OpenRouter fields are mapped when present; plain OpenAI entries only
@@ -241,17 +279,18 @@ carry an id."
          (max-output (harness-plist-get-in entry '(:top_provider :max_completion_tokens)))
          (modalities (harness-plist-get-in entry '(:architecture :input_modalities)))
          (params (plist-get entry :supported_parameters))
+         (efforts (harness-openai--entry-efforts endpoint entry))
          (pricing (harness-openai--pricing (plist-get entry :pricing)))
          (model (list :name name :label (or (plist-get entry :name) name))))
     (when context (setq model (plist-put model :context-window context)))
     (when max-output (setq model (plist-put model :max-output max-output)))
     (when modalities (setq model (plist-put model :input-modalities modalities)))
-    (when (member "reasoning" params)
-      (setq model (plist-put model :thinking-levels '("low" "medium" "high"))))
+    (when efforts
+      (setq model (plist-put model :thinking-levels efforts)))
     (when pricing (setq model (plist-put model :pricing pricing)))
     (let (caps)
       (when (member "tools" params) (setq caps (plist-put caps :tools t)))
-      (when (member "reasoning" params) (setq caps (plist-put caps :thinking t)))
+      (when efforts (setq caps (plist-put caps :thinking t)))
       (when modalities (setq caps (plist-put caps :vision (and (member "image" modalities) t))))
       (when caps (setq model (plist-put model :capabilities caps))))
     model))
@@ -481,16 +520,31 @@ DeepSeek endpoints get the thinking of assistant messages back as
     ("low" "low")
     (_ nil)))
 
+(defconst harness-openai--deepseek-efforts '("low" "high" "max")
+  "DeepSeek's reasoning efforts, weakest first.
+These are the only values DeepSeek acts on, so a DeepSeek model offers
+exactly them as its `:thinking-levels'; the harness levels between them
+take the effort DeepSeek's own server-side mapping gives them (see
+`harness-openai--deepseek-effort').")
+
+(defconst harness-openai--deepseek-effort-map
+  '(("minimal" . "low") ("low" . "low")
+    ("medium" . "high") ("high" . "high") ("xhigh" . "high")
+    ("max" . "max")
+    ("none" . "none") ("off" . "none") ("disabled" . "none"))
+  "Harness thinking level -> the effort DeepSeek acts on.
+DeepSeek collapses the levels it cannot tell apart itself: minimal is
+low, and medium and xhigh are high.  Every value but `none' is one of
+`harness-openai--deepseek-efforts'.")
+
 (defun harness-openai--deepseek-effort (level)
-  "Map the harness thinking LEVEL onto a DeepSeek reasoning effort.
-DeepSeek takes none, low, high or max; minimal is low, and medium and
-xhigh are high."
-  (pcase (harness-openai--string level)
-    ("max" "max")
-    ((or "high" "medium" "xhigh") "high")
-    ((or "low" "minimal") "low")
-    ((or "none" "off" "disabled") "none")
-    (_ nil)))
+  "Map the harness thinking LEVEL onto a DeepSeek reasoning effort, or nil.
+The levels in between DeepSeek's own ladder take the effort DeepSeek
+itself gives them (see `harness-openai--deepseek-effort-map'), so asking
+for one never sends a stronger effort than DeepSeek would; a level
+DeepSeek does not know at all yields nil and no `reasoning_effort' is
+sent."
+  (cdr (assoc (harness-openai--string level) harness-openai--deepseek-effort-map)))
 
 (defun harness-openai--body (endpoint name request)
   "Build the chat completions body for model NAME at ENDPOINT from REQUEST."

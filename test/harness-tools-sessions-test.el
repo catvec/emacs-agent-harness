@@ -186,6 +186,29 @@
         (should (plist-get r :is-error))
         (should (string-match-p "cannot message itself" (plist-get r :content)))))))
 
+(ert-deftest harness-tools-sessions-send-says-who-sent-it ()
+  "A message session_send delivers is the sending session's, not the user's.
+Its node says so, a queued one too, and session_read and session_search
+tell it from the user's messages."
+  (harness-tools-sessions-test-with
+    (let ((me (harness-tools-sessions-test-session :name "Boss"))
+          (other (harness-tools-sessions-test-session :name "Worker"))
+          (third (harness-tools-sessions-test-session :name "Onlooker")))
+      (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "status?" :wait t))
+      (let ((user (cl-find 'user (harness-call 'session/nodes other) :key (lambda (n) (plist-get n :kind)))))
+        (should (equal (list :kind 'session :id me :name "Boss") (harness-node-sender user))))
+      (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "later" :mode "queue"))
+      (let ((item (car (plist-get (harness-call 'session/get other) :queue))))
+        (should (string-suffix-p "later" (plist-get item :text)))
+        (should (equal me (plist-get (plist-get item :from) :id))))
+      (harness-call 'session/queue-take other)
+      (harness-call 'session/append other '(:kind user :content "from the user"))
+      (let ((tag (regexp-quote (format ", from session %s \"Boss\"]" me))))
+        (let ((text (harness-tools-sessions-test-ok third "session_read" (list :session_id other))))
+          (should (string-match-p (concat tag (regexp-quote " [Message from session")) text))
+          (should (string-match-p "\\[user n-[a-z0-9]+\\] from the user" text)))
+        (should (string-match-p tag (harness-tools-sessions-test-ok third "session_search" '(:query "status?"))))))))
+
 (ert-deftest harness-tools-sessions-send-then-wait ()
   (harness-tools-sessions-test-with
     (let ((harness-provider-demo--delay 0.1)
@@ -328,26 +351,6 @@
           (should (string-match-p (concat (regexp-quote second) " +needs-input +export the reports as csv") listing))
           (should (string-match-p (concat "state refining (duplicate), duplicate of " (regexp-quote first)) listing))
           (should (string-match-p (regexp-quote first) listing)))))))
-
-(defvar harness-tasks-store-in-repository)
-(defvar harness-tasks-directory)
-
-(ert-deftest harness-tools-sessions-task-list-shows-task-files ()
-  "A task file written by hand in the project's docs/tasks shows in task_list."
-  (harness-tools-sessions-test-with
-    (let* ((harness-tasks-store-in-repository t)
-           (harness-tasks-directory "docs/tasks")
-           (root (file-name-as-directory (expand-file-name "repo" (harness-test-temp-dir))))
-           (file (expand-file-name "docs/tasks/csv-export.md" root)))
-      (make-directory (file-name-directory file) t)
-      (let ((default-directory root))
-        (should (zerop (call-process "git" nil nil nil "init" "-q" "-b" "main"))))
-      (with-temp-file file
-        (insert "---\ntitle: Add CSV export\n---\n\nReports should be exportable as CSV.\n"))
-      (let* ((me (let ((default-directory root)) (harness-tools-sessions-test-session)))
-             (listing (harness-tools-sessions-test-ok me "task_list" nil)))
-        (should (string-match-p "t-[a-z0-9]+ +pending +Add CSV export" listing))
-        (should (string-match-p "No tasks match" (harness-tools-sessions-test-ok me "task_list" '(:column "active"))))))))
 
 (ert-deftest harness-tools-sessions-pending-task-message-edits-prompt ()
   (harness-tools-sessions-test-with

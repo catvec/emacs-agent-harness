@@ -249,6 +249,59 @@ It is never added to the running turn: no steering node, no
       (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/send-queue id)) :stop-reason)))
       (should (equal "first\n\nsecond" (plist-get (car (harness-call 'session/nodes id)) :content))))))
 
+(defun harness-agent-test-user-nodes (id)
+  "Return the user messages of session ID, oldest first."
+  (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes id)))
+
+(ert-deftest harness-agent-prompt-records-who-sent-it ()
+  "A message the user did not write keeps its sender, as a turn or as steering.
+The model gets it as a user message all the same."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (system (harness-sender-system "tasks"))
+          (other (harness-sender-session '(:id "s-other" :name "Other"))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "carry on" (list :from system)))
+                                       :stop-reason)))
+      (harness-test-await (harness-call 'agent/prompt id "thanks"))
+      (let ((p (harness-call 'agent/prompt id "tour")))
+        (harness-test-wait (lambda () (harness-agent-running-p id)) 5 "the turn")
+        (harness-call 'agent/prompt id "also this" (list :from other))
+        (harness-test-await p))
+      (pcase-let ((`(,carry ,thanks ,tour ,also) (harness-agent-test-user-nodes id)))
+        (should (equal system (harness-node-sender carry)))
+        ;; The user's own messages name no sender.
+        (should-not (harness-node-sender thanks))
+        (should-not (plist-get tour :meta))
+        ;; Steering keeps its own marks beside the sender.
+        (should (equal "also this" (plist-get also :content)))
+        (should (plist-get (plist-get also :meta) :steering))
+        (should (equal other (harness-node-sender also))))
+      (let ((first (car (harness-call 'session/messages id))))
+        (should (eq 'user (plist-get first :role)))
+        (should (equal "carry on" (plist-get (car (plist-get first :content)) :text)))))))
+
+(ert-deftest harness-agent-send-queue-keeps-the-sender ()
+  "Queued messages keep their sender; sent as one, they are the user's when any is."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (other (harness-sender-session '(:id "s-other" :name "Other"))))
+      (harness-test-await (harness-call 'agent/prompt id "from elsewhere" (list :queue t :from other)))
+      (should (equal other (plist-get (car (plist-get (harness-call 'session/get id) :queue)) :from)))
+      (harness-test-await (harness-call 'agent/send-queue id))
+      (should (equal other (harness-node-sender (car (harness-agent-test-user-nodes id)))))
+      ;; With one of the user's own among them, the message is the user's.
+      (harness-call 'session/queue id "from elsewhere again" nil other)
+      (harness-call 'session/queue id "and mine" nil)
+      (harness-test-await (harness-call 'agent/send-queue id))
+      (let ((joined (car (last (harness-agent-test-user-nodes id)))))
+        (should (equal "from elsewhere again\n\nand mine" (plist-get joined :content)))
+        (should-not (harness-node-sender joined)))
+      ;; An empty item of the user's does not take the message over.
+      (harness-call 'session/queue id "" nil)
+      (harness-call 'session/queue id "only theirs" nil other)
+      (harness-test-await (harness-call 'agent/send-queue id))
+      (should (equal other (harness-node-sender (car (last (harness-agent-test-user-nodes id)))))))))
+
 (ert-deftest harness-agent-prompt-refuses-empty-messages ()
   "Nothing to send starts no turn and queues nothing; a JSON false does not queue."
   (harness-agent-test-with

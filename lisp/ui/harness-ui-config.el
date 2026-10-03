@@ -18,8 +18,8 @@
 ;; saying how many there are and how many were changed, and `a' (or the
 ;; button there) shows them, by module.  The Project scope shows only
 ;; the settings that layer (model, permission mode, thinking, allowed
-;; directories, budget, sandbox policy, non-interactive, task files),
-;; in their sections, and folds the rest, which have a global value
+;; directories, budget, sandbox policy, non-interactive), in their
+;; sections, and folds the rest, which have a global value
 ;; only, into one line.  The options of the interface itself live in
 ;; this Emacs, not the harness: a button at the end opens Customize on
 ;; them.

@@ -256,6 +256,60 @@ Per-token billing reads \"$1.20\"; usage a plan paid for reads
   "Cheap token estimate for STRING (about four characters per token)."
   (ceiling (length (or string "")) 4))
 
+;;;; Senders
+;;
+;; A user message the user did not write says who sent it: its node's
+;; `:meta' holds `:from', a sender plist.  Kind `system' is the harness
+;; itself, with `:source' naming the part of it that sent the message
+;; ("tasks", "merge queue"); kind `session' is the agent of another
+;; session, with its `:id' and its `:name' at the time.  No `:from'
+;; means the user wrote the message.  The kind may have travelled as a
+;; string (over the wire, or through a node log), so read it with
+;; `harness-sender-kind'.
+
+(defun harness-sender-system (source)
+  "Return the sender of a message the harness sends on its own.
+SOURCE names the part of the harness that sends it, in words people
+read, such as \"tasks\" or \"merge queue\"."
+  (list :kind 'system :source source))
+
+(defun harness-sender-session (session)
+  "Return the sender of a message the agent of SESSION (a plist) sends."
+  (list :kind 'session :id (plist-get session :id) :name (plist-get session :name)))
+
+(defun harness-sender-kind (from)
+  "Return the kind of sender FROM, `system' or `session', or nil.
+FROM is who sent a message (see `harness-node-sender'); nil, or a value
+without a kind, means the user did."
+  (let ((kind (and (consp from) (plist-get from :kind))))
+    (cond ((and (stringp kind) (not (string-empty-p kind))) (intern kind))
+          ((and kind (symbolp kind) (not (eq kind :false))) kind))))
+
+(defun harness-node-sender (node)
+  "Return who sent NODE, a user message, when it was not the user, or nil.
+That is NODE's `:meta' `:from': (:kind system :source SOURCE) for the
+harness itself, made by `harness-sender-system', or (:kind session :id
+ID :name NAME) for another session's agent, made by
+`harness-sender-session'."
+  (let ((from (plist-get (plist-get node :meta) :from)))
+    (and (harness-sender-kind from) from)))
+
+(defun harness-sender-description (from)
+  "Describe FROM, who sent a message, in a few words, as transcripts read.
+The harness reads \"the harness (SOURCE)\", another session's agent
+\"session ID \\\"NAME\\\"\", and nil, the user, \"the user\"."
+  (pcase (harness-sender-kind from)
+    ('system (let ((source (plist-get from :source)))
+               (if (and (stringp source) (not (string-blank-p source)))
+                   (format "the harness (%s)" source)
+                 "the harness")))
+    ('session (format "session %s%s" (or (plist-get from :id) "?")
+                      (if (and (stringp (plist-get from :name)) (not (string-blank-p (plist-get from :name))))
+                          (format " %S" (plist-get from :name))
+                        "")))
+    ('nil "the user")
+    (kind (format "the %s" kind))))
+
 ;;;; Paths
 
 (defun harness-path-normalize (path)
@@ -347,45 +401,116 @@ KEY extracts the string to match; LIMIT caps the result count."
 
 ;;;; Processes
 
-(cl-defun harness-run-command (command &key cwd (timeout 120) stdin on-output name)
+(defvar harness--process-kill-grace 3
+  "Seconds between TERM and KILL when a timed-out command is killed.
+Internal, not an option (see docs/configuration-audit.md).  A command
+runs in its own process group, so a timeout kills its children too: the
+group gets TERM, then KILL when anything in it is still alive after
+this many seconds.")
+
+(defun harness--process-children (pid)
+  "Return the direct children of PID, from the system process table.
+Empty when the table cannot be read (no /proc, a sandbox, a remote
+host), which leaves the group kill in `harness-process-tree' as the
+only mechanism."
+  (when (fboundp 'list-system-processes)
+    (let (children)
+      (dolist (candidate (ignore-errors (list-system-processes)))
+        (let ((attrs (ignore-errors (process-attributes candidate))))
+          (when (eql pid (alist-get 'ppid attrs))
+            (push candidate children))))
+      children)))
+
+(defun harness-process-tree (pid group)
+  "Return the process tree rooted at PID as a plist.
+The plist is (:pid PID :group GROUP :children PIDS): the descendants are
+collected now, before anything is signalled, because a killed parent
+cannot be asked for them again and they are reparented as it dies.
+Every command Emacs spawns gets its own process group, so a group kill
+alone misses a grandchild that a child Emacs spawned with `call-process';
+walking the process table catches it."
+  (let (children queue)
+    (setq queue (list pid))
+    (while queue
+      (dolist (child (harness--process-children (pop queue)))
+        (push child children)
+        (push child queue)))
+    (list :pid pid :group group :children (nreverse children))))
+
+(defun harness-kill-process-tree (tree &optional signal)
+  "Send SIGNAL (TERM by default) to every process in TREE.
+TREE is what `harness-process-tree' returned: the root and its group
+(when local) and the descendants collected with it.  Best-effort: a
+process that is already gone is not an error."
+  (let ((sig (or signal 'term))
+        (pid (plist-get tree :pid))
+        (group (plist-get tree :group)))
+    (when (and (integerp pid) (> pid 0))
+      (dolist (child (plist-get tree :children))
+        (ignore-errors (signal-process child sig)))
+      (when group
+        (ignore-errors (signal-process (- pid) sig)))
+      (ignore-errors (signal-process pid sig)))))
+
+(cl-defun harness-run-command (command &key cwd (timeout 120) stdin on-output name env)
   "Run COMMAND (a list of strings) asynchronously and return a promise.
 The promise resolves to (:exit CODE :stdout STRING :stderr STRING).
 CWD defaults to `default-directory'; a remote (TRAMP) CWD runs the
-command on that host.  STDIN, when given, is sent to the process.
+command on that host.  STDIN, when given, is sent to the process.  ENV,
+an alist, is prepended to `process-environment' for the command.
 ON-OUTPUT is called with every chunk of standard output as it arrives.
-After TIMEOUT seconds the process is killed and :exit is `timeout'."
+After TIMEOUT seconds the process is killed -- its whole process group
+on a local CWD, so children cannot outlive it -- and :exit is
+`timeout'."
   (harness-with-promise (resolve reject)
     (ignore reject)
     (let* ((default-directory (file-name-as-directory (expand-file-name (or cwd default-directory))))
-           (stdout "") (stderr-buf (generate-new-buffer " *harness-cmd-stderr*" t))
-           (done nil) (timer nil)
+           (group (not (file-remote-p default-directory)))
+           (chunks nil)
+           (stderr-buf (generate-new-buffer " *harness-cmd-stderr*" t))
+           (done nil) (timer nil) (kill-timer nil) (pid nil) (proc nil) (tree nil)
            (finish (lambda (code)
                      (unless done
                        (setq done t)
                        (when timer (cancel-timer timer))
+                       (when kill-timer (cancel-timer kill-timer))
                        (let ((err (and (buffer-live-p stderr-buf)
                                        (with-current-buffer stderr-buf (buffer-string)))))
                          (when (buffer-live-p stderr-buf) (kill-buffer stderr-buf))
-                         (funcall resolve (list :exit code :stdout stdout :stderr (or err "")))))))
-           (proc (make-process :name (or name "harness-cmd")
-                               :command command
-                               :connection-type 'pipe
-                               :noquery t
-                               :file-handler t
-                               :stderr stderr-buf
-                               :filter (lambda (_p chunk)
-                                         (setq stdout (concat stdout chunk))
-                                         (when on-output (funcall on-output chunk)))
-                               :sentinel (lambda (p _e)
-                                           (unless (process-live-p p)
-                                             (funcall finish (process-exit-status p)))))))
+                         (funcall resolve (list :exit code
+                                                :stdout (apply #'concat (nreverse chunks))
+                                                :stderr (or err ""))))))))
+      (let ((process-environment (if env
+                                     (append (mapcar (lambda (pair)
+                                                       (format "%s=%s" (car pair) (cdr pair)))
+                                                     env)
+                                             process-environment)
+                                   process-environment)))
+        (setq proc (make-process :name (or name "harness-cmd")
+                                 :command command
+                                 :connection-type 'pipe
+                                 :noquery t
+                                 :file-handler t
+                                 :stderr stderr-buf
+                                 :filter (lambda (_p chunk)
+                                           (push chunk chunks)
+                                           (when on-output (funcall on-output chunk)))
+                                 :sentinel (lambda (p _e)
+                                             (unless (process-live-p p)
+                                               (funcall finish (process-exit-status p))))))
+        (setq pid (process-id proc)))
       (when-let* ((ep (get-buffer-process stderr-buf)))
         (set-process-query-on-exit-flag ep nil)
         (set-process-sentinel ep #'ignore))
       (setq timer (run-at-time timeout nil
                                (lambda ()
+                                 (setq tree (harness-process-tree pid group))
                                  (funcall finish 'timeout)
-                                 (when (process-live-p proc) (delete-process proc)))))
+                                 (harness-kill-process-tree tree 'term)
+                                 (setq kill-timer
+                                       (run-at-time harness--process-kill-grace nil
+                                                    (lambda ()
+                                                      (harness-kill-process-tree tree 'kill)))))))
       (when stdin (process-send-string proc stdin))
       (when (process-live-p proc) (process-send-eof proc)))))
 

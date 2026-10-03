@@ -72,9 +72,9 @@ An entry is (:child ID :parent ID :status queued|merging|conflict
     (ignore-errors (harness-call 'session/hint id text))))
 
 (defun harness-merge--steer (id text)
-  "Send TEXT to session ID as a steering (or fresh) prompt."
+  "Send TEXT to session ID as a steering (or fresh) prompt from the merge queue."
   (when (and (harness-merge--session id) (harness-method-exists-p 'agent/prompt))
-    (harness-catch (harness-call-async 'agent/prompt id text)
+    (harness-catch (harness-call-async 'agent/prompt id text (list :from (harness-sender-system "merge queue")))
                    (lambda (e) (harness-log 'warn "merge: steering %s failed: %s" id (harness-error-message e)) nil))))
 
 (defun harness-merge--entry (child-id)

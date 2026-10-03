@@ -75,7 +75,8 @@ Only the ACP client half is used: its TCP server stays off here.")
 (defconst harness--self-file (expand-file-name "harness.el" harness-directory)
   "Absolute path of this file, reloaded first by `harness-reload'.")
 
-(defconst harness--core-files '("lisp/harness-core.el" "lisp/harness-util.el" "lisp/harness-http.el")
+(defconst harness--core-files '("lisp/harness-core.el" "lisp/harness-util.el"
+                               "lisp/harness-http.el" "lisp/harness-elisp.el")
   "Files loaded before any module, in order, relative to `harness-directory'.")
 
 (add-to-list 'load-path (expand-file-name "lisp" harness-directory))

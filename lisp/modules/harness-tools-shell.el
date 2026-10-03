@@ -13,12 +13,14 @@
 ;;   unconfined run.  Remote (TRAMP) directories run the command on
 ;;   that host, unwrapped.
 ;;
-;; - `elisp' evaluates Emacs Lisp inside the harness Emacs, which is
+;; - `elisp' evaluates Emacs Lisp in a child `emacs --batch' process,
 ;;   the Emacs-native alternative to a shell: the value of the last
 ;;   form, anything printed to `standard-output' and any `message'
-;;   calls are returned.  Evaluation is synchronous by nature; it is
-;;   capped with `with-timeout', which can interrupt code that yields
-;;   to the event loop but not a tight loop.
+;;   calls come back as JSON.  It never runs in the user's Emacs,
+;;   where model-written code could block the UI beyond recovery (see
+;;   harness-elisp.el); `harness-elisp-allow-ui-eval' restores the old
+;;   in-UI evaluation for a user who asks for it.  A timeout kills the
+;;   child, its whole process group included.
 
 ;;; Code:
 
@@ -29,6 +31,7 @@
 (require 'harness-util)
 (require 'harness-tools)
 (require 'harness-client-tools)
+(require 'harness-elisp)
 
 (defconst harness-tools-shell--program "bash"
   "Shell used by the bash tool.")
@@ -124,15 +127,104 @@
 
 ;;;; elisp
 
+;;;; elisp
+
+(defun harness-tools-shell--elisp-batch-result (r result-file timeout)
+  "Turn R, a `harness-run-command' result, into an elisp tool result.
+RESULT-FILE is the JSON the child wrote; TIMEOUT names the evaluation's
+limit in the message a killed child gets."
+  (let ((exit (plist-get r :exit)))
+    (cond
+     ((eq exit 'timeout)
+      (harness-tool-error (format "Evaluation timed out after %ss" timeout)
+                          :meta (list :exit exit)))
+     ((not (file-readable-p result-file))
+      (harness-tool-error
+       (format "Evaluation produced no result (exit %s): %s"
+               exit (string-trim (or (plist-get r :stderr) "")))))
+     (t
+      (let* ((text (with-temp-buffer (insert-file-contents result-file) (buffer-string)))
+             (payload (condition-case err
+                          (harness-json-parse text)
+                        (error (harness-log 'warn "elisp: unreadable result: %S" err) nil)))
+             (error (and (listp payload) (plist-get payload :error))))
+        (cond
+         ((not (listp payload))
+          (harness-tool-error (format "Evaluation produced an unreadable result (exit %s)" exit)))
+         ((and (stringp error) (not (string-empty-p error)))
+          (harness-tool-error (format "Error: %s" error)))
+         (t
+          (harness-tool-ok (harness-elisp-format-result (or (plist-get payload :value) "")
+                                                        (or (plist-get payload :output) "")
+                                                        (or (plist-get payload :messages) ""))
+                           :meta (list :exit exit)))))))))
+
+(defun harness-tools-shell--elisp-batch (code input ctx)
+  "Run CODE for the elisp tool in a child Emacs; return a promise.
+INPUT and CTX supply the working directory; the child adds the harness
+to its `load-path' so `(require \='harness-...)' works as it did when the
+code ran in the harness's own Emacs."
+  (let* ((cwd (harness-tools-shell--bash-cwd input ctx))
+         (cwd (if (file-remote-p cwd) default-directory cwd))
+         (dir (make-temp-file "harness-elisp-" t))
+         (code-file (expand-file-name "code.el" dir))
+         (result-file (expand-file-name "result.json" dir))
+         (timeout (or (harness-tools-shell--number (plist-get input :timeout) harness-elisp--timeout)
+                      harness-elisp--timeout))
+         (timeout (max 1 (min timeout harness-tools-shell--max-timeout))))
+    (let ((coding-system-for-write 'utf-8-unix))
+      (write-region code nil code-file nil 'silent)
+      (set-file-modes code-file #o600))
+    (harness-with-promise (resolve reject)
+      (ignore reject)
+      (let* ((settled nil)
+             (finish (lambda (result)
+                       (unless settled
+                         (setq settled t)
+                         (ignore-errors (delete-directory dir t))
+                         (funcall resolve result)))))
+        (harness-then
+         (harness-run-command
+          (list harness-elisp-emacs "--batch" "-Q"
+                "-L" harness-directory
+                "-L" (expand-file-name "lisp" harness-directory)
+                "-l" (expand-file-name "lisp/harness-elisp.el" harness-directory)
+                "-f" "harness-elisp-batch-main")
+          :cwd cwd
+          :timeout (+ timeout 5)
+          :name "harness-elisp"
+          :env (list (cons "HARNESS_ELISP_CODE" code-file)
+                     (cons "HARNESS_ELISP_RESULT" result-file)
+                     (cons "HARNESS_ELISP_TIMEOUT" (number-to-string timeout))
+                     (cons "HARNESS_ELISP_MAX_VALUE_CHARS"
+                           (number-to-string harness-elisp--max-value-chars))))
+         (lambda (r) (funcall finish (harness-tools-shell--elisp-batch-result r result-file timeout)))
+         (lambda (e) (funcall finish (harness-tool-error
+                                      (format "elisp failed: %s" (harness-error-message e))))))))))
+
+(defun harness-tools-shell--elisp (input ctx)
+  "Handler for the elisp tool with INPUT under CTX; returns a promise.
+Evaluation happens in a child Emacs unless the user turned on
+`harness-elisp-allow-ui-eval', which puts it back in the UI's Emacs."
+  (let ((code (plist-get input :code)))
+    (cond
+     ((or (not (stringp code)) (string-blank-p code))
+      (harness-tool-error "Missing code"))
+     (harness-elisp-allow-ui-eval
+      (funcall (harness-tools-in-client "elisp") input ctx))
+     (t (harness-tools-shell--elisp-batch code input ctx)))))
+
 (harness-define-tool "elisp"
   :label "Emacs Lisp"
-  :description "Evaluate Emacs Lisp in the running Emacs (lexical binding). Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation. Use it to inspect or drive Emacs, or as an alternative to bash for file work."
+  :description "Evaluate Emacs Lisp with lexical binding in a fresh Emacs batch process whose working directory is the working directory and whose load path has the harness, so a harness library can be required to inspect or drive it. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation. Use it as the Emacs-native alternative to bash for file work; the emacs_* tools read the user's live buffers. Evaluation is killed at timeout seconds (30 by default)."
   :schema '(:type "object"
-            :properties (:code (:type "string" :description "One or more Emacs Lisp forms"))
+            :properties (:code (:type "string" :description "One or more Emacs Lisp forms")
+                         :timeout (:type "integer" :description "Seconds before the evaluation is killed. Default 30"))
             :required ("code"))
   :kind 'exec
+  :timeout 3700
   :subject (lambda (input) (harness-first-line (plist-get input :code) 70))
-  :handler (harness-tools-in-client "elisp"))
+  :handler #'harness-tools-shell--elisp)
 
 (harness-define-module 'tools-shell
   :doc "Bash (asynchronous, sandboxed when available) and Emacs Lisp evaluation."

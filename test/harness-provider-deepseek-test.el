@@ -115,6 +115,26 @@
       (setq harness-openai-endpoints saved)
       (harness-openai--register-all))))
 
+;;;; Thinking levels
+
+(ert-deftest harness-deepseek-model-levels-are-the-effort-ladder ()
+  "Every model offers DeepSeek's real ladder, weakest first, and each
+level buys strictly more thinking than the one before it."
+  (should (equal '("low" "high" "max") harness-openai--deepseek-efforts))
+  (dolist (model (harness-deepseek--models))
+    (let* ((levels (plist-get model :thinking-levels))
+           (efforts (mapcar #'harness-openai--deepseek-effort levels))
+           (ranks (mapcar (lambda (e) (cl-position e harness-openai--deepseek-efforts
+                                                   :test #'equal))
+                          efforts)))
+      (should (equal harness-openai--deepseek-efforts levels))
+      ;; One effort each, strictly increasing along the ladder.
+      (should (equal '(0 1 2) ranks))))
+  ;; A spec that names no levels gets the ladder too, never a subset.
+  (let ((harness-deepseek-model-specs '((:name "half" :tier flash))))
+    (should (equal harness-openai--deepseek-efforts
+                   (plist-get (car (harness-deepseek--models)) :thinking-levels)))))
+
 ;;;; Peak schedule
 
 (ert-deftest harness-deepseek-peak-windows ()

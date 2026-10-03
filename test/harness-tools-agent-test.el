@@ -238,9 +238,12 @@ option, is an error saying what to fix, and asks nothing."
           (should (equal "explorer" (plist-get child :name)))
           (should (equal "demo:scripted" (plist-get child :model)))
           (should (eq 'idle (plist-get child :status)))
-          ;; A fresh child starts from the prompt only.
+          ;; A fresh child starts from the prompt only, which the parent's
+          ;; agent wrote, not the user.
           (should (eq 'user (plist-get (car (harness-call 'session/nodes cid)) :kind)))
           (should (string-match-p "give me the tour" (plist-get (car (harness-call 'session/nodes cid)) :content)))
+          (should (equal (list :kind 'session :id sid :name nil)
+                         (harness-node-sender (car (harness-call 'session/nodes cid)))))
           ;; The parent lists it as a child.
           (should (equal (list cid) (mapcar (lambda (s) (plist-get s :id))
                                             (harness-call 'session/list (list :parent-id sid)))))))
@@ -267,6 +270,12 @@ option, is an error saying what to fix, and asks nothing."
         (should (equal (mapcar (lambda (n) (plist-get n :id)) parent-nodes)
                        (mapcar (lambda (n) (plist-get n :id)) (seq-take child-nodes (length parent-nodes)))))
         (should (> (length child-nodes) (length parent-nodes)))
+        ;; Its new message is the parent's; the copied one stays the user's.
+        (should-not (harness-node-sender (car child-nodes)))
+        (should (equal sid (plist-get (harness-node-sender
+                                       (cl-find 'user (nthcdr (length parent-nodes) child-nodes)
+                                                :key (lambda (n) (plist-get n :kind))))
+                                      :id)))
         ;; The parent's own transcript is untouched by the child's turn.
         (should (equal (length parent-nodes) (length (harness-call 'session/nodes sid))))))))
 

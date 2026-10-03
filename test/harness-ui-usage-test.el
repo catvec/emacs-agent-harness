@@ -362,6 +362,7 @@
       (should (equal "$0" (funcall text fresh)))
       (should (equal "$2.00" (funcall text old)))
       (should (string-match-p "billed per token" (get-text-property 0 'help-echo (harness-ui-format-spend api))))
+      (should-not (string-match-p "\n" (get-text-property 0 'help-echo (harness-ui-format-spend api))))
       ;; Before its first call a session goes by its provider's account.
       (harness-ui--store-quota "claude" (harness-ui-usage-test-max-quota now))
       (should (equal "Max" (funcall text fresh)))
@@ -372,10 +373,13 @@
         (should (string-match-p "Covered by Claude Max, not billed per token" help))
         (should (string-match-p "at API prices: \\$3\\.40" help))
         (should (string-match-p "Current session (5 hours): 9% used, resets in " help))
-        (should (string-match-p "Extra usage: off" help)))
+        (should (string-match-p "Extra usage: off" help))
+        ;; One line, or showing it in the echo area moves the button.
+        (should-not (string-match-p "\n" help)))
       (let ((help (get-text-property 0 'help-echo (harness-ui-format-spend mixed))))
         (should (string-match-p "\\$0\\.400 billed as extra usage" help))
-        (should (string-match-p "\\$3\\.40 more at API prices covered by Claude Max" help)))
+        (should (string-match-p "\\$3\\.40 more at API prices covered by Claude Max" help))
+        (should-not (string-match-p "\n" help)))
       ;; A window close to its limit joins the header.
       (harness-ui--store-quota "claude" (plist-put (harness-ui-usage-test-max-quota now) :windows
                                                    '((:name "5h" :used 0.2) (:name "7d Fable" :used 0.96))))
@@ -397,6 +401,41 @@
     (should (equal "GPT X (OpenAI)" (harness-ui-model-label "openai:gpt-x")))
     (puthash "claude:claude-opus-5-5" (list :label "Claude Opus 5.5" :provider-label "Claude Code") harness-ui--models)
     (should (equal "Opus 5.5 (Claude)" (harness-ui-model-label "claude:claude-opus-5-5")))))
+
+(ert-deftest harness-ui-usage-chart-tooltip-is-one-line ()
+  "A chart column's tooltip stays on one line.
+Two lines would grow the echo area and move the chart under the mouse."
+  (harness-ui-usage-test-with
+    (dolist (bucket '(hour day))
+      (let* ((key (if (eq bucket 'hour) "2026-10-03 14:00" "2026-10-03"))
+             (help (harness-ui-usage--bar-help
+                    (list :key key :cost 1.5 :list-cost 2.0 :calls 3
+                          :input 1200 :output 345)
+                    bucket)))
+        (should (string-match-p (if (eq bucket 'hour) "14:00" "Oct 3, 2026") help))
+        (should (string-match-p "3 calls" help))
+        (should (string-match-p "1\\.2k in / 345 out" help))
+        (should-not (string-match-p "\n" help))))))
+
+(ert-deftest harness-ui-usage-dashboard-tooltips-are-one-line ()
+  "Every tooltip of the rendered dashboard fits one echo-area line."
+  (harness-ui-usage-test-with
+    (let* ((now (float-time))
+           (project (file-name-as-directory dir)))
+      (harness-ui-usage-test-record now project "demo:scripted" 1.5)
+      (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                     (list :budget (list :scope "project" :target project :amount 8 :hard t)))
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage-buffer-name
+        (let ((pos (point-min)) (found nil) (offenders nil))
+          (while (< pos (point-max))
+            (when-let* ((help (get-text-property pos 'help-echo)))
+              (setq found t)
+              (when (and (stringp help) (string-match-p "\n" help))
+                (push help offenders)))
+            (setq pos (1+ pos)))
+          (should found)
+          (should-not offenders))))))
 
 (provide 'harness-ui-usage-test)
 ;;; harness-ui-usage-test.el ends here

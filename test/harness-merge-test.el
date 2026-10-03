@@ -141,7 +141,9 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
       (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get child) :status))) 10 "child idle")
       (let ((users (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes child))))
         (should (= 1 (length users)))
-        (should (string-match-p "Commit your changes in the worktree first" (plist-get (car users) :content))))
+        (should (string-match-p "Commit your changes in the worktree first" (plist-get (car users) :content)))
+        ;; From the merge queue, not the user.
+        (should (equal (harness-sender-system "merge queue") (harness-node-sender (car users)))))
       (should (cl-some (lambda (h) (string-match-p "commit your changes" h)) (harness-merge-test--hints parent)))
       (should (null (harness-call 'merge/queue parent))))))
 
@@ -169,7 +171,8 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
       (let ((user (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes child))))
         (should (string-match-p "- README" (plist-get user :content)))
         (should (string-match-p (regexp-quote root) (plist-get user :content)))
-        (should (string-match-p "merge_done" (plist-get user :content))))
+        (should (string-match-p "merge_done" (plist-get user :content)))
+        (should (equal (harness-sender-system "merge queue") (harness-node-sender user))))
       (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get child) :status))) 10 "child idle")
       ;; The parent is held: a new turn waits for the lock.
       (let ((held (harness-call 'agent/prompt parent "hello while merging")))

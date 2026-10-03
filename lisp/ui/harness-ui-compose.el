@@ -141,7 +141,7 @@ window the ones that must stay on one line."
                             (harness-truncate-middle (harness-relative-path (harness-compose--project) path) 40)
                             (harness-format-bytes (plist-get att :size)))))
         (insert (buttonize label (lambda (_) (find-file-other-window path)) nil
-                           (concat path "\nmouse-1: open"))
+                           (harness-ui-one-line (concat path "\nmouse-1: open")))
                 (propertize (buttonize "×" (lambda (_) (harness-compose-remove-attachment path)) nil
                                        "Remove this attachment")
                             'face 'harness-dim-face)

@@ -215,6 +215,63 @@
         (should (string-match-p "idle" (harness-chat--mode-line)))
         (should (equal "" (harness-compose-text)))))))
 
+(defun harness-ui-chat-test-bar-face-at (pos face)
+  "Non-nil when the bar in the margin at POS is drawn in FACE."
+  (let* ((prefix (get-text-property pos 'line-prefix))
+         (f (and prefix (get-text-property 0 'face prefix))))
+    (or (eq f face) (and (listp f) (memq face f)))))
+
+(ert-deftest harness-ui-chat-messages-the-user-did-not-write ()
+  "A message the harness or another session sent names its sender, not \"You\",
+on a background and bar of its own; the user's own messages are as before."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session))
+          (opened nil))
+      (harness-call 'session/append sid '(:kind user :content "my own words"))
+      (harness-call 'session/append sid (list :kind 'user :content "carry on after the restart"
+                                              :meta (list :from (harness-sender-system "tasks"))))
+      (harness-call 'session/append sid (list :kind 'user :content "rebase please"
+                                              :meta (list :steering t
+                                                          :from (harness-sender-session
+                                                                 '(:id "0123456789abcdef" :name "Fix the parser")))))
+      (harness-call 'session/append sid (list :kind 'user :content "from a nameless one"
+                                              :meta (list :from (harness-sender-session '(:id "fedcba9876543210")))))
+      (let ((buf (harness-ui-chat-test-open sid))
+            (start (lambda (buf text) (- (harness-ui-chat-test-find buf text) (length text)))))
+        (with-current-buffer buf
+          (let ((case-fold-search nil))
+            ;; One "You", over the user's own message; the others name their sender.
+            (should (= 1 (how-many "^You$" (point-min) (point-max))))
+            (should (= 1 (how-many "^System · tasks$" (point-min) (point-max))))
+            (should (= 1 (how-many "^Session · Fix the parser$" (point-min) (point-max))))
+            ;; Without a name, a session goes by its short id.
+            (should (= 1 (how-many "^Session · fedcba98$" (point-min) (point-max)))))
+          (let ((mine (funcall start buf "my own words"))
+                (label (funcall start buf "System · tasks"))
+                (system (funcall start buf "carry on after the restart"))
+                (session (funcall start buf "rebase please")))
+            (should (harness-ui-chat-test-face-at mine 'harness-user-face))
+            (should (harness-ui-chat-test-bar-face-at mine 'harness-user-bar-face))
+            (should (harness-ui-chat-test-face-at label 'harness-system-label-face))
+            (dolist (pos (list label system session))
+              (should (harness-ui-chat-test-face-at pos 'harness-system-face))
+              (should-not (harness-ui-chat-test-face-at pos 'harness-user-face))
+              (should (harness-ui-chat-test-bar-face-at pos 'harness-system-bar-face))))
+          ;; The sending session's name opens it.
+          (let ((action (get-text-property (funcall start buf "Fix the parser") 'harness-chat-action)))
+            (should (functionp action))
+            (cl-letf (((symbol-function 'harness-open-session) (lambda (id &rest _) (setq opened id))))
+              (funcall action))
+            (should (equal "0123456789abcdef" opened)))))
+      ;; One that arrives while the buffer is open is shown so too.
+      (let ((buf (harness-chat--buffer-for sid)))
+        (harness-call 'session/append sid (list :kind 'user :content "resolve the conflicts"
+                                                :meta (list :from (harness-sender-system "merge queue"))))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "System · merge queue")) 5 "the live message")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "resolve the conflicts"))
+                                                'harness-system-face)))))))
+
 ;; In a graphical frame an icon is a space whose `display' draws its
 ;; image.  Toggling a block once carried the collapsed icon's `display'
 ;; over to the expanded one, so the arrow never turned.  Batch draws no
@@ -266,7 +323,48 @@
           (should-not (string-match-p "\\$0\\.5" header))
           (let ((pos (string-match "Pro" header)))
             (should (string-match-p "Covered by Claude Pro" (get-text-property pos 'help-echo header)))
+            ;; One line: showing it in the echo area must not move the header.
+            (should-not (string-match-p "\n" (get-text-property pos 'help-echo header)))
             (should (get-text-property pos 'local-map header))))))))
+
+(ert-deftest harness-ui-chat-hover-help-is-one-line ()
+  "Every tooltip of a rendered session fits one echo-area line.
+With tooltips off (`tooltip-mode' nil) the help shows in the echo area,
+where a second line grows the mini window, shrinks every window and
+moves the button under the mouse."
+  (harness-ui-chat-test-with
+    (clrhash harness-ui--quotas)
+    (let* ((sid (harness-ui-chat-test-session "Hover"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-prompt buf "give me the tour")
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (let ((last (car (last (harness-ui-chat-test-blocks buf "assistant")))))
+                                        (and last (string-prefix-p "# Tour" (harness-chat-block-content last))))))
+                         5 "the tour")
+      ;; A plan with a quota gives the header's spend segment its long tooltip.
+      (harness-call 'session/usage-add sid '(:input 100 :output 10 :cost 0.0 :list-cost 0.5
+                                             :billing subscription :plan "pro"))
+      (harness-ui--store-quota "demo" '(:billing "subscription" :plan "pro" :plan-label "Claude Pro"
+                                        :extra (:enabled t :used 0.4 :limit 10.0)
+                                        :windows ((:name "5h" :label "Current session (5 hours)" :used 0.42)
+                                                  (:name "7d" :label "Weekly (7 days)" :used 0.7))))
+      (harness-test-wait (lambda () (equal "subscription"
+                                           (format "%s" (plist-get (plist-get (harness-ui-session sid) :usage) :billing))))
+                         5 "the session update")
+      (with-current-buffer buf
+        (let ((offenders nil))
+          (dolist (text (list (buffer-string) (harness-chat--header)))
+            (let ((pos 0))
+              (while (< pos (length text))
+                (let ((help (get-text-property pos 'help-echo text)))
+                  (when (and (stringp help) (string-match-p "\n" help))
+                    (push help offenders)))
+                (setq pos (1+ pos)))))
+          ;; The header's spend tooltip really is among them.
+          (let* ((header (harness-chat--header))
+                 (pos (string-match "Pro" header)))
+            (should (string-match-p "Covered by Claude Pro" (get-text-property pos 'help-echo header))))
+          (should-not offenders))))))
 
 (ert-deftest harness-ui-chat-header-functions-come-first ()
   "What `harness-chat-header-functions' return leads the header, in order.
@@ -1963,6 +2061,96 @@ connection let go of is never reported as closed."
         (should (> (window-start window) (point-min)))
         (should (= (- (window-body-height window t) (frame-char-height))
                    (cdr (window-text-pixel-size window (window-start window) harness-compose-end))))))))
+
+(ert-deftest harness-ui-chat-todos-show-in-header-and-panel ()
+  "A session's todo list is conspicuous without opening its tool block:
+a progress segment in the header, the items in a panel above the box."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Todos"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/set-todos sid
+                    '((:id "1" :text "Survey the project" :status "done")
+                      (:id "2" :text "Make the change" :status "in-progress")
+                      (:id "3" :text "Check the result" :status "pending")))
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (and harness-chat--todos
+                                           (harness-ui-chat-test-find buf "Check the result"))))
+                         5 "the todo list to show")
+      (with-current-buffer buf
+        ;; The header names the progress and the item in hand.
+        (let* ((header (harness-chat--header))
+               (segment (harness-ui-chat-test-segment header #'harness-chat-toggle-todos)))
+          (should segment)
+          (should (string-match-p "1/3" (car segment)))
+          (should (string-match-p "Make the change" (car segment)))
+          (let ((help (get-text-property (cadr segment) 'help-echo header)))
+            (should (string-match-p "\\[x\\] Survey the project" help))
+            (should (string-match-p "\\[~\\] Make the change" help))
+            (should (string-match-p "\\[ \\] Check the result" help))))
+        ;; The panel shows every item; the one in progress is bold.
+        (should (harness-ui-chat-test-find buf "Survey the project"))
+        (should (harness-ui-chat-test-find buf "Check the result"))
+        (should (harness-ui-chat-test-face-at
+                 (1- (harness-ui-chat-test-find buf "Make the change")) 'bold))
+        ;; Folding leaves the title line; unfolding brings the items back.
+        (harness-chat-toggle-todos)
+        (should-not (harness-ui-chat-test-find buf "Check the result"))
+        (should (harness-ui-chat-test-find buf "1/3"))
+        (harness-chat-toggle-todos)
+        (should (harness-ui-chat-test-find buf "Check the result"))
+        ;; Clearing the list takes the segment and the panel away.
+        (harness-call 'session/set-todos sid nil)
+        (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--todos)))
+                           5 "the list to clear")
+        (with-current-buffer buf
+          (should-not (harness-ui-chat-test-segment (harness-chat--header)
+                                                    #'harness-chat-toggle-todos))
+          (should-not (harness-ui-chat-test-find buf "Check the result")))))))
+
+(ert-deftest harness-ui-chat-todos-follow-todo-write ()
+  "The demo work script's `todo_write' calls keep the view current:
+the panel ends on the finished list, and it agrees with the session's
+own, which the task board shows."
+  (harness-ui-chat-test-with
+    ;; The tool that replaces the list; the harness serves it in production.
+    (harness-test-load-module 'tools-agent)
+    (let* ((sid (harness-ui-chat-test-session "Work"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-prompt buf "please work through this project")
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (equal 3 (length harness-chat--todos))))
+                         5 "the finished todo list")
+      (with-current-buffer buf
+        (should (equal '("done" "done" "done")
+                       (mapcar (lambda (item) (plist-get item :status)) harness-chat--todos)))
+        (should (string-match-p "3/3" (harness-chat--header)))
+        (should (harness-ui-chat-test-find buf "Survey the project"))
+        (should (harness-ui-chat-test-find buf "Check the result"))
+        ;; What the view shows is the session's list, item for item.
+        (should (equal (mapcar (lambda (item) (plist-get item :text))
+                               (plist-get (harness-ui-session sid) :todos))
+                       (mapcar (lambda (item) (plist-get item :text)) harness-chat--todos)))))))
+
+(ert-deftest harness-ui-chat-todos-take-the-plan-update ()
+  "An ACP `plan' update alone fills the header and the panel.
+It is the live signal of a `todo_write' call, with ACP's own status
+spellings; the chat used to drop it.  A long list is capped."
+  (harness-ui-chat-test-with
+    (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "Plan"))))
+      (with-current-buffer buf
+        (harness-chat--on-plan
+         (list :entries (append (list (list :content "item 1" :status "completed")
+                                      (list :content "item 2" :status "in_progress"))
+                                (cl-loop for i from 3 to 25
+                                         collect (list :content (format "item %d" i) :status "pending")))))
+        (should (equal 25 (length harness-chat--todos)))
+        (let ((header (harness-chat--header)))
+          (should (string-match-p "1/25" header))
+          (should (string-match-p "item 2" header)))
+        ;; The panel lists the cap, then counts the rest.
+        (should (harness-ui-chat-test-find buf "item 20"))
+        (should (harness-ui-chat-test-find buf "… 5 more"))
+        (should-not (harness-ui-chat-test-find buf "item 21"))))))
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

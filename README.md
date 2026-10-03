@@ -227,6 +227,7 @@ the `[menu]` button in the header line.
 | `C-c C-k` | Cancel the running turn |
 | `TAB` | Complete in the compose box; elsewhere, fold or unfold the block at point |
 | `C-c C-s` | Search the transcript |
+| `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
 | `C-c C-e` | Jump to the bottom |
 | `C-c C-r` | Redraw the buffer |
@@ -235,6 +236,12 @@ Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list, or the waiting session itself when only one needs you.
+
+While the agent works through a todo list (`todo_write`), the list stays
+in view: the header line names the progress and the item in hand, and a
+panel above the compose box lists every item with its state. `C-c C-t`,
+a click on the header segment, or `TAB` on the panel folds the items
+away and brings them back; the list disappears when the agent clears it.
 
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
@@ -255,10 +262,11 @@ and show one at a time. Switch between them with the tabs above the
 area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
 buffer, or by moving point onto an option.
 
-The header line shows the session's status, name, model, permission
-mode, whether it is `non-interactive` or `interactive`, thinking level,
-context and cost. Click the model, the permission mode, the
-non-interactive switch or the thinking level to change it. A
+The header line shows the session's status, name, todo progress while
+it has one, model, permission mode, whether it is `non-interactive` or
+`interactive`, thinking level, context and cost. Click the model, the
+permission mode, the non-interactive switch or the thinking level to
+change it. A
 non-interactive session never waits for you, which suits a session you
 leave to work while you are away. Whatever would ask you for
 permission, the auto-mode judge decides instead, whatever the
@@ -322,6 +330,12 @@ so several tasks can work in parallel.
   unless your configuration says otherwise, so a request that needs
   you, such as access to another directory, waits for you in *Requires
   your input* instead of being denied.
+- The `own worktree` switch beside those settings, in a git project,
+  changes the next task to the **main tree**: no worktree and no branch,
+  nothing merges, and its changes take effect in your checkout directly.
+  Submit a task that way when it has to touch the checkout itself, such
+  as cleaning up uncommitted changes. A refined task keeps the choice
+  for when you start it.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback.
@@ -423,7 +437,6 @@ project's, and a project's over the global value.
 - `harness-budget`
 - `harness-sandbox-policy`
 - `harness-non-interactive`
-- `harness-tasks-directory`
 
 The rest of the settings have a global value only.
 
@@ -502,8 +515,13 @@ with the Chinese public holiday calendar.
 DeepSeek's thinking mode (on by default) requires the reasoning of
 earlier assistant turns to come back as `reasoning_content` once a
 request carries tools, so the provider replays the recorded thinking of
-each assistant message, empty when it has none; OpenAI and OpenRouter
-are unaffected and still drop thinking.
+each assistant message, empty when it has none.  This follows an
+official DeepSeek host, so an OpenAI-compatible endpoint you added
+yourself at `api.deepseek.com` gets it too; OpenAI and OpenRouter are
+unaffected and still drop thinking.  Thinking effort uses DeepSeek's own
+three-step ladder — low, high, max — which its /models route reports, so
+the thinking menu offers exactly those levels and never a `medium` or
+`xhigh` that DeepSeek would just collapse onto `high`.
 
 ### AWS Bedrock
 
@@ -610,32 +628,6 @@ directory instead.
 Tasks saved by earlier versions move into their repositories
 automatically. A copy of the file they came from is kept as
 `tasks.json.bak` in the state directory.
-
-### Task files
-
-The board of a git project is also a folder of Markdown files, one per
-task, in `docs/tasks/` of the main checkout. Set
-`harness-tasks-directory` to use another folder; a project's
-`.dir-locals.el` may name its own folder, or nil for none.
-
-Each file starts with YAML front matter (`id`, `title`, `state`,
-`column`, `session`, `branch`, `merge`, `model`, `created`, `verified`
-and so on), followed by the task's prompt, the request it was written
-from, the feedback from each time it was sent back from review, and its
-plan.
-
-- The harness writes a file whenever its task changes. It reads back
-  edits to the prompt, the request, the title, the model, the thinking
-  level, and `state: done`.
-- Adding a file creates a backlog task. Deleting a file, or moving it
-  into `docs/tasks/archive/`, archives its task, and archiving a task on
-  the board moves its file there.
-- Front matter keys that the harness does not know are preserved.
-- Files are written only in the main checkout, never in a task's
-  worktree, and the harness does not commit them.
-
-See the tasks section of [docs/architecture.md](docs/architecture.md)
-for the file format.
 
 ## Remote control
 
