@@ -111,8 +111,21 @@ PROVIDER:NAME forces that model, and nil uses the session's own model."
   :group 'harness)
 
 (defconst harness-perms--auto-timeout 30
-  "Seconds the auto-mode judge may take before it counts as giving no verdict.
-The call then asks the user, or is denied in a non-interactive session.")
+  "Seconds one auto-mode judge call may take before it counts as giving no verdict.
+A call that takes longer asks the user, or is denied in a
+non-interactive session.  Each of the judge's two calls gets its own.")
+
+(defconst harness-perms--judge-max-tokens 200
+  "Output budget of the auto-mode judge's first call.
+It leaves room for the one line of JSON a verdict is and little else,
+so an ordinary judge call stays cheap.  A reasoning model spends it on
+thinking before it writes anything, so a call that runs out is asked
+again with `harness-perms--judge-retry-max-tokens'.")
+
+(defconst harness-perms--judge-retry-max-tokens 2048
+  "Output budget of the auto-mode judge's second call.
+The first ran out of tokens, which a reasoning model does before its
+verdict is written, so the second gives it room to think and answer.")
 
 ;;;; Runtime state (survives reloads)
 
@@ -588,6 +601,12 @@ DECISION is the current value and NEXT continues the chain."
 
 ;;;; Auto mode: a cheap model judges
 
+;; The judge gets two tries when it runs out of output tokens: a
+;; reasoning model spends the first call's small budget thinking and
+;; never writes its verdict, so the second call gives it room to
+;; answer.  Only a call neither call decided is denied while the user
+;; is away.
+
 (defconst harness-perms--judge-system
   "You are the permission judge for an autonomous coding agent running inside Emacs.
 The agent wants to run a tool.  Decide whether the call is safe and within the
@@ -667,16 +686,21 @@ nil uses the session's model."
   "Ask a cheap model to decide REQUEST, in auto mode or for a user away.
 The judge decides what is still undecided in `auto' mode, and in every
 mode while the session is non-interactive (`harness-perms--judge-p').
-Without a verdict the call goes on undecided, so it asks the user, with
-`:no-verdict' saying why for the stage that denies it when the user is
-away.  DECISION is the current value and NEXT continues the chain."
+A judge call that ends at its output limit before writing a verdict is
+asked again with a larger budget (`harness-perms--judge-max-tokens',
+then `harness-perms--judge-retry-max-tokens'), since running out of
+room is no verdict on the call.  Without a verdict the call goes on
+undecided, so it asks the user, with `:no-verdict' saying why for the
+stage that denies it when the user is away.  DECISION is the current
+value and NEXT continues the chain."
   (let ((session (plist-get request :session)))
     (if (not (and (eq (plist-get decision :behavior) 'ask)
                   (harness-perms--judge-p session)
                   (harness-method-exists-p 'provider/complete)))
         (funcall next decision)
       (let* ((model (harness-perms--judge-model session))
-             (text "") (settled nil) (timer nil) (handle nil)
+             (attempt 0)                ; judge calls made so far
+             (settled nil) (timer nil) (handle nil)
              (failure nil)              ; why the judge gave no verdict
              ;; A verdict is a new decision: DECISION itself comes back
              ;; when the judge gave none.
@@ -688,40 +712,63 @@ away.  DECISION is the current value and NEXT continues the chain."
                                            (plist-put (copy-sequence decision) :no-verdict
                                                       (or failure "it gave no answer"))
                                          d))))))
-        (setq timer (run-at-time harness-perms--auto-timeout nil
-                                 (lambda ()
-                                   (harness-log 'warn "perms: auto judge timed out for %s" (plist-get request :tool))
-                                   (setq failure (format "it took longer than %ss" harness-perms--auto-timeout))
-                                   (funcall finish decision)
-                                   (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
-        (condition-case err
-            (setq handle
-                  (harness-call
-                   'provider/complete
-                   (list :model model
-                         :session (list :id (format "%s-perms" (plist-get session :id))
-                                        :cwd (plist-get session :cwd) :host (plist-get session :host))
-                         :system harness-perms--judge-system
-                         :messages (list (list :role 'user
-                                               :content (list (list :type "text"
-                                                                    :text (harness-perms--judge-text request)))))
-                         :tools nil :max-tokens 200
-                         :on-event (lambda (ev)
-                                     (when (eq (plist-get ev :type) 'done)
-                                       (setq failure (harness-perms--judge-failure ev text)))
-                                     (pcase (plist-get ev :type)
-                                       ('text (setq text (concat text (or (plist-get ev :delta) ""))))
-                                       ('done
-                                        (let ((verdict (and (eq (plist-get ev :stop-reason) 'end-turn)
-                                                            (harness-perms--parse-verdict text))))
-                                          (unless verdict
-                                            (harness-log 'warn "%s" (harness-perms--no-verdict-message
-                                                                     (plist-get request :tool) ev text)))
-                                          (funcall finish (or verdict decision)))))))))
-          (error
-           (harness-log 'warn "perms: auto judge failed: %S" err)
-           (setq failure (format "it failed: %s" (harness-error-message err)))
-           (funcall finish decision)))))))
+        (cl-labels
+            ;; Ask once, as call N.  Each call keeps its own reply and
+            ;; only speaks while it is the live one, so an event from a
+            ;; call that ran out cannot decide for its retry.
+            ((ask (n)
+                  (let ((text "") (live (setq attempt n)))
+                    (setq failure nil)
+                    (when timer (cancel-timer timer))
+                    (setq timer
+                          (run-at-time harness-perms--auto-timeout nil
+                                       (lambda ()
+                                         (harness-log 'warn "perms: auto judge timed out for %s" (plist-get request :tool))
+                                         (setq failure (format "it took longer than %ss" harness-perms--auto-timeout))
+                                         (funcall finish decision)
+                                         (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
+                    (condition-case err
+                        (setq handle
+                              (harness-call
+                               'provider/complete
+                               (list :model model
+                                     :session (list :id (format "%s-perms" (plist-get session :id))
+                                                    :cwd (plist-get session :cwd) :host (plist-get session :host))
+                                     :system harness-perms--judge-system
+                                     :messages (list (list :role 'user
+                                                           :content (list (list :type "text"
+                                                                                :text (harness-perms--judge-text request)))))
+                                     :tools nil
+                                     :max-tokens (if (= n 1)
+                                                     harness-perms--judge-max-tokens
+                                                   harness-perms--judge-retry-max-tokens)
+                                     :on-event
+                                     (lambda (ev)
+                                       (when (= live attempt)
+                                         (when (eq (plist-get ev :type) 'done)
+                                           (setq failure (harness-perms--judge-failure ev text)))
+                                         (pcase (plist-get ev :type)
+                                           ('text
+                                            (setq text (concat text (or (plist-get ev :delta) ""))))
+                                           ('done
+                                            (let ((verdict (harness-perms--parse-verdict text)))
+                                              (cond
+                                               (verdict (funcall finish verdict))
+                                               ((and (= n 1) (eq (plist-get ev :stop-reason) 'max-tokens))
+                                                (harness-log
+                                                 'info
+                                                 "perms: auto judge ran out of output tokens for %s; asking once more"
+                                                 (plist-get request :tool))
+                                                (ask 2))
+                                               (t
+                                                (harness-log 'warn "%s" (harness-perms--no-verdict-message
+                                                                         (plist-get request :tool) ev text))
+                                                (funcall finish decision)))))))))))
+                      (error
+                       (harness-log 'warn "perms: auto judge failed: %S" err)
+                       (setq failure (format "it failed: %s" (harness-error-message err)))
+                       (funcall finish decision))))))
+          (ask 1))))))
 
 ;;;; Non-interactive mode
 
