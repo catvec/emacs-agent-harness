@@ -1668,6 +1668,19 @@ and icons via `icons.el` (`define-icon`) with text fallbacks.  Every
 command has a mouse target: buttons, header-line segments, or mode-line
 segments.
 
+Pending requests (`harness-ui-pending`): the permission prompts and
+questions a session waits on, held per session -- fed both by the ACP
+requests that block a client and by the session's pending list, so a
+view that is not watching a session can still answer it -- and drawn,
+answered and keyed by this module wherever they show: the chat's tail
+panels and a popout of their own.  The request records and the diagram
+each question shows belong to the session, not to the buffer drawing
+them, so the chat and a popout of the same request agree.  Views get one
+line about a session with `harness-ui-pending-summary` ("has a question
+for you"), a kind with `harness-ui-pending-status`, and the full request
+with `harness-ui-pending-popout` (from the session list and the task
+board, SPC, through `harness-ui-popout-at-point-functions`).
+
 Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
 list + attachments row + compose region at the bottom.  Rendering is
 incremental (append and in-place update by node id using markers);
@@ -1686,8 +1699,11 @@ summary block counts the failed and denied calls it folds.
 The panel of a question whose options have diagrams shows one diagram
 at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
-it.  Switching redraws the options and that area alone, in place, so
-point, the windows and the compose box stay put.
+it (all of it in `harness-ui-pending`).  Switching redraws the options
+and that area alone, in place, so point, the windows and the compose box
+stay put.  A module hosted by a chat buffer can put a read-only panel of
+its own above the box with `harness-chat-panel-functions` and take the
+box's message with `harness-chat-send-function`.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
@@ -1842,7 +1858,11 @@ waiting in pending until you start it (`s`); `r` refines a queued task,
 retries a stopped write-up or sends feedback on a backlog task's.  `I` or
 [Add session] makes an ongoing session a task.  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
-its tasks (`task/btw`).  Boards reload after any
+its tasks (`task/btw`).  `SPC` over a card, or [Answer…] / [Request…]
+on it, pops out the permission prompt or question its session waits on
+(`harness-ui-popout-at-point`), which the board reads through
+`harness-ui-pending`, its shared notion of what a session waits on.
+Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
 finished first and completed the latest completed (verified, else
@@ -1863,7 +1883,9 @@ The UI keeps each provider's QUOTA from `provider/quota` and
 `provider/quota-updated` (`harness-ui-quota`).
 
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
-children, filter/sort by any column; scoped to the current project, its
+children, filter/sort by any column; SPC on a session pops out what it
+waits on, its status cell's tooltip says so (`harness-ui-sessions-requests`);
+scoped to the current project, its
 git worktrees and so its tasks' sessions included, each session's root
 resolved to its main checkout once with `harness-files-main-checkout`),
 conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
@@ -1886,6 +1908,15 @@ first message names it `btw: ...`, unless it was named by hand.
 Closing it returns there; a BTW nothing was asked in is deleted with
 its buffer, once the harness confirms it holds no node of its own,
 and an idle one is closed.  Keeping it makes it a normal session
-window in that place, with nothing of the BTW left in its header), media
+window in that place, with nothing of the BTW left in its header),
+popout (`harness-ui-popout`: one item of a session or task -- the request
+it waits on, a task's report -- in a selected bottom side window fitted
+to it; a KEY names the item and reusing it reuses the buffer, so state
+the owner keeps there survives: whoever owns the item passes a TITLE and
+a RENDER, and with `:compose' the shared compose box under the content,
+whose C-c C-c gives the owner the text and attachments.  `q' closes it,
+`g' draws it again, and C-g closes it once there is nothing else to
+quit; `harness-ui-popout-at-point-functions' lets a view pop out the item
+at point with one key), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video thumbnails/open).

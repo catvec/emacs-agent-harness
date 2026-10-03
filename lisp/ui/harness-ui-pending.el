@@ -86,6 +86,12 @@ popout sets it to the session its item belongs to.")
   (or harness-ui-pending-session-id
       (and (boundp 'harness-ui-session-id) harness-ui-session-id)))
 
+(defun harness-ui-pending--forget-all ()
+  "Forget every request, its diagrams and the answers just given."
+  (clrhash harness-ui-pending--requests)
+  (clrhash harness-ui-pending--diagrams)
+  (clrhash harness-ui-pending--answered))
+
 (defun harness-ui-pending-items (session-id)
   "Return the request records SESSION-ID waits on, oldest first."
   (gethash session-id harness-ui-pending--requests))
@@ -100,20 +106,25 @@ popout sets it to the session its item belongs to.")
   (cl-find "question" (reverse (harness-ui-pending-items session-id))
            :key (lambda (r) (plist-get r :kind)) :test #'equal))
 
+(defun harness-ui-pending--session-kind (session)
+  "Return the kind of the request SESSION waits on, or nil.
+The store is asked first: it knows a request as soon as it arrives,
+while the session's own pending list may lag a round trip behind."
+  (let* ((items (harness-ui-pending-items (plist-get session :id)))
+         (item (car (or items (plist-get session :pending)))))
+    (when item (format "%s" (plist-get item :kind)))))
+
 (defun harness-ui-pending-summary (session)
-  "Say what the first request of SESSION is, one short line, or nil.
+  "Say what SESSION waits on, one short line, or nil.
 This is for cards and rows that say what a session needs without
 opening it."
-  (when-let* ((item (car (plist-get session :pending))))
-    (if (equal (format "%s" (plist-get item :kind)) "question")
-        "has a question for you"
-      "needs your permission")))
+  (when-let* ((kind (harness-ui-pending--session-kind session)))
+    (if (equal kind "question") "has a question for you" "needs your permission")))
 
 (defun harness-ui-pending-status (session)
   "Return \"question\", \"permission\" or nil: what SESSION waits on."
-  (let ((item (car (plist-get session :pending))))
-    (when item
-      (if (equal (format "%s" (plist-get item :kind)) "question") "question" "permission"))))
+  (when-let* ((kind (harness-ui-pending--session-kind session)))
+    (if (equal kind "question") "question" "permission")))
 
 (defun harness-ui-pending--changed (session-id)
   "Run `harness-ui-pending-changed-hook' for SESSION-ID."
@@ -147,7 +158,8 @@ arriving: the record keeps its `:respond' and does not come back."
                                       :key (lambda (r) (plist-get r :id)) :test #'equal)))
 
 (defun harness-ui-pending--mark-answered (session-id pid)
-  "Remember that PID was answered here, for `harness-ui-pending-sync'."
+  "Remember that PID of SESSION-ID was answered here.
+`harness-ui-pending-sync' keeps such a request off the panels."
   (puthash session-id
            (cons (cons pid (float-time))
                  (cl-remove-if (lambda (cell) (> (- (float-time) (cdr cell)) 30))
@@ -413,12 +425,14 @@ Each is (:type \"ascii\" :text TEXT) or (:type \"image\" :path PATH :mime MIME).
        (append (plist-get r :diagrams) nil)))
 
 (defun harness-ui-pending--shown-index (session-id pid count)
-  "Return which option's diagram the panel of PID shows, valid for COUNT options."
+  "Return which option's diagram the panel of PID of SESSION-ID shows.
+The index is kept valid for COUNT options."
   (let ((i (cdr (assoc pid (gethash session-id harness-ui-pending--diagrams)))))
     (if (and (integerp i) (< -1 i count)) i 0)))
 
 (defun harness-ui-pending-shown-diagram (session-id pid)
-  "Return the index of the option whose diagram the panel of PID shows."
+  "Return the index of the option whose diagram the panel of PID shows.
+SESSION-ID is the session the request PID belongs to."
   (harness-ui-pending--shown-index session-id pid
                                    (length (plist-get (harness-ui-pending-record session-id pid) :options))))
 
@@ -646,10 +660,9 @@ request is answered from the session's pending list instead.")
 
 (defun harness-ui-pending--popout-title (session-id)
   "Return the title of the popout of SESSION-ID's requests."
-  (let ((session (harness-ui-session session-id))
-        (status (harness-ui-pending-status (harness-ui-session session-id))))
+  (let ((session (harness-ui-session session-id)))
     (format "%s · %s" (if session (harness-ui-session-label session) session-id)
-            (if (equal status "question") "question" "permission"))))
+            (if (harness-ui-pending-question session-id) "question" "permission"))))
 
 (defun harness-ui-pending--popout-submit (session-id)
   "Return what the popout box of SESSION-ID sends with, or nil for no box.

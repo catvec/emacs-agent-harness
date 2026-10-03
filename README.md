@@ -177,6 +177,7 @@ named by `harness-server-init-file`.
 | `C-c h o` | `harness-open-latest-session` | Open the newest session of the current project |
 | `C-c h O` | `harness-open-session` | Open a session chosen by name |
 | `C-c h l` | `harness-sessions` | Show the session list |
+| `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
@@ -243,6 +244,13 @@ and show one at a time. Switch between them with the tabs above the
 area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
 buffer, or by moving point onto an option.
 
+The same request can be read and answered without opening the session:
+`SPC` in the session list, or on the task board, pops out
+what the session at point waits on, in a small window with the same
+panel -- the permission prompt or the question in full, its options,
+diagrams and keys, and a box for a typed answer. It closes itself once
+the request is settled, and the session's own view stays where it was.
+
 The header line shows the session's status, name, model, permission
 mode, whether it is `non-interactive` or `interactive`, thinking level,
 context and cost. Click the model, the permission mode, the
@@ -307,6 +315,10 @@ so several tasks can work in parallel.
   set to nil, tasks complete without review.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
+- `SPC` on a task that needs input pops out what it waits on -- the
+  permission prompt or the question, with its options and diagrams --
+  and answers it there. The card offers the same as [Answer…] or
+  [Request…] next to [Allow] and [Deny].
 - `RET` opens the session of the task at point. From that session,
   `C-c h a` leads back to the board.
 
