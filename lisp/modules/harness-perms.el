@@ -37,6 +37,14 @@
 ;; steering message (`harness-perms--on-decided'): the user is away, so
 ;; it should find another way rather than wait.
 ;;
+;; The judge is a safety check, not the agent's manager.  It is shown
+;; one call (the tool, what it does, the input and where the agent
+;; works) and decides only whether that call risks serious harm,
+;; leaning to allow, since a needless denial stops work the user wants
+;; done.  Its request is `:ephemeral', so the provider brings no earlier
+;; verdicts and no project instructions (CLAUDE.md) along: it never
+;; rules on the task, its review or the project's workflow.
+;;
 ;; An agent asks for another directory with the request_directory_access
 ;; tool.  The first stage owns that tool's decision and always makes it
 ;; final, so the call never reaches the mode, the standing rules or the
@@ -61,15 +69,19 @@
 
 (defconst harness-perms--auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
-    "emacs_buffers" "emacs_describe" "emacs_messages" "web_search" "notify")
+    "emacs_buffers" "emacs_describe" "emacs_messages" "web_search" "notify"
+    "hand_in")
   "Tools that never need approval, in every permission mode.
 `web_search' is included because it only sends its query to the
 configured `harness-websearch-provider', so even unattended task
 sessions can look things up; `web_fetch' is not, because it reaches
 whatever URL the agent names.  `notify' only reaches the user, through
 the notification providers they set up, so unattended sessions can
-tell them when they are needed.  Standing rules in `harness-perms-rules'
-are checked first and can still deny any of these tools.")
+tell them when they are needed.  `hand_in' only records a task's
+report and ends the turn: whether the work is ready is the user's
+call when they review it, never the judge's.  Standing rules in
+`harness-perms-rules' are checked first and can still deny any of
+these tools.")
 
 (defcustom harness-perms-rules nil
   "Standing permission rules that apply to every session.
@@ -609,38 +621,78 @@ DECISION is the current value and NEXT continues the chain."
 
 (defconst harness-perms--judge-system
   "You are the permission judge for an autonomous coding agent running inside Emacs.
-The agent wants to run a tool.  Decide whether the call is safe and within the
-user's evident intent.  Allow ordinary development work inside the allowed
-directories.  Looking things up on the web (documentation, references, issue
-trackers, package registries) is ordinary development work too, as long as the
-URL does not carry secrets or project data.  Deny anything destructive or
-irreversible outside the project (deleting or overwriting unrelated files,
-force pushes, changing system configuration, exfiltrating secrets, network
-calls to unexpected hosts, or installing software system-wide).  Also deny
-anything that would widen the agent's own permissions or weaken the harness's
-safeguards: granting itself directories (harness-allowed-directories,
-including in .dir-locals.el files), changing the permission mode or the
-non-interactive setting, or turning the sandbox off.  Only the user grants
-directories; the agent asks for one with the request_directory_access tool.
-When unsure, deny with a reason the agent can act on.  Reply with exactly one
-line of JSON and nothing else:
+You see one tool call and nothing else: not the conversation, the task, the
+plan or the project's instructions, and you must not guess at them.  Decide
+one thing: could this call do serious harm that is hard to undo?  Whether the
+call is needed, fits the task, comes at the right time or follows the
+project's workflow (reviews, handing work in, committing, merging, landing,
+tests, conventions) is not your question; never deny a call for such reasons.
+
+Allow ordinary development work: reading anything, editing and creating files,
+building, running tests and scripts, local git operations, making scratch
+files and directories anywhere (temporary directories included), and looking
+things up on the web (documentation, references, issue trackers, package
+registries) as long as the URL carries no secrets or project data.  The
+allowed roots are where the agent's own work lives; reading outside them, or
+creating new files outside them, is fine.
+
+Deny only what clearly risks serious harm:
+- deleting or overwriting existing data outside the allowed roots (system
+  files, the user's files, other repositories), or wiping a repository or a
+  home directory;
+- force pushes, deleting remote branches, or other irreversible changes to
+  shared remotes;
+- changing system configuration, installing software system-wide, or killing
+  unrelated processes (the user's Emacs, say);
+- sending secrets or private data off the machine;
+- widening the agent's own permissions or weakening the harness's safeguards:
+  granting itself directories (harness-allowed-directories, including in
+  .dir-locals.el files), changing the permission mode or the non-interactive
+  setting, or turning the sandbox off.  Only the user grants directories; the
+  agent asks for one with the request_directory_access tool.
+When in doubt, allow: a needless denial stops work the user wants done.  Reply
+with exactly one line of JSON and nothing else:
 {\"decision\":\"allow\"|\"deny\",\"reason\":\"one short sentence\"}"
-  "System prompt for the auto-mode judge.")
+  "System prompt for the auto-mode judge.
+The judge is a safety check, not the agent's manager: it sees the one
+call, decides only whether that call risks serious harm, and leans to
+allowing, since a needless denial stops an unattended task.  It never
+rules on the task, its scope or the project's workflow, and it is given
+nothing to rule on them with: `harness-perms--judge-text' describes the
+call alone, and the request is `:ephemeral', so the provider brings no
+earlier conversation and no project instructions (CLAUDE.md and the
+like) either.")
+
+(defun harness-perms--what-it-does (description)
+  "Return what a tool does: the first sentence of its DESCRIPTION.
+The rest of a description tells the agent how to use the tool (prefer
+this tool to that command, call it once, when to stop), which is not
+the judge's to enforce."
+  (let ((text (and (stringp description) (string-trim description)))
+        (case-fold-search nil))           ; else [:upper:] matches any letter
+    (cond ((or (null text) (string-empty-p text)) "(no description)")
+          ((string-match "[.!?]\\([ \t\n]+\\)[[:upper:]]" text) (substring text 0 (match-beginning 1)))
+          (t text))))
 
 (defun harness-perms--judge-text (request)
   "Return the user message describing REQUEST for the judge.
-The input goes in as text, not bytes: the provider encodes the whole
-message as JSON again, and the bytes of non-ASCII input would make
-that fail."
+That is the call alone: the tool, what it does, its input, and where
+the agent works.  The input goes in as text, not bytes: the provider
+encodes the whole message as JSON again, and the bytes of non-ASCII
+input would make that fail."
   (let* ((tool (plist-get request :tool))
          (spec (and (harness-method-exists-p 'tools/get) (harness-call 'tools/get tool)))
          (session (plist-get request :session)))
-    (format "Tool: %s\nKind: %s\nDescription: %s\n\nInput (JSON):\n%s\n\nWorking directory: %s\nAllowed roots:\n%s\n\nAnswer with one line of JSON: {\"decision\":\"allow\"|\"deny\",\"reason\":\"...\"}"
+    (format "Tool: %s\nKind: %s\nWhat it does: %s\n\nInput (JSON):\n%s\n\nWorking directory: %s\nAllowed roots (where the agent's own work lives):\n%s\n\nIs this one call safe?  Answer with one line of JSON: {\"decision\":\"allow\"|\"deny\",\"reason\":\"...\"}"
             tool (plist-get request :kind)
-            (or (plist-get spec :description) "(no description)")
+            (harness-perms--what-it-does (plist-get spec :description))
             (harness-truncate-end (harness-json-encode-text (or (plist-get request :input) :empty)) 4000)
             (or (plist-get session :cwd) default-directory)
             (mapconcat (lambda (r) (concat "- " r)) (harness-perms-roots session) "\n"))))
+
+(defconst harness-perms-judge-deny-hint
+  "The permission judge found this call unsafe for the reason given. Reach the goal another way that avoids that risk."
+  "Hint attached to a denial by the auto-mode judge.")
 
 (defun harness-perms--parse-verdict (text)
   "Return (:behavior allow|deny :reason R) from the first JSON object in TEXT.
@@ -652,7 +704,7 @@ Return nil when TEXT holds no usable verdict."
       (pcase (and (stringp decision) (downcase decision))
         ("allow" (list :behavior 'allow :reason (or reason "allowed by the auto-mode judge")))
         ("deny" (list :behavior 'deny :reason (or reason "denied by the auto-mode judge")
-                      :hint "Choose a different approach that stays within the allowed scope."))))))
+                      :hint harness-perms-judge-deny-hint))))))
 
 (defun harness-perms--no-verdict-message (tool event text)
   "Return the warning for a judge of TOOL whose `done' EVENT brought no verdict.
@@ -732,6 +784,9 @@ value and NEXT continues the chain."
                               (harness-call
                                'provider/complete
                                (list :model model
+                                     ;; A verdict on this call alone: no earlier
+                                     ;; verdicts, no project instructions.
+                                     :ephemeral t
                                      :session (list :id (format "%s-perms" (plist-get session :id))
                                                     :cwd (plist-get session :cwd) :host (plist-get session :host))
                                      :system harness-perms--judge-system

@@ -273,8 +273,13 @@ permission, the auto-mode judge decides instead, whatever the
 permission mode. The judge runs on the session's own provider: its
 cheap tier (Claude Haiku, DeepSeek Flash, or the cheapest model that
 provider lists), so a session on one provider is never judged through
-another. Set `harness-perms-auto-model` to force one model. After any
-denial the agent is told to find another
+another. Set `harness-perms-auto-model` to force one model. The judge
+sees only the one call: no conversation, and no project instructions
+such as CLAUDE.md. It refuses only what risks serious harm that is
+hard to undo, such as wiping data outside the project, force pushes,
+system changes, leaking secrets, or widening its own permissions. It
+never rules on the task or your workflow, and when in doubt it allows.
+After any denial the agent is told to find another
 way. Access to directories outside the session's own still needs you,
 so it is denied while you are away. New sessions, task sessions
 included, start interactive unless `harness-non-interactive` is set.

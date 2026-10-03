@@ -468,6 +468,15 @@ loops only the trailing user message is sent.  A REQUEST may also carry
 the provider turns on its own tools in their place for this request,
 and `:tools` lacks them.
 
+A REQUEST with `:ephemeral t` is a one-off question, such as the
+auto-mode judge's.  The provider answers it from the request alone, as
+if nothing came before it and nothing comes after it: it brings no
+earlier conversation, keeps none, and loads no context of its own
+(project instructions, memory).  Providers that send the whole request
+every time (the HTTP APIs) already work that way.  Claude Code starts
+a throwaway CLI process for it, and Copilot a throwaway session (see
+below).
+
 Events delivered to `:on-event` (one plist each, in order):
 
 ```elisp
@@ -595,6 +604,25 @@ model), and the echoed `tool_result` a `tool-result`.  The process
 records which tools it was started with, so a request that turns
 WebSearch on or off restarts it with `--resume`.
 
+One-off requests (`:ephemeral`) do not use the session's CLI process.
+Each starts a process of its own, under a key of its own
+(SESSION-ID~N), never with `--resume`.  The process stops once the
+request is done: its input is closed, and it is killed if it still
+runs a few seconds later.  It runs with
+`harness-provider-claude--ephemeral-environment`
+(`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`,
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
+`CLAUDE_CODE_SKIP_PROMPT_HISTORY=1`; a CLI that does not know one
+ignores it), so it loads no CLAUDE.md or auto memory and saves no
+transcript.  A local session's request runs in a private empty
+directory, `claude-one-off/` in the state directory, rather than the
+project's, so no project settings or hooks apply either.  A remote
+session's runs in its own directory on its host.  This keeps the
+permission judge's verdicts on the call alone.  When the judge kept one
+CLI conversation per session, started in the project, each verdict saw
+the earlier ones (a hand-in, say) and the project's CLAUDE.md, and it
+judged by them.
+
 The Bedrock provider (`provider-bedrock`) is a native loop over the
 Converse API: one ConverseStream request per call, its binary event
 stream decoded into `text`, `thinking`, `usage` and `tool-call` events.
@@ -675,7 +703,8 @@ version 3 or newer.  Per harness session one CLI process:
   is `(:copilot-session-id PARENT :fork-pending t)`, which the first
   turn turns into `sessions.fork`.
 - Side requests are one-off questions: naming, compaction and the
-  permission judge.  A request is one when it sets `:max-tokens` (a turn
+  permission judge.  A request is one when it sets `:ephemeral` or
+  `:max-tokens` (a turn
   of the conversation never caps its answer), when its provider state
   is not the one its session has recorded (naming brings a fork of it),
   or when its session record has no state at all (the judge's).  Any
@@ -851,12 +880,27 @@ pending request and resolves when answered).
   `harness-perms--auto-allow-tools` are allowed in every mode: the meta
   tools, skill and Emacs lookups, `web_search`, which only sends its
   query to the configured search provider, so task sessions can search,
-  and `notify`, which only reaches the user through the notification
-  providers they set up, so unattended sessions can say they need them.
+  `notify`, which only reaches the user through the notification
+  providers they set up, so unattended sessions can say they need them,
+  and `hand_in`, which only records a task's report and ends the turn.
   The model provider's own search, standing in for `web_search` (see
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
   `web_fetch` reaches any URL and stays with the mode (the judge in auto).
+- The judge is a safety check, not the agent's manager.  Its prompt
+  (`harness-perms--judge-system`) has it decide one thing: whether the
+  call risks serious harm that is hard to undo.  That means destroying
+  data outside the roots, force pushes, system changes, sending secrets
+  away, or widening its own permissions.  It leans to allowing:
+  reads anywhere, edits, builds, tests, local git and scratch files
+  anywhere (temporary directories included) are ordinary work.  It
+  never rules on the task, its scope, its review or the project's
+  workflow, and it is given nothing to rule on them with.  The user
+  message (`harness-perms--judge-text`) holds the call alone: the tool,
+  the first sentence of its description, the input, the working
+  directory and the allowed roots.  The request is `:ephemeral`, so the
+  provider brings no earlier verdicts and no project instructions
+  (CLAUDE.md).  A judge's denial carries `harness-perms-judge-deny-hint`.
 - Jail denials are final and carry a constructive hint listing the
   allowed roots and how to widen them.
 - Non-interactive (the user is away) is no permission policy of its
@@ -1441,7 +1485,7 @@ TRAMP prefixes come from the session host):
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
-| `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only) |
+| `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read |
 | `merge_done` | Finish merge | none | meta (merge module) |

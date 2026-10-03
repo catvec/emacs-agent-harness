@@ -50,6 +50,16 @@
 ;;   data behind the CLI's /usage, fetched without a model call) gives
 ;;   the plan's quota and the cost total the process starts from.
 ;;
+;; One-off questions (a request with `:ephemeral', the permission
+;; judge's) are the exception to one process per session: each gets a
+;; CLI process of its own, started for it under a key of its own and
+;; stopped once it is done, so it never resumes a conversation and
+;; leaves none behind.  That process loads no CLAUDE.md and no auto
+;; memory and saves no transcript, and a local one runs in a private
+;; empty directory rather than the project's: the answer comes from
+;; the request alone, not from earlier requests or the project's
+;; instructions.
+;;
 ;; Pricing.  A `result' carries `total_cost_usd', a running total for
 ;; the whole process that `--resume' seeds with the session's earlier
 ;; spend, so a turn costs the difference to the previous total.  That
@@ -78,6 +88,8 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-provider)
+
+(defvar harness-state-directory)
 
 ;;;; Customisation
 
@@ -415,15 +427,21 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
          (command (harness-provider-claude--command model effort system resume fork
                                                     (harness-provider-claude--cli-tools request)))
          (stderr (generate-new-buffer " *harness-claude-stderr*" t))
-         (proc (make-process :name (format "harness-claude-%s" (harness-provider-claude-session-id entry))
-                             :command command
-                             :coding '(utf-8 . utf-8)
-                             :connection-type 'pipe
-                             :noquery t
-                             :file-handler t
-                             :stderr stderr
-                             :filter (lambda (_p chunk) (harness-provider-claude--filter entry chunk))
-                             :sentinel (lambda (p e) (harness-provider-claude--sentinel entry p e)))))
+         (proc (condition-case err
+                   (make-process :name (format "harness-claude-%s" (harness-provider-claude-session-id entry))
+                                 :command command
+                                 :coding '(utf-8 . utf-8)
+                                 :connection-type 'pipe
+                                 :noquery t
+                                 :file-handler t
+                                 :stderr stderr
+                                 :filter (lambda (_p chunk) (harness-provider-claude--filter entry chunk))
+                                 :sentinel (lambda (p e) (harness-provider-claude--sentinel entry p e)))
+                 ;; A CLI that cannot start (missing, say) leaves the pipe
+                 ;; its stderr was to come through behind.
+                 (error (when-let* ((ep (get-buffer-process stderr))) (delete-process ep))
+                        (kill-buffer stderr)
+                        (signal (car err) (cdr err))))))
     (when-let* ((ep (get-buffer-process stderr)))
       (set-process-query-on-exit-flag ep nil)
       (set-process-sentinel ep #'ignore))
@@ -1514,6 +1532,84 @@ fetched first when REFRESH is non-nil or the last one is stale (see
   "Return a promise of the static model catalogue."
   (harness-resolved (mapcar #'copy-sequence harness-provider-claude-models)))
 
+;;;; One-off requests
+
+(defconst harness-provider-claude--ephemeral-environment
+  '("CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"
+    "CLAUDE_CODE_SKIP_PROMPT_HISTORY=1")
+  "Environment added to the CLI process of a one-off request.
+The process loads no CLAUDE.md (neither the user's, nor the project's,
+nor auto memory) and saves no transcript, so its answer comes from the
+request alone.  These are documented environment variables of Claude
+Code: a CLI too old to know one ignores it.")
+
+(defvar harness-provider-claude--ephemeral-count 0
+  "Counter that keeps the process keys of one-off requests apart.")
+
+(defun harness-provider-claude--ephemeral-directory (session)
+  "Return the directory the CLI process of a one-off request of SESSION runs in.
+For a local session that is a private, empty directory of the harness's
+own, made when missing, so no project's settings or hooks come along
+either.  A remote session's request runs in the session's directory on
+its host, where the environment alone keeps CLAUDE.md out."
+  (let ((cwd (or (plist-get session :cwd) default-directory)))
+    (if (or (plist-get session :host) (file-remote-p cwd))
+        cwd
+      (let ((dir (file-name-as-directory (expand-file-name "claude-one-off" harness-state-directory))))
+        (unless (file-directory-p dir)
+          (make-directory dir t)
+          (set-file-modes dir #o700))
+        dir))))
+
+(defun harness-provider-claude--end-ephemeral (key)
+  "Stop the CLI process of the one-off request KEY and forget it.
+Its input is closed, so that it can exit by itself once it has answered
+what it was still asked (a usage report, say); it is killed if it still
+runs `harness-provider-claude--interrupt-timeout' seconds later."
+  (when-let* ((entry (gethash key harness-provider-claude--sessions)))
+    (remhash key harness-provider-claude--sessions)
+    (let ((proc (harness-provider-claude-session-process entry)))
+      (when (process-live-p proc)
+        (ignore-errors (process-send-eof proc))))
+    (run-at-time harness-provider-claude--interrupt-timeout nil #'harness-provider-claude--kill entry)))
+
+(defun harness-provider-claude--complete-ephemeral (request)
+  "Run the one-off REQUEST in a CLI process of its own; return its handle.
+The process is started for REQUEST alone, under a key of its own, so
+it resumes no CLI session and REQUEST's session keeps its own; it is
+stopped once REQUEST is done (`harness-provider-claude--end-ephemeral').
+It runs with `harness-provider-claude--ephemeral-environment', in
+`harness-provider-claude--ephemeral-directory'."
+  (let* ((session (plist-get request :session))
+         (key (format "%s~%d" (or (plist-get session :id) "default")
+                      (cl-incf harness-provider-claude--ephemeral-count)))
+         (on-event (or (plist-get request :on-event) #'ignore))
+         ;; The spawn takes the environment from here.
+         (process-environment (append harness-provider-claude--ephemeral-environment
+                                      process-environment)))
+    (condition-case err
+        (harness-provider-claude--complete
+         (append (list :session (list :id key :host (plist-get session :host)
+                                      :cwd (harness-provider-claude--ephemeral-directory session))
+                       :provider-state nil
+                       :on-event (lambda (event)
+                                   (unwind-protect (funcall on-event event)
+                                     (when (eq (plist-get event :type) 'done)
+                                       (run-at-time 0 nil #'harness-provider-claude--end-ephemeral key)))))
+                 (harness-plist-remove request :session :provider-state :on-event)))
+      (error (harness-provider-claude--end-ephemeral key)
+             (signal (car err) (cdr err))))))
+
+(defun harness-provider-claude--start (request)
+  "Start REQUEST, the provider's `:complete'; return a handle with `:cancel'.
+A one-off request (`:ephemeral') runs in a CLI process of its own
+\(`harness-provider-claude--complete-ephemeral'), any other in its
+session's (`harness-provider-claude--complete')."
+  (if (harness-json-true-p (plist-get request :ephemeral))
+      (harness-provider-claude--complete-ephemeral request)
+    (harness-provider-claude--complete request)))
+
 (defun harness-provider-claude-close (session-id)
   "Shut down the CLI process serving SESSION-ID, if any."
   (when-let* ((entry (gethash session-id harness-provider-claude--sessions)))
@@ -1531,8 +1627,26 @@ fetched first when REFRESH is non-nil or the last one is stale (see
   (harness-provider-claude--settle-refresh))
 
 (defun harness-provider-claude--on-session-gone (session-id &rest _)
-  "Close the process for SESSION-ID when its session is deleted or deactivated."
-  (harness-provider-claude-close session-id))
+  "Close the process for SESSION-ID when its session is deleted or deactivated.
+Requests made on its behalf under keys of their own (a one-off
+request's SESSION-ID-perms~N) lose theirs too."
+  (harness-provider-claude-close session-id)
+  (dolist (id (hash-table-keys harness-provider-claude--sessions))
+    (when (string-prefix-p (concat session-id "-") id)
+      (harness-provider-claude-close id))))
+
+(defun harness-provider-claude--drop-judge-conversations ()
+  "Stop the idle CLI processes the permission judge kept per session.
+Before one-off requests had processes of their own, each session's
+judge kept one CLI conversation, under SESSION-ID-perms, until the
+harness stopped.  Loading this file ends the idle ones."
+  (dolist (id (hash-table-keys harness-provider-claude--sessions))
+    (let ((entry (gethash id harness-provider-claude--sessions)))
+      (when (and (string-suffix-p "-perms" id)
+                 (not (harness-provider-claude-session-active entry)))
+        (harness-provider-claude-close id)))))
+
+(harness-provider-claude--drop-judge-conversations)
 
 (defun harness-provider-claude--init ()
   "Register the provider and subscribe to session lifecycle events."
@@ -1543,7 +1657,7 @@ fetched first when REFRESH is non-nil or the last one is stale (see
   :label "Claude Code"
   :doc "Claude models through the official claude CLI (subscription friendly)."
   :models #'harness-provider-claude--models
-  :complete #'harness-provider-claude--complete
+  :complete #'harness-provider-claude--start
   :fork #'harness-provider-claude--fork
   :quota #'harness-provider-claude--quota
   :capabilities harness-provider-claude-capabilities

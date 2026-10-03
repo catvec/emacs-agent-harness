@@ -355,6 +355,150 @@ and the sessions created meanwhile kept that window."
       (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason))))
     (harness-provider-claude-close "child")))
 
+;;;; One-off requests
+
+(defun harness-provider-claude-test--one-off (sid cwd text &rest extra)
+  "Run a one-off request of SID's in CWD with TEXT and EXTRA keys.
+Return (EVENTS . DUMP), DUMP being what its CLI process saw."
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+         (events (car (harness-provider-claude-test--run
+                       (apply #'harness-provider-claude-test--request sid text
+                              :session (list :id sid :cwd cwd) :ephemeral t :tools nil :max-tokens 200
+                              extra)))))
+    (cons events (harness-provider-claude-test--read-argv argv-file))))
+
+(defun harness-provider-claude-test--one-off-processes (prefix)
+  "Return the live CLI processes of the one-off requests of session PREFIX."
+  (cl-remove-if-not (lambda (p) (and (process-live-p p)
+                                     (string-prefix-p (format "harness-claude-%s~" prefix) (process-name p))))
+                    (process-list)))
+
+(defun harness-provider-claude-test--cli-session (events)
+  "Return the CLI session id the provider-state event of EVENTS names."
+  (plist-get (plist-get (harness-provider-claude-test--find events 'provider-state) :state) :cli-session-id))
+
+(ert-deftest harness-provider-claude-one-off-request-runs-alone ()
+  "A one-off request runs in a fresh CLI process that loads no context.
+The permission judge's requests are one-off ones.  They used to go into
+one CLI conversation per session, started in the project, so every
+verdict saw the earlier ones (a task handed in) and the project's
+CLAUDE.md, and judged by them.  Each now runs in a process of its own:
+never resumed, with CLAUDE.md, auto memory and transcripts off, in a
+private directory rather than the project, and stopped once done.  The
+session's own process is left alone."
+  (harness-provider-claude-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (argv-file (harness-provider-claude-test--argv-file))
+         (turn (let ((process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file)
+                                                process-environment)))
+                 (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "s9" "hi" :session (list :id "s9" :cwd cwd))))))
+         (own (harness-provider-claude-session-process (gethash "s9" harness-provider-claude--sessions)))
+         (own-env (plist-get (harness-provider-claude-test--read-argv argv-file) :env))
+         (first (harness-provider-claude-test--one-off "s9-perms" cwd "is this call safe"))
+         (dump (cdr first))
+         (env (plist-get dump :env))
+         (ran-in (file-name-as-directory (file-truename (plist-get dump :cwd)))))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find turn 'done) :stop-reason)))
+    ;; A session's turn loads what the CLI loads.
+    (should-not (plist-get own-env :CLAUDE_CODE_DISABLE_CLAUDE_MDS))
+    ;; The one-off is answered...
+    (should (equal "hello" (harness-provider-claude-test--text (car first))))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find (car first) 'done) :stop-reason)))
+    ;; ...from the request alone: no conversation before it, no CLAUDE.md,
+    ;; memory or transcript, not in the project.
+    (should-not (member "--resume" (plist-get dump :argv)))
+    (should (equal "1" (plist-get env :CLAUDE_CODE_DISABLE_CLAUDE_MDS)))
+    (should (equal "1" (plist-get env :CLAUDE_CODE_DISABLE_AUTO_MEMORY)))
+    (should (equal "1" (plist-get env :CLAUDE_CODE_SKIP_PROMPT_HISTORY)))
+    (should-not (equal (file-truename cwd) ran-in))
+    (should (equal (file-truename (expand-file-name "claude-one-off/" harness-state-directory)) ran-in))
+    (should (= #o700 (file-modes ran-in)))
+    ;; Nothing is kept once it is done: no record, and its process exits.
+    (harness-test-wait (lambda () (= 1 (hash-table-count harness-provider-claude--sessions)))
+                       5 "the one-off's record to go")
+    (should (gethash "s9" harness-provider-claude--sessions))
+    (harness-test-wait (lambda () (null (harness-provider-claude-test--one-off-processes "s9-perms")))
+                       5 "the one-off's process to exit")
+    ;; The next one-off starts afresh, not in the first one's conversation.
+    (let ((second (harness-provider-claude-test--one-off "s9-perms" cwd "and this one")))
+      (should-not (member "--resume" (plist-get (cdr second) :argv)))
+      (should (stringp (harness-provider-claude-test--cli-session (car second))))
+      (should-not (equal (harness-provider-claude-test--cli-session (car first))
+                         (harness-provider-claude-test--cli-session (car second)))))
+    ;; The session's own process served neither, and still serves it.
+    (should (eq own (harness-provider-claude-session-process (gethash "s9" harness-provider-claude--sessions))))
+    (should (process-live-p own))
+    (harness-provider-claude-close "s9")))
+
+(ert-deftest harness-provider-claude-one-off-request-ends-every-way ()
+  "A one-off request's process goes however the request ends.
+Cancelled (the judge timing out), dead mid-turn, or never started: no
+record and no process is left behind."
+  (harness-provider-claude-test--setup)
+  (let ((cwd (harness-test-temp-dir)))
+    ;; Cancelled.
+    (let* (events
+           (handle (harness-call 'provider/complete
+                                 (harness-provider-claude-test--request
+                                  "s10" "hang here" :session (list :id "s10-perms" :cwd cwd) :ephemeral t
+                                  :on-event (lambda (ev) (push ev events))))))
+      (harness-test-wait (lambda () (harness-provider-claude-test--find events 'text)) 10 "first delta")
+      (should (harness-provider-claude-test--one-off-processes "s10-perms"))
+      (funcall (plist-get handle :cancel))
+      (harness-test-wait (lambda () (harness-provider-claude-test--find events 'done)) 10 "done")
+      (should (eq 'cancelled (plist-get (harness-provider-claude-test--find events 'done) :stop-reason))))
+    ;; Dead mid-turn.
+    (let ((done (harness-provider-claude-test--find (car (harness-provider-claude-test--one-off "s10-perms" cwd "die now"))
+                                                    'done)))
+      (should (eq 'error (plist-get done :stop-reason))))
+    (harness-test-wait (lambda () (and (zerop (hash-table-count harness-provider-claude--sessions))
+                                       (null (harness-provider-claude-test--one-off-processes "s10-perms"))))
+                       10 "the one-offs' records and processes to go")
+    ;; Never started: the CLI is missing.
+    (let* ((harness-provider-claude-program (expand-file-name "no-such-claude" cwd))
+           (done (harness-provider-claude-test--find
+                  (car (harness-provider-claude-test--run
+                        (harness-provider-claude-test--request
+                         "s10" "hi" :session (list :id "s10-perms" :cwd cwd) :ephemeral t)))
+                  'done)))
+      (should (eq 'error (plist-get done :stop-reason)))
+      (should (zerop (hash-table-count harness-provider-claude--sessions)))
+      ;; Not even the pipe its stderr was to come through.
+      (should-not (harness-provider-claude-test--one-off-processes "s10-perms")))
+    ;; Its session deleted while it runs.
+    (let (events)
+      (harness-call 'provider/complete
+                    (harness-provider-claude-test--request
+                     "s10" "hang here" :session (list :id "s10-perms" :cwd cwd) :ephemeral t
+                     :on-event (lambda (ev) (push ev events))))
+      (harness-test-wait (lambda () (harness-provider-claude-test--find events 'text)) 10 "first delta")
+      (harness-emit 'session/deleted "s10")
+      (should (eq 'cancelled (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+      (should (zerop (hash-table-count harness-provider-claude--sessions)))
+      (harness-test-wait (lambda () (null (harness-provider-claude-test--one-off-processes "s10-perms")))
+                         5 "the one-off's process to go"))))
+
+(ert-deftest harness-provider-claude-drops-the-judges-old-conversations ()
+  "Loading the provider stops the CLI processes the judge kept per session.
+Each session's judge used to keep one conversation, SESSION-ID-perms,
+until the harness stopped, even after the session was deleted.  A busy
+one finishes its request; other sessions keep theirs."
+  (harness-provider-claude-test--setup)
+  (let ((cwd (harness-test-temp-dir)))
+    (dolist (sid '("s12" "s12-perms"))
+      (harness-provider-claude-test--run
+       (harness-provider-claude-test--request sid "hi" :session (list :id sid :cwd cwd))))
+    (let ((judge (harness-provider-claude-session-process (gethash "s12-perms" harness-provider-claude--sessions)))
+          (own (harness-provider-claude-session-process (gethash "s12" harness-provider-claude--sessions))))
+      (harness-test-load-module 'provider-claude)
+      (should-not (gethash "s12-perms" harness-provider-claude--sessions))
+      (should-not (process-live-p judge))
+      (should (eq own (harness-provider-claude-session-process (gethash "s12" harness-provider-claude--sessions))))
+      (should (process-live-p own)))
+    (harness-provider-claude-close "s12")))
+
 ;;;; Sessions on the CLI: what BTWs and forks share
 
 (defmacro harness-provider-claude-test-with-sessions (&rest body)
