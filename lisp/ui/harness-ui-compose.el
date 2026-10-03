@@ -708,7 +708,12 @@ space) is cleaned first; one that is no http, https or ftp link with a
 host to fetch is refused, shown with %S so that what was wrong with it
 shows."
   (interactive (list (read-string "Download and attach the link: ")))
-  (setq url (harness-http-clean-url url))
+  (let ((raw url))
+    (setq url (harness-http-clean-url url))
+    (unless (equal raw url)
+      ;; The junk a drop hides: worth a line in the log, since it is what
+      ;; makes curl disagree with what the box shows.
+      (harness-log 'info "compose: link arrived as %S, cleaned to %S" raw url)))
   (harness-log 'debug "compose: link to download: %S" url)
   (unless (and (string-match-p "\\`\\(?:https?\\|ftps?\\)://" url) (harness-http-link-p url))
     (user-error "That is not a link I can fetch: %S" url))
@@ -757,6 +762,7 @@ A web page is not downloaded: the link goes into the box instead."
      (err
       (with-current-buffer buf
         (harness-compose--settle-pending id nil)
+        (harness-log 'warn "compose: download failed for %S: %s" (plist-get att :url) err)
         (message "Could not download %s: %s" (plist-get att :url) err)))
      (t
       (with-current-buffer buf

@@ -153,6 +153,22 @@ oldest first."
     (should (equal "https://exa\u00e9mple.com/x" (harness-http-clean-url "https://exa\u00e9mple.com/x")))
     (should (equal "https://example.com/a%20b.png"
                    (harness-http-clean-url "https://example.com/a%20b.png"))))
+  ;; The invisible spaces: no-break space, soft hyphen, zero width and
+  ;; bidi marks, ideographic space, in characters and in UTF-8 bytes.
+  (dolist (junk (list "\u00a0" "\u00ad" "\u200b" "\u200e" "\u2028" "\u202f" "\u2060" "\u3000" "\ufeff"))
+    (should (equal "https://git.sr.ht/~x" (harness-http-clean-url (concat "https://git.sr.ht" junk "/~x")))))
+  (should (equal "https://git.sr.ht/~x"
+                 (harness-http-clean-url (concat "https://git.sr.ht" (unibyte-string 194 160) "/~x"))))
+  (should (equal "https://git.sr.ht/~x"
+                 (harness-http-clean-url (concat "https://git.sr.ht" (unibyte-string 226 128 139) "/~x"))))
+  ;; A host with junk in it is no host: the box must not hand it to curl.
+  (should-not (harness-http-link-p "https://git.sr.ht\u00a0/~x"))
+  (should (harness-http-link-p (harness-http-clean-url "https://git.sr.ht\u00a0/~x")))
+  (should (harness-http-link-p "https://git.sr.ht:8080/x"))
+  (should (harness-http-link-p "https://user@example.com/x"))
+  (should (harness-http-link-p "http://[::1]:8080/x"))
+  (should-not (harness-http-link-p "https://exa mple.com/x"))
+  (should (harness-http-link-p "http://127.0.0.1:8080/x.png"))
   (should (harness-http-link-p "http://127.0.0.1:8080/x.png"))
   (should (harness-http-link-p "ftp://example.com/x"))
   (should-not (harness-http-link-p "https://"))

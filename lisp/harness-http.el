@@ -257,22 +257,48 @@ event.  Multi-line data fields are joined with newlines per the spec."
 
 (defun harness-http-clean-url (url)
   "Return URL without the junk a drop or a clipboard can carry.
-Control characters, NULs and byte order marks make curl read an address
-differently from how it prints -- a link that looks whole can come back
-as \"URL rejected: No host present\" -- and browsers strip tabs and
-newlines from URLs themselves.  A leading byte order mark, in bytes or
-as a character, goes too, as does surrounding whitespace."
+Control characters, NULs, byte order marks and the invisible spaces
+(no-break space, soft hyphen, zero width and bidi marks, ideographic
+space) make curl read an address differently from how it prints -- a
+link that looks whole can come back as \"URL rejected: No host
+present\" -- and browsers strip tabs and newlines from URLs
+themselves.  A leading byte order mark, in bytes or as a character,
+goes too, as does surrounding whitespace."
   (let ((clean (or url "")))
     (when (string-prefix-p "\357\273\277" clean)      ; a UTF-8 BOM, unibyte
       (setq clean (substring clean 3)))
+    ;; The same invisible characters as they are spelled in UTF-8 bytes,
+    ;; for a unibyte string straight off a selection.
+    (setq clean (replace-regexp-in-string
+                 "\\(?:\302\240\\|\302\255\\|\342\200[\213-\217\250-\257]\\|\343\200\200\\|\357\273\277\\)+"
+                 "" clean))
     (setq clean (replace-regexp-in-string "[\0-\37\177]+" "" clean))
     (when (multibyte-string-p clean)
-      (setq clean (replace-regexp-in-string "[\ufeff\u200b-\u200f\u2028\u2029\u2060]+" "" clean)))
+      (setq clean
+            (replace-regexp-in-string
+             "[\ufeff\u00a0\u00ad\u1680\u2000-\u200f\u2028-\u202f\u205f\u2060-\u206f\u3000]+" "" clean)))
     (string-trim clean)))
 
+(defun harness-http--host-ok-p (url)
+  "Non-nil when the host of URL is made of characters a host may hold.
+This is what tells a link that only looks whole (invisible junk in the
+authority, say) from one that can be fetched."
+  (when (string-match "\\`[a-zA-Z][a-zA-Z0-9+.-]*://\\([^/?#]*\\)" url)
+    (let* ((authority (match-string 1 url))
+           (host (if (string-match "@" authority)
+                     (substring authority (1+ (match-beginning 0)))
+                   authority))
+           (host (if (string-prefix-p "[" host)
+                     (if (string-match "\\`\\[[0-9a-fA-F:.]*\\]" host) (match-string 0 host) host)
+                   (car (split-string host ":")))))
+      (and (not (string-empty-p host))
+           (string-match-p "\\`\\(?:\\[[0-9a-fA-F:.]*\\]\\|[A-Za-z0-9._~-]+\\)\\'" host)))))
+
 (defun harness-http-link-p (url)
-  "Non-nil when URL is a link the harness can fetch: a scheme and a host."
-  (and (stringp url) (string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#[:space:]]+" url)))
+  "Non-nil when URL is a link the harness can fetch: a scheme and a sane host."
+  (and (stringp url)
+       (string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" url)
+       (harness-http--host-ok-p url)))
 
 (defvar harness-http-download-progress-interval 0.25
   "Seconds between the progress reports of a download.")
