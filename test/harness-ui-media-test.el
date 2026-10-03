@@ -197,7 +197,14 @@ shows Stop, and stopping it kills the player."
       (set-file-modes script #o755)
       (harness-ui-media-play-video video)
       (should (harness-ui-media--video-process video))
-      (harness-test-wait (lambda () (file-exists-p log)) 5 "the player started")
+      ;; The shell creates the log before it writes it, so wait for the
+      ;; content, not the file: under load an empty file is a real race.
+      (harness-test-wait (lambda ()
+                           (and (file-exists-p log)
+                                (with-temp-buffer
+                                  (insert-file-contents log)
+                                  (string-match-p "movie.mp4" (buffer-string)))))
+                         5 "the player logged its arguments")
       (should (string-match-p "movie.mp4" (with-temp-buffer (insert-file-contents log) (buffer-string))))
       (let ((plain (substring-no-properties (harness-ui-media-render-attachment (list :path video :mime "video/mp4")))))
         (should (string-match-p "Stop" plain))
