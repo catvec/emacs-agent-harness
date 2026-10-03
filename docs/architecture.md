@@ -605,8 +605,11 @@ hits), sends the reasoning efforts DeepSeek accepts, and rebuilds
 (empty when there is none).  DeepSeek's thinking mode, on by default,
 rejects a tool-using history whose assistant messages omit that field,
 so the whole conversation goes back to it, not just the model's own
-call; the pass-back is gated on this flavor, and OpenAI and OpenRouter
-still drop thinking.  `harness-deepseek-*` adds registration and prices.
+call.  The handling follows an official DeepSeek host, not only the
+flavor: a hand-written OpenAI-compatible endpoint at `api.deepseek.com`
+still gets it (even when it names `:flavor openai'), so its tool loops
+do not 400, while OpenAI and OpenRouter hosts still drop thinking.
+`harness-deepseek-*` adds registration and prices.
 The provider is created only while a key is found
 (`harness-deepseek-api-key`, DEEPSEEK_API_KEY, or auth-source), so
 nothing uncallable is listed; see `harness-deepseek-always-register`.

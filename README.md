@@ -494,8 +494,10 @@ with the Chinese public holiday calendar.
 DeepSeek's thinking mode (on by default) requires the reasoning of
 earlier assistant turns to come back as `reasoning_content` once a
 request carries tools, so the provider replays the recorded thinking of
-each assistant message, empty when it has none; OpenAI and OpenRouter
-are unaffected and still drop thinking.
+each assistant message, empty when it has none.  This follows an
+official DeepSeek host, so an OpenAI-compatible endpoint you added
+yourself at `api.deepseek.com` gets it too; OpenAI and OpenRouter are
+unaffected and still drop thinking.
 
 ### AWS Bedrock
 

@@ -115,8 +115,9 @@ Every entry is a plist with these keys:
                    without a /models route
   :default-context context window used for models that do not report one
   :flavor          `openrouter', `openai' or `deepseek'; guessed from
-                   the URL when absent (`deepseek' is never guessed, so
-                   name it for an endpoint that needs its handling)
+                   the URL when absent (`deepseek' is never guessed, but
+                   an official DeepSeek host gets its handling anyway;
+                   see `harness-openai--deepseek-p')
   :capabilities    static capability plist overriding the flavor default
   :tiers           model names per tier (:cheap :balanced :frontier), as
                    `harness-define-provider' takes them; without one the
@@ -140,7 +141,10 @@ variable through customize re-registers the providers."
   (string-remove-suffix "/" (or (plist-get endpoint :base-url) "")))
 
 (defun harness-openai--flavor (endpoint)
-  "Return `openrouter' or `openai' for ENDPOINT."
+  "Return `openrouter' or `openai' for ENDPOINT.
+An explicit `:flavor' of `deepseek' is possible too, but the DeepSeek
+handling does not depend on it: an official DeepSeek host is recognized
+by its URL (see `harness-openai--deepseek-p')."
   (or (plist-get endpoint :flavor)
       (if (string-match-p "openrouter" (harness-openai--base-url endpoint))
           'openrouter
@@ -156,8 +160,10 @@ DeepSeek differs from plain OpenAI in how it reports cached input (its
 `prompt_tokens' includes the cached tokens, which are billed apart), in
 the reasoning efforts it accepts, and in requiring a tool-using
 history to carry the thinking of earlier assistant turns back as
-`reasoning_content'."
-  (eq (harness-openai--flavor endpoint) 'deepseek))
+`reasoning_content'.  The dialect follows the host, so an official
+DeepSeek host counts even when the endpoint names another flavor."
+  (or (eq (harness-openai--flavor endpoint) 'deepseek)
+      (harness-openai--deepseek-host-p endpoint)))
 
 (defun harness-openai--capabilities (endpoint)
   "Return the static capability plist for ENDPOINT."
@@ -171,6 +177,21 @@ history to carry the thinking of earlier assistant turns back as
 (defun harness-openai--host (endpoint)
   "Return the host part of ENDPOINT's base URL."
   (url-host (url-generic-parse-url (harness-openai--base-url endpoint))))
+
+(defconst harness-openai--deepseek-host-regexp
+  "\\`\\(.*\\.\\)?deepseek\\.com\\'"
+  "Hosts that speak the DeepSeek dialect, whatever an endpoint calls itself.")
+
+(defun harness-openai--deepseek-host-p (endpoint)
+  "Non-nil when ENDPOINT's base URL points at an official DeepSeek host.
+DeepSeek's rules (the reasoning replay, the reasoning efforts and how
+cached input is reported) follow the server rather than the endpoint's
+label, so an endpoint that declares another flavor but talks to
+DeepSeek still gets them."
+  (let ((host (harness-openai--host endpoint)))
+    (and (stringp host)
+         (not (string-empty-p host))
+         (and (string-match-p harness-openai--deepseek-host-regexp host) t))))
 
 (defun harness-openai--auth-source-key (host)
   "Look HOST up in auth-source with user \"apikey\"; return the secret or nil."

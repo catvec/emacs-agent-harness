@@ -78,6 +78,12 @@ RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
     :api-key "sk-test-deepseek" :flavor deepseek)
   "A DeepSeek-flavoured endpoint.")
 
+(defvar harness-openai-test-deepseek-host-endpoint
+  '(:id testdscompat :label "DeepSeek (OpenAI-compatible)"
+    :base-url "https://api.deepseek.com/v1" :api-key "sk-test-deepseek-compat"
+    :flavor openai)
+  "An endpoint pointed at DeepSeek but labelled plain OpenAI.")
+
 (defun harness-openai-test--complete (endpoint request)
   "Run REQUEST directly against ENDPOINT's complete function, collecting events.
 Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
@@ -302,6 +308,41 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
                                                            (:type "text" :text "ok")))))
                   harness-openai-test-endpoint)))
       (should-not (plist-get (car msgs) :reasoning_content)))))
+
+(ert-deftest harness-provider-openai-deepseek-host-is-recognized ()
+  ;; The dialect follows the host, not the label: an endpoint pointed at
+  ;; DeepSeek but declared `:flavor openai' still gets DeepSeek handling,
+  ;; or its tool loops would 400 for a missing reasoning_content.
+  (should (harness-openai--deepseek-p harness-openai-test-deepseek-host-endpoint))
+  (should (harness-openai--deepseek-p (list :base-url "https://api.deepseek.com")))
+  ;; A look-alike host is not DeepSeek, and plain OpenAI stays plain.
+  (should-not (harness-openai--deepseek-p (list :base-url "https://deepseek.com.evil.example/v1")))
+  (should-not (harness-openai--deepseek-p harness-openai-test-openai-endpoint))
+  (should-not (harness-openai--deepseek-p (list :base-url "https://api.openai.example/v1"))))
+
+(ert-deftest harness-provider-openai-deepseek-host-replays-reasoning-content ()
+  ;; An endpoint that only looks OpenAI-ish but talks to DeepSeek replays
+  ;; the recorded thinking, the way a `:flavor deepseek' one does.
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (harness-openai-test--complete
+     harness-openai-test-deepseek-host-endpoint
+     '(:model "testdscompat:deepseek-flash" :thinking "high" :max-tokens 321
+       :tools ((:name "echo"))
+       :messages ((:role user :content ((:type "text" :text "go")))
+                  (:role assistant :content ((:type "thinking" :text "weigh it")
+                                             (:type "tool_use" :id "call_1" :name "echo" :input (:value "x"))))
+                  (:role tool :content ((:type "tool_result" :tool_use_id "call_1" :content "x!"))))))
+    (let* ((body (harness-openai-test--last-request-json))
+           (assistant (nth 1 (plist-get body :messages))))
+      (should (equal "weigh it" (plist-get assistant :reasoning_content)))
+      ;; DeepSeek's reasoning efforts and max_tokens follow the host too.
+      (should (equal "high" (plist-get body :reasoning_effort)))
+      (should-not (plist-get body :reasoning))
+      (should (= 321 (plist-get body :max_tokens)))
+      (should-not (plist-get body :max_completion_tokens)))))
 
 ;;;; Event streams
 
