@@ -57,7 +57,10 @@
 ;;   active    its session is working on it, or stopped part way
 ;;             (`:outcome' says why: error, cancelled, merge-failed…)
 ;;   merging   the agent finished (and, with review, the user verified
-;;             the work); its branch is queued or merging
+;;             the work); its branch is queued or merging, or its
+;;             session resolves the merge's conflicts (`:merge-status'
+;;             queued, merging or conflict; `:merge-queued' says when
+;;             the branch joined the queue)
 ;;   review    the agent finished; the work waits for the user to
 ;;             verify it or send it back with feedback
 ;;   done      merged (or finished, outside git), and verified with
@@ -71,7 +74,10 @@
 ;;                 permission or a question, or it (or its refinement)
 ;;                 stopped part way
 ;;   review        finished, waiting for the user to verify it
-;;   active        in progress, merging included
+;;   merging       its branch holds a place in the merge queue: queued,
+;;                 merging, or its session resolving the conflicts
+;;                 (unless that session waits on the user: needs-input)
+;;   active        in progress
 ;;   done          completed
 ;;
 ;; Records are written shortly after every change and on exit; the
@@ -1673,9 +1679,13 @@ Their folders are read first, so no edit is written over."
 ;;;; Columns
 
 (defun harness-tasks--column (task)
-  "Return the kanban column of TASK: pending, needs-input, review, active or done.
+  "Return the kanban column of TASK, a symbol.
+That is pending, needs-input, review, merging, active or done.
 A task being refined shows in pending, where it ends up, unless the
-refinement needs the user."
+refinement needs the user.  A task whose branch holds a place in the
+merge queue shows in merging however it holds it: queued, merging, or
+its session resolving the conflicts; unless that session waits on the
+user, whose answer the queue then waits for too."
   (pcase (plist-get task :state)
     ('pending 'pending)
     ('done 'done)
@@ -1688,6 +1698,7 @@ refinement needs the user."
     (_ (let ((session (harness-tasks--session task)))
          (cond ((gethash (plist-get task :id) harness-tasks--starting) 'active)
                ((plist-get session :pending) 'needs-input)
+               ((plist-get task :merge-status) 'merging)
                ((eq (plist-get session :status) 'running) 'active)
                ((plist-get task :outcome) 'needs-input)
                (t 'active))))))
@@ -1739,7 +1750,8 @@ The bookkeeping of its file stays out."
                :id)))
 
 (defun harness-tasks--enqueue-merge (id)
-  "Queue task ID's branch for the merge queue, or put the task before the user."
+  "Queue task ID's branch for the merge queue, or put the task before the user.
+`:merge-queued' records when the branch joined the queue."
   (let* ((task (harness-tasks--get id))
          (attempts (1+ (or (plist-get task :merge-attempts) 0))))
     (cond
@@ -1752,7 +1764,7 @@ The bookkeeping of its file stays out."
       (condition-case err
           (let ((target (harness-tasks--merge-target (plist-get task :project))))
             (harness-tasks--set id :state 'merging :merge-status 'queued :merge-attempts attempts
-                                :merge-target target :outcome nil :error nil)
+                                :merge-target target :merge-queued (float-time) :outcome nil :error nil)
             (harness-call 'merge/enqueue (plist-get task :session) target
                           :message (format "task %s" (harness-first-line (plist-get task :prompt) 60))))
         (error (harness-tasks--set id :state 'active :outcome 'merge-failed :merge-status nil

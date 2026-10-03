@@ -948,6 +948,7 @@ and never ends, so the task stays in progress, and nothing is committed."
     ("slower than" . harness-media--task-slow)
     ("typed config" . harness-media--task-settings)
     ("OpenAPI" . harness-media--task-openapi)
+    ("Hold this turn" . harness-media--hold-script)
     ("/health" . harness-media--task-health))
   "Scripts as (REGEXP . FUNCTION), matched against the newest user message.")
 
@@ -1135,8 +1136,20 @@ Give up after TIMEOUT seconds (default 90)."
   "Submit PROMPT as a task of the demo project with OPTS; return its id."
   (plist-get (harness-call 'task/submit harness-media-project prompt opts) :id))
 
+(defun harness-media--hold-script (_request)
+  "A turn that never ends: the merge queue's parent, kept busy for the board picture."
+  (list (list :type 'hold)))
+
+(defun harness-media--hold-merge-session ()
+  "Keep the task project's merge session busy, so a merged branch waits in the queue.
+The picture of the board then has a task in its merging section."
+  (let ((merger (cl-find "Task merges" (harness-call 'session/list)
+                         :key (lambda (s) (plist-get s :name)) :test #'equal)))
+    (when merger
+      (harness-media--prompt (plist-get merger :id) "Hold this turn while the picture is taken." '(running)))))
+
 (defun harness-media--build-tasks ()
-  "Fill the task board: done, in review, in progress, stuck and in the backlog."
+  "Fill the task board: done, merging, in review, in progress, stuck and in the backlog."
   (let* ((constant (harness-media--submit "use hmac.compare_digest when checking API keys, so a key check takes the same time whatever the key"))
          (python (harness-media--submit "we deploy on 3.12 now: bump requires-python and list the versions we support in pyproject.toml")))
     (dolist (id (list constant python))
@@ -1153,6 +1166,11 @@ Give up after TIMEOUT seconds (default 90)."
           (retry (harness-media--submit "webhooks: retry failed deliveries with exponential backoff, give up after an hour" :refine t)))
       (dolist (id (list pagination slow))
         (harness-media--wait-task id (lambda (task) (equal (harness-media--column task) "review")) "to wait for review"))
+      ;; With the merge session busy, the verified branch waits in the queue.
+      (harness-media--hold-merge-session)
+      (harness-call 'task/verify pagination)
+      (harness-media--wait-task pagination (lambda (task) (equal (harness-media--column task) "merging"))
+                                "to wait in the merge queue")
       (harness-call 'task/reject slow "Say which unit the threshold is in.")
       (harness-media--wait-task slow (lambda (task) (equal (harness-media--column task) "active")) "to go back to work")
       (harness-media--wait-task slow (lambda (task) (equal (harness-media--column task) "review")) "to come back for review")
@@ -1288,6 +1306,9 @@ Give up after TIMEOUT seconds (default 90)."
                        (and refined (list :refined (harness-media--ago refined)))))
         (when-let* ((sid (plist-get task :session)))
           (harness-media--set-times sid created (or finished verified refined 1)))))
+    ;; The branch waiting in the merge queue joined it when its work finished,
+    ;; so its card reads "queued 21m ago" rather than "just now".
+    (harness-tasks--set (plist-get tasks :pagination) :merge-queued (harness-media--ago 21))
     (pcase-dolist (`(,key ,created ,updated)
                    '((:guide 2900 2870) (:flaky 5800 5790) (:hero 7 0.2) (:fork 3 2) (:btw 1 0.5)
                      (:permission 9 8) (:question 15 14)))

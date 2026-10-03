@@ -1984,6 +1984,49 @@ Each is a new session, never an earlier one."
         (harness-tasks-test-wait-state id 'done)
         (should (equal (list (list id 'merged t)) done))))))
 
+(ert-deftest harness-tasks-git-merge-queue-column ()
+  "A task whose branch is in the merge queue shows in a column of its own.
+The task record keeps when the branch joined the queue; done only once
+the merge finished."
+  (harness-tasks-test-with-git
+    (let ((harness-tasks-require-verification t)
+          (columns nil))
+      (harness-on 'task/changed (lambda (task) (push (plist-get task :column) columns)))
+      (let ((id (harness-tasks-test-submit "Change the shared file")))
+        (harness-tasks-test-wait-state id 'review)
+        (should-not (plist-get (harness-tasks-test-task id) :merge-queued))
+        (harness-call 'task/verify id)
+        (harness-tasks-test-wait-state id 'done)
+        ;; It waited in merging while the queue held its branch, and the
+        ;; time it joined the queue is kept.
+        (should (memq 'merging columns))
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'done (plist-get task :column)))
+          (should-not (plist-get task :merge-status))
+          (should (numberp (plist-get task :merge-queued))))
+        (should (equal "two\n" (harness-tasks-test--main-text root)))))))
+
+(ert-deftest harness-tasks-column-merging-for-every-place-in-the-queue ()
+  "Queued, merging and conflict all read as the merging column.
+A session the user has to answer for comes first: the queue waits too."
+  (harness-tasks-test-with
+    (let* ((sid (plist-get (harness-call 'session/create :cwd default-directory) :id))
+           (id "t-in-the-queue")
+           (task (list :id id :project default-directory :cwd default-directory
+                       :prompt "conflicted" :session sid :state 'merging
+                       :merge-status 'queued :created (float-time))))
+      (harness-tasks--put task)
+      (dolist (status '(queued merging conflict))
+        (harness-tasks--set id :merge-status status)
+        (should (eq 'merging (plist-get (harness-call 'task/get id) :column))))
+      (let ((pid (harness-call 'session/pending-add sid '(:kind question :payload (:question "Which?")))))
+        (should (eq 'needs-input (plist-get (harness-call 'task/get id) :column)))
+        (harness-call 'session/pending-resolve sid pid "theirs")
+        (should (eq 'merging (plist-get (harness-call 'task/get id) :column))))
+      ;; Once the merge is done it is not in the queue any more.
+      (harness-tasks--set id :state 'done :merge-status nil)
+      (should (eq 'done (plist-get (harness-call 'task/get id) :column))))))
+
 (defun harness-tasks-test--lock-line (root path)
   "Return the `locked' line `git worktree list --porcelain' gives PATH of ROOT, or nil."
   (let ((dir (file-name-as-directory (file-truename path))))

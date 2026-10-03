@@ -45,7 +45,7 @@ APIs and AWS Bedrock.
 |---|---|
 | ![A chat waiting for permission to run pip install, with the allow and deny buttons](docs/media/chat-permission.png) | ![A chat waiting for the answer to a question, with three options](docs/media/chat-question.png) |
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
-| ![The task board with tasks needing input, in review, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
+| ![The task board with tasks needing input, in review, merging, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![The usage dashboard: a month of cost per day, cost by model, the plan's quota and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
 | Usage: cost per day and model, plan quota, budgets | Settings, here as one project overrides them |
@@ -291,6 +291,10 @@ so several tasks can work in parallel.
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback. With `harness-tasks-require-verification`
   set to nil, tasks complete without review.
+- A verified task waits in *Merging* while its branch goes through the
+  merge queue: queued for the queue's turn, merging, or, when the merge
+  conflicts, its session resolving them. The card says where it stands;
+  the task moves to *Completed* once the branch is in.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `RET` opens the session of the task at point. From that session,
