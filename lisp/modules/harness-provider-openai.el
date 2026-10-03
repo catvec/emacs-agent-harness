@@ -111,8 +111,10 @@ variable through customize re-registers the providers."
 (defun harness-openai--deepseek-p (endpoint)
   "Non-nil when ENDPOINT speaks the DeepSeek dialect.
 DeepSeek differs from plain OpenAI in how it reports cached input (its
-`prompt_tokens' includes the cached tokens, which are billed apart) and
-in the reasoning efforts it accepts."
+`prompt_tokens' includes the cached tokens, which are billed apart), in
+the reasoning efforts it accepts, and in requiring a tool-using
+history to carry the thinking of earlier assistant turns back as
+`reasoning_content'."
   (eq (harness-openai--flavor endpoint) 'deepseek))
 
 (defun harness-openai--capabilities (endpoint)
@@ -352,12 +354,18 @@ hides the others."
         :tool_call_id (plist-get block :tool_use_id)
         :content (harness-openai--result-text (plist-get block :content))))
 
-(defun harness-openai--assistant-message (blocks)
-  "Map assistant content BLOCKS to one assistant message; thinking is dropped."
-  (let (texts calls)
+(defun harness-openai--assistant-message (blocks &optional reasoning)
+  "Map assistant content BLOCKS to one assistant message.
+Thinking is dropped unless REASONING is non-nil: DeepSeek's thinking
+mode requires the reasoning of earlier assistant turns to be sent back
+as `reasoning_content' when the request carries tools.  With REASONING
+the key is always set, empty when the message has no thinking, because
+DeepSeek rejects a tool-using history whose assistant messages omit it."
+  (let (texts calls thoughts)
     (dolist (b blocks)
       (pcase (harness-openai--block-type b)
         ("text" (push (or (plist-get b :text) "") texts))
+        ("thinking" (when reasoning (push (or (plist-get b :text) "") thoughts)))
         ("tool_use"
          (push (list :id (plist-get b :id)
                      :type "function"
@@ -373,6 +381,9 @@ hides the others."
                                               (calls nil)
                                               (t ""))))
       (when calls (setq msg (plist-put msg :tool_calls (nreverse calls))))
+      (when reasoning
+        (setq msg (plist-put msg :reasoning_content
+                             (string-join (nreverse thoughts) "\n\n"))))
       msg)))
 
 (defun harness-openai--message-blocks (msg)
@@ -380,9 +391,12 @@ hides the others."
   (let ((c (plist-get msg :content)))
     (if (stringp c) (list (list :type "text" :text c)) c)))
 
-(defun harness-openai--messages (request)
-  "Build the OpenAI messages array for REQUEST."
-  (let (out)
+(defun harness-openai--messages (request &optional endpoint)
+  "Build the OpenAI messages array for REQUEST at ENDPOINT.
+DeepSeek endpoints get the thinking of assistant messages back as
+`reasoning_content'; every other dialect drops it."
+  (let ((reasoning (and endpoint (harness-openai--deepseek-p endpoint)))
+        out)
     (when-let* ((system (plist-get request :system)))
       (unless (string-empty-p system)
         (push (list :role "system" :content system) out)))
@@ -393,7 +407,7 @@ hides the others."
           ("system"
            (push (list :role "system" :content (harness-openai--result-text blocks)) out))
           ("assistant"
-           (push (harness-openai--assistant-message blocks) out))
+           (push (harness-openai--assistant-message blocks reasoning) out))
           (_
            ;; user or tool: tool results become their own messages first
            ;; (they must follow the assistant call), the rest is user content.
@@ -445,7 +459,7 @@ xhigh are high."
                    (harness-openai--effort (plist-get request :thinking))))
          (tools (harness-openai--tools (plist-get request :tools)))
          (body (list :model name
-                     :messages (harness-openai--messages request)
+                     :messages (harness-openai--messages request endpoint)
                      :stream t
                      :stream_options '(:include_usage t))))
     (when tools (setq body (plist-put body :tools tools)))
