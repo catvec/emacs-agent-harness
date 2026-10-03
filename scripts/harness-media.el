@@ -101,6 +101,8 @@
 (declare-function harness-usage "harness-ui-usage")
 (declare-function harness-ui-usage-set-period "harness-ui-usage")
 (declare-function harness-ui-usage-set-group "harness-ui-usage")
+(declare-function harness-ui-usage-toggle-worktrees "harness-ui-usage")
+(defvar harness-ui-usage--unfolded)
 (declare-function harness-worktrees "harness-ui-worktree")
 (declare-function harness-settings "harness-ui-config")
 (declare-function harness-tasks--set "harness-tasks")
@@ -1692,6 +1694,28 @@ popout both show; the popout is a side window and keeps its height."
                          (harness-media--settle 1.5)))
   (harness-media--capture "usage"))
 
+(defun harness-media--usage-by-project (unfold)
+  "Show the usage dashboard over 30 days by project, worktrees shown when UNFOLD.
+Every project starts folded, whatever an earlier shot unfolded."
+  (harness-media--view #'harness-usage
+                       (lambda ()
+                         (setq harness-ui-usage--unfolded nil)
+                         (harness-ui-usage-set-period '30d)
+                         (harness-ui-usage-set-group 'project)
+                         (harness-media--settle 1.5)
+                         (when unfold (harness-ui-usage-toggle-worktrees))
+                         (goto-char (point-min)))))
+
+(defun harness-media-shot-usage-projects ()
+  "The usage dashboard by project, the tasks' worktrees folded under theirs."
+  (harness-media--usage-by-project nil)
+  (harness-media--capture "usage-projects"))
+
+(defun harness-media-shot-usage-worktrees ()
+  "The usage dashboard by project, the demo project's worktrees unfolded."
+  (harness-media--usage-by-project t)
+  (harness-media--capture "usage-worktrees"))
+
 (defun harness-media-shot-worktrees ()
   "The worktrees of the demo project."
   (harness-media--view (lambda () (harness-worktrees harness-media-project)))
@@ -1757,6 +1781,8 @@ popout both show; the popout is a side window and keeps its height."
     ("popout-question" . harness-media-shot-popout-question)
     ("tree" . harness-media-shot-tree)
     ("usage" . harness-media-shot-usage)
+    ("usage-projects" . harness-media-shot-usage-projects)
+    ("usage-worktrees" . harness-media-shot-usage-worktrees)
     ("worktrees" . harness-media-shot-worktrees)
     ("settings" . harness-media-shot-settings)
     ("btw" . harness-media-shot-btw)

@@ -651,6 +651,12 @@ The usage dashboard (`C-c h u`) lists every quota window with its reset
 time, the plan's extra usage, and the value at API prices that the plan
 covered.
 
+Grouped by project, every task's git worktree is folded under the
+project it belongs to: one line per project, with the total and how many
+worktrees it holds. `TAB`, `RET` or a click on a project shows its main
+checkout's usage and each worktree's, and hides them again; `w` (or
+`[show worktrees]`) does it for every project at once.
+
 Budgets count billed cost only. A budget created partway through a
 month can start from what was already spent outside the harness: press
 `s` on its line in the dashboard (or use the add-budget wizard) to set

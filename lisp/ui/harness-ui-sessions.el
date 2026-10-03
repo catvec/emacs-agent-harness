@@ -60,16 +60,12 @@ tasks never does.")
   "Return the main checkout session project ROOT belongs to.
 A linked git worktree belongs to its main checkout.  A root gone from
 disk, like an archived task's worktree, belongs to the project around it.
-Remote roots are not looked at."
+Remote roots are not looked at.  See `harness-files-owning-checkout'."
   (when root
     (let ((memo (or harness-ui-sessions--main-roots
                     (setq harness-ui-sessions--main-roots (make-hash-table :test 'equal)))))
       (or (gethash root memo)
-          (puthash root
-                   (cond ((file-remote-p root) root)
-                         ((file-directory-p root) (harness-files-main-checkout root))
-                         (t (harness-files-main-root root)))
-                   memo)))))
+          (puthash root (harness-files-owning-checkout root) memo)))))
 
 (defun harness-ui-sessions--task (s)
   "Return the task session S works on, or nil."
