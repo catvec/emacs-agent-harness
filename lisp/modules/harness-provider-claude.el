@@ -64,6 +64,11 @@
 ;;   has recorded (naming brings a fork of it) runs in a CLI process of
 ;;   its own, closed once it is done, so it never writes into the
 ;;   session's CLI session or restarts its process.
+;; - A session that runs below its model's context window (a task's is
+;;   capped by `harness-tasks-context-limit') is spawned with
+;;   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE' set to that percentage, so the
+;;   CLI's own compaction happens at the point the harness chose rather
+;;   than at its default one.
 ;; - Every new process is sent an `initialize' and a `get_usage' control
 ;;   request.  The initialize answer names the account the CLI is logged
 ;;   in with, which decides how turns are billed; the usage report (the
@@ -375,6 +380,39 @@ resumes the CLI session in a new one."
   "Return `process-environment' without the CLAUDECODE nesting marker."
   (cl-remove-if (lambda (e) (string-prefix-p "CLAUDECODE=" e)) process-environment))
 
+(defun harness-provider-claude--model-window (model-id)
+  "Return the context window the catalogue gives MODEL-ID, or nil."
+  (and (harness-method-exists-p 'provider/model)
+       (condition-case nil
+           (plist-get (harness-call 'provider/model model-id) :context-window)
+         (error nil))))
+
+(defun harness-provider-claude--autocompact-pct (request)
+  "Return the percentage the CLI should auto-compact at for REQUEST, or nil.
+A session whose context window is smaller than its model's (the harness
+caps a task's, say) is told to auto-compact at that part of the window,
+so the CLI's own compaction matches the budget the harness gave the
+session.  nil leaves the CLI's default."
+  (let* ((session (plist-get request :session))
+         (window (plist-get session :context-window))
+         (model-window (harness-provider-claude--model-window (plist-get request :model))))
+    (when (and (numberp window) (> window 0)
+               (numberp model-window) (> model-window 0)
+               (< window model-window))
+      (max 1 (min 99 (round (* 100.0 (/ window (float model-window)))))))))
+
+(defun harness-provider-claude--environment-for (request)
+  "Return `process-environment' for the CLI process serving REQUEST.
+A session that runs below its model's context window tells the CLI to
+auto-compact at the same point (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', a
+percentage), so the CLI's own compaction matches the shorter budget the
+harness gave the session (a task's, say)."
+  (let ((pct (harness-provider-claude--autocompact-pct request))
+        (env (harness-provider-claude--environment)))
+    (if pct
+        (cons (format "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d" pct) env)
+      env)))
+
 ;;;; Command line and spawning
 
 (defun harness-provider-claude--prompts-routed-p (args)
@@ -440,13 +478,14 @@ They stand in for the harness tools its `:builtin-tools' names."
 
 (defun harness-provider-claude--spawn-key (request)
   "Return the settings a CLI process must have been started with to serve REQUEST.
-That is (MODEL EFFORT SYSTEM), and the CLI tools it turns on when it
-turns any on: a process started otherwise is restarted."
-  (let ((builtin (harness-provider-claude--cli-tools request)))
-    (append (list (cdr (harness-provider-parse-model (plist-get request :model)))
-                  (plist-get request :thinking)
-                  (plist-get request :system))
-            (and builtin (list builtin)))))
+That is (MODEL EFFORT SYSTEM BUILTIN PCT): the CLI tools it turns on
+\(nil when none) and the auto-compact percentage it was given (nil
+without one).  A process started otherwise is restarted."
+  (list (cdr (harness-provider-parse-model (plist-get request :model)))
+        (plist-get request :thinking)
+        (plist-get request :system)
+        (harness-provider-claude--cli-tools request)
+        (harness-provider-claude--autocompact-pct request)))
 
 (defun harness-provider-claude--builtin-name (entry name)
   "Return the harness tool that the CLI's tool NAME stands in for on ENTRY, or nil.
@@ -463,7 +502,7 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
          (host (plist-get session :host))
          (cwd (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd))
          (default-directory (file-name-as-directory (expand-file-name cwd)))
-         (process-environment (harness-provider-claude--environment))
+         (process-environment (harness-provider-claude--environment-for request))
          (model (cdr (harness-provider-parse-model (plist-get request :model))))
          (effort (plist-get request :thinking))
          (system (plist-get request :system))

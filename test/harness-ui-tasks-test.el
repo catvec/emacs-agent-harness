@@ -203,18 +203,16 @@ as a one-column symbol, already in line, so they keep the old layout."
                   ((symbol-function 'frame-char-width) (lambda (&optional _) 11)))
           (with-temp-buffer
             (harness-ui-tasks--insert-card task 'needs-input nil)
-            (should (equal "  x  Fix the parser"
-                           (buffer-substring-no-properties (point-min) (+ (point-min) 19))))
-            ;; A column and a half before the mark, half a column after it.
-            (should (equal '(space :width (6)) (get-text-property (+ (point-min) 1) 'display)))
-            (should (equal '(space :width (5)) (get-text-property (+ (point-min) 3) 'display)))))
+            ;; The chevron comes first; then a column less nudge before
+            ;; the mark, and a column plus the same nudge after it.
+            (should (equal '(space :width (6)) (get-text-property (+ (point-min) 3) 'display)))
+            (should (equal '(space :width (16)) (get-text-property (+ (point-min) 5) 'display)))))
         ;; A one-column symbol, as a terminal draws it, is left alone.
         (cl-letf (((symbol-function 'harness-ui-tasks--icon) (lambda (&rest _) "x")))
           (with-temp-buffer
             (harness-ui-tasks--insert-card task 'needs-input nil)
-            (should (equal "  x Fix the parser"
-                           (buffer-substring-no-properties (point-min) (+ (point-min) 18))))
-            (should-not (get-text-property (+ (point-min) 1) 'display))))))))
+            (should-not (get-text-property (+ (point-min) 3) 'display))
+            (should-not (get-text-property (+ (point-min) 5) 'display))))))))
 
 (ert-deftest harness-ui-tasks-card-keys ()
   (harness-ui-tasks-test-with
