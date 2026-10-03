@@ -1145,5 +1145,28 @@ Folded header lines continue the header above them."
       (should (equal '(:type done :stop-reason end-turn) (car (last second))))
       (should (string-match-p "ZEBRA-4242" (harness-bedrock-test--text second))))))
 
+;;;; Customize types
+
+(ert-deftest harness-provider-bedrock-types-name-every-key ()
+  "The settings page offers every key of an endpoint and of a model family."
+  (let ((endpoint harness-bedrock--endpoint-type)
+        (family (cadr harness-bedrock--model-defaults-type)))
+    (should (null (cl-set-difference (harness-test-documented-keys 'harness-bedrock-endpoints)
+                                     (harness-test-option-keys endpoint))))
+    (should (null (cl-set-difference (harness-test-documented-keys 'harness-bedrock-model-defaults)
+                                     (harness-test-option-keys (car (last family))))))
+    (harness-test-check-record-type endpoint)
+    (harness-test-check-record-type (car (last family)))
+    (should (harness-test-fits-p endpoint (plist-get (cdr endpoint) :value)))
+    (should (harness-test-fits-p family (plist-get (cdr family) :value)))
+    (dolist (sym '(harness-bedrock-endpoints harness-bedrock-model-defaults harness-bedrock-thinking-budgets))
+      (should (harness-test-fits-p (get sym 'custom-type) (eval (car (get sym 'standard-value)) t))))
+    ;; Keys set in Lisp that the type does not name still fit.
+    (should (harness-test-fits-p (get 'harness-bedrock-endpoints 'custom-type)
+                                 '((:id x :list-models nil :inference-profiles :false :credentials ignore
+                                    :models ("m" (:name "arn" :label "Mine" :base "b" :odd 1))))))
+    (should (harness-test-fits-p (get 'harness-bedrock-model-defaults 'custom-type)
+                                 '(("x" :thinking-levels ("unheard-of") :foo 1) ("y"))))))
+
 (provide 'harness-provider-bedrock-test)
 ;;; harness-provider-bedrock-test.el ends here

@@ -355,6 +355,14 @@ project's, and a project's over the global value.
 The settings page lists the other options too; they have a global value
 only.
 
+Settings that hold records — the OpenAI-compatible and Bedrock
+endpoints, Bedrock's per-model defaults, the standing permission rules
+— are edited as forms: every key the harness reads is named (Base URL,
+Context window, Thinking…), has a value of its own kind, and says what
+it is for. Each record in a list folds to one line; `Edit` opens it and
+`INS` adds one, filled in from what that kind of record starts as.
+Model fields complete model ids.
+
 ## Providers and billing
 
 ### Claude

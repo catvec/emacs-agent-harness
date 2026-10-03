@@ -64,14 +64,29 @@ Each rule is a plist (:tool NAME :kind KIND :behavior allow|deny).
 NAME is a tool name or nil for any tool; KIND is a tool kind or nil
 for any kind.  The first matching rule wins.  Rules are added here
 when a permission request is answered with scope `always'."
-  :type '(repeat (plist :key-type (choice (const :tool) (const :kind) (const :behavior))
-                        :value-type sexp))
+  :type '(repeat
+          (plist
+           :tag "Rule"
+           :value (:behavior deny)
+           :options
+           ((:tool (choice :tag "Tool" :value "web_search"
+                           :doc "Name of the tool the rule is about."
+                           (const :tag "Any tool" nil) (string :tag "Tool name")))
+            (:kind (choice :tag "Kind" :value exec
+                           :doc "Kind of call the rule is about."
+                           (const :tag "Any kind" nil) (const :tag "Read" read) (const :tag "Write" write)
+                           (const :tag "Exec" exec) (const :tag "Net" net) (const :tag "Meta" meta)
+                           (symbol :tag "Other kind")))
+            (:behavior (choice :tag "Decision" :value deny
+                               :doc "What the rule decides."
+                               (const :tag "Allow" allow) (const :tag "Deny" deny)
+                               (string :tag "Other name"))))))
   :group 'harness)
 
 (defcustom harness-perms-auto-model "claude:claude-haiku-4-5-20251001"
   "Model that judges tool calls in `auto' mode, as PROVIDER:NAME.
 When nil the session's own model is used."
-  :type '(choice (const nil) string) :group 'harness)
+  :type '(choice (const :tag "The session's model" nil) (string :tag "Model")) :group 'harness)
 
 (defcustom harness-perms-auto-timeout 30
   "Seconds the auto-mode judge may take before the call falls back to asking."

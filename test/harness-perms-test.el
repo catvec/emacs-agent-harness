@@ -926,5 +926,17 @@ for a request without a session record."
         (should-not ran))
     (harness-sandbox-detect)))
 
+(ert-deftest harness-perms-rules-type-names-every-key ()
+  "The settings page offers each part of a standing rule by name."
+  (require 'harness-test-helpers)
+  (let ((type (cadr (get 'harness-perms-rules 'custom-type))))
+    (should (equal '(:tool :kind :behavior) (harness-test-option-keys type)))
+    (harness-test-check-record-type type)
+    (should (harness-test-fits-p type '(:tool "web_search" :behavior deny)))
+    (should (harness-test-fits-p type '(:kind read :behavior allow)))
+    (should (harness-test-fits-p type '(:behavior "deny")))
+    (should (harness-test-fits-p (get 'harness-perms-rules 'custom-type)
+                                 '((:tool "bash" :kind exec :behavior deny) (:behavior allow))))))
+
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here

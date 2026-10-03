@@ -54,6 +54,48 @@
   (when (fboundp 'harness-openai--register-all)
     (harness-openai--register-all)))
 
+(defconst harness-openai--endpoint-type
+  `(plist
+    :tag "Endpoint"
+    ;; A new endpoint starts as a local server.
+    :value (:id local :label "Local server" :base-url "http://localhost:11434/v1")
+    :options
+    ((:id (symbol :tag "ID" :value local
+                  :doc "Names the provider: its models are ID:MODEL.
+Lower-case letters, digits, - and _."))
+     (:label (string :tag "Label" :value "Local server"
+                     :doc "Name of the provider in the model picker."))
+     (:base-url (string :tag "Base URL" :value "http://localhost:11434/v1"
+                        :doc "Root of the API, the part before /chat/completions.  For a local
+server: Ollama http://localhost:11434/v1, llama.cpp
+http://localhost:8080/v1, vLLM http://localhost:8000/v1, LM Studio
+http://localhost:1234/v1."))
+     (:api-key-env (string :tag "API key variable" :value "OPENAI_API_KEY"
+                           :doc "Environment variable that holds the API key.  Without a key,
+auth-source is searched for the URL's host and the user \"apikey\"."))
+     (:headers (alist :tag "Headers" :key-type (string :tag "Header") :value-type (string :tag "Value")
+                      :doc "Extra request headers."))
+     (:models (repeat :tag "Models"
+                      :doc "Models to offer instead of those the server lists at /models."
+                      (choice :tag "Model" :value "model-name"
+                              (string :tag "Name")
+                              ,(harness-provider-model-type))))
+     (:default-context (integer :tag "Default context" :value 128000
+                                :doc "Context window of the models the server does not size."))
+     (:flavor (choice :tag "Flavor" :value openai
+                      :doc "Dialect of the API; guessed from the URL when not set."
+                      (const :tag "OpenAI" openai)
+                      (const :tag "OpenRouter" :menu-tag "OpenRouter: prices come with the model list"
+                             openrouter)))
+     (:capabilities (plist :tag "Capabilities" :value (:vision t :thinking t)
+                           :doc "What the models can do, replacing what the flavor says: images
+and thinking, and for OpenRouter prices and costs too."
+                           :options ((:vision (const :tag "Images" t))
+                                     (:thinking (const :tag "Thinking" t))
+                                     (:pricing (const :tag "Prices come from the model list" dynamic))
+                                     (:cost-reported (const :tag "Replies say what they cost" t)))))))
+  "Customize type of an entry of `harness-openai-endpoints'.")
+
 (defcustom harness-openai-endpoints
   '((:id openrouter :label "OpenRouter"
      :base-url "https://openrouter.ai/api/v1" :api-key-env "OPENROUTER_API_KEY")
@@ -78,7 +120,7 @@ Every entry is a plist with these keys:
 When neither :api-key nor :api-key-env yields a key, auth-source is
 searched with the URL's host and user \"apikey\".  Changing this
 variable through customize re-registers the providers."
-  :type '(repeat (plist :key-type symbol :value-type sexp))
+  :type `(repeat ,harness-openai--endpoint-type)
   :set #'harness-openai--custom-set
   :group 'harness)
 

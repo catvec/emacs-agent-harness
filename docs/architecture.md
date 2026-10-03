@@ -246,6 +246,18 @@ global value only.  Options named `...-api-key`, `-token`, `-secret`
 or `-password` are secrets: their values never leave the harness and
 never go to a `.dir-locals.el`.
 
+Where an option holds records (the provider endpoints, Bedrock's
+per-model defaults, the standing permission rules, a model plist), its
+customize type names the keys of the record in `:options`: each key
+with a `:tag`, a value type of its own, a `:doc`, and the `:value` it
+starts from.  (`harness-provider.el` holds the shared model, price,
+modality and thinking-level types; `harness-provider-model-type` adds
+a provider's own keys to the model type.)  Keys the type does not name
+stay matched, as `plist` does, so a record written in Lisp is never
+refused for having an extra key; the settings page draws them last, to
+be removed.  A key that names a value type the value does not fit is
+refused on save, where a free-form plist would have taken it.
+
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
   or its name; layered settings only).
 - `config/set KEY VALUE &key scope cwd printed` — scope
@@ -1626,11 +1638,21 @@ scopes; the other options are listed by module in the Global scope and
 folded into one line in the Project scope.  Each setting is a
 `wid-edit` widget built from its customize type, with its doc and
 where its value in effect comes from; toggles and menus save at once,
-text saves with RET (C-x C-s saves every edit).  [Remove override]
+text saves with RET (C-x C-s saves every edit).  A type whose plist
+names its keys (`:options`) is drawn as a form: one line per key,
+`[X] Base URL: …` with the key's help under it, the key's name width
+aligned, and a key the value does not set greyed out with the value it
+would start from (`harness-ui-config--present` rewrites the type; the
+values it accepts do not change).  In a list, each record folds into a
+line summing it up, `[Edit]` opens it into the form and `[Hide]` folds
+it again; `[INS]` adds a record, open, from the type's starting value.
+[More] unfolds a long documentation, whose first line shows with the
+keys' help doing the rest.  A string key of a `*-model` setting
+completes model ids, menus included.  [Remove override]
 deletes a project value, [Reset to default] a customized global one.
 Secrets show as set or not and are set through `read-passwd`; long
 texts open in `string-edit`.  The page reloads on `config/changed`,
-keeping edits not saved yet.
+keeping edits not saved yet, point, and the records left open.
 
 Session settings: `harness-set-model`, `-thinking`, `-permission-mode`
 and `harness-toggle-non-interactive` (`C-c h m` `T` `p` `i`) change what

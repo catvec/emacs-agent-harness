@@ -25,6 +25,61 @@
   "Model used when nothing more specific is configured, as PROVIDER:NAME."
   :type 'string :group 'harness)
 
+;;;; Customize types of model plists
+;;
+;; Options that describe models by hand (an endpoint's `:models',
+;; Bedrock's model defaults) share these types.  Every key has a name,
+;; a value of its own type, help, and the value it starts from, so the
+;; settings page and customize can offer each key without anyone
+;; having to know it.
+
+(defconst harness-provider-pricing-type
+  '(plist :tag "Price"
+          :doc "US dollars per million tokens; a part left out costs nothing."
+          :value (:input 0.0 :output 0.0)
+          :options ((:input (number :tag "Input" :value 0.0))
+                    (:output (number :tag "Output" :value 0.0))
+                    (:cache-read (number :tag "Cache read" :value 0.0
+                                         :doc "Input read back from the prompt cache."))
+                    (:cache-write (number :tag "Cache write" :value 0.0
+                                          :doc "Input written to the prompt cache."))))
+  "Customize type of a model's `:pricing'.")
+
+(defconst harness-provider-modalities-type
+  '(choice :tag "Input" :value ("text" "image")
+           :doc "What a prompt may hold besides text."
+           (const :tag "Text" ("text"))
+           (const :tag "Text and images" ("text" "image"))
+           (repeat :tag "Other" (string :tag "Modality")))
+  "Customize type of a model's `:input-modalities'.")
+
+(defconst harness-provider-thinking-levels-type
+  '(set :tag "Thinking levels" :format "%{%t%}: %v\n" :entry-format "%b %v"
+        :value ("low" "medium" "high")
+        :doc "Levels the model thinks at, for the session's thinking menu."
+        (const :format "%t  " "low") (const :format "%t  " "medium") (const :format "%t  " "high")
+        (const :format "%t  " "xhigh") (const :format "%t" "max"))
+  "Customize type of a model's `:thinking-levels'.")
+
+(defun harness-provider-model-type (&rest options)
+  "Return the customize type of a model plist, with OPTIONS added.
+OPTIONS are more `:options' entries of the plist, for keys a provider
+reads besides those of every model."
+  `(plist :tag "Model"
+          :value (:name "model-name")
+          :options ((:name (string :tag "Name" :value "model-name"
+                                   :doc "The id the API knows the model by."))
+                    (:label (string :tag "Label" :value "Model"
+                                    :doc "Shown in the model picker instead of the name."))
+                    (:context-window (integer :tag "Context window" :value 128000
+                                              :doc "Tokens the model holds: input and output."))
+                    (:max-output (integer :tag "Max output" :value 8192
+                                          :doc "Most tokens of one reply."))
+                    (:input-modalities ,harness-provider-modalities-type)
+                    (:thinking-levels ,harness-provider-thinking-levels-type)
+                    (:pricing ,harness-provider-pricing-type)
+                    ,@options)))
+
 (cl-defstruct (harness-provider (:copier nil))
   id label doc models-fn complete-fn fork-fn quota-fn capabilities)
 

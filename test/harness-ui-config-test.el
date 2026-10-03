@@ -14,6 +14,23 @@
   "A secret option for the tests."
   :type '(choice (const nil) string) :group 'harness)
 
+(defconst harness-ui-config-test--server-type
+  '(plist :tag "Server"
+          :value (:id new :url "http://localhost")
+          :options ((:id (symbol :tag "ID" :value new :doc "Names the server."))
+                    (:url (string :tag "URL" :value "http://localhost"))
+                    (:port (integer :tag "Port" :value 8080 :doc "Port it listens on."))
+                    (:secure (const :tag "Speaks TLS" t))))
+  "A record type, like a provider endpoint's.")
+
+(defcustom harness-ui-config-test-servers '((:id alpha :url "http://alpha"))
+  "Servers, records in a list, for the tests.
+Each is a plist with these keys:
+
+  :id    a symbol
+  :url   where it is"
+  :type `(repeat ,harness-ui-config-test--server-type) :group 'harness)
+
 (defun harness-ui-config-test--project ()
   "Return a fresh git project."
   (let ((root (harness-test-temp-dir)))
@@ -43,7 +60,8 @@ state directory, as they would the user's."
             (harness-thinking harness-thinking)
             (harness-context-reserve harness-context-reserve)
             (harness-non-interactive harness-non-interactive)
-            (harness-ui-config-test-api-key nil))
+            (harness-ui-config-test-api-key nil)
+            (harness-ui-config-test-servers (copy-tree harness-ui-config-test-servers)))
        (unwind-protect
            (progn ,@body)
          (dolist (b (harness-ui-config--buffers)) (kill-buffer b))
@@ -84,6 +102,38 @@ state directory, as they would the user's."
   "Replace the text field of setting KEY with TEXT, typing it."
   (goto-char (harness-ui-config--setting-start key))
   (let ((field (progn (widget-forward 1) (widget-field-at (point)))))
+    (should field)
+    (goto-char (widget-field-start field))
+    (delete-region (point) (widget-field-end field))
+    (execute-kbd-macro text)))
+
+(defun harness-ui-config-test-press (key label &optional last)
+  "Press the button LABEL of setting KEY, the LAST one with LAST non-nil."
+  (let ((start (harness-ui-config--setting-start key))
+        (case-fold-search nil))
+    (goto-char start)
+    (if (not last)
+        (search-forward label)
+      (goto-char (next-single-property-change start 'harness-ui-config-key nil (point-max)))
+      (search-backward label start))
+    (goto-char (match-beginning 0))
+    (should (get-char-property (point) 'button))
+    (execute-kbd-macro (kbd "RET"))))
+
+(defun harness-ui-config-test-await-block (key regexp)
+  "Wait until the block of setting KEY matches REGEXP; return the block."
+  (let ((buf (current-buffer)))
+    (harness-test-wait (lambda () (with-current-buffer buf
+                                    (string-match-p regexp (harness-ui-config-test-block key))))
+                       5 (format "%s showing %s" key regexp))
+    (set-buffer buf)
+    (harness-ui-config-test-block key)))
+
+(defun harness-ui-config-test-type-after (key label text)
+  "Replace the text of the field after LABEL in setting KEY with TEXT, typing it."
+  (harness-ui-config-test-goto key label)
+  (widget-forward 1)
+  (let ((field (widget-field-at (point))))
     (should field)
     (goto-char (widget-field-start field))
     (delete-region (point) (widget-field-end field))
@@ -305,6 +355,143 @@ state directory, as they would the user's."
               (should (equal root (buffer-local-value 'harness-ui-config--root page)))
               (should (equal root (buffer-local-value 'harness-ui-config--cwd page)))))
         (kill-buffer file-buffer)))))
+
+;;;; Records
+
+(ert-deftest harness-ui-config-folds-records-and-opens-them-as-forms ()
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (harness-ui-config-test-open root)
+    (let ((block (harness-ui-config-test-block "harness-ui-config-test-servers")))
+      ;; One line per record, never the Lisp of a plist.
+      (should (string-match-p "alpha · http://alpha +\\[?Edit" block))
+      (should-not (string-match-p "Lisp expression\\|Symbol:\\|URL:" block))
+      ;; The documentation shows its first line; the form says the rest.
+      (should (string-match-p "Servers, records in a list, for the tests\\. +\\[?More" block))
+      (should-not (string-match-p ":url   where it is" block)))
+    (harness-ui-config-test-press "harness-ui-config-test-servers" "Edit")
+    (let ((block (harness-ui-config-test-await-block "harness-ui-config-test-servers" "Hide")))
+      ;; Each key by name, lined up, with its help; a key not set is
+      ;; offered with the value it starts from, a flag by what it means.
+      (should (string-match-p "\\[X\\] ID: +alpha\n +Names the server\\." block))
+      (should (string-match-p "\\[X\\] URL: +http://alpha" block))
+      (should (string-match-p "\\[ \\] Port: +8080\n +Port it listens on\\." block))
+      (should (string-match-p "\\[ \\] Speaks TLS" block))
+      (let ((id (progn (string-match "ID: +" block) (match-end 0)))
+            (url (progn (string-match "URL: +" block) (match-end 0))))
+        (should (= (- id (save-match-data (string-match "\\[X\\] ID" block)))
+                   (- url (string-match "\\[X\\] URL" block))))))
+    ;; The page's commands know the form belongs to the setting.
+    (harness-ui-config-test-goto "harness-ui-config-test-servers" "Port it listens")
+    (should (equal "harness-ui-config-test-servers" (harness-ui-config--key-at-point)))
+    (should-not (harness-ui-config--edited-p "harness-ui-config-test-servers"))
+    ;; A redraw keeps it open.
+    (harness-call 'config/set 'harness-thinking "low" :scope 'global :cwd root)
+    (harness-ui-config-test-wait "harness-thinking" :global "\"low\"")
+    (should (string-match-p "URL:" (harness-ui-config-test-block "harness-ui-config-test-servers")))
+    (harness-ui-config-test-press "harness-ui-config-test-servers" "Hide")
+    (harness-ui-config-test-await-block "harness-ui-config-test-servers" "alpha.*Edit")
+    (should-not (string-match-p "URL:" (harness-ui-config-test-block "harness-ui-config-test-servers")))
+    ;; [More] shows the whole documentation.
+    (harness-ui-config-test-press "harness-ui-config-test-servers" "More")
+    (harness-ui-config-test-await-block "harness-ui-config-test-servers" ":url   where it is")))
+
+(ert-deftest harness-ui-config-saves-a-record-edited-in-its-form ()
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (setq harness-ui-config-test-servers '((:id alpha :url "http://alpha" :extra 1)))
+    (harness-ui-config-test-open root)
+    (harness-ui-config-test-press "harness-ui-config-test-servers" "Edit")
+    (harness-ui-config-test-await-block "harness-ui-config-test-servers" "Hide")
+    ;; A key the type does not name stays, to be removed if wanted.
+    (should (string-match-p "Other key: :extra" (harness-ui-config-test-block "harness-ui-config-test-servers")))
+    (harness-ui-config-test-type-after "harness-ui-config-test-servers" "URL:" "http://beta")
+    (should (harness-ui-config--edited-p "harness-ui-config-test-servers"))
+    ;; Ticking a key gives it the value it starts from.
+    (harness-ui-config-test-goto "harness-ui-config-test-servers" "[ ] Port")
+    (execute-kbd-macro (kbd "RET"))
+    (harness-ui-config-test-goto "harness-ui-config-test-servers" "[ ] Speaks TLS")
+    (execute-kbd-macro (kbd "RET"))
+    (execute-kbd-macro (kbd "C-x C-s"))
+    (harness-test-wait (lambda () (equal "http://beta" (plist-get (car harness-ui-config-test-servers) :url)))
+                       5 "record saved")
+    (harness-test-wait (lambda () (null (harness-ui-config--state-of "harness-ui-config-test-servers")))
+                       5 "save settled")
+    (let ((server (car harness-ui-config-test-servers)))
+      (should (eq 'alpha (plist-get server :id)))
+      (should (= 8080 (plist-get server :port)))
+      (should (eq t (plist-get server :secure)))
+      (should (= 1 (plist-get server :extra))))
+    ;; Saved, the page draws again with the record still open.
+    (let ((block (harness-ui-config-test-await-block "harness-ui-config-test-servers" "customized")))
+      (should (string-match-p "\\[X\\] Port: +8080" block))
+      (should (string-match-p "default is alpha" block)))
+    (should-not (harness-ui-config--edited-p "harness-ui-config-test-servers"))))
+
+(ert-deftest harness-ui-config-adds-a-record-from-where-its-type-starts ()
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (harness-ui-config-test-open root)
+    (harness-ui-config-test-press "harness-ui-config-test-servers" "INS" t)
+    ;; The new record is open, filled in from the type's starting value.
+    (let ((block (harness-ui-config-test-await-block "harness-ui-config-test-servers" "Hide")))
+      (should (string-match-p "new · http://localhost +\\[?Hide" block))
+      (should (string-match-p "\\[X\\] ID: +new" block))
+      (should (string-match-p "alpha · http://alpha +\\[?Edit" block)))
+    (should (harness-ui-config--edited-p "harness-ui-config-test-servers"))
+    (goto-char (harness-ui-config--setting-start "harness-ui-config-test-servers"))
+    (execute-kbd-macro (kbd "C-c C-c"))
+    (harness-test-wait (lambda () (= 2 (length harness-ui-config-test-servers))) 5 "record added")
+    (should (equal '((:id alpha :url "http://alpha") (:id new :url "http://localhost"))
+                   harness-ui-config-test-servers))))
+
+(ert-deftest harness-ui-config-keeps-a-key-with-a-value-of-another-type ()
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    ;; Set in Lisp: the key stays the key, with a plain editor for its
+    ;; odd value, and editing the rest of the record never loses it.
+    (setq harness-ui-config-test-servers '((:id alpha :port "eighty")))
+    (harness-ui-config-test-open root)
+    (harness-ui-config-test-press "harness-ui-config-test-servers" "Edit")
+    (let ((block (harness-ui-config-test-await-block "harness-ui-config-test-servers" "Hide")))
+      (should (string-match-p "\\[X\\] Port: +\"eighty\"" block))
+      (should (string-match-p "Kept as Lisp: it does not fit Port" block)))
+    (harness-ui-config-test-type-after "harness-ui-config-test-servers" "ID:" "beta")
+    (execute-kbd-macro (kbd "C-x C-s"))
+    (harness-test-wait (lambda () (eq 'beta (plist-get (car harness-ui-config-test-servers) :id)))
+                       5 "record saved")
+    (should (equal '((:id beta :port "eighty")) harness-ui-config-test-servers))))
+
+(ert-deftest harness-ui-config-presents-types-without-changing-their-values ()
+  (require 'harness-ui-config)
+  (let ((types `((,harness-ui-config-test--server-type
+                  (:id a) (:id a :url "u" :port 1 :secure t) (:port "x" :odd 2) nil)
+                 ((repeat ,harness-ui-config-test--server-type) ((:id a) (:url "u")) nil)
+                 ((cons (regexp :tag "Name") ,harness-ui-config-test--server-type) ("re" :port 2) ("re"))
+                 ((choice (const :tag "None" nil) (string :tag "Model")) nil "claude:x")
+                 ((alist :key-type (string :tag "Level") :value-type (integer :tag "Tokens")) (("low" . 1))))))
+    (dolist (case types)
+      (let ((presented (widget-convert (harness-ui-config--present (car case) t))))
+        (dolist (value (cdr case))
+          (should (widget-apply presented :match value))))
+      (should-not (widget-apply (widget-convert (harness-ui-config--present (car case)))
+                                :match 'not-a-fitting-value))))
+  ;; A text field of a model setting completes model ids, in a menu too.
+  (let* ((presented (harness-ui-config--present '(choice (const nil) (string :tag "Model")) t))
+         (string (car (last presented))))
+    (should (eq 'string (car string)))
+    (should (plist-member (cdr string) :completions)))
+  ;; Summaries name a record, then say what it has.
+  (should (equal "alpha · http://alpha · Port 8080 · Speaks TLS"
+                 (substring-no-properties
+                  (harness-ui-config--summary harness-ui-config-test--server-type
+                                              '(:id alpha :url "http://alpha" :port 8080 :secure t)))))
+  (should (equal "re · Port 2"
+                 (substring-no-properties
+                  (harness-ui-config--summary `(cons (regexp :tag "Name") ,harness-ui-config-test--server-type)
+                                              '("re" :port 2)))))
+  (should (equal "1,000,000" (harness-ui-config--short-number 1000000)))
+  (should (equal "8192" (harness-ui-config--short-number 8192))))
 
 (provide 'harness-ui-config-test)
 ;;; harness-ui-config-test.el ends here

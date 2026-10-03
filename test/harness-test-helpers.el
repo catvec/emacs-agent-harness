@@ -98,6 +98,36 @@ Signal an error mentioning MESSAGE on timeout.  Return PRED's value."
   "Create and return a fresh temporary directory."
   (file-name-as-directory (make-temp-file "harness-tmp-" t)))
 
+;;;; Customize types
+
+(defun harness-test-fits-p (type value)
+  "Non-nil when VALUE fits the customize TYPE."
+  (widget-apply (widget-convert type) :match value))
+
+(defun harness-test-option-keys (type)
+  "Return the keys the plist TYPE names in its `:options'."
+  (mapcar (lambda (o) (if (consp o) (car o) o)) (plist-get (cdr type) :options)))
+
+(defun harness-test-documented-keys (symbol)
+  "Return the plist keys the documentation of option SYMBOL lists.
+They are the keywords that start an indented line, as in
+\"  :base-url   API root\"."
+  (let ((doc (documentation-property symbol 'variable-documentation t))
+        (start 0) keys)
+    (while (string-match "^  +\\(:[a-z][a-z-]*\\)\\s-" doc start)
+      (push (intern (match-string 1 doc)) keys)
+      (setq start (match-end 0)))
+    (nreverse (delete-dups keys))))
+
+(defun harness-test-check-record-type (type)
+  "Check that every key of the record TYPE has a name and starts from a value that fits."
+  (dolist (option (plist-get (cdr type) :options))
+    (let ((vtype (cadr option)))
+      (unless (eq (car-safe vtype) 'const)
+        (should (plist-get (cdr vtype) :tag)))
+      (when (plist-member (cdr vtype) :value)
+        (should (harness-test-fits-p vtype (plist-get (cdr vtype) :value)))))))
+
 (defvar harness-acp-server-enabled)
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")

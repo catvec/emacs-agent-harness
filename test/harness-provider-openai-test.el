@@ -542,5 +542,23 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (string-match-p "ZEBRA-4242" (harness-openai-test--text second)))
       (should (cl-find 'usage second :key (lambda (e) (plist-get e :type)))))))
 
+;;;; Customize type
+
+(ert-deftest harness-openai-endpoints-type-names-every-key ()
+  "The settings page offers every key of an endpoint, with a value to start from."
+  (let ((entry harness-openai--endpoint-type))
+    ;; Every key the documentation lists, but the literal key it discourages.
+    (should (equal '(:api-key) (cl-set-difference (harness-test-documented-keys 'harness-openai-endpoints)
+                                                  (harness-test-option-keys entry))))
+    (harness-test-check-record-type entry)
+    (should (harness-test-fits-p entry (plist-get (cdr entry) :value)))
+    (should (harness-test-fits-p (get 'harness-openai-endpoints 'custom-type)
+                                 (eval (car (get 'harness-openai-endpoints 'standard-value)) t)))
+    ;; What the type does not name, or names with another kind of value,
+    ;; still fits: nothing set in Lisp turns invalid.
+    (should (harness-test-fits-p (get 'harness-openai-endpoints 'custom-type)
+                                 '((:id "named-by-a-string" :api-key "sk-x" :weird 3
+                                    :models ("a" (:name "b" :context-window 4096 :pricing (:input 1)))))))))
+
 (provide 'harness-provider-openai-test)
 ;;; harness-provider-openai-test.el ends here
