@@ -2440,44 +2440,52 @@ conversation and gives it its [close] and [keep] buttons this way.")
                         nil))
     (apply #'concat (nreverse segments))))
 
-(defun harness-chat--header ()
-  "Return the header line."
+(defun harness-chat--header (&optional width)
+  "Return the header line, fitted to WIDTH, its window's by default.
+In a window too narrow for all of it, the spend goes first, then the
+thinking level, the context, the non-interactive mode and the model;
+the name shortens after those.  What `harness-chat-header-functions'
+put in front, the status, the permission mode, [menu] and the notice of
+new messages stay.  WIDTH is as `harness-ui-fit-header' takes it."
   (let* ((s (harness-chat--session))
          (status (or (plist-get s :status) "idle"))
          (running (equal status "running"))
          (name (or (plist-get s :name) "unnamed")))
-    (concat
-     (harness-chat--header-prefix)
-     " "
-     (if running
-         (propertize (harness-chat--spinner-frame)
-                     'face 'harness-status-running-face
-                     'help-echo (harness-chat--activity-text harness-chat--activity))
-       (propertize (harness-ui-status-icon status) 'help-echo status))
-     " "
-     (harness-chat--segment name #'harness-rename-session "Session name (mouse-1: rename)" 'bold)
-     "  "
-     (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
-                            "Model (mouse-1: change)" 'harness-dim-face)
-     "  "
-     (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
-                            #'harness-set-permission-mode
-                            "Permission mode (mouse-1: change)")
-     "  "
-     (harness-chat--non-interactive-segment s)
-     "  "
-     (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
-                            #'harness-set-thinking "Thinking level (mouse-1: change)" 'harness-dim-face)
-     "  "
-     (harness-ui-format-context s)
-     "  "
-     (harness-chat--spend-segment s)
-     "  "
-     (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face)
-     (if harness-chat--unseen
-         (concat "  " (harness-chat--segment "↓ new messages" #'harness-chat-scroll-to-bottom
-                                             "New content below (mouse-1: jump to it)" 'harness-status-blocked-face))
-       ""))))
+    (harness-ui-fit-header
+     (list
+      (harness-chat--header-prefix)
+      (concat " "
+              (if running
+                  (propertize (harness-chat--spinner-frame)
+                              'face 'harness-status-running-face
+                              'help-echo (harness-chat--activity-text harness-chat--activity))
+                (propertize (harness-ui-status-icon status) 'help-echo status)))
+      (list (concat " " (harness-chat--segment name #'harness-rename-session
+                                               "Session name (mouse-1: rename)" 'bold))
+            70 (concat " " (harness-chat--segment (harness-truncate-end name 8) #'harness-rename-session
+                                                 "Session name (mouse-1: rename)" 'bold)))
+      (list (concat "  " (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
+                                                "Model (mouse-1: change)" 'harness-dim-face))
+            50)
+      (list (concat "  " (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
+                                                #'harness-set-permission-mode
+                                                "Permission mode (mouse-1: change)"))
+            90)
+      (list (concat "  " (harness-chat--non-interactive-segment s)) 40)
+      (list (concat "  " (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
+                                                #'harness-set-thinking "Thinking level (mouse-1: change)"
+                                                'harness-dim-face))
+            20)
+      (list (concat "  " (harness-ui-format-context s)) 30)
+      (list (concat "  " (harness-chat--spend-segment s)) 10)
+      (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
+            95)
+      (and harness-chat--unseen
+           (list (concat "  " (harness-chat--segment "↓ new messages" #'harness-chat-scroll-to-bottom
+                                                     "New content below (mouse-1: jump to it)"
+                                                     'harness-status-blocked-face))
+                 88)))
+     width)))
 
 (defun harness-chat--mode-line ()
   "Return the mode line text."

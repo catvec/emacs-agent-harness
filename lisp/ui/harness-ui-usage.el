@@ -352,26 +352,34 @@ SELECTED highlights it."
               'help-echo help
               'local-map (harness-ui-mouse-keymap command)))
 
-(defun harness-ui-usage--header ()
-  "Return the header line with the period and grouping selectors."
-  (append
-   (list (propertize " Usage " 'face 'harness-usage-heading-face))
-   (mapcar (lambda (p)
-             (harness-ui-usage--segment (nth 1 p) (harness-ui-usage--period-command (car p))
-                                        (eq (car p) harness-ui-usage--period) (nth 2 p)))
-           harness-ui-usage--periods)
-   (list (propertize "  by" 'face 'harness-dim-face))
-   (mapcar (lambda (g)
-             (harness-ui-usage--segment (nth 1 g) (harness-ui-usage--group-command (car g))
-                                        (eq (car g) harness-ui-usage--group)
-                                        (format "Group the table by %s" (downcase (nth 1 g)))))
-           harness-ui-usage--groups)
-   (list "  "
-         (cond (harness-ui-usage--loading (propertize "loading… " 'face 'harness-dim-face))
-               (harness-ui-usage--error (propertize (format "error: %s " harness-ui-usage--error) 'face 'error))
-               (t ""))
-         (harness-ui-usage--segment "g" #'harness-ui-usage-refresh nil "Refresh")
-         (harness-ui-usage--segment "q" #'quit-window nil "Quit"))))
+(defun harness-ui-usage--header (&optional width)
+  "Return the header line with the period and grouping selectors.
+It is fitted to WIDTH, its window's by default.  In a window too narrow
+for all of it, the groupings not chosen go first, then \"by\", the
+periods not chosen and the chosen grouping; the chosen period, g, q and
+a load in progress or an error stay longest.  WIDTH is as
+`harness-ui-fit-header' takes it."
+  (harness-ui-fit-header
+   (append
+    (list (propertize " Usage " 'face 'harness-usage-heading-face))
+    (mapcar (lambda (p)
+              (let ((chosen (eq (car p) harness-ui-usage--period)))
+                (list (harness-ui-usage--segment (nth 1 p) (harness-ui-usage--period-command (car p)) chosen (nth 2 p))
+                      (if chosen 90 50))))
+            harness-ui-usage--periods)
+    (list (list (propertize "  by" 'face 'harness-dim-face) 45))
+    (mapcar (lambda (g)
+              (let ((chosen (eq (car g) harness-ui-usage--group)))
+                (list (harness-ui-usage--segment (nth 1 g) (harness-ui-usage--group-command (car g)) chosen
+                                                 (format "Group the table by %s" (downcase (nth 1 g))))
+                      (if chosen 55 40))))
+            harness-ui-usage--groups)
+    (list (cond (harness-ui-usage--loading (list (propertize "  loading…" 'face 'harness-dim-face) 95))
+                (harness-ui-usage--error
+                 (list (concat "  " (propertize (format "error: %s" harness-ui-usage--error) 'face 'error)) 95)))
+          (list (concat "  " (harness-ui-usage--segment "g" #'harness-ui-usage-refresh nil "Refresh")) 60)
+          (list (harness-ui-usage--segment "q" #'quit-window nil "Quit") 65)))
+   width))
 
 (defun harness-ui-usage--period-command (period)
   "Return a command selecting PERIOD."

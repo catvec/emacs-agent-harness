@@ -1069,6 +1069,132 @@ The bindings also work from header-line and mode-line segments."
     (define-key map (kbd "RET") run)
     map))
 
+;;;; Layout
+
+;; A view decides whether its text fits a window -- whether a buffer
+;; ends above the bottom, whether a board leaves room for its compose
+;; box -- by measuring it with `harness-ui-text-height'.
+;;
+;; A header line is not the buffer's text: it is drawn by the mode line
+;; machinery, and one wider than its window is simply cut at the right
+;; edge, which is where a view puts its buttons and its keys.  Views
+;; therefore build a header from segments with priorities and fit it
+;; with `harness-ui-fit-header'.
+
+(defun harness-ui-header-width (&optional window)
+  "Return the room WINDOW's header line has, in its units.
+WINDOW defaults to the narrowest visible window showing the current
+buffer, and to the selected window when none does: one header line is
+drawn in every window showing a buffer, so it is fitted to the least
+room any of them gives, which fits them all.  Pixels on a graphic
+frame, columns on a text terminal."
+  (let ((w (or window
+               (car (sort (get-buffer-window-list (current-buffer) nil t)
+                          (lambda (a b) (< (window-pixel-width a) (window-pixel-width b)))))
+               (selected-window))))
+    (if (display-graphic-p (window-frame w))
+        (- (window-pixel-width w)
+           (or (window-scroll-bar-width w) 0)
+           (or (window-right-divider-width w) 0))
+      (window-body-width w))))
+
+(defun harness-ui-header-string-width (string)
+  "Return how wide STRING shows in a header line of the selected window.
+Pixels on a graphic frame, measured in the `header-line' face so icons
+and a header font of another size count; columns on a text terminal."
+  (if (display-graphic-p)
+      (let ((s (copy-sequence string)))
+        (add-face-text-property 0 (length s) 'header-line t s)
+        (if (fboundp 'string-pixel-width) (string-pixel-width s) (* (frame-char-width) (string-width s))))
+    (string-width string)))
+
+(defun harness-ui-fit-header (segments &optional width)
+  "Return the header line made of SEGMENTS, fitted to WIDTH.
+SEGMENTS are in display order, each a string or (TEXT PRIORITY MIN):
+
+- TEXT, with the separator in front of it, such as \"  Model (Claude)\",
+  so that a segment which goes takes its separator with it;
+- PRIORITY, higher for a segment more worth keeping, or t to keep it
+  always;
+- MIN, optional: the same segment shortened, shown when the line still
+  does not fit without it.
+
+When the whole line is wider than WIDTH, segments make room lowest
+priority first, and the rightmost first among equals, until the rest
+fits.  A segment with MIN, a session or project name, shortens to its
+shortened form before it goes: only when even that leaves the line too
+wide is it dropped.  A segment whose priority is t is never dropped,
+only shortened.  What cannot be made to fit is left to the window,
+which cuts it as usual.
+
+WIDTH defaults to the room of the selected window, which is the window
+whose header line is drawn while a `header-line-format' `:eval' form
+runs.  When everything fits this is one measurement, so it can run on
+every redisplay."
+  (let* ((items (cl-loop for s in segments
+                         for i from 0
+                         for text = (if (consp s) (car s) s)
+                         when (and text (stringp text) (not (string-empty-p text)))
+                         collect (list :index i :text text
+                                       :priority (if (consp s) (nth 1 s) t)
+                                       :min (and (consp s) (nth 2 s)))))
+         (width (or width (harness-ui-header-width)))
+         (whole (mapconcat (lambda (it) (plist-get it :text)) items ""))
+         (total (harness-ui-header-string-width whole)))
+    (if (<= total width)
+        whole
+      (let ((droppable (sort (cl-remove-if-not (lambda (it) (numberp (plist-get it :priority)))
+                                               (copy-sequence items))
+                             (lambda (a b) (or (< (plist-get a :priority) (plist-get b :priority))
+                                               (and (= (plist-get a :priority) (plist-get b :priority))
+                                                    (> (plist-get a :index) (plist-get b :index))))))))
+        ;; The least important segments go first, one at a time, and no
+        ;; more of them than the window needs.  One with a shortened form
+        ;; takes it first and goes only when it is not enough: a name is
+        ;; worth a few columns even when the model and the counts are not.
+        (while (and droppable (> total width))
+          (let ((it (pop droppable)))
+            (when-let* ((min (plist-get it :min)))
+              (let ((was (harness-ui-header-string-width (plist-get it :text))))
+                (plist-put it :text min)
+                (cl-decf total (- was (harness-ui-header-string-width min)))))
+            (when (> total width)
+              (cl-decf total (harness-ui-header-string-width (plist-get it :text)))
+              (setq items (delq it items)))))
+        ;; What may not be dropped, a segment a mode puts in front of the
+        ;; session's own, shortens too: nothing else is left to give.
+        (dolist (it (reverse items))
+          (when (and (> total width) (plist-get it :min))
+            (let ((was (harness-ui-header-string-width (plist-get it :text))))
+              (plist-put it :text (plist-get it :min))
+              (cl-decf total (- was (harness-ui-header-string-width (plist-get it :text)))))))
+        (mapconcat (lambda (it) (plist-get it :text)) items "")))))
+
+(defun harness-ui-text-height (window from to limit)
+  "Return how many pixels the text from FROM to TO takes in WINDOW.
+The value is exact while it is LIMIT or less, and more than LIMIT for
+text that takes more, so comparing it with LIMIT tells whether the text
+fits.  Measuring stops about LIMIT pixels in, however long the text.
+The current buffer must be WINDOW's; on a text terminal a pixel is a
+line.
+
+`window-text-pixel-size' with a Y-LIMIT cannot tell: for text taller
+than the limit it returns where the line crossing the limit starts,
+which is the limit or less whenever that line is cut, so text that
+overflows the window reads as text that fits."
+  (let ((lines (+ 2 (/ limit (max 1 (frame-char-height (window-frame window))))))
+        (height nil))
+    ;; A screen line at the default height or more, as most are, fills
+    ;; LIMIT within the first round; lines of a smaller face take more.
+    (while (null height)
+      (let* ((end (save-excursion (goto-char from) (vertical-motion lines window) (point)))
+             ;; To a line's start, the line counts: never more than the text.
+             (h (cdr (window-text-pixel-size window from (min end to)))))
+        (if (or (>= end to) (> h limit))
+            (setq height h)
+          (setq lines (* 2 lines)))))
+    height))
+
 ;;;; Positions
 
 (defcustom harness-ui-positions

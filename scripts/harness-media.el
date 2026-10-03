@@ -71,6 +71,7 @@
 (defvar harness-chat--loading)
 (defvar harness-chat--order)
 (defvar harness-sessions)
+(defvar harness-ui-tasks--tasks)
 
 (declare-function harness-start "harness")
 (declare-function harness-call "harness-core")
@@ -1505,6 +1506,66 @@ Return the chat's buffer."
       (set-window-start window (point-min))))
   (harness-media--capture "tasks"))
 
+(defconst harness-media--done-titles
+  '("add a DELETE /orders/{id} endpoint"
+    "return 409 when an order already shipped"
+    "keep the order tests off the network"
+    "log the request id with every order line"
+    "make the invoice total an int in cents"
+    "retry a failed webhook once before giving up"
+    "rate-limit the login endpoint"
+    "validate the coupon code before applying it"
+    "document the pagination parameters"
+    "drop the unused legacy_price column"
+    "send a receipt email after checkout"
+    "cache the product catalogue for five minutes")
+  "Titles of the pretend completed tasks of the long board picture.")
+
+(defun harness-media--add-done-tasks (n)
+  "Put N completed tasks of the demo project on the board.
+The picture is about a long board -- one grown by weeks of merged work
+-- and running N tasks through the scripted providers would take
+minutes: the board draws the same cards from its own task list."
+  (setq harness-ui-tasks--tasks
+        (append harness-ui-tasks--tasks
+                (cl-loop for i below n
+                         for title = (nth (mod i (length harness-media--done-titles))
+                                          harness-media--done-titles)
+                         for age = (* 7200 (1+ i))
+                         for created = (- (float-time) age)
+                         collect (list :id (format "t-media%03d" i)
+                                       :project harness-media-project
+                                       :cwd harness-media-project
+                                       :prompt title
+                                       :state "done" :column "done" :merged t
+                                       :created created
+                                       :started (+ created 600)
+                                       :finished (+ created 1200)
+                                       :verified-at (+ created 1300))))))
+
+(defun harness-media-shot-tasks-long ()
+  "A board grown long by merged work, still fitting its window.
+53 completed tasks and every other column filled: the board holds the
+least urgent cards back, a capped section saying \"... N more  [Show
+all]\", so the compose box stays at the bottom of the window with the
+task being written in it.  The frame is a fixed height, the same as the
+before picture's: a board that does not fit would push the box below
+the last line."
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  (set-frame-size nil harness-media-columns 40)
+  (let ((window (selected-window)))
+    (with-current-buffer (window-buffer window)
+      (harness-media--add-done-tasks 53)
+      (harness-compose-set "Add DELETE /orders/{id}, which cancels an order that has not shipped yet")
+      (set-window-point window (point-max))
+      ;; The frame is the picture's size now: lay the board out for it
+      ;; once more, as a tick does when a window changes size.
+      (harness-ui-tasks--render))
+    (harness-media--settle 1)
+    (set-window-start window (point-min))
+    (harness-media--settle 1))
+  (harness-media--capture "tasks-long"))
+
 (defun harness-media-shot-sessions ()
   "The session list."
   (harness-media--view #'harness-sessions)
@@ -1556,6 +1617,7 @@ Return the chat's buffer."
     ("chat-permission" . harness-media-shot-chat-permission)
     ("chat-question" . harness-media-shot-chat-question)
     ("tasks" . harness-media-shot-tasks)
+    ("tasks-long" . harness-media-shot-tasks-long)
     ("sessions" . harness-media-shot-sessions)
     ("tree" . harness-media-shot-tree)
     ("usage" . harness-media-shot-usage)

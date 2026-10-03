@@ -241,7 +241,8 @@ from `pre-redisplay-functions'."
         ;; box, where a host following the end (chat) puts the bottom of
         ;; the window; padding inside the buffer puts the box on the last line.
         (let* ((line (frame-char-height (window-frame window)))
-               (used (cdr (window-text-pixel-size window (point-min) harness-compose-end nil body)))
+               ;; More than BODY for a buffer taller than the window: no padding.
+               (used (harness-ui-text-height window (point-min) harness-compose-end body))
                (lines (/ (- body used (if harness-compose--pad-at 0 line)) line)))
           (when (and (= (window-start window) (point-min)) (> lines 0))
             ;; An explicit face: bare newlines would take the height of the
@@ -287,8 +288,11 @@ is left to the user."
         (let* ((body (window-body-height window t))
                (line (frame-char-height (window-frame window)))
                (room (- body (if harness-compose--pad-at 0 line)))
-               (height (lambda (from)
-                         (cdr (window-text-pixel-size window from harness-compose-end nil (1+ body)))))
+               ;; Exact up to ROOM and more than ROOM beyond, so a buffer
+               ;; taller than the window never reads as one that fits:
+               ;; showing it from its start would push point, and the
+               ;; box with it, out of the window on every redraw.
+               (height (lambda (from) (harness-ui-text-height window from harness-compose-end room)))
                (start (window-start window))
                (pt (window-point window))
                (anchor (if harness-compose--pad-at harness-compose-end (point-max))))

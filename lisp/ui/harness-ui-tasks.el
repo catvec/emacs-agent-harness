@@ -131,6 +131,10 @@ harness's task defaults and changed with the usual session commands.")
 (defvar-local harness-ui-tasks--error nil "Last failure, shown above the compose box.")
 (defvar-local harness-ui-tasks--show-archived nil)
 (defvar-local harness-ui-tasks--folded nil "Columns whose section is folded.")
+(defvar-local harness-ui-tasks--expanded nil
+  "Columns whose section shows every task, whatever the window holds.
+The board fits its window by capping the least urgent sections; a
+section opened with its \"… N more  [Show all]\" line is left whole.")
 (defvar-local harness-ui-tasks--submitting nil "Prompts sent but not yet acknowledged.")
 (defvar-local harness-ui-tasks--target nil
   "What the compose box does: nil for a new task, else (KIND . ID).
@@ -490,12 +494,183 @@ a button whose label changes, a setting's value say, needs one."
   (let ((windows (get-buffer-window-list nil nil t)))
     (if windows (apply #'max (mapcar #'window-body-width windows)) 100)))
 
+;;; Fitting the board to the window
+
+;; The board sits above the compose box, which stays at the bottom of
+;; the window.  A board taller than the room it has would push the box
+;; off the bottom, where the box's padding and scrolling would then
+;; fight over the window (see `harness-compose--follow').  So the board
+;; is drawn to fit: the least urgent sections cap their lists first,
+;; each saying how many tasks it holds back, and a section you expanded
+;; keeps its whole list until folded again.
+
+(defun harness-ui-tasks--window ()
+  "Return the window the board should be drawn for.
+The selected one while it shows the board, else its first visible
+window, if any."
+  (or (and (eq (window-buffer (selected-window)) (current-buffer)) (selected-window))
+      (car (get-buffer-window-list nil nil t))))
+
+(defun harness-ui-tasks--tail-key (window)
+  "Return what the lines below the board say in WINDOW.
+Their height is what the board must leave room for, and the caps depend
+on it: a box that grew a line or a new attachment changes what fits."
+  (when (and window harness-ui-tasks--list-end
+             (< (marker-position harness-ui-tasks--list-end) (point-max)))
+    ;; Without the padding: it fills the room that is left, and counting
+    ;; it would make the caps depend on the board they were sized for, a
+    ;; loop.  The next redisplay sizes it again.
+    (harness-compose-repad window)
+    (list (harness-ui-text-height window (marker-position harness-ui-tasks--list-end)
+                                  (point-max) (window-body-height window t))
+          (buffer-substring-no-properties (marker-position harness-ui-tasks--list-end) (point-max)))))
+
 (defun harness-ui-tasks--fit (string room)
   "STRING shortened to ROOM columns (at least 12), keeping its properties."
   (let ((room (max 12 room)))
     (if (<= (string-width string) room)
         string
       (concat (truncate-string-to-width string (1- room)) "…"))))
+
+(defun harness-ui-tasks--more-line (n column)
+  "The line saying a section holds back N more tasks of COLUMN.
+It takes the place of the cards it hides; its [Show all] button opens
+them, and a section already open gets [Show fewer] instead."
+  (let ((start (point)))
+    (insert (if (> n 0)
+                (concat (propertize (format "    %s %d more" harness-ui-tasks--ellipsis n)
+                                    'face 'harness-dim-face)
+                        "  ")
+              "    ")
+            (if (memq column harness-ui-tasks--expanded)
+                (harness-ui-tasks--button "[Show fewer]" #'harness-ui-tasks-show-fewer
+                                          "Let the section fit the window again")
+              (harness-ui-tasks--button "[Show all]" #'harness-ui-tasks-show-all
+                                        "Show every task of this section, however tall it is"))
+            "\n")
+    ;; The line belongs to its column, so its buttons know which one they open.
+    (put-text-property start (point) 'harness-task-more column)))
+
+(defun harness-ui-tasks-show-all ()
+  "Show every task of the section at point, however tall it makes the board."
+  (interactive)
+  (when-let* ((column (or (get-text-property (point) 'harness-task-section)
+                          (get-text-property (point) 'harness-task-more))))
+    (setq harness-ui-tasks--expanded (cons column harness-ui-tasks--expanded))
+    (harness-ui-tasks--render t)
+    (message "Showing every task of this section")))
+
+(defun harness-ui-tasks-show-fewer ()
+  "Let the section at point fit the window again."
+  (interactive)
+  (when-let* ((column (or (get-text-property (point) 'harness-task-section)
+                          (get-text-property (point) 'harness-task-more))))
+    (setq harness-ui-tasks--expanded (delq column harness-ui-tasks--expanded))
+    (harness-ui-tasks--render t)))
+
+(defconst harness-ui-tasks--cap-min-lines 24
+  "Fewest lines of room a window must have before sections are capped.
+Below that, a board of headings and notes alone helps nobody: the board
+is drawn whole, scrolls under the reader, and the compose box keeps its
+place at the bottom of the window (`harness-compose--follow').")
+
+(defconst harness-ui-tasks--cap-order '(done pending active review needs-input)
+  "Columns the board caps, least urgent first.
+A cap hides part of a column's list, so the ones that need you are
+capped last, and only ever after everything below them.")
+
+(defun harness-ui-tasks--cappable-p (groups)
+  "Non-nil when some section of GROUPS may have its list capped."
+  (cl-some (lambda (c)
+             (and (not (memq (car c) harness-ui-tasks--folded))
+                  (not (memq (car c) harness-ui-tasks--expanded))
+                  (cdr (assq (car c) groups))))
+           harness-ui-tasks--columns))
+
+(defun harness-ui-tasks--empty-caps ()
+  "Return every column's cap with nothing held back: (COLUMN SHOW . MORE)."
+  (mapcar (lambda (c) (cons (car c) (cons nil 0))) harness-ui-tasks--columns))
+
+(defun harness-ui-tasks--cap-cards (caps groups n)
+  "Hold back N more cards in CAPS, least urgent section first.
+CAPS is the alist of (COLUMN SHOW . MORE) from
+`harness-ui-tasks--empty-caps'; GROUPS the tasks shown.  A section that
+is folded keeps its cap; one you expanded is left whole.  Return CAPS,
+and non-nil when it held a card back."
+  (let ((left n) (dropped nil))
+    (dolist (column harness-ui-tasks--cap-order caps)
+      (when (> left 0)
+        (let* ((cap (cdr (assq column caps)))
+               (total (length (cdr (assq column groups))))
+               (show (if (null (car cap)) total (car cap))))
+          (unless (or (memq column harness-ui-tasks--folded)
+                      (memq column harness-ui-tasks--expanded))
+            (let ((drop (min left show)))
+              (when (> drop 0)
+                (setcdr (assq column caps) (cons (- show drop) (+ (cdr cap) drop)))
+                (setq dropped t)
+                (cl-decf left drop)))))))
+    dropped))
+
+(defun harness-ui-tasks--fits-p (window)
+  "Non-nil when the whole buffer fits WINDOW, board and compose box both.
+Measuring to the end of the buffer counts the box and the lines above
+it exactly, wrapping and all, and `harness-ui-text-height' is exact at
+the limit, so this answers \"would the box stay in the window?\" without
+needing the height of text that overflows."
+  (let ((body (window-body-height window t)))
+    (<= (harness-ui-text-height window (point-min) (point-max) body) body)))
+
+(defun harness-ui-tasks--draw-board (caps)
+  "Draw the board region with CAPS, from the start of the buffer.
+CAPS is the alist `harness-ui-tasks--cap-cards' makes, or nil for
+everything.  Point is left at the end of the board."
+  (delete-region (point-min) harness-ui-tasks--list-end)
+  (goto-char (point-min))
+  (harness-ui-tasks--insert-board caps))
+
+(defun harness-ui-tasks--fit-board ()
+  "Draw the board, holding back the least urgent cards until the box fits.
+The board region is drawn whole first and the whole buffer measured
+through `harness-ui-tasks--fits-p'; when the compose box would not stay
+in the window, the fewest cards that must be held back are found by
+bisection -- a card takes a line or two, and which sections give way
+depends on the wrapping in that window in a way only a drawing answers
+-- each capped section getting the line that says how many it holds and
+its [Show all].  Nothing is capped without a window, when the window has
+no room to speak of, or when everything is folded away or expanded: the
+board then scrolls, and the box keeps its place at the bottom of the
+window."
+  (let* ((window (harness-ui-tasks--window))
+         (line (and window (frame-char-height (window-frame window))))
+         (body (and window (window-body-height window t)))
+         (groups (harness-ui-tasks--visible))
+         (empty (harness-ui-tasks--empty-caps)))
+    (cond
+     ((or (null window) (null line) (null body)
+          (< body (* line harness-ui-tasks--cap-min-lines))
+          (not (harness-ui-tasks--cappable-p groups)))
+      (harness-ui-tasks--draw-board nil)
+      nil)
+     (t
+      (harness-ui-tasks--draw-board empty)
+      (if (harness-ui-tasks--fits-p window)
+          empty
+        (let* ((total (cl-loop for c in harness-ui-tasks--columns
+                               sum (length (cdr (assq (car c) groups)))))
+               (lo 0) (hi total))
+          (while (< lo hi)
+            (let* ((mid (/ (+ lo hi) 2))
+                   (caps (harness-ui-tasks--empty-caps)))
+              (harness-ui-tasks--cap-cards caps groups mid)
+              (harness-ui-tasks--draw-board caps)
+              (if (harness-ui-tasks--fits-p window)
+                  (setq hi mid)
+                (setq lo (1+ mid)))))
+          (let ((caps (harness-ui-tasks--empty-caps)))
+            (when (> hi 0) (harness-ui-tasks--cap-cards caps groups hi))
+            (harness-ui-tasks--draw-board caps)
+            caps)))))))
 
 (defun harness-ui-tasks--insert-card (task column position)
   (let* ((start (point))
@@ -517,7 +692,10 @@ a button whose label changes, a setting's value say, needs one."
             buttons "\n")
     (put-text-property start (point) 'harness-task-id (plist-get task :id))))
 
-(defun harness-ui-tasks--insert-section (column heading tasks)
+(defun harness-ui-tasks--insert-section (column heading tasks &optional cap)
+  "Draw one column: HEADING, its TASKS and, with CAP (SHOW . MORE), the cap.
+SHOW of the tasks are drawn, in order, and its line says how many MORE
+the window is too small for."
   (let ((folded (memq column harness-ui-tasks--folded))
         (start (point)))
     (insert (propertize (harness-ui-icon (if folded 'harness-icon-collapsed 'harness-icon-expanded))
@@ -544,23 +722,33 @@ a button whose label changes, a setting's value say, needs one."
                                        (- (harness-ui-tasks--width) 17
                                           (string-width (harness-ui-icon 'harness-icon-task-pending)))))
                               'face 'harness-dim-face))))
-      (if (and (null tasks) (not (and (eq column 'pending) harness-ui-tasks--submitting)))
+      (let ((shown (if cap (car cap) nil))
+            (more (if cap (cdr cap) 0)))
+        (cond
+         ((and (null tasks) (not (and (eq column 'pending) harness-ui-tasks--submitting)))
           (insert (propertize (pcase column
                                 ('needs-input "    nothing needs you\n")
                                 ('review "    nothing to review\n")
                                 ('active "    nothing working\n")
                                 ('pending "    no tasks waiting\n")
                                 (_ "    none yet\n"))
-                              'face 'harness-dim-face))
-        ;; Only queued tasks have a place in line; the backlog waits for you.
-        (let ((queued 0))
-          (dolist (task tasks)
-            (harness-ui-tasks--insert-card
-             task column (and (eq column 'pending) (not (harness-ui-tasks--backlog-p task))
-                              (cl-incf queued)))))))
-    (insert "\n")))
+                              'face 'harness-dim-face)))
+         (t
+          ;; Only queued tasks have a place in line; the backlog waits for you.
+          (let ((queued 0))
+            (dolist (task (if shown (seq-take tasks shown) tasks))
+              (harness-ui-tasks--insert-card
+               task column (and (eq column 'pending) (not (harness-ui-tasks--backlog-p task))
+                                (cl-incf queued)))))))
+        ;; The line for a section the window is too small for, or one open
+        ;; past the room the window has, which folds it back.
+        (when (or (> more 0) (memq column harness-ui-tasks--expanded))
+          (harness-ui-tasks--more-line more column)))
+      (insert "\n"))))
 
-(defun harness-ui-tasks--insert-board ()
+(defun harness-ui-tasks--insert-board (&optional caps)
+  "Draw the board region, with CAPS from `harness-ui-tasks--fit-board'.
+CAPS is the alist of (COLUMN SHOW . MORE), or nil to draw everything."
   (cond
    ((and harness-ui-tasks--loading (null harness-ui-tasks--tasks))
     (insert (propertize "\n  loading tasks…\n" 'face 'harness-dim-face)))
@@ -571,7 +759,8 @@ a button whose label changes, a setting's value say, needs one."
           (insert (propertize "  No tasks yet.  Describe one below: it gets a session of its own\n  and works on it while you do something else.\n\n"
                               'face 'harness-dim-face 'wrap-prefix "  "))
         (dolist (c harness-ui-tasks--columns)
-          (harness-ui-tasks--insert-section (car c) (cadr c) (cdr (assq (car c) groups)))))))))
+          (harness-ui-tasks--insert-section (car c) (cadr c) (cdr (assq (car c) groups))
+                                            (cdr (assq (car c) caps)))))))))
 
 ;;;; Point across redraws
 
@@ -734,20 +923,29 @@ something else, but at the start of the line instead."
       (when pt (set-window-point w (harness-ui-tasks--anchor-position pt)))
       (when start (set-window-start w (harness-ui-tasks--anchor-position start) t)))))
 
-(defun harness-ui-tasks--render ()
+(defvar-local harness-ui-tasks--drawn-key nil
+  "What the board region was last drawn as, for `harness-ui-tasks--render'.")
+
+(defun harness-ui-tasks--render (&optional force)
   "Redraw the board region, leaving the compose box alone.
 Point and every window showing the board stay where they were: on the
-same line of the same task, on the same button (`harness-ui-tasks--anchor')."
-  (when (harness-ui-tasks--board-p (current-buffer))
+same line of the same task, on the same button (`harness-ui-tasks--anchor').
+A redraw that would draw the same board is skipped -- the tick runs
+every `harness-ui-tasks-tick' seconds -- unless FORCE, which expansion,
+folding and the like pass: the caps depend on the window, not the
+board, so what was skipped is only skipped while both are unchanged."
+  (when (and (harness-ui-tasks--board-p (current-buffer))
+             (or force
+                 (not (equal (harness-ui-tasks--board-key)
+                             (buffer-local-value 'harness-ui-tasks--drawn-key (current-buffer))))))
+    (setq harness-ui-tasks--drawn-key (harness-ui-tasks--board-key))
     (let* ((inhibit-read-only t)
            (buffer-undo-list t)
            (places (harness-ui-tasks--places)))
       (unless harness-ui-tasks--list-end
         (setq harness-ui-tasks--list-end (copy-marker (point-min) t)))
       (save-excursion
-        (delete-region (point-min) harness-ui-tasks--list-end)
-        (goto-char (point-min))
-        (harness-ui-tasks--insert-board)
+        (harness-ui-tasks--fit-board)
         (put-text-property (point-min) (point) 'read-only t)
         (put-text-property (point-min) (point) 'keymap harness-ui-tasks-board-map)
         (harness-ui-tasks--compose-buttons-keymap (point-min) (point)))
@@ -755,6 +953,27 @@ same line of the same task, on the same button (`harness-ui-tasks--anchor')."
       (harness-ui-tasks--focus-card)
       (set-buffer-modified-p nil)
       (force-mode-line-update))))
+
+(defun harness-ui-tasks--board-key ()
+  "Return what the board region's drawing depends on.
+The tasks and their sessions (their status, todos and cost feed the
+cards), the clock, the caps the window allows, and the state a card
+cannot show: which column is folded, which is expanded, which tasks
+are submitting."
+  (list harness-ui-tasks--tasks
+        (mapcar (lambda (session)
+                  (list (plist-get session :id) (plist-get session :name) (plist-get session :status)
+                        (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)))
+                (harness-ui-sessions))
+        (truncate (float-time) 5)
+        (harness-ui-tasks--window)
+        (and (harness-ui-tasks--window) (window-body-height (harness-ui-tasks--window) t))
+        (harness-ui-tasks--tail-key (harness-ui-tasks--window))
+        harness-ui-tasks--folded
+        harness-ui-tasks--expanded
+        harness-ui-tasks--submitting
+        harness-ui-tasks--show-archived
+        harness-ui-tasks--loading))
 
 (defvar-local harness-ui-tasks--focus nil
   "(ID . TIME): the task whose card point goes to once the board shows it.
@@ -1019,41 +1238,53 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
   (propertize text 'mouse-face 'mode-line-highlight 'help-echo help
               'keymap (harness-ui-mouse-keymap command)))
 
-(defun harness-ui-tasks--header ()
+(defun harness-ui-tasks--header (&optional width)
+  "Return the header line, fitted to WIDTH, its window's by default.
+In a window too narrow for all of it, [Add session] goes first, then
+the counts of completed, pending and working tasks; the project's name
+shortens after those, then [BTW] and [Archived].  What needs you, what
+waits for your review, [Refresh] and a board still loading stay
+longest.  WIDTH is as `harness-ui-fit-header' takes it."
   (let* ((counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) (harness-ui-tasks--visible)))
          (needs (alist-get 'needs-input counts))
-         (review (alist-get 'review counts)))
-    (concat
-     " " (propertize "Tasks" 'face 'bold) " "
-     (propertize (if harness-ui-tasks--project
-                     (file-name-nondirectory (directory-file-name harness-ui-tasks--project))
-                   (abbreviate-file-name (or harness-ui-tasks--dir "")))
-                 'face 'harness-dim-face)
-     "   "
-     (if (> needs 0)
-         (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
-                     'face 'harness-status-blocked-face)
-       "")
-     (if (> review 0)
-         (propertize (format "  %s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
-                     'face 'harness-task-review-face)
-       "")
-     (format "  %s %d  %s %d  %s %d"
-             (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)
-             (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts)
-             (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts))
-     "   "
-     (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
-                                "Ask about the tasks in a side conversation")
-     " "
-     (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
-                                "Make an ongoing session of this project a task")
-     " "
-     (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
-                                #'harness-ui-tasks-toggle-archived "Show or hide archived tasks")
-     " "
-     (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")
-     (if harness-ui-tasks--loading (propertize "  loading…" 'face 'harness-dim-face) ""))))
+         (review (alist-get 'review counts))
+         (name (if harness-ui-tasks--project
+                   (file-name-nondirectory (directory-file-name harness-ui-tasks--project))
+                 (abbreviate-file-name (or harness-ui-tasks--dir ""))))
+         (sep "   ")
+         (gap (lambda () (prog1 sep (setq sep "  ")))))
+    (harness-ui-fit-header
+     (list
+      (concat " " (propertize "Tasks" 'face 'bold))
+      (list (concat " " (propertize name 'face 'harness-dim-face))
+            50 (concat " " (propertize (harness-truncate-end name 6) 'face 'harness-dim-face)))
+      (and (> needs 0)
+           (list (concat (funcall gap)
+                         (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
+                                     'face 'harness-status-blocked-face))
+                 90))
+      (and (> review 0)
+           (list (concat (funcall gap)
+                         (propertize (format "%s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
+                                     'face 'harness-task-review-face))
+                 88))
+      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)) 45)
+      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
+            40)
+      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)
+      (list (concat "   " (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
+                                                     "Ask about the tasks in a side conversation"))
+            60)
+      (list (concat " " (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
+                                                   "Make an ongoing session of this project a task"))
+            20)
+      ;; Showing archived tasks is not the usual board: that stays longer.
+      (list (concat " " (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
+                                                   #'harness-ui-tasks-toggle-archived "Show or hide archived tasks"))
+            (if harness-ui-tasks--show-archived 75 55))
+      (list (concat " " (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")) 80)
+      (and harness-ui-tasks--loading (list (propertize "  loading…" 'face 'harness-dim-face) 85)))
+     width)))
 
 ;;;; Data
 
