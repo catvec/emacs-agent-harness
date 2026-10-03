@@ -320,9 +320,21 @@ resumes the CLI session in a new one."
                         (max (point-min) (- (point-max) 2000)) (point-max))))
       "")))
 
-(defun harness-provider-claude--environment ()
-  "Return `process-environment' without the CLAUDECODE nesting marker."
-  (cl-remove-if (lambda (e) (string-prefix-p "CLAUDECODE=" e)) process-environment))
+(defun harness-provider-claude--environment (&optional effort)
+  "Return `process-environment' without the CLAUDECODE nesting marker.
+With EFFORT `off' it also turns the CLI's extended thinking off (see
+`harness-provider-claude--effort')."
+  (append (and (eq effort 'off) (list "MAX_THINKING_TOKENS=0"))
+          (cl-remove-if (lambda (e) (string-prefix-p "CLAUDECODE=" e)) process-environment)))
+
+(defun harness-provider-claude--effort (request)
+  "Return the thinking level a CLI process serving REQUEST runs at.
+That is REQUEST's `:thinking', or `off' when it asks for no thinking
+with `:no-thinking'.  The CLI takes no output budget, so it ignores a
+request's `:max-tokens', and a model thinking by default spends its
+whole output on thinking before a short answer: the auto-mode judge
+ended at max_tokens with no verdict, or half of one."
+  (if (plist-get request :no-thinking) 'off (plist-get request :thinking)))
 
 ;;;; Command line and spawning
 
@@ -354,10 +366,11 @@ go."
 
 (defun harness-provider-claude--command (model effort system resume fork &optional builtin)
   "Build the `claude' command line.
-MODEL is the model name, EFFORT the thinking level or nil, SYSTEM the
-system prompt or nil, RESUME a CLI session id to continue or nil, and
-FORK non-nil to fork RESUME into a new session.  BUILTIN lists the
-CLI's own tools to turn on (\"WebSearch\"); every other one is off."
+MODEL is the model name, EFFORT the thinking level, `off' for no
+extended thinking, or nil, SYSTEM the system prompt or nil, RESUME a
+CLI session id to continue or nil, and FORK non-nil to fork RESUME into
+a new session.  BUILTIN lists the CLI's own tools to turn on
+\(\"WebSearch\"); every other one is off."
   (append
    (list harness-provider-claude-program
          "-p" "--input-format" "stream-json" "--output-format" "stream-json"
@@ -369,7 +382,11 @@ CLI's own tools to turn on (\"WebSearch\"); every other one is off."
    harness-provider-claude-permission-args
    (harness-provider-claude--ask-args builtin)
    (list "--model" model)
-   (when effort (list "--effort" effort))
+   (cond ((eq effort 'off)
+          ;; Thinking off.  Flag settings beat the user's settings files,
+          ;; whose `env' would otherwise beat the process environment.
+          (list "--settings" (harness-json-encode '(:env (:MAX_THINKING_TOKENS "0")))))
+         (effort (list "--effort" effort)))
    (when (and system (not (harness-string-blank-p system)))
      (list "--system-prompt" system))
    (when resume (list "--resume" resume))
@@ -389,7 +406,7 @@ That is (MODEL EFFORT SYSTEM), and the CLI tools it turns on when it
 turns any on: a process started otherwise is restarted."
   (let ((builtin (harness-provider-claude--cli-tools request)))
     (append (list (cdr (harness-provider-parse-model (plist-get request :model)))
-                  (plist-get request :thinking)
+                  (harness-provider-claude--effort request)
                   (plist-get request :system))
             (and builtin (list builtin)))))
 
@@ -408,9 +425,9 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
          (host (plist-get session :host))
          (cwd (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd))
          (default-directory (file-name-as-directory (expand-file-name cwd)))
-         (process-environment (harness-provider-claude--environment))
+         (effort (harness-provider-claude--effort request))
+         (process-environment (harness-provider-claude--environment effort))
          (model (cdr (harness-provider-parse-model (plist-get request :model))))
-         (effort (plist-get request :thinking))
          (system (plist-get request :system))
          (command (harness-provider-claude--command model effort system resume fork
                                                     (harness-provider-claude--cli-tools request)))

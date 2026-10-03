@@ -562,7 +562,8 @@ class Fake:
             with open(path, "w") as f:
                 json.dump({"argv": self.argv,
                            "cwd": os.getcwd(),
-                           "claudecode": os.environ.get("CLAUDECODE")}, f)
+                           "claudecode": os.environ.get("CLAUDECODE"),
+                           "max_thinking_tokens": os.environ.get("MAX_THINKING_TOKENS")}, f)
         while True:
             msg = self.next_message()
             if msg is None:

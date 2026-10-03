@@ -390,6 +390,47 @@ call, so a non-interactive session is not refused one nobody judged."
     (should (equal "fine" (plist-get d :reason)))
     (should (= 1 (length (funcall requests))))))
 
+(ert-deftest harness-perms-auto-mode-a-verdict-ending-at-max-tokens-decides ()
+  "A parseable verdict decides even when the completion stopped at max-tokens.
+The judge used to require `end-turn' and so discarded verdicts like
+these, from the log, then denied ordinary unattended work.  The judge
+asks for no extended thinking, which spent its output before the verdict."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_edit" :label "Edit" :kind 'write :description "Edits a file." :handler #'ignore)
+  (pcase-dolist (`(,reply ,behavior ,reason)
+                 '(("{\"decision\":\"allow\",\"reason\":\"Ordinary source edit within the project worktree.\"}"
+                    allow "Ordinary source edit within the project worktree.")
+                   ("{\"decision\":\"deny\",\"reason\":\"Outside the project.\"}"
+                    deny "Outside the project.")))
+    (let* ((requests (harness-perms-test--scripted-judge
+                      `(((:type text :delta ,reply) (:type done :stop-reason max-tokens)))))
+           (harness-perms-auto-model "judge:x")
+           (d (harness-perms-test--decide (harness-perms-test--request "t_edit" 'write))))
+      (should (eq behavior (plist-get d :behavior)))
+      (should (equal reason (plist-get d :reason)))
+      (should-not (plist-get d :no-verdict))
+      ;; Decided at once, without the retry; and with thinking off.
+      (should (= 1 (length (funcall requests))))
+      (should (eq t (plist-get (car (funcall requests)) :no-thinking))))))
+
+(ert-deftest harness-perms-auto-mode-a-cut-verdict-at-max-tokens-is-no-verdict ()
+  "A reply cut off before its verdict is complete gives no verdict, whatever it began.
+Nothing is read into half a JSON object, so a non-interactive session
+denies the call as nobody's verdict, after the one retry."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let* ((cut '((:type text :delta "{\"decision\":\"allow\",\"reason\":\"")
+                (:type done :stop-reason max-tokens)))
+         (requests (harness-perms-test--scripted-judge (list cut cut)))
+         (harness-perms-auto-model "judge:x")
+         (d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (equal harness-perms-no-verdict-hint (plist-get d :hint)))
+    (should (string-match-p "no verdict (it stopped: max-tokens)" (plist-get d :reason)))
+    (should (= 2 (length (funcall requests)))))
+  (should-not (harness-perms--parse-verdict "{\"decision\":\"allow\",\"reason\":\""))
+  (should-not (harness-perms--parse-verdict "{\"decision\":\"maybe\",\"reason\":\"unsure\"}"))
+  (should-not (harness-perms--parse-verdict "")))
+
 (defconst harness-perms-test--non-ascii "\N{U+2717} caf\N{U+E9} 3 \N{U+D7} 4 \N{U+2026}"
   "Text with a ballot X, an accented letter, a multiplication sign and an ellipsis.")
 
