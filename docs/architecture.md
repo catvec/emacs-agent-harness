@@ -784,17 +784,39 @@ pending request and resolves when answered).
   (see sandbox).  A guard that fails lets the chain go on.
 
 - `permission/answer SESSION-ID PENDING-ID ANSWER` — ANSWER
-  `(:behavior allow|deny :scope once|session|always :reason)`, or an
-  option id string such as "allow-session" (what ACP clients send back).
+  `(:behavior allow|deny :scope once|session|always :reason :pattern)`,
+  or an option id string such as "allow-session" (what ACP clients send
+  back), also as `(:option ID :pattern P)`.
+- Patterns: a prompt about paths is answered for a glob pattern, not
+  for one file.  Its payload's `:pattern` is everything in the
+  directory of the call's paths (`DIR/**`, `harness-perms--paths-dir`:
+  the directory holding a file, a directory itself, the deepest common
+  one of several), with symbolic links resolved.  ANSWER's `:pattern`,
+  absolute or relative to the session's cwd, replaces it: more specific
+  (`DIR/sub/**`, `DIR/*.el`, one file) or less (a parent).  Roots and
+  rule paths alike are directories, holding themselves and all below,
+  or globs, which have a `*` or a `?` (`*` within a name, `**` across
+  directories, `**/` also none, `?` one character;
+  `harness-glob-regexp` in harness-util, shared with the glob tool),
+  matched case-sensitively against resolved paths by
+  `harness-perms--within-p`.  Brackets are no classes there: they match
+  themselves, so a directory such as `Photos [2024]` stays a directory.
+  `DIR/**` also holds DIR itself, and a glob ending in `/` holds
+  everything below the directories it matches.  A grant of `DIR/**` is
+  kept as the directory DIR/, so default grants read as before; a grant
+  narrowed to one file keeps its name.
 - The jail asks instead of denying when a path lies outside the roots
   and someone can answer: a pending `permission` request whose payload
-  carries `:dir` and the options allow-once / allow-session (grant the
-  directory to the session) / allow-always (add it to
-  `harness-allowed-directories`) / deny-once.  After a grant the rest
-  of the chain still decides the call itself.  Non-interactive sessions
-  are denied with a hint as before.  The prompt names the directory
-  with symbolic links resolved, since that is what the jail compares
-  and what a grant opens.
+  carries `:dir`, `:pattern` and the options allow-once (this call may
+  reach the pattern) / allow-session (grant the pattern to the session)
+  / allow-always (add it to `harness-allowed-directories`) / deny-once
+  / deny-always (a standing rule `(:path PATTERN :behavior deny)`, for
+  every tool).  After a grant the rest of the chain still decides the
+  call itself; a pattern that leaves the call's path out makes the jail
+  ask again.  A rule that denies the call anyway denies it at once,
+  without asking.  Non-interactive sessions are denied with a hint as
+  before.  The prompt names the directory with symbolic links resolved,
+  since that is what the jail compares and what a grant opens.
 - Agents ask for a directory themselves with the `request_directory_access`
   tool (`path`, `reason`).  The dir-request stage owns that tool's
   decision and always makes it final, so the mode, standing rules,
@@ -802,11 +824,16 @@ pending request and resolves when answered).
   In every mode, auto and yolo included, a directory is granted only
   by a person answering the prompt.  A directory that is already
   reachable is allowed at once and nothing is granted.  Non-interactive
-  sessions are denied with a hint.  Otherwise the session blocks on a
-  `permission` prompt (`:dir`, the agent's reason, options
-  allow-session / allow-always / deny-once; a generic allow-once
-  answer grants to the session).  The handler then tells the agent
-  what it can reach.  Being a permission and not a question, the
+  sessions are denied with a hint, and so is a directory a path rule
+  for no tool in particular denies (`harness-perms--dir-rule`, what
+  deny-always records); no rule grants one.  Otherwise the session
+  blocks on a `permission` prompt (`:dir`, `:pattern`, the agent's
+  reason, options allow-session / allow-always / deny-once /
+  deny-always; a generic allow-once answer grants to the session).  The
+  decision hands the handler the grant as `:granted` in its `:input`,
+  and the handler tells the agent what it can reach, saying so when the
+  user granted another pattern than it asked for.  Being a permission
+  and not a question, the
   prompt cannot be answered by another agent through `session_control`.
   The auto judge is also told to deny calls that widen the agent's own
   permissions some other way (for example `harness-allowed-directories`
@@ -820,13 +847,21 @@ pending request and resolves when answered).
   `permission/pending SESSION-ID`.
 - Session directory grants are stored on the session record
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
-- Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :behavior allow|deny)`;
-  session rules live in memory, always-rules in `harness-perms-rules`.
-  The mode stage checks them first, before the auto-allow list and the mode.
+- Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :path PATTERN-or-nil
+  :behavior allow|deny)`; session rules live in memory, always-rules in
+  `harness-perms-rules`.  A rule with a `:path` (absolute, or relative to
+  the session's cwd) applies to calls with paths only: an allow rule when
+  the pattern holds every path of the call, a deny rule when it holds
+  any.  The mode stage checks them first, before the auto-allow list and
+  the mode.  A tool prompt for a call with paths offers its `:pattern`,
+  and its allow-session / allow-always / deny-always answers record
+  `(:tool NAME :path PATTERN :behavior B)` rather than a rule for the
+  tool everywhere; a call without paths records `(:tool NAME :behavior B)`
+  as before.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
-  `:dir` and `:reason` for a directory prompt; UIs offer only the
-  listed `:options`),
+  `:pattern` for a call with paths and `:dir` and `:reason` for a
+  directory prompt; UIs offer only the listed `:options`),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
@@ -1675,7 +1710,10 @@ change), `_harness/node` (a finalised or updated node), `_harness/hint`,
 `_harness/activity` (`activity`: what the running turn does, as
 `agent/activity` returns it; null once the turn ends).
 Requests agent → client: `session/request_permission {sessionId, toolCall,
-options:[{optionId,name,kind}]}` → `{outcome:{outcome:"selected",optionId}}`
+options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, dir,
+pattern, reason}}` → `{outcome:{outcome:"selected",optionId}}`, plus
+`_harness:{pattern}` when the client answers a request about paths for
+another glob pattern than its `_harness.pattern` (see perms),
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
 Its `options` are the answers' labels; `diagrams`, present when the
 options have them, holds one per option, `{type: "ascii", text}` or

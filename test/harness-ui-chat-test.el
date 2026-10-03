@@ -853,6 +853,93 @@ It is never added to the running turn."
         (harness-test-wait (lambda () recorded) 5 "answered through the method")
         (should (equal (list sid "pre" "allow-always") (car recorded)))))))
 
+(ert-deftest harness-ui-chat-permission-pattern-is-editable ()
+  "A prompt about paths shows the pattern it is answered for; e edits it, the answer carries it."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (answers nil)
+           (respond (lambda (r) (push r answers)))
+           (params (lambda (pid)
+                     (list :sessionId sid
+                           :toolCall (list :toolCallId pid :title "Access ~/notes/" :kind "read"
+                                           :rawInput '(:path "~/notes/todo.org"))
+                           :options harness-acp--dir-permission-options
+                           :_harness (list :pendingId pid :tool "read_file" :dir (expand-file-name "~/notes/")
+                                           :pattern (expand-file-name "~/notes/**")
+                                           :paths (list (expand-file-name "~/notes/todo.org"))
+                                           :reason "Read file wants ~/notes/todo.org, which is outside the allowed directories")))))
+      (should (harness-chat--on-permission (funcall params "d1") respond))
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "pattern: ~/notes/**  [Edit] e"))
+        ;; A directory prompt's buttons speak of the pattern, not of a directory.
+        (should (harness-ui-chat-test-find buf "[Allow once] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N"))
+        ;; e on the panel edits it, from the pattern shown; M-n offers others.
+        (goto-char (harness-ui-chat-test-find buf "Permission"))
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_prompt initial _history defaults)
+                     (should (equal "~/notes/**" initial))
+                     (should (equal '("~/notes/todo.org" "~/notes/*.org" "~/notes/**" "~/**") defaults))
+                     " ~/notes/*.org ")))
+          (call-interactively (lookup-key harness-chat-panel-map (kbd "e"))))
+        (should (harness-ui-chat-test-find buf "pattern: ~/notes/*.org (edited)"))
+        ;; Point stays on the panel, so its keys still answer it.
+        (should (equal "d1" (get-text-property (point) 'harness-chat-pending)))
+        (call-interactively (lookup-key harness-chat-panel-map (kbd "s")))
+        (should (equal '(:outcome (:outcome "selected" :optionId "allow-session") :_harness (:pattern "~/notes/*.org"))
+                       (car answers)))
+        (should (null harness-chat--pending))
+        ;; Unedited, the answer is the plain option; an empty edit goes back to the request's own.
+        (harness-chat--on-permission (funcall params "d2") respond)
+        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "~/elsewhere/**")))
+          (harness-chat-edit-permission-pattern))
+        (should (harness-ui-chat-test-find buf "pattern: ~/elsewhere/** (edited)"))
+        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+          (harness-chat-edit-permission-pattern))
+        (should (harness-ui-chat-test-find buf "pattern: ~/notes/**  [Edit]"))
+        (goto-char (harness-ui-chat-test-find buf "Permission"))
+        (call-interactively (lookup-key harness-chat-panel-map (kbd "N")))
+        (should (equal '(:outcome (:outcome "selected" :optionId "deny-always")) (car answers)))
+        ;; Without a request about paths there is nothing to edit.
+        (harness-chat--on-permission (list :sessionId sid :toolCall '(:toolCallId "c3" :title "Bash: ls" :kind "execute")
+                                           :options harness-acp--permission-options
+                                           :_harness '(:pendingId "p3" :tool "bash"))
+                                     respond)
+        (should-not (harness-ui-chat-test-find buf "pattern:"))
+        (should-error (harness-chat-edit-permission-pattern) :type 'user-error)))))
+
+(ert-deftest harness-ui-chat-tool-permission-pattern ()
+  "A tool call's prompt says which answers its pattern is remembered for."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (recorded nil))
+      (harness-register-method 'permission/answer
+                               (lambda (session-id pending-id answer)
+                                 (push (list session-id pending-id answer) recorded)
+                                 (harness-call 'session/pending-resolve session-id pending-id answer)
+                                 answer))
+      (harness-call 'session/pending-add sid
+                    (list :id "w1" :kind 'permission
+                          :payload (list :tool "write_file" :kind 'write :title "Write file: lisp/a.el"
+                                         :input '(:path "lisp/a.el")
+                                         :paths (list (expand-file-name "~/proj/lisp/a.el"))
+                                         :pattern (expand-file-name "~/proj/lisp/**")
+                                         :options '(allow-once allow-session allow-always deny-once deny-always))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-find buf "pattern: ~/proj/lisp/**  [Edit] e   s, a, N remember the answer for it"))
+          (should (harness-ui-chat-test-find buf "[Allow] y  [Allow for session] s"))
+          ;; C-c C-p edits it from the compose box.
+          (goto-char harness-compose-end)
+          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "~/proj/**")))
+            (call-interactively (lookup-key harness-chat-mode-map (kbd "C-c C-p"))))
+          (should (harness-ui-chat-test-find buf "pattern: ~/proj/** (edited)"))
+          (goto-char (1- (harness-ui-chat-test-find buf "[Always allow]")))
+          (harness-chat-push))
+        (harness-test-wait (lambda () recorded) 5 "answered through the method")
+        (should (equal (list sid "w1" '(:option "allow-always" :pattern "~/proj/**")) (car recorded)))))))
+
 (ert-deftest harness-ui-chat-question-panel ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))

@@ -1459,8 +1459,11 @@ state the group had."
   (let ((old (harness-chat--pending-record (plist-get record :id))))
     (setq harness-chat--pending
           (append (cl-remove old harness-chat--pending)
-                  (list (if (and old (plist-get old :respond) (not (plist-get record :respond)))
-                            old record)))))
+                  (list (cond ((and old (plist-get old :respond) (not (plist-get record :respond))) old)
+                              ;; A pattern the user edited survives the request's arrival.
+                              ((plist-get old :edited-pattern)
+                               (plist-put (copy-sequence record) :edited-pattern (plist-get old :edited-pattern)))
+                              (t record))))))
   (harness-chat--render-tail)
   (harness-chat--start-spinner))
 
@@ -1488,7 +1491,8 @@ Return non-nil when something changed."
                                       :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
                                       :tool (plist-get payload :tool) :tool-kind (harness-chat--str (plist-get payload :kind))
                                       :input (plist-get payload :input) :paths (plist-get payload :paths)
-                                      :dir (plist-get payload :dir) :reason (plist-get payload :reason)
+                                      :dir (plist-get payload :dir) :pattern (plist-get payload :pattern)
+                                      :reason (plist-get payload :reason)
                                       :options (plist-get payload :options))))))
           (setq changed t))))
     (dolist (r harness-chat--pending)
@@ -1512,7 +1516,8 @@ The panel answers through RESPOND."
                :title (or (plist-get tc :title) (plist-get extra :tool) "tool call")
                :tool (plist-get extra :tool) :tool-kind (plist-get tc :kind)
                :input (plist-get tc :rawInput) :paths (plist-get extra :paths)
-               :dir (plist-get extra :dir) :reason (plist-get extra :reason)
+               :dir (plist-get extra :dir) :pattern (plist-get extra :pattern)
+               :reason (plist-get extra :reason)
                :options (plist-get params :options)))))
     t))
 
@@ -1528,19 +1533,90 @@ The panel answers through RESPOND."
     t))
 
 (defun harness-chat--answer-permission (pid option)
-  "Answer permission request PID with OPTION (an option id such as \"allow-once\")."
+  "Answer permission request PID with OPTION (an option id such as \"allow-once\").
+A pattern the user edited (`harness-chat-edit-permission-pattern') goes
+with the answer."
   (when-let* ((r (harness-chat--pending-record pid)))
-    (if-let* ((respond (plist-get r :respond)))
-        (funcall respond (list :outcome (list :outcome "selected" :optionId option)))
-      (harness-ui-call "_harness/permission/answer"
-                       (list :session-id harness-ui-session-id :pending-id pid :answer option)
-                       #'ignore))
-    (harness-chat--remove-pending pid)
-    (message "%s" (pcase option
-                    ("allow-once" "Allowed")
-                    ("allow-session" (if (plist-get r :dir) "Directory allowed for this session" "Allowed for this session"))
-                    ("allow-always" (if (plist-get r :dir) "Directory always allowed" "Always allowed"))
-                    ("deny-always" "Always denied") (_ "Denied")))))
+    (let ((edited (plist-get r :edited-pattern))
+          (shown (harness-chat--permission-pattern r)))
+      (if-let* ((respond (plist-get r :respond)))
+          (funcall respond (append (list :outcome (list :outcome "selected" :optionId option))
+                                   (and edited (list :_harness (list :pattern edited)))))
+        (harness-ui-call "_harness/permission/answer"
+                         (list :session-id harness-ui-session-id :pending-id pid
+                               :answer (if edited (list :option option :pattern edited) option))
+                         #'ignore))
+      (harness-chat--remove-pending pid)
+      (message "%s" (pcase option
+                      ("allow-once" "Allowed")
+                      ("allow-session" (if shown (format "Allowed %s for this session" shown) "Allowed for this session"))
+                      ("allow-always" (if shown (format "Always allowed %s" shown) "Always allowed"))
+                      ("deny-always" (if shown (format "Always denied %s" shown) "Always denied"))
+                      (_ "Denied"))))))
+
+(defun harness-chat--permission-pattern (r)
+  "Return the glob pattern permission record R is answered for, as shown, or nil.
+That is the one the user edited, else the request's own, abbreviated."
+  (or (plist-get r :edited-pattern)
+      (and (stringp (plist-get r :pattern)) (abbreviate-file-name (plist-get r :pattern)))))
+
+(defun harness-chat--pattern-suggestions (r)
+  "Return patterns more or less specific than permission record R's own.
+The paths of the call itself, every file with one's extension in the
+directory, the directory, and its parent: what
+\\<minibuffer-local-map>\\[next-history-element] offers while editing."
+  (let* ((pattern (plist-get r :pattern))
+         (dir (and (string-suffix-p "/**" pattern) (substring pattern 0 -2)))
+         (parent (and dir (file-name-directory (directory-file-name dir))))
+         (paths (mapcar (lambda (p) (format "%s" p)) (append (plist-get r :paths) nil))))
+    (delete-dups
+     (mapcar #'abbreviate-file-name
+             (delq nil (append paths
+                               (mapcar (lambda (p)
+                                         (and dir (file-name-extension p) (equal (file-name-directory p) dir)
+                                              (concat dir "*." (file-name-extension p))))
+                                       paths)
+                               (list pattern
+                                     (and parent (not (equal parent dir)) (concat parent "**")))))))))
+
+(defun harness-chat--set-permission-pattern (pid pattern)
+  "Make PATTERN, or the request's own when nil, the one PID is answered for.
+The panel is drawn again and point goes back to its pattern line."
+  (setq harness-chat--pending
+        (mapcar (lambda (r)
+                  (if (equal (plist-get r :id) pid) (plist-put (copy-sequence r) :edited-pattern pattern) r))
+                harness-chat--pending))
+  (harness-chat--render-tail)
+  (let ((pos harness-chat--transcript-end))
+    (while (and pos (not (and (equal (get-text-property pos 'harness-chat-pending) pid)
+                              (get-text-property pos 'harness-chat-pattern))))
+      (setq pos (next-single-property-change pos 'harness-chat-pattern)))
+    (when pos (goto-char pos))))
+
+(defun harness-chat-edit-permission-pattern (&optional pid)
+  "Edit the glob pattern the permission request PID is answered for.
+PID is the request at point, or else the newest one.  A request about
+paths is answered for everything in the directory they lie in; edit
+the pattern to be more specific (a subdirectory, src/*.el, one file)
+or less (a parent directory).  `*' matches within a name, `**' across
+directories; a relative pattern is relative to the session's working
+directory.  \\<minibuffer-local-map>\\[next-history-element] offers
+patterns around the request's own; an empty answer goes back to it."
+  (interactive)
+  (let* ((pid (or pid (harness-chat--pending-at-point)))
+         (r (and pid (harness-chat--pending-record pid))))
+    (unless (and r (equal (plist-get r :kind) "permission"))
+      (setq r (cl-find-if (lambda (x) (equal (plist-get x :kind) "permission")) (reverse harness-chat--pending))
+            pid (plist-get r :id)))
+    (unless (plist-get r :pattern)
+      (user-error "No permission request about paths is waiting"))
+    (let* ((own (abbreviate-file-name (plist-get r :pattern)))
+           (typed (string-trim (read-string "Pattern (* within a name, ** across directories): "
+                                            (harness-chat--permission-pattern r) nil
+                                            (harness-chat--pattern-suggestions r)))))
+      (harness-chat--set-permission-pattern
+       pid (unless (or (string-empty-p typed) (equal typed own)) typed))
+      (message "Answers now hold for %s" (harness-chat--permission-pattern (harness-chat--pending-record pid))))))
 
 (defun harness-chat--answer-question (pid answer)
   "Answer question PID with ANSWER."
@@ -1567,15 +1643,16 @@ The panel answers through RESPOND."
           (harness-chat--answer-permission pid option)
         (user-error "No permission request waiting")))))
 
-(defvar harness-chat-panel-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "y") (harness-chat--permission-command "allow-once"))
-    (define-key map (kbd "s") (harness-chat--permission-command "allow-session"))
-    (define-key map (kbd "a") (harness-chat--permission-command "allow-always"))
-    (define-key map (kbd "n") (harness-chat--permission-command "deny-once"))
-    (define-key map (kbd "N") (harness-chat--permission-command "deny-always"))
-    map)
+(defvar harness-chat-panel-map (make-sparse-keymap)
   "Keys active while point is on a permission panel.")
+
+;; Filled at top level, not in the `defvar', so a reload updates the map.
+(define-key harness-chat-panel-map (kbd "y") (harness-chat--permission-command "allow-once"))
+(define-key harness-chat-panel-map (kbd "s") (harness-chat--permission-command "allow-session"))
+(define-key harness-chat-panel-map (kbd "a") (harness-chat--permission-command "allow-always"))
+(define-key harness-chat-panel-map (kbd "n") (harness-chat--permission-command "deny-once"))
+(define-key harness-chat-panel-map (kbd "N") (harness-chat--permission-command "deny-always"))
+(define-key harness-chat-panel-map (kbd "e") #'harness-chat-edit-permission-pattern)
 
 (defun harness-chat-allow-newest ()
   "Allow the newest pending permission request once."
@@ -1613,22 +1690,53 @@ strings) or from an ACP request (plists with `:optionId')."
 
 (defun harness-chat--permission-buttons (r)
   "Return the (LABEL KEY OPTION) buttons for permission record R.
-A directory prompt is worded for directories; only the options R
-offers are shown, so an agent's own directory request has no
-\"Allow once\"."
-  (let ((all (if (plist-get r :dir)
-                 '(("Allow once" "y" "allow-once") ("Allow directory for session" "s" "allow-session")
-                   ("Always allow directory" "a" "allow-always") ("Deny" "n" "deny-once"))
+A directory prompt answered for a pattern says so on its pattern line,
+one without speaks of the directory; only the options R offers are
+shown, so an agent's own directory request has no \"Allow once\"."
+  (let ((all (cond
+              ((and (plist-get r :dir) (not (plist-get r :pattern)))
+               '(("Allow once" "y" "allow-once") ("Allow directory for session" "s" "allow-session")
+                 ("Always allow directory" "a" "allow-always") ("Deny" "n" "deny-once")
+                 ("Always deny directory" "N" "deny-always")))
+              ((plist-get r :dir)
+               '(("Allow once" "y" "allow-once") ("Allow for session" "s" "allow-session")
+                 ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always")))
+              (t
                '(("Allow" "y" "allow-once") ("Allow for session" "s" "allow-session")
-                 ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always"))))
+                 ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always")))))
         (offered (harness-chat--offered-options r)))
     (or (and offered (cl-remove-if-not (lambda (o) (member (nth 2 o) offered)) all))
-        all)))
+        (if (plist-get r :dir) (cl-remove "deny-always" all :key #'caddr :test #'equal) all))))
+
+(defun harness-chat--insert-pattern-line (r buttons)
+  "Insert the line of the pattern permission record R is answered for.
+BUTTONS are the panel's; for a tool call, the line says which of them
+the pattern is for: those that remember the answer."
+  (let* ((pid (plist-get r :id))
+         (remembering (and (not (plist-get r :dir))
+                           (cl-remove-if-not (lambda (b) (member (nth 2 b) '("allow-session" "allow-always" "deny-always")))
+                                             buttons)))
+         (start (point)))
+    (insert (propertize "   pattern: " 'face 'harness-dim-face)
+            (propertize (harness-chat--permission-pattern r) 'face 'harness-tool-subject-face)
+            (if (plist-get r :edited-pattern) (propertize " (edited)" 'face 'harness-dim-face) "")
+            "  "
+            (harness-chat--button "[Edit]" (lambda () (harness-chat-edit-permission-pattern pid))
+                                  :help "Edit the pattern, to make it more or less specific (e)")
+            " " (harness-chat--kbd "e")
+            (if remembering
+                (propertize (format "   %s remember the answer for it"
+                                    (mapconcat (lambda (b) (nth 1 b)) remembering ", "))
+                            'face 'harness-dim-face)
+              "")
+            "\n")
+    (put-text-property start (point) 'harness-chat-pattern t)))
 
 (defun harness-chat--insert-permission-panel (r)
   "Insert the panel for permission record R."
   (let ((pid (plist-get r :id))
-        (start (point)))
+        (start (point))
+        (buttons (harness-chat--permission-buttons r)))
     (insert (propertize (concat " " (harness-ui-icon 'harness-icon-blocked) " Permission  ") 'face 'harness-label-face)
             (harness-ui-tool-title-string (plist-get r :tool) (plist-get r :title))
             "\n")
@@ -1640,8 +1748,10 @@ offers are shown, so an agent's own directory request has no
       (insert (propertize (concat "   " (harness-chat--input-summary input) "\n") 'face 'harness-dim-face)))
     (when-let* ((reason (plist-get r :reason)))
       (insert (propertize (format "   %s\n" reason) 'face 'harness-hint-face)))
+    (when (plist-get r :pattern)
+      (harness-chat--insert-pattern-line r buttons))
     (insert "   ")
-    (dolist (o (harness-chat--permission-buttons r))
+    (dolist (o buttons)
       (let ((option (nth 2 o)))
         (insert (harness-chat--button (format "[%s]" (nth 0 o))
                                       (lambda () (harness-chat--answer-permission pid option))
@@ -2799,6 +2909,7 @@ message sent from it resumes it."
   (define-key map (kbd "C-c C-s") #'harness-chat-search)
   (define-key map (kbd "C-c C-y") #'harness-chat-allow-newest)
   (define-key map (kbd "C-c C-n") #'harness-chat-deny-newest)
+  (define-key map (kbd "C-c C-p") #'harness-chat-edit-permission-pattern)
   (define-key map (kbd "C-c C-f") #'harness-chat-next-diagram)
   (define-key map (kbd "C-c C-b") #'harness-chat-previous-diagram)
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
@@ -2839,6 +2950,7 @@ on \\[harness-menu] here, or the [menu] button in the header line.
        ["Agent"
         ("C-c C-y" "Allow request" harness-chat-allow-newest)
         ("C-c C-n" "Deny request" harness-chat-deny-newest)
+        ("C-c C-p" "Edit request's pattern" harness-chat-edit-permission-pattern)
         ("C-c C-f" "Next diagram" harness-chat-next-diagram)
         ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
         ("C-c C-k" "Cancel turn" harness-chat-cancel)]
