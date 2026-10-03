@@ -1975,6 +1975,39 @@ out, so the session gets what its directory configures."
             (cond (non-interactive (list :non-interactive t))
                   ((plist-member task :non-interactive) (list :non-interactive :false))))))
 
+(defconst harness-tasks-bulk-columns '(active pending needs-input)
+  "Task columns a bulk update reaches by default.
+They are the current work: running, pending and blocked tasks.  Review,
+done and archived tasks are history and are left alone.")
+
+(defconst harness-tasks-pref-keys '(:model :thinking :permission-mode :non-interactive)
+  "Session settings a task carries until its next start.")
+
+(defun harness-tasks--prefs-differ-p (task settings)
+  "Non-nil when SETTINGS would change TASK."
+  (cl-some (lambda (k)
+             (let ((want (plist-get settings k)) (have (plist-get task k)))
+               (if (eq k :non-interactive)
+                   (not (eq (and (harness-json-true-p want) t)
+                            (and (harness-json-true-p have) t)))
+                 (not (equal want have)))))
+           (harness-plist-keys settings)))
+
+(defun harness-tasks--apply-prefs (task settings)
+  "Merge SETTINGS into TASK and, when it has a session, into that session.
+TASK's record carries what a later start would use; a started task's
+session is what its next turn uses, so both change.  Return TASK's view."
+  (let* ((id (plist-get task :id))
+         (prefs (cl-loop for k in harness-tasks-pref-keys
+                         when (plist-member settings k)
+                         append (list k (plist-get settings k)))))
+    (when prefs
+      (apply #'harness-tasks--set id prefs)
+      (let ((session (harness-tasks--session task)))
+        (when (and session (harness-method-exists-p 'session/update))
+          (apply #'harness-call 'session/update (plist-get session :id) prefs))))
+    (harness-call 'task/get id)))
+
 (defun harness-tasks--open-session (id cwd worktree)
   "Create task ID's session in CWD (in WORKTREE, when non-nil) and prompt it."
   (condition-case err
@@ -2524,6 +2557,36 @@ non-interactive is on only when `harness-tasks-non-interactive' is, or
                      (and (boundp 'harness-default-model) harness-default-model))
           :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
           :worktrees (and root (harness-tasks--git-p root) t))))
+
+(harness-defmethod task/set-all (settings &optional filter)
+  "Apply SETTINGS to every current task FILTER selects; return the ids changed.
+SETTINGS is a plist of `:model', `:thinking', `:permission-mode' and
+`:non-interactive' (an explicit false turns it off).  A started task's
+session gets the change too, so its next turn uses it; a pending task
+keeps it for when it starts.  FILTER: `:columns' (default
+`harness-tasks-bulk-columns', the running, pending and blocked tasks),
+`:ids' to name tasks outright, `:except' ids to leave alone, and `:cwd'
+to stay inside one project.  Review, done and archived tasks are
+history and are never touched.  Return the ids that changed, oldest
+first."
+  (let* ((columns (mapcar (lambda (c) (if (stringp c) (intern c) c))
+                          (or (plist-get filter :columns) harness-tasks-bulk-columns)))
+         (project (and (plist-get filter :cwd) (harness-tasks--project (plist-get filter :cwd))))
+         (ids (plist-get filter :ids))
+         (except (plist-get filter :except))
+         changed)
+    (dolist (task (harness-tasks--sorted
+                   (lambda (task)
+                     (and (or (null project) (equal project (plist-get task :project)))
+                          (or (null ids) (member (plist-get task :id) ids))))))
+      (let ((id (plist-get task :id)))
+        (when (and (not (member id except))
+                   (not (harness-json-true-p (plist-get task :archived)))
+                   (memq (harness-tasks--column task) columns)
+                   (harness-tasks--prefs-differ-p task settings))
+          (harness-tasks--apply-prefs task settings)
+          (push id changed))))
+    (nreverse changed)))
 
 (harness-defmethod task/start (id)
   "Start pending task ID now, even when every slot is taken.

@@ -351,6 +351,36 @@ told from, like a worktree git lost track of, still leads back."
                          5 "the session's mode to change"))))
 
 (declare-function harness-ui-tasks--on-window-change "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-bulk-edit-current-tasks ()
+  "Bulk mode makes the setting commands change every current task."
+  (harness-ui-tasks-test-with
+    (let ((pending nil))
+      (let ((harness-tasks-max-running 0))
+        (setq pending (plist-get (harness-call 'task/submit default-directory "later") :id)))
+      (harness-ui-tasks--fetch board t)
+      (harness-test-wait (lambda () (with-current-buffer board (harness-ui-tasks--find pending)))
+                         5 "the board's task")
+      (with-current-buffer board
+        (should (= 1 (length (harness-ui-tasks--bulk-tasks))))
+        (should-not harness-ui-tasks--bulk)
+        (harness-ui-tasks-toggle-bulk)
+        (should harness-ui-tasks--bulk)
+        (should (string-match-p "Bulk: editing" (harness-ui-tasks--header)))
+        (should (string-match-p "EDITING 1 CURRENT TASK" (harness-ui-tasks-test--tail-text board)))
+        (should (equal "for 1 task" (nth 2 (harness-ui--setting-target nil))))
+        ;; The next task's own settings are untouched; the current one changes,
+        ;; and so does the record the next task will start from.
+        (should (equal "auto" (format "%s" (plist-get harness-ui-tasks--new :permission-mode))))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "YOLO")))
+          (harness-set-permission-mode))
+        (harness-test-wait (lambda () (equal "yolo" (format "%s" (plist-get (harness-call 'task/get pending) :permission-mode))))
+                           5 "the pending task's mode")
+        (should (equal "yolo" (format "%s" (plist-get harness-ui-tasks--new :permission-mode))))
+        (harness-ui-tasks-toggle-bulk)
+        (should-not harness-ui-tasks--bulk)
+        (should-not (string-match-p "Bulk: editing" (harness-ui-tasks--header)))))))
+
 (declare-function harness-ui-tasks--on-resize "harness-ui-tasks")
 (declare-function harness-ui-tasks--refresh-soon "harness-ui-tasks")
 (declare-function harness-ui-tasks--schedule-render "harness-ui-tasks")

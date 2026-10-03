@@ -1233,10 +1233,13 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
   (plist-get (if (stringp target) (harness-ui-session target) (car target)) key))
 
 (defun harness-ui--setting-set (target key value label)
-  "Set KEY to VALUE on TARGET and say LABEL when it is done."
+  "Set KEY to VALUE on TARGET and say LABEL when it is done.
+A non-string TARGET is (VALUES SET-FN &optional CONTEXT): VALUES is
+what the setting commands read, SET-FN applies the change, and CONTEXT
+names who it applies to (\"for new tasks\" without one)."
   (if (not (stringp target))
-      (progn (funcall (cdr target) key value)
-             (message "%s (for new tasks)" label))
+      (progn (funcall (nth 1 target) key value)
+             (message "%s (%s)" label (or (nth 2 target) "for new tasks")))
     (pcase key
       (:model (harness-ui-call "session/set_model" (list :sessionId target :modelId value)
                                (lambda (_) (message "%s" label))))
@@ -1284,13 +1287,14 @@ available is offered."
 
 ;;;###autoload
 (defun harness-set-model-all (&optional no-default)
-  "Choose a model and switch every session to it.
+  "Choose a model and switch every current session to it.
 The choice also becomes the default for new sessions, unless a prefix
 argument says otherwise.  Use this when a plan runs out, a provider
 fails, or a cheaper model should take over work already in flight.
-Every session of every project changes; each records it as a hint, and
-status is untouched, so nothing running is cancelled.  A session's
-provider state is kept, so switching back can still resume it."
+Idle, running and blocked sessions of every project change, each
+recording it as a hint; inactive ones are history and are left alone,
+and no running turn is cancelled.  A session's provider state is kept,
+so switching back can still resume it."
   (interactive "P")
   (harness-ui-choose-model
    (lambda (id label)
@@ -1299,26 +1303,56 @@ provider state is kept, so switching back can still resume it."
                         (list :key "harness-model" :value id :scope "global")
                         (lambda (_) nil)))
      (harness-ui-call "_harness/session/set-all"
-                      (list :settings (list :model id))
+                      (list :settings (list :model id) :filter (list :active t))
                       (lambda (ids)
                         (message "Model → %s for %s session%s%s"
                                  label (length ids) (if (= 1 (length ids)) "" "s")
                                  (if no-default "" ", and for new sessions")))))))
+
+(defun harness-ui-choose-thinking (callback &optional model)
+  "Prompt for a thinking level and call CALLBACK with (VALUE LABEL).
+VALUE is nil for the model default.  MODEL names the levels offered;
+without one the common levels are."
+  (let ((choose (lambda (levels)
+                  (let* ((levels (delete-dups (append levels '("low" "medium" "high" "xhigh" "max"))))
+                         (choice (completing-read "Thinking: " (cons "default" levels) nil t)))
+                    (funcall callback (unless (equal choice "default") choice) choice)))))
+    (if (null model)
+        (funcall choose nil)
+      (harness-ui-call "_harness/provider/model" (list :model-id model)
+                       (lambda (m) (funcall choose (plist-get m :thinking-levels)))))))
 
 ;;;###autoload
 (defun harness-set-thinking (&optional session-id)
   "Choose a thinking level for SESSION-ID."
   (interactive)
   (let* ((target (harness-ui--setting-target session-id))
-         (model (harness-ui--setting-get target :model))
-         (choose (lambda (levels)
-                   (let ((choice (completing-read "Thinking: " (cons "default" levels) nil t)))
-                     (harness-ui--setting-set target :thinking (unless (equal choice "default") choice)
-                                              (format "Thinking → %s" choice))))))
-    (if (null model)
-        (funcall choose '("low" "medium" "high"))
-      (harness-ui-call "_harness/provider/model" (list :model-id model)
-                       (lambda (m) (funcall choose (or (plist-get m :thinking-levels) '("low" "medium" "high"))))))))
+         (model (harness-ui--setting-get target :model)))
+    (harness-ui-choose-thinking
+     (lambda (value label)
+       (harness-ui--setting-set target :thinking value (format "Thinking → %s" label)))
+     model)))
+
+;;;###autoload
+(defun harness-set-thinking-all (&optional no-default)
+  "Choose a thinking level and set it on every current session.
+Idle, running and blocked sessions of every project change; inactive
+ones are history and are left alone.  The level also becomes the
+default for new sessions, unless a prefix argument says otherwise."
+  (interactive "P")
+  (harness-ui-choose-thinking
+   (lambda (value label)
+     (unless no-default
+       (harness-ui-call "_harness/config/set"
+                        (list :key "harness-thinking" :value (prin1-to-string value)
+                              :printed t :scope "global")
+                        (lambda (_) nil)))
+     (harness-ui-call "_harness/session/set-all"
+                      (list :settings (list :thinking value) :filter (list :active t))
+                      (lambda (ids)
+                        (message "Thinking → %s for %s session%s%s"
+                                 label (length ids) (if (= 1 (length ids)) "" "s")
+                                 (if no-default "" ", and for new sessions")))))))
 
 ;;;###autoload
 (defun harness-set-permission-mode (&optional session-id)
@@ -1425,6 +1459,7 @@ either the command asks for a session, so the label has no state."
     (define-key map (kbd "m") #'harness-set-model)
     (define-key map (kbd "M") #'harness-set-model-all)
     (define-key map (kbd "T") #'harness-set-thinking)
+    (define-key map (kbd "H") #'harness-set-thinking-all)
     (define-key map (kbd "p") #'harness-set-permission-mode)
     (define-key map (kbd "f") #'harness-fork-session)
     (define-key map (kbd "k") #'harness-cancel-turn)
@@ -1645,6 +1680,7 @@ leaves the buffer's commands out, never the whole menu."
     ("m" "Model" harness-set-model)
     ("M" "Model for all sessions" harness-set-model-all)
     ("T" "Thinking" harness-set-thinking)
+    ("H" "Thinking for all sessions" harness-set-thinking-all)
     ("p" "Permission mode" harness-set-permission-mode)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)

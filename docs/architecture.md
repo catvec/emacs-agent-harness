@@ -1161,7 +1161,12 @@ to the task's file (below); the record also keeps `:file-base` and
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
-  hand), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
+  hand), `task/set-all SETTINGS &optional FILTER` (apply `:model',
+  `:thinking', `:permission-mode' and `:non-interactive' to every task
+  FILTER selects and, when started, its session; FILTER is `:columns'
+  (default `harness-tasks-bulk-columns': running, pending and blocked),
+  `:ids', `:except' and `:cwd', and review, done and archived tasks are
+  never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
   steering; reopens), `task/refine ID &optional TEXT`,
   `task/merge ID` (retry; not in review), `task/verify ID`,
   `task/reject ID FEEDBACK &optional ATTACHMENTS` (both in review only),

@@ -400,7 +400,7 @@ nothing about it and asks for nothing."
       ;; What a target function names, as the task board's new-task settings.
       (harness-ui-test-with-menu-buffer #'fundamental-mode
         (setq-local harness-ui-setting-target-function
-                    (lambda () (cons '(:non-interactive t) (lambda (key value) (push (list key value) set)))))
+                    (lambda () (list '(:non-interactive t) (lambda (key value) (push (list key value) set)))))
         (should (string-match-p " i Non-interactive: on" (harness-ui-test-menu "i")))
         (should (equal '((:non-interactive nil)) set))))
     (should-not sent)))

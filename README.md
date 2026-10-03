@@ -184,8 +184,9 @@ named by `harness-server-init-file`.
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
-| `C-c h M` | `harness-set-model-all` | Choose a model and switch every session to it |
+| `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session to it |
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
+| `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
@@ -437,13 +438,23 @@ profile or a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`). See
 ### Switching model or provider
 
 `C-c h m` (`harness-set-model`) chooses the model for the current
-session. `C-c h M` (`harness-set-model-all`) chooses one model and
-switches every session of every project to it, and makes it the default
-for new sessions too; with a prefix argument (`C-u C-c h M`) the default
-is left alone. Use it when a plan runs out of credit, a provider fails,
-or a cheaper model should take over work already in flight: no running
-turn is cancelled, each session records the change as a hint, and
-provider state is kept so switching back can still resume it.
+session, and `C-c h T` its thinking level. `C-c h M`
+(`harness-set-model-all`) chooses one model and switches every current
+session to it; `C-c h H` (`harness-set-thinking-all`) does the same for
+the thinking level. Both make the choice the default for new sessions
+too, unless a prefix argument (`C-u C-c h M`) says otherwise. Only idle,
+running and blocked sessions change — deactivated ones are history and
+are left alone — no running turn is cancelled, each session records the
+change as a hint, and provider state is kept so switching back can
+still resume it. Use them when a plan runs out of credit, a provider
+fails, or a cheaper model should take over work already in flight.
+
+The task board has the same thing scoped to its tasks: turn on bulk edit
+(`B`, or `[Bulk edit: N tasks]` in the board's header) and the model,
+thinking, permission-mode and interactivity buttons then change every
+running, pending and blocked task at once. A conspicuous `EDITING N
+CURRENT TASKS` banner shows while it is on, and review, done and
+archived tasks are history and are left alone.
 
 ### Usage and budgets
 

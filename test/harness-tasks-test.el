@@ -133,6 +133,39 @@ turn `harness-tasks-require-verification' on themselves."
         (harness-call 'task/cancel id)
         (should-not (gethash id harness-tasks--table))))))
 
+(ert-deftest harness-tasks-set-all-updates-current-tasks ()
+  "task/set-all changes a pending task's record and a started task's session."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-delay 5)          ; keep the started one running
+          (harness-tasks-max-running 0))
+      (let* ((running (harness-tasks-test-submit "running"))
+             (waiting (harness-tasks-test-submit "waiting")))
+        (harness-call 'task/start running)
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task running) :session))
+                           5 "the started task's session")
+        (let ((ids (harness-call 'task/set-all (list :model "demo:other" :thinking "high"))))
+          (should (member running ids))
+          (should (member waiting ids))
+          ;; The started task's session and the pending task's record both change.
+          (should (equal "demo:other" (plist-get (harness-tasks-test-session running) :model)))
+          (should (equal "high" (plist-get (harness-tasks-test-session running) :thinking)))
+          (should (equal "demo:other" (plist-get (harness-tasks-test-task waiting) :model)))
+          (should (equal "high" (plist-get (harness-tasks-test-task waiting) :thinking)))
+          ;; Asking again changes nothing, and can stay in one project.
+          (should-not (harness-call 'task/set-all (list :model "demo:other" :thinking "high")))
+          (should-not (harness-call 'task/set-all (list :model "demo:third")
+                                    (list :cwd (harness-test-temp-dir)))))
+        (harness-call 'task/cancel running)))))
+
+(ert-deftest harness-tasks-set-all-leaves-history ()
+  "task/set-all never touches a done or archived task."
+  (harness-tasks-test-with
+    (let ((id (harness-tasks-test-submit "historical")))
+      (harness-tasks-test-wait-state id 'done)
+      (harness-call 'task/archive id)
+      (should (null (harness-call 'task/set-all (list :model "demo:other"))))
+      (should-not (plist-get (harness-tasks-test-task id) :model)))))
+
 (ert-deftest harness-tasks-stopped-turn-stays-active ()
   (harness-tasks-test-with
     (let ((harness-provider-demo-script-override

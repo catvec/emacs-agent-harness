@@ -72,6 +72,19 @@
         (should (equal "deepseek:deepseek-flash" (plist-get (harness-call 'session/get b) :model)))
         (should (equal "high" (plist-get (harness-call 'session/get c) :thinking)))))))
 
+(ert-deftest harness-session-set-all-active-only-leaves-history ()
+  "A bulk update with `:active' skips deactivated sessions."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (live (plist-get (harness-call 'session/create :cwd cwd :model "claude:opus") :id))
+           (gone (plist-get (harness-call 'session/create :cwd cwd :model "claude:opus") :id)))
+      (harness-call 'session/deactivate gone)
+      (let ((changed (harness-call 'session/set-all (list :model "deepseek:deepseek-flash")
+                                   (list :active t))))
+        (should (equal (list live) changed))
+        (should (equal "deepseek:deepseek-flash" (plist-get (harness-call 'session/get live) :model)))
+        (should (equal "claude:opus" (plist-get (harness-call 'session/get gone) :model)))))))
+
 (ert-deftest harness-session-set-all-filters-by-project ()
   "A bulk switch can stay inside one project."
   (harness-session-test-with

@@ -138,6 +138,8 @@ KIND is edit, reply, answer, refine (feedback on a backlog task's
 write-up) or reject (feedback that sends a task back from review).")
 (defvar-local harness-ui-tasks--refine nil
   "Non-nil when new tasks are refined for the backlog, not submitted.")
+(defvar-local harness-ui-tasks--bulk nil
+  "Non-nil when the setting buttons change every current task at once.")
 (defvar-local harness-ui-tasks--list-end nil "Marker: end of the board, start of the tail.")
 
 (defun harness-ui-tasks--board-p (buffer)
@@ -754,7 +756,9 @@ same line of the same task, on the same button (`harness-ui-tasks--anchor')."
       (harness-ui-tasks--restore places)
       (harness-ui-tasks--focus-card)
       (set-buffer-modified-p nil)
-      (force-mode-line-update))))
+      (force-mode-line-update)
+      ;; The bulk banner counts the tasks, so it follows the board.
+      (when harness-ui-tasks--bulk (harness-ui-tasks--render-tail)))))
 
 (defvar-local harness-ui-tasks--focus nil
   "(ID . TIME): the task whose card point goes to once the board shows it.
@@ -823,14 +827,79 @@ On `harness-ui-notification-functions': non-nil when it was a task's."
     (_ "New task")))
 
 (defun harness-ui-tasks--setting-button (label command help)
-  "A button LABEL running the session setting COMMAND on the new-task settings."
+  "A button LABEL running the session setting COMMAND on the board's target.
+The target is the new-task settings, the task at point, or every current
+task in bulk mode (see `harness-ui-tasks--setting-target')."
   (propertize (harness-ui-tasks--button label (lambda () (call-interactively command)) help command)
               'face 'harness-dim-face))
 
+(defconst harness-ui-tasks--bulk-columns '(active pending needs-input)
+  "Columns the bulk editor reaches: running, pending and blocked tasks.
+Review, done and archived tasks are history and are left alone.")
+
+(defun harness-ui-tasks--bulk-tasks ()
+  "Return the tasks a bulk update on this board would reach."
+  (cl-remove-if-not (lambda (task)
+                      (and (not (harness-ui-tasks--archived-p task))
+                           (memq (harness-ui-tasks--column task) harness-ui-tasks--bulk-columns)))
+                    harness-ui-tasks--tasks))
+
+(defun harness-ui-tasks--bulk-common (tasks key)
+  "Return TASKS' common value for KEY, or nil when they differ."
+  (let ((values (mapcar (lambda (task) (plist-get task key)) tasks)))
+    (and values (cl-every (lambda (v) (equal v (car values))) values) (car values))))
+
+(defun harness-ui-tasks--bulk-values ()
+  "Return the values the bulk-edited tasks agree on, for the setting commands."
+  (let ((tasks (harness-ui-tasks--bulk-tasks)))
+    (list :model (harness-ui-tasks--bulk-common tasks :model)
+          :thinking (harness-ui-tasks--bulk-common tasks :thinking)
+          :permission-mode (harness-ui-tasks--bulk-common tasks :permission-mode)
+          :non-interactive (harness-ui-tasks--bulk-common tasks :non-interactive))))
+
+(defun harness-ui-tasks--set-bulk (key value)
+  "Apply KEY VALUE to every current task on this board.
+The new-task settings take it too, so a task submitted next matches."
+  (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
+  (let ((ids (mapcar (lambda (task) (plist-get task :id)) (harness-ui-tasks--bulk-tasks))))
+    (harness-ui-call "_harness/task/set-all"
+                     (list :settings (list key (if (and (eq key :non-interactive) (not value)) :false value))
+                           :filter (list :ids ids :cwd harness-ui-tasks--dir))
+                     (lambda (_) (harness-ui-tasks--render-tail))
+                     (lambda (e) (message "Bulk update failed: %s" (harness-error-message e))))))
+
+(defun harness-ui-tasks-toggle-bulk ()
+  "Switch bulk editing of the current tasks on or off.
+While on, the model, effort, permission-mode and non-interactive buttons
+change every running, pending or blocked task, not just the new task or
+the one at point.  Review, done and archived tasks are history and are
+left alone."
+  (interactive)
+  (setq harness-ui-tasks--bulk (not harness-ui-tasks--bulk))
+  (harness-ui-tasks--render-tail)
+  (force-mode-line-update)
+  (let ((n (length (harness-ui-tasks--bulk-tasks))))
+    (message (if harness-ui-tasks--bulk
+                 (format "Bulk editing %d current task%s: the settings below change all of them"
+                         n (if (= 1 n) "" "s"))
+               "Bulk editing off"))))
+
+(defun harness-ui-tasks--bulk-banner ()
+  "The conspicuous line that says bulk editing is on."
+  (let ((n (length (harness-ui-tasks--bulk-tasks))))
+    (propertize
+     (format "EDITING %d CURRENT TASK%s (running, pending, blocked) — the settings below change all of them"
+             n (if (= 1 n) "" "S"))
+     'face 'harness-task-attention-face)))
+
 (defun harness-ui-tasks--new-settings-line ()
-  "The new-task settings, each a button changing it, and how tasks run."
-  (let ((new harness-ui-tasks--new)
-        (s harness-ui-tasks--settings))
+  "The settings line: each setting as a button.
+In bulk mode the values are the current tasks' and the buttons change
+them all; otherwise they are the new task's."
+  (let* ((bulk harness-ui-tasks--bulk)
+         (values (if bulk (harness-ui-tasks--bulk-values) harness-ui-tasks--new))
+         (s harness-ui-tasks--settings)
+         (scope (if bulk "current tasks" "new tasks")))
     (if (null s)
         ""
       (concat
@@ -838,27 +907,29 @@ On `harness-ui-notification-functions': non-nil when it was a task's."
        (mapconcat
         #'identity
         (list (harness-ui-tasks--setting-button
-               (harness-ui-model-label (plist-get new :model))
-               #'harness-set-model "Model of new tasks")
+               (harness-ui-model-label (plist-get values :model))
+               #'harness-set-model (format "Model of %s" scope))
               (harness-ui-tasks--setting-button
-               (if-let* ((m (plist-get new :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
-               #'harness-set-permission-mode "Permission mode of new tasks")
+               (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
+               #'harness-set-permission-mode (format "Permission mode of %s" scope))
               (harness-ui-tasks--setting-button
-               (harness-ui-thinking-label (plist-get new :thinking))
-               #'harness-set-thinking "Thinking level of new tasks")
+               (harness-ui-thinking-label (plist-get values :thinking))
+               #'harness-set-thinking (format "Thinking level of %s" scope))
               (harness-ui-tasks--setting-button
-               (harness-ui-non-interactive-label (plist-get new :non-interactive))
-               #'harness-toggle-non-interactive "Non-interactive mode of new tasks"))
+               (harness-ui-non-interactive-label (plist-get values :non-interactive))
+               #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope)))
         (propertize " · " 'face 'harness-dim-face))
-       (let ((notes (if harness-ui-tasks--refine
-                        (list "an agent writes it up; you start it")
-                      (delq nil (list (and (harness-json-true-p (plist-get s :worktrees))
-                                           "own worktree, merged when done")
-                                      (and (plist-get s :max-running)
-                                           (format "%s at a time" (plist-get s :max-running))))))))
-         (if notes
-             (propertize (concat "   " (string-join notes " · ")) 'face 'harness-dim-face)
-           ""))))))
+       (if bulk
+           (propertize "   new tasks keep their own settings" 'face 'harness-dim-face)
+         (let ((notes (if harness-ui-tasks--refine
+                          (list "an agent writes it up; you start it")
+                        (delq nil (list (and (harness-json-true-p (plist-get s :worktrees))
+                                             "own worktree, merged when done")
+                                        (and (plist-get s :max-running)
+                                             (format "%s at a time" (plist-get s :max-running))))))))
+           (if notes
+               (propertize (concat "   " (string-join notes " · ")) 'face 'harness-dim-face)
+             "")))))))
 
 (defun harness-ui-tasks--set-new (key value)
   "Set the new-task setting KEY to VALUE and show it."
@@ -867,13 +938,17 @@ On `harness-ui-notification-functions': non-nil when it was a task's."
 
 (defun harness-ui-tasks--setting-target ()
   "Where the session setting commands apply on the board.
-The session of the started task at point, else the new-task settings.
-A backlog task's session only writes it up, with settings of its own,
-so it counts as not started."
-  (let ((task (and (not (harness-compose-in-p)) (harness-ui-tasks--task t))))
-    (if (and task (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
-        (plist-get task :session)
-      (cons harness-ui-tasks--new #'harness-ui-tasks--set-new))))
+In bulk mode, every current task; else the session of the started task
+at point, else the new-task settings.  A backlog task's session only
+writes it up, with settings of its own, so it counts as not started."
+  (if (and harness-ui-tasks--bulk (harness-ui-tasks--bulk-tasks))
+      (let ((n (length (harness-ui-tasks--bulk-tasks))))
+        (list (harness-ui-tasks--bulk-values) #'harness-ui-tasks--set-bulk
+              (format "for %d task%s" n (if (= 1 n) "" "s"))))
+    (let ((task (and (not (harness-compose-in-p)) (harness-ui-tasks--task t))))
+      (if (and task (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
+          (plist-get task :session)
+        (list harness-ui-tasks--new #'harness-ui-tasks--set-new)))))
 
 (defun harness-ui-tasks--insert-tail-head ()
   "Insert the error line, the compose label, the settings and the attachments.
@@ -902,6 +977,9 @@ label carries the Submit / Refine toggle, which the label makes room for."
       ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
       (harness-ui-tasks--insert-tail-line 'label (harness-ui-tasks--fit (concat label toggle cancel) room)))
     (unless harness-ui-tasks--target
+      (when harness-ui-tasks--bulk
+        (harness-ui-tasks--insert-tail-line
+         'bulk (harness-ui-tasks--fit (harness-ui-tasks--bulk-banner) room)))
       (let ((line (harness-ui-tasks--new-settings-line)))
         (unless (string-empty-p line)
           (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
@@ -1042,6 +1120,15 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
              (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)
              (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts)
              (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts))
+     "  "
+     (let* ((n (length (harness-ui-tasks--bulk-tasks)))
+            (segment (harness-ui-tasks--segment
+                      (if harness-ui-tasks--bulk
+                          (format "[Bulk: editing %d task%s]" n (if (= 1 n) "" "s"))
+                        (format "[Bulk edit: %d task%s]" n (if (= 1 n) "" "s")))
+                      #'harness-ui-tasks-toggle-bulk
+                      "Bulk edit: apply the model, effort, permission mode and interactivity to every running, pending and blocked task")))
+       (if harness-ui-tasks--bulk (propertize segment 'face 'harness-task-attention-face) segment))
      "   "
      (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
                                 "Ask about the tasks in a side conversation")
@@ -1209,6 +1296,7 @@ anything that moves a task without one, so a board never drifts.")
   (define-key map (kbd "X") #'harness-ui-tasks-archive-done)
   (define-key map (kbd "D") #'harness-ui-tasks-delete)
   (define-key map (kbd "A") #'harness-ui-tasks-toggle-archived)
+  (define-key map (kbd "B") #'harness-ui-tasks-toggle-bulk)
   (define-key map (kbd "I") #'harness-ui-tasks-adopt)
   (define-key map (kbd "b") #'harness-ui-tasks-btw)
   (define-key map (kbd "g") #'harness-ui-tasks-refresh)
@@ -1277,6 +1365,7 @@ anything that moves a task without one, so a board never drifts.")
         (". I" "Adopt a session" harness-ui-tasks-adopt)
         (". X" "Archive completed" harness-ui-tasks-archive-done)
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
+        (". B" "Bulk edit current tasks" harness-ui-tasks-toggle-bulk)
         (". g" "Refresh" harness-ui-tasks-refresh)]
        ["Compose box"
         ("C-c C-c" "Submit" harness-ui-tasks-submit)
