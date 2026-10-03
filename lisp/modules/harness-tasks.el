@@ -217,6 +217,72 @@ A write-up should be quick, so the default thinks little."
 The agent is steered once, to write the task up with what it knows; nil
 never tells it.  It keeps a backlog write-up brief.")
 
+;;;; Recaps
+
+;; A card's subtitle is a recap of the task, written by a cheap model
+;; call (see harness-recap.el).  The recap is refreshed at the first of
+;; `harness-tasks-recap-turns' turns, `harness-tasks-recap-seconds'
+;; seconds or `harness-tasks-recap-tool-calls' tool calls since the
+;; last one, whichever comes first, like a warranty's months or miles:
+;; a card that sat in review for a week should not count that as work.
+
+(defcustom harness-tasks-recap t
+  "When non-nil, task cards get a recap subtitle from a short model call."
+  :type 'boolean :group 'harness)
+
+(defcustom harness-tasks-recap-turns 4
+  "Turns since the last recap that make a new one due.
+Whichever comes first of this, `harness-tasks-recap-seconds' and
+`harness-tasks-recap-tool-calls'; nil never refreshes on turns."
+  :type '(choice (const :tag "Never" nil) (integer :tag "Turns")) :group 'harness)
+
+(defcustom harness-tasks-recap-seconds 120
+  "Seconds of work since the last recap that make a new one due.
+Whichever comes first of this, `harness-tasks-recap-turns' and
+`harness-tasks-recap-tool-calls'; nil never refreshes on time."
+  :type '(choice (const :tag "Never" nil) (number :tag "Seconds")) :group 'harness)
+
+(defcustom harness-tasks-recap-tool-calls 8
+  "Tool calls since the last recap that make a new one due.
+Whichever comes first of this, `harness-tasks-recap-turns' and
+`harness-tasks-recap-seconds'; nil never refreshes on tool calls."
+  :type '(choice (const :tag "Never" nil) (integer :tag "Tool calls")) :group 'harness)
+
+(defcustom harness-tasks-recap-model 'auto
+  "Model that writes task recaps.
+`auto' asks the session's provider for its cheap tier, falling back
+to the session's own model; nil uses the session's own model."
+  :type '(choice (const :tag "Provider's cheap tier" auto)
+                 (const :tag "The task's model" nil)
+                 (string :tag "Model"))
+  :group 'harness)
+
+(defcustom harness-tasks-recap-thinking nil
+  "Thinking level of a recap request, or nil for the provider's default."
+  :type `(choice (const :tag "Provider default" nil) ,@harness-tasks--thinking-levels)
+  :group 'harness)
+
+(defcustom harness-tasks-recap-max-tokens 60
+  "Most tokens a recap request may write."
+  :type 'integer :group 'harness)
+
+(defcustom harness-tasks-recap-max-length 160
+  "Longest recap a card shows, in characters."
+  :type 'integer :group 'harness)
+
+(defcustom harness-tasks-recap-context 8000
+  "Characters of transcript a recap request may carry.
+The tail of the transcript, so the request stays short on a long task."
+  :type 'integer :group 'harness)
+
+(defcustom harness-tasks-recap-interval 30
+  "Seconds between checks for a recap due on time while a task works."
+  :type '(choice (const :tag "No timer" nil) (number :tag "Seconds")) :group 'harness)
+
+(defcustom harness-tasks-recap-retry 60
+  "Seconds before a new recap is tried again after one failed."
+  :type '(choice (const :tag "No wait" nil) (number :tag "Seconds")) :group 'harness)
+
 (defconst harness-tasks--start-message
   "Start working on this task now.  It was written up earlier without doing any of it; that is over, so change files, run commands and so on as the task requires.  If it names related tasks, see where they stand now and coordinate with them as it says before you change the same code."
   "Opening of the message that starts a backlog task's work.
@@ -752,8 +818,10 @@ projects' tasks from before repository stores."
 ;;
 ;; The store keeps the whole record, with what only the harness needs
 ;; (attachments, worktree, merge target); the files show the rest and
-;; take edits.  Only the main checkout gets files, never a task's
-;; worktree, and the harness never commits them.
+;; take edits.  A model-written recap subtitle (`recap') is not an edit:
+;; it is written like the other known fields, and a file that contradicts
+;; it is written again.  Only the main checkout gets files, never a
+;; task's worktree, and the harness never commits them.
 ;;
 ;; - Writing: a save first reads what changed on disk, then writes the
 ;;   file of every task that changed since its file was last in step with
@@ -1016,7 +1084,7 @@ a line that is no entry is one with KEY nil.  Comment lines are dropped."
 ;;;;; The file format
 
 (defconst harness-tasks--file-keys
-  '("id" "title" "state" "column" "backlog" "outcome" "error" "duplicate-of" "session" "branch" "base"
+  '("id" "title" "state" "column" "backlog" "outcome" "error" "recap" "duplicate-of" "session" "branch" "base"
     "merge" "model" "thinking" "created" "started" "refined" "finished" "verified" "updated")
   "Frontmatter keys of a task file, in the order the harness writes them.
 Other keys are kept as written.")
@@ -1098,6 +1166,8 @@ and so is `updated' with SANS-UPDATED."
            (cons "outcome" (plist-get task :outcome))
            (cons "error" (and (stringp err) (not (string-blank-p err))
                               (harness-truncate-end (string-trim err) 300)))
+           (cons "recap" (let ((recap (plist-get task :recap)))
+                           (and (stringp recap) (not (string-blank-p recap)) (string-trim recap))))
            (cons "duplicate-of" (plist-get task :duplicate-of))
            (cons "session" (plist-get task :session))
            (cons "branch" (plist-get task :branch))
@@ -2742,7 +2812,8 @@ Before a backlog task starts, TEXT is feedback on its write-up."
       (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
         (harness-call 'session/resume sid))
       (when (plist-get task :archived) (harness-tasks--set id :archived nil))
-      (harness-tasks--set id :merge-attempts 0)
+      (harness-tasks--set id :merge-attempts 0
+                          :recap nil :recap-at nil :recap-turns nil :recap-tools nil)
       (if (harness-tasks--refinement-p task)
           (harness-tasks--refine-turn id sid blocks)
         (harness-catch (harness-call-async 'agent/prompt sid blocks)
@@ -2809,6 +2880,7 @@ task."
         (harness-call 'session/resume sid))
       (harness-tasks--set id :state 'active :outcome nil :error nil :finished nil :archived nil
                           :verified nil :verified-at nil :merge-attempts 0
+                          :recap nil :recap-at nil :recap-turns nil :recap-tools nil
                           :feedback (append (plist-get task :feedback)
                                             (list (list :text feedback :at (float-time)))))
       (harness-catch (harness-call-async 'agent/prompt sid
@@ -2824,6 +2896,13 @@ Hand-in uses it, and the review banner: a session that is a task's has
 exactly one."
   (let ((task (harness-tasks--by-session session-id)))
     (and task (harness-tasks--view task))))
+
+(harness-defmethod task/set-recap (id &rest plist)
+  "Store recap fields PLIST on task ID; return its view.
+The recap module writes a card's subtitle with it: `:recap' the line
+shown, `:recap-at' when it was made, and `:recap-turns' plus
+`:recap-tools' the counters it was made at.  A nil `:recap' clears it."
+  (apply #'harness-tasks--set id plist))
 
 (harness-defmethod task/hand-in (id report)
   "Record REPORT as the work ID hands in, waiting for the user's review.

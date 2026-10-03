@@ -2556,5 +2556,35 @@ The refusal says what to fix, and the task keeps working."
           (harness-tasks-flush)
           (should (equal text (harness-read-file path))))))))
 
+(ert-deftest harness-tasks-recap-survives-a-restart ()
+  "A recap, and the counters it was made at, are kept in the store."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "recap me later")))
+        (harness-call 'task/set-recap id :recap "Wrote the parser and its tests"
+                      :recap-at 1700000000.0 :recap-turns 2 :recap-tools 3)
+        (harness-tasks-test--restart)
+        (let ((task (harness-tasks-test-task id)))
+          (should (equal "Wrote the parser and its tests" (plist-get task :recap)))
+          (should (= 1700000000.0 (plist-get task :recap-at)))
+          (should (= 2 (plist-get task :recap-turns)))
+          (should (= 3 (plist-get task :recap-tools))))))))
+
+(ert-deftest harness-tasks-recap-is-written-to-the-file ()
+  "A recap reaches the task file; an edit of it does not stand."
+  (harness-tasks-test-with-files
+    (let ((id (harness-tasks-test-submit "Show my recap")))
+      (harness-tasks-flush)
+      (let ((path (harness-tasks-test--file id)))
+        (harness-call 'task/set-recap id :recap "Ran the tests; two failures left"
+                      :recap-at 1700000000.0)
+        (harness-tasks-flush)
+        (should (equal "Ran the tests; two failures left" (harness-tasks-test--field path "recap")))
+        ;; The recap is the harness's line, not the person's: the next one wins.
+        (harness-tasks-test--edit path "recap: .*" "recap: something I made up")
+        (harness-call 'task/set-recap id :recap "Two failures fixed; all green" :recap-at 1700000100.0)
+        (harness-tasks-flush)
+        (should (equal "Two failures fixed; all green" (harness-tasks-test--field path "recap")))))))
+
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

@@ -42,6 +42,9 @@
 (declare-function harness-ui-tasks-edit "harness-ui-tasks")
 (declare-function harness-ui-tasks--header "harness-ui-tasks")
 (declare-function harness-ui-tasks--render "harness-ui-tasks")
+(declare-function harness-ui-tasks--find "harness-ui-tasks")
+(declare-function harness-ui-tasks-toggle-subtitle "harness-ui-tasks")
+(declare-function harness-ui-tasks-tab "harness-ui-tasks")
 (declare-function harness-acp--drop-client "harness-acp")
 
 (defmacro harness-ui-tasks-test-with (&rest body)
@@ -673,6 +676,16 @@ told from, like a worktree git lost track of, still leads back."
     (goto-char (point-min))
     (search-forward text)))
 
+(defun harness-ui-tasks-test--show-subtitle (board text)
+  "Show the subtitle of BOARD's card whose title shows TEXT, and render.
+Cards are one line by default (see `harness-ui-tasks-toggle-subtitle');
+tests that check a card's detail line show it first."
+  (with-current-buffer board
+    (harness-ui-tasks-test--goto-card board text)
+    (let ((id (plist-get (harness-ui-tasks--task) :id)))
+      (harness-ui-tasks--set-subtitle id t)
+      (harness-ui-tasks--render))))
+
 (ert-deftest harness-ui-tasks-refine-toggle-fills-the-backlog ()
   "With the toggle on Refine a new task is written up and waits in Pending for its start."
   (harness-ui-tasks-test-with
@@ -696,7 +709,9 @@ told from, like a worktree git lost track of, still leads back."
         ;; The toggle stays on Refine for the next one.
         (should harness-ui-tasks--refine))
       (harness-ui-tasks-test--wait-text
-       board "Pending  1\\(.\\|\n\\)*Fix nested quotes in the parser\\(.\\|\n\\)*refined, start it when ready")
+       board "Pending  1\\(.\\|\n\\)*Fix nested quotes in the parser")
+      (harness-ui-tasks-test--show-subtitle board "Fix nested quotes in the parser")
+      (harness-ui-tasks-test--wait-text board "refined, start it when ready")
       (should (string-match-p "In progress  0" (harness-ui-tasks-test--board-text board)))
       (let ((task (car (harness-call 'task/list default-directory))))
         (should (eq 'pending (plist-get task :state)))
@@ -755,7 +770,9 @@ told from, like a worktree git lost track of, still leads back."
         (goto-char harness-compose-start)
         (insert "Make the shaky idea solid")
         (harness-ui-tasks-submit))
-      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Make the shaky idea solid\\(.\\|\n\\)*on hold"))))
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Make the shaky idea solid")
+      (harness-ui-tasks-test--show-subtitle board "Make the shaky idea solid")
+      (harness-ui-tasks-test--wait-text board "on hold"))))
 
 (ert-deftest harness-ui-tasks-refused-duplicate-card ()
   "A write-up that refuses its task as a duplicate names the original; r writes it up all the same."
@@ -773,7 +790,7 @@ told from, like a worktree git lost track of, still leads back."
       (with-current-buffer board (harness-ui-tasks-toggle-refine))
       (harness-ui-tasks-test--type-and-submit board "export the reports as csv")
       (harness-ui-tasks-test--wait-text
-       board "Requires your input  1\\(.\\|\n\\)*duplicate of .CSV export. — The board has it already.")
+       board "Requires your input  1\\(.\\|\n\\)*duplicate of .CSV export.")
       (harness-ui-tasks-test--goto-card board "duplicate of")
       (with-current-buffer board
         (should (equal '("Drop" "Write it up")
@@ -862,6 +879,9 @@ told from, like a worktree git lost track of, still leads back."
                     (apply orig format-string args))))
         (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
         (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Fix the flaky test")
+        ;; The review facts ("sent back once", the merge target) live on
+        ;; the subtitle, folded by default: show it for the checks below.
+        (harness-ui-tasks-test--show-subtitle board "Fix the flaky test")
         ;; It says so wherever you are.
         (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "Fix the flaky test. is ready for your review" m))
                                                notices))
@@ -1057,7 +1077,7 @@ argument says which way to turn it, and turning it on asks nothing."
 
 (ert-deftest harness-ui-tasks-redraw-keeps-point-on-the-buttons ()
   "Point moved to a card's buttons stays on the same button through redraws.
-The card's first line is where a redraw used to put it back."
+A folded card is one line, so its buttons sit right of its facts there."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-max-running 0))
       (harness-ui-tasks-test--type-and-submit board "First waiting task")
@@ -1065,18 +1085,17 @@ The card's first line is where a redraw used to put it back."
       (harness-ui-tasks-test--wait-text board "Pending  2")
       (let ((id (harness-ui-tasks-test--card-id board "First waiting task")))
         (with-current-buffer board
-          ;; Down to the second line, three characters into [Start now].
+          ;; On the card's only line, three characters into [Start now].
           (search-forward "[Start now]")
           (goto-char (+ (match-beginning 0) 3))
-          (should (harness-ui-tasks-test--on-second-line-p id))
+          (should (equal id (get-text-property (point) 'harness-task-id)))
           (harness-ui-tasks--render)
-          (should (harness-ui-tasks-test--on-second-line-p id))
+          (should (equal id (get-text-property (point) 'harness-task-id)))
           (should (looking-at-p (regexp-quote "art now]")))
           ;; The text on its left grows: point stays on the button.
-          (harness-ui-tasks-test--change board id :prompt "First waiting task\nNow with a body line under it")
+          (harness-ui-tasks-test--change board id :prompt "First waiting task, now under a much longer title")
           (harness-ui-tasks--render)
-          (should (string-search "with a body line" (harness-ui-tasks-test--line)))
-          (should (harness-ui-tasks-test--on-second-line-p id))
+          (should (string-search "First waiting task" (harness-ui-tasks-test--line)))
           (should (looking-at-p (regexp-quote "art now]")))
           ;; The keys pressed there push the button, and act on its card.
           (should (eq 'push-button (key-binding (kbd "RET"))))
@@ -1087,7 +1106,6 @@ The card's first line is where a redraw used to put it back."
           (forward-char 6)
           (harness-ui-tasks-test--change board id :prompt "First waiting task")
           (harness-ui-tasks--render)
-          (should (harness-ui-tasks-test--on-second-line-p id))
           (should (= 6 (current-column))))))))
 
 (ert-deftest harness-ui-tasks-redraw-never-puts-point-on-another-button ()
@@ -1105,7 +1123,7 @@ RET there would push a button point was never on."
           (harness-ui-tasks-test--change board id :state "done" :column "done")
           (harness-ui-tasks--render)
           (should (string-search "[Archive] [Reply]" (harness-ui-tasks-test--line)))
-          (should (harness-ui-tasks-test--on-second-line-p id))
+          (should (equal id (get-text-property (point) 'harness-task-id)))
           (should-not (get-text-property (point) 'button))
           (should (eq 'harness-ui-tasks-open (key-binding (kbd "RET")))))))))
 
@@ -1119,7 +1137,9 @@ RET there would push a button point was never on."
       (let ((first (harness-ui-tasks-test--card-id board "First waiting task"))
             (second (harness-ui-tasks-test--card-id board "Second waiting task")))
         (with-current-buffer board
-          (forward-line 2)
+          ;; On the blank line right after the second card.
+          (harness-ui-tasks-test--goto-card board "Second waiting task")
+          (forward-line 1)
           (should (and (bolp) (eolp)))
           (should (equal second (get-text-property (1- (point)) 'harness-task-id)))
           ;; The cards above it change length.
@@ -1156,7 +1176,7 @@ RET there would push a button point was never on."
               (should (= (point) harness-compose-end))
               (save-excursion
                 (goto-char (window-point side))
-                (should (harness-ui-tasks-test--on-second-line-p second))
+                (should (equal second (get-text-property (point) 'harness-task-id)))
                 (should (looking-at-p (regexp-quote "Edit]"))))
               (save-excursion
                 (goto-char (window-start side))
@@ -1282,6 +1302,104 @@ the desktop (stubbed here) and the click opens the board on the card."
       (setq harness-ui-tasks--focus (cons "t-later" (- (float-time) 60)))
       (harness-ui-tasks--render)
       (should-not harness-ui-tasks--focus))))
+
+;;;; Subtitles
+
+(defun harness-ui-tasks-test--recap (board id text)
+  "Put TEXT as the recap of task ID, wait for BOARD to have it, render."
+  (harness-call 'task/set-recap id :recap text :recap-at (float-time))
+  (harness-test-wait
+   (lambda () (with-current-buffer board
+                (equal text (plist-get (harness-ui-tasks--find id) :recap))))
+   5 "the recap to reach the board")
+  (with-current-buffer board (harness-ui-tasks--render)))
+
+(ert-deftest harness-ui-tasks-subtitles-folded-in-most-columns ()
+  "A pending card is one line: its recap shows only when you ask for it."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "Fold the recap")
+      (harness-ui-tasks-test--wait-text board "Pending\\(.\\|\n\\)*Fold the recap")
+      (let* ((id (plist-get (car (harness-call 'task/list default-directory)) :id))
+             (harness-ui-tasks--subtitles nil))
+        (harness-ui-tasks-test--recap board id "Wrote the pager and its tests.")
+        ;; Folded: no recap, and not even the old detail line: one line.
+        (should-not (string-match-p "Wrote the pager" (harness-ui-tasks-test--board-text board)))
+        (should-not (string-match-p "in line" (harness-ui-tasks-test--board-text board)))
+        (with-current-buffer board
+          (goto-char (point-min))
+          (search-forward "Fold the recap")
+          (call-interactively #'harness-ui-tasks-toggle-subtitle))
+        (should (string-match-p "Wrote the pager and its tests"
+                                (harness-ui-tasks-test--board-text board)))
+        (with-current-buffer board
+          (goto-char (point-min))
+          (search-forward "Fold the recap")
+          (call-interactively #'harness-ui-tasks-toggle-subtitle))
+        (should-not (string-match-p "Wrote the pager" (harness-ui-tasks-test--board-text board)))))))
+
+(ert-deftest harness-ui-tasks-needs-input-shows-the-recap ()
+  "The needs-input column shows the recap, with the request beside it."
+  (harness-ui-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type tool-call :id "demo-q" :name "ask_user"
+                    :input (:question "Which colour?" :options ("red" "green")))
+             (:type text :delta "Noted.")
+             (:type done :stop-reason end-turn))))
+      (harness-test-load-module 'tools-agent)
+      (harness-ui-tasks-test--type-and-submit board "Pick a colour")
+      (harness-ui-tasks-test--wait-text board "Requires your input\\(.\\|\n\\)*has a question for you")
+      (let* ((id (plist-get (car (harness-call 'task/list default-directory)) :id))
+             (harness-ui-tasks--subtitles nil))
+        (harness-ui-tasks-test--recap board id "Read the palette code; one choice is left.")
+        (let ((text (harness-ui-tasks-test--board-text board)))
+          (should (string-match-p "Read the palette code" text))
+          (should (string-match-p "has a question for you" text)))
+        ;; Even here you can fold it away, and unfold it again.
+        (with-current-buffer board
+          (goto-char (point-min))
+          (search-forward "Pick a colour")
+          (call-interactively #'harness-ui-tasks-toggle-subtitle))
+        (should-not (string-match-p "Read the palette code" (harness-ui-tasks-test--board-text board)))
+        (should-not (string-match-p "has a question for you" (harness-ui-tasks-test--board-text board)))
+        (with-current-buffer board
+          (goto-char (point-min))
+          (search-forward "Pick a colour")
+          (call-interactively #'harness-ui-tasks-toggle-subtitle))
+        (should (string-match-p "Read the palette code" (harness-ui-tasks-test--board-text board)))))))
+
+(ert-deftest harness-ui-tasks-review-card-folded ()
+  "A card waiting for review hides its recap by default too."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (harness-ui-tasks--subtitles nil))
+      (harness-ui-tasks-test--type-and-submit board "Send for review")
+      (harness-ui-tasks-test--wait-text board "Ready for review\\(.\\|\n\\)*Send for review")
+      (let ((id (plist-get (car (harness-call 'task/list default-directory)) :id)))
+        (harness-ui-tasks-test--recap board id "Added the endpoint and its tests.")
+        (should-not (string-match-p "Added the endpoint" (harness-ui-tasks-test--board-text board)))))))
+
+(ert-deftest harness-ui-tasks-tab-toggles-the-subtitle-and-keeps-point ()
+  "TAB shows and hides a card's recap; a card that shrank keeps point."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "Keep my point")
+      (harness-ui-tasks-test--wait-text board "Pending\\(.\\|\n\\)*Keep my point")
+      (let* ((id (plist-get (car (harness-call 'task/list default-directory)) :id))
+             (harness-ui-tasks--subtitles nil))
+        (harness-ui-tasks-test--recap board id "A recap line to fold.")
+        (with-current-buffer board
+          (goto-char (point-min))
+          (search-forward "Keep my point")
+          (harness-ui-tasks-tab)
+          (should (string-match-p "A recap line to fold" (harness-ui-tasks-test--board-text board)))
+          ;; Fold from the second line: point stays on the card.
+          (goto-char (point-min))
+          (search-forward "A recap line to fold")
+          (harness-ui-tasks-tab)
+          (should (equal id (get-text-property (point) 'harness-task-id)))
+          (should-not (string-match-p "A recap line to fold"
+                                      (harness-ui-tasks-test--board-text board))))))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

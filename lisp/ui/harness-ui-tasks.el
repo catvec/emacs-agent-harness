@@ -103,9 +103,12 @@ Either way the toggle above the compose box switches it per board."
   "Task waiting for your review: a flag." :version "29.1")
 
 (defconst harness-ui-tasks--columns
-  '((needs-input "Requires your input") (review "Ready for review") (active "In progress")
+  '((needs-input "Requires your input" t) (review "Ready for review") (active "In progress")
     (pending "Pending") (done "Completed"))
-  "Columns in display order: (COLUMN HEADING).")
+  "Columns in display order: (COLUMN HEADING &optional SUBTITLE-SHOWN).
+SUBTITLE-SHOWN is non-nil when the cards of the column show their
+recap subtitle by default; elsewhere a card is one line until you
+show it (see `harness-ui-tasks-toggle-subtitle').")
 
 ;;;; Buffer state
 
@@ -140,6 +143,10 @@ harness's task defaults and changed with the usual session commands.")
 (defvar-local harness-ui-tasks--error nil "Last failure, shown above the compose box.")
 (defvar-local harness-ui-tasks--show-archived nil)
 (defvar-local harness-ui-tasks--folded nil "Columns whose section is folded.")
+(defvar-local harness-ui-tasks--subtitles nil
+  "Alist of task id -> whether your choice shows its recap subtitle.
+Only cards you toggled are in it; the rest follow their column
+\(see `harness-ui-tasks--columns').")
 (defvar-local harness-ui-tasks--submitting nil "Prompts sent but not yet acknowledged.")
 (defvar-local harness-ui-tasks--target nil
   "What the compose box does: nil for a new task, else (KIND . ID).
@@ -352,6 +359,44 @@ plain text: no list, heading or emphasis markers."
   "TEXT between curly double quotes, as the compose labels name a task."
   (concat (string #x201c) text (string #x201d)))
 
+;;;; The subtitle
+
+;; A card's second line is its subtitle: the recap a short model call
+;; wrote (`harness-tasks-recap').  It is folded away on most cards -- you
+;; see one line per task -- except where it matters most, on a task that
+;; needs your input, and on the cards you show it on yourself.
+
+(defun harness-ui-tasks--subtitle-shown-p (task)
+  "Non-nil when TASK's card shows its subtitle now.
+Your own choice for the task wins over its column's default."
+  (let ((choice (assoc (plist-get task :id) harness-ui-tasks--subtitles)))
+    (if choice (cdr choice)
+      (nth 2 (assq (harness-ui-tasks--column task) harness-ui-tasks--columns)))))
+
+(defun harness-ui-tasks--set-subtitle (id shown)
+  "Show or hide the subtitle of task ID from now on, whatever its column."
+  (setq harness-ui-tasks--subtitles
+        (cons (cons id shown) (assoc-delete-all id harness-ui-tasks--subtitles))))
+
+(defun harness-ui-tasks--subtitle (task column session position room)
+  "The text under TASK's title, at most ROOM columns wide: its recap,
+else the old detail line.  In the needs-input column the detail that
+says what blocks the task stays after the recap, since that card shows
+its subtitle by default and the recap must not hide what it waits for."
+  (let* ((recap (plist-get task :recap))
+         (recap (and (stringp recap) (not (harness-string-blank-p recap)) (string-trim recap)))
+         (detail (harness-ui-tasks--detail task column session position))
+         (sep (concat " " harness-ui-tasks--dot " ")))
+    (cond
+     ((null recap) (harness-ui-tasks--fit (or detail "") room))
+     ((and (eq column 'needs-input) detail)
+      (harness-ui-tasks--fit
+       (concat (harness-ui-tasks--fit (propertize recap 'face 'harness-dim-face)
+                                      (- room (string-width detail) (string-width sep)))
+               sep detail)
+       room))
+     (t (harness-ui-tasks--fit (propertize recap 'face 'harness-dim-face) room)))))
+
 (defun harness-ui-tasks--pending-detail (task position todos)
   "The second line of pending TASK's card: what it waits for.
 POSITION is its place in line among queued tasks; TODOS its session's."
@@ -530,6 +575,17 @@ its final message and evidence, in a popout."
                      (lambda () (harness-ui-report-popout task))
                      "What it handed in: the final message and the evidence" "report"))))))
 
+(defun harness-ui-tasks--subtitle-button (task shown)
+  "The chevron that shows or hides TASK's recap subtitle.
+SHOWN is whether the subtitle shows now."
+  (let ((id (plist-get task :id)))
+    (harness-ui-tasks--button
+     (propertize (harness-ui-icon (if shown 'harness-icon-expanded 'harness-icon-collapsed))
+                 'face 'harness-dim-face)
+     (lambda () (harness-ui-tasks--with-task id (harness-ui-tasks-toggle-subtitle)))
+     (if shown "Hide the recap" "Show the recap")
+     (concat "subtitle:" id))))
+
 ;;;; Rendering
 
 (defun harness-ui-tasks--width ()
@@ -544,24 +600,53 @@ its final message and evidence, in a popout."
         string
       (concat (truncate-string-to-width string (1- room)) "…"))))
 
+(defconst harness-ui-tasks--min-title-room 24
+  "Title columns a one-line card keeps before its facts are left out.
+On a narrow board the buttons stay and the facts wait for a wider
+window or for the card to be shown, so the title is not squeezed to
+nothing.")
+
+(defconst harness-ui-tasks--collapse-min-width 48
+  "Board width below which cards keep their second line.
+A one-line card shares its line with its buttons, and below this width
+the title would be left with nothing; there cards stay two lines,
+whatever the columns or your own toggles say.")
+
 (defun harness-ui-tasks--insert-card (task column position)
   (let* ((start (point))
          (session (harness-ui-tasks--session task))
          (width (harness-ui-tasks--width))
+         (narrow (< width harness-ui-tasks--collapse-min-width))
          (meta (harness-ui-tasks--meta task column session))
          (buttons (harness-ui-tasks--card-buttons task))
-         (detail (harness-ui-tasks--fit (or (harness-ui-tasks--detail task column session position) "")
-                                        (- width (string-width buttons) 7))))
-    (insert "  " (harness-ui-tasks--icon task column session) " "
-            (propertize (harness-ui-tasks--fit (harness-ui-tasks--title task) (- width (string-width meta) 7))
+         (shown (or (harness-ui-tasks--subtitle-shown-p task) narrow))
+         (chevron (if narrow "" (harness-ui-tasks--subtitle-button task shown)))
+         (icon (harness-ui-tasks--icon task column session))
+         (left (concat "  " (if (string-empty-p chevron) "" (concat chevron " ")) icon " "))
+         (subtitle (and shown (harness-ui-tasks--subtitle task column session position
+                                                          (- width (string-width buttons) 8))))
+         ;; A one-line card carries the buttons beside the facts.  When
+         ;; the facts would squeeze the title, a narrow board keeps the
+         ;; title and the buttons and lets the facts wait for a wider
+         ;; window or for the card to be opened.
+         (right (if subtitle meta (concat meta "  " buttons)))
+         (right (if (and (not subtitle)
+                         (< (- width (string-width right) (string-width left) 3)
+                            harness-ui-tasks--min-title-room))
+                    buttons
+                  right))
+         (room (- width (string-width right) (string-width left) 3)))
+    (insert left
+            (propertize (harness-ui-tasks--fit (harness-ui-tasks--title task) room)
                         'face (if (eq column 'done) 'default 'harness-task-title-face)
                         'mouse-face 'highlight
                         'help-echo "Open the session")
-            (propertize " " 'display `(space :align-to (- right ,(1+ (string-width meta)))))
-            meta "\n"
-            "    " detail
-            (propertize " " 'display `(space :align-to (- right ,(1+ (string-width buttons)))))
-            buttons "\n")
+            (propertize " " 'display `(space :align-to (- right ,(1+ (string-width right)))))
+            right "\n")
+    (when subtitle
+      (insert "      " subtitle
+              (propertize " " 'display `(space :align-to (- right ,(1+ (string-width buttons)))))
+              buttons "\n"))
     (put-text-property start (point) 'harness-task-id (plist-get task :id))))
 
 (defun harness-ui-tasks--insert-section (column heading tasks)
@@ -754,6 +839,14 @@ something else, but at the start of the line instead."
            (save-excursion
              (goto-char start)
              (forward-line line)
+             ;; A card that shrank: back to the last line that is still its
+             ;; own.  A line just past KEY -- the blank after a column -- is
+             ;; where point was and stays.
+             (let ((mine (lambda ()
+                           (let ((k (harness-ui-tasks--line-key (line-beginning-position))))
+                             (or (null k) (equal k key))))))
+               (while (and (> (point) start) (not (funcall mine)))
+                 (forward-line -1)))
              ;; A line counted from the board stays on the board.
              (when (and (< start harness-ui-tasks--list-end) (>= (point) harness-ui-tasks--list-end))
                (goto-char board-end)
@@ -1433,6 +1526,7 @@ anything that moves a task without one, so a board never drifts.")
        ["Task at point"
         (". RET" "Open its session" harness-ui-tasks-open)
         (". o" "Open in position" harness-ui-tasks-open-other)
+        (". TAB" "Fold the section or the recap" harness-ui-tasks-tab)
         (". s" "Start now" harness-ui-tasks-start)
         (". e" "Edit prompt" harness-ui-tasks-edit)
         (". m" "Message session" harness-ui-tasks-reply)
@@ -1567,16 +1661,37 @@ By default it takes the board's own position, replacing the board."
                    (harness-ui-tasks--actions task)))
      event)))
 
-(defun harness-ui-tasks-tab ()
-  "Fold the section at point, or move to the next task."
+(defun harness-ui-tasks-toggle-subtitle ()
+  "Show or hide the recap subtitle of the task card at point.
+A card's column decides by default -- folded in pending, in progress
+and ready for review, shown when a task requires your input -- and your
+choice for a card stays with it, whatever column it moves to."
   (interactive)
-  (if-let* ((column (get-text-property (point) 'harness-task-section)))
-      (progn (setq harness-ui-tasks--folded
-                   (if (memq column harness-ui-tasks--folded)
-                       (delq column harness-ui-tasks--folded)
-                     (cons column harness-ui-tasks--folded)))
-             (harness-ui-tasks--render))
-    (harness-ui-tasks-next)))
+  (let ((id (get-text-property (point) 'harness-task-id)))
+    (unless id (user-error "Point is not on a task card"))
+    (let ((task (harness-ui-tasks--find id)))
+      (harness-ui-tasks--set-subtitle id (not (harness-ui-tasks--subtitle-shown-p task)))
+      (harness-ui-tasks--render)
+      ;; A card that shrank keeps point on itself, not on the line below.
+      (when-let* ((start (harness-ui-tasks--key-start (cons 'harness-task-id id))))
+        (goto-char start)
+        (skip-chars-forward " ")))))
+
+(defun harness-ui-tasks-tab ()
+  "Fold the section or card at point, or move to the next task.
+A heading folds its column; a card shows or hides its recap subtitle."
+  (interactive)
+  (cond
+   ((get-text-property (point) 'harness-task-section)
+    (let ((column (get-text-property (point) 'harness-task-section)))
+      (setq harness-ui-tasks--folded
+            (if (memq column harness-ui-tasks--folded)
+                (delq column harness-ui-tasks--folded)
+              (cons column harness-ui-tasks--folded)))
+      (harness-ui-tasks--render)))
+   ((get-text-property (point) 'harness-task-id)
+    (harness-ui-tasks-toggle-subtitle))
+   (t (harness-ui-tasks-next))))
 
 (defun harness-ui-tasks--move (forward)
   (let ((here (get-text-property (point) 'harness-task-id))
