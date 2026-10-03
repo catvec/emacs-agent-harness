@@ -251,7 +251,11 @@ The renderer drops the last newline; what follows starts a line of its own."
           (harness-ui-report--insert-markdown summary)))
       (insert "\n" (propertize (format "Evidence (%d)\n" (length evidence)) 'face 'harness-label-face) "\n")
       (if evidence
-          (dolist (item evidence) (harness-ui-report--insert-item item task))
+          ;; A blank line between pieces of evidence, so each reads as one
+          ;; with its caption; none after the last.
+          (cl-loop for item in evidence for first = t then nil
+                   do (unless first (insert "\n"))
+                   (harness-ui-report--insert-item item task))
         (insert (propertize "  none\n" 'face 'harness-dim-face))))))
 
 (defun harness-ui-report--insert-buffer (task)
