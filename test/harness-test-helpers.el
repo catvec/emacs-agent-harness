@@ -98,6 +98,64 @@ Signal an error mentioning MESSAGE on timeout.  Return PRED's value."
   "Create and return a fresh temporary directory."
   (file-name-as-directory (make-temp-file "harness-tmp-" t)))
 
+;;;; A web server
+
+(defun harness-test-http-serve (routes)
+  "Answer HTTP requests on 127.0.0.1 from ROUTES; return the server process.
+ROUTES maps a path to (STATUS HEADERS BODY . OPTIONS): HEADERS an alist
+sent as given, BODY a string of bytes.  OPTIONS is a plist: :chunks
+splits the body in that many pieces sent :delay seconds apart (the
+first one after :delay too), :no-length leaves Content-Length out.  A
+path ROUTES lacks gets a 404.  `harness-test-http-url' makes addresses."
+  (make-network-process
+   :name "harness-test-http" :server t :host "127.0.0.1" :service t :family 'ipv4
+   :coding 'binary :noquery t
+   :log (lambda (_server connection _message) (set-process-query-on-exit-flag connection nil))
+   :filter (lambda (proc data)
+             (let ((text (concat (or (process-get proc 'text) "") data)))
+               (process-put proc 'text text)
+               (when (and (string-match-p "\r\n\r\n" text) (not (process-get proc 'answered)))
+                 (process-put proc 'answered t)
+                 (let ((path (nth 1 (split-string (car (split-string text "\r\n")) " "))))
+                   (harness-test--http-answer
+                    proc (or (cdr (assoc path routes))
+                             (list 404 '(("Content-Type" . "text/plain")) "not found")))))))))
+
+(defun harness-test--http-answer (proc route)
+  "Send PROC the answer ROUTE describes (see `harness-test-http-serve')."
+  (pcase-let* ((`(,status ,headers ,body . ,options) route)
+               (chunks (max 1 (or (plist-get options :chunks) 1)))
+               (delay (or (plist-get options :delay) 0))
+               (size (length body))
+               (step (max 1 (ceiling size chunks)))
+               (pieces (let (out (i 0))
+                         (while (< i size)
+                           (push (substring body i (min size (+ i step))) out)
+                           (setq i (+ i step)))
+                         (nreverse out)))
+               (send nil))
+    (process-send-string
+     proc (concat (format "HTTP/1.1 %d %s\r\n" status (if (< status 400) "OK" "Error"))
+                  (mapconcat (lambda (h) (format "%s: %s\r\n" (car h) (cdr h))) headers "")
+                  (if (plist-get options :no-length) "" (format "Content-Length: %d\r\n" size))
+                  "Connection: close\r\n\r\n"))
+    (setq send (lambda ()
+                 (when (process-live-p proc)
+                   (if pieces
+                       (progn (ignore-errors (process-send-string proc (pop pieces)))
+                              (if (> delay 0) (run-at-time delay nil send) (funcall send)))
+                     (ignore-errors (process-send-eof proc))))))
+    (if (> delay 0) (run-at-time delay nil send) (funcall send))))
+
+(defun harness-test-http-url (server path)
+  "Return the address of PATH on SERVER, from `harness-test-http-serve'."
+  (format "http://127.0.0.1:%d%s" (process-contact server :service) path))
+
+(defconst harness-test-png
+  (base64-decode-string
+   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEUlEQVR4nGP4z8DA8B+MgBgAHfAD/dPQfSYAAAAASUVORK5CYII=")
+  "The bytes of a 2x2 PNG.")
+
 (defvar harness-acp-server-enabled)
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")

@@ -116,10 +116,32 @@
           (should-not (string-match-p "thumbnail…" plain))))
       ;; With ffmpeg present the placeholder appears while the thumbnail is generated.
       (cl-letf (((symbol-function 'executable-find) (lambda (p) (equal p "ffmpeg")))
-                ((symbol-function 'harness-run-command) (lambda (&rest _) (harness-resolved '(:exit 1)))))
+                ((symbol-function 'harness-run-command) (lambda (&rest _) (harness-make-promise))))
         (should (string-match-p "thumbnail…" (substring-no-properties
                                               (harness-ui-media-render-attachment (list :path video :mime "video/mp4"))))))
       (clrhash harness-ui-media--thumbnailing)
+      ;; A thumbnail that could not be made is not tried again, and the
+      ;; callback of whoever asked for it runs once it is over.
+      (let ((runs 0) (called 0))
+        (cl-letf (((symbol-function 'executable-find) (lambda (p) (equal p "ffmpeg")))
+                  ((symbol-function 'harness-run-command)
+                   (lambda (&rest _) (cl-incf runs) (harness-resolved '(:exit 1)))))
+          (should-not (harness-ui-media-video-thumbnail video (lambda () (cl-incf called))))
+          (should (= 1 runs))
+          (should (= 1 called))
+          (let ((plain (substring-no-properties
+                        (harness-ui-media-render-attachment (list :path video :mime "video/mp4")))))
+            (should-not (string-match-p "thumbnail…" plain))
+            (should (string-match-p "movie.mp4" plain)))
+          (should-not (harness-ui-media-video-thumbnail video))
+          (should (= 1 runs))))
+      ;; One that exists is returned as it is.
+      (let ((other (expand-file-name "made.mp4" dir)))
+        (with-temp-file other (insert "x"))
+        (with-temp-file (harness-ui-media-thumbnail-path other) (insert "png"))
+        (should (equal (harness-ui-media-thumbnail-path other) (harness-ui-media-video-thumbnail other))))
+      (clrhash harness-ui-media--thumbnailing)
+      (clrhash harness-ui-media--thumbnail-failed)
       ;; Any other file is a button with its type and size.
       (let* ((s (harness-ui-media-render-attachment (list :path (expand-file-name "notes.txt" dir) :mime "text/plain" :size 2048)))
              (plain (substring-no-properties s)))

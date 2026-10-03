@@ -1193,6 +1193,32 @@ opening it where images cannot show or the file is remote."
         (harness-compose-remove-attachment (plist-get (car harness-compose-attachments) :path))
         (should (null harness-compose-attachments))))))
 
+(ert-deftest harness-ui-chat-dropped-link-is-sent-as-an-image ()
+  ;; A link dropped on a chat downloads behind a chip in the tail; the
+  ;; message waits for it, then carries the image.
+  (skip-unless (executable-find "curl"))
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (server (harness-test-http-serve
+                    `(("/cat.png" 200 (("Content-Type" . "image/png")) ,harness-test-png :chunks 2 :delay 0.3)))))
+      (unwind-protect
+          (save-window-excursion
+            (set-window-buffer (selected-window) buf)
+            (dnd-handle-multiple-urls (selected-window) (list (harness-test-http-url server "/cat.png")) 'private)
+            (with-current-buffer buf
+              (should (text-property-not-all harness-chat--transcript-end (point-max) 'harness-compose-pending nil))
+              (harness-ui-chat-test-type buf "what is this?")
+              (should-error (harness-chat-send) :type 'user-error)
+              (should (equal "what is this?" (harness-compose-text)))
+              (harness-test-wait (lambda () (not (plist-get (car harness-compose-attachments) :pending))) 10 "the download")
+              (should (harness-ui-chat-test-find buf "cat.png (")))
+            (harness-ui-chat-test-prompt buf "")
+            (let ((user (cl-find 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
+              (should (cl-some (lambda (b) (equal "image" (plist-get b :type))) (plist-get user :blocks))))
+            (with-current-buffer buf (should-not harness-compose-attachments)))
+        (delete-process server)))))
+
 (ert-deftest harness-ui-chat-session-deleted ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))

@@ -22,7 +22,7 @@ module needs something more, add it here first.
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
-                binary bodies)
+                binary bodies, downloads into a file with progress)
 ```
 
 The core never shows UI and never calls a model.  UI modules never
@@ -1598,6 +1598,27 @@ line), a prompt that is a field of its own (`C-a` stops after it, so
 completion, attachments (`C-c C-a`, clipboard `C-c C-v`, drag and
 drop), skill expansion (`harness-compose-with-expanded-text`) and ACP
 attachment blocks.
+An attachment chip leads with a thumbnail (`harness-compose-thumbnail-lines`)
+when it is an image, or a video whose thumbnail the media module makes
+with ffmpeg in the background; the box is redrawn when it lands.  A link
+dropped from a browser or a page (`dnd-protocol-alist` for
+http/https/ftp, plus the X types through `x-dnd-types-alist`: a raw
+image, a browser's file promise, `text/html`, text, and X direct save)
+downloads with `harness-http-download` behind a chip whose spinner,
+progress bar and size an overlay redraws, so the buffer's text is not
+touched while it ticks; the file attaches under the name the server or
+the link gave, or the link goes in as text when it turns out to be a
+web page.  Sending waits for a download in flight.  The X handlers take
+what the drop says the dragged media is (a browser's `text/html` or
+`application/x-moz-file-promise-url` names the image inside a link),
+and dropped text goes into the box rather than into the read-only
+transcript around it.
+Media on the clipboard is read without touching `kill-ring`: `C-y` in a
+compose box attaches the image, or the files a file manager copied, and
+pushes captures on the media ring (`harness-ui-media-ring`), a ring of
+its own under `harness-state-directory/clips/` deduplicated by the
+SHA-1 of the bytes, which `M-y` goes back through and `C-u C-c C-v`
+picks from; `yank-media` attaches them too (`harness-compose-yank-media`).
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
@@ -1731,4 +1752,6 @@ its buffer, once the harness confirms it holds no node of its own,
 and an idle one is closed.  Keeping it makes it a normal session
 window in that place, with nothing of the BTW left in its header), media
 (`harness-ui-media`: inline images, audio record/playback with svg
-meters, video thumbnails/open).
+meters, video thumbnails/open -- `harness-ui-media-video-thumbnail`
+hands a chip one, making it in the background; `harness-ui-media-ring`
+is the media ring on its own).

@@ -311,7 +311,11 @@ Unknown durations are probed once with ffprobe and cached."
 
 ;;;; Video
 
-(defvar harness-ui-media--thumbnailing (make-hash-table :test 'equal) "Paths whose thumbnail is being made.")
+(defvar harness-ui-media--thumbnailing (make-hash-table :test 'equal)
+  "Path -> functions to call once the thumbnail being made of it is done.")
+
+(defvar harness-ui-media--thumbnail-failed (make-hash-table :test 'equal)
+  "Thumbnail paths that could not be made, so they are not tried again.")
 
 (defun harness-ui-media-thumbnail-path (path)
   "Return the thumbnail file for the video PATH under the state directory."
@@ -327,15 +331,39 @@ Unknown durations are probed once with ffprobe and cached."
          (list "ffmpeg" "-loglevel" "error" "-y" "-ss" "1" "-i" path "-frames:v" "1"
                "-vf" (format "scale=%d:-1" harness-ui-media-thumbnail-width) out))))
 
-(defun harness-ui-media--make-thumbnail (path)
-  "Generate the thumbnail of PATH in the background, then redraw its renderings."
+(defun harness-ui-media--make-thumbnail (path &optional callback)
+  "Generate the thumbnail of PATH in the background, then redraw its renderings.
+CALLBACK, when given, is called with no arguments once that is over,
+whether the thumbnail was made or not.  One that could not be made is
+not tried again."
   (let ((out (harness-ui-media-thumbnail-path path)))
-    (unless (or (file-exists-p out) (gethash path harness-ui-media--thumbnailing))
+    (cond
+     ((or (file-exists-p out) (gethash out harness-ui-media--thumbnail-failed)))
+     ((gethash path harness-ui-media--thumbnailing)
+      (when callback (push callback (gethash path harness-ui-media--thumbnailing))))
+     (t
       (when-let* ((cmd (harness-ui-media--thumbnail-command path out)))
-        (puthash path t harness-ui-media--thumbnailing)
-        (harness-then (harness-run-command cmd :name "harness-thumbnail" :timeout 60)
-                      (lambda (_) (remhash path harness-ui-media--thumbnailing) (harness-ui-media--rerender path))
-                      (lambda (_) (remhash path harness-ui-media--thumbnailing) (harness-ui-media--rerender path)))))))
+        (puthash path (list (or callback #'ignore)) harness-ui-media--thumbnailing)
+        (let ((done (lambda (_)
+                      (let ((callbacks (gethash path harness-ui-media--thumbnailing)))
+                        (remhash path harness-ui-media--thumbnailing)
+                        (unless (file-exists-p out) (puthash out t harness-ui-media--thumbnail-failed))
+                        (harness-ui-media--rerender path)
+                        (dolist (f callbacks)
+                          (condition-case err (funcall f)
+                            (error (harness-log 'warn "media: thumbnail callback failed: %S" err))))))))
+          (harness-then (harness-run-command cmd :name "harness-thumbnail" :timeout 60) done done)))))))
+
+(defun harness-ui-media-video-thumbnail (path &optional callback)
+  "Return the thumbnail image file of the video PATH, or nil while there is none.
+Without one, it is made in the background when ffmpegthumbnailer or
+ffmpeg is installed, and CALLBACK is called with no arguments once that
+is over, whether it was made or not."
+  (let ((thumb (harness-ui-media-thumbnail-path path)))
+    (if (file-exists-p thumb)
+        thumb
+      (harness-ui-media--make-thumbnail path callback)
+      nil)))
 
 (defun harness-ui-media-open (path)
   "Open PATH with the desktop's default application or mpv."
@@ -362,7 +390,8 @@ Unknown durations are probed once with ffprobe and cached."
                              (define-key m [mouse-1] (lambda () (interactive) (harness-ui-media-open path)))
                              m)))
       (ready (propertize (format " %s " (harness-ui-icon 'harness-icon-video)) 'face 'harness-dim-face))
-      ((harness-ui-media--thumbnail-command (or path "") "")
+      ((and (not (gethash thumb harness-ui-media--thumbnail-failed))
+            (harness-ui-media--thumbnail-command (or path "") ""))
        (propertize (format " %s thumbnail… " (harness-ui-icon 'harness-icon-video)) 'face 'harness-dim-face))
       (t (propertize (format " %s " (harness-ui-icon 'harness-icon-video)) 'face 'harness-dim-face)))
      " " (propertize (harness-ui-media--name attachment) 'face 'bold)

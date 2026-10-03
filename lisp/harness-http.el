@@ -19,6 +19,13 @@
 ;;   `harness-http-request'   -- start a request, returns a handle
 ;;   `harness-http-cancel'    -- abort it
 ;;   `harness-http-sse-parser' -- build an :on-chunk function for SSE
+;;   `harness-http-download'  -- download a URL into a file, with progress
+;;   `harness-http-download-cancel' -- abort a download
+;;
+;; A download never passes the body through Emacs: curl writes the file
+;; itself, the response headers arrive as soon as they are sent (so a
+;; caller can stop a download it does not want, a web page say), and the
+;; progress is the size of the file so far against its Content-Length.
 
 ;;; Code:
 
@@ -241,6 +248,220 @@ event.  Multi-line data fields are joined with newlines per the spec."
 (defun harness-http-active-count ()
   "Number of in-flight requests."
   (length harness-http--active))
+
+;;;; Downloads into a file
+
+(defcustom harness-http-download-user-agent "Mozilla/5.0 (X11; Linux x86_64) emacs-agent-harness"
+  "User agent `harness-http-download' sends; some hosts refuse curl's own."
+  :type 'string :group 'harness)
+
+(defvar harness-http-download-progress-interval 0.25
+  "Seconds between the progress reports of a download.")
+
+(cl-defstruct (harness-download (:constructor harness-http--make-download) (:copier nil))
+  "A download started by `harness-http-download'.
+STATUS, HEADERS, MIME, TOTAL (the Content-Length) and NAME (the file
+name the server gave) describe the final response once it arrived;
+URL-EFFECTIVE is the address after redirects, once done."
+  url file process config-file
+  (stdout "") (parsed 0)
+  status headers mime total name url-effective
+  done cancelled timer
+  callback on-headers on-progress max-size)
+
+(defun harness-http-unhex-bytes (string)
+  "Return the bytes STRING spells with its %XX escapes decoded."
+  (replace-regexp-in-string "%[[:xdigit:]]\\{2\\}"
+                            (lambda (m) (unibyte-string (string-to-number (substring m 1) 16)))
+                            (encode-coding-string string 'utf-8) t t))
+
+(defun harness-http--unhex (string &optional coding)
+  "Decode the %XX escapes of STRING, as CODING (default UTF-8)."
+  (decode-coding-string (harness-http-unhex-bytes string) (or coding 'utf-8)))
+
+(defun harness-http--disposition-filename (value)
+  "Return the file name a Content-Disposition header VALUE gives, or nil."
+  (let ((case-fold-search t))
+    (cond ((null value) nil)
+          ((string-match "filename\\*[ \t]*=[ \t]*\\([^';]*\\)'[^']*'\\([^;]+\\)" value)
+           (let ((charset (downcase (match-string 1 value)))
+                 (name (string-trim (match-string 2 value))))
+             (harness-http--unhex name (or (and (not (string-empty-p charset))
+                                                (ignore-errors (check-coding-system (intern charset))))
+                                           'utf-8))))
+          ((string-match "filename[ \t]*=[ \t]*\"\\(\\(?:[^\"\\]\\|\\\\.\\)*\\)\"" value)
+           (replace-regexp-in-string "\\\\\\(.\\)" "\\1" (match-string 1 value) t))
+          ((string-match "filename[ \t]*=[ \t]*\\([^; \t]+\\)" value)
+           (match-string 1 value)))))
+
+(defun harness-http-url-file-name (url)
+  "Return the file name at the end of URL's path, decoded, or nil."
+  (when (string-match "\\`[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]*\\(/[^?#]*\\)?" url)
+    (let* ((path (or (match-string 1 url) ""))
+           (name (harness-http--unhex (file-name-nondirectory path))))
+      (and (not (string-blank-p name)) name))))
+
+(defun harness-http-download-received (download)
+  "Return the bytes DOWNLOAD has written to its file so far."
+  (or (harness-file-size (harness-download-file download)) 0))
+
+(defun harness-http--download-parse (dl)
+  "Take the complete response header blocks off DL's output.
+The final response, the first that is neither informational nor a
+redirect, sets DL's status, headers, MIME type, size and name and
+is reported to its ON-HEADERS."
+  (let ((out (harness-download-stdout dl)) (done nil))
+    (while (and (not done) (not (harness-download-done dl))
+                (eq t (compare-strings "HTTP/" nil nil out (harness-download-parsed dl)
+                                       (min (length out) (+ 5 (harness-download-parsed dl))))))
+      (let ((end (string-search "\r\n\r\n" out (harness-download-parsed dl))))
+        (if (not end)
+            (setq done t)
+          (let* ((parsed (harness-http--parse-headers
+                          (decode-coding-string (substring out (harness-download-parsed dl) end) 'utf-8)))
+                 (status (car parsed))
+                 (headers (cdr parsed)))
+            (setf (harness-download-parsed dl) (+ end 4))
+            (cond ((null status))
+                  ((or (< status 200) (and (>= status 300) (< status 400))))
+                  ((>= status 400) (setf (harness-download-status dl) status))
+                  (t
+                   (let ((type (cdr (assoc "content-type" headers)))
+                         (length (cdr (assoc "content-length" headers))))
+                     (setf (harness-download-status dl) status
+                           (harness-download-headers dl) headers
+                           (harness-download-mime dl)
+                           (and type (downcase (string-trim (car (split-string type ";")))))
+                           (harness-download-total dl)
+                           (and length (string-match-p "\\`[ \t]*[0-9]+[ \t]*\\'" length)
+                                (string-to-number length))
+                           (harness-download-name dl)
+                           (harness-http--disposition-filename (cdr (assoc "content-disposition" headers)))))
+                   (when (harness-download-on-headers dl)
+                     (condition-case err
+                         (funcall (harness-download-on-headers dl) dl)
+                       (error (harness-log 'error "download on-headers failed: %S" err))))))))))))
+
+(defun harness-http--download-summary (dl)
+  "Return the JSON curl wrote after DL's headers, as a plist, or nil."
+  (let ((rest (substring (harness-download-stdout dl) (min (harness-download-parsed dl)
+                                                           (length (harness-download-stdout dl))))))
+    (when (string-match "^{.*}[ \t\r\n]*\\'" rest)
+      (ignore-errors (harness-json-parse (decode-coding-string (match-string 0 rest) 'utf-8))))))
+
+(defun harness-http--download-error (dl code summary stderr)
+  "Describe why DL failed with curl exit CODE, its SUMMARY and STDERR."
+  (let ((http (plist-get summary :http_code)))
+    (pcase code
+      (22 (format "the server answered HTTP %s" (or (harness-download-status dl)
+                                                     (and (numberp http) (> http 0) http) "error")))
+      (63 (format "it is larger than %s" (harness-format-bytes (harness-download-max-size dl))))
+      (_ (let ((msg (or (plist-get summary :errormsg)
+                        (and (not (string-blank-p stderr))
+                             (string-trim (replace-regexp-in-string "\\`curl: ([0-9]+) " "" (string-trim stderr))))
+                        (format "curl exited %s" code))))
+           msg)))))
+
+(defun harness-http--download-finish (dl error)
+  "Settle DL with ERROR, a string, or nil when it succeeded; once."
+  (unless (harness-download-done dl)
+    (setf (harness-download-done dl) t)
+    (when (harness-download-timer dl) (cancel-timer (harness-download-timer dl)))
+    (when-let* ((f (harness-download-config-file dl))) (ignore-errors (delete-file f)))
+    (when error (ignore-errors (delete-file (harness-download-file dl))))
+    (when (harness-download-callback dl)
+      (condition-case err
+          (funcall (harness-download-callback dl) dl error)
+        (error (harness-log 'error "download callback failed: %S" err))))))
+
+(defun harness-http--download-sentinel (dl process stderr-buf)
+  "Settle DL once curl's PROCESS has exited; STDERR-BUF holds what it said."
+  (unless (process-live-p process)
+    (let ((stderr (if (buffer-live-p stderr-buf) (with-current-buffer stderr-buf (buffer-string)) "")))
+      (when (buffer-live-p stderr-buf) (kill-buffer stderr-buf))
+      (unless (harness-download-done dl)
+        (harness-http--download-parse dl))
+      (let* ((summary (harness-http--download-summary dl))
+             (code (process-exit-status process)))
+        (when summary
+          (setf (harness-download-url-effective dl) (plist-get summary :url_effective))
+          (unless (harness-download-mime dl)
+            (when-let* ((type (plist-get summary :content_type)))
+              (setf (harness-download-mime dl) (downcase (string-trim (car (split-string type ";"))))))))
+        (harness-http--download-finish
+         dl (cond ((harness-download-cancelled dl) "cancelled")
+                  ((and (eq (process-status process) 'exit) (zerop code)) nil)
+                  (t (harness-http--download-error dl code summary stderr))))))))
+
+(cl-defun harness-http-download (url file &key callback on-headers on-progress max-size timeout headers)
+  "Download URL into FILE asynchronously with curl; return the download.
+Only http, https, ftp and ftps are fetched, redirects included.
+ON-HEADERS is called with the download once the final response's
+headers arrived (see `harness-download'; a proxy's answer to CONNECT
+may come first), and may cancel it; ON-PROGRESS every
+`harness-http-download-progress-interval' seconds with the download,
+the bytes received and the expected total (nil when the server did not
+say).  CALLBACK is called once, with the download and nil when FILE
+holds the body, or with a message saying what went wrong (\"cancelled\"
+after `harness-http-download-cancel'); FILE is deleted then.  MAX-SIZE
+caps the body in bytes, TIMEOUT the whole transfer in seconds (default
+one hour; a transfer stalled for a minute fails anyway).  HEADERS is an
+alist of extra request headers."
+  (unless harness-http-curl-program
+    (error "harness-http: curl is not available"))
+  (harness-ensure-directory (file-name-directory (expand-file-name file)))
+  (let* ((config (make-temp-file "harness-download-" nil ".curlrc"))
+         (dl (harness-http--make-download :url url :file (expand-file-name file) :config-file config
+                                          :callback callback :on-headers on-headers
+                                          :on-progress on-progress :max-size max-size))
+         (stderr (generate-new-buffer " *harness-download-stderr*" t)))
+    (with-temp-file config
+      (set-file-modes config #o600)
+      (insert (format "url = %S\n" url)
+              (format "user-agent = %S\n" harness-http-download-user-agent))
+      (dolist (h headers)
+        (insert (format "header = %S\n" (format "%s: %s" (car h) (cdr h))))))
+    (let ((process
+           (make-process
+            :name "harness-download"
+            :command (append (list harness-http-curl-program
+                                   "--silent" "--show-error" "--location" "--fail" "--max-redirs" "10"
+                                   "--proto" "=http,https,ftp,ftps" "--proto-redir" "=http,https,ftp,ftps"
+                                   "--connect-timeout" "30" "--speed-limit" "1" "--speed-time" "60"
+                                   "--max-time" (number-to-string (or timeout 3600))
+                                   "--dump-header" "-" "--output" (harness-download-file dl)
+                                   "--write-out" "\n%{json}\n"
+                                   "--config" config)
+                             (and max-size (list "--max-filesize" (number-to-string max-size))))
+            :coding 'binary :connection-type 'pipe :noquery t :stderr stderr
+            :filter (lambda (_p data)
+                      (unless (harness-download-done dl)
+                        (setf (harness-download-stdout dl) (concat (harness-download-stdout dl) data))
+                        (harness-http--download-parse dl)))
+            :sentinel (lambda (p _e) (harness-http--download-sentinel dl p stderr)))))
+      (when-let* ((ep (get-buffer-process stderr)))
+        (set-process-query-on-exit-flag ep nil)
+        (set-process-sentinel ep #'ignore))
+      (setf (harness-download-process dl) process)
+      (when on-progress
+        (setf (harness-download-timer dl)
+              (run-at-time harness-http-download-progress-interval harness-http-download-progress-interval
+                           (lambda ()
+                             (if (harness-download-done dl)
+                                 (when (harness-download-timer dl) (cancel-timer (harness-download-timer dl)))
+                               (condition-case err
+                                   (funcall on-progress dl (harness-http-download-received dl)
+                                            (harness-download-total dl))
+                                 (error (harness-log 'error "download progress failed: %S" err))))))))
+      dl)))
+
+(defun harness-http-download-cancel (download)
+  "Abort DOWNLOAD: its callback is told \"cancelled\" and its file deleted."
+  (when (and download (not (harness-download-done download)))
+    (setf (harness-download-cancelled download) t)
+    (let ((p (harness-download-process download)))
+      (when (process-live-p p) (delete-process p)))
+    (harness-http--download-finish download "cancelled")))
 
 (provide 'harness-http)
 ;;; harness-http.el ends here
