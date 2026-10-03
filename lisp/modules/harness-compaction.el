@@ -16,11 +16,14 @@
 ;; waits for the summary and then proceeds.  Providers that report
 ;; `:compaction hosted' compact on their own side and are left alone.
 ;;
-;; The summarisation request is a fresh one: no tools and no provider
-;; state.  For a hosted-loop provider that means a fresh process that
-;; receives the transcript as ordinary messages, which is fine for a
-;; one-shot summary; such providers normally declare hosted compaction
-;; and never get here.
+;; The summarisation request has no tools.  An API provider gets the
+;; transcript as ordinary messages.  A hosted-loop provider keeps the
+;; conversation itself and is only sent the newest user messages, so it
+;; summarises on a fork of the session's provider state (as naming
+;; does): the fork starts from the real conversation, and the session's
+;; own one stays untouched.  Such providers declare hosted compaction
+;; and are never compacted automatically; they get here when asked to,
+;; as a handoff to another provider does (see harness-handoff.el).
 ;;
 ;; `compaction/status' grades how full the window is so a UI can colour
 ;; the token count progressively.
@@ -167,63 +170,95 @@ TRAILING the unanswered user nodes to carry over."
     (harness-emit 'compaction/done session-id node)
     node))
 
+(defun harness-compaction--forked-state (session-id model)
+  "Return a promise of the provider state to summarise SESSION-ID with on MODEL.
+That is a fork of the session's state when MODEL's provider can continue
+it and fork it (a hosted loop: Claude Code, Copilot), so the summary
+comes from the real conversation without writing into it; else nil, and
+MODEL gets the transcript as messages."
+  (let ((state (and (harness-method-exists-p 'session/provider-state)
+                    (harness-call 'session/provider-state session-id model))))
+    (if (and state
+             (harness-method-exists-p 'provider/fork)
+             (plist-get (harness-call 'provider/capabilities model) :fork))
+        (harness-catch (harness-call-async 'provider/fork model state)
+                       (lambda (e)
+                         (harness-log 'warn "compaction: provider fork failed, sending the transcript: %s"
+                                      (harness-error-message e))
+                         nil))
+      (harness-resolved nil))))
+
+(defun harness-compaction--request (session-id session model state promise)
+  "Ask MODEL for the summary of SESSION-ID, whose record is SESSION.
+STATE is the provider state to send it with; PROMISE settles with the
+compaction node."
+  (let* ((old-head (plist-get session :head))
+         (path (harness-call 'session/nodes session-id))
+         (trailing (harness-compaction--trailing-user-nodes path))
+         (messages (harness-compaction--messages session-id))
+         (estimate (or (let ((c (plist-get (plist-get session :usage) :context)))
+                         (and (numberp c) (> c 0) c))
+                       (harness-compaction--messages-tokens messages)))
+         (text "") (usage nil))
+    (harness-log 'info "compaction: summarising %s with %s (%s tokens)" session-id model estimate)
+    (harness-call
+     'provider/complete
+     (list :model model :session session
+           :system harness-compaction--system-prompt
+           :messages messages :tools nil :provider-state state
+           :max-tokens harness-compaction--max-tokens
+           :on-event
+           (lambda (ev)
+             (pcase (plist-get ev :type)
+               ('text (setq text (concat text (plist-get ev :delta))))
+               ('usage (setq usage ev))
+               ('done
+                (let* ((reason (plist-get ev :stop-reason))
+                       (summary (string-trim text))
+                       (problem (cond ((memq reason '(error cancelled))
+                                       (or (plist-get ev :error) (format "%s" reason)))
+                                      ((string-empty-p summary)
+                                       "the model returned an empty summary"))))
+                  (if problem
+                      (harness-compaction--fail session-id promise problem)
+                    (condition-case err
+                        (harness-resolve
+                         promise
+                         (harness-compaction--finish
+                          session-id summary old-head model usage
+                          (or (plist-get usage :context)
+                              (and (plist-get usage :input)
+                                   (+ (plist-get usage :input) (or (plist-get usage :cache-read) 0)))
+                              estimate)
+                          trailing))
+                      (error (harness-compaction--fail session-id promise err))))))
+               (_ nil)))))))
+
 (harness-defmethod compaction/compact (session-id &optional opts)
   "Summarise the transcript of SESSION-ID; return a promise of the compaction node.
 OPTS `:model' picks a summariser other than the session's model.  The
 summary replaces the transcript for the provider (`session/messages'
-restarts at the compaction node); unanswered user messages at the end
-of the transcript are carried over after it.  A second call while one
-is running returns the running promise."
+restarts at the compaction node, as a user message); unanswered user
+messages at the end of the transcript are carried over after it.  A
+summariser that keeps the conversation itself (a hosted loop) works on
+a fork of the session's provider state; see
+`harness-compaction--forked-state'.  A second call while one is
+running returns the running promise."
   (or (gethash session-id harness-compaction--running)
       (let* ((session (harness-call 'session/get session-id))
              (model (or (plist-get opts :model) (plist-get session :model)))
-             (old-head (plist-get session :head))
-             (path (harness-call 'session/nodes session-id))
-             (trailing (harness-compaction--trailing-user-nodes path))
-             (messages (harness-compaction--messages session-id))
-             (estimate (or (let ((c (plist-get (plist-get session :usage) :context)))
-                             (and (numberp c) (> c 0) c))
-                           (harness-compaction--messages-tokens messages)))
-             (promise (harness-make-promise))
-             (text "") (usage nil))
+             (promise (harness-make-promise)))
         (puthash session-id promise harness-compaction--running)
         (harness-finally promise (lambda () (remhash session-id harness-compaction--running)))
         (harness-call 'session/hint session-id "Compacting context…")
-        (harness-log 'info "compaction: summarising %s with %s (%s tokens)" session-id model estimate)
-        (condition-case err
-            (harness-call
-             'provider/complete
-             (list :model model :session session
-                   :system harness-compaction--system-prompt
-                   :messages messages :tools nil :provider-state nil
-                   :max-tokens harness-compaction--max-tokens
-                   :on-event
-                   (lambda (ev)
-                     (pcase (plist-get ev :type)
-                       ('text (setq text (concat text (plist-get ev :delta))))
-                       ('usage (setq usage ev))
-                       ('done
-                        (let* ((reason (plist-get ev :stop-reason))
-                               (summary (string-trim text))
-                               (problem (cond ((memq reason '(error cancelled))
-                                               (or (plist-get ev :error) (format "%s" reason)))
-                                              ((string-empty-p summary)
-                                               "the model returned an empty summary"))))
-                          (if problem
-                              (harness-compaction--fail session-id promise problem)
-                            (condition-case err
-                                (harness-resolve
-                                 promise
-                                 (harness-compaction--finish
-                                  session-id summary old-head model usage
-                                  (or (plist-get usage :context)
-                                      (and (plist-get usage :input)
-                                           (+ (plist-get usage :input) (or (plist-get usage :cache-read) 0)))
-                                      estimate)
-                                  trailing))
-                              (error (harness-compaction--fail session-id promise err))))))
-                       (_ nil)))))
-          (error (harness-compaction--fail session-id promise err)))
+        (harness-then (harness-compaction--forked-state session-id model)
+                      (lambda (state)
+                        (condition-case err
+                            ;; The record from before the hint: its head is
+                            ;; the one compacted.
+                            (harness-compaction--request session-id session model state promise)
+                          (error (harness-compaction--fail session-id promise err))))
+                      (lambda (err) (harness-compaction--fail session-id promise err)))
         promise)))
 
 (defun harness-compaction--fail (session-id promise err)

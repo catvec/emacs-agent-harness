@@ -221,6 +221,42 @@
          (f (and prefix (get-text-property 0 'face prefix))))
     (or (eq f face) (and (listp f) (memq face f)))))
 
+(ert-deftest harness-ui-chat-handoff-notes ()
+  "A note handing the conversation to another provider's model is the harness's.
+It names the two models and opens the transcript it points at; a
+summary made for a handoff says so."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session))
+          (file (expand-file-name "handoff.md" (harness-test-temp-dir)))
+          (visited nil))
+      (harness-call 'session/append sid '(:kind user :content "fix the parser"))
+      (harness-call 'session/append sid
+                    (list :kind 'user :content "Read the transcript before you answer."
+                          :meta (list :from (harness-sender-system "model handoff")
+                                      :handoff (list :mode "transcript" :file file
+                                                     :from "demo:scripted" :to "claude:claude-opus-5-5"))))
+      (harness-call 'session/append sid
+                    (list :kind 'compaction :content "The parser needs fixing."
+                          :meta (list :handoff (list :mode "compact" :from "demo:scripted"
+                                                     :to "claude:claude-opus-5-5"))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (let ((case-fold-search nil)
+                (from (harness-ui-model-label "demo:scripted"))
+                (to (harness-ui-model-label "claude:claude-opus-5-5")))
+            (should (= 1 (how-many "^You$" (point-min) (point-max))))
+            (should (= 1 (how-many "^System · model handoff$" (point-min) (point-max))))
+            (should (= 1 (how-many (concat "^" (regexp-quote (format "%s → %s" from to))) (point-min) (point-max))))
+            (should (= 1 (how-many (regexp-quote (concat "context compacted to hand over to " to))
+                                   (point-min) (point-max))))))
+        (let ((action (with-current-buffer buf
+                        (get-text-property (- (harness-ui-chat-test-find buf "[open the transcript]") 2)
+                                           'harness-chat-action))))
+          (should (functionp action))
+          (cl-letf (((symbol-function 'find-file-other-window) (lambda (f &rest _) (setq visited f))))
+            (funcall action))
+          (should (equal file visited)))))))
+
 (ert-deftest harness-ui-chat-messages-the-user-did-not-write ()
   "A message the harness or another session sent names its sender, not \"You\",
 on a background and bar of its own; the user's own messages are as before."

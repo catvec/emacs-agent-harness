@@ -443,12 +443,15 @@ are reported through the `:on-event' callback as a `done' event with
 
 (harness-defmethod provider/fork (model-id state)
   "Ask MODEL-ID's provider to fork provider STATE.
-Return a promise of the new state, or of nil when unsupported."
+Return a promise of the new state, or of nil when unsupported.  The
+new state names the provider it belongs to (`:provider', see
+`harness-tag-provider-state')."
   (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model model-id))
                (provider (and pid (harness-provider-get pid))))
     (if (and provider (harness-provider-fork-fn provider))
         (condition-case err
-            (harness-as-promise (funcall (harness-provider-fork-fn provider) model-id state))
+            (harness-then (harness-as-promise (funcall (harness-provider-fork-fn provider) model-id state))
+                          (lambda (new) (harness-tag-provider-state new model-id)))
           (error (harness-rejected err)))
       (harness-resolved nil))))
 

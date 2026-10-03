@@ -117,6 +117,61 @@ its own web_search, as Claude Code does."
 (defun harness-agent-test-hosted-session ()
   (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "hosted:loop") :id))
 
+;;;; Provider state
+
+(ert-deftest harness-agent-provider-state-is-its-providers ()
+  "A provider's state is recorded as its own and given to it alone.
+A step on another provider drops it: that provider's turns are ones the
+state's conversation never saw, so switching back must not look as if
+it could carry on."
+  (harness-agent-test-with
+    (harness-agent-test-define-hosted
+     (lambda (_prompt) '((:type provider-state :state (:conv "c1"))
+                         (:type text :delta "hi")
+                         (:type done :stop-reason end-turn))))
+    (let ((id (harness-agent-test-hosted-session))
+          (state '(:conv "c1" :provider "hosted")))
+      (harness-await (harness-call 'agent/prompt id "hello"))
+      (should (equal state (plist-get (harness-call 'session/get id) :provider-state)))
+      (harness-await (harness-call 'agent/prompt id "again"))
+      (should (equal state (plist-get (cadr harness-agent-test-requests) :provider-state)))
+      ;; Switched away, the state stays until a step runs elsewhere...
+      (harness-call 'session/update id :model "demo:scripted" :silent t)
+      (should (equal state (plist-get (harness-call 'session/get id) :provider-state)))
+      (let ((requests nil))
+        (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                   ((symbol-function 'harness-method/provider/complete)
+                    (lambda (req) (push req requests) (funcall orig req))))
+          (harness-await (harness-call 'agent/prompt id "on demo")))
+        ;; ...which is not sent it, and drops it.
+        (should-not (plist-get (car requests) :provider-state))
+        (should-not (plist-get (plist-get (car requests) :session) :provider-state)))
+      (should-not (plist-get (harness-call 'session/get id) :provider-state))
+      ;; Back on the hosted provider, its next step starts afresh.
+      (harness-call 'session/update id :model "hosted:loop" :silent t)
+      (harness-await (harness-call 'agent/prompt id "back"))
+      (should-not (plist-get (car (last harness-agent-test-requests)) :provider-state)))))
+
+(ert-deftest harness-agent-step-writes-under-its-own-model ()
+  "What a step reports belongs to the model it went to, though the session switched meanwhile.
+A switch applies from the next step: the reply names the model that
+wrote it, and the provider state is the old provider's."
+  (harness-agent-test-with
+    (let ((id nil))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         (list (lambda () (harness-call 'session/update id :model "demo:scripted" :silent t))
+               '(:type provider-state :state (:conv "c2"))
+               '(:type text :delta "still hosted")
+               '(:type done :stop-reason end-turn))))
+      (setq id (harness-agent-test-hosted-session))
+      (harness-await (harness-call 'agent/prompt id "hello"))
+      (let ((reply (cl-find 'assistant (harness-call 'session/nodes id) :key (lambda (n) (plist-get n :kind)))))
+        (should (equal "still hosted" (plist-get reply :content)))
+        (should (equal "hosted:loop" (plist-get (plist-get reply :meta) :model))))
+      (should (equal '(:conv "c2" :provider "hosted") (plist-get (harness-call 'session/get id) :provider-state)))
+      (should (equal "demo:scripted" (plist-get (harness-call 'session/get id) :model))))))
+
 (ert-deftest harness-agent-text-turn ()
   (harness-agent-test-with
     (let* ((id (harness-agent-test-session))

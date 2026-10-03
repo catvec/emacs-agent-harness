@@ -426,6 +426,38 @@ return value lists the ids that changed, newest first."
     (harness-session--touch s)
     state))
 
+(defun harness-session--last-model (s)
+  "Return the model that answered last in the transcript of S, or nil.
+That is the `:meta' `:model' of the newest assistant or thinking node."
+  (cl-loop for n in (reverse (harness-session--path s))
+           for model = (and (memq (plist-get n :kind) '(assistant thinking))
+                            (plist-get (plist-get n :meta) :model))
+           when (and (stringp model) (not (string-empty-p model))) return model))
+
+(defun harness-session--state-owner (s state)
+  "Return the provider, a symbol, that provider STATE of session S belongs to.
+A state names its provider (see `harness-tag-provider-state').  One
+written before states did belongs to the provider that answered last in
+S's transcript: had another provider answered since, the state's own
+would not have seen those turns.  With no answer to go by, it is the
+provider of S's model.  Nil means no provider can vouch for STATE."
+  (or (harness-provider-state-owner state)
+      (harness-model-provider (or (harness-session--last-model s) (harness-session-model s)))))
+
+(harness-defmethod session/provider-state (id &optional model)
+  "Return the provider state of session ID that MODEL can continue, or nil.
+MODEL defaults to the session's model.  A state belongs to the provider
+it names (`:provider'), and only that provider's models continue it: a
+model of another provider gets nil, as if the session had no state.  A
+state written before states named their provider is attributed as
+`harness-session--state-owner' says."
+  (let* ((s (harness-session--get id))
+         (state (harness-session-provider-state s))
+         (provider (harness-model-provider (or model (harness-session-model s)))))
+    (and state provider
+         (eq provider (harness-session--state-owner s state))
+         state)))
+
 (harness-defmethod session/runtime (id &optional key value)
   "Get or set the runtime (unpersisted) property KEY of session ID.
 With only ID return the whole runtime plist."
@@ -443,10 +475,11 @@ PLIST may set `:kind' (fork, subagent), `:name', `:cwd', `:model' and
 any other `session/create' key.  The ancestor chain is copied so the
 fork starts with the parent's transcript.  Its provider state is the
 one `provider/fork' derives from the parent's, or none when the
-provider cannot fork it.  It is never the parent's own state, which
-would carry on the parent's provider conversation: for Claude Code,
-resume and write into the parent's CLI session.  A BTW is no fork; see
-`session/btw'."
+provider cannot fork it, or when the fork's model cannot continue the
+parent's state (see `session/provider-state').  It is never the
+parent's own state, which would carry on the parent's provider
+conversation: for Claude Code, resume and write into the parent's CLI
+session.  A BTW is no fork; see `session/btw'."
   (let* ((parent (harness-session--get id))
          (path (harness-session--path parent))
          (child-plist (harness-plist-merge
@@ -475,7 +508,7 @@ resume and write into the parent's CLI session.  A BTW is no fork; see
     (harness-then
      (if (harness-method-exists-p 'provider/fork)
          (harness-catch (harness-call 'provider/fork (harness-session-model cs)
-                                      (harness-session-provider-state parent))
+                                      (harness-call 'session/provider-state id (harness-session-model cs)))
                         (lambda (e)
                           (harness-log 'warn "provider fork failed, %s starts without provider state: %s"
                                        (harness-session-id cs) (harness-error-message e))

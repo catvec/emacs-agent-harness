@@ -94,6 +94,40 @@
                  (plist-get (plist-get (harness-call 'session/get id) :usage) :context)))
       (should (zerop (hash-table-count harness-compaction--running))))))
 
+(ert-deftest harness-compaction-hosted-summary-on-a-fork ()
+  "A summariser that keeps the conversation itself works on a fork of the session's.
+A hosted loop is sent only the newest user messages, so without the
+conversation it would summarise nothing; on a fork it has all of it,
+and the session's own conversation is left alone.  A state of another
+provider is never forked."
+  (harness-compaction-test-with
+    (let ((requests nil) (forks nil))
+      (harness-define-provider 'forky
+        :complete (lambda (req)
+                    (push req requests)
+                    (let ((on-event (plist-get req :on-event)))
+                      (run-at-time 0.005 nil (lambda ()
+                                               (funcall on-event '(:type text :delta "SUMMARY"))
+                                               (funcall on-event '(:type done :stop-reason end-turn)))))
+                    (list :cancel #'ignore))
+        :fork (lambda (model state)
+                (push (list model state) forks)
+                (harness-resolved (list :conv (plist-get state :conv) :fork-pending t)))
+        :capabilities '(:hosted-loop t :fork t :compaction hosted))
+      (let ((id (harness-compaction-test-session)))
+        (harness-call 'session/update id :model "forky:m" :silent t)
+        (harness-call 'session/set-provider-state id '(:conv "c9" :provider "forky"))
+        (should (equal "SUMMARY" (plist-get (harness-await (harness-call 'compaction/compact id)) :content)))
+        (should (equal '(("forky:m" (:conv "c9" :provider "forky"))) forks))
+        (should (equal '(:conv "c9" :fork-pending t :provider "forky") (plist-get (car requests) :provider-state)))
+        (should (equal '(:conv "c9" :provider "forky") (plist-get (harness-call 'session/get id) :provider-state)))
+        ;; Another provider's state: no fork, no state.
+        (harness-call 'session/set-provider-state id '(:conv "c9" :provider "other"))
+        (setq forks nil)
+        (harness-await (harness-call 'compaction/compact id))
+        (should-not forks)
+        (should-not (plist-get (car requests) :provider-state))))))
+
 (ert-deftest harness-compaction-compact-error-rejects ()
   (harness-compaction-test-with
     (let* ((id (harness-compaction-test-session))

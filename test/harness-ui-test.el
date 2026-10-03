@@ -890,5 +890,117 @@ once, and a change made with `setopt' reaches it."
     (should (equal "deepseek:deepseek-flash"
                    (plist-get (plist-get (cdr (assoc "_harness/session/set-all" calls)) :settings) :model)))))
 
+;;;; Switches that lose the conversation
+
+(defun harness-ui-test--lossy-check (id name &optional running)
+  "Return a `handoff/check' answer saying that switching session ID loses it.
+NAME is the session's name; RUNNING says a turn runs."
+  (list :id id :name name :lossy t :history t :running running
+        :from "deepseek:deepseek-flash" :from-label "DeepSeek V4.1 Flash"
+        :to "claude:claude-opus-5-5" :to-label "Claude Opus 5.5" :to-provider "Claude Code"
+        :reason "Claude Code keeps its own conversation and is sent only the user messages after the model's last reply."
+        :risks '("Cold prompt cache: written, not read." "Reduced fidelity: explored again."
+                 "Provider state stays behind." "It takes effect at the next step, not mid-step.")
+        :cache-cost "120k tokens of context cost about $0.60 to write to the cache, against $0.02 to read"))
+
+(defmacro harness-ui-test-with-switch (answers key &rest body)
+  "Run BODY switching models with the harness answering from ANSWERS.
+ANSWERS maps a method to its result.  The user picks the first model
+and, asked about a lossy switch, KEY.  BODY sees CALLS, the requests
+made, newest first, and ASKED, the arguments of each question asked."
+  (declare (indent 2))
+  `(let ((calls nil) (asked nil))
+     (cl-letf (((symbol-function 'harness-ui-refresh-models)
+                (lambda (&optional callback)
+                  (funcall callback (list (list :id "claude:claude-opus-5-5" :label "Claude Opus 5.5"
+                                                :provider-label "Claude Code" :context-window 1000000)))))
+               ((symbol-function 'harness-ui-call)
+                (lambda (method params &optional callback _on-error)
+                  (push (cons method params) calls)
+                  (when callback (funcall callback (cdr (assoc method ,answers))))))
+               ((symbol-function 'completing-read) (lambda (_prompt table &rest _) (caar table)))
+               ((symbol-function 'read-multiple-choice)
+                (lambda (prompt choices &optional help show &rest _)
+                  (push (list prompt choices help show) asked)
+                  (assq ,key choices))))
+       ,@body)))
+
+(ert-deftest harness-ui-set-model-asks-before-losing-the-conversation ()
+  "A lossy switch states its risks first and hands over as the user chooses."
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check" (harness-ui-test--lossy-check "s1" "Fix the parser" t))
+            (cons "_harness/handoff/switch" '(:mode "transcript" :file "/tmp/p/.harness/handoff/s1.md")))
+      ?t
+    (harness-set-model "s1")
+    (should (= 1 (length asked)))
+    (pcase-let ((`(,_prompt ,choices ,help ,show) (car asked)))
+      ;; Shown at once: what happens, why, the risks, the choices.
+      (should show)
+      (should (equal '(?c ?t ?s ?q) (mapcar #'car choices)))
+      (should (string-match-p (concat "Switching “Fix the parser” from "
+                                      (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash"))
+                                      " to .* starts a new conversation")
+                              help))
+      (should (string-match-p "sent only the user messages after the model's last reply" help))
+      (dolist (risk '("Cold prompt cache" "Reduced fidelity" "Provider state stays behind" "next step"))
+        (should (string-match-p (regexp-quote risk) help)))
+      (should (string-match-p "this session's 120k tokens of context cost about \\$0\\.60 to write" help))
+      (should (string-match-p "A turn is running now" help))
+      (should (string-match-p "c  compact first" help))
+      (should (string-match-p "t  full transcript" help)))
+    (let ((check (cdr (assoc "_harness/handoff/check" calls)))
+          (switch (cdr (assoc "_harness/handoff/switch" calls))))
+      (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5") check))
+      (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5" :mode "transcript") switch)))
+    (should-not (assoc "session/set_model" calls))))
+
+(ert-deftest harness-ui-set-model-cancel-or-plain ()
+  "Cancelling leaves the model alone; a switch that loses nothing just happens."
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check" (harness-ui-test--lossy-check "s1" "Fix the parser")))
+      ?q
+    (harness-set-model "s1")
+    (should (= 1 (length asked)))
+    (should-not (assoc "_harness/handoff/switch" calls))
+    (should-not (assoc "session/set_model" calls)))
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check" '(:id "s1" :lossy nil :reason "The new model is of the same provider.")))
+      ?q
+    (harness-set-model "s1")
+    (should-not asked)
+    (should (equal '(:sessionId "s1" :modelId "claude:claude-opus-5-5")
+                   (cdr (assoc "session/set_model" calls))))))
+
+(ert-deftest harness-ui-set-model-all-asks-once ()
+  "Switching every session asks once, for all those that would lose their conversation."
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check-all"
+                  (list (harness-ui-test--lossy-check "s1" "Fix the parser" t)
+                        (harness-ui-test--lossy-check "s2" nil)
+                        '(:id "s3" :lossy nil :reason "Same provider.")))
+            (cons "_harness/handoff/switch-all" '("s1" "s2" "s3")))
+      ?c
+    (harness-set-model-all)
+    (should (= 1 (length asked)))
+    (let ((help (nth 2 (car asked))))
+      (should (string-match-p "Switching 3 sessions to .*: 2 of them start a new conversation there" help))
+      (let ((from (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash"))))
+        (should (string-match-p (concat "- “Fix the parser”, from " from ", running a turn: 120k tokens of context cost about \\$0\\.60")
+                                help))
+        (should (string-match-p (concat "- s2, from " from) help)))
+      (should (string-match-p "The choice applies to each session listed; the others just switch" help)))
+    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t))
+                   (cdr (assoc "_harness/handoff/check-all" calls))))
+    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t) :mode "compact")
+                   (cdr (assoc "_harness/handoff/switch-all" calls))))
+    (should-not (assoc "_harness/session/set-all" calls))
+    (should (equal "claude:claude-opus-5-5" (plist-get (cdr (assoc "_harness/config/set" calls)) :value))))
+  ;; Cancelled: nothing changes, not even the default for new sessions.
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check-all" (list (harness-ui-test--lossy-check "s1" "Fix the parser"))))
+      ?q
+    (harness-set-model-all)
+    (should (equal '("_harness/handoff/check-all") (mapcar #'car calls)))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here
