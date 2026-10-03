@@ -1866,25 +1866,38 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
 
 ;;;; The task prompts
 
+(defconst harness-tasks-hand-in-prompt
+  "Finish with the hand_in tool rather than a plain reply: it hands your summary and your evidence to the user and ends the turn, so the task waits for their review.  The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id.  A file, a code block or a note is evidence for what cannot be shown.  Then stop; do not start more work."
+  "What a task's session is told about handing its finished work in.")
+
 (defun harness-tasks--system-prompt (prompt session)
   "Tell a task's SESSION what its turns are for (PROMPT filter).
 Before the task starts they write it up (`harness-tasks-refine-prompt');
-afterwards, in a worktree, they learn how the work reaches the main branch."
+afterwards they learn how to hand the finished work in, and, in a
+worktree, how it reaches the main branch."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
      ((and task (harness-tasks--refinement-p task)
            (not (harness-string-blank-p harness-tasks-refine-prompt)))
       (concat prompt "\n\n" harness-tasks-refine-prompt "\n"))
-     ((not (and task (plist-get task :worktree))) prompt)
+     ((not task) prompt)
      (t
       (concat prompt "\n\n## Task mode\n"
-              (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
-                      (plist-get task :worktree) (plist-get task :branch))
-              "Do the whole task there. When you are done, commit all of your changes on that branch "
-              "(git add -A, then git commit with a message saying what the change does). "
-              (format "Do not merge, rebase onto or push %s yourself: when your turn ends the harness merges "
-                      (or (plist-get task :base) "the main branch"))
-              "your branch through the merge queue, and it will come back to you if the merge needs anything.\n")))))
+              (if (plist-get task :worktree)
+                  (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
+                          (plist-get task :worktree) (plist-get task :branch))
+                "You are working on one task of a board, unattended. ")
+              "Do the whole task there. "
+              (if (plist-get task :worktree)
+                  (concat "When you are done, commit all of your changes on that branch "
+                          "(git add -A, then git commit with a message saying what the change does). "
+                          (format "Do not merge, rebase onto or push %s yourself: when your turn ends the harness merges "
+                                  (or (plist-get task :base) "the main branch"))
+                          "your branch through the merge queue, and it will come back to you if the merge needs anything. ")
+                "")
+              harness-tasks-hand-in-prompt)))))
+
+
 
 (defun harness-tasks--naming-prompt (prompt session)
   "Ask for a ticket title when naming a task's SESSION (PROMPT filter)."

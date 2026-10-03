@@ -1791,10 +1791,14 @@ Each is a new session, never an earlier one."
       (should-not (plist-get again :provider-state))
       (should (equal (concat "Base.\n\n" harness-tasks-btw-prompt "\n")
                      (harness-run-filter 'agent/system-prompt "Base." btw)))
-      ;; Task sessions, other sessions and a BTW over a session are left alone.
+      ;; Other sessions and a BTW over a session are left alone.  A task
+      ;; session, worktree or not, is told to hand its finished work in.
       (should (equal (plist-get plain :id) (plist-get side :parent-id)))
-      (dolist (s (list task-session plain side))
+      (dolist (s (list plain side))
         (should (equal "Base." (harness-run-filter 'agent/system-prompt "Base." s))))
+      (let ((task-prompt (harness-run-filter 'agent/system-prompt "Base." task-session)))
+        (should (string-match-p "## Task mode" task-prompt))
+        (should (string-match-p "hand_in" task-prompt)))
       (let ((harness-tasks-btw-prompt nil))
         (should (equal "Base." (harness-run-filter 'agent/system-prompt "Base." btw))))
       ;; A conversation about the board is no task to onboard.
