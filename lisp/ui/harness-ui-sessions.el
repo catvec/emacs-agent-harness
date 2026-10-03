@@ -319,12 +319,15 @@ listed, and from a task's worktree the list shows the whole project."
               (if (equal what "question") "blocked on a question" "blocked on a permission request")))))
 
 (defun harness-ui-sessions-requests ()
-  "Pop out what the session at point waits on, if it does."
+  "Pop out what the session at point waits on.
+A session that waits on nothing leaves the key to what it did before
+this command existed: SPC scrolls the list."
   (interactive)
-  (unless (harness-ui-pending-items (harness-ui-sessions--id))
-    (user-error "This session is not waiting on anything"))
-  (unless (fboundp 'harness-ui-popout-at-point) (user-error "The popout module is not loaded"))
-  (harness-ui-popout-at-point))
+  (if (and (harness-ui-pending-items (harness-ui-sessions--id))
+           (fboundp 'harness-ui-popout-at-point))
+      (harness-ui-popout-at-point)
+    ;; Without a window (a test run) there is nothing to scroll.
+    (ignore-errors (call-interactively #'scroll-up-command))))
 
 (defun harness-ui-sessions--init ()
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)

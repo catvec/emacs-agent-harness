@@ -1884,7 +1884,8 @@ The UI keeps each provider's QUOTA from `provider/quota` and
 
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; SPC on a session pops out what it
-waits on, its status cell's tooltip says so (`harness-ui-sessions-requests`);
+waits on (a session that waits on nothing leaves SPC scrolling), its
+status cell's tooltip says so (`harness-ui-sessions-requests`);
 scoped to the current project, its
 git worktrees and so its tasks' sessions included, each session's root
 resolved to its main checkout once with `harness-files-main-checkout`),

@@ -296,15 +296,15 @@ The list says so in the status cell's tooltip, and answers from there."
       (should (equal (list 'permission sid "p1" "allow-once") (car harness-ui-pending-test-answers)))
       (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the popout to close"))))
 
-(ert-deftest harness-ui-pending-sessions-list-says-nothing-to-show ()
-  "A session that waits on nothing says so instead of popping out."
+(ert-deftest harness-ui-pending-sessions-list-leaves-spc-alone ()
+  "A session that waits on nothing pops nothing out: SPC still scrolls."
   (harness-ui-pending-test-with
     (let ((sid (harness-ui-pending-test-session "Busy")))
       (harness-sessions)
       (with-current-buffer harness-ui-sessions-buffer-name
         (goto-char (point-min))
         (should (equal sid (tabulated-list-get-id)))
-        (should-error (harness-ui-sessions-requests) :type 'user-error)
+        (harness-ui-sessions-requests)
         (should-not (harness-ui-popout-buffer (list 'pending sid)))))))
 
 (ert-deftest harness-ui-pending-task-board-pops-it-out ()
