@@ -73,7 +73,7 @@ Optional dependencies:
 | `DEEPSEEK_API_KEY` | DeepSeek models, with off-peak pricing tracked |
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
 | `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
-| `ffmpeg`, `mpv` | Audio recording and playback, video thumbnails |
+| `ffmpeg`, `mpv` | Audio recording and playback, video posters (playing videos, and the thumbnails and durations shown; `ffprobe` comes with `ffmpeg`) |
 | `notify-send` (libnotify), or Emacs with D-Bus support | Desktop notifications on GNU/Linux; macOS uses `osascript` |
 | A [Gotify](https://gotify.net) server | Notifications on your phone |
 
@@ -235,6 +235,17 @@ Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list, or the waiting session itself when only one needs you.
+
+An image the agent reads (`read_file`) shows in the transcript, under
+the call's header and outside its fold, so a collapsed call still shows
+the picture; so does an SVG, read as text and shown as an image, and a
+video attached to a message. A video shows its thumbnail as a poster
+under a play button, with its duration and size under it. Click the
+poster or the Play button, or press `RET` on it, to play the video with
+`mpv`, `ffplay` (`harness-ui-media-video-player`, nil picks the first
+installed) or, failing those, the desktop's own player; the poster then
+shows Stop. A video `read_file` reads is shown to you and told to the
+model, which cannot see it and inspects it with `ffmpeg` instead.
 
 A digit answers a question with that option; any other answer goes in
 the compose box. When the options are easier to compare by sight, such

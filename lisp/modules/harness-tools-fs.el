@@ -19,6 +19,11 @@
 ;; requested range to `harness-tools-max-output-chars' at a line
 ;; boundary and says where to continue, other tools rely on the
 ;; generic guard in `tools/execute'.
+;;
+;; read_file also returns media as `:attachments', which the chat
+;; shows the user: an image, a video (as a poster the user can play;
+;; the model is told what it is and how to look inside), and the
+;; picture of an SVG read from its top, whose text the model reads.
 
 ;;; Code:
 
@@ -85,6 +90,10 @@
     (and mime (string-prefix-p "image/" mime)
          (not (string= mime "image/svg+xml")))))
 
+(defun harness-tools-fs--svg-p (path)
+  "Non-nil when PATH is an SVG image by extension (a text file)."
+  (equal (harness-tools-fs--mime path) "image/svg+xml"))
+
 (defun harness-tools-fs--binary-p (path)
   "Non-nil when the first bytes of PATH contain a NUL character."
   (with-temp-buffer
@@ -94,6 +103,20 @@
       (error nil))
     (goto-char (point-min))
     (and (search-forward "\0" nil t) t)))
+
+(defun harness-tools-fs--video-p (path)
+  "Non-nil when PATH is a video: a video type by extension, binary inside.
+The content counts too, so a text file whose extension some MIME table
+gives to video (TypeScript's .ts, an MPEG transport stream elsewhere)
+stays a text file."
+  (let ((mime (harness-tools-fs--mime path)))
+    (and mime (string-prefix-p "video/" mime)
+         (harness-tools-fs--binary-p path))))
+
+(defun harness-tools-fs--attachment (path mime)
+  "Return the attachment of PATH, of type MIME, that a UI shows."
+  (list :path path :mime mime :size (harness-file-size path)
+        :name (file-name-nondirectory path)))
 
 (defun harness-tools-fs--insert-text (path)
   "Insert the contents of text file PATH into the current buffer."
@@ -161,31 +184,43 @@ TEXT is numbered and already trimmed to the output budget."
      ((harness-tools-fs--image-p path)
       (let ((size (harness-file-size path)) (mime (harness-tools-fs--mime path)))
         (harness-tool-ok (format "Image %s (%s, %s) attached." shown mime (harness-format-bytes size))
-                         :attachments (list (list :path path :mime mime :size size
-                                                  :name (file-name-nondirectory path))))))
+                         :attachments (list (harness-tools-fs--attachment path mime)))))
+     ;; The chat shows a video to the user, who can play it; the model
+     ;; gets what it is and how to look inside.
+     ((harness-tools-fs--video-p path)
+      (let ((mime (harness-tools-fs--mime path)))
+        (harness-tool-ok (format "Video %s (%s, %s) is shown to the user in the chat, who can play it there; read_file cannot show you its frames. To inspect it, use bash: ffprobe for its streams and duration, ffmpeg to extract frames."
+                                 shown mime (harness-format-bytes (harness-file-size path)))
+                         :attachments (list (harness-tools-fs--attachment path mime)))))
      ((harness-tools-fs--binary-p path)
       (harness-tool-error (format "%s is a binary file (%s); read_file only shows text. Use file_info for metadata or bash with `file`, `xxd` or `strings` to inspect it"
                                   shown (harness-format-bytes (harness-file-size path)))))
      ((and limit (< limit 1))
       (harness-tool-error "The limit must be at least 1"))
      (t
-      (pcase-let ((`(,text ,first ,shown-last ,wanted-last ,total)
-                   (harness-tools-fs--read-range path offset limit)))
+      (pcase-let* ((`(,text ,first ,shown-last ,wanted-last ,total)
+                    (harness-tools-fs--read-range path offset limit))
+                   ;; An SVG is text to the model and a picture to the
+                   ;; user: a read from its top shows the user the image.
+                   (shows (and (= first 1) (harness-tools-fs--svg-p path)
+                               (list :attachments (list (harness-tools-fs--attachment path "image/svg+xml"))))))
         (cond
          ((and (zerop total) (= first 1))
           (harness-tool-ok (format "%s is empty (0 lines)" shown)))
          ((> first total)
           (harness-tool-error (format "offset %d is past the end of %s (%d lines)" first shown total)))
          ((< shown-last wanted-last)
-          (harness-tool-ok
-           (format "%s\n\n[%s: showing lines %d-%d of %d; the requested range was too large for one read. Continue with offset %d, or use a smaller limit.]"
-                   text shown first shown-last total (1+ shown-last))
-           :truncated (list :path path :lines (cons first shown-last) :total total)))
+          (apply #'harness-tool-ok
+                 (format "%s\n\n[%s: showing lines %d-%d of %d; the requested range was too large for one read. Continue with offset %d, or use a smaller limit.]"
+                         text shown first shown-last total (1+ shown-last))
+                 :truncated (list :path path :lines (cons first shown-last) :total total)
+                 shows))
          (t
-          (harness-tool-ok
-           (if (and (= first 1) (= shown-last total))
-               text
-             (format "%s\n\n[%s: lines %d-%d of %d]" text shown first shown-last total))))))))))
+          (apply #'harness-tool-ok
+                 (if (and (= first 1) (= shown-last total))
+                     text
+                   (format "%s\n\n[%s: lines %d-%d of %d]" text shown first shown-last total))
+                 shows))))))))
 
 (defun harness-tools-fs--read-subject (input)
   "What a read_file call with INPUT reads: the path and the lines asked for."
@@ -200,7 +235,7 @@ TEXT is numbered and already trimmed to the output budget."
 
 (harness-define-tool "read_file"
   :label "Read file"
-  :description "Read a text file. Output lines are prefixed with their line number. Use offset (1-based line) and limit (number of lines) to read a range of a large file; a read that would be too big is trimmed and tells you where to continue. Images are attached as images; binary files are refused."
+  :description "Read a text file. Output lines are prefixed with their line number. Use offset (1-based line) and limit (number of lines) to read a range of a large file; a read that would be too big is trimmed and tells you where to continue. Images are attached as images; a video is shown to the user, who can play it; other binary files are refused."
   :schema '(:type "object"
             :properties (:path (:type "string" :description "File path, absolute or relative to the working directory")
                          :offset (:type "integer" :description "First line to read (1-based). Default 1")

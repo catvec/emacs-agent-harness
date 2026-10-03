@@ -85,6 +85,39 @@
     (harness-tools-fs-test--write "empty.txt" "")
     (should (string-search "empty" (plist-get (harness-tools-fs-test--call "read_file" :path "empty.txt") :content)))))
 
+(ert-deftest harness-tools-fs-read-file-videos-and-svg ()
+  "A video comes back as an attachment the chat shows, with a text for
+the model; text behind a video's extension is read as text; an SVG read
+from its top is its text plus its picture."
+  (harness-tools-fs-test--setup)
+  (harness-tools-fs-test-in-dir
+    (let ((coding-system-for-write 'binary))
+      (harness-tools-fs-test--write "clip.mp4" (concat "\0\0\0\030ftypmp42" (make-string 64 0))))
+    (let* ((r (harness-tools-fs-test--call "read_file" :path "clip.mp4"))
+           (att (car (plist-get r :attachments))))
+      (should-not (plist-get r :is-error))
+      (should (string-match-p "\\`Video clip.mp4 (video/mp4, 76 B) is shown to the user" (plist-get r :content)))
+      (should (string-search "ffprobe" (plist-get r :content)))
+      (should (equal (list :path (expand-file-name "clip.mp4" root) :mime "video/mp4" :size 76 :name "clip.mp4")
+                     att)))
+    ;; Text behind a video's extension stays text.
+    (harness-tools-fs-test--write "notes.webm" "not a video\n")
+    (let ((r (harness-tools-fs-test--call "read_file" :path "notes.webm")))
+      (should (equal "     1\tnot a video" (plist-get r :content)))
+      (should-not (plist-get r :attachments)))
+    ;; An SVG: the text for the model, the picture for the user, from its top only.
+    (harness-tools-fs-test--write "icon.svg" "<svg xmlns=\"http://www.w3.org/2000/svg\">\n<rect/>\n</svg>\n")
+    (let ((r (harness-tools-fs-test--call "read_file" :path "icon.svg")))
+      (should (string-prefix-p "     1\t<svg" (plist-get r :content)))
+      (should (equal '("image/svg+xml") (mapcar (lambda (a) (plist-get a :mime)) (plist-get r :attachments)))))
+    (let ((r (harness-tools-fs-test--call "read_file" :path "icon.svg" :limit 1)))
+      (should (string-search "lines 1-1 of 3" (plist-get r :content)))
+      (should (plist-get r :attachments)))
+    (should-not (plist-get (harness-tools-fs-test--call "read_file" :path "icon.svg" :offset 2) :attachments))
+    ;; Plain text carries none.
+    (harness-tools-fs-test--write "a.txt" "one\n")
+    (should-not (plist-member (harness-tools-fs-test--call "read_file" :path "a.txt") :attachments))))
+
 (ert-deftest harness-tools-fs-read-file-context-bomb ()
   (harness-tools-fs-test--setup)
   (harness-tools-fs-test-in-dir

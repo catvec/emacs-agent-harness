@@ -8,11 +8,14 @@
 ;;   (:path :size :mime :name) into a propertized string: an audio
 ;;   player line (play/pause button, an SVG progress bar animated by a
 ;;   timer against the file's duration, a volume indicator), a video
-;;   thumbnail (made asynchronously with ffmpegthumbnailer or ffmpeg,
-;;   a placeholder until it is ready) with an [open] button, or a file
-;;   button for anything else.  Rendered strings carry a
-;;   `harness-ui-media-id' property so every copy in every buffer is
-;;   redrawn in place when playback advances or a thumbnail lands.
+;;   poster (its thumbnail, made asynchronously with ffmpegthumbnailer
+;;   or ffmpeg, under a play button, with the duration in a corner and
+;;   a Play caption under it) or a file button for anything else.
+;;   Rendered strings carry a `harness-ui-media-id' property so every
+;;   copy in every buffer is redrawn in place when playback advances or
+;;   a thumbnail lands, keeping the properties the host buffer gave the
+;;   copy (a chat block's margins and read-only).  The chat module (see
+;;   harness-ui-chat.el) is what shows these renderings.
 ;; - `harness-record-audio' records from the microphone with pw-record,
 ;;   arecord or ffmpeg into harness-state-directory/recordings/, shows a
 ;;   live level meter in the mode line (the level is the RMS of the
@@ -99,14 +102,22 @@ The chat module sets it; when nil the path is only reported.")
   (or (plist-get attachment :name)
       (file-name-nondirectory (or (plist-get attachment :path) "attachment"))))
 
+(defun harness-ui-media--clickable (string action help)
+  "Return STRING running ACTION (a thunk) on mouse-1, mouse-2 and RET.
+HELP is its tooltip; the mouse pointer turns into a hand over it."
+  (let ((map (make-sparse-keymap))
+        (run (lambda () (interactive) (funcall action))))
+    (define-key map [mouse-1] run)
+    (define-key map [mouse-2] run)
+    (define-key map (kbd "RET") run)
+    (propertize string 'help-echo help 'pointer 'hand
+                'keymap map 'follow-link t 'harness-ui-media-button t)))
+
 (defun harness-ui-media--button (label action help &optional face)
   "Return LABEL as a text button with HELP running ACTION (a thunk).
 FACE overrides the button face."
-  (let ((map (make-sparse-keymap)))
-    (define-key map [mouse-1] (lambda () (interactive) (funcall action)))
-    (define-key map (kbd "RET") (lambda () (interactive) (funcall action)))
-    (propertize label 'face (or face 'button) 'mouse-face 'highlight 'help-echo help
-                'keymap map 'follow-link t 'harness-ui-media-button t)))
+  (harness-ui-media--clickable (propertize label 'face (or face 'button) 'mouse-face 'highlight)
+                               action help))
 
 (defun harness-ui-media--graphic-p ()
   "Non-nil when images can be shown on the selected frame."
@@ -117,23 +128,57 @@ FACE overrides the button face."
   (let ((s (max 0 (floor (or seconds 0)))))
     (format "%d:%02d" (/ s 60) (% s 60))))
 
+(defconst harness-ui-media--own-properties
+  '(face display keymap help-echo pointer follow-link mouse-face
+         harness-ui-media-button harness-ui-media-id harness-ui-media-attachment harness-ui-media-mime)
+  "Text properties a rendering of an attachment sets itself.")
+
+(defvar harness-ui-media-rerender-functions nil
+  "Functions called with a media ID (a path) whose rendering changed.
+A host view that draws media inside a structure of its own -- the chat,
+which folds its tool block around it -- redraws that structure instead
+of letting this module edit the buffer in place: an in-place edit makes
+a fold overlay collapse onto the media and hide it.  A function returns
+non-nil when it handled the ID, and then no copy is edited here.")
+
+(defun harness-ui-media--host-rerender (id)
+  "Let a host view redraw its own rendering of media ID.
+Return non-nil when one did."
+  (let (handled)
+    (dolist (fn harness-ui-media-rerender-functions)
+      (when (ignore-errors (funcall fn id)) (setq handled t)))
+    handled))
+
+(defun harness-ui-media--host-properties (props)
+  "Return the properties of PROPS that the buffer holding a rendering added.
+Margins, read-only and the like: the rendering does not set them."
+  (cl-loop for (k v) on props by #'cddr
+           unless (memq k harness-ui-media--own-properties) nconc (list k v)))
+
 (defun harness-ui-media--rerender (id)
-  "Redraw every rendered copy of media ID in every buffer, in place."
-  (dolist (buf (buffer-list))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (save-excursion
-          (goto-char (point-min))
-          (let ((inhibit-read-only t) (inhibit-modification-hooks t) m)
-            (while (setq m (text-property-search-forward 'harness-ui-media-id id t))
-              (let* ((beg (prop-match-beginning m))
-                     (end (prop-match-end m))
-                     (attachment (get-text-property beg 'harness-ui-media-attachment))
-                     (new (and attachment (harness-ui-media-render-attachment attachment))))
-                (when new
-                  (goto-char beg)
-                  (delete-region beg end)
-                  (insert new))))))))))
+  "Redraw every rendered copy of media ID in every buffer, in place.
+Each copy keeps the properties its buffer gave it (a chat's margin,
+read-only and node), which a fresh rendering does not have.  A view
+that renders media in a structure of its own redraws it instead (see
+`harness-ui-media-rerender-functions')."
+  (unless (harness-ui-media--host-rerender id)
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (save-excursion
+            (goto-char (point-min))
+            (let ((inhibit-read-only t) (inhibit-modification-hooks t) (buffer-undo-list t) m)
+              (while (setq m (text-property-search-forward 'harness-ui-media-id id t))
+                (let* ((beg (prop-match-beginning m))
+                       (end (prop-match-end m))
+                       (attachment (get-text-property beg 'harness-ui-media-attachment))
+                       (new (and attachment (harness-ui-media-render-attachment attachment)))
+                       (host (harness-ui-media--host-properties (text-properties-at beg))))
+                  (when new
+                    (when host (add-text-properties 0 (length new) host new))
+                    (goto-char beg)
+                    (delete-region beg end)
+                    (insert new)))))))))))
 
 ;;;; Duration
 
@@ -145,7 +190,9 @@ FACE overrides the button face."
       (with-temp-buffer
         (set-buffer-multibyte nil)
         (insert-file-contents-literally path nil 0 64)
-        (when (and (>= (buffer-size) 44) (string= (buffer-substring 1 5) "RIFF"))
+        ;; WAVE too: an AVI is a RIFF file as well.
+        (when (and (>= (buffer-size) 44) (string= (buffer-substring 1 5) "RIFF")
+                   (string= (buffer-substring 9 13) "WAVE"))
           (let* ((bytes (lambda (pos n)
                           (let ((v 0))
                             (dotimes (i n) (setq v (+ v (ash (char-after (+ pos i)) (* 8 i)))))
@@ -157,10 +204,12 @@ FACE overrides the button face."
 
 (defun harness-ui-media--duration (path)
   "Return the known duration of PATH in seconds, or nil.
-Unknown durations are probed once with ffprobe and cached."
+Unknown durations are probed once with ffprobe and cached.  A remote
+file is never read: that would block."
   (let ((cached (gethash path harness-ui-media--durations)))
     (cond ((numberp cached) cached)
           ((eq cached 'unknown) nil)
+          ((file-remote-p path) nil)
           (t
            (let ((wav (harness-ui-media--wav-duration path)))
              (if wav (puthash path wav harness-ui-media--durations)
@@ -173,9 +222,10 @@ Unknown durations are probed once with ffprobe and cached."
   (if (not (executable-find "ffprobe"))
       (funcall callback nil)
     (harness-then
+     ;; Run here, not on the host of a remote `default-directory'.
      (harness-run-command (list "ffprobe" "-v" "error" "-show_entries" "format=duration"
                                 "-of" "default=nw=1:nk=1" path)
-                          :name "harness-ffprobe" :timeout 20)
+                          :name "harness-ffprobe" :timeout 20 :cwd temporary-file-directory)
      (lambda (r)
        (let ((n (string-to-number (string-trim (or (plist-get r :stdout) "")))))
          (when (> n 0) (puthash path n harness-ui-media--durations))
@@ -310,8 +360,33 @@ Unknown durations are probed once with ffprobe and cached."
      " ")))
 
 ;;;; Video
+;;
+;; A video shows as a poster: its thumbnail, made in the background by
+;; ffmpegthumbnailer or ffmpeg (a dark card until it lands, or for good
+;; when none can be made), under a round play button, with its duration
+;; in a corner.  A caption follows: a Play button, the name, duration
+;; and size.  The poster and the button both play the video, on a
+;; click or RET.  While a player the harness started itself (mpv,
+;; ffplay) plays it, the poster shows a stop button and both stop it;
+;; an opener (xdg-open) hands the video to the desktop's player.  A
+;; terminal shows the caption alone.
+
+(defcustom harness-ui-media-video-player nil
+  "Program playing videos, or nil for the first one installed of mpv,
+the desktop's opener (xdg-open, or open on macOS) and ffplay.
+While a player the harness started plays a video, its poster shows a
+stop button, which stops it; an opener hands the video to the
+desktop's player and is done."
+  :type '(choice (const :tag "Auto-detect" nil) string)
+  :group 'harness-ui-media)
 
 (defvar harness-ui-media--thumbnailing (make-hash-table :test 'equal) "Paths whose thumbnail is being made.")
+
+(defvar harness-ui-media--thumbnail-failed (make-hash-table :test 'equal)
+  "Paths no thumbnail could be made of; they are not tried again.")
+
+(defvar harness-ui-media--video-players (make-hash-table :test 'equal)
+  "Video path -> the player process the harness started for it.")
 
 (defun harness-ui-media-thumbnail-path (path)
   "Return the thumbnail file for the video PATH under the state directory."
@@ -319,23 +394,51 @@ Unknown durations are probed once with ffprobe and cached."
                        (or (ignore-errors (float-time (file-attribute-modification-time (file-attributes path)))) 0))))
     (expand-file-name (concat (sha1 stamp) ".png") (harness-ui-media--dir "thumbs"))))
 
-(defun harness-ui-media--thumbnail-command (path out)
-  "Return the command producing thumbnail OUT of video PATH, or nil."
-  (cond ((executable-find "ffmpegthumbnailer")
-         (list "ffmpegthumbnailer" "-i" path "-o" out "-s" (number-to-string harness-ui-media-thumbnail-width) "-q" "8"))
-        ((executable-find "ffmpeg")
-         (list "ffmpeg" "-loglevel" "error" "-y" "-ss" "1" "-i" path "-frames:v" "1"
-               "-vf" (format "scale=%d:-1" harness-ui-media-thumbnail-width) out))))
+(defun harness-ui-media--thumbnail-commands (path out)
+  "Return the commands to try in turn for the thumbnail OUT of video PATH.
+ffmpeg takes the frame a second in, then the first one, for a clip
+shorter than that.  Nil when neither ffmpegthumbnailer nor ffmpeg is
+installed."
+  (let ((width (number-to-string harness-ui-media-thumbnail-width)))
+    (cond ((executable-find "ffmpegthumbnailer")
+           (list (list "ffmpegthumbnailer" "-i" path "-o" out "-s" width "-q" "8")))
+          ((executable-find "ffmpeg")
+           (let ((output (list "-frames:v" "1" "-vf" (format "scale=%s:-1" width) "-update" "1" out)))
+             (list (append (list "ffmpeg" "-loglevel" "error" "-y" "-ss" "1" "-i" path) output)
+                   (append (list "ffmpeg" "-loglevel" "error" "-y" "-i" path) output)))))))
+
+(defun harness-ui-media--thumbnail-ready-p (file)
+  "Non-nil when the thumbnail FILE exists and is not empty."
+  (let ((size (harness-file-size file)))
+    (and size (> size 0))))
 
 (defun harness-ui-media--make-thumbnail (path)
-  "Generate the thumbnail of PATH in the background, then redraw its renderings."
+  "Make the thumbnail of the video PATH in the background, then redraw it.
+Return non-nil while it is being made.  A video none could be made of
+is remembered, and not tried again."
   (let ((out (harness-ui-media-thumbnail-path path)))
-    (unless (or (file-exists-p out) (gethash path harness-ui-media--thumbnailing))
-      (when-let* ((cmd (harness-ui-media--thumbnail-command path out)))
+    (unless (or (harness-ui-media--thumbnail-ready-p out)
+                (gethash path harness-ui-media--thumbnailing)
+                (gethash path harness-ui-media--thumbnail-failed))
+      (when-let* ((commands (harness-ui-media--thumbnail-commands path out)))
         (puthash path t harness-ui-media--thumbnailing)
-        (harness-then (harness-run-command cmd :name "harness-thumbnail" :timeout 60)
-                      (lambda (_) (remhash path harness-ui-media--thumbnailing) (harness-ui-media--rerender path))
-                      (lambda (_) (remhash path harness-ui-media--thumbnailing) (harness-ui-media--rerender path)))))))
+        (harness-ui-media--try-thumbnail path out commands)))
+    (gethash path harness-ui-media--thumbnailing)))
+
+(defun harness-ui-media--try-thumbnail (path out commands)
+  "Run the first of COMMANDS to make the thumbnail OUT of video PATH.
+When it made none, the next one runs; after the last, PATH has failed."
+  (let ((after (lambda (_)
+                 (if (and (cdr commands) (not (harness-ui-media--thumbnail-ready-p out)))
+                     (harness-ui-media--try-thumbnail path out (cdr commands))
+                   (unless (harness-ui-media--thumbnail-ready-p out)
+                     (puthash path t harness-ui-media--thumbnail-failed))
+                   (remhash path harness-ui-media--thumbnailing)
+                   (harness-ui-media--rerender path)))))
+    ;; Run here, not on the host of a remote `default-directory'.
+    (harness-then (harness-run-command (car commands) :name "harness-thumbnail" :timeout 60
+                                       :cwd temporary-file-directory)
+                  after after)))
 
 (defun harness-ui-media-open (path)
   "Open PATH with the desktop's default application or mpv."
@@ -345,31 +448,181 @@ Unknown durations are probed once with ffprobe and cached."
     (make-process :name "harness-open" :command (list program (expand-file-name path)) :noquery t :buffer nil)
     (message "Opening %s…" (file-name-nondirectory path))))
 
+;;;;; Playing
+
+(defun harness-ui-media--video-player-program ()
+  "Return the program to play videos with, or nil when none is installed."
+  (if (stringp harness-ui-media-video-player)
+      (and (executable-find harness-ui-media-video-player) harness-ui-media-video-player)
+    (cl-find-if #'executable-find
+                (list "mpv" (if (eq system-type 'darwin) "open" "xdg-open") "ffplay"))))
+
+(defun harness-ui-media--opener-p (program)
+  "Non-nil when PROGRAM hands a file to the desktop rather than playing it."
+  (member (file-name-nondirectory program) '("xdg-open" "open")))
+
+(defun harness-ui-media--video-command (program file)
+  "Return the command playing the video FILE with PROGRAM."
+  (pcase (file-name-nondirectory program)
+    ("mpv" (list program "--no-terminal" "--force-window=immediate"
+                 (format "--volume=%d" harness-ui-media-volume) file))
+    ("ffplay" (list program "-autoexit" "-loglevel" "quiet"
+                    "-volume" (number-to-string harness-ui-media-volume)
+                    "-window_title" (file-name-nondirectory file) file))
+    (_ (list program file))))
+
+(defun harness-ui-media--video-process (path)
+  "Return the live player process the harness started for video PATH, or nil."
+  (let ((proc (gethash path harness-ui-media--video-players)))
+    (and (process-live-p proc) proc)))
+
+(defun harness-ui-media-play-video (path)
+  "Play the video PATH with `harness-ui-media-video-player'."
+  (interactive "fVideo file: ")
+  (let ((program (harness-ui-media--video-player-program))
+        (file (expand-file-name path)))
+    (unless program (user-error "No video player found: install mpv, or ffmpeg for ffplay"))
+    (harness-ui-media-stop-video path)
+    (if (harness-ui-media--opener-p program)
+        (progn
+          (make-process :name "harness-open" :command (list program file)
+                        :noquery t :buffer nil :connection-type 'pipe)
+          (message "Opening %s in the desktop's video player…" (file-name-nondirectory file)))
+      (puthash path
+               (make-process :name "harness-video" :command (harness-ui-media--video-command program file)
+                             :noquery t :buffer nil :connection-type 'pipe
+                             :sentinel (lambda (proc _event)
+                                         (unless (process-live-p proc)
+                                           (when (eq proc (gethash path harness-ui-media--video-players))
+                                             (remhash path harness-ui-media--video-players))
+                                           (harness-ui-media--rerender path))))
+               harness-ui-media--video-players)
+      (message "Playing %s in %s…" (file-name-nondirectory file) (file-name-nondirectory program))
+      (harness-ui-media--rerender path))))
+
+(defun harness-ui-media-stop-video (path)
+  "Stop the player the harness started for the video PATH."
+  (interactive "fVideo file: ")
+  (when-let* ((proc (gethash path harness-ui-media--video-players)))
+    (remhash path harness-ui-media--video-players)
+    (when (process-live-p proc) (delete-process proc))
+    (harness-ui-media--rerender path)))
+
+(defun harness-ui-media-toggle-video (path)
+  "Play the video PATH, or stop it while a player the harness started plays it."
+  (if (harness-ui-media--video-process path)
+      (harness-ui-media-stop-video path)
+    (harness-ui-media-play-video path)))
+
+;;;;; Poster
+
+(defun harness-ui-media--png-size (file)
+  "Return (WIDTH . HEIGHT) of the PNG FILE, read from its header, or nil."
+  (condition-case nil
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert-file-contents-literally file nil 0 24)
+        (when (and (= (buffer-size) 24)
+                   (string= (buffer-substring 1 9) "\211PNG\r\n\032\n")
+                   (string= (buffer-substring 13 17) "IHDR"))
+          (cl-flet ((u32 (pos)
+                      (let ((v 0))
+                        (dotimes (i 4) (setq v (+ (* v 256) (char-after (+ pos i)))))
+                        v)))
+            (let ((w (u32 17)) (h (u32 21)))
+              (and (> w 0) (> h 0) (cons w h))))))
+    (error nil)))
+
+(defun harness-ui-media--poster-size (thumb)
+  "Return (WIDTH . HEIGHT), in pixels, of the poster showing THUMB.
+THUMB, a PNG file or nil, keeps its shape and fits in
+`harness-ui-media-thumbnail-width' by three quarters of that; without
+one the poster is 16:9."
+  (let* ((max-w harness-ui-media-thumbnail-width)
+         (max-h (round (* 0.75 max-w)))
+         (size (and thumb (harness-ui-media--png-size thumb))))
+    (if (null size)
+        (cons max-w (round (* 9 max-w) 16))
+      (let ((scale (min (/ (float max-w) (car size)) (/ (float max-h) (cdr size)))))
+        (cons (max 1 (round (* scale (car size)))) (max 1 (round (* scale (cdr size)))))))))
+
+(defun harness-ui-media--poster-image (thumb width height playing duration)
+  "Return the poster of a video, an SVG image WIDTH by HEIGHT pixels.
+THUMB, a PNG file, fills it; without one it is a dark card.  Over it a
+round play button, a stop button while PLAYING, and DURATION, in
+seconds or nil, in the bottom right corner."
+  (let* ((svg (svg-create width height))
+         (clip (svg-clip-path svg :id "harness-poster"))
+         (r (max 14 (round (* 0.14 (min width height)))))
+         (cx (/ width 2.0))
+         (cy (/ height 2.0)))
+    (svg-rectangle clip 0 0 width height :rx 8)
+    (svg-rectangle svg 0 0 width height :rx 8 :fill "#16181d")
+    (when thumb
+      (svg-embed svg thumb "image/png" nil :x 0 :y 0 :width width :height height
+                 :preserveAspectRatio "xMidYMid slice" :clip-path "url(#harness-poster)"))
+    (svg-circle svg cx cy r :fill "#000000" :fill-opacity 0.55
+                :stroke "#ffffff" :stroke-opacity 0.9 :stroke-width 2)
+    (if playing
+        (let ((side (* 0.7 r)))
+          (svg-rectangle svg (- cx (/ side 2)) (- cy (/ side 2)) side side :rx 2 :fill "#ffffff"))
+      ;; The triangle's centroid sits on the centre: it looks centred.
+      (svg-polygon svg (list (cons (- cx (* 0.32 r)) (- cy (* 0.5 r)))
+                             (cons (- cx (* 0.32 r)) (+ cy (* 0.5 r)))
+                             (cons (+ cx (* 0.56 r)) cy))
+                   :fill "#ffffff"))
+    (when duration
+      (let* ((label (harness-ui-media--format-time duration))
+             (w (+ 12 (* 7 (length label))))
+             (h 18)
+             (x (- width w 8))
+             (y (- height h 8)))
+        (svg-rectangle svg x y w h :rx 4 :fill "#000000" :fill-opacity 0.65)
+        (svg-text svg label :x (+ x (/ w 2.0)) :y (+ y 13) :text-anchor "middle"
+                  :font-family "sans-serif" :font-size 12 :fill "#ffffff")))
+    (svg-image svg :ascent 'center :margin '(0 . 3))))
+
 (defun harness-ui-media--render-video (attachment)
-  "Return the thumbnail line for video ATTACHMENT."
+  "Return the poster and the caption of the video ATTACHMENT.
+The poster, its thumbnail under a play button, and the Play button of
+the caption both play the video on mouse-1, mouse-2 or RET; while a
+player the harness started plays it, they stop it.  A terminal shows no
+poster: the caption starts with a video icon.  A remote file is never
+read, which would block: it has no thumbnail and no duration."
   (let* ((path (plist-get attachment :path))
-         (thumb (and path (harness-ui-media-thumbnail-path path)))
-         (ready (and thumb (file-exists-p thumb)))
-         (open (harness-ui-media--button "[open]" (lambda () (harness-ui-media-open path)) "Open in the video player")))
-    (unless ready (when path (harness-ui-media--make-thumbnail path)))
+         (name (harness-ui-media--name attachment))
+         (local (and path (not (file-remote-p path))))
+         (proc (and path (harness-ui-media--video-process path)))
+         (thumb (and local (harness-ui-media-thumbnail-path path)))
+         (ready (and thumb (harness-ui-media--thumbnail-ready-p thumb) thumb))
+         (making (and local (not ready) (harness-ui-media--make-thumbnail path)))
+         (duration (and local (harness-ui-media--duration path)))
+         (size (plist-get attachment :size))
+         (action (and path (lambda () (harness-ui-media-toggle-video path))))
+         (help (format "%s %s: mouse-1 or RET" (if proc "Stop" "Play") name))
+         (poster (and action (harness-ui-media--graphic-p)
+                      (let ((dims (harness-ui-media--poster-size ready)))
+                        (harness-ui-media--poster-image ready (car dims) (cdr dims) proc duration)))))
     (concat
-     (cond
-      ((and ready (display-graphic-p) (image-type-available-p 'png))
-       (propertize " " 'display (create-image thumb 'png nil :max-width harness-ui-media-thumbnail-width
-                                              :max-height (/ (* 9 harness-ui-media-thumbnail-width) 16))
-                   'help-echo "Video thumbnail (mouse-1: open)"
-                   'keymap (let ((m (make-sparse-keymap)))
-                             (define-key m [mouse-1] (lambda () (interactive) (harness-ui-media-open path)))
-                             m)))
-      (ready (propertize (format " %s " (harness-ui-icon 'harness-icon-video)) 'face 'harness-dim-face))
-      ((harness-ui-media--thumbnail-command (or path "") "")
-       (propertize (format " %s thumbnail… " (harness-ui-icon 'harness-icon-video)) 'face 'harness-dim-face))
-      (t (propertize (format " %s " (harness-ui-icon 'harness-icon-video)) 'face 'harness-dim-face)))
-     " " (propertize (harness-ui-media--name attachment) 'face 'bold)
-     (if-let* ((size (plist-get attachment :size)))
-         (propertize (format " %s" (harness-format-bytes size)) 'face 'harness-dim-face)
+     (if poster
+         (concat (harness-ui-media--clickable (propertize (format "[video %s]" name) 'display poster)
+                                              action help)
+                 "\n")
+       (propertize (format " %s " (harness-ui-icon 'harness-icon-video)) 'face 'harness-dim-face))
+     (if action
+         (concat (harness-ui-media--button (format " %s %s " (harness-ui-icon (if proc 'harness-icon-stop 'harness-icon-play))
+                                                   (if proc "Stop" "Play"))
+                                           action help)
+                 " ")
        "")
-     "  " open " ")))
+     (propertize name 'face 'bold)
+     (propertize (concat (if duration (concat " · " (harness-ui-media--format-time duration)) "")
+                         (if size (concat " · " (harness-format-bytes size)) "")
+                         (cond (proc (format " · playing in %s" (file-name-nondirectory (car (process-command proc)))))
+                               (making " · making a thumbnail…")
+                               (t "")))
+                 'face 'harness-dim-face)
+     " ")))
 
 ;;;; Other files
 
