@@ -297,8 +297,10 @@ controls appear at the front of its header line:
 ### Task board
 
 `C-c h a` opens the task board of the current project. Each task runs in
-its own session and, in a git project, in its own worktree and branch,
-so several tasks can work in parallel.
+its own session and, in a git project, normally in its own worktree and
+branch, so several tasks can work in parallel; a task that has to touch
+your checkout itself can be submitted to the **main tree** instead (the
+`own worktree` / `main tree` switch below).
 
 - Write a task in the compose box at the bottom of the board and press
   `C-c C-c` to submit it. `C-c C-t` switches the box between **Submit**,
@@ -314,6 +316,13 @@ so several tasks can work in parallel.
   unless your configuration says otherwise, so a request that needs
   you, such as access to another directory, waits for you in *Requires
   your input* instead of being denied.
+- Beside those settings a worktree switch picks where the next task
+  works: **own worktree**, on its own branch, merged back when it is
+  done, or **main tree**, the project's checkout itself, with no branch
+  and nothing to merge. Use the main tree for work that has to touch
+  the checkout directly, such as cleaning up uncommitted changes; those
+  tasks show `main tree` on their card. An agent can ask for the same
+  thing with `task_submit`'s `main_tree`.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback.

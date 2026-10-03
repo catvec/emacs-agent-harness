@@ -401,7 +401,8 @@ card's title, so the prompt shows here."
          (usage (plist-get session :usage))
          (parts
           (delq nil
-                (list (and todos (not (memq column '(done review))) (format "%d/%d" (nth 0 todos) (nth 1 todos)))
+                (list (and (harness-json-true-p (plist-get task :main-tree)) "main tree")
+                      (and todos (not (memq column '(done review))) (format "%d/%d" (nth 0 todos) (nth 1 todos)))
                       (pcase column
                         ('pending (cond ((harness-ui-tasks--refining-p task) nil)
                                         ((plist-get task :refined)
@@ -948,34 +949,46 @@ them all; otherwise they are the new task's."
   (let* ((bulk harness-ui-tasks--bulk)
          (values (if bulk (harness-ui-tasks--bulk-values) harness-ui-tasks--new))
          (s harness-ui-tasks--settings)
-         (scope (if bulk "current tasks" "new tasks")))
+         (scope (if bulk "current tasks" "new tasks"))
+         (main-tree (and (not bulk) (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree)))))
     (if (null s)
         ""
       (concat
        " "
        (mapconcat
         #'identity
-        (list (harness-ui-tasks--setting-button
-               (harness-ui-model-label (plist-get values :model))
-               #'harness-set-model (format "Model of %s" scope))
-              (harness-ui-tasks--setting-button
-               (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
-               #'harness-set-permission-mode (format "Permission mode of %s" scope))
-              (harness-ui-tasks--setting-button
-               (harness-ui-thinking-label (plist-get values :thinking))
-               #'harness-set-thinking (format "Thinking level of %s" scope))
-              (harness-ui-tasks--setting-button
-               (harness-ui-non-interactive-label (plist-get values :non-interactive))
-               #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope)))
+        (delq nil
+              (list (harness-ui-tasks--setting-button
+                     (harness-ui-model-label (plist-get values :model))
+                     #'harness-set-model (format "Model of %s" scope))
+                    (harness-ui-tasks--setting-button
+                     (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
+                     #'harness-set-permission-mode (format "Permission mode of %s" scope))
+                    (harness-ui-tasks--setting-button
+                     (harness-ui-thinking-label (plist-get values :thinking))
+                     #'harness-set-thinking (format "Thinking level of %s" scope))
+                    (harness-ui-tasks--setting-button
+                     (harness-ui-non-interactive-label (plist-get values :non-interactive))
+                     #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope))
+                    ;; A task that starts cannot change where it works, so
+                    ;; this one is only about the next task, never bulk.
+                    (and (harness-json-true-p (plist-get s :worktrees))
+                         (harness-ui-tasks--setting-button
+                          (if main-tree "main tree" "own worktree")
+                          #'harness-ui-tasks-toggle-main-tree
+                          "Where the next task works: its own worktree and branch, or the project's main tree, where nothing merges"))))
         (propertize " · " 'face 'harness-dim-face))
        (if bulk
            (propertize "   new tasks keep their own settings" 'face 'harness-dim-face)
          (let ((notes (if harness-ui-tasks--refine
-                          (list "an agent writes it up; you start it")
+                          (delq nil (list "an agent writes it up; you start it"
+                                          (and main-tree "no worktree: works in the main tree")))
                         (delq nil (list (and (harness-json-true-p (plist-get s :worktrees))
-                                             (if (harness-ui-tasks--review-p)
-                                                 "own worktree, merged once you verify it"
-                                               "own worktree, merged when done"))
+                                             (if main-tree
+                                                 "no worktree: works in the main tree"
+                                               (if (harness-ui-tasks--review-p)
+                                                   "own worktree, merged once you verify it"
+                                                 "own worktree, merged when done")))
                                         (and (plist-get s :max-running)
                                              (format "%s at a time" (plist-get s :max-running))))))))
            (if notes
@@ -1101,6 +1114,27 @@ restarts, until you start it (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-
 when it is positive and submit otherwise."
   (interactive "P")
   (harness-ui-tasks--set-refine (if arg (> (prefix-numeric-value arg) 0) (not harness-ui-tasks--refine))))
+
+(defun harness-ui-tasks--set-main-tree (main-tree)
+  "Make new tasks work in the main tree when MAIN-TREE, else in a worktree.
+A task that needs the main tree works in the project's checkout itself:
+no worktree, no branch, and nothing merges -- for work that has to
+touch the checkout, such as cleaning up uncommitted changes."
+  (harness-ui-tasks--set-new :main-tree (if main-tree t :false))
+  (message (if main-tree
+               "Main tree: the next task works in the project's checkout, with nothing to merge"
+             "Worktree: the next task gets its own branch and merges back when done")))
+
+(defun harness-ui-tasks-toggle-main-tree (&optional arg)
+  "Switch the next task between its own worktree and the main tree.
+In the main tree (see `harness-ui-tasks--set-main-tree') the task works
+in the project's own checkout, so it can touch it directly; a backlog
+task (Refine) keeps the choice for when it starts.  With a prefix ARG,
+the main tree when it is positive and a worktree otherwise."
+  (interactive "P")
+  (harness-ui-tasks--set-main-tree
+   (if arg (> (prefix-numeric-value arg) 0)
+     (not (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree))))))
 
 (defun harness-ui-tasks--render-tail (&optional text)
   "Draw the error line, the compose label, the attachments and the compose box.
@@ -1673,7 +1707,8 @@ and attachments go along, as in a chat."
   (let ((new harness-ui-tasks--new))
     (append (cl-loop for k in '(:model :thinking :permission-mode)
                      when (plist-get new k) append (list k (plist-get new k)))
-            (and new (list :non-interactive (if (harness-json-true-p (plist-get new :non-interactive)) t :false))))))
+            (and new (list :non-interactive (if (harness-json-true-p (plist-get new :non-interactive)) t :false)))
+            (and (harness-json-true-p (plist-get new :main-tree)) (list :main-tree t)))))
 
 (defun harness-ui-tasks--send (target text expanded atts &optional refine)
   "Send EXPANDED (typed as TEXT) with attachments ATTS for compose TARGET.
