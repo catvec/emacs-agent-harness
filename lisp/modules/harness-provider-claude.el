@@ -250,6 +250,14 @@ Each is a plist (:id TOOL-USE-ID :name HARNESS-NAME :input INPUT :asked
 BOOL), `:asked' once the CLI asked whether it may run.  Kept beside the
 session records, as `harness-provider-claude--blocks' is.")
 
+(defvar harness-provider-claude--turn-failure (make-hash-table :test 'equal)
+  "Harness session id -> what the CLI said about the current turn's failure.
+Each is a plist (:kind SYMBOL :resets FLOAT :text TEXT): the kind of
+failure the CLI reported (`quota', `billing', `rate-limit' or `auth'),
+when a used-up quota comes back, and what it said.  Kept beside the
+session records, as `harness-provider-claude--blocks' is, so reloading
+this file leaves the running CLI processes alone.")
+
 (defun harness-provider-claude--drop-stale-entries ()
   "Stop the CLI processes of records older than the current record layout.
 A reload keeps live records; one made before slots were added has no
@@ -296,6 +304,7 @@ resumes the CLI session in a new one."
       (cancel-timer timer))
     (harness-provider-claude--end-block entry)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--builtin-calls)
+    (remhash (harness-provider-claude-session-id entry) harness-provider-claude--turn-failure)
     (let ((fn (harness-provider-claude-session-on-event entry)))
       (setf (harness-provider-claude-session-active entry) nil
             (harness-provider-claude-session-cancel-timer entry) nil
@@ -817,7 +826,23 @@ block has ended by then, so a report never follows the call it is about."
 (defun harness-provider-claude--handle-assistant (entry message)
   "Remember tool_use ids from the authoritative assistant MESSAGE on ENTRY.
 A call of the CLI's own tools that stands in for a harness tool is
-reported to the turn here, where its input is complete."
+reported to the turn here, where its input is complete.  An assistant
+message that reports an `error' (a usage limit, a billing problem, a
+refused login) is remembered for the turn's `done' event."
+  (when-let* ((error (plist-get message :error)))
+    (let* ((old (gethash (harness-provider-claude-session-id entry)
+                         harness-provider-claude--turn-failure))
+           (kind (harness-provider-claude--failure-kind error))
+           (text (harness-provider-claude--failure-text message)))
+      ;; A rejected usage window said `quota' already; a plain rate
+      ;; limit must not talk it down, and a billing error must win.
+      (harness-provider-claude--note-failure
+       entry
+       :kind (cond ((memq kind '(billing auth)) kind)
+                   ((and (eq kind 'rate-limit)
+                         (eq (plist-get old :kind) 'quota)) 'quota)
+                   (t kind))
+       :text text)))
   (dolist (block (plist-get message :content))
     (when (equal (plist-get block :type) "tool_use")
       (harness-provider-claude--remember-tool-use
@@ -896,6 +921,45 @@ own tools that the CLI's rules refuse."
   (cond ((numberp value) (float value))
         ((and (stringp value) (not (string-empty-p value)))
          (condition-case nil (float-time (parse-iso8601-time-string value)) (error nil)))))
+
+(defun harness-provider-claude--failure-kind (name)
+  "Return the failure kind of the CLI's assistant error NAME, or nil.
+`billing_error', `account_on_hold' and `credits_required' mean money is
+out; `authentication_failed' a refused login; `rate_limit' a short
+term limit, which a rejected usage window turns into a used-up quota."
+  (pcase (and name (downcase (format "%s" name)))
+    ((or "billing_error" "account_on_hold" "credits_required" "out_of_credits") 'billing)
+    ("authentication_failed" 'auth)
+    ((or "rate_limit" "rate_limit_error") 'rate-limit)
+    (_ nil)))
+
+(defun harness-provider-claude--event-reset (info)
+  "Return when the quota window INFO rejected comes back, or nil."
+  (or (harness-provider-claude--time (plist-get info :resetsAt))
+      (let (best)
+        (cl-loop for (_key win) on (plist-get info :unifiedWindows) by #'cddr
+                 for used = (plist-get win :utilization)
+                 for resets = (harness-provider-claude--time (plist-get win :resetsAt))
+                 when (and resets (numberp used) (>= used 0.999))
+                 do (setq best (if best (min best resets) resets)))
+        best)))
+
+(defun harness-provider-claude--note-failure (entry &rest fields)
+  "Note FIELDS (:kind, :resets, :text) of the current turn's failure on ENTRY.
+Later notes win; the note is what the turn's `done' event reports."
+  (let* ((id (harness-provider-claude-session-id entry))
+         (old (gethash id harness-provider-claude--turn-failure)))
+    (puthash id (harness-plist-merge old fields) harness-provider-claude--turn-failure)))
+
+(defun harness-provider-claude--failure-text (message)
+  "Return the text blocks of an assistant MESSAGE, joined, or nil."
+  (let ((text (string-join
+               (delq nil (mapcar (lambda (block)
+                                   (and (equal (plist-get block :type) "text")
+                                        (plist-get block :text)))
+                                 (plist-get message :content)))
+               "\n")))
+    (unless (string-empty-p (string-trim text)) text)))
 
 (defun harness-provider-claude--plan-id (label)
   "Return the plan id of subscription LABEL (\"Claude Max\" gives \"max\"), or nil."
@@ -1129,13 +1193,23 @@ at API prices, once a window is used up."
     (harness-provider-claude--end-probe entry)))
 
 (defun harness-provider-claude--handle-rate-limit (entry info)
-  "Fold the rate_limit_event INFO into the account status and ENTRY's turn."
+  "Fold the rate_limit_event INFO into the account status and ENTRY's turn.
+A rejected window is a used-up quota, and tells the turn when it comes
+back; the CLI's error code says when it is money that ran out."
   (let ((status (harness-provider-claude--publish
                  (list :windows (harness-provider-claude--merge-windows
                                  (plist-get harness-provider-claude--status :windows)
                                  (harness-provider-claude--windows info))
                        :limit-status (plist-get info :status)
                        :using-extra (harness-json-true-p (plist-get info :isUsingOverage))))))
+    (when (equal (plist-get info :status) "rejected")
+      (harness-provider-claude--note-failure
+       entry
+       :kind (let ((code (downcase (format "%s" (or (plist-get info :errorCode) "")))))
+               (if (member code '("credits_required" "out_of_credits" "billing_error"))
+                   'billing
+                 'quota))
+       :resets (harness-provider-claude--event-reset info)))
     (when-let* ((windows (plist-get status :windows)))
       (harness-provider-claude--emit entry (list :type 'quota :windows windows)))))
 
@@ -1343,11 +1417,25 @@ its usage report has arrived."
      (cond ((harness-provider-claude-session-cancelled entry)
             '(:type done :stop-reason cancelled))
            (is-error
-            (list :type 'done :stop-reason 'error
-                  :error (let ((text (plist-get msg :result)))
-                           (if (and (stringp text) (not (string-empty-p text)))
-                               text
-                             (format "Claude Code: %s" subtype)))))
+            (let* ((failure (gethash (harness-provider-claude-session-id entry)
+                                     harness-provider-claude--turn-failure))
+                   (api-status (plist-get msg :api_error_status))
+                   (kind (or (and (equal api-status 402) 'billing)
+                             (and (member api-status '(401 403)) 'auth)
+                             (and (equal api-status 429)
+                                  (if (memq (plist-get failure :kind) '(quota billing))
+                                      (plist-get failure :kind)
+                                    'rate-limit))
+                             (plist-get failure :kind))))
+              (append (list :type 'done :stop-reason 'error
+                            :error (let ((text (plist-get msg :result)))
+                                     (if (and (stringp text) (not (string-empty-p text)))
+                                         text
+                                       (or (plist-get failure :text)
+                                           (format "Claude Code: %s" subtype)))))
+                      (when kind (list :error-kind kind))
+                      (when-let* ((resets (plist-get failure :resets)))
+                        (list :resets resets)))))
            ((equal (plist-get msg :stop_reason) "max_tokens")
             '(:type done :stop-reason max-tokens))
            (t '(:type done :stop-reason end-turn))))))

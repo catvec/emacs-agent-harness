@@ -238,6 +238,13 @@ Each is a plist (:id TOOL-CALL-ID :name HARNESS-NAME :input INPUT :asked
 BOOL), `:asked' once Copilot asked whether it may run.  Kept beside the
 records, whose layout a reload must keep.")
 
+(defvar harness-provider-copilot--turn-failure (make-hash-table :test 'eq :weakness 'key)
+  "Turn record -> what the CLI said about the turn's failure.
+Each is a plist (:kind SYMBOL :resets FLOAT), from a `session.error'
+that says the plan's quota or the account's money ran out.  Kept beside
+the records, whose layout a reload must keep; the keys are weak, as a
+turn is only of interest while it runs.")
+
 (defun harness-provider-copilot--drop-stale-value (value depth)
   "Stop what VALUE, found in a slot of a stale record, holds.
 A process stops, a buffer is killed, a timer is cancelled and a request
@@ -459,6 +466,30 @@ The reason the process went away is shown as it is."
   (if (and (eq (car-safe err) 'harness-provider-copilot-gone) (stringp (cadr err)))
       (cadr err)
     (harness-error-message err)))
+
+(defun harness-provider-copilot--failure-kind (data)
+  "Return the kind of failure DATA, a `session.error', names, or nil.
+`quota' when the CLI names a used-up plan allowance (`errorType'
+\"quota\"), `billing' when it names money (an HTTP 402, a credit
+problem, an account on hold), `auth' for a refused login."
+  (let ((type (downcase (format "%s" (or (plist-get data :errorType) ""))))
+        (message (downcase (format "%s" (or (plist-get data :message) ""))))
+        (status (plist-get data :statusCode)))
+    (cond ((member status '(402 "402")) 'billing)
+          ((string-match-p "quota\\|allowance" type) 'quota)
+          ((string-match-p "billing\\|payment\\|credit" type) 'billing)
+          ((member status '(401 403 "401" "403")) 'auth)
+          ((string-match-p "auth\\|login\\|unauthorized" type) 'auth)
+          ((string-match-p "quota\\|allowance\\|usage limit\\|premium request" message) 'quota)
+          ((string-match-p "insufficient\\|no \\(?:ai \\)?credits\\|out of credits\\|payment required" message)
+           'billing))))
+
+(defun harness-provider-copilot--failure-reset (data)
+  "Return when the quota DATA says ran out comes back, as a float time, or nil."
+  (or (harness-provider-copilot--time (plist-get data :resetsAt))
+      (harness-provider-copilot--time (plist-get data :resetDate))
+      (let ((ms (or (plist-get data :resetDateEpochMs) (plist-get data :resetsAtEpochMs))))
+        (and (numberp ms) (/ ms 1000.0)))))
 
 (defun harness-provider-copilot--answer (entry id result &optional error)
   "Answer the CLI's request ID on ENTRY with RESULT.
@@ -842,7 +873,11 @@ AGENT is the sub-agent the event comes from, nil for the main agent."
                     (format "%s error" (or (plist-get data :errorType) "unknown")))))
        (if agent
            (harness-provider-copilot--emit turn (list :type 'hint :text (concat "Copilot sub-agent: " text)))
-         (setf (harness-provider-copilot-turn-error turn) text))))
+         (setf (harness-provider-copilot-turn-error turn) text)
+         (when-let* ((kind (harness-provider-copilot--failure-kind data)))
+           (puthash turn (list :kind kind
+                               :resets (harness-provider-copilot--failure-reset data))
+                    harness-provider-copilot--turn-failure)))))
     ("session.compaction_start"
      (harness-provider-copilot--emit turn '(:type hint :text "Copilot is compacting the context…")))
     ("session.compaction_complete"
@@ -1641,14 +1676,22 @@ A side request's throwaway session goes."
       (when fn (funcall fn event)))))
 
 (defun harness-provider-copilot--end-turn (entry turn aborted)
-  "End TURN on ENTRY now that its session is idle; ABORTED says the CLI stopped it."
+  "End TURN on ENTRY now that its session is idle; ABORTED says the CLI stopped it.
+What a `session.error' said about the plan running out of quota or money
+rides along with the turn's error, so the fallback can act on it."
   (let ((error (harness-provider-copilot-turn-error turn))
+        (failure (gethash turn harness-provider-copilot--turn-failure))
         (finish (plist-get (harness-provider-copilot-turn-usage turn) :finish)))
+    (remhash turn harness-provider-copilot--turn-failure)
     (harness-provider-copilot--finish
      entry turn
      (cond ((or (harness-provider-copilot-turn-cancelled turn) aborted)
             '(:type done :stop-reason cancelled))
-           (error (list :type 'done :stop-reason 'error :error (concat "Copilot: " error)))
+           (error (append (list :type 'done :stop-reason 'error :error (concat "Copilot: " error))
+                          (when-let* ((kind (plist-get failure :kind)))
+                            (list :error-kind kind))
+                          (when-let* ((resets (plist-get failure :resets)))
+                            (list :resets resets))))
            ((equal finish "length") '(:type done :stop-reason max-tokens))
            (t '(:type done :stop-reason end-turn))))))
 

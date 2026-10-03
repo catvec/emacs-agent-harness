@@ -345,13 +345,40 @@ class Fake:
                 "cache_read_input_tokens": 2000, "output_tokens": 7}
 
     def result(self, subtype="success", is_error=False, text="hello",
-               stop_reason="end_turn"):
+               stop_reason="end_turn", api_error_status=None):
         self.total += TURN_COST
-        emit({"type": "result", "subtype": subtype, "is_error": is_error,
-              "duration_ms": 5, "num_turns": 1, "result": text,
-              "session_id": self.session_id, "total_cost_usd": round(self.total, 6),
-              "usage": self.usage(), "stop_reason": stop_reason,
-              "permission_denials": self.denials})
+        obj = {"type": "result", "subtype": subtype, "is_error": is_error,
+               "duration_ms": 5, "num_turns": 1, "result": text,
+               "session_id": self.session_id, "total_cost_usd": round(self.total, 6),
+               "usage": self.usage(), "stop_reason": stop_reason,
+               "permission_denials": self.denials}
+        if api_error_status is not None:
+            obj["api_error_status"] = api_error_status
+        emit(obj)
+
+    def turn_failure(self, error, text, api_status=None):
+        """End the turn the way the CLI does when a call failed.
+
+        ERROR is the assistant message's `error' field (`rate_limit',
+        `billing_error', `account_on_hold', `authentication_failed' or
+        None); a `rate_limit' one comes after a rejected usage window,
+        which carries when the window comes back."""
+        if error == "rate_limit":
+            emit({"type": "rate_limit_event",
+                  "rate_limit_info": {
+                      "status": "rejected", "resetsAt": 1800000000,
+                      "rateLimitType": "five_hour",
+                      "unifiedWindows": {
+                          "five_hour": {"utilization": 1.0, "resetsAt": 1800000000}}},
+                  "session_id": self.session_id})
+        message = {"id": "msg_err", "role": "assistant", "model": self.model,
+                   "content": [{"type": "text", "text": text}],
+                   "stop_reason": "stop_sequence", "usage": self.usage()}
+        if error is not None:
+            message["error"] = error
+        emit({"type": "assistant", "session_id": self.session_id, "message": message})
+        self.result(subtype="error_during_execution", is_error=True, text=text,
+                    stop_reason="stop_sequence", api_error_status=api_status)
 
     def permit(self, tool, tool_input, tool_use_id):
         """Decide a call of TOOL as the CLI does.
@@ -480,6 +507,24 @@ class Fake:
             sys.stderr.write("fake-claude: dying on request\n")
             sys.stderr.flush()
             sys.exit(3)
+        if "out of quota" in text:
+            self.turn_failure("rate_limit", "You've hit your limit · resets 3pm")
+            return
+        if "out of credits" in text:
+            self.turn_failure("billing_error", "Your credit balance is too low to access the API")
+            return
+        if "account on hold" in text:
+            self.turn_failure("account_on_hold", "Your account is on hold")
+            return
+        if "logged out" in text:
+            self.turn_failure("authentication_failed", "Invalid API key · Please run /login")
+            return
+        if "api 402" in text:
+            self.turn_failure(None, "Insufficient Balance", api_status=402)
+            return
+        if "api 429" in text:
+            self.turn_failure(None, "Rate limit exceeded", api_status=429)
+            return
         if "hang" in text:
             self.stream({"type": "content_block_start", "index": 0,
                          "content_block": {"type": "text", "text": ""}})

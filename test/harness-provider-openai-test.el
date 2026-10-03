@@ -514,6 +514,32 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (string-match-p "Invalid API key" (plist-get (cadr events) :error)))
       (should (string-match-p "401" (plist-get (cadr events) :error))))))
 
+(ert-deftest harness-provider-openai-http-errors-say-what-kind ()
+  "HTTP failures carry what kind they are, so the fallback can act on them."
+  (dolist (case '((402 "Insufficient Balance" billing)
+                  (429 "Rate limit exceeded" rate-limit)
+                  (401 "Invalid API key" auth)))
+    (pcase-let ((`(,status ,message ,kind) case))
+      (harness-openai-test-with-fake
+          `(("chat/completions" . (:status ,status
+                                    :body ,(format "{\"error\":{\"message\":%S}}" message))))
+        (let* ((events (car (harness-openai-test--complete
+                             harness-openai-test-endpoint
+                             '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "hi"))))))))
+               (done (car (last events))))
+          (should (eq 'error (plist-get done :stop-reason)))
+          (should (eq kind (plist-get done :error-kind)))))))
+  ;; A 429 whose body says the account's quota is used up is out of
+  ;; money, the way DeepSeek answers a spent prepaid balance.
+  (harness-openai-test-with-fake
+      '(("chat/completions" . (:status 429
+                               :body "{\"error\":{\"message\":\"Insufficient Balance\",\"type\":\"insufficient_quota\"}}")))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-deepseek-endpoint
+                        '(:model "testdeepseek:deepseek-flash"
+                          :messages ((:role user :content ((:type "text" :text "hi")))))))))
+      (should (eq 'billing (plist-get (car (last events)) :error-kind))))))
+
 (ert-deftest harness-provider-openai-missing-key-and-transport-error ()
   (with-environment-variables (("HARNESS_TEST_MISSING_KEY" nil))
     (harness-openai-test-with-fake nil
