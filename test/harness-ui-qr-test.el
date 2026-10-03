@@ -119,11 +119,13 @@
   (should-error (harness-qr-encode (make-string 3000 ?a) 'M)))
 
 (ert-deftest harness-qr-speed ()
-  "Encoding a pairing link is cheap on the main thread."
+  "Encoding a pairing link is cheap on the main thread.
+The cost is the processor time Emacs spends, not the time on the clock,
+which a busy machine stretches however cheap the work is."
   (let ((url "http://192.168.100.200:4276/pair?code=abcdefghij2345678901&with=more&characters=to-make-it-longer-than-usual")
-        (start (float-time)))
+        (start (float-time (get-internal-run-time))))
     (dotimes (_ 20) (harness-qr-encode url))
-    (should (< (- (float-time) start) 1.0))))
+    (should (< (- (float-time (get-internal-run-time)) start) 1.0))))
 
 ;;;; Drawing
 

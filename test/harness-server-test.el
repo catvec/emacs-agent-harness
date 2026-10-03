@@ -124,6 +124,26 @@ forwarded as every `harness-' option the user sets."
                          30 "restart")
       (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30))))))
 
+(ert-deftest harness-server-a-stopped-process-ending-late-changes-nothing ()
+  "A harness process stopped and started again at once: the old one,
+whose end is heard once the new one runs, neither takes the new one's
+place nor starts yet another."
+  (harness-server-test-with-process
+    (harness-test-await (harness-ui-request "_harness/session/list") 30)
+    (let ((old harness-ui--server)
+          (ended nil))
+      (add-function :after (process-sentinel old) (lambda (&rest _) (setq ended t)))
+      ;; Nothing in between reads the old process's end.
+      (harness-ui--stop-server)
+      (harness-ui--ensure-server)
+      (let ((new harness-ui--server))
+        (should (process-live-p new))
+        (should-not (eq new old))
+        (harness-test-wait (lambda () ended) 10 "the old process's end to be heard")
+        (should (eq new harness-ui--server))
+        (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30)))
+        (should (eq new harness-ui--server))))))
+
 (ert-deftest harness-server-requires-the-token ()
   (harness-server-test-with-process
     (harness-test-await (harness-ui-request "_harness/session/list") 30)

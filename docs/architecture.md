@@ -60,7 +60,9 @@ default) the layers above are split across two Emacs processes:
   `*harness-log*`.  Its stdin is closed, so a stray prompt fails rather
   than hangs; it exits when its parent dies.  The parent restarts it
   with backoff when it crashes and stops it with SIGTERM (which runs
-  `kill-emacs-hook`, flushing sessions, tasks and streamed text).
+  `kill-emacs-hook`, flushing sessions, tasks and streamed text).  Only
+  the current child's end or address counts: one stopped just before
+  the next started may be heard of late, and changes nothing.
   `M-x harness-restart` restarts it with fresh configuration;
   `harness-reload` reloads both sides.
 - Work about the user's Emacs runs there, asked for by the harness with

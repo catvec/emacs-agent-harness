@@ -427,35 +427,44 @@ later in the init file still reach the process."
     (add-hook 'emacs-startup-hook #'harness-ui--ensure-server))
    (t
     (remove-hook 'emacs-startup-hook #'harness-ui--ensure-server)
-    (setq harness-ui--server-address nil
-          harness-ui--server-stopping nil
-          harness-ui--server
-          (harness-server-spawn
-           :on-address (lambda (address token)
-                         (setq harness-ui--server-address (cons address token))
-                         (when (eq harness-ui-connection-address 'process)
-                           (harness-ui--open address token)
-                           (run-hooks 'harness-ui-redraw-hook)))
-           :on-exit #'harness-ui--on-server-exit)))))
+    (let ((server nil))
+      (setq harness-ui--server-address nil
+            harness-ui--server-stopping nil
+            server
+            (harness-server-spawn
+             :on-address (lambda (address token)
+                           ;; Only the harness process's own: one stopped
+                           ;; while it started may still announce itself.
+                           (when (eq server harness-ui--server)
+                             (setq harness-ui--server-address (cons address token))
+                             (when (eq harness-ui-connection-address 'process)
+                               (harness-ui--open address token)
+                               (run-hooks 'harness-ui-redraw-hook))))
+             :on-exit (lambda (status) (harness-ui--on-server-exit status server)))
+            harness-ui--server server)))))
 
-(defun harness-ui--on-server-exit (status)
-  "React to the harness process ending with STATUS: restart it unless stopped."
-  (setq harness-ui--server nil harness-ui--server-address nil)
-  (unless harness-ui--server-stopping
-    (let* ((now (float-time))
-           (recent (cl-remove-if (lambda (time) (< time (- now 60))) harness-ui--server-restarts)))
-      (setq harness-ui--server-restarts (cons now recent))
-      (if (>= (length recent) 5)
-          (progn
-            (harness-log 'error "harness process keeps exiting (status %s); not restarting" status)
-            (message "Harness process exited (status %s) 5 times in a minute; see M-x harness-show-log, then M-x harness-restart"
-                     status))
-        (harness-log 'warn "harness process exited (status %s); restarting" status)
-        (message "Harness process exited (status %s); restarting" status)
-        (run-at-time (expt 2 (length recent)) nil
-                     (lambda ()
-                       (when (eq harness-ui-connection-address 'process)
-                         (harness-ui--ensure-server))))))))
+(defun harness-ui--on-server-exit (status &optional process)
+  "React to the harness PROCESS ending with STATUS: restart it unless stopped.
+A PROCESS that is no longer the harness process changes nothing: one
+stopped, whose end is heard once the next one started, would otherwise
+take that one's place away and start yet another."
+  (when (or (null process) (eq process harness-ui--server))
+    (setq harness-ui--server nil harness-ui--server-address nil)
+    (unless harness-ui--server-stopping
+      (let* ((now (float-time))
+             (recent (cl-remove-if (lambda (time) (< time (- now 60))) harness-ui--server-restarts)))
+        (setq harness-ui--server-restarts (cons now recent))
+        (if (>= (length recent) 5)
+            (progn
+              (harness-log 'error "harness process keeps exiting (status %s); not restarting" status)
+              (message "Harness process exited (status %s) 5 times in a minute; see M-x harness-show-log, then M-x harness-restart"
+                       status))
+          (harness-log 'warn "harness process exited (status %s); restarting" status)
+          (message "Harness process exited (status %s); restarting" status)
+          (run-at-time (expt 2 (length recent)) nil
+                       (lambda ()
+                         (when (eq harness-ui-connection-address 'process)
+                           (harness-ui--ensure-server)))))))))
 
 (defun harness-ui--stop-server ()
   "Stop the harness process cleanly."

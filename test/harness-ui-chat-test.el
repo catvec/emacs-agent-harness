@@ -1650,7 +1650,8 @@ to a waiting question still goes through the question instead."
       (with-current-buffer buf
         (setq harness-compose--files nil)
         (harness-compose-fetch-completions)
-        (harness-test-wait (lambda () harness-compose--files) 5 "files fetched")
+        ;; Listed by git, a process of its own: slow on a busy machine.
+        (harness-test-wait (lambda () harness-compose--files) 30 "files fetched")
         (should (member "notes.txt" harness-compose--files))
         (harness-ui-chat-test-type buf "see @not")
         (let ((capf (harness-compose-completion-at-point)))
