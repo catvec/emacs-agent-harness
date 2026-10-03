@@ -977,33 +977,35 @@ and any other that is at least 70% used."
       "the subscription"))
 
 (defun harness-ui-spend-help (session)
-  "Return the tooltip that explains what SESSION cost and who pays for it."
+  "Return the tooltip that explains what SESSION cost and who pays for it.
+One line, so showing it in the echo area moves nothing."
   (let* ((usage (plist-get session :usage))
          (quota (harness-ui-session-quota session))
          (billing (harness-ui-session-billing session))
          (cost (float (or (plist-get usage :cost) 0)))
          (covered (harness-usage-covered usage))
          (payer (harness-ui-plan-title quota (plist-get usage :plan))))
-    (string-join
-     (delq nil
-           (append
-            (list
-             (cond ((and (> covered 0) (> cost 0))
-                    (format "%s billed as extra usage; %s more at API prices covered by %s."
-                            (harness-format-cost cost) (harness-format-cost covered) payer))
-                   ((or (> covered 0) (memq billing '(subscription extra-usage)))
-                    (format "Covered by %s, not billed per token.\nThis session at API prices: %s."
-                            payer (harness-format-cost covered)))
-                   ((eq billing 'api)
-                    (format "Session cost: %s, billed per token%s."
-                            (harness-format-cost cost)
-                            (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) "")))
-                   (t (format "Session cost: %s." (harness-format-cost cost)))))
-            (when (memq billing '(subscription extra-usage))
-              (append (mapcar #'harness-ui-describe-window (plist-get quota :windows))
-                      (list (harness-ui-describe-extra (plist-get quota :extra)))))
-            (list "mouse-1: usage and plan quota")))
-     "\n")))
+    (harness-ui-one-line
+     (string-join
+      (delq nil
+            (append
+             (list
+              (cond ((and (> covered 0) (> cost 0))
+                     (format "%s billed as extra usage; %s more at API prices covered by %s."
+                             (harness-format-cost cost) (harness-format-cost covered) payer))
+                    ((or (> covered 0) (memq billing '(subscription extra-usage)))
+                     (format "Covered by %s, not billed per token. This session at API prices: %s."
+                             payer (harness-format-cost covered)))
+                    ((eq billing 'api)
+                     (format "Session cost: %s, billed per token%s."
+                             (harness-format-cost cost)
+                             (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) "")))
+                    (t (format "Session cost: %s." (harness-format-cost cost)))))
+             (when (memq billing '(subscription extra-usage))
+               (append (mapcar #'harness-ui-describe-window (plist-get quota :windows))
+                       (list (harness-ui-describe-extra (plist-get quota :extra)))))
+             (list "mouse-1: usage and plan quota")))
+      "\n"))))
 
 (defun harness-ui-format-spend (session &optional with-quota)
   "Return what SESSION cost, saying when a subscription pays for it.
@@ -1071,6 +1073,14 @@ Those lines read % as the start of a construct such as %b, so a literal
 one -- a quota window's \"23%\" -- would vanish together with the
 character after it.  Text properties are kept."
   (replace-regexp-in-string "%" (lambda (match) (concat match match)) string t t))
+
+(defun harness-ui-one-line (text)
+  "Return TEXT on one line, its runs of whitespace collapsed to a space.
+Hover text belongs on one line: shown in the echo area where tooltips
+are off, a second line grows the mini window, which shrinks every other
+window in the frame and moves the button under the mouse until it is
+hard to click.  Build `help-echo' text from parts through this."
+  (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim (or text ""))))
 
 (defun harness-ui-format-context (session)
   "Return \"12.3k/200k\" for SESSION with the warning face applied."
