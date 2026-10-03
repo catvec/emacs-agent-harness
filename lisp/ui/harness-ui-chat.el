@@ -4,8 +4,9 @@
 
 ;; One buffer per session, "*harness: NAME*", laid out top to bottom:
 ;;
-;;   header line   status, name, model, permission mode, non-interactive or interactive,
-;;                 thinking, context, cost, menu, after what
+;;   header line   status, name, todo progress, model, permission mode,
+;;                 non-interactive or interactive, thinking, context,
+;;                 cost, menu, after what
 ;;                 `harness-chat-header-functions' put in front (a BTW's buttons)
 ;;   transcript    one block per node, rendered incrementally with markers
 ;;   activity      while a turn runs, what it does and for how long, on a
@@ -14,6 +15,7 @@
 ;;                 a question whose options have diagrams shows one of
 ;;                 them at a time, in one place, and switches between them
 ;;   queue         messages queued for the next turn
+;;   todos         the session's todo items, one per line, or folded
 ;;   attachments   chips for files attached to the next message
 ;;   notice        the session was deleted, or is inactive (sending resumes it)
 ;;   compose       an editable region; C-c C-c sends, RET adds a newline
@@ -175,6 +177,10 @@ under it." :group 'harness-ui-chat)
 (defvar-local harness-chat--session nil "Last session plist seen, for after deletion.")
 (defvar-local harness-chat--unfinished nil "Ids of tool-call blocks without a result yet.")
 (defvar-local harness-chat--inactive nil "Non-nil while the session is inactive; sending resumes it.")
+(defvar-local harness-chat--todos nil
+  "The session's todo list as last seen: a list of (:text :status).")
+(defvar-local harness-chat--todos-collapsed nil
+  "Non-nil when the todo panel shows its title line alone.")
 (defvar-local harness-chat--activity nil
   "What the running turn does, as `agent/activity' last said (wire shape).")
 (defvar-local harness-chat--activity-overlay nil
@@ -1266,6 +1272,7 @@ state the group had."
     ("agent_message_chunk" (harness-chat--on-chunk update "assistant"))
     ("agent_thought_chunk" (harness-chat--on-chunk update "thinking"))
     ("_harness/activity" (harness-chat--on-activity (plist-get update :activity)))
+    ("plan" (harness-chat--on-plan update))
     ("_harness/session" (harness-chat--on-session (plist-get update :session)))
     ("_harness/session_deleted" (harness-chat--on-deleted))))
 
@@ -1357,6 +1364,8 @@ state the group had."
       (setq harness-chat--inactive (equal status "inactive") changed t))
     (unless (equal (plist-get session :queue) harness-chat--queue)
       (setq harness-chat--queue (plist-get session :queue) changed t))
+    (when (harness-chat--set-todos (plist-get session :todos))
+      (setq changed t))
     (if changed
         (harness-chat--render-tail)
       (harness-chat--refresh-activity))
@@ -1861,6 +1870,163 @@ Options with diagrams get the area showing one of them under them."
                   "\n")))
       (add-face-text-property start (point) 'harness-queue-face t))))
 
+;;;; The todo list
+
+;; The agent replaces the session's plan with every `todo_write' call;
+;; the harness emits `session/todos' for it, and ACP announces the same
+;; list as a plan update.  The chat renders it from that data, never by
+;; reading a tool block (those fold, and at work the list is the point):
+;; a header segment with the progress and the item in hand, always on
+;; screen, and a panel above the compose box with one line and a status
+;; icon per item, which folds away or disappears with the list.
+
+(defconst harness-chat--todos-limit 20
+  "Most todo items the panel lists before it counts the rest.")
+
+(defun harness-chat--todo-status (value)
+  "Return VALUE as one of \"pending\", \"in-progress\" or \"done\".
+Both the tool's spelling (`done', `in-progress') and ACP's
+\(\"completed\", \"in_progress\") are understood."
+  (let ((s (downcase (format "%s" (or value "pending")))))
+    (cond ((member s '("done" "completed" "complete")) "done")
+          ((member s '("in-progress" "in_progress" "in progress" "active" "doing")) "in-progress")
+          (t "pending"))))
+
+(defun harness-chat--todo-text (item)
+  "Return the text of todo ITEM, a plist or a plain string."
+  (if (stringp item)
+      item
+    (or (plist-get item :text) (plist-get item :content) "")))
+
+(defun harness-chat--normalise-todos (todos)
+  "Return TODOS as the one shape the chat renders: a list of (:text :status).
+TODOS is the session's wire list (`session/get', `_harness/session') or
+the entries of an ACP plan update; both spell their statuses their own
+way, and an entry without an id is as good as one with."
+  (mapcar (lambda (item)
+            (list :text (harness-chat--todo-text item)
+                  :status (harness-chat--todo-status (and (consp item) (plist-get item :status)))))
+          todos))
+
+(defun harness-chat--todo-summary ()
+  "Return (DONE TOTAL CURRENT) for the session's todo list, or nil.
+CURRENT is the item in progress, else the first one not done, as the
+header names it."
+  (when harness-chat--todos
+    (let* ((status (lambda (item) (plist-get item :status)))
+           (current (or (cl-find "in-progress" harness-chat--todos :key status :test #'equal)
+                        (cl-find-if (lambda (item) (not (equal "done" (plist-get item :status))))
+                                    harness-chat--todos))))
+      (list (cl-count "done" harness-chat--todos :key status :test #'equal)
+            (length harness-chat--todos)
+            (and current (plist-get current :text))))))
+
+(defun harness-chat--set-todos (todos)
+  "Record TODOS (wire shape) as the session's list.
+Return non-nil when the rendered list changed.  Comparing texts and
+statuses alone, an ACP plan update and the session plist that follows
+it redraw once, not twice."
+  (let ((todos (harness-chat--normalise-todos todos)))
+    (unless (equal todos harness-chat--todos)
+      (setq harness-chat--todos todos)
+      t)))
+
+(defun harness-chat--on-plan (update)
+  "Take the todo list carried by an ACP plan UPDATE.
+This is the live signal of a `todo_write' call, ahead of the debounced
+session plist that repeats it."
+  (when (harness-chat--set-todos (plist-get update :entries))
+    (harness-chat--render-tail)
+    (force-mode-line-update)))
+
+(defun harness-chat--todo-mark (status)
+  "Return (ICON . FACE) marking a todo in STATUS."
+  (pcase status
+    ("done" '(harness-icon-success . harness-success-face))
+    ("in-progress" '(harness-icon-running . harness-status-running-face))
+    (_ '(harness-icon-idle . harness-dim-face))))
+
+(defun harness-chat--todos-help ()
+  "Return the tooltip of the header's todo segment: every item, marked."
+  (let ((summary (harness-chat--todo-summary)))
+    (concat (format "Todo list (%d/%d) — mouse-1, C-c C-t: show or hide it"
+                    (nth 0 summary) (nth 1 summary))
+            "\n"
+            (mapconcat (lambda (item)
+                         (format "%s %s"
+                                 (pcase (plist-get item :status)
+                                   ("done" "[x]") ("in-progress" "[~]") (_ "[ ]"))
+                                 (harness-chat--todo-text item)))
+                       harness-chat--todos "\n"))))
+
+(defun harness-chat--todos-segment ()
+  "Return the header segment for the session's todo list, or nil.
+It names the progress and the item in hand, so a running turn's plan
+is on screen without opening its `todo_write' block."
+  (when-let* ((summary (harness-chat--todo-summary)))
+    (let* ((done (nth 0 summary))
+           (total (nth 1 summary))
+           (current (nth 2 summary))
+           (text (concat (harness-ui-icon 'harness-chat-icon-plan)
+                         (format " %d/%d" done total)
+                         (cond (current (concat " \N{U+00B7} " (harness-first-line current 34)))
+                               ((= done total) " done")
+                               (t "")))))
+      (concat (harness-chat--segment text #'harness-chat-toggle-todos
+                                     (harness-chat--todos-help)
+                                     (and (= done total) 'harness-dim-face))
+              "  "))))
+
+(defun harness-chat--insert-todos ()
+  "Insert the panel listing the session's todo items.
+A fold button leads its title; every item follows with a status icon,
+the one in progress in bold and the rest dim.  A list longer than
+`harness-chat--todos-limit' counts the rest instead of showing them."
+  (when harness-chat--todos
+    (let* ((summary (harness-chat--todo-summary))
+           (done (nth 0 summary))
+           (total (nth 1 summary))
+           (shown (seq-take harness-chat--todos harness-chat--todos-limit))
+           (fold (harness-chat--fold-button harness-chat--todos-collapsed
+                                            #'harness-chat-toggle-todos
+                                            "mouse-1, TAB: show or hide the todo list"))
+           (start (point)))
+      (add-text-properties 0 (length fold) '(harness-chat-todos t) fold)
+      (insert fold
+              " "
+              (propertize (concat (harness-ui-icon 'harness-chat-icon-plan)
+                                  (format " Todo list  %d/%d" done total))
+                          'face 'harness-label-face
+                          'harness-chat-todos t)
+              (if harness-chat--todos-collapsed
+                  (concat "  " (propertize (or (nth 2 summary) "") 'face 'harness-dim-face))
+                "")
+              "\n")
+      (unless harness-chat--todos-collapsed
+        (dolist (item shown)
+          (let* ((status (plist-get item :status))
+                 (mark (harness-chat--todo-mark status)))
+            (insert "   "
+                    (propertize (harness-ui-icon (car mark)) 'face (cdr mark))
+                    " "
+                    (propertize (harness-first-line (plist-get item :text) 100)
+                                'face (if (equal status "in-progress") 'bold 'harness-dim-face)
+                                'wrap-prefix "   ")
+                    "\n")))
+        (when (> total (length shown))
+          (insert "   "
+                  (propertize (format "… %d more" (- total (length shown))) 'face 'harness-dim-face)
+                  "\n")))
+      (add-face-text-property start (point) 'harness-chat-plan-face t))))
+
+(defun harness-chat-toggle-todos ()
+  "Show or hide the session's todo list above the compose box."
+  (interactive)
+  (unless harness-chat--todos (user-error "This session has no todo list"))
+  (setq harness-chat--todos-collapsed (not harness-chat--todos-collapsed))
+  (harness-chat--render-tail)
+  (force-mode-line-update))
+
 (defvar harness-chat-panel-functions nil
   "Functions putting a panel of their own below the transcript.
 Each is called without arguments in the chat buffer on every render of
@@ -1902,6 +2068,7 @@ override, as the pending panel's do."
               (harness-chat--insert-question-panel r)
             (harness-chat--insert-permission-panel r)))
         (harness-chat--insert-queue)
+        (harness-chat--insert-todos)
         (harness-chat--insert-panels)
         (harness-compose-insert-attachments)
         (when harness-chat--dead
@@ -2170,9 +2337,12 @@ end afterwards."
                  (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
                (harness-chat--restore-anchors anchors)
                (dolist (u (nreverse harness-chat--deferred))
-                 (when (and (equal (plist-get u :sessionUpdate) "_harness/node")
-                            (harness-chat--node-current-p (plist-get u :node)))
-                   (harness-chat--apply-update u)))
+                 (pcase (plist-get u :sessionUpdate)
+                   ;; The list is state, not transcript: the newest wins.
+                   ("plan" (harness-chat--apply-update u))
+                   ("_harness/node"
+                    (when (harness-chat--node-current-p (plist-get u :node))
+                      (harness-chat--apply-update u)))))
                (setq harness-chat--deferred nil)
                (when keep-bottom (harness-chat-scroll-to-bottom))
                (harness-chat--schedule-history))))))
@@ -2602,6 +2772,7 @@ conversation and gives it its [close] and [keep] buttons this way.")
      " "
      (harness-chat--segment name #'harness-rename-session "Session name (mouse-1: rename)" 'bold)
      "  "
+     (harness-chat--todos-segment)
      (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
                             "Model (mouse-1: change)" 'harness-dim-face)
      "  "
@@ -2695,6 +2866,7 @@ keeps it only while it is visible."
   "Complete in the compose box; elsewhere expand or collapse the block at point."
   (interactive)
   (cond ((harness-compose-in-p) (completion-at-point))
+        ((get-text-property (point) 'harness-chat-todos) (harness-chat-toggle-todos))
         ((get-text-property (point) 'harness-chat-group) (harness-chat-toggle-group))
         ((get-text-property (point) 'harness-chat-node)
          (let ((b (gethash (get-text-property (point) 'harness-chat-node) harness-chat--blocks)))
@@ -2752,6 +2924,7 @@ message sent from it resumes it."
   (define-key map (kbd "C-c C-f") #'harness-chat-next-diagram)
   (define-key map (kbd "C-c C-b") #'harness-chat-previous-diagram)
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
+  (define-key map (kbd "C-c C-t") #'harness-chat-toggle-todos)
   (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
   (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom))
 
@@ -2791,6 +2964,7 @@ on \\[harness-menu] here, or the [menu] button in the header line.
         ("C-c C-n" "Deny request" harness-chat-deny-newest)
         ("C-c C-f" "Next diagram" harness-chat-next-diagram)
         ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
+        ("C-c C-t" "Show or hide the todo list" harness-chat-toggle-todos)
         ("C-c C-k" "Cancel turn" harness-chat-cancel)]
        ["Transcript"
         (". TAB" "Fold block" harness-chat-tab)

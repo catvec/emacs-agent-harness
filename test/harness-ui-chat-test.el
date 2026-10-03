@@ -1964,5 +1964,95 @@ connection let go of is never reported as closed."
         (should (= (- (window-body-height window t) (frame-char-height))
                    (cdr (window-text-pixel-size window (window-start window) harness-compose-end))))))))
 
+(ert-deftest harness-ui-chat-todos-show-in-header-and-panel ()
+  "A session's todo list is conspicuous without opening its tool block:
+a progress segment in the header, the items in a panel above the box."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Todos"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/set-todos sid
+                    '((:id "1" :text "Survey the project" :status "done")
+                      (:id "2" :text "Make the change" :status "in-progress")
+                      (:id "3" :text "Check the result" :status "pending")))
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (and harness-chat--todos
+                                           (harness-ui-chat-test-find buf "Check the result"))))
+                         5 "the todo list to show")
+      (with-current-buffer buf
+        ;; The header names the progress and the item in hand.
+        (let* ((header (harness-chat--header))
+               (segment (harness-ui-chat-test-segment header #'harness-chat-toggle-todos)))
+          (should segment)
+          (should (string-match-p "1/3" (car segment)))
+          (should (string-match-p "Make the change" (car segment)))
+          (let ((help (get-text-property (cadr segment) 'help-echo header)))
+            (should (string-match-p "\\[x\\] Survey the project" help))
+            (should (string-match-p "\\[~\\] Make the change" help))
+            (should (string-match-p "\\[ \\] Check the result" help))))
+        ;; The panel shows every item; the one in progress is bold.
+        (should (harness-ui-chat-test-find buf "Survey the project"))
+        (should (harness-ui-chat-test-find buf "Check the result"))
+        (should (harness-ui-chat-test-face-at
+                 (1- (harness-ui-chat-test-find buf "Make the change")) 'bold))
+        ;; Folding leaves the title line; unfolding brings the items back.
+        (harness-chat-toggle-todos)
+        (should-not (harness-ui-chat-test-find buf "Check the result"))
+        (should (harness-ui-chat-test-find buf "1/3"))
+        (harness-chat-toggle-todos)
+        (should (harness-ui-chat-test-find buf "Check the result"))
+        ;; Clearing the list takes the segment and the panel away.
+        (harness-call 'session/set-todos sid nil)
+        (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--todos)))
+                           5 "the list to clear")
+        (with-current-buffer buf
+          (should-not (harness-ui-chat-test-segment (harness-chat--header)
+                                                    #'harness-chat-toggle-todos))
+          (should-not (harness-ui-chat-test-find buf "Check the result")))))))
+
+(ert-deftest harness-ui-chat-todos-follow-todo-write ()
+  "The demo work script's `todo_write' calls keep the view current:
+the panel ends on the finished list, and it agrees with the session's
+own, which the task board shows."
+  (harness-ui-chat-test-with
+    ;; The tool that replaces the list; the harness serves it in production.
+    (harness-test-load-module 'tools-agent)
+    (let* ((sid (harness-ui-chat-test-session "Work"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-prompt buf "please work through this project")
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (equal 3 (length harness-chat--todos))))
+                         5 "the finished todo list")
+      (with-current-buffer buf
+        (should (equal '("done" "done" "done")
+                       (mapcar (lambda (item) (plist-get item :status)) harness-chat--todos)))
+        (should (string-match-p "3/3" (harness-chat--header)))
+        (should (harness-ui-chat-test-find buf "Survey the project"))
+        (should (harness-ui-chat-test-find buf "Check the result"))
+        ;; What the view shows is the session's list, item for item.
+        (should (equal (mapcar (lambda (item) (plist-get item :text))
+                               (plist-get (harness-ui-session sid) :todos))
+                       (mapcar (lambda (item) (plist-get item :text)) harness-chat--todos)))))))
+
+(ert-deftest harness-ui-chat-todos-take-the-plan-update ()
+  "An ACP `plan' update alone fills the header and the panel.
+It is the live signal of a `todo_write' call, with ACP's own status
+spellings; the chat used to drop it.  A long list is capped."
+  (harness-ui-chat-test-with
+    (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "Plan"))))
+      (with-current-buffer buf
+        (harness-chat--on-plan
+         (list :entries (append (list (list :content "item 1" :status "completed")
+                                      (list :content "item 2" :status "in_progress"))
+                                (cl-loop for i from 3 to 25
+                                         collect (list :content (format "item %d" i) :status "pending")))))
+        (should (equal 25 (length harness-chat--todos)))
+        (let ((header (harness-chat--header)))
+          (should (string-match-p "1/25" header))
+          (should (string-match-p "item 2" header)))
+        ;; The panel lists the cap, then counts the rest.
+        (should (harness-ui-chat-test-find buf "item 20"))
+        (should (harness-ui-chat-test-find buf "… 5 more"))
+        (should-not (harness-ui-chat-test-find buf "item 21"))))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
