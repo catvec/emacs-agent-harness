@@ -18,6 +18,17 @@
 ;; settles that turn: tool calls left without a result get one saying
 ;; they were interrupted, and a hint says what the session was doing.
 ;;
+;; A hosted-loop provider (Claude Code, Copilot) keeps the conversation
+;; itself, so the transcript and that conversation must agree.  Nodes
+;; carry the provider's `:checkpoint' where it reported one (for Claude
+;; Code the CLI session and message uuid holding them), and the session
+;; remembers the node its provider conversation reached
+;; (`provider-node').  When the head moves off that conversation (a
+;; checkout at an earlier node) or a fork starts at an earlier node,
+;; the conversation is cut at the last checkpoint up to the node, or
+;; started anew from the transcript (`harness-session--continuation'),
+;; so the model never knows what came after the node.
+;;
 ;; A session's context window is its model's, looked up in the provider
 ;; catalogue whenever the session is described, unless one was set for
 ;; the session (`:context-window' to `session/create' or
@@ -47,16 +58,35 @@
   ;; runtime only
   (nodes (make-hash-table :test 'equal))
   (loaded nil)
-  (runtime nil))
+  (runtime nil)
+  ;; Slots added later go last, see `harness-session--upgrade-records'.
+  provider-node)                        ; the node its provider conversation reached
 
 (defvar harness-sessions (make-hash-table :test 'equal)
   "Session id -> `harness-session'.")
+
+(defun harness-session--upgrade-records ()
+  "Give the sessions in memory the slots the struct gained since they were made.
+A reload replaces the definitions under the running sessions, and a
+record made by an earlier layout is too short for the slots added at
+the end: it is copied into a new record whose new slots keep their
+defaults."
+  (let ((size (length (make-harness-session)))
+        (old nil))
+    (maphash (lambda (id s) (when (< (length s) size) (push (cons id s) old))) harness-sessions)
+    (pcase-dolist (`(,id . ,s) old)
+      (let ((new (make-harness-session)))
+        (dotimes (i (1- (length s)))
+          (aset new (1+ i) (aref s (1+ i))))
+        (puthash id new harness-sessions)))))
+
+(harness-session--upgrade-records)
 
 (defconst harness-session--public-keys
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
     :context-window :context-window-override :budget :head :queue :pending :todos :plan
-    :provider-state))
+    :provider-state :provider-node))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
@@ -93,7 +123,8 @@
         :budget (harness-session-budget s) :head (harness-session-head s)
         :queue (harness-session-queue s) :pending (harness-session-pending s)
         :todos (harness-session-todos s) :plan (harness-session-plan s)
-        :provider-state (harness-session-provider-state s)))
+        :provider-state (harness-session-provider-state s)
+        :provider-node (harness-session-provider-node s)))
 
 (defun harness-session--intern-values (plist)
   "Turn string enum values in PLIST back into symbols."
@@ -133,7 +164,8 @@
           (harness-session-pending s) nil
           (harness-session-todos s) (plist-get pl :todos)
           (harness-session-plan s) (plist-get pl :plan)
-          (harness-session-provider-state s) (plist-get pl :provider-state))
+          (harness-session-provider-state s) (plist-get pl :provider-state)
+          (harness-session-provider-node s) (plist-get pl :provider-node))
     s))
 
 ;;;; Persistence
@@ -209,6 +241,73 @@ HEAD defaults to the session head."
             (progn (push n out) (setq id (plist-get n :parent)))
           (setq id nil))))
     out))
+
+(defun harness-session--last-checkpoint (path)
+  "Return the last node of PATH that carries a provider `:checkpoint', or nil."
+  (cl-find-if (lambda (n) (plist-get n :checkpoint)) path :from-end t))
+
+(defun harness-session--went-past-p (s node-id)
+  "Non-nil when the provider conversation of S went past NODE-ID, S's head.
+For a session that recorded no `provider-node', made before sessions
+recorded one.  Its conversation went on past its head when S holds a
+node after the head (the head was moved back to it, and no turn ran
+since), or, for a fork, when its parent held a node after the fork node
+before the fork was made: the fork was taken at an earlier node, and
+then got the parent's whole provider conversation."
+  (let ((after (lambda (table node before)
+                 (catch 'found
+                   (maphash (lambda (_ n)
+                              (when (and (equal (plist-get n :parent) node)
+                                         (or (null before) (< (or (plist-get n :ts) 0) before)))
+                                (throw 'found t)))
+                            table)
+                   nil)))
+        (parent (and (equal (format "%s" (harness-session-kind s)) "fork")
+                     (gethash (harness-session-parent-id s) harness-sessions))))
+    (or (and node-id (funcall after (harness-session-nodes s) node-id nil))
+        (and parent (harness-session-fork-node s)
+             (progn (harness-session--load-nodes parent)
+                    (funcall after (harness-session-nodes parent) (harness-session-fork-node s)
+                             (harness-session-created s)))))))
+
+(defun harness-session--continuation (s node-id)
+  "Return how the provider conversation of S goes on from NODE-ID.
+A hosted-loop provider keeps the conversation itself, so the transcript
+up to NODE-ID and the conversation the provider holds must agree before
+anything is sent after NODE-ID.  The value is one of:
+
+  (:mode current)      S's own provider state is that conversation as
+                       it stands: NODE-ID is S's head and comes at or
+                       after the node the conversation reached
+                       (`provider-node').  A session older than
+                       `provider-node' counts as there unless its
+                       conversation went past its head
+                       (`harness-session--went-past-p').
+  (:mode checkpoint :checkpoint CP :node ID)
+                       the conversation must be cut at CP, the provider
+                       checkpoint of node ID, the last node on the path
+                       to NODE-ID that has one.  A node after ID that
+                       the provider would have to know again, such as a
+                       user message, is sent once more with the next
+                       turn's message.
+  (:mode fresh)        no checkpoint precedes NODE-ID: the provider must
+                       start a new conversation, which it seeds with
+                       the transcript.
+
+The head moves off the conversation when it is checked out at an
+earlier node or on another branch (`session/set-head'), and a fork
+taken anywhere but at the head of its parent starts off it."
+  (let* ((path (harness-session--path s node-id))
+         (reached (harness-session-provider-node s)))
+    (if (and (equal node-id (harness-session-head s))
+             (if reached
+                 (cl-find reached path :key (lambda (n) (plist-get n :id)) :test #'equal)
+               (not (harness-session--went-past-p s node-id))))
+        (list :mode 'current)
+      (let ((cut (harness-session--last-checkpoint path)))
+        (if cut
+            (list :mode 'checkpoint :checkpoint (plist-get cut :checkpoint) :node (plist-get cut :id))
+          (list :mode 'fresh))))))
 
 (defun harness-session--config (key cwd)
   (if (harness-method-exists-p 'config/get)
@@ -445,11 +544,35 @@ return value lists the ids that changed, newest first."
     (nreverse changed)))
 
 (harness-defmethod session/set-provider-state (id state)
-  "Replace the opaque provider state of session ID with STATE."
+  "Replace the opaque provider state of session ID with STATE.
+A STATE different from the one held is announced as
+`session/provider-state-changed', so a provider whose live process
+serves the old conversation can let it go."
   (let ((s (harness-session--get id)))
-    (setf (harness-session-provider-state s) state)
-    (harness-session--touch s)
+    (unless (equal state (harness-session-provider-state s))
+      (setf (harness-session-provider-state s) state)
+      (harness-emit 'session/provider-state-changed id state)
+      (harness-session--touch s))
     state))
+
+(harness-defmethod session/set-provider-node (id node-id)
+  "Record NODE-ID as the node the provider conversation of session ID reached.
+The agent records the head when a turn ends; `session/provider-continuation'
+compares it with the head to tell whether the head moved off that
+conversation since."
+  (let ((s (harness-session--get id)))
+    (unless (equal node-id (harness-session-provider-node s))
+      (setf (harness-session-provider-node s) node-id)
+      (harness-session--touch s))
+    node-id))
+
+(harness-defmethod session/provider-continuation (id &optional node-id)
+  "Return how the provider conversation of session ID goes on from NODE-ID.
+NODE-ID defaults to the head.  The value is (:mode current),
+\(:mode checkpoint :checkpoint CP :node ID) or (:mode fresh); see
+`harness-session--continuation'."
+  (let ((s (harness-session--get id)))
+    (harness-session--continuation s (or node-id (harness-session-head s)))))
 
 (harness-defmethod session/runtime (id &optional key value)
   "Get or set the runtime (unpersisted) property KEY of session ID.
@@ -465,15 +588,28 @@ With only ID return the whole runtime plist."
 (harness-defmethod session/fork (id &rest plist)
   "Fork session ID; return a promise of the new session plist.
 PLIST may set `:kind' (fork, subagent), `:name', `:cwd', `:model' and
-any other `session/create' key.  The ancestor chain is copied so the
-fork starts with the parent's transcript.  Its provider state is the
-one `provider/fork' derives from the parent's, or none when the
-provider cannot fork it.  It is never the parent's own state, which
-would carry on the parent's provider conversation: for Claude Code,
-resume and write into the parent's CLI session.  A BTW is no fork; see
-`session/btw'."
+any other `session/create' key, and `:node', the node to fork at: by
+default the head.  Forking at another node leaves ID's head where it
+is.  The path from the root to that node is copied (same node ids), so
+the fork starts with the parent's transcript up to there.
+
+Its provider state is the one `provider/fork' derives from the
+parent's, and holds exactly that transcript, nothing after it (see
+`harness-session--continuation'): at the parent's head, a fork of the
+parent's whole provider conversation; at an earlier node, a fork of it
+cut at the last provider checkpoint up to the node; and none when no
+checkpoint precedes the node, or the provider cannot fork the state,
+so that the provider starts a new conversation from the transcript.
+It is never the parent's own state, which would carry on the parent's
+provider conversation: for Claude Code, resume and write into the
+parent's CLI session.  A BTW is no fork; see `session/btw'."
   (let* ((parent (harness-session--get id))
-         (path (harness-session--path parent))
+         (node (or (plist-get plist :node) (harness-session-head parent)))
+         (path (progn (harness-session--load-nodes parent)
+                      (when (and node (not (gethash node (harness-session-nodes parent))))
+                        (signal 'harness-error (list (format "No node %s in %s" node id))))
+                      (harness-session--path parent node)))
+         (continuation (harness-session--continuation parent node))
          (child-plist (harness-plist-merge
                        (list :cwd (harness-session-cwd parent)
                              :host (harness-session-host parent)
@@ -488,19 +624,24 @@ resume and write into the parent's CLI session.  A BTW is no fork; see
                              :budget (harness-session-budget parent)
                              :kind 'fork
                              :parent-id id
-                             :fork-node (harness-session-head parent))
-                       plist))
+                             :fork-node node)
+                       (harness-plist-remove plist :node)))
          (child (apply #'harness-call 'session/create child-plist))
          (cs (harness-session--get (plist-get child :id))))
     (dolist (n path)
       (puthash (plist-get n :id) n (harness-session-nodes cs))
       (harness-session--persist-node cs n))
-    (setf (harness-session-head cs) (harness-session-head parent))
+    (setf (harness-session-head cs) node
+          ;; Its provider state, whatever it is, is the conversation up to NODE.
+          (harness-session-provider-node cs) node)
     (harness-session--save (harness-session-id cs))
     (harness-then
-     (if (harness-method-exists-p 'provider/fork)
-         (harness-catch (harness-call 'provider/fork (harness-session-model cs)
-                                      (harness-session-provider-state parent))
+     (if (and (harness-method-exists-p 'provider/fork)
+              (not (eq (plist-get continuation :mode) 'fresh)))
+         (harness-catch (apply #'harness-call 'provider/fork (harness-session-model cs)
+                               (harness-session-provider-state parent)
+                               (and (eq (plist-get continuation :mode) 'checkpoint)
+                                    (list (plist-get continuation :checkpoint))))
                         (lambda (e)
                           (harness-log 'warn "provider fork failed, %s starts without provider state: %s"
                                        (harness-session-id cs) (harness-error-message e))
@@ -634,11 +775,20 @@ With `:transient' non-nil the change is announced but not persisted
     n))
 
 (harness-defmethod session/set-head (id node-id)
-  "Move the head of session ID to NODE-ID (time travel within the DAG)."
+  "Move the head of session ID to NODE-ID (time travel within the DAG).
+The next message continues from NODE-ID: the transcript the model gets
+is the path up to it, and before the next turn the agent rewinds a
+hosted provider's conversation to match (`session/provider-continuation').
+A session running a turn refuses, since the turn would go on writing
+after the new head."
   (let ((s (harness-session--get id)))
     (harness-session--load-nodes s)
     (unless (gethash node-id (harness-session-nodes s))
       (signal 'harness-error (list (format "No node %s" node-id))))
+    (when (if (harness-method-exists-p 'agent/running)
+              (harness-call 'agent/running id)
+            (eq (harness-session-status s) 'running))
+      (signal 'harness-error (list "The session is running a turn; stop it before moving its head")))
     (setf (harness-session-head s) node-id)
     (harness-emit 'session/head-moved id node-id)
     (harness-session--touch s)
@@ -992,6 +1142,7 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
               (session/status . "(ID STATUS)")
               (session/deleted . "(ID SESSION)") (session/resumed . "(ID)") (session/deactivated . "(ID)")
               (session/forked . "(PARENT-ID CHILD-ID)")
+              (session/provider-state-changed . "(ID STATE) when the provider state is replaced by another")
               (session/node-added . "(ID NODE)") (session/node-updated . "(ID NODE TRANSIENT)")
               (session/head-moved . "(ID NODE-ID)")
               (session/queue-changed . "(ID ITEMS)") (session/pending-changed . "(ID ITEMS)")

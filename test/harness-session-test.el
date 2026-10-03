@@ -292,6 +292,172 @@ when it is forked to a model of a provider that cannot."
         (dolist (p '(test-plain test-broken test-forky))
           (remhash p harness-providers))))))
 
+(defmacro harness-session-test-with-cut-provider (&rest body)
+  "Run BODY with the provider `test-cut', which can fork at a checkpoint.
+Its fork of a whole state is (:whole CLI-SESSION-ID), of a checkpoint
+\(:cut CHECKPOINT)."
+  (declare (indent 0))
+  `(unwind-protect
+       (progn
+         (harness-define-provider 'test-cut :complete #'ignore
+                                  :fork (lambda (_model st &optional checkpoint)
+                                          (harness-resolved (if checkpoint (list :cut checkpoint)
+                                                              (list :whole (plist-get st :cli-session-id))))))
+         ,@body)
+     (remhash 'test-cut harness-providers)))
+
+(defun harness-session-test-conversation (id)
+  "Give session ID two exchanges whose replies carry checkpoints c1 and c2.
+The provider conversation is S and reached the second reply.  Return
+the node ids (u1 a1 u2 a2)."
+  (let ((ids (mapcar (lambda (n) (plist-get (harness-call 'session/append id n) :id))
+                     '((:kind user :content "q1") (:kind assistant :content "a1" :checkpoint (:at "c1"))
+                       (:kind user :content "q2") (:kind assistant :content "a2" :checkpoint (:at "c2"))))))
+    (harness-call 'session/set-provider-state id '(:cli-session-id "S"))
+    (harness-call 'session/set-provider-node id (nth 3 ids))
+    ids))
+
+(ert-deftest harness-session-fork-at-a-node-cuts-the-provider-conversation ()
+  "A fork at a node holds the provider conversation up to that node, never more.
+At the parent's head it forks the whole conversation; at an earlier
+node, the conversation cut at the last checkpoint up to the node; with
+no checkpoint before the node, none.  The parent's head never moves,
+and a parent whose head was moved off its conversation forks it cut
+too, even at its head."
+  (harness-session-test-with
+    (harness-session-test-with-cut-provider
+      (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "test-cut:m") :id))
+             (ids (harness-session-test-conversation id))
+             (fork (lambda (&optional node)
+                     (harness-call 'session/get
+                                   (plist-get (harness-test-await
+                                               (apply #'harness-call 'session/fork id :kind 'fork
+                                                      (and node (list :node node))))
+                                              :id)))))
+        (pcase-let ((`(,u1 ,a1 ,u2 ,a2) ids))
+          (let ((at-head (funcall fork)))
+            (should (equal '(:whole "S") (plist-get at-head :provider-state)))
+            (should (equal a2 (plist-get at-head :fork-node)))
+            (should (equal a2 (plist-get at-head :provider-node))))
+          (let ((at-u2 (funcall fork u2)))
+            (should (equal '(:cut (:at "c1")) (plist-get at-u2 :provider-state)))
+            (should (equal u2 (plist-get at-u2 :head)))
+            (should (equal u2 (plist-get at-u2 :fork-node)))
+            (should (equal u2 (plist-get at-u2 :provider-node)))
+            (should (equal (list u1 a1 u2) (mapcar (lambda (n) (plist-get n :id))
+                                                   (harness-call 'session/nodes (plist-get at-u2 :id))))))
+          (should-not (plist-get (funcall fork u1) :provider-state))
+          (should-error (funcall fork "n-nowhere"))
+          ;; The parent is where it was.
+          (should (equal a2 (plist-get (harness-call 'session/get id) :head)))
+          (should (equal '(:cli-session-id "S") (plist-get (harness-call 'session/get id) :provider-state)))
+          ;; Its head moved back to the first reply: a fork at the head is cut.
+          (harness-call 'session/set-head id a1)
+          (should (equal '(:cut (:at "c1")) (plist-get (funcall fork) :provider-state))))))))
+
+(ert-deftest harness-session-provider-continuation-follows-the-head ()
+  "Where the head is says how the provider conversation goes on.
+At or after the node it reached, as it stands; elsewhere, cut at the
+last checkpoint up to the head, or anew when there is none.  A session
+that never recorded where its conversation got to goes on as it
+stands."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (ids (harness-session-test-conversation id)))
+      (pcase-let ((`(,u1 ,a1 ,_u2 ,a2) ids))
+        (should (equal '(:mode current) (harness-call 'session/provider-continuation id)))
+        (harness-call 'session/append id '(:kind user :content "q3"))
+        (harness-call 'session/hint id "a hint")
+        (should (equal '(:mode current) (harness-call 'session/provider-continuation id)))
+        (harness-call 'session/set-head id a1)
+        (should (equal (list :mode 'checkpoint :checkpoint '(:at "c1") :node a1)
+                       (harness-call 'session/provider-continuation id)))
+        (harness-call 'session/set-head id u1)
+        (should (equal '(:mode fresh) (harness-call 'session/provider-continuation id)))
+        ;; Asked about another node than the head.
+        (should (equal (list :mode 'checkpoint :checkpoint '(:at "c2") :node a2)
+                       (harness-call 'session/provider-continuation id a2)))
+        (harness-call 'session/set-head id a2)
+        (should (equal '(:mode current) (harness-call 'session/provider-continuation id)))
+        ;; Nothing recorded (a session older than that): as it stands at
+        ;; its newest node, but not once its head was moved back.
+        (harness-call 'session/set-provider-node id nil)
+        (let ((newest (plist-get (car (last (plist-get (harness-call 'session/tree id) :nodes))) :id)))
+          (harness-call 'session/set-head id newest))
+        (should (equal '(:mode current) (harness-call 'session/provider-continuation id)))
+        (harness-call 'session/set-head id a1)
+        (should (equal (list :mode 'checkpoint :checkpoint '(:at "c1") :node a1)
+                       (harness-call 'session/provider-continuation id)))))))
+
+(ert-deftest harness-session-old-fork-at-an-earlier-node-starts-anew ()
+  "A fork made before forks were cut, at an earlier node, does not go on as it was.
+The tree once forked a session at an earlier node by forking its whole
+provider conversation, which knew what came after the node.  Such a
+fork, which recorded no node its conversation reached, starts anew from
+its transcript; one made at its parent's head goes on."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (ids (mapcar (lambda (n) (plist-get (harness-call 'session/append id n) :id))
+                        '((:kind user :content "q1") (:kind assistant :content "a1")
+                          (:kind user :content "q2") (:kind assistant :content "a2"))))
+           (old-fork (lambda (node)
+                       (let ((child (plist-get (harness-test-await (harness-call 'session/fork id :node node)) :id)))
+                         ;; As the old code left it: the parent's whole state, nothing recorded.
+                         (harness-call 'session/set-provider-state child '(:cli-session-id "whole"))
+                         (harness-call 'session/set-provider-node child nil)
+                         child))))
+      (let ((early (funcall old-fork (nth 1 ids)))
+            (at-head (funcall old-fork (nth 3 ids))))
+        (should (equal '(:mode fresh) (harness-call 'session/provider-continuation early)))
+        (should (equal '(:mode current) (harness-call 'session/provider-continuation at-head)))
+        ;; Its own later turns do not change that it was cut short.
+        (harness-call 'session/append early '(:kind user :content "q-fork"))
+        (should (equal '(:mode fresh) (harness-call 'session/provider-continuation early)))))))
+
+(ert-deftest harness-session-provider-state-and-node-persist ()
+  "A new provider state is announced once; the node it reached survives a restart."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (node (plist-get (harness-call 'session/append id '(:kind user :content "q1")) :id))
+           (events nil))
+      (harness-on 'session/provider-state-changed (lambda (sid state) (push (list sid state) events)))
+      (harness-call 'session/set-provider-state id '(:cli-session-id "S"))
+      (harness-call 'session/set-provider-state id '(:cli-session-id "S"))
+      (harness-call 'session/set-provider-state id nil)
+      (should (equal (list (list id nil) (list id '(:cli-session-id "S"))) events))
+      (harness-call 'session/set-provider-node id node)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal node (plist-get (harness-call 'session/get id) :provider-node))))))
+
+(ert-deftest harness-session-set-head-refuses-while-running ()
+  "The head stays put under a running turn, which would write after it."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (first (plist-get (harness-call 'session/append id '(:kind user :content "q1")) :id)))
+      (harness-call 'session/append id '(:kind assistant :content "a1"))
+      (harness-call 'session/set-status id 'running)
+      (should-error (harness-call 'session/set-head id first))
+      (harness-call 'session/set-status id 'idle)
+      (harness-call 'session/set-head id first)
+      (should (equal first (plist-get (harness-call 'session/get id) :head))))))
+
+(ert-deftest harness-session-reload-upgrades-old-records ()
+  "A session made by an earlier layout of the struct gets the slots added since."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "old") :id))
+           (s (gethash id harness-sessions))
+           (old (apply #'record (cl-loop for i below (1- (length s)) collect (aref s i)))))
+      (puthash id old harness-sessions)
+      (should-error (harness-session-provider-node old))
+      (harness-session--upgrade-records)
+      (let ((new (gethash id harness-sessions)))
+        (should (= (length s) (length new)))
+        (should (equal "old" (harness-session-name new)))
+        (should-not (harness-session-provider-node new))
+        (should (equal "old" (plist-get (harness-call 'session/get id) :name)))))))
+
 (defun harness-session-test-kinds (id)
   (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes id)))
 

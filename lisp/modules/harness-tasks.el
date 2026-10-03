@@ -1088,8 +1088,10 @@ It opens with `harness-tasks--reject-message', unless that is blank."
 WORKTREE, when non-nil, is the task's worktree.  The session takes the
 task's settings instead of the refinement's read-only ones.  When the
 directory changes, the provider's conversation is dropped: the Claude
-CLI keeps conversations per directory, and the start message carries
-everything the work needs, while the transcript keeps the refinement."
+CLI keeps conversations per directory.  The start message carries
+everything the work needs, and the new conversation gets the
+transcript, which keeps the refinement, as text
+\(`harness-provider-history-text')."
   (condition-case err
       (let* ((task (harness-tasks--get id))
              (sid (plist-get task :session))

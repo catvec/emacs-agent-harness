@@ -300,6 +300,16 @@ box stays available, and the first message you send resumes it.
 `C-c h f` forks the current session. The fork starts from the
 conversation so far and continues independently.
 
+`C-c h t` shows the conversation tree: every message of the session, its
+forks and its BTWs as a git-like graph. On a message, `f` forks the
+session there and `c` checks the message out, moving the session's head
+back to it. Either way the next message continues from that message: the
+model knows the conversation up to it and nothing that came after, which
+stays in the tree on its own branch. With Claude Code the CLI's own
+conversation is cut at that message, so the fork keeps its cached
+prefix. Where nothing can be cut there (Copilot, or a session older than
+this), the new conversation gets the transcript up to the message.
+
 `C-c h b` opens a BTW ("by the way") side conversation in a window
 below the session. A BTW is a new, empty session that shares nothing
 with the session or with other BTWs, which makes it a good place for

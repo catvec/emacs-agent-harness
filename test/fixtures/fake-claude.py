@@ -20,7 +20,20 @@ Behaviour is chosen by the prompt text:
   "hang"       -> starts a turn and waits for an interrupt (or forever
                   with "hang ignore", to exercise the kill path)
   "die"        -> exits mid-turn without a result
+  "recall"     -> answers "I remember: " and the user prompts the
+                  conversation holds, oldest first, joined by " | "
 Anything else streams the text "hello" and finishes.
+
+Like the real CLI, the session's chain is a list of entries, each with a
+uuid: the user's prompts, the assistant messages and the tool results.
+Assistant messages and tool-result echoes carry their entry's uuid.
+When HARNESS_FAKE_CLAUDE_STORE names a directory, every session's chain
+is kept there as SESSION-ID.json, so a later process can resume it:
+--resume ID continues ID's chain, --fork-session copies it to a new
+session, and --resume-session-at UUID keeps the copy up to and
+including that entry.  As the real CLI does, it exits with status 1
+when the session to resume or the entry to resume at does not exist.
+Without the variable, --resume starts from an empty chain.
 
 These words add the gaps a real turn has, each as a pause (below) and
 in this order, so one prompt can combine them:
@@ -80,6 +93,7 @@ import time
 import uuid
 
 AUTH = os.environ.get("HARNESS_FAKE_CLAUDE_AUTH", "")
+STORE = os.environ.get("HARNESS_FAKE_CLAUDE_STORE")
 OVERAGE = bool(os.environ.get("HARNESS_FAKE_CLAUDE_OVERAGE"))
 GATE = os.environ.get("HARNESS_FAKE_CLAUDE_GATE")
 PAUSE = float(os.environ.get("HARNESS_FAKE_CLAUDE_PAUSE", "1.5"))
@@ -206,6 +220,24 @@ def rate_limits():
     }
 
 
+def fail(message):
+    """Exit at startup the way the real CLI refuses a resume."""
+    sys.stderr.write(message + "\n")
+    sys.stderr.flush()
+    sys.exit(1)
+
+
+def load_chain(session_id):
+    """The stored chain of SESSION_ID, None when there is none."""
+    if not STORE:
+        return []
+    path = os.path.join(STORE, session_id + ".json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
 class Fake:
     def __init__(self, argv):
         self.argv = argv
@@ -213,12 +245,26 @@ class Fake:
         self.rpc_id = 10
         self.tools = []
         resume = arg_value(argv, "--resume")
+        resume_at = arg_value(argv, "--resume-session-at")
+        self.chain = []
+        if resume:
+            chain = load_chain(resume)
+            if chain is None:
+                fail("No conversation found with session ID: %s" % resume)
+            self.chain = chain
         if resume and "--fork-session" in argv:
+            if resume_at:
+                kept = [i for i, e in enumerate(self.chain) if e["uuid"] == resume_at]
+                if not kept and STORE:
+                    fail("No message found with message.uuid of: %s" % resume_at)
+                if kept:
+                    self.chain = self.chain[:kept[0] + 1]
             self.session_id = "forked-" + uuid.uuid4().hex[:8]
         elif resume:
             self.session_id = resume
         else:
             self.session_id = "fake-" + uuid.uuid4().hex[:8]
+        self.save()
         self.model = arg_value(argv, "--model") or "fake-model"
         self.total = RESTORED_COST if resume else 0.0
         self.needs_handshake = "--mcp-config" in argv
@@ -229,6 +275,25 @@ class Fake:
         self.denials = []
         self.interrupted = False
         self.pauses = 0
+
+    # -- the session's chain ------------------------------------------------
+
+    def save(self):
+        if STORE:
+            with open(os.path.join(STORE, self.session_id + ".json"), "w") as f:
+                json.dump(self.chain, f)
+
+    def record(self, kind, text):
+        """Add an entry of KIND ("user", "assistant", "tool_result") with
+        TEXT to the chain and return its uuid."""
+        entry = {"uuid": str(uuid.uuid4()), "type": kind, "text": text}
+        self.chain.append(entry)
+        self.save()
+        return entry["uuid"]
+
+    def remembered(self):
+        """The user prompts the conversation holds, oldest first."""
+        return [e["text"] for e in self.chain if e["type"] == "user"]
 
     # -- plumbing ---------------------------------------------------------
 
@@ -400,6 +465,8 @@ class Fake:
                          "delta": {"type": "input_json_delta", "partial_json": piece}})
         self.stream({"type": "content_block_stop", "index": 0})
         emit({"type": "assistant", "session_id": self.session_id,
+              "uuid": self.record("assistant", "[called %s]" % tool),
+              "parent_tool_use_id": None,
               "message": {"id": "msg_1", "role": "assistant", "model": self.model,
                           "content": [{"type": "tool_use", "id": tool_use_id,
                                        "name": tool, "input": tool_input}],
@@ -424,6 +491,8 @@ class Fake:
         else:
             content, is_error = "ran %s" % tool, False
         emit({"type": "user", "session_id": self.session_id,
+              "uuid": self.record("tool_result", "[result of %s]" % tool),
+              "parent_tool_use_id": None,
               "message": {"role": "user",
                           "content": [{"type": "tool_result", "tool_use_id": tool_use_id,
                                        "content": content, "is_error": is_error}]}})
@@ -460,6 +529,7 @@ class Fake:
             text = blocks
         else:
             text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        self.record("user", text)
         emit({"type": "system", "subtype": "init", "session_id": self.session_id,
               "model": self.model, "cwd": os.getcwd(), "tools": [],
               "mcp_servers": [{"name": "harness", "status": "connected"}],
@@ -530,6 +600,8 @@ class Fake:
             pieces = ["One.", "\n\n", "Two."]
         elif "slow-text" in text:
             pieces = ["Hel", None, "lo"]
+        elif "recall" in text:
+            pieces = ["I remember: " + " | ".join(self.remembered())]
         else:
             pieces = ["hel", "lo"]
         self.stream({"type": "content_block_start", "index": 2,
@@ -547,6 +619,8 @@ class Fake:
                                "cache_read_input_tokens": 2000, "output_tokens": 7}})
         self.stream({"type": "message_stop"})
         emit({"type": "assistant", "session_id": self.session_id,
+              "uuid": self.record("assistant", reply),
+              "parent_tool_use_id": None,
               "message": {"id": "msg_2", "role": "assistant", "model": self.model,
                           "content": [{"type": "thinking", "thinking": "", "signature": "sig"},
                                       {"type": "text", "text": reply}],
