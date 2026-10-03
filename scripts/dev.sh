@@ -17,7 +17,9 @@ DEVDIR="$ROOT/scripts/.dev"
 export HARNESS_DEV_STATE=${HARNESS_DEV_STATE:-$DEVDIR/state-$SOCKET}
 mkdir -p "$DEVDIR"
 
-ec() { emacsclient -s "$SOCKET" "$@"; }
+# Never let a wedged daemon hang the script (or a caller) forever.
+DEV_TIMEOUT=${HARNESS_DEV_TIMEOUT:-60}
+ec() { timeout "$DEV_TIMEOUT" emacsclient -s "$SOCKET" "$@"; }
 alive() { ec --eval t >/dev/null 2>&1; }
 
 cmd=${1:-status}; shift || true

@@ -64,12 +64,15 @@ default) the layers above are split across two Emacs processes:
   `M-x harness-restart` restarts it with fresh configuration;
   `harness-reload` reloads both sides.
 - Work about the user's Emacs runs there, asked for by the harness with
-  `client/request` (below): the `emacs_*` and `elisp` tools
+  `client/request` (below): the `emacs_*` tools
   (lisp/harness-client-tools.el), saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
   writes a file (event `tools/file-written`), and desktop notifications
   (lisp/harness-notifications-desktop.el, see notifications), so they
   show where the user is and a click on one opens what it is about.
+  The `elisp` tool is not one of them: model-written code runs in a
+  child `emacs --batch' (lisp/harness-elisp.el), never in the UI, where
+  a blocking call could freeze it beyond recovery.
 - Project roots and file lists (lisp/harness-files.el) are computed on
   both sides with the same code; the UI lists files itself so `@`
   completion uses the user's projectile cache.
@@ -1521,7 +1524,7 @@ TRAMP prefixes come from the session host):
 | `glob` | Find files | pattern, path | read |
 | `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
 | `bash` | Bash | command, timeout, cwd | exec |
-| `elisp` | Emacs Lisp | code | exec |
+| `elisp` | Emacs Lisp | code, timeout | exec |
 | `emacs_buffers` | List buffers | filter, all | read |
 | `emacs_buffer` | Read buffer | name, offset, limit | read |
 | `emacs_describe` | Describe symbol | symbol | read |
@@ -1616,11 +1619,24 @@ how providers are set up.  A session sends at most
 past that it is told when it can send again.  `notification_providers`
 lists `notification/providers`: set up or not, used by default or not.
 
-`elisp` and the `emacs_*` tools are about the user's Emacs, so their
-handlers (`harness-tools-in-client NAME`) forward the call to the UI as
+The `emacs_*` tools are about the user's Emacs, so their handlers
+(`harness-tools-in-client NAME`) forward the call to the UI as
 `_harness/client/tool {name, input}`; `harness-client-tools-run` answers
-it there.  `write_file`/`edit_file` emit `tools/file-written PATH`; the UI
-reverts unmodified buffers visiting PATH.
+it there, under a deadline (`harness-tools--client-timeout'): a UI that
+cannot answer fails the call, logs, and shows a desktop notice, rather
+than leaving the turn pending.  `write_file`/`edit_file` emit
+`tools/file-written PATH`; the UI reverts unmodified buffers visiting
+PATH.
+
+The `elisp` tool evaluates in a child `emacs --batch' process, never in
+the UI: Emacs runs Lisp on one thread, so model-written code that blocks
+(a `call-process' waiting on a child, a loop that never yields) freezes
+typing and redisplay, and neither a timer nor a signal can end it.  The
+child gets the harness on its `load-path', the working directory as its
+`default-directory', a timeout, and the process tree killed when it
+overruns (lisp/harness-elisp.el); its result comes back as JSON.
+`harness-elisp-allow-ui-eval', off by default, restores in-UI
+evaluation for a user who asks for it and accepts that hazard.
 
 ### acp
 

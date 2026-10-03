@@ -45,6 +45,65 @@
 (defconst harness-tools--timeout 600
   "Default seconds a tool may run before it is cancelled.")
 
+(defvar harness-tools--client-timeout 15
+  "Seconds a tool about the user's Emacs may wait for the UI to answer.
+Internal, not an option (see docs/configuration-audit.md).  The
+`emacs_*' tools ask the Emacs showing the UI over `client/request'; a UI
+busy or blocked longer than this fails the tool call, with a desktop
+notice, instead of leaving the session waiting forever.")
+
+(defconst harness-tools--ui-notice-interval 300
+  "Seconds between desktop notices that the Emacs UI is not answering.")
+
+(defvar harness-tools--ui-notice-at 0
+  "When the UI was last reported unresponsive.")
+
+(declare-function harness-notifications-desktop-notify "harness-notifications-desktop" (&rest params))
+
+(defun harness-tools--ui-unresponsive (what seconds)
+  "Report that the Emacs UI did not answer WHAT within SECONDS.
+Logs the miss, and shows a desktop notification at most every
+`harness-tools--ui-notice-interval' seconds: a UI blocked in a
+subprocess call can stay that way for hours, and nothing else would
+say so."
+  (harness-log 'warn "tools: %s did not answer within %ss; the Emacs UI may be blocked" what seconds)
+  (when (> (- (float-time) harness-tools--ui-notice-at) harness-tools--ui-notice-interval)
+    (setq harness-tools--ui-notice-at (float-time))
+    (when (or (fboundp 'harness-notifications-desktop-notify)
+              (require 'harness-notifications-desktop nil t))
+      (ignore-errors
+        (harness-notifications-desktop-notify
+         :title "Harness: the Emacs UI is not responding"
+         :body (format "%s waited %ss for an answer. The UI may be blocked; see %s."
+                       what seconds harness-log-buffer-name)
+         :urgency 'critical)))))
+
+(defun harness-tools--with-deadline (promise seconds what)
+  "Return a promise settled as PROMISE, or rejected after SECONDS.
+WHAT names the work for the timeout, which is also reported as an
+unresponsive UI (`harness-tools--ui-unresponsive')."
+  (let ((result (harness-make-promise))
+        (timer nil) (settled nil))
+    (setq timer (run-at-time seconds nil
+                             (lambda ()
+                               (unless settled
+                                 (setq settled t)
+                                 (harness-tools--ui-unresponsive what seconds)
+                                 (harness-reject result
+                                                 (list 'timeout
+                                                       (format "%s did not answer within %ss"
+                                                               what seconds)))))))
+    (harness-then promise
+                  (lambda (value)
+                    (unless settled (setq settled t) (cancel-timer timer)
+                            (harness-resolve result value))
+                    nil)
+                  (lambda (err)
+                    (unless settled (setq settled t) (cancel-timer timer)
+                            (harness-reject result err))
+                    nil))
+    result))
+
 (cl-defstruct (harness-tool (:copier nil))
   ;; New slots go last, so a tool registered before a reload still reads
   ;; right should its module fail to load again (see `harness-tools--label').
@@ -144,15 +203,23 @@ call is about nothing in particular."
   "Return a tool handler that runs client tool NAME in the user's Emacs.
 The harness may run in its own process (see harness-server.el), so tools
 about the user's Emacs are executed there by `harness-client-tools-run',
-reached through a `_harness/client/tool' request to the UI."
+reached through a `_harness/client/tool' request to the UI.  The request
+has a deadline (`harness-tools--client-timeout'): a UI that cannot answer
+fails the call instead of hanging the session."
   (lambda (input _ctx)
     (if (not (harness-method-exists-p 'client/request))
         (harness-tool-error (format "%s needs the Emacs UI, which is not connected" name))
-      (harness-then (harness-call-async 'client/request "_harness/client/tool" (list :name name :input input))
-                    (lambda (r)
-                      (if (harness-json-true-p (plist-get r :is-error))
-                          (harness-tool-error (or (plist-get r :content) "failed"))
-                        (harness-tool-ok (or (plist-get r :content) ""))))))))
+      (harness-then
+       (harness-tools--with-deadline
+        (harness-call-async 'client/request "_harness/client/tool" (list :name name :input input))
+        harness-tools--client-timeout
+        (format "the Emacs UI (for %s)" name))
+       (lambda (r)
+         (if (harness-json-true-p (plist-get r :is-error))
+             (harness-tool-error (or (plist-get r :content) "failed"))
+           (harness-tool-ok (or (plist-get r :content) ""))))
+       (lambda (e)
+         (harness-tool-error (format "%s in the Emacs UI: %s" name (harness-error-message e))))))))
 
 (defun harness-tools--normalise-result (value)
   (cond ((and (listp value) (plist-member value :content))

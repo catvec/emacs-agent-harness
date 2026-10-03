@@ -34,7 +34,7 @@
   "Default maximum seconds a request may take, including streaming.")
 
 (cl-defstruct (harness-http-handle (:copier nil))
-  process url config-file
+  process url config-file body-file timeout timer
   (status nil) (headers nil) (header-buffer "")
   (headers-done nil) (body "")
   callback on-chunk on-headers
@@ -96,7 +96,10 @@
   (unless (harness-http-handle-done handle)
     (setf (harness-http-handle-done handle) t)
     (setq harness-http--active (delq handle harness-http--active))
+    (when-let* ((timer (harness-http-handle-timer handle))) (cancel-timer timer))
     (when-let* ((f (harness-http-handle-config-file handle)))
+      (ignore-errors (delete-file f)))
+    (when-let* ((f (harness-http-handle-body-file handle)))
       (ignore-errors (delete-file f)))
     (let ((cb (harness-http-handle-callback handle)))
       (when cb
@@ -137,6 +140,30 @@
         (insert (format "header = %S\n" (format "%s: %s" (car h) (cdr h))))))
     file))
 
+(defun harness-http--write-body (body binary)
+  "Write BODY to a mode 600 temp file; return its path.
+A request body never goes through `process-send-string': a body big
+enough to fill the pipe can be left half-written in Emacs's process
+write queue, which only another send would drain, and curl then waits
+forever for the rest of its stdin.  A file has neither problem."
+  (let ((file (make-temp-file "harness-http-" nil ".body"))
+        (coding-system-for-write (if binary 'binary 'utf-8-unix)))
+    (set-file-modes file #o600)
+    (write-region body nil file nil 'silent)
+    file))
+
+(defun harness-http--timed-out (handle)
+  "Fail HANDLE because the request outlived its timeout.
+`--max-time' cannot stop a curl that is still waiting for its stdin, so
+the request is stopped here, where the timer does run."
+  (unless (harness-http-handle-done handle)
+    (let ((process (harness-http-handle-process handle)))
+      (when (process-live-p process) (delete-process process)))
+    (harness-http--finish handle
+                          (list 'timeout
+                                (format "request timed out after %ss"
+                                        (harness-http-handle-timeout handle))))))
+
 (cl-defun harness-http-request (url &key (method "GET") headers body json binary
                                     callback on-chunk on-headers timeout)
   "Start an asynchronous HTTP request to URL.
@@ -159,15 +186,18 @@ with `harness-http-cancel'."
     (setq body (encode-coding-string body 'utf-8 t)))
   (when body
     (push (cons "Content-Length" (number-to-string (string-bytes body))) headers))
-  (let* ((config (harness-http--write-config url method headers))
+  (let* ((seconds (or timeout harness-http--default-timeout))
+         (config (harness-http--write-config url method headers))
+         (body-file (and body (harness-http--write-body body binary)))
          (handle (make-harness-http-handle :url url :callback callback
                                            :on-chunk on-chunk :on-headers on-headers
-                                           :config-file config :started (float-time)))
+                                           :config-file config :body-file body-file
+                                           :timeout seconds :started (float-time)))
          (stderr (generate-new-buffer " *harness-http-stderr*" t))
          (args (append (list "--silent" "--show-error" "--no-buffer" "--include"
-                             "--max-time" (number-to-string (or timeout harness-http--default-timeout))
+                             "--max-time" (number-to-string seconds)
                              "--config" config)
-                       (when body (list "--data-binary" "@-"))))
+                       (when body-file (list "--data-binary" (concat "@" body-file)))))
          (process (make-process :name "harness-http"
                                 :command (cons harness-http--curl-program args)
                                 :coding (if binary 'binary '(utf-8 . utf-8))
@@ -184,10 +214,10 @@ with `harness-http-cancel'."
     (set-process-sentinel (get-buffer-process stderr) #'ignore)
     (setf (harness-http-handle-process handle) process)
     (push handle harness-http--active)
-    (when body
-      (process-send-string process body))
-    (when (process-live-p process)
-      (process-send-eof process))
+    ;; Curl's own `--max-time' only counts the transfer; this watchdog is
+    ;; what ends a request whose curl is stuck before it ever connects.
+    (setf (harness-http-handle-timer handle)
+          (run-at-time (+ seconds 5) nil (lambda () (harness-http--timed-out handle))))
     handle))
 
 (defun harness-http-cancel (handle)

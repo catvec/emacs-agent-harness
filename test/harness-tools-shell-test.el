@@ -122,6 +122,24 @@
       (should (string-search "hidden" (plist-get r :content)))
       (should (plist-get (plist-get r :meta) :sandboxed)))))
 
+(ert-deftest harness-tools-shell-bash-timeout-kills-the-process-tree ()
+  "A timed-out command takes its children with it."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (let* ((pidfile (expand-file-name "child.pid" root))
+           (r (harness-tools-shell-test--call
+               "bash"
+               :command (format "sleep 300 & echo $! > %s; wait" (shell-quote-argument pidfile))
+               :timeout 2)))
+      (should (eq 'timeout (plist-get (plist-get r :meta) :exit)))
+      (should (file-exists-p pidfile))
+      (let ((child (string-to-number (string-trim (with-temp-buffer (insert-file-contents pidfile) (buffer-string))))))
+        (should (> child 0))
+        (let ((deadline (+ (float-time) 5)))
+          (while (and (eql 0 (signal-process child 0)) (< (float-time) deadline))
+            (sleep-for 0.1)))
+        (should-not (eql 0 (signal-process child 0)))))))
+
 ;;;; elisp
 
 (ert-deftest harness-tools-shell-elisp-values-output-and-messages ()
@@ -143,7 +161,7 @@
       (should (string-search "--- messages ---\nhello 42" c)))
     ;; Strings and long values.
     (should (equal "=> \"s\"" (plist-get (harness-tools-shell-test--call "elisp" :code "\"s\"") :content)))
-    (let ((harness-client-tools--elisp-max-value-chars 20))
+    (let ((harness-elisp--max-value-chars 20))
       (should (<= (length (plist-get (harness-tools-shell-test--call "elisp" :code "(make-string 500 ?x)") :content)) 24)))
     (should (eq 'exec (harness-tool-kind (harness-tool-get "elisp"))))
     (should (equal "Emacs Lisp: (+ 1 2)" (harness-tool-title "elisp" '(:code "(+ 1 2)\n(more)"))))))
@@ -163,10 +181,58 @@
       (should (string-search "End of file" (plist-get r :content))))
     (should (plist-get (harness-tools-shell-test--call "elisp" :code "  ") :is-error))
     ;; The timeout interrupts code that yields to the event loop.
-    (let* ((harness-client-tools--elisp-timeout 0.3)
+    (let* ((harness-elisp--timeout 0.3)
            (r (harness-tools-shell-test--call "elisp" :code "(sit-for 5) 'never")))
       (should (plist-get r :is-error))
       (should (string-search "exceeded" (plist-get r :content))))))
+
+(ert-deftest harness-tools-shell-elisp-runs-out-of-process ()
+  "The tool evaluates in a child Emacs, never in this one, with the
+harness on its load path."
+  (harness-tools-shell-test--setup)
+  (harness-test-with-temp-state
+    (let* ((content (plist-get (harness-tools-shell-test--call "elisp" :code "(emacs-pid)") :content))
+           (pid (string-trim (string-remove-prefix "=> " content))))
+      (should (string-prefix-p "=> " content))
+      (should-not (equal (number-to-string (emacs-pid)) pid)))
+    (should (string-search "harness-provider-openai"
+                           (plist-get (harness-tools-shell-test--call
+                                       "elisp" :code "(locate-library \"harness-provider-openai\")")
+                                      :content)))))
+
+(ert-deftest harness-tools-shell-elisp-timeout-kills-a-blocked-evaluation ()
+  "A blocking evaluation is killed, tree and all, at its timeout.
+This is the freeze this design exists for: a `call-process' waiting on
+a child never yields, so nothing in the evaluating Emacs can end it."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (let* ((pidfile (expand-file-name "blocked.pid" root))
+           (command (format "echo $$ > %s; sleep 300" (shell-quote-argument pidfile)))
+           (code (format "(call-process \"sh\" nil nil nil \"-c\" %S)" command))
+           (start (float-time))
+           (harness--process-kill-grace 0.3)
+           (r (harness-tools-shell-test--call "elisp" :timeout 1 :code code)))
+      (should (plist-get r :is-error))
+      (should (string-search "timed out" (plist-get r :content)))
+      (should (< (- (float-time) start) 15))
+      (should (file-exists-p pidfile))
+      (let ((pid (string-to-number (string-trim (with-temp-buffer (insert-file-contents pidfile) (buffer-string))))))
+        (should (> pid 0))
+        (let ((deadline (+ (float-time) 5)))
+          (while (and (eql 0 (signal-process pid 0)) (< (float-time) deadline))
+            (sleep-for 0.1)))
+        (should-not (eql 0 (signal-process pid 0)))))))
+
+(ert-deftest harness-tools-shell-elisp-in-ui-is-opt-in ()
+  "The UI refuses to evaluate elisp unless the user allowed it."
+  (harness-tools-shell-test--setup)
+  (harness-test-with-temp-state
+    (should-not harness-elisp-allow-ui-eval)
+    (let ((r (harness-client-tools-run "elisp" (list :code "(+ 1 2)"))))
+      (should (plist-get r :is-error))
+      (should (string-search "harness-elisp-allow-ui-eval" (plist-get r :content))))
+    (let ((harness-elisp-allow-ui-eval t))
+      (should (equal "=> 3" (plist-get (harness-client-tools-run "elisp" (list :code "(+ 1 2)")) :content))))))
 
 (provide 'harness-tools-shell-test)
 ;;; harness-tools-shell-test.el ends here
