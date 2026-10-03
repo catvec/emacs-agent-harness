@@ -273,6 +273,38 @@
         (harness-compose--drop-direct-save nil path)
         (should (equal path (plist-get (cadr harness-compose-attachments) :path)))))))
 
+(ert-deftest harness-ui-compose-dropped-link-with-junk-still-downloads ()
+  ;; A drop can carry a BOM, a newline, a tab or a NUL around the link
+  ;; (the class of \"URL rejected: No host present\": curl reads what the
+  ;; message does not show).  The box scrubs it, so the file arrives all
+  ;; the same and the attachment keeps the clean address.
+  (skip-unless (executable-find "curl"))
+  (harness-ui-compose-test-with
+    (let* ((server (harness-test-http-serve
+                    `(("/junk.png" 200 (("Content-Type" . "image/png")) ,harness-test-png))))
+           (url (harness-test-http-url server "/junk.png")))
+      (unwind-protect
+          (progn
+            (harness-compose-download (concat "\ufeff\t" url "\r\n\0") "junk.png")
+            (should (harness-ui-compose-test--pending))
+            (harness-test-wait #'harness-ui-compose-test--settled 10 "the download")
+            (let ((att (car harness-compose-attachments)))
+              (should (equal url (plist-get att :url)))
+              (should (equal "image/png" (plist-get att :mime)))
+              (should (equal harness-test-png (harness-ui-compose-test--bytes (plist-get att :path))))))
+        (delete-process server)))))
+
+(ert-deftest harness-ui-compose-link-with-no-host-is-refused-clearly ()
+  ;; No curl error for a link the box cannot fetch: it says so itself,
+  ;; with the link shown as it is, escapes and all.
+  (harness-ui-compose-test-with
+    (let ((message (error-message-string
+                    (should-error (harness-compose-download "https://") :type 'user-error))))
+      (should (string-match-p "not a link I can fetch" message))
+      (should (string-match-p "\"https://\"" message)))
+    (should-not harness-compose-attachments)
+    (should-not (harness-ui-compose-test--pending))))
+
 ;;;; Chips
 
 (ert-deftest harness-ui-compose-chips-show-thumbnails ()

@@ -82,10 +82,10 @@ oldest first."
                                                                       :max-size 1000)))
             (should (string-match-p "larger than 1000" err))
             (should-not (file-exists-p file)))
-          ;; Only web addresses are fetched.
-          (pcase-let ((`(,_dl ,err . ,_) (harness-http-test--download "file:///etc/hostname" file)))
-            (should (string-match-p "file" err))
-            (should-not (file-exists-p file))))
+          ;; Only links with a host to fetch: a file: URL has none, and
+          ;; is refused before curl is even run.
+          (should-error (harness-http-download "file:///etc/hostname" file) :type 'error)
+          (should-not (file-exists-p file)))
       (delete-process server))
     ;; Nobody listening.
     (let ((port (let ((p (make-network-process :name "harness-test-port" :server t :host "127.0.0.1"
@@ -139,6 +139,77 @@ oldest first."
   (should-not (harness-http-url-file-name "https://example.com/"))
   (should-not (harness-http-url-file-name "https://example.com"))
   (should (equal "\211PNG" (harness-http-unhex-bytes "%89PNG"))))
+
+(ert-deftest harness-http-cleaned-links ()
+  ;; A drop or a clipboard hands over what it likes: a NUL, a newline, a
+  ;; BOM, a zero width space.  curl reads those differently from how they
+  ;; print ("URL rejected: No host present" for a link that looks whole),
+  ;; so they are scrubbed before it ever sees them.
+  (let ((url "https://example.com/a/b.png"))
+    (should (equal url (harness-http-clean-url (concat "\ufeff" url "\r\n\0"))))
+    (should (equal url (harness-http-clean-url (concat "\357\273\277" url))))     ; BOM bytes
+    (should (equal url (harness-http-clean-url (concat "\u200b" url "\u2060 "))))
+    (should (equal url (harness-http-clean-url (concat "\n\t" url))))
+    (should (equal "https://exa\u00e9mple.com/x" (harness-http-clean-url "https://exa\u00e9mple.com/x")))
+    (should (equal "https://example.com/a%20b.png"
+                   (harness-http-clean-url "https://example.com/a%20b.png"))))
+  (should (harness-http-link-p "http://127.0.0.1:8080/x.png"))
+  (should (harness-http-link-p "ftp://example.com/x"))
+  (should-not (harness-http-link-p "https://"))
+  (should-not (harness-http-link-p "https:///x.png"))
+  (should-not (harness-http-link-p "example.com/x.png"))
+  (should-not (harness-http-link-p "file:///etc/hostname")))
+
+(ert-deftest harness-http-download-takes-a-link-with-junk-around-it ()
+  ;; The whole class of "URL rejected: No host present": the URL the drop
+  ;; gave is scrubbed, so the file arrives all the same.
+  (skip-unless (executable-find "curl"))
+  (let* ((server (harness-test-http-serve
+                  '(("/pic.png" 200 (("Content-Type" . "image/png")) "PNG!"))))
+         (file (expand-file-name "x.part" (harness-test-temp-dir))))
+    (unwind-protect
+        (pcase-let ((`(,dl ,err . ,_)
+                     (harness-http-test--download
+                      (concat "\ufeff\t" (harness-test-http-url server "/pic.png") "\r\n\0") file)))
+          (should-not err)
+          (should (equal "image/png" (harness-download-mime dl)))
+          (should (equal (harness-test-http-url server "/pic.png") (harness-download-url dl)))
+          (should (equal "PNG!" (with-temp-buffer (insert-file-contents-literally file) (buffer-string)))))
+      (delete-process server)))
+  ;; A link with no host is refused before curl runs, with the link shown
+  ;; as it really is.
+  (should-error (harness-http-download "https://" (make-temp-name "/tmp/x")) :type 'error))
+
+(ert-deftest harness-http-cancel-settles-before-the-kill ()
+  ;; Cancelling settles the download first, so nothing the kill or a
+  ;; sentinel does can leave it half-settled (a chip stuck "downloading").
+  (skip-unless (executable-find "curl"))
+  (let* ((server (harness-test-http-serve
+                  `(("/slow" 200 (("Content-Type" . "video/webm")) ,(make-string 40000 ?s)
+                     :chunks 40 :delay 0.2))))
+         (file (expand-file-name "x.part" (harness-test-temp-dir)))
+         (calls 0) (error nil) (dl nil) (settled-at nil))
+    (unwind-protect
+        (progn
+          (setq dl (harness-http-download (harness-test-http-url server "/slow") file
+                                          :callback (lambda (_dl err)
+                                                      (cl-incf calls)
+                                                      (setq error err settled-at (harness-download-done dl)))))
+          (harness-test-wait (lambda () (> (harness-http-download-received dl) 0)) 10 "the first bytes")
+          (harness-http-download-cancel dl)
+          ;; Settled before the process was killed, and exactly once.
+          (should (eq t settled-at))
+          (should (equal "cancelled" error))
+          (should (= 1 calls))
+          (should (harness-download-done dl))
+          (should-not (file-exists-p file))
+          (harness-test-wait (lambda () (not (process-live-p (harness-download-process dl)))) 5 "curl gone")
+          (accept-process-output nil 0.2)
+          (should (= 1 calls))
+          ;; Cancelling again, or after it settled, does nothing.
+          (harness-http-download-cancel dl)
+          (should (= 1 calls)))
+      (delete-process server))))
 
 (provide 'harness-http-test)
 ;;; harness-http-test.el ends here

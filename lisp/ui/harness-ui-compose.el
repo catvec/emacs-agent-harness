@@ -702,10 +702,16 @@ A fresh one is never touched: only files older than a day go."
 NAME is the name to give the file, else the server's or the link's.
 Meanwhile the chip of the download shows its progress, and its ×
 stops it; the message waits for it.  A link to a web page (HTML) is
-not downloaded: it goes into the box as text."
+not downloaded: it goes into the box as text.  A link that arrives
+with junk around it (a NUL, a newline, a byte order mark, a zero width
+space) is cleaned first; one that is no http, https or ftp link with a
+host to fetch is refused, shown with %S so that what was wrong with it
+shows."
   (interactive (list (read-string "Download and attach the link: ")))
-  (unless (string-match-p "\\`\\(?:https?\\|ftps?\\)://" url)
-    (user-error "Not a web link: %s" url))
+  (setq url (harness-http-clean-url url))
+  (harness-log 'debug "compose: link to download: %S" url)
+  (unless (and (string-match-p "\\`\\(?:https?\\|ftps?\\)://" url) (harness-http-link-p url))
+    (user-error "That is not a link I can fetch: %S" url))
   (unless harness-http-curl-program
     (user-error "Downloading a link needs curl"))
   (harness-compose--clean-partials)
