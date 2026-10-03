@@ -1859,9 +1859,11 @@ retries a stopped write-up or sends feedback on a backlog task's.  `I` or
 [Add session] makes an ongoing session a task.  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  `SPC` over a card, or [Answer…] / [Request…]
-on it, pops out the permission prompt or question its session waits on
-(`harness-ui-popout-at-point`), which the board reads through
-`harness-ui-pending`, its shared notion of what a session waits on.
+on it, pops out what the task at point needs -- the permission prompt or
+question its session waits on, a task's report -- through the shared
+`harness-ui-popout-at-point`, which runs whichever view of the item
+registered for it.  The board reads what a session waits on through
+`harness-ui-pending`, its shared notion of it.
 Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
