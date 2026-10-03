@@ -1170,7 +1170,26 @@ Give up after TIMEOUT seconds (default 90)."
       (setq harness-media--world
             (append (list :tasks (list :constant constant :python python :pagination pagination :slow slow
                                        :health health :settings settings :openapi openapi :csv csv :retry retry))
-                    harness-media--world)))))
+                    harness-media--world))
+      (harness-media--seed-recaps (plist-get harness-media--world :tasks)))))
+
+(defun harness-media--seed-recaps (tasks)
+  "Give TASKS their recap subtitles, as the recap module would.
+Every agent of the run is scripted, so the module is off (see
+`harness-media--setup-harness') and the pictures get hand-written
+recaps: the lines the model would have written by now."
+  (let ((now (float-time)))
+    (cl-loop for (key . recap)
+             in `((:constant . "Switched the API key check to hmac.compare_digest; the timing test passes")
+                  (:python . "Bumped requires-python to 3.12 and listed the supported versions in pyproject")
+                  (:pagination . "Added limit/offset paging to GET /orders, 50 by default and at most 200, with the total count")
+                  (:slow . "Logs method, path and duration for requests over 500 ms, and names the unit in the message")
+                  (:health . "Added /health and its test; waiting on whether readiness should check the database")
+                  (:settings . "Moved settings.py to a typed config object, so a bad environment variable fails at startup")
+                  (:openapi . "Wrote the OpenAPI 3.1 schema for the /orders endpoints in docs/openapi.yaml"))
+             for id = (plist-get tasks key)
+             when id do (harness-tasks--set id :recap recap :recap-at now
+                                            :recap-turns 3 :recap-tools 6))))
 
 (defun harness-media--build-sessions ()
   "Run the conversations the chat pictures and the session list show."
@@ -1669,7 +1688,10 @@ popout both show; the popout is a side window and keeps its height."
   (add-to-list 'load-path harness-media-root)
   (setq harness-state-directory (expand-file-name "~/.emacs.d/harness/")
         harness-process nil
-        harness-disabled-modules '(provider-claude provider-copilot provider-openai provider-bedrock provider-demo))
+        ;; Every agent is scripted, so recaps are seeded for the pictures
+        ;; instead (`harness-media--seed-recaps').
+        harness-disabled-modules '(provider-claude provider-copilot provider-openai provider-bedrock provider-demo
+                                                   recap))
   (require 'harness)
   (unless (harness-start) (error "The harness did not start cleanly"))
   ;; Chats take half the frame: the code beside them keeps 80 columns.

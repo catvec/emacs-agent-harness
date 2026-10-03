@@ -344,6 +344,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   first: a task it already has is refused rather than written up (drop
   it, or write it up anyway), and the write-up names the tasks working
   on the same code, to coordinate with instead of redoing their work.
+- Each card is one line, with a subtitle that recaps the task: what it is
+  doing or has done so far, written by a short model call and refreshed
+  at the first of so many turns, seconds or tool calls since the last
+  one, like a warranty's months or miles (see
+  `harness-tasks-recap-turns`, `harness-tasks-recap-seconds` and
+  `harness-tasks-recap-tool-calls`). The recap shows by default where it
+  matters most, in *Requires your input*, beside what the task waits
+  for; elsewhere `TAB` on a card, or a click on its chevron, shows it.
 - `C-c h m`, `C-c h T`, `C-c h p` and `C-c h i` set the model, thinking
   level, permission mode and non-interactive mode of the next task, or
   of the task at point. New tasks run in auto mode and are interactive

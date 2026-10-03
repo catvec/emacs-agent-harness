@@ -2018,5 +2018,19 @@ The refusal says what to fix, and the task keeps working."
       (should (member "hand_in" (funcall names sid)))
       (should (member "hand_in" (funcall names nil))))))
 
+(ert-deftest harness-tasks-recap-survives-a-restart ()
+  "A recap, and the counters it was made at, are kept in the store."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "recap me later")))
+        (harness-call 'task/set-recap id :recap "Wrote the parser and its tests"
+                      :recap-at 1700000000.0 :recap-turns 2 :recap-tools 3)
+        (harness-tasks-test--restart)
+        (let ((task (harness-tasks-test-task id)))
+          (should (equal "Wrote the parser and its tests" (plist-get task :recap)))
+          (should (= 1700000000.0 (plist-get task :recap-at)))
+          (should (= 2 (plist-get task :recap-turns)))
+          (should (= 3 (plist-get task :recap-tools))))))))
+
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here
