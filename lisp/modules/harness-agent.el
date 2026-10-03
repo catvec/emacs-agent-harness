@@ -56,7 +56,8 @@ Work carefully and verify what you do. Prefer the provided tools over guessing; 
   session-id promise handle (steps 0) cancelled
   steering                              ; pending (:node ID :text TEXT), oldest first
   text-node text-buf think-node think-buf
-  (pending 0) waiting-done stop-reason error hosted last-usage started)
+  (pending 0) waiting-done stop-reason error hosted last-usage started
+  ending)                               ; a tool ended the turn (hand_in)
 
 (defvar harness-agent--turns (make-hash-table :test 'equal)
   "Session id -> running `harness-agent-turn'.")
@@ -713,20 +714,24 @@ REASON is why the provider stopped (`cancelled', say)."
                    (harness-agent--remove-call sid (car call)))))))))
 
 (defun harness-agent--finish-turn (turn)
-  "End TURN cleanly as a tool asked, then stop its provider.
+  "End TURN cleanly as a tool asked, and stop its provider.
 The provider may still be streaming when a tool hands the work in
 (`:end-turn' on its result): the turn ends with `end-turn' as if the
-model had stopped itself, and no further step follows.  The request is
-cancelled after that, not before, so its news cannot race the turn's
-end into `cancelled' (`harness-agent--on-event' drops it).  The
-transcript keeps everything recorded so far."
-  (harness-agent--end turn 'end-turn)
+model had stopped itself, and no further step follows.  The provider
+is cancelled first, so it drops whatever it kept for a next step -- a
+scripted provider's remaining script -- which this turn will not take;
+marking the turn ending keeps the provider's own news of that cancel
+from ending it as `cancelled' instead.  The transcript keeps
+everything recorded so far."
+  (setf (harness-agent-turn-ending turn) t)
   (when-let* ((handle (harness-agent-turn-handle turn)))
-    (ignore-errors (funcall (plist-get handle :cancel)))))
+    (ignore-errors (funcall (plist-get handle :cancel))))
+  (harness-agent--end turn 'end-turn))
 
 (defun harness-agent--maybe-continue (turn)
   "Decide what happens once the provider is done and no tools are running."
   (when (and (harness-agent-turn-waiting-done turn)
+             (not (harness-agent-turn-ending turn))
              (zerop (harness-agent-turn-pending turn)))
     (setf (harness-agent-turn-waiting-done turn) nil)
     (let ((sid (harness-agent-turn-session-id turn))

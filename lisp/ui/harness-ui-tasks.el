@@ -488,15 +488,23 @@ a button whose label changes, a setting's value say, needs one."
   (car (plist-get (harness-ui-tasks--session task) :pending)))
 
 (defun harness-ui-tasks--card-buttons (task)
-  "Buttons for TASK's two most useful actions besides opening it."
+  "Buttons for TASK's two most useful actions besides opening it.
+A task that handed a report in (`hand_in') gets a [Report] button too:
+its final message and evidence, in a popout."
   (let ((id (plist-get task :id)))
-    (mapconcat (lambda (a)
-                 (harness-ui-tasks--button
-                  (format "[%s]" (car a))
-                  (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
-                  (car a) (nth 1 a)))
-               (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))
-               " ")))
+    (concat
+     (mapconcat (lambda (a)
+                  (harness-ui-tasks--button
+                   (format "[%s]" (car a))
+                   (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
+                   (car a) (nth 1 a)))
+                (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))
+                " ")
+     (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
+       (concat " " (harness-ui-tasks--button
+                     "[Report]"
+                     (lambda () (harness-ui-report-popout task))
+                     "What it handed in: the final message and the evidence" "report"))))))
 
 ;;;; Rendering
 
@@ -1263,6 +1271,7 @@ anything that moves a task without one, so a board never drifts.")
   (define-key map (kbd "D") #'harness-ui-tasks-delete)
   (define-key map (kbd "A") #'harness-ui-tasks-toggle-archived)
   (define-key map (kbd "V") #'harness-ui-tasks-toggle-review)
+  (define-key map (kbd "SPC") #'harness-ui-tasks-popout-at-point)
   (define-key map (kbd "I") #'harness-ui-tasks-adopt)
   (define-key map (kbd "b") #'harness-ui-tasks-btw)
   (define-key map (kbd "g") #'harness-ui-tasks-refresh)
@@ -1332,6 +1341,7 @@ anything that moves a task without one, so a board never drifts.")
         (". X" "Archive completed" harness-ui-tasks-archive-done)
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
         (". V" "Review on or off" harness-ui-tasks-toggle-review)
+        (". SPC" "Pop out at point" harness-ui-tasks-popout-at-point)
         (". g" "Refresh" harness-ui-tasks-refresh)]
        ["Compose box"
         ("C-c C-c" "Submit" harness-ui-tasks-submit)
@@ -1734,6 +1744,14 @@ sent at once."
      (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
                                         "Sending the task back")
         (message "Sent back: its session works on your feedback")))))
+
+(defun harness-ui-tasks-popout-at-point ()
+  "Pop out what the task at point has: its report, or what it waits on.
+In the compose box it types a space, as SPC should."
+  (interactive)
+  (if (harness-compose-in-p)
+      (insert " ")
+    (harness-ui-popout-at-point)))
 
 (defun harness-ui-tasks--count-tasks (n)
   "N tasks in words: \"task\" for one, \"3 tasks\" for more."
