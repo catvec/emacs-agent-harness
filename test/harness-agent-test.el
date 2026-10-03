@@ -15,7 +15,7 @@
      (clrhash harness-sessions)
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
@@ -295,7 +295,7 @@ It is never added to the running turn: no steering node, no
 It used to stay pending, so every later stop stepped again until max-steps."
   (harness-agent-test-with
     (let ((id (harness-agent-test-session))
-          (harness-provider-demo-delay 0.05)
+          (harness-provider-demo--delay 0.05)
           (steps 0))
       (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))
       (let ((p (harness-call 'agent/prompt id "hello")))
@@ -371,7 +371,7 @@ user message after that answer: \"No user message to send\"."
 (ert-deftest harness-agent-cancel ()
   (harness-agent-test-with
     (let* ((id (harness-agent-test-session))
-           (harness-provider-demo-delay 0.2)
+           (harness-provider-demo--delay 0.2)
            (p (harness-call 'agent/prompt id "tour")))
       (harness-test-wait (lambda () (harness-agent-running-p id)))
       (should (harness-call 'agent/cancel id))
@@ -385,7 +385,7 @@ user message after that answer: \"No user message to send\"."
   "Text a running turn has streamed is written when the harness exits."
   (harness-agent-test-with
     (let* ((id (harness-agent-test-session))
-           (harness-provider-demo-delay 0.3)
+           (harness-provider-demo--delay 0.3)
            (harness-provider-demo-script-override
             '((:type text :delta "Hello") (:type text :delta ", world")
               (:type text :delta "!") (:type done :stop-reason end-turn)))
@@ -466,7 +466,7 @@ user message after that answer: \"No user message to send\"."
   (harness-agent-test-with
     (let* ((id (harness-agent-test-session))
            (seen (harness-agent-test-record-activity id))
-           (harness-agent-progress-interval 0.2)
+           (harness-agent--progress-interval 0.2)
            (finish nil)
            (decide nil)
            (harness-provider-demo-script-override

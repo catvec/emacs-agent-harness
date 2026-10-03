@@ -59,7 +59,7 @@
 
 ;;;; Customisation
 
-(defcustom harness-perms-auto-allow-tools
+(defconst harness-perms--auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
     "emacs_buffers" "emacs_describe" "emacs_messages" "web_search" "notify")
   "Tools that never need approval, in every permission mode.
@@ -69,8 +69,7 @@ sessions can look things up; `web_fetch' is not, because it reaches
 whatever URL the agent names.  `notify' only reaches the user, through
 the notification providers they set up, so unattended sessions can
 tell them when they are needed.  Standing rules in `harness-perms-rules'
-are checked first and can still deny any of these tools."
-  :type '(repeat string) :group 'harness)
+are checked first and can still deny any of these tools.")
 
 (defcustom harness-perms-rules nil
   "Standing permission rules that apply to every session.
@@ -111,10 +110,9 @@ PROVIDER:NAME forces that model, and nil uses the session's own model."
                  (string :tag "Model"))
   :group 'harness)
 
-(defcustom harness-perms-auto-timeout 30
+(defconst harness-perms--auto-timeout 30
   "Seconds the auto-mode judge may take before it counts as giving no verdict.
-The call then asks the user, or is denied in a non-interactive session."
-  :type 'number :group 'harness)
+The call then asks the user, or is denied in a non-interactive session.")
 
 ;;;; Runtime state (survives reloads)
 
@@ -571,7 +569,7 @@ DECISION is returned unchanged when the mode leaves the question open."
           (list :behavior 'deny :reason (format "denied by a standing rule for %s" (or (plist-get rule :tool) "every tool"))
                 :hint "Do not retry this call; choose a different approach.")
         (list :behavior 'allow :reason (format "allowed by a standing rule for %s" (or (plist-get rule :tool) "every tool")))))
-     ((member tool harness-perms-auto-allow-tools)
+     ((member tool harness-perms--auto-allow-tools)
       (list :behavior 'allow :reason (format "%s never needs approval" tool)))
      ((eq mode 'yolo) (list :behavior 'allow :reason "yolo mode"))
      ((and (eq mode 'accept-edits) (memq kind '(read write)))
@@ -690,10 +688,10 @@ away.  DECISION is the current value and NEXT continues the chain."
                                            (plist-put (copy-sequence decision) :no-verdict
                                                       (or failure "it gave no answer"))
                                          d))))))
-        (setq timer (run-at-time harness-perms-auto-timeout nil
+        (setq timer (run-at-time harness-perms--auto-timeout nil
                                  (lambda ()
                                    (harness-log 'warn "perms: auto judge timed out for %s" (plist-get request :tool))
-                                   (setq failure (format "it took longer than %ss" harness-perms-auto-timeout))
+                                   (setq failure (format "it took longer than %ss" harness-perms--auto-timeout))
                                    (funcall finish decision)
                                    (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
         (condition-case err
@@ -979,7 +977,7 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
   (let ((session (harness-perms--session session-id)))
     (list :mode (harness-perms--mode-of session)
           :non-interactive (and (harness-perms--non-interactive-p session) t)
-          :auto-allow harness-perms-auto-allow-tools
+          :auto-allow harness-perms--auto-allow-tools
           :session (gethash session-id harness-perms--session-rules)
           :always harness-perms-rules
           :roots (harness-perms-roots session))))

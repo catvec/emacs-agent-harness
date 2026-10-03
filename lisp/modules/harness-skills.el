@@ -42,13 +42,11 @@ global one with the same name."
   :type '(repeat (choice directory function))
   :group 'harness)
 
-(defcustom harness-skills-prompt-limit 40
-  "Maximum number of skills listed in the system prompt index."
-  :type 'integer :group 'harness)
+(defconst harness-skills--prompt-limit 40
+  "Maximum number of skills listed in the system prompt index.")
 
-(defcustom harness-skills-description-limit 120
-  "Descriptions longer than this are truncated in listings."
-  :type 'integer :group 'harness)
+(defconst harness-skills--description-limit 120
+  "Descriptions longer than this are truncated in listings.")
 
 (defconst harness-skills-file-name "SKILL.md"
   "Name of the file that makes a directory a skill.")
@@ -288,7 +286,7 @@ when no such skill exists."
 (defun harness-skills--format-line (skill)
   "Return a one-line description of SKILL for listings."
   (let ((desc (harness-truncate-end (harness-first-line (or (plist-get skill :description) ""))
-                                    harness-skills-description-limit)))
+                                    harness-skills--description-limit)))
     (if (string-empty-p desc)
         (plist-get skill :name)
       (format "%s — %s" (plist-get skill :name) desc))))
@@ -374,7 +372,7 @@ Registered on `agent/system-prompt'.  Does nothing when no skill exists."
     (if (null skills)
         prompt
       (let* ((total (length skills))
-             (shown (seq-take skills harness-skills-prompt-limit)))
+             (shown (seq-take skills harness-skills--prompt-limit)))
         (concat (or prompt "")
                 (if (harness-string-blank-p prompt) "" "\n\n")
                 "## Available skills\n"

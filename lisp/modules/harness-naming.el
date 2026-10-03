@@ -11,7 +11,7 @@
 ;; transcript is sent again as plain messages.
 ;;
 ;; The result is sanitised (first line, no quotes or markdown, at most
-;; `harness-naming-max-length' characters) and stored with
+;; `harness-naming--max-length' characters) and stored with
 ;; `session/update', which adds the "renamed to" hint.
 ;;
 ;; The request's system prompt goes through the sync filter
@@ -30,20 +30,17 @@
   "When non-nil, name a nameless session after its first turn."
   :type 'boolean :group 'harness)
 
-(defcustom harness-naming-max-length 60
-  "Longest name the model may give a session."
-  :type 'integer :group 'harness)
+(defconst harness-naming--max-length 60
+  "Longest name the model may give a session.")
 
-(defcustom harness-naming-system-prompt
+(defconst harness-naming--base-system-prompt
   "You write short titles for conversations between a software engineer and a coding agent.  A good title says what the conversation is about in 3 to 6 words, like a commit subject or a ticket title."
   "System prompt for the naming request.
-Modules add to it per session through the `naming/system-prompt' filter."
-  :type 'string :group 'harness)
+Modules add to it per session through the `naming/system-prompt' filter.")
 
-(defcustom harness-naming-request-text
+(defconst harness-naming--request-text
   "Give the conversation above a title of 3 to 6 words.  Reply with the title only: no quotes, no trailing period, no markdown, no explanation."
-  "User message that asks the model for a title."
-  :type 'string :group 'harness)
+  "User message that asks the model for a title.")
 
 (defconst harness-naming--skip-kinds '(btw subagent)
   "Session kinds that are never named automatically.")
@@ -57,25 +54,25 @@ Modules add to it per session through the `naming/system-prompt' filter."
   "Turn model output TEXT into a session name, or nil when nothing is left.
 Keeps the first non-blank line, strips markdown markers, quotes and a
 trailing period, collapses whitespace and truncates to
-`harness-naming-max-length' characters."
+`harness-naming--max-length' characters."
   (let ((line (harness-first-line (or text ""))))
     (setq line (replace-regexp-in-string "\\`\\(?:title\\|name\\)[ \t]*:[ \t]*" "" line nil nil nil))
     (setq line (replace-regexp-in-string "[*_`#>]+" "" line))
     (setq line (string-trim line "[][ \t\"'“”‘’(){}<>.,:;!?-]+" "[][ \t\"'“”‘’(){}<>.,:;!?-]+"))
     (setq line (replace-regexp-in-string "[ \t]+" " " line))
     (unless (string-empty-p line)
-      (harness-truncate-end line harness-naming-max-length))))
+      (harness-truncate-end line harness-naming--max-length))))
 
 ;;;; Naming
 
 (defun harness-naming--system-prompt (session)
   "Return the naming system prompt for SESSION after `naming/system-prompt'."
-  (harness-run-filter 'naming/system-prompt harness-naming-system-prompt session))
+  (harness-run-filter 'naming/system-prompt harness-naming--base-system-prompt session))
 
 (defun harness-naming--messages (session-id)
   "Return the naming messages for SESSION-ID: the transcript plus the question."
   (let* ((messages (harness-call 'session/messages session-id))
-         (ask (list :type "text" :text harness-naming-request-text))
+         (ask (list :type "text" :text harness-naming--request-text))
          (last (car (last messages))))
     (if (and last (eq (plist-get last :role) 'user))
         (append (butlast messages)

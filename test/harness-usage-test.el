@@ -14,7 +14,7 @@
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-usage--warned)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)

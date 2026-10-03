@@ -34,13 +34,8 @@
 (defgroup harness-ui-worktree nil
   "The worktree list." :group 'harness-ui)
 
-(defcustom harness-ui-worktree-buffer-name "*harness worktrees*"
-  "Name of the worktree list buffer."
-  :type 'string :group 'harness-ui-worktree)
-
-(defcustom harness-ui-worktree-branch-prefix "harness/"
-  "Prefix proposed for the branch of a new worktree."
-  :type 'string :group 'harness-ui-worktree)
+(defconst harness-ui-worktree--buffer-name "*harness worktrees*"
+  "Name of the worktree list buffer.")
 
 (defface harness-worktree-main-face '((t :inherit bold))
   "The main worktree." :group 'harness-ui-worktree)
@@ -297,7 +292,7 @@
   "List the git worktrees of the repository at ROOT (default: this project)."
   (interactive)
   (let ((start (expand-file-name (or root (harness-ui--default-directory))))
-        (buf (get-buffer-create harness-ui-worktree-buffer-name)))
+        (buf (get-buffer-create harness-ui-worktree--buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-worktree-mode) (harness-ui-worktree-mode))
       (setq harness-ui-worktree--root (harness-ui-worktree--dir start)
@@ -337,16 +332,17 @@
   (harness-ui-worktree-dired))
 
 (defun harness-ui-worktree--read-branch ()
-  "Read a branch name for a new worktree with a generated default."
-  (let ((default (concat harness-ui-worktree-branch-prefix (harness-short-id 6))))
-    (let ((name (read-string (format "Branch (default %s): " default) nil nil default)))
-      (if (string-empty-p name) default name))))
+  "Read a branch name for a new worktree, or nil to have the harness name one.
+The harness names it after `harness-worktree-branch-prefix'."
+  (let ((name (string-trim (read-string "Branch (empty for a new one): "))))
+    (unless (string-empty-p name) name)))
 
 (defun harness-ui-worktree--create (root branch base callback)
-  "Create a worktree of ROOT on BRANCH from BASE, then call CALLBACK with it."
-  (message "Creating worktree %s…" branch)
+  "Create a worktree of ROOT on BRANCH from BASE, then call CALLBACK with it.
+A nil BRANCH has the harness make up a new branch."
+  (message "Creating worktree%s…" (if branch (concat " " branch) ""))
   (harness-ui-call "_harness/worktree/create"
-                   (append (list :root root :branch branch) (and base (list :base base)))
+                   (append (list :root root) (and branch (list :branch branch)) (and base (list :base base)))
                    callback))
 
 (defun harness-ui-worktree-create (branch &optional base)
@@ -470,7 +466,8 @@ before the harness locked them, or registered again after a prune."
      (lambda (wt)
        (let ((path (plist-get wt :path)))
          (harness-ui-call "_harness/session/fork"
-                          (list :id session-id :kind "fork" :cwd path :worktree path :name branch)
+                          (list :id session-id :kind "fork" :cwd path :worktree path
+                                :name (or branch (plist-get wt :branch)))
                           (lambda (child)
                             (harness-ui-refresh-sessions
                              (lambda (_)
@@ -514,7 +511,7 @@ before the harness locked them, or registered again after a prune."
 
 (defun harness-ui-worktree--buffer ()
   "Return the live worktree buffer, or nil."
-  (let ((b (get-buffer harness-ui-worktree-buffer-name)))
+  (let ((b (get-buffer harness-ui-worktree--buffer-name)))
     (and b (with-current-buffer b (derived-mode-p 'harness-ui-worktree-mode)) b)))
 
 (defun harness-ui-worktree--on-event (event args)

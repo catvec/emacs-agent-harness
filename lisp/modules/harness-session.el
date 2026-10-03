@@ -33,12 +33,10 @@
 (require 'harness-core)
 (require 'harness-util)
 
-(defvar harness-default-model)
 (defvar harness-state-directory)
 
-(defcustom harness-session-save-delay 0.3
-  "Seconds of quiet before a changed session record is written to disk."
-  :type 'number :group 'harness)
+(defconst harness-session--save-delay 0.3
+  "Seconds of quiet before a changed session record is written to disk.")
 
 (cl-defstruct (harness-session (:copier nil))
   id name kind project cwd host worktree model permission-mode thinking non-interactive
@@ -163,7 +161,7 @@
   "Mark S changed: update the timestamp, schedule a save, emit `session/changed'."
   (setf (harness-session-updated s) (float-time))
   (harness-debounce (list 'harness-session (harness-session-id s))
-                    harness-session-save-delay #'harness-session--save (harness-session-id s))
+                    harness-session--save-delay #'harness-session--save (harness-session-id s))
   (harness-session--announce s))
 
 (defun harness-session-flush ()
@@ -240,8 +238,7 @@ HEAD defaults to the session head."
          (cwd (file-name-as-directory (expand-file-name cwd)))
          (project (or (plist-get plist :project)
                       (if (harness-method-exists-p 'project/root) (harness-call 'project/root cwd) cwd)))
-         (model (or (plist-get plist :model) (harness-session--config 'harness-model cwd)
-                    (and (boundp 'harness-default-model) harness-default-model)))
+         (model (or (plist-get plist :model) (harness-session--config 'harness-model cwd)))
          (s (make-harness-session)))
     (setf (harness-session-id s) (or (plist-get plist :id) (harness-uuid))
           (harness-session-name s) (plist-get plist :name)
@@ -335,7 +332,7 @@ FILTER keys: :project :status :kind :parent-id :active."
 
 (harness-defmethod session/set-status (id status)
   "Set the status of session ID to STATUS (idle, running, blocked, inactive).
-The record is written at once rather than after `harness-session-save-delay',
+The record is written at once rather than after `harness-session--save-delay',
 so a harness that dies mid-turn leaves the session saved as running and the
 next start settles its turn."
   (let ((s (harness-session--get id)))

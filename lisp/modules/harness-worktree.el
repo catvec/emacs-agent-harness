@@ -36,10 +36,6 @@
 
 ;;;; Customisation
 
-(defcustom harness-worktree-git-program "git"
-  "Name of the git executable used for worktree operations."
-  :type 'string :group 'harness)
-
 (defcustom harness-worktree-directory-function #'harness-worktree-default-directory
   "Function returning the directory for a new worktree.
 Called with the repository ROOT and the BRANCH name; must return an
@@ -50,11 +46,10 @@ absolute path that does not exist yet."
   "Prefix of branch names generated for new worktrees."
   :type 'string :group 'harness)
 
-(defcustom harness-worktree-subdirectory ".worktrees"
+(defconst harness-worktree--subdirectory ".worktrees"
   "Directory inside the repository root that holds default worktrees.
 `worktree/create' writes a `.gitignore' of `*' into it so the main
-checkout's status stays clean."
-  :type 'string :group 'harness)
+checkout's status stays clean.")
 
 (defconst harness-worktree-lock-prefix "harness: "
   "Start of the reason of every lock the harness puts on a worktree.
@@ -70,9 +65,9 @@ Those are the repositories whose existing worktrees
 
 (defun harness-worktree-default-directory (root branch)
   "Return ROOT/.worktrees/BRANCH with slashes in BRANCH replaced.
-The parent directory is `harness-worktree-subdirectory'."
+The parent directory is `harness-worktree--subdirectory'."
   (let ((leaf (replace-regexp-in-string "/" "-" branch)))
-    (expand-file-name leaf (expand-file-name harness-worktree-subdirectory root))))
+    (expand-file-name leaf (expand-file-name harness-worktree--subdirectory root))))
 
 (defun harness-worktree--ignore-container (root path)
   "Keep the directory holding worktree PATH out of ROOT's git status.
@@ -103,7 +98,7 @@ The promise rejects with `harness-error' carrying git's stderr when
 the command fails."
   (let ((cwd (file-name-as-directory (expand-file-name cwd))))
     (harness-then
-     (harness-run-command (cons harness-worktree-git-program args) :cwd cwd
+     (harness-run-command (cons "git" args) :cwd cwd
                           :name "harness-git")
      (lambda (result)
        (if (eql (plist-get result :exit) 0)
@@ -215,7 +210,7 @@ is gone; the main worktree comes first."
 (defun harness-worktree--branch-exists-p (root branch)
   "Return a promise of non-nil when BRANCH exists in the repository at ROOT."
   (harness-then
-   (harness-run-command (list harness-worktree-git-program "rev-parse" "--verify" "--quiet"
+   (harness-run-command (list "git" "rev-parse" "--verify" "--quiet"
                               (concat "refs/heads/" branch))
                         :cwd root :name "harness-git")
    (lambda (result) (eql (plist-get result :exit) 0))))
@@ -363,7 +358,7 @@ missing (`worktree/remove' takes those away)."
   (let ((root (file-name-as-directory (expand-file-name root)))
         (args (list "worktree" "prune" "-v")))
     (harness-then
-     (harness-run-command (cons harness-worktree-git-program args) :cwd root :name "harness-git")
+     (harness-run-command (cons "git" args) :cwd root :name "harness-git")
      (lambda (result)
        (unless (eql (plist-get result :exit) 0)
          (signal 'harness-error (cdr (harness-worktree--error args result))))

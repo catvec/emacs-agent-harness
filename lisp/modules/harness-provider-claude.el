@@ -64,7 +64,7 @@
 ;; weeks) and its extra usage come from usage reports and
 ;; `rate_limit_event' messages.  `provider/quota' returns them, fetched
 ;; again through a live process, or a short-lived probe process when
-;; none runs, once they are older than `harness-provider-claude-quota-ttl';
+;; none runs, once they are older than `harness-provider-claude--quota-ttl';
 ;; every change is announced as `provider/quota-updated'.
 ;;
 ;; Nothing here blocks: output is handled in a process filter, death in
@@ -89,9 +89,8 @@
   "Path to the `claude' command line program."
   :type 'string :group 'harness)
 
-(defcustom harness-provider-claude-interrupt-timeout 3
-  "Seconds to wait after an interrupt before killing the CLI process."
-  :type 'number :group 'harness)
+(defconst harness-provider-claude--interrupt-timeout 3
+  "Seconds to wait after an interrupt before killing the CLI process.")
 
 (defcustom harness-provider-claude-extra-args nil
   "Extra command line arguments appended to every `claude' invocation."
@@ -126,20 +125,17 @@ the harness's say; managed settings may forbid it."
                  (repeat :tag "Other arguments" string))
   :group 'harness)
 
-(defcustom harness-provider-claude-quota-ttl 60
+(defconst harness-provider-claude--quota-ttl 60
   "Seconds after which the plan's quota report counts as stale.
 A stale report is fetched again after a turn and when `provider/quota'
 is asked.  The report comes from the CLI's usage endpoint and makes no
-model call.  nil fetches it only when nothing is known yet."
-  :type '(choice (const :tag "Only once" nil) number) :group 'harness)
+model call.  nil fetches it only when nothing is known yet.")
 
-(defcustom harness-provider-claude-probe-timeout 20
-  "Seconds to wait for a usage report before answering with what is known."
-  :type 'number :group 'harness)
+(defconst harness-provider-claude--probe-timeout 20
+  "Seconds to wait for a usage report before answering with what is known.")
 
-(defcustom harness-provider-claude-progress-interval 0.25
-  "Seconds between reports of how much of a tool call's input has streamed."
-  :type 'number :group 'harness)
+(defconst harness-provider-claude--progress-interval 0.25
+  "Seconds between reports of how much of a tool call's input has streamed.")
 
 ;;;; Constants
 
@@ -750,12 +746,12 @@ BLOCK's keys all exist from the start, so it is updated in place."
 
 (defun harness-provider-claude--input-progress (entry chars)
   "Count CHARS more characters of the tool input streaming on ENTRY.
-Reports go out at most every `harness-provider-claude-progress-interval'
+Reports go out at most every `harness-provider-claude--progress-interval'
 seconds; one held back goes out when the interval is up, unless the
 block has ended by then, so a report never follows the call it is about."
   (when-let* ((block (gethash (harness-provider-claude-session-id entry) harness-provider-claude--blocks)))
     (setf (plist-get block :chars) (+ chars (plist-get block :chars)))
-    (let ((wait (- (+ (plist-get block :sent-at) harness-provider-claude-progress-interval) (float-time))))
+    (let ((wait (- (+ (plist-get block :sent-at) harness-provider-claude--progress-interval) (float-time))))
       (cond ((<= wait 0) (harness-provider-claude--report-input entry block))
             ((null (plist-get block :timer))
              (setf (plist-get block :timer)
@@ -1189,13 +1185,13 @@ the turn is priced from the model catalogue instead."
 (defun harness-provider-claude--stale-p ()
   "Non-nil when the account status should be fetched again.
 Asking counts like an answer, so a CLI that cannot report usage is not
-asked again before `harness-provider-claude-quota-ttl' has passed."
+asked again before `harness-provider-claude--quota-ttl' has passed."
   (let* ((status harness-provider-claude--status)
          (last (max (or (plist-get status :updated) 0) (or harness-provider-claude--asked 0))))
     (cond ((zerop last) t)
           ((eq (plist-get status :billing) 'api) nil)
-          ((null harness-provider-claude-quota-ttl) nil)
-          (t (> (- (float-time) last) harness-provider-claude-quota-ttl)))))
+          ((null harness-provider-claude--quota-ttl) nil)
+          (t (> (- (float-time) last) harness-provider-claude--quota-ttl)))))
 
 (defun harness-provider-claude--live-entry ()
   "Return a session record with a live CLI process, idle ones first, or nil."
@@ -1220,7 +1216,7 @@ asked again before `harness-provider-claude-quota-ttl' has passed."
   "Fetch a fresh usage report; return a promise of the account status.
 ENTRY's process asks when it is alive, else any live process, else a
 probe started for the purpose.  The promise resolves with what is known
-once the report arrives, or after `harness-provider-claude-probe-timeout'."
+once the report arrives, or after `harness-provider-claude--probe-timeout'."
   (if harness-provider-claude--refresh
       (nth 1 harness-provider-claude--refresh)
     (let ((promise (harness-make-promise)))
@@ -1230,7 +1226,7 @@ once the report arrives, or after `harness-provider-claude-probe-timeout'."
                             (harness-provider-claude--start-probe)))
                  (id (harness-provider-claude--request-usage asker)))
             (setq harness-provider-claude--refresh
-                  (list id promise (run-at-time harness-provider-claude-probe-timeout nil
+                  (list id promise (run-at-time harness-provider-claude--probe-timeout nil
                                                 #'harness-provider-claude--settle-refresh))))
         (error
          (harness-log 'warn "provider-claude: cannot ask for usage: %s" (harness-error-message err))
@@ -1271,7 +1267,7 @@ its usage report has arrived."
       (harness-log 'info "provider-claude: probing the account and its quota")
       (harness-provider-claude--send
        entry '(:type "control_request" :request_id "init-1" :request (:subtype "initialize")))
-      (run-at-time (+ 5 harness-provider-claude-probe-timeout) nil
+      (run-at-time (+ 5 harness-provider-claude--probe-timeout) nil
                    #'harness-provider-claude--end-probe entry t)
       entry)))
 
@@ -1487,7 +1483,7 @@ its usage report has arrived."
        entry (list :type "control_request" :request_id (harness-uuid)
                    :request '(:subtype "interrupt")))
       (setf (harness-provider-claude-session-cancel-timer entry)
-            (run-at-time harness-provider-claude-interrupt-timeout nil
+            (run-at-time harness-provider-claude--interrupt-timeout nil
                          #'harness-provider-claude--force-cancel entry)))))
 
 (defun harness-provider-claude--force-cancel (entry)
@@ -1509,7 +1505,7 @@ resumes it with --fork-session so the cached prefix is reused."
   "Return a promise of how the account is billed and of its plan quota.
 The shape is the one `provider/quota' documents.  A new usage report is
 fetched first when REFRESH is non-nil or the last one is stale (see
-`harness-provider-claude-quota-ttl'); it makes no model call."
+`harness-provider-claude--quota-ttl'); it makes no model call."
   (if (or refresh (harness-provider-claude--stale-p))
       (harness-provider-claude--refresh)
     (harness-resolved harness-provider-claude--status)))

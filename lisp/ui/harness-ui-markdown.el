@@ -61,9 +61,8 @@
   "Fenced block language names mapped to major modes."
   :type '(alist :key-type string :value-type symbol) :group 'harness-ui-markdown)
 
-(defcustom harness-ui-markdown-fontify-limit 40000
-  "Code blocks longer than this many characters are not fontified."
-  :type 'integer :group 'harness-ui-markdown)
+(defconst harness-ui-markdown--fontify-limit 40000
+  "Code blocks longer than this many characters are not fontified.")
 
 ;;;; Inline rendering
 
@@ -139,7 +138,7 @@
 (defun harness-ui-markdown--fontify-code (code lang)
   "Return CODE fontified with the major mode for LANG when possible."
   (let ((mode (and lang (cdr (assoc (downcase lang) harness-ui-markdown-language-modes)))))
-    (if (and mode (fboundp mode) (< (length code) harness-ui-markdown-fontify-limit))
+    (if (and mode (fboundp mode) (< (length code) harness-ui-markdown--fontify-limit))
         (condition-case nil
             (with-temp-buffer
               (insert code)

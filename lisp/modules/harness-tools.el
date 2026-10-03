@@ -42,9 +42,8 @@
   "Tool outputs longer than this are saved to a file and truncated."
   :type 'integer :group 'harness)
 
-(defcustom harness-tools-timeout 600
-  "Default seconds a tool may run before it is cancelled."
-  :type 'number :group 'harness)
+(defconst harness-tools--timeout 600
+  "Default seconds a tool may run before it is cancelled.")
 
 (cl-defstruct (harness-tool (:copier nil))
   ;; New slots go last, so a tool registered before a reload still reads
@@ -338,7 +337,7 @@ model is told."
 (defun harness-tools--run-handler (tool input ctx)
   "Run TOOL's handler; return a promise of a normalised result, with timeout."
   (harness-with-promise (resolve reject)
-    (let* ((timeout (or (harness-tool-timeout tool) harness-tools-timeout))
+    (let* ((timeout (or (harness-tool-timeout tool) harness-tools--timeout))
            (timer nil)
            (settled nil)
            (finish (lambda (value)

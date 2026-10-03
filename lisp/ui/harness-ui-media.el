@@ -62,9 +62,8 @@ Nil auto-detects pw-record, arecord or ffmpeg (PulseAudio input)."
   "Playback volume in percent for external players."
   :type 'integer :group 'harness-ui-media)
 
-(defcustom harness-ui-media-thumbnail-width 320
-  "Width in pixels of generated video thumbnails."
-  :type 'integer :group 'harness-ui-media)
+(defconst harness-ui-media--thumbnail-width 320
+  "Width in pixels of generated video thumbnails.")
 
 (defvar harness-ui-media-attach-function nil
   "Function called with an ATTACHMENT plist when a recording finishes.
@@ -399,7 +398,7 @@ desktop's player and is done."
 ffmpeg takes the frame a second in, then the first one, for a clip
 shorter than that.  Nil when neither ffmpegthumbnailer nor ffmpeg is
 installed."
-  (let ((width (number-to-string harness-ui-media-thumbnail-width)))
+  (let ((width (number-to-string harness-ui-media--thumbnail-width)))
     (cond ((executable-find "ffmpegthumbnailer")
            (list (list "ffmpegthumbnailer" "-i" path "-o" out "-s" width "-q" "8")))
           ((executable-find "ffmpeg")
@@ -536,9 +535,9 @@ When it made none, the next one runs; after the last, PATH has failed."
 (defun harness-ui-media--poster-size (thumb)
   "Return (WIDTH . HEIGHT), in pixels, of the poster showing THUMB.
 THUMB, a PNG file or nil, keeps its shape and fits in
-`harness-ui-media-thumbnail-width' by three quarters of that; without
+`harness-ui-media--thumbnail-width' by three quarters of that; without
 one the poster is 16:9."
-  (let* ((max-w harness-ui-media-thumbnail-width)
+  (let* ((max-w harness-ui-media--thumbnail-width)
          (max-h (round (* 0.75 max-w)))
          (size (and thumb (harness-ui-media--png-size thumb))))
     (if (null size)

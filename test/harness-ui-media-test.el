@@ -9,7 +9,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent acp ui ui-media))
          (harness-test-load-module m)))
      (clrhash harness-ui-media--players)

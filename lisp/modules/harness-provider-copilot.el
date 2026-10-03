@@ -74,7 +74,7 @@
 ;; Nothing here blocks: output is handled in a process filter, death in
 ;; a sentinel, timeouts by timers, and every answer by a callback.  A
 ;; request the CLI leaves unanswered fails after
-;; `harness-provider-copilot-startup-timeout' instead of hanging.
+;; `harness-provider-copilot--startup-timeout' instead of hanging.
 
 ;;; Code:
 
@@ -117,19 +117,16 @@ prices."
   "Extra command line arguments appended to every `copilot' invocation."
   :type '(repeat string) :group 'harness)
 
-(defcustom harness-provider-copilot-interrupt-timeout 3
-  "Seconds to wait after an abort before killing the CLI process."
-  :type 'number :group 'harness)
+(defconst harness-provider-copilot--interrupt-timeout 3
+  "Seconds to wait after an abort before killing the CLI process.")
 
-(defcustom harness-provider-copilot-startup-timeout 30
-  "Seconds a new CLI process has to answer before the provider gives up."
-  :type 'number :group 'harness)
+(defconst harness-provider-copilot--startup-timeout 30
+  "Seconds a new CLI process has to answer before the provider gives up.")
 
-(defcustom harness-provider-copilot-quota-ttl 300
+(defconst harness-provider-copilot--quota-ttl 300
   "Seconds after which the plan's quota report counts as stale.
 A stale report is fetched again when `provider/quota' is asked.  The
-report makes no model call.  nil fetches it only when nothing is known."
-  :type '(choice (const :tag "Only once" nil) number) :group 'harness)
+report makes no model call.  nil fetches it only when nothing is known.")
 
 ;;;; Constants
 
@@ -436,12 +433,12 @@ late answer is dropped then)."
   "Return a promise of the result of METHOD with PARAMS on ENTRY's CLI.
 It is rejected with a readable message, an ordinary `error', when the
 CLI answers an error or does not answer within TIMEOUT seconds (by
-default `harness-provider-copilot-startup-timeout'); with
+default `harness-provider-copilot--startup-timeout'); with
 `harness-provider-copilot-gone' and the reason when the process goes
 away first; and with `harness-provider-copilot-restart' when it is
 stopped on purpose."
   (let ((promise (harness-make-promise))
-        (seconds (or timeout harness-provider-copilot-startup-timeout)))
+        (seconds (or timeout harness-provider-copilot--startup-timeout)))
     (harness-provider-copilot--rpc
      entry method params
      (lambda (result error)
@@ -559,7 +556,7 @@ RESULT is the answer to connect, or to ping from older CLIs."
 (defun harness-provider-copilot--handshake (entry proc)
   "Return a promise of the auth status of ENTRY's new process PROC.
 It is rejected when the CLI speaks too old a protocol, dies, or does
-not answer within `harness-provider-copilot-startup-timeout'."
+not answer within `harness-provider-copilot--startup-timeout'."
   (let* ((promise (harness-make-promise))
          (timer nil)
          (fail (lambda (message)
@@ -592,12 +589,12 @@ not answer within `harness-provider-copilot-startup-timeout'."
                      (harness-provider-copilot--flush-doomed entry))
                    (harness-resolve promise auth))))))))
     (setq timer
-          (run-at-time harness-provider-copilot-startup-timeout nil
+          (run-at-time harness-provider-copilot--startup-timeout nil
                        (lambda ()
                          (unless (harness-promise-settled-p promise)
                            (let ((tail (harness-provider-copilot--stderr-tail entry)))
                              (funcall fail (format "copilot did not answer within %ss; it must be GitHub Copilot CLI 1.0 or newer%s"
-                                                   harness-provider-copilot-startup-timeout
+                                                   harness-provider-copilot--startup-timeout
                                                    (if (string-empty-p tail) "" (concat ": " tail)))))
                            (when (eq proc (harness-provider-copilot-session-process entry))
                              (harness-provider-copilot--kill entry))))))
@@ -1264,12 +1261,12 @@ Every request hears about them once, and again whenever they change."
 (defun harness-provider-copilot--stale-p ()
   "Non-nil when the plan's quota should be fetched again.
 Asking counts like an answer, so a CLI that cannot report quota is not
-asked again before `harness-provider-copilot-quota-ttl' has passed."
+asked again before `harness-provider-copilot--quota-ttl' has passed."
   (let* ((status harness-provider-copilot--status)
          (last (max (or (plist-get status :updated) 0) (or harness-provider-copilot--asked 0))))
     (cond ((zerop last) t)
-          ((null harness-provider-copilot-quota-ttl) nil)
-          (t (> (- (float-time) last) harness-provider-copilot-quota-ttl)))))
+          ((null harness-provider-copilot--quota-ttl) nil)
+          (t (> (- (float-time) last) harness-provider-copilot--quota-ttl)))))
 
 ;;;; Probe and server-level requests
 
@@ -1453,7 +1450,7 @@ before it is logged in.  Without the program there are no models."
 (defun harness-provider-copilot--refresh ()
   "Fetch the plan's quota; return a promise of the account status.
 The promise resolves with what is known once the report arrives, or
-after `harness-provider-copilot-startup-timeout' seconds."
+after `harness-provider-copilot--startup-timeout' seconds."
   (or harness-provider-copilot--refresh
       (let* ((promise (harness-make-promise))
              (timer nil)
@@ -1466,7 +1463,7 @@ after `harness-provider-copilot-startup-timeout' seconds."
                        nil)))
         (setq harness-provider-copilot--asked (float-time)
               harness-provider-copilot--refresh promise
-              timer (run-at-time harness-provider-copilot-startup-timeout nil
+              timer (run-at-time harness-provider-copilot--startup-timeout nil
                                  (lambda () (funcall settle harness-provider-copilot--status))))
         (harness-then
          (harness-provider-copilot--with-server
@@ -1488,7 +1485,7 @@ after `harness-provider-copilot-startup-timeout' seconds."
   "Return a promise of how the account is billed and of its plan's quota.
 The shape is the one `provider/quota' documents.  A new report is
 fetched first when REFRESH is non-nil or the last one is stale (see
-`harness-provider-copilot-quota-ttl'); it makes no model call."
+`harness-provider-copilot--quota-ttl'); it makes no model call."
   (if (and (or refresh (harness-provider-copilot--stale-p)) (harness-provider-copilot--program-p))
       (harness-provider-copilot--refresh)
     (harness-resolved harness-provider-copilot--status)))
@@ -1905,14 +1902,14 @@ logged in."
 (defun harness-provider-copilot--send-turn (entry turn sid prompt)
   "Send PROMPT, (TEXT . ATTACHMENTS), as TURN in Copilot session SID on ENTRY.
 When the CLI answers an error, or nothing within
-`harness-provider-copilot-startup-timeout' seconds, no turn runs: SID
+`harness-provider-copilot--startup-timeout' seconds, no turn runs: SID
 is idle again, an abort of it in flight is forgotten, and TURN ends,
 cancelled when it was being cancelled, else with the error."
   (setf (harness-provider-copilot-turn-target turn) sid
         (harness-provider-copilot-turn-sent turn) t)
   (push sid (harness-provider-copilot-session-busy entry))
   (let ((proc (harness-provider-copilot-session-process entry))
-        (seconds harness-provider-copilot-startup-timeout))
+        (seconds harness-provider-copilot--startup-timeout))
     (harness-provider-copilot--rpc
      entry "session.send"
      (append (list :sessionId sid :prompt (car prompt))
@@ -1969,7 +1966,7 @@ stopped on the way starts again once in a new one (RETRIED)."
 
 (defun harness-provider-copilot--abort (entry sid &optional gentle)
   "Ask ENTRY's CLI to stop the turn of Copilot session SID.
-When it is not idle `harness-provider-copilot-interrupt-timeout' later,
+When it is not idle `harness-provider-copilot--interrupt-timeout' later,
 the process is killed; with GENTLE, for a throwaway session, only the
 request that ran it ends then, the session is deleted, and the process
 keeps running."
@@ -1979,7 +1976,7 @@ keeps running."
     ;; The entry, (SID TIMER . GENTLE), is handed to its own timer,
     ;; which removes exactly it.
     (let ((abort (list sid)))
-      (setcdr abort (cons (run-at-time harness-provider-copilot-interrupt-timeout nil
+      (setcdr abort (cons (run-at-time harness-provider-copilot--interrupt-timeout nil
                                        #'harness-provider-copilot--force-abort
                                        entry (harness-provider-copilot-session-process entry) abort)
                           gentle))

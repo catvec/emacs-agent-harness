@@ -49,7 +49,7 @@ re-detected before BODY and restored afterwards."
         (dolist (flag '("--unshare-pid" "--unshare-ipc" "--unshare-uts" "--die-with-parent" "--new-session"))
           (should (member flag cmd)))
         (should (harness-sandbox-test--subseq-p (list "--chdir" (directory-file-name cwd)) cmd))
-        (should (harness-sandbox-test--subseq-p (list "--setenv" "HOME" harness-sandbox-home) cmd))
+        (should (harness-sandbox-test--subseq-p (list "--setenv" "HOME" harness-sandbox--home) cmd))
         ;; Network stays on by default.
         (should-not (member "--unshare-net" cmd))
         ;; The real home is never bound.
@@ -164,7 +164,7 @@ re-detected before BODY and restored afterwards."
           (let* ((out (plist-get r :stdout))
                  (lines (split-string out "\n" t)))
             (should (member "ok" lines))
-            (should (member (concat "HOME=" harness-sandbox-home) lines))
+            (should (member (concat "HOME=" harness-sandbox--home) lines))
             ;; Nothing from the real home directory shows up: not the
             ;; empty sandbox home, not a listing of the real path.
             (let ((real-entries (directory-files home nil "\\`[^.]" t)))

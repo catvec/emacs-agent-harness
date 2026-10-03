@@ -13,7 +13,7 @@
 
 (defvar harness-provider-claude-program)
 (defvar harness-provider-claude-permission-args)
-(defvar harness-provider-claude-interrupt-timeout)
+(defvar harness-provider-claude--interrupt-timeout)
 (defvar harness-provider-claude--sessions)
 (defvar harness-sessions)
 (defvar harness-tools)
@@ -308,7 +308,7 @@ and the sessions created meanwhile kept that window."
 
 (ert-deftest harness-provider-claude-cancel-kills-when-interrupt-ignored ()
   (harness-provider-claude-test--setup)
-  (let* ((harness-provider-claude-interrupt-timeout 0.3)
+  (let* ((harness-provider-claude--interrupt-timeout 0.3)
          events
          (request (plist-put (harness-provider-claude-test--request "s5" "hang ignore")
                              :on-event (lambda (ev) (push ev events))))

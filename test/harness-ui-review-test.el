@@ -12,7 +12,7 @@
 (require 'harness-acp)
 
 (defvar harness-provider-demo-script-override)
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 (defvar harness-naming-auto)
 (defvar harness-sessions)
 (defvar harness-tools)
@@ -25,7 +25,7 @@
 (defvar harness-tasks-model)
 (defvar harness-tasks-worktrees)
 (defvar harness-ui-default-position)
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-ui--sessions)
@@ -50,7 +50,7 @@ review with a report; BODY gets `board', `id' and `sid'."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent tasks acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
@@ -61,7 +61,7 @@ review with a report; BODY gets `board', `id' and `sid'."
      (setq harness-tasks--loaded t harness-acp--clients nil)
      ;; After the clears: the fixture must not wipe the tool's registration.
      (harness-test-load-module 'tools-handin)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override
             '((:type text :delta "All done.\n")
               (:type tool-call :id "h1" :name "hand_in"

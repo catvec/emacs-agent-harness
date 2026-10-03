@@ -159,19 +159,19 @@
   (should (eq 'allow (harness-perms-test--behavior "write_file" 'write
                                                    (expand-file-name "f" (plist-get harness-perms-test--session :cwd))))))
 
-(ert-deftest harness-perms-auto-allow-tools ()
+(ert-deftest harness-perms--auto-allow-tools ()
   (harness-perms-test--setup :permission-mode 'ask)
-  (dolist (tool harness-perms-auto-allow-tools)
+  (dolist (tool harness-perms--auto-allow-tools)
     (should (eq 'allow (harness-perms-test--behavior tool 'meta))))
   (should (eq 'deny (harness-perms-test--behavior "spawn_agent" 'meta)))
-  (let ((harness-perms-auto-allow-tools '("spawn_agent")))
+  (let ((harness-perms--auto-allow-tools '("spawn_agent")))
     (should (eq 'allow (harness-perms-test--behavior "spawn_agent" 'meta)))))
 
 (ert-deftest harness-perms-web-search-needs-no-approval ()
   ;; web_search only sends its query to the configured search provider,
   ;; so it is allowed in every mode; web_fetch reaches any host and asks.
   (harness-perms-test--setup :permission-mode 'ask)
-  (should (member "web_search" harness-perms-auto-allow-tools))
+  (should (member "web_search" harness-perms--auto-allow-tools))
   (should (eq 'allow (harness-perms-test--behavior "web_search" 'net)))
   (should (eq 'deny (harness-perms-test--behavior "web_fetch" 'net)))
   (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'accept-edits))
@@ -181,7 +181,7 @@
   ;; notify only reaches the user, through the providers they set up, so
   ;; unattended sessions can tell them they are needed.
   (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
-  (should (member "notify" harness-perms-auto-allow-tools))
+  (should (member "notify" harness-perms--auto-allow-tools))
   (should (eq 'allow (harness-perms-test--behavior "notify" 'meta)))
   (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'auto))
   (should (eq 'allow (harness-perms-test--behavior "notify" 'meta))))
@@ -327,7 +327,7 @@ A model named by the provider's `:tiers' is used; an explicit model wins."
   ;; Timeout: the handle is cancelled and the chain proceeds.
   (let* ((probe (harness-perms-test--judge-provider '((:type start))))
          (harness-perms-auto-model "judge:x")
-         (harness-perms-auto-timeout 0.2)
+         (harness-perms--auto-timeout 0.2)
          (start (float-time))
          (d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
     (should (eq 'deny (plist-get d :behavior)))
@@ -439,7 +439,7 @@ stands, an allow as much as a deny.  spawn_agent used to be refused
 whenever the judge was not the one deciding."
   (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
   (let ((harness-perms-auto-model "judge:small")
-        (harness-perms-auto-timeout 2))
+        (harness-perms--auto-timeout 2))
     (dolist (mode '(ask accept-edits auto))
       (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode mode))
       (let* ((probe (harness-perms-test--allowing-judge))
@@ -499,7 +499,7 @@ is away, so it is denied; the reason says why there was no verdict."
       (should (string-match-p "no verdict (it stopped: max-tokens)" (funcall reason))))
     (let ((probe (harness-perms-test--judge-provider '((:type start))))
           (harness-perms-auto-model "judge:x")
-          (harness-perms-auto-timeout 0.2))
+          (harness-perms--auto-timeout 0.2))
       (should (string-match-p "no verdict (it took longer than 0.2s)" (funcall reason)))
       (should (funcall probe 'cancelled))))
   ;; No judge to ask at all.
@@ -855,7 +855,7 @@ for a request without a session record."
                      (:type done :stop-reason end-turn))))
            (harness-perms-auto-model "judge:x")
            (harness-perms-rules '((:behavior allow)))
-           (harness-perms-auto-allow-tools (cons harness-perms-dir-tool harness-perms-auto-allow-tools))
+           (harness-perms--auto-allow-tools (cons harness-perms-dir-tool harness-perms--auto-allow-tools))
            (outside (harness-test-temp-dir))
            (started (harness-perms-test--start-request outside "need it")))
       ;; The call waits for the user, whatever the mode says.

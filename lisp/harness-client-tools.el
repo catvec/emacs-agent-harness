@@ -33,13 +33,11 @@
   "Return a failed tool result with MESSAGE."
   (list :content message :is-error t))
 
-(defcustom harness-tools-emacs-value-chars 500
-  "Variable values longer than this are truncated by emacs_describe."
-  :type 'integer :group 'harness)
+(defconst harness-client-tools--value-chars 500
+  "Variable values longer than this are truncated by emacs_describe.")
 
-(defcustom harness-tools-emacs-messages-default 50
-  "Number of *Messages* lines emacs_messages returns by default."
-  :type 'integer :group 'harness)
+(defconst harness-client-tools--messages-default 50
+  "Number of *Messages* lines emacs_messages returns by default.")
 
 (defun harness-client-tools--int (v default)
   "Return V as an integer, or DEFAULT."
@@ -148,7 +146,7 @@
                     ((local-variable-if-set-p sym) "buffer-local variable")
                     (t "variable"))
               sym
-              (harness-truncate-end value harness-tools-emacs-value-chars)
+              (harness-truncate-end value harness-client-tools--value-chars)
               (if (and doc (not (string-empty-p doc))) doc "(no documentation)")))))
 
 (defun harness-client-tools--describe (input _ctx)
@@ -171,7 +169,7 @@
 
 (defun harness-client-tools--messages (input _ctx)
   "Handler for emacs_messages with INPUT."
-  (let* ((count (max 1 (harness-client-tools--int (plist-get input :count) harness-tools-emacs-messages-default)))
+  (let* ((count (max 1 (harness-client-tools--int (plist-get input :count) harness-client-tools--messages-default)))
          (buf (messages-buffer)))
     (with-current-buffer buf
       (save-excursion
@@ -182,13 +180,11 @@
 
 
 
-(defcustom harness-elisp-timeout 30
-  "Seconds an elisp evaluation may take before it is abandoned."
-  :type 'number :group 'harness)
+(defconst harness-client-tools--elisp-timeout 30
+  "Seconds an elisp evaluation may take before it is abandoned.")
 
-(defcustom harness-elisp-max-value-chars 10000
-  "Printed values longer than this are elided in elisp results."
-  :type 'integer :group 'harness)
+(defconst harness-client-tools--elisp-max-value-chars 10000
+  "Printed values longer than this are elided in elisp results.")
 
 (defun harness-client-tools--read-forms (code)
   "Return the list of forms read from CODE."
@@ -233,8 +229,8 @@ OUTPUT is what the forms printed to `standard-output'; MESSAGES are
               (message-log-max t)
               (inhibit-message t)
               (debug-on-error nil))
-          (with-timeout (harness-elisp-timeout
-                         (error "Evaluation exceeded %ss" harness-elisp-timeout))
+          (with-timeout (harness-client-tools--elisp-timeout
+                         (error "Evaluation exceeded %ss" harness-client-tools--elisp-timeout))
             (dolist (form forms)
               (setq value (eval form t))))
           (list value
@@ -256,7 +252,7 @@ OUTPUT is what the forms printed to `standard-output'; MESSAGES are
               (harness-client-tools--ok
                (string-join
                 (delq nil
-                      (list (format "=> %s" (harness-truncate-end printed harness-elisp-max-value-chars))
+                      (list (format "=> %s" (harness-truncate-end printed harness-client-tools--elisp-max-value-chars))
                             (unless (string-empty-p output)
                               (concat "--- output ---\n" (string-trim-right output)))
                             (unless (string-empty-p messages)

@@ -37,20 +37,17 @@
   "Maximum model calls in one turn before the harness stops it."
   :type 'integer :group 'harness)
 
-(defcustom harness-agent-base-system-prompt
+(defconst harness-agent--base-system-prompt
   "You are an expert software engineering agent working inside the user's GNU Emacs through the Emacs agent harness.
 
 Work carefully and verify what you do. Prefer the provided tools over guessing; read files before editing them; keep edits minimal and correct. When a tool call is denied, read the reason: it tells you what is permitted, so adjust your approach instead of repeating the call. Stay inside the session's working directory unless told otherwise. When you need a decision only the user can make, use the ask_user tool. Keep answers concise and concrete."
-  "First section of every system prompt."
-  :type 'string :group 'harness)
+  "First section of every system prompt.")
 
-(defcustom harness-agent-cancel-grace 3
-  "Seconds to wait for a provider to acknowledge a cancel before forcing it."
-  :type 'number :group 'harness)
+(defconst harness-agent--cancel-grace 3
+  "Seconds to wait for a provider to acknowledge a cancel before forcing it.")
 
-(defcustom harness-agent-progress-interval 0.5
-  "Seconds between announcements of a running tool's progress."
-  :type 'number :group 'harness)
+(defconst harness-agent--progress-interval 0.5
+  "Seconds between announcements of a running tool's progress.")
 
 (cl-defstruct (harness-agent-turn (:copier nil))
   session-id promise handle (steps 0) cancelled
@@ -192,7 +189,7 @@ redrawn with carriage returns gives its latest state."
     (unless (gethash sid harness-agent--progress-timers)
       (harness-agent--update-activity sid)
       ;; Further progress within the interval goes out once it is up.
-      (puthash sid (run-at-time harness-agent-progress-interval nil
+      (puthash sid (run-at-time harness-agent--progress-interval nil
                                 (lambda ()
                                   (remhash sid harness-agent--progress-timers)
                                   (when (gethash sid harness-agent--turns)
@@ -216,7 +213,7 @@ permission is decided and `:detail', its latest progress, and
 (defun harness-agent--system-prompt (session)
   "Return the system prompt for SESSION after the `agent/system-prompt' filter."
   (let ((base (format "%s\n\n## Environment\n- Working directory: %s\n- Project: %s\n- Date: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
-                      harness-agent-base-system-prompt
+                      harness-agent--base-system-prompt
                       (plist-get session :cwd)
                       (or (and (harness-method-exists-p 'project/name)
                                (harness-call 'project/name (plist-get session :project)))
@@ -798,7 +795,7 @@ a running turn, the queued messages would steer it."
       (setf (harness-agent-turn-cancelled turn) t)
       (let ((cancel (plist-get (harness-agent-turn-handle turn) :cancel)))
         (when cancel (ignore-errors (funcall cancel))))
-      (run-at-time harness-agent-cancel-grace nil
+      (run-at-time harness-agent--cancel-grace nil
                    (lambda () (when (eq (gethash session-id harness-agent--turns) turn)
                                 (harness-agent--finalize-live turn)
                                 (harness-agent--end turn 'cancelled))))

@@ -10,7 +10,7 @@
 
 (require 'harness-test-helpers)
 
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-compose-start)
 (defvar harness-compose-end)
 (defvar harness-ui-popout-key)
@@ -33,7 +33,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(acp ui ui-compose ui-popout))
          (harness-test-load-module m)))
      (unwind-protect

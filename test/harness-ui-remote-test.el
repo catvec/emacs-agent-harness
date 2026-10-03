@@ -11,7 +11,7 @@
 
 (require 'harness-test-helpers)
 
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-acp-remote)
 
 (defmacro harness-ui-remote-test-with (&rest body)
@@ -19,7 +19,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil) (harness-acp-remote nil))
+     (let ((harness-acp--server-enabled nil) (harness-acp-remote nil))
        (dolist (m '(acp acp-remote ui ui-qr ui-remote)) (harness-test-load-module m)))
      (let ((harness-acp-token nil)
            (harness-acp-remote nil)

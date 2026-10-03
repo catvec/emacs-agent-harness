@@ -22,6 +22,15 @@
 ;; init file sets them.  Values cross the wire printed (see
 ;; `config/describe'): JSON cannot tell a symbol from a string, nor an
 ;; unset layer from one set to nil.
+;;
+;; Few options are for everyone.  `harness-config-sections' names those,
+;; grouped by what they are for (new sessions, the task board,
+;; notifications ...), and `config/describe' lists them first, each with
+;; its section; every other option is an advanced one, which a settings
+;; page can keep out of the way while still offering it.  What the
+;; harness only needs to work (prompts, timeouts, polling intervals,
+;; limits of the tools) is no option at all: those are constants of the
+;; modules.  See docs/configuration-audit.md.
 
 ;;; Code:
 
@@ -31,6 +40,11 @@
 (require 'wid-edit)
 (require 'harness-core)
 (require 'harness-util)
+
+;; The provider module once had a default model of its own, the same
+;; setting under a second name.  Declared before `harness-model' so a
+;; value set under the old name is kept.
+(define-obsolete-variable-alias 'harness-default-model 'harness-model "3.1.0")
 
 (defcustom harness-model "claude:claude-fable-5-1"
   "Default model as PROVIDER:MODEL."
@@ -88,10 +102,6 @@ unless `harness-tasks-non-interactive' is on: then they start
 non-interactive anyway."
   :type 'boolean :safe #'booleanp :group 'harness)
 
-(defcustom harness-context-reserve 20000
-  "Tokens kept free below the context window before compaction."
-  :type 'integer :safe #'integerp :group 'harness)
-
 (defcustom harness-tasks-directory "docs/tasks"
   "Folder of a git project's task files, relative to its main checkout.
 Every task on the project's board is also a markdown file there: YAML
@@ -108,9 +118,41 @@ folder for that project, or nil to keep none there."
 
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-allowed-directories
-    harness-budget harness-sandbox-policy harness-non-interactive harness-context-reserve
-    harness-tasks-directory)
+    harness-budget harness-sandbox-policy harness-non-interactive harness-tasks-directory)
   "Settings that take part in layering.")
+
+(defconst harness-config-sections
+  '((sessions
+     :title "New sessions"
+     :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
+     :keys (harness-model harness-thinking harness-permission-mode harness-non-interactive
+            harness-budget))
+    (safety
+     :title "Files and safety"
+     :doc "What sessions may reach, and what may run without asking you."
+     :keys (harness-allowed-directories harness-sandbox-policy harness-perms-rules
+            harness-perms-auto-model))
+    (tasks
+     :title "Task board"
+     :doc "The sessions tasks start with, and when their work counts as done."
+     :keys (harness-tasks-model harness-tasks-thinking harness-tasks-permission-mode
+            harness-tasks-non-interactive harness-tasks-require-verification
+            harness-tasks-max-running harness-tasks-worktrees harness-tasks-directory))
+    (notifications
+     :title "Notifications"
+     :doc "When the harness tells you it needs you, and where."
+     :keys (harness-tasks-notify-events harness-notifications-providers harness-gotify-url
+            harness-gotify-token))
+    (services
+     :title "Models and services"
+     :doc "Model providers besides Claude Code, and the other services the harness talks to."
+     :keys (harness-openai-endpoints harness-bedrock-endpoints harness-websearch-provider
+            harness-websearch-builtin harness-brave-api-key)))
+  "The settings most people change, in sections named by what they are for.
+Each entry is (NAME :title TITLE :doc DOC :keys OPTIONS).
+`config/describe' lists these options first, in this order, each with
+its section; every other option it lists is an advanced one.  An option
+no loaded module defines is left out, and so is a section left empty.")
 
 (defconst harness-config-hidden-options
   '(harness-process harness-module-directories harness-enabled-modules harness-disabled-modules
@@ -192,6 +234,19 @@ the harness modules and core, not those of the UI (its own groups)."
                    (harness-config--listed-p sym))
           (cl-pushnew sym out))))
     (sort out (lambda (a b) (string< (symbol-name a) (symbol-name b))))))
+
+(defun harness-config--describable-p (key)
+  "Non-nil when `config/describe' lists option KEY."
+  (or (memq key harness-config-keys) (harness-config--listed-p key)))
+
+(defun harness-config--placed ()
+  "Return ((KEY . SECTION) ...) for the options `harness-config-sections' shows.
+In the order of the sections, then of their keys, without the options
+that no loaded module defines."
+  (cl-loop for (section . props) in harness-config-sections
+           append (cl-loop for key in (plist-get props :keys)
+                           when (and (boundp key) (harness-config--describable-p key))
+                           collect (cons key section))))
 
 (defun harness-config--key (key)
   "Return the option KEY names, a symbol or its name; signal for anything else.
@@ -426,14 +481,18 @@ alists of the project's and the directory's dir-locals files."
 Return (:cwd DIR :root DIR :project NAME :in-project BOOL
 :files (:project FILE :project-exists BOOL
         :directory FILE :directory-exists BOOL)
+:sections ((:name NAME :title TITLE :doc DOC) ...)
 :modules ((:name NAME :doc DOC) ...) :settings (SETTING ...)).
-The layered settings (`harness-config-keys') come first, then the
-options with a global value only.  SETTING is
-  (:key NAME :module NAME :doc DOC :type TYPE :layered BOOL :secret BOOL
-   :editable BOOL :invalid (LAYER ...) :standard V :global V :project V
-   :directory V :value V :source global|project|directory)
-where :value is what is in effect at CWD, :source the layer it comes
-from and :invalid names the layers whose value does not fit TYPE.
+The settings of `harness-config-sections' come first, section by
+section, then the advanced ones: the other settings that layer, then
+the options with a global value only.
+:sections lists the sections that have settings, in order.  SETTING is
+  (:key NAME :module NAME :section NAME :doc DOC :type TYPE :layered BOOL
+   :secret BOOL :editable BOOL :invalid (LAYER ...) :standard V :global V
+   :project V :directory V :value V :source global|project|directory)
+where :section is nil for an advanced setting, :value is what is in
+effect at CWD, :source the layer it comes from and :invalid names the
+layers whose value does not fit TYPE.
 TYPE and every V are printed with `prin1': `read' them back.  An
 unset :project or :directory is nil, while one set to nil is \"nil\".
 :directory is nil when CWD is the project root.  A secret has no V;
@@ -446,10 +505,15 @@ does not survive printing (a function object, say)."
          (directory (and sub (harness-config--dir-locals-alist cwd)))
          (pfile (expand-file-name dir-locals-file root))
          (dfile (and sub (expand-file-name dir-locals-file cwd)))
-         (settings (append (mapcar (lambda (k) (harness-config--describe-key k t project directory))
-                                   harness-config-keys)
-                           (mapcar (lambda (k) (harness-config--describe-key k nil nil nil))
-                                   (harness-config--global-options)))))
+         (placed (harness-config--placed))
+         (describe (lambda (key section)
+                     (let ((layered (memq key harness-config-keys)))
+                       (append (harness-config--describe-key
+                                key layered (and layered project) (and layered directory))
+                               (list :section (and section (symbol-name section)))))))
+         (settings (append (mapcar (lambda (cell) (funcall describe (car cell) (cdr cell))) placed)
+                           (cl-loop for k in (append harness-config-keys (harness-config--global-options))
+                                    unless (assq k placed) collect (funcall describe k nil)))))
     (list :cwd cwd :root root
           :project (if (harness-method-exists-p 'project/name)
                        (harness-call 'project/name root)
@@ -457,6 +521,11 @@ does not survive printing (a function object, say)."
           :in-project (if (harness-config--in-project-p cwd) t :false)
           :files (list :project pfile :project-exists (if (file-exists-p pfile) t :false)
                        :directory dfile :directory-exists (if (and dfile (file-exists-p dfile)) t :false))
+          :sections (cl-loop for (section . props) in harness-config-sections
+                             when (rassq section placed)
+                             collect (list :name (symbol-name section)
+                                           :title (plist-get props :title)
+                                           :doc (plist-get props :doc)))
           :modules (let (names)
                      (dolist (s settings) (cl-pushnew (plist-get s :module) names :test #'equal))
                      (mapcar (lambda (name)

@@ -128,7 +128,7 @@ They are the keywords that start an indented line, as in
       (when (plist-member (cdr vtype) :value)
         (should (harness-test-fits-p vtype (plist-get (cdr vtype) :value)))))))
 
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")
 (declare-function harness-client-tools-run "harness-client-tools")
@@ -140,7 +140,7 @@ They are the keywords that start an indented line, as in
 It answers `_harness/client/tool' and `_harness/client/customize-save',
 and reverts buffers on
 `tools/file-written', like lisp/ui does.  Return the connection."
-  (let ((harness-acp-server-enabled nil))
+  (let ((harness-acp--server-enabled nil))
     (harness-test-load-module 'acp))
   (require 'harness-client-tools)
   (let ((conn (harness-acp-connect nil)))

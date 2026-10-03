@@ -62,24 +62,21 @@ detection, subject to `harness-sandbox-policy'."
   :type '(choice (const auto) (const bwrap) (const systemd) (const none))
   :group 'harness)
 
-(defcustom harness-sandbox-bwrap-program "bwrap"
-  "Name or path of the bubblewrap executable."
-  :type 'string :group 'harness)
+(defconst harness-sandbox--bwrap-program "bwrap"
+  "Name or path of the bubblewrap executable.")
 
-(defcustom harness-sandbox-systemd-run-program "systemd-run"
-  "Name or path of the systemd-run executable."
-  :type 'string :group 'harness)
+(defconst harness-sandbox--systemd-run-program "systemd-run"
+  "Name or path of the systemd-run executable.")
 
 (defcustom harness-sandbox-extra-read-only-dirs nil
   "Additional directories bound read-only into every sandbox.
 Useful for toolchains that live outside /usr, such as /opt or /nix."
   :type '(repeat directory) :group 'harness)
 
-(defcustom harness-sandbox-home "/tmp/harness-home"
+(defconst harness-sandbox--home "/tmp/harness-home"
   "Path used as $HOME inside the sandbox.
 It lives on the sandbox's private /tmp, so it starts empty for every
-command and nothing written there survives."
-  :type 'string :group 'harness)
+command and nothing written there survives.")
 
 (defconst harness-sandbox--system-dirs '("/lib" "/lib64" "/bin" "/sbin")
   "Top-level directories mirrored as symlinks or read-only binds.")
@@ -99,8 +96,8 @@ command and nothing written there survives."
   "Find the available backends and choose one.
 Return the chosen backend symbol.  Safe to call again: it refreshes
 `harness-sandbox--available' and `harness-sandbox--backend'."
-  (let ((bwrap (executable-find harness-sandbox-bwrap-program))
-        (systemd (executable-find harness-sandbox-systemd-run-program)))
+  (let ((bwrap (executable-find harness-sandbox--bwrap-program))
+        (systemd (executable-find harness-sandbox--systemd-run-program)))
     (setq harness-sandbox--programs
           (delq nil (list (and bwrap (cons 'bwrap bwrap))
                           (and systemd (cons 'systemd systemd)))))
@@ -229,7 +226,7 @@ namespace; WRITABLE and READABLE list extra directories to expose."
      (list "--proc" "/proc"
            "--dev" "/dev"
            "--tmpfs" "/tmp"
-           "--dir" harness-sandbox-home)
+           "--dir" harness-sandbox--home)
      ;; Binds come after the tmpfs so a working directory under /tmp
      ;; is not hidden by it.
      (list "--bind" cwd cwd)
@@ -240,7 +237,7 @@ namespace; WRITABLE and READABLE list extra directories to expose."
            "--die-with-parent" "--new-session"
            "--chdir" cwd)
      (unless (harness-sandbox--home-inside-p cwd)
-       (list "--setenv" "HOME" harness-sandbox-home))
+       (list "--setenv" "HOME" harness-sandbox--home))
      (unless network (list "--unshare-net"))
      (list "--")
      command)))

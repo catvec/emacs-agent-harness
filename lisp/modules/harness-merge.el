@@ -33,15 +33,10 @@
 (require 'harness-util)
 (require 'harness-tools)
 
-;;;; Customisation
+;;;; Constants
 
-(defcustom harness-merge-git-program "git"
-  "Name of the git executable used for merges."
-  :type 'string :group 'harness)
-
-(defcustom harness-merge-hold-timeout 1800
-  "Seconds a conflicted merge may hold the parent before it is aborted."
-  :type 'number :group 'harness)
+(defconst harness-merge--hold-timeout 1800
+  "Seconds a conflicted merge may hold the parent before it is aborted.")
 
 ;;;; State
 
@@ -98,7 +93,7 @@ An entry is (:child ID :parent ID :status queued|merging|conflict
 
 (defun harness-merge--git (cwd &rest args)
   "Run git ARGS in CWD; return a promise of (:exit :stdout :stderr)."
-  (harness-run-command (append (list harness-merge-git-program "-C" (directory-file-name cwd)) args)
+  (harness-run-command (append (list "git" "-C" (directory-file-name cwd)) args)
                        :cwd cwd :name "harness-merge-git"))
 
 (defun harness-merge--in-git-repo-p (dir)
@@ -295,11 +290,11 @@ filter core would adopt a returned promise as the gate value."
              (mapconcat (lambda (f) (concat "- " f)) files "\n")
              parent-cwd (directory-file-name parent-cwd) (directory-file-name parent-cwd)))
     (puthash parent-id
-             (run-at-time harness-merge-hold-timeout nil #'harness-merge--timeout entry)
+             (run-at-time harness-merge--hold-timeout nil #'harness-merge--timeout entry)
              harness-merge--timers)))
 
 (defun harness-merge--timeout (entry)
-  "Abort the merge of ENTRY after `harness-merge-hold-timeout'."
+  "Abort the merge of ENTRY after `harness-merge--hold-timeout'."
   (when (and (eq (plist-get entry :status) 'conflict)
              (equal (gethash (plist-get entry :parent) harness-merge--locks) (plist-get entry :child)))
     (let ((parent (harness-merge--session (plist-get entry :parent))))
@@ -309,7 +304,7 @@ filter core would adopt a returned promise as the gate value."
          (harness-resolved nil))
        (lambda (_)
          (harness-merge--finish entry 'aborted
-                                (format "not resolved within %s" (harness-format-duration harness-merge-hold-timeout))))))))
+                                (format "not resolved within %s" (harness-format-duration harness-merge--hold-timeout))))))))
 
 (defun harness-merge--unlock-worktree (entry)
   "Lift the harness's lock on the worktree of ENTRY's child, now merged.

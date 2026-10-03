@@ -4,13 +4,13 @@
 (require 'harness-test-helpers)
 
 (defvar harness-provider-demo-script-override)
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 (defvar harness-naming-auto)
 (defvar harness-sessions)
 (defvar harness-tools)
 (defvar harness-agent--turns)
 (defvar harness-naming--running)
-(defvar harness-naming-system-prompt)
+(defvar harness-naming--base-system-prompt)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-agent-running-p "harness-agent")
 (declare-function harness-naming-sanitise "harness-naming")
@@ -26,7 +26,7 @@
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-naming--running)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override nil)
            (harness-naming-auto t)
            (default-directory dir))
@@ -117,8 +117,8 @@
                   (lambda (req) (push (plist-get req :system) systems) (funcall orig req))))
         (harness-await (harness-call 'naming/name id))
         (harness-await (harness-call 'naming/name other)))
-      (should (equal (list harness-naming-system-prompt
-                           (concat harness-naming-system-prompt "\n\nLike a ticket."))
+      (should (equal (list harness-naming--base-system-prompt
+                           (concat harness-naming--base-system-prompt "\n\nLike a ticket."))
                      systems)))))
 
 (ert-deftest harness-naming-name-error-rejects ()

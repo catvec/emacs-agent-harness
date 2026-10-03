@@ -33,9 +33,8 @@
 (defgroup harness-ui-sessions nil
   "The session list." :group 'harness-ui)
 
-(defcustom harness-ui-sessions-buffer-name "*harness sessions*"
-  "Name of the session list buffer."
-  :type 'string :group 'harness-ui-sessions)
+(defconst harness-ui-sessions--buffer-name "*harness sessions*"
+  "Name of the session list buffer.")
 
 (defvar-local harness-ui-sessions--project nil
   "Main checkout the list is scoped to, or nil for all projects.")
@@ -216,7 +215,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
 
 (defun harness-ui-sessions--redraw ()
   "Redraw the list buffer if it exists, keeping point on the same session."
-  (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))
+  (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     (with-current-buffer buf
       (let ((id (tabulated-list-get-id)))
         (harness-ui-sessions--refresh)
@@ -236,9 +235,9 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
   "Ask the harness for every project's tasks, then redraw the list.
 The list keeps those that have a session, by session.  When the request
 fails, as on a harness without tasks, the list names no task."
-  (when (get-buffer harness-ui-sessions-buffer-name)
+  (when (get-buffer harness-ui-sessions--buffer-name)
     (cl-flet ((keep (table)
-                (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))
+                (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
                   (with-current-buffer buf (setq harness-ui-sessions--tasks table))
                   (harness-ui-sessions--redraw))))
       (harness-ui-call
@@ -262,7 +261,7 @@ fails, as on a harness without tasks, the list names no task."
   "Follow the tasks in the list: `task/changed' (TASK) and `task/deleted' (ID).
 A task changes session when it starts, so it is looked up by its id."
   (when-let* ((buf (and (member event '("task/changed" "task/deleted"))
-                        (get-buffer harness-ui-sessions-buffer-name))))
+                        (get-buffer harness-ui-sessions--buffer-name))))
     (with-current-buffer buf
       (pcase event
         ("task/deleted" (harness-ui-sessions--forget-task (car args)))
@@ -282,7 +281,7 @@ A task's session shows its task's title until it is named."
   (interactive "P")
   (let ((project (unless all-projects
                    (harness-files-main-root default-directory)))
-        (buf (get-buffer-create harness-ui-sessions-buffer-name)))
+        (buf (get-buffer-create harness-ui-sessions--buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-sessions-mode) (harness-ui-sessions-mode))
       (setq harness-ui-sessions--project project)
@@ -369,7 +368,7 @@ A task's session matches its task's title and the kind task."
 (defun harness-ui-sessions-reload ()
   "Reload sessions and tasks from the harness and resolve their projects again."
   (interactive)
-  (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))
+  (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     (with-current-buffer buf (setq harness-ui-sessions--main-roots nil)))
   (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw)))
   (harness-ui-sessions--fetch-tasks))

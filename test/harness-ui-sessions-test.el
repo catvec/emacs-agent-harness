@@ -64,7 +64,7 @@ Anything else, or the tasks when they are `fail', fails."
              (let ((harness-ui-sessions-test--tasks nil))
                ,@body)))
        (clrhash harness-ui--sessions)
-       (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name))) (kill-buffer buf))
+       (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name))) (kill-buffer buf))
        (ignore-errors (delete-directory base t)))))
 
 (defun harness-ui-sessions-test--add (id project &rest props)
@@ -78,12 +78,12 @@ It is named ID unless PROPS, which go first, say otherwise."
 
 (defun harness-ui-sessions-test--shown ()
   "Return the sorted ids the list buffer shows."
-  (with-current-buffer harness-ui-sessions-buffer-name
+  (with-current-buffer harness-ui-sessions--buffer-name
     (sort (mapcar #'car tabulated-list-entries) #'string<)))
 
 (defun harness-ui-sessions-test--row (id)
   "Return (NAME KIND) as the list buffer shows session ID, as plain text."
-  (with-current-buffer harness-ui-sessions-buffer-name
+  (with-current-buffer harness-ui-sessions--buffer-name
     (let ((columns (cadr (assoc id tabulated-list-entries))))
       (list (substring-no-properties (aref columns 1))
             (substring-no-properties (aref columns 3))))))
@@ -106,7 +106,7 @@ It is named ID unless PROPS, which go first, say otherwise."
     (let ((default-directory root)) (harness-sessions))
     (should (equal '("main" "task") (harness-ui-sessions-test--shown)))
     ;; `a' toggles every project, and back.
-    (with-current-buffer harness-ui-sessions-buffer-name
+    (with-current-buffer harness-ui-sessions--buffer-name
       (harness-ui-sessions-toggle-scope)
       (should (equal '("elsewhere" "main" "task") (harness-ui-sessions-test--shown)))
       (harness-ui-sessions-toggle-scope)
@@ -132,7 +132,7 @@ It is named ID unless PROPS, which go first, say otherwise."
       (make-directory default-directory t)
       (harness-sessions))
     (should (equal root (buffer-local-value 'harness-ui-sessions--project
-                                            (get-buffer harness-ui-sessions-buffer-name))))
+                                            (get-buffer harness-ui-sessions--buffer-name))))
     (should (equal '("main" "task") (harness-ui-sessions-test--shown)))))
 
 (ert-deftest harness-ui-sessions-removed-worktree-stays-with-its-project ()
@@ -155,7 +155,7 @@ It is named ID unless PROPS, which go first, say otherwise."
       (harness-ui-sessions-test--add "remote" remote)
       (let ((default-directory root)) (harness-sessions))
       (should (equal '("main") (harness-ui-sessions-test--shown)))
-      (with-current-buffer harness-ui-sessions-buffer-name
+      (with-current-buffer harness-ui-sessions--buffer-name
         (cl-letf (((symbol-function 'harness-files-main-checkout) (lambda (&rest _) (error "Looked at")))
                   ((symbol-function 'harness-files-main-root) (lambda (&rest _) (error "Looked at")))
                   ((symbol-function 'file-directory-p) (lambda (&rest _) (error "Looked at"))))
@@ -181,7 +181,7 @@ It is named ID unless PROPS, which go first, say otherwise."
         (should (= 4 calls))
         (dotimes (_ 3) (harness-ui-sessions--redraw))
         (should (= 4 calls))
-        (with-current-buffer harness-ui-sessions-buffer-name (harness-ui-sessions-reload))
+        (with-current-buffer harness-ui-sessions--buffer-name (harness-ui-sessions-reload))
         (should (= 7 calls))
         (should (equal '("main" "task" "task-again") (harness-ui-sessions-test--shown)))))))
 
@@ -248,7 +248,7 @@ harness cannot say, as one without tasks, the list names no task."
     (should (equal '("Log slow requests" "task") (harness-ui-sessions-test--row "s-1")))
     (setq harness-ui-sessions-test--tasks
           (list (list :id "t-1" :session "s-1" :prompt "Log requests slower than 500 ms")))
-    (with-current-buffer harness-ui-sessions-buffer-name (harness-ui-sessions-reload))
+    (with-current-buffer harness-ui-sessions--buffer-name (harness-ui-sessions-reload))
     (should (equal '("Log requests slower than 500 ms" "task") (harness-ui-sessions-test--row "s-1")))
     ;; Connected to a harness without tasks.
     (setq harness-ui-sessions-test--tasks 'fail)
@@ -262,7 +262,7 @@ harness cannot say, as one without tasks, the list names no task."
     (harness-ui-sessions-test--add "s-guide" root :name "Write the API guide")
     (setq harness-ui-sessions-test--tasks (list (list :id "t-1" :session "s-task" :prompt "Paginate GET /orders")))
     (let ((default-directory root)) (harness-sessions))
-    (with-current-buffer harness-ui-sessions-buffer-name
+    (with-current-buffer harness-ui-sessions--buffer-name
       (harness-ui-sessions-filter "paginate")
       (should (equal '("s-task") (harness-ui-sessions-test--shown)))
       (harness-ui-sessions-filter "task")

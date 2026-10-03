@@ -2,6 +2,8 @@
 ;;; Code:
 
 (require 'harness-test-helpers)
+
+(defvar harness-worktree-branch-prefix)
 (require 'harness-acp)
 
 (defun harness-ui-worktree-test--git (dir &rest args)
@@ -32,14 +34,14 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent usage worktree merge acp ui ui-worktree))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-ui--sessions)
-     (let* ((harness-provider-demo-delay 0.005)
+     (let* ((harness-provider-demo--delay 0.005)
             (harness-acp-token nil)
             (default-directory dir)
             (repo (harness-ui-worktree-test--make-repo dir))
@@ -48,7 +50,7 @@
        (ignore root wt)
        (unwind-protect
            (progn ,@body)
-         (when (get-buffer harness-ui-worktree-buffer-name) (kill-buffer harness-ui-worktree-buffer-name))
+         (when (get-buffer harness-ui-worktree--buffer-name) (kill-buffer harness-ui-worktree--buffer-name))
          (dolist (c (copy-sequence harness-acp--clients))
            (harness-acp--drop-client c))))))
 
@@ -59,7 +61,7 @@
 (defun harness-ui-worktree-test-open (root count)
   "Open the list for ROOT and wait until COUNT rows with status are shown."
   (harness-worktrees root)
-  (set-buffer harness-ui-worktree-buffer-name)
+  (set-buffer harness-ui-worktree--buffer-name)
   (harness-test-wait (lambda () (and (not harness-ui-worktree--loading)
                                      (= count (length harness-ui-worktree--worktrees))
                                      (= count (hash-table-count harness-ui-worktree--status))))
@@ -108,7 +110,7 @@
     (harness-ui-worktree-test-goto wt)
     (should (string-match-p "dirty" (harness-ui-worktree-test-column "Status")))
     ;; Opening from inside a worktree resolves to the main root.
-    (kill-buffer harness-ui-worktree-buffer-name)
+    (kill-buffer harness-ui-worktree--buffer-name)
     (harness-ui-worktree-test-open wt 2)
     (should (harness-ui-worktree-test-same-p root harness-ui-worktree--root))
     ;; The mode line carries a mouse target for every command.
@@ -153,6 +155,18 @@
           (harness-ui-worktree-test-wait-rows 2))
         (should asked-force)
         (should-not (file-exists-p (plist-get new :path)))))
+    ;; An empty answer has the harness name the branch, with its prefix.
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+      (call-interactively #'harness-ui-worktree-create))
+    (harness-ui-worktree-test-wait-rows 3)
+    (let ((named (cl-find-if (lambda (w) (string-prefix-p harness-worktree-branch-prefix
+                                                          (or (plist-get w :branch) "")))
+                             harness-ui-worktree--worktrees)))
+      (should named)
+      (harness-ui-worktree-test-goto (plist-get named :path))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+        (harness-ui-worktree-remove)
+        (harness-ui-worktree-test-wait-rows 2)))
     ;; The main worktree refuses to be removed.
     (harness-ui-worktree-test-goto root)
     (should-error (harness-ui-worktree-remove) :type 'user-error)

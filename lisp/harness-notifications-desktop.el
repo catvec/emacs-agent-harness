@@ -68,18 +68,15 @@ signals or rejects when it cannot show it."
                  (function :tag "Function"))
   :group 'harness)
 
-(defcustom harness-notifications-desktop-app-name "Emacs Agent Harness"
-  "Application name desktop notifications are shown under."
-  :type 'string :group 'harness)
+(defconst harness-notifications-desktop--app-name "Emacs Agent Harness"
+  "Application name desktop notifications are shown under.")
 
-(defcustom harness-notifications-desktop-icon nil
+(defconst harness-notifications-desktop--icon-name nil
   "Icon of desktop notifications: an image file or an icon name.
-nil uses the Emacs icon."
-  :type '(choice (const :tag "The Emacs icon" nil) string) :group 'harness)
+nil uses the Emacs icon.")
 
-(defcustom harness-notifications-desktop-notify-send-program "notify-send"
-  "The notify-send program the `notify-send' backend runs."
-  :type 'string :group 'harness)
+(defconst harness-notifications-desktop--notify-send "notify-send"
+  "The notify-send program the `notify-send' backend runs.")
 
 (defconst harness-notifications-desktop-max-waiting 16
   "Clickable notify-send notifications listened to at most.
@@ -96,9 +93,9 @@ the oldest stops listening (its notification stays).")
 
 (defun harness-notifications-desktop--notify-send-program ()
   "Return the notify-send executable, or nil."
-  (and (stringp harness-notifications-desktop-notify-send-program)
-       (not (string-empty-p harness-notifications-desktop-notify-send-program))
-       (executable-find harness-notifications-desktop-notify-send-program)))
+  (and (stringp harness-notifications-desktop--notify-send)
+       (not (string-empty-p harness-notifications-desktop--notify-send))
+       (executable-find harness-notifications-desktop--notify-send)))
 
 (defun harness-notifications-desktop--dbus-session-p ()
   "Non-nil when this Emacs has D-Bus and a session bus to reach.
@@ -140,15 +137,15 @@ chosen backend cannot work in this Emacs."
         (format "The %s desktop notification backend does not work in this Emacs%s"
                 choice
                 (if (eq choice 'notify-send)
-                    (format " (no %s program)" harness-notifications-desktop-notify-send-program)
+                    (format " (no %s program)" harness-notifications-desktop--notify-send)
                   ""))
       "No way to show desktop notifications here: install notify-send (libnotify), use an Emacs with D-Bus support, or set harness-notifications-desktop-backend")))
 
 ;;;; Text
 
 (defun harness-notifications-desktop--icon ()
-  "Return the icon to show: `harness-notifications-desktop-icon' or Emacs's."
-  (or harness-notifications-desktop-icon
+  "Return the icon to show: `harness-notifications-desktop--icon-name' or Emacs's."
+  (or harness-notifications-desktop--icon-name
       (let ((svg (expand-file-name "images/icons/hicolor/scalable/apps/emacs.svg" data-directory)))
         (if (file-exists-p svg) svg "emacs"))))
 
@@ -186,7 +183,7 @@ LEGACY leaves out the options an old notify-send does not know."
   (let ((title (or (plist-get params :title) ""))
         (body (plist-get params :body)))
     (append
-     (list (concat "--app-name=" harness-notifications-desktop-app-name)
+     (list (concat "--app-name=" harness-notifications-desktop--app-name)
            (concat "--urgency=" (symbol-name (harness-notifications-desktop--urgency
                                                (plist-get params :urgency))))
            (concat "--icon=" (harness-notifications-desktop--icon)))
@@ -334,7 +331,7 @@ Past `harness-notifications-desktop-max-waiting' the oldest stops."
 (defun harness-notifications-desktop--dbus-args (params clickable)
   "Return the arguments of the Notify call for PARAMS.
 CLICKABLE adds the default action, which a click on it invokes."
-  (list :string harness-notifications-desktop-app-name
+  (list :string harness-notifications-desktop--app-name
         :uint32 0
         :string (harness-notifications-desktop--icon)
         :string (or (plist-get params :title) "")
@@ -416,7 +413,7 @@ CLICKABLE adds the default action, which a click on it invokes."
              :body (harness-truncate-end (or (plist-get params :body) "") 255)
              :level (if (eq (harness-notifications-desktop--urgency (plist-get params :urgency)) 'critical)
                         'warning 'info)
-             :tip (harness-truncate-end harness-notifications-desktop-app-name 127))))
+             :tip (harness-truncate-end harness-notifications-desktop--app-name 127))))
     (setq harness-notifications-desktop--w32-id id)
     ;; It stays in the tray until closed.
     (run-at-time 30 nil (lambda ()

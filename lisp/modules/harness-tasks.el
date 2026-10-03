@@ -10,7 +10,7 @@
 ;; configuration makes it non-interactive (`harness-tasks-non-interactive',
 ;; or `harness-non-interactive' for its directory).  The session's name is
 ;; the task's title, so when the model names it,
-;; `harness-tasks-naming-prompt' asks for a ticket title.
+;; `harness-tasks--naming-instructions' asks for a ticket title.
 ;;
 ;; In a git project a task owns the whole life of its change: it starts
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
@@ -19,7 +19,7 @@
 ;; branch checked out at the project root.  A task is complete only once
 ;; its changes are merged.  The merge queue needs a parent session to
 ;; merge into, so every project gets one quiet session at its root,
-;; named by `harness-tasks-merge-session-name', that only ever receives
+;; named by `harness-tasks--merge-session-name', that only ever receives
 ;; merges.  Conflicts are handed back to the task's own session by the
 ;; merge queue; any other failure puts the task in front of the user.
 ;; Archiving a merged task removes its worktree and its merged branch.
@@ -41,7 +41,7 @@
 ;; Backlog refinement (once called grooming): a task submitted with
 ;; `:refine' is jotted down for later, not started.  An agent writes it
 ;; up first -- briefly, read-only, at the project's root, told so by
-;; `harness-tasks-refine-prompt' -- and its final reply becomes the
+;; `harness-tasks--refine-prompt' -- and its final reply becomes the
 ;; task's prompt; the original words stay in `:note'.  The task then
 ;; waits in pending as a backlog task (`:backlog'): the scheduler never
 ;; starts it, only `task/start' does, so the backlog survives restarts
@@ -118,7 +118,7 @@
 ;; user asks how the tasks are going.  Like every BTW, each is a new
 ;; `btw' session sharing nothing with any other; as the board has no
 ;; session to list it under, it has no parent, and it works at the
-;; project root.  `harness-tasks-btw-prompt' tells it to answer from the
+;; project root.  `harness-tasks--btw-prompt' tells it to answer from the
 ;; task and session tools.
 
 ;;; Code:
@@ -179,14 +179,13 @@ own setting, from the board or `task/submit', wins over both."
   :type `(choice (const :tag "Configured default" nil) ,@harness-tasks--thinking-levels)
   :group 'harness)
 
-(defcustom harness-tasks-naming-prompt
+(defconst harness-tasks--naming-instructions
   "This conversation is a task the engineer handed to the agent to do unattended, tracked on a task board.  Title it like a ticket on that board: an imperative summary of the work to be done, such as \"Fix login redirect loop\" or \"Add CSV export to reports\"."
   "Text added to the naming system prompt of task sessions, or nil for none.
 A task's session name is its title on the board, so by default the
-model titles task sessions like tickets."
-  :type '(choice (const :tag "Name tasks like other sessions" nil) string) :group 'harness)
+model titles task sessions like tickets.")
 
-(defcustom harness-tasks-refine-prompt
+(defconst harness-tasks--refine-prompt
   "## Task refinement
 This session refines a task for the backlog: the engineer jotted it down to be done later, maybe by another agent that will not see this conversation.  Do not do the task: write it up.
 - First, a quick search for related tasks: call task_list once with include_archived true and limit 50, the project's most recent tasks (the line of this one says \"(this task)\").  Read a task's session with session_read only when its line leaves you unsure what it changes.
@@ -201,8 +200,7 @@ self-contained write-up.  It also has the agent look for related tasks
 first and refuse a task the board already has, with a reply whose
 first line is \"Duplicate of ID\" (see `harness-tasks--refusal'), and
 name the related tasks in the same code area in the write-up, with
-how to coordinate with their sessions."
-  :type 'string :group 'harness)
+how to coordinate with their sessions.")
 
 (defcustom harness-tasks-refine-model nil
   "Model that writes backlog tasks up, or nil for the task's own model."
@@ -214,33 +212,29 @@ A write-up should be quick, so the default thinks little."
   :type `(choice (const :tag "The task's thinking level" nil) ,@harness-tasks--thinking-levels)
   :group 'harness)
 
-(defcustom harness-tasks-refine-tool-calls 8
+(defconst harness-tasks--refine-tool-calls 8
   "Tool calls a write-up may make before the agent is told to finish it.
 The agent is steered once, to write the task up with what it knows; nil
-never tells it.  It keeps a backlog write-up brief."
-  :type '(choice (const :tag "Never" nil) integer) :group 'harness)
+never tells it.  It keeps a backlog write-up brief.")
 
-(defcustom harness-tasks-start-text
+(defconst harness-tasks--start-message
   "Start working on this task now.  It was written up earlier without doing any of it; that is over, so change files, run commands and so on as the task requires.  If it names related tasks, see where they stand now and coordinate with them as it says before you change the same code."
   "Opening of the message that starts a backlog task's work.
 The task's write-up follows it, then the request it was written from.
 A write-up names the related tasks working on the same code, which the
-work coordinates with (see `harness-tasks-refine-prompt')."
-  :type 'string :group 'harness)
+work coordinates with (see `harness-tasks--refine-prompt').")
 
-(defcustom harness-tasks-reject-text
+(defconst harness-tasks--reject-message
   "The user reviewed your work on this task and sent it back. Address their feedback below, then finish as before (commit your changes, if you work in a git worktree). Your work goes back to the user for review when your turn ends."
   "Opening of the message that sends a task back to its session after review.
-The user's feedback follows it (`task/reject')."
-  :type 'string :group 'harness)
+The user's feedback follows it (`task/reject').")
 
-(defcustom harness-tasks-btw-prompt
+(defconst harness-tasks--btw-prompt
   "## Task board
 This is a side conversation the user opened from this project's task board to ask about its tasks: what each one is doing, how far along it is, what it changed, why it is stuck, which ones need the user. Answer from the live state and check it again for every question: task_list shows the board (each task's title, column, state, session, branch and what it waits on), session_read a task's session (its plan, todos, latest transcript and working directory, where git shows what it changed), session_search where something was said, and task_wait or session_wait wait for a task or a session to settle. Refer to tasks by title and id, and keep answers short. Change nothing (tasks, sessions or files) unless the user asks you to."
   "Text added to the system prompt of BTW conversations about a task board.
 Such a conversation is opened from the board (`task/btw') to ask about
-its tasks; nil adds nothing."
-  :type '(choice (const :tag "Nothing" nil) string) :group 'harness)
+its tasks; nil adds nothing.")
 
 (defcustom harness-tasks-worktrees t
   "When non-nil, tasks in a git project work in a worktree and merge back.
@@ -252,31 +246,24 @@ complete only when the merge queue has merged that branch."
   "Prefix of the branches task worktrees are created on."
   :type 'string :group 'harness)
 
-(defcustom harness-tasks-merge-attempts 3
-  "Merges a task may try before it waits for the user."
-  :type 'integer :group 'harness)
+(defconst harness-tasks--merge-attempts 3
+  "Merges a task may try before it waits for the user.")
 
-(defcustom harness-tasks-merge-session-name "Task merges"
-  "Name of the session at a project's root that task branches merge into."
-  :type 'string :group 'harness)
-
-(defcustom harness-tasks-git-program "git"
-  "Git executable used to delete merged task branches."
-  :type 'string :group 'harness)
+(defconst harness-tasks--merge-session-name "Task merges"
+  "Name of the session at a project's root that task branches merge into.")
 
 (defcustom harness-tasks-resume-interrupted t
   "When non-nil, tasks a stopped harness interrupted carry on by themselves.
 A task that was working when the harness stopped (Emacs quit,
-`harness-restart', a crash) is sent `harness-tasks-resume-prompt' when the
+`harness-restart', a crash) is sent `harness-tasks--resume-prompt' when the
 harness starts again.  With nil it waits in needs-input instead, with
 the outcome `interrupted', until you reply.  The same goes for a backlog
 task's write-up: it is written again, or with nil waits for a retry."
   :type 'boolean :group 'harness)
 
-(defcustom harness-tasks-resume-prompt
+(defconst harness-tasks--resume-prompt
   "The harness restarted while you were working on this task, so your last turn was cut short: tool calls that were still running did not finish. Check where you left off, then carry on with the task."
-  "Message that resumes a task's session after a restart interrupted it."
-  :type 'string :group 'harness)
+  "Message that resumes a task's session after a restart interrupted it.")
 
 (defcustom harness-tasks-store-in-repository t
   "When non-nil, a git project keeps its tasks inside its repository.
@@ -294,11 +281,10 @@ state directory of its own, like a test run) keeps its tasks of that
 repository in its state directory instead."
   :type 'boolean :group 'harness)
 
-(defcustom harness-tasks-directory-poll 2
+(defconst harness-tasks--directory-poll 2
   "Seconds between looks at the task folders for files changed by hand.
 A folder is also read when a board lists its tasks and before every
-save; nil only does that.  The folder is `harness-tasks-directory'."
-  :type '(choice (const :tag "Only when listing and saving" nil) number) :group 'harness)
+save; nil only does that.  The folder is `harness-tasks-directory'.")
 
 (defcustom harness-tasks-directory-archive "archive"
   "Subfolder of a task folder that the files of archived tasks move to.
@@ -308,11 +294,10 @@ the files of archived tasks instead.  The task folder is
 `harness-tasks-directory'."
   :type '(choice (const :tag "Delete the files" nil) (string :tag "Subfolder")) :group 'harness)
 
-(defcustom harness-tasks-directory-ignore
+(defconst harness-tasks--directory-ignore
   "\\`\\(?:[._#~].*\\|readme\\.md\\|index\\.md\\|template\\.md\\)\\'"
   "Names of the files in a task folder that are no tasks, matched ignoring case.
-The folder is `harness-tasks-directory'; only its .md files count."
-  :type 'regexp :group 'harness)
+The folder is `harness-tasks-directory'; only its .md files count.")
 
 (defvar harness-state-directory)
 
@@ -778,7 +763,7 @@ projects' tasks from before repository stores."
 ;;   and restoring it moves it back; deleting or cancelling a task deletes
 ;;   its file.
 ;; - Reading: on load, when a board lists the project's tasks, before
-;;   every save and every `harness-tasks-directory-poll' seconds (file
+;;   every save and every `harness-tasks--directory-poll' seconds (file
 ;;   notifications never reach a batch Emacs), the files whose stamp
 ;;   changed are read.  The person's edits are what differs from what the
 ;;   file said last (`:file-base'), so a file the harness has yet to
@@ -1614,7 +1599,7 @@ become tasks and deleted files are followed (see Task files)."
           (let ((path (car entry)) (attrs (cdr entry)))
             (unless (or (eq t (file-attribute-type attrs))
                         (let ((case-fold-search t))
-                          (string-match-p harness-tasks-directory-ignore (file-name-nondirectory path))))
+                          (string-match-p harness-tasks--directory-ignore (file-name-nondirectory path))))
               (puthash path t present)
               (unless (equal (list (file-attribute-modification-time attrs) (file-attribute-size attrs))
                              (gethash path harness-tasks--file-stamps))
@@ -1639,16 +1624,16 @@ become tasks and deleted files are followed (see Task files)."
 
 (defun harness-tasks--poll ()
   "Read what changed in the task folders.
-It runs every `harness-tasks-directory-poll' seconds."
-  (when (and harness-tasks--loaded harness-tasks-directory-poll)
+It runs every `harness-tasks--directory-poll' seconds."
+  (when (and harness-tasks--loaded harness-tasks--directory-poll)
     (harness-tasks--scan-roots (hash-table-keys harness-tasks--file-roots))))
 
 (defun harness-tasks--start-polling ()
-  "Start reading the task folders every `harness-tasks-directory-poll' seconds."
+  "Start reading the task folders every `harness-tasks--directory-poll' seconds."
   (when (timerp harness-tasks--poll-timer) (cancel-timer harness-tasks--poll-timer))
   (setq harness-tasks--poll-timer
-        (and (numberp harness-tasks-directory-poll) (> harness-tasks-directory-poll 0)
-             (run-with-timer harness-tasks-directory-poll harness-tasks-directory-poll #'harness-tasks--poll))))
+        (and (numberp harness-tasks--directory-poll) (> harness-tasks--directory-poll 0)
+             (run-with-timer harness-tasks--directory-poll harness-tasks--directory-poll #'harness-tasks--poll))))
 
 (defun harness-tasks--archive-file (task folder path)
   "Take the file PATH of archived TASK out of the task FOLDER.
@@ -1792,12 +1777,12 @@ The bookkeeping of its file stays out."
 
 (defun harness-tasks--merge-target (root)
   "Return the id of the session at project ROOT that task branches merge into."
-  (let ((existing (cl-find-if (lambda (s) (and (equal (plist-get s :name) harness-tasks-merge-session-name)
+  (let ((existing (cl-find-if (lambda (s) (and (equal (plist-get s :name) harness-tasks--merge-session-name)
                                                (equal (plist-get s :cwd) root)
                                                (null (plist-get s :worktree))))
                               (harness-call 'session/list (list :project root)))))
     (plist-get (or existing
-                   (harness-call 'session/create :cwd root :name harness-tasks-merge-session-name))
+                   (harness-call 'session/create :cwd root :name harness-tasks--merge-session-name))
                :id)))
 
 (defun harness-tasks--enqueue-merge (id)
@@ -1805,10 +1790,10 @@ The bookkeeping of its file stays out."
   (let* ((task (harness-tasks--get id))
          (attempts (1+ (or (plist-get task :merge-attempts) 0))))
     (cond
-     ((> attempts harness-tasks-merge-attempts)
+     ((> attempts harness-tasks--merge-attempts)
       (harness-tasks--set id :state 'active :outcome 'merge-failed :merge-status nil
                           :error (format "gave up after %d merge attempts: %s"
-                                         harness-tasks-merge-attempts (or (plist-get task :error) "?"))))
+                                         harness-tasks--merge-attempts (or (plist-get task :error) "?"))))
      ((harness-call 'merge/status (plist-get task :session)) nil)
      (t
       (condition-case err
@@ -1891,7 +1876,7 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
      (lambda (_)
        (harness-tasks--set (plist-get task :id) :worktree-removed t)
        (when branch
-         (harness-run-command (list harness-tasks-git-program "-C" (directory-file-name root) "branch" "-d" branch)
+         (harness-run-command (list "git" "-C" (directory-file-name root) "branch" "-d" branch)
                               :cwd root :name "harness-tasks-git")))
      (lambda (err)
        (harness-log 'warn "task %s: keeping its worktree: %s" (plist-get task :id) (harness-error-message err))
@@ -1905,14 +1890,14 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
 
 (defun harness-tasks--system-prompt (prompt session)
   "Tell a task's SESSION what its turns are for (PROMPT filter).
-Before the task starts they write it up (`harness-tasks-refine-prompt');
+Before the task starts they write it up (`harness-tasks--refine-prompt');
 afterwards they learn how to hand the finished work in, and, in a
 worktree, how it reaches the main branch."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
      ((and task (harness-tasks--refinement-p task)
-           (not (harness-string-blank-p harness-tasks-refine-prompt)))
-      (concat prompt "\n\n" harness-tasks-refine-prompt "\n"))
+           (not (harness-string-blank-p harness-tasks--refine-prompt)))
+      (concat prompt "\n\n" harness-tasks--refine-prompt "\n"))
      ((not task) prompt)
      (t
       (concat prompt "\n\n## Task mode\n"
@@ -1934,9 +1919,9 @@ worktree, how it reaches the main branch."
 
 (defun harness-tasks--naming-prompt (prompt session)
   "Ask for a ticket title when naming a task's SESSION (PROMPT filter)."
-  (if (and (not (harness-string-blank-p harness-tasks-naming-prompt))
+  (if (and (not (harness-string-blank-p harness-tasks--naming-instructions))
            (harness-tasks--by-session (plist-get session :id)))
-      (concat prompt "\n\n" harness-tasks-naming-prompt)
+      (concat prompt "\n\n" harness-tasks--naming-instructions)
     prompt))
 
 ;;;; Side conversations about the board
@@ -1950,8 +1935,8 @@ listed under it (`session/btw'), so only the board's have no parent."
 
 (defun harness-tasks--btw-system-prompt (prompt session)
   "Tell SESSION, when it is about a task board, how to answer (PROMPT filter)."
-  (if (and (harness-tasks--btw-p session) (not (harness-string-blank-p harness-tasks-btw-prompt)))
-      (concat prompt "\n\n" harness-tasks-btw-prompt "\n")
+  (if (and (harness-tasks--btw-p session) (not (harness-string-blank-p harness-tasks--btw-prompt)))
+      (concat prompt "\n\n" harness-tasks--btw-prompt "\n")
     prompt))
 
 ;;;; Scheduling
@@ -2103,7 +2088,7 @@ depends on the provider remembering the refinement (after moving into a
 worktree it does not), and the request it was written from, quoted."
   (let ((prompt (plist-get task :prompt))
         (note (plist-get task :note)))
-    (concat harness-tasks-start-text "\n\n" prompt
+    (concat harness-tasks--start-message "\n\n" prompt
             (if (and note (not (equal (string-trim note) (string-trim prompt))))
                 (concat "\n\n---\nIt was written up from this request (the write-up above takes precedence):\n\n"
                         (harness-tasks--quote note))
@@ -2111,10 +2096,10 @@ worktree it does not), and the request it was written from, quoted."
 
 (defun harness-tasks--reject-text (feedback)
   "Return the message that sends a task back to its session with FEEDBACK.
-It opens with `harness-tasks-reject-text', unless that is blank."
-  (if (harness-string-blank-p harness-tasks-reject-text)
+It opens with `harness-tasks--reject-message', unless that is blank."
+  (if (harness-string-blank-p harness-tasks--reject-message)
       feedback
-    (concat harness-tasks-reject-text "\n\n" feedback)))
+    (concat harness-tasks--reject-message "\n\n" feedback)))
 
 (defun harness-tasks--continue-session (id cwd worktree)
   "Start task ID's work in the session that wrote it up, moved to CWD.
@@ -2183,15 +2168,15 @@ Matched ignoring case, markdown around it allowed.")
 (defconst harness-tasks--refine-enough-text
   "That is enough looking around: end the task now with what you know, as your final message -- the write-up, or the refusal when the board has it already."
   "Steering message for a write-up that looked around long enough.
-That is once it made `harness-tasks-refine-tool-calls' tool calls.")
+That is once it made `harness-tasks--refine-tool-calls' tool calls.")
 
 (defvar harness-tasks--refine-calls (make-hash-table :test 'equal)
   "Session id -> tool calls of the write-up turn running in it.")
 
 (defun harness-tasks--on-tool-call (session-id &rest _)
   "Count the tool calls of a write-up in SESSION-ID; tell it to finish in time.
-At `harness-tasks-refine-tool-calls' calls it is steered to write up now."
-  (when-let* ((limit harness-tasks-refine-tool-calls)
+At `harness-tasks--refine-tool-calls' calls it is steered to write up now."
+  (when-let* ((limit harness-tasks--refine-tool-calls)
               (task (harness-tasks--by-session session-id))
               ((eq (plist-get task :state) 'refining)))
     (let ((n (1+ (gethash session-id harness-tasks--refine-calls 0))))
@@ -2469,7 +2454,7 @@ A session that never received the task gets the task itself."
     (puthash id t harness-tasks--starting)
     (harness-catch (harness-call-async 'agent/prompt sid
                                        (if begun
-                                           (list (list :type "text" :text harness-tasks-resume-prompt))
+                                           (list (list :type "text" :text harness-tasks--resume-prompt))
                                          (harness-tasks--blocks task)))
                    (lambda (e) (harness-tasks--fail id e)))))
 
@@ -2499,7 +2484,7 @@ waits for the user with the outcome `interrupted'."
 Runs once the modules are up, before the scheduler.  A task stopped
 before it had a session starts over, in its worktree when it got that
 far; a task whose session was at work carries on with
-`harness-tasks-resume-prompt', or waits for the user with the outcome
+`harness-tasks--resume-prompt', or waits for the user with the outcome
 `interrupted' when `harness-tasks-resume-interrupted' is nil.  A
 backlog task stopped while its session was being handed the work starts
 again, or with nil goes back to the backlog.  Working past the
@@ -2596,7 +2581,7 @@ It must be open, not a task already, not a merge target and not a
 conversation about the board."
   (and (not (eq (plist-get session :status) 'inactive))
        (not (harness-tasks--by-session (plist-get session :id)))
-       (not (equal (plist-get session :name) harness-tasks-merge-session-name))
+       (not (equal (plist-get session :name) harness-tasks--merge-session-name))
        (not (harness-tasks--btw-p session))))
 
 (harness-defmethod task/adoptable (&optional cwd)
@@ -2646,7 +2631,7 @@ Return its session, where the user asks how the tasks are going: a new
 `btw' session named NAME at the project root on every call, sharing
 nothing with earlier ones, and without a parent (a BTW over a session is
 listed under it instead, see `session/btw'), which
-`harness-tasks-btw-prompt' tells to answer with the task and session
+`harness-tasks--btw-prompt' tells to answer with the task and session
 tools.  The caller sends the first question."
   (harness-call 'session/create :cwd (harness-tasks--project cwd) :kind 'btw :name name))
 
@@ -2687,8 +2672,7 @@ nil, which JSON could not tell from a harness that does not say):
                                     (harness-json-true-p (harness-tasks--config 'harness-non-interactive root)))
                                 t)
           :require-verification (if harness-tasks-require-verification t :false)
-          :model (or harness-tasks-model (harness-tasks--config 'harness-model root)
-                     (and (boundp 'harness-default-model) harness-default-model))
+          :model (or harness-tasks-model (harness-tasks--config 'harness-model root))
           :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
           :worktrees (and root (harness-tasks--git-p root) t))))
 
@@ -2808,7 +2792,7 @@ already, it is done now."
 (harness-defmethod task/reject (id feedback &optional attachments)
   "Send task ID, which waits in review, back to work with FEEDBACK.
 FEEDBACK and ATTACHMENTS go to the task's own session, in its own
-worktree, as a new prompt opened by `harness-tasks-reject-text'.  The
+worktree, as a new prompt opened by `harness-tasks--reject-message'.  The
 round of feedback is kept in the task's `:feedback'.  The task is
 active again and comes back to review when that turn ends.  Return the
 task."

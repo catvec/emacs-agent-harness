@@ -14,12 +14,12 @@
 (require 'harness-test-helpers)
 
 ;; Bound before the modules that define them load.
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-acp-remote)
 
 (defun harness-acp-remote-test-load ()
   "Load the acp and acp-remote modules, the TCP server off."
-  (let ((harness-acp-server-enabled nil)
+  (let ((harness-acp--server-enabled nil)
         (harness-acp-remote nil))
     (harness-test-load-module 'acp)
     (harness-test-load-module 'acp-remote)))

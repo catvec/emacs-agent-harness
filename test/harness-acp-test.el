@@ -20,7 +20,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
@@ -28,7 +28,7 @@
      (clrhash harness-agent--turns)
      (setq harness-acp--clients nil
            harness-acp-test-messages nil)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-acp-token nil)
            (default-directory dir))
        (harness-add-filter 'permission/decide
@@ -169,14 +169,14 @@
         (should (equal (list sid "end-turn") (plist-get (cadr ended) :args)))))))
 
 (defvar harness-provider-demo-script-override)
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 
 (ert-deftest harness-acp-local-activity-updates ()
   "What a running turn does reaches clients as it changes, and can be asked."
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))
            (sid (harness-acp-test-new-session conn))
-           (harness-provider-demo-delay 0.2)
+           (harness-provider-demo--delay 0.2)
            (harness-provider-demo-script-override
             '((:type activity :phase thinking)
               (:type text :delta "Looking.")
@@ -211,7 +211,7 @@
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))
            (sid (harness-acp-test-new-session conn))
-           (harness-provider-demo-delay 0.2)
+           (harness-provider-demo--delay 0.2)
            (p (harness-acp-request conn "session/prompt"
                                    (list :sessionId sid :prompt (list (list :type "text" :text "tour"))))))
       (harness-test-wait (lambda () (harness-agent-running-p sid)))

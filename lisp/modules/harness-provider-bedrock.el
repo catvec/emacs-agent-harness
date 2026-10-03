@@ -9,8 +9,8 @@
 ;; and turned into harness events.  The agent runs the tool loop.
 ;;
 ;; Models come from ListFoundationModels and ListInferenceProfiles,
-;; cached for `harness-bedrock-models-ttl'.  Bedrock reports neither
-;; context windows nor prices, so `harness-bedrock-model-defaults'
+;; cached for `harness-bedrock--models-ttl'.  Bedrock reports neither
+;; context windows nor prices, so `harness-bedrock--model-defaults'
 ;; supplies them by model family.
 ;;
 ;; Claude and Nova requests carry prompt cache points.  Claude thinks
@@ -33,45 +33,34 @@
 
 ;;;; Customisation
 
-(defcustom harness-bedrock-models-ttl 3600
-  "Seconds a listed model catalogue stays cached per endpoint."
-  :type 'integer :group 'harness)
+(defconst harness-bedrock--models-ttl 3600
+  "Seconds a listed model catalogue stays cached per endpoint.")
 
-(defcustom harness-bedrock-request-timeout 900
-  "Maximum seconds a completion request may take, including streaming."
-  :type 'integer :group 'harness)
+(defconst harness-bedrock--request-timeout 900
+  "Maximum seconds a completion request may take, including streaming.")
 
-(defcustom harness-bedrock-max-tokens 32000
+(defconst harness-bedrock--default-max-tokens 32000
   "Output token limit sent with each request.
 It is lowered to the model's own limit when
-`harness-bedrock-model-defaults' knows it.  For a model whose limit is
+`harness-bedrock--model-defaults' knows it.  For a model whose limit is
 unknown no limit is sent, so the model's default applies, unless the
-endpoint sets `:max-tokens'.  nil sends the model's own limit."
-  :type '(choice (const :tag "The model's limit" nil) integer) :group 'harness)
+endpoint sets `:max-tokens'.  nil sends the model's own limit.")
 
-(defcustom harness-bedrock-prompt-caching t
+(defconst harness-bedrock--prompt-caching t
   "Whether requests carry prompt cache points.
-t places them for the models `harness-bedrock-model-defaults' marks
+t places them for the models `harness-bedrock--model-defaults' marks
 `:prompt-caching' (Claude, Nova), `always' for every model, nil never.
-An endpoint's `:prompt-caching' overrides this."
-  :type '(choice (const :tag "Models that support it" t)
-                 (const :tag "Every model" always)
-                 (const :tag "Never" nil))
-  :group 'harness)
+An endpoint's `:prompt-caching' overrides this.")
 
-(defcustom harness-bedrock-thinking-budgets
+(defconst harness-bedrock--thinking-budgets
   '(("low" . 4000) ("medium" . 10000) ("high" . 20000) ("xhigh" . 32000) ("max" . 48000))
   "Thinking token budget per thinking level, for models that take a budget.
 Claude 3.7 to 4.5 think within a fixed budget; newer Claude models
-think adaptively at an effort level named like the thinking level."
-  :type '(alist :key-type (string :tag "Thinking level" :value "high")
-                :value-type (integer :tag "Budget (tokens)" :value 16000))
-  :group 'harness)
+think adaptively at an effort level named like the thinking level.")
 
-(defcustom harness-bedrock-max-retries 3
+(defconst harness-bedrock--max-retries 3
   "Times a throttled or unavailable request is retried before it fails.
-Only a request that has not streamed anything yet is retried."
-  :type 'integer :group 'harness)
+Only a request that has not streamed anything yet is retried.")
 
 (defcustom harness-bedrock-tiers
   '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
@@ -111,9 +100,9 @@ prices."
                                           :key-type (symbol :tag "Field" :value :field)
                                           :value-type (sexp :tag "Value")
                                           :doc "Merged into each request's additionalModelRequestFields."))))))
-  "Customize type of `harness-bedrock-model-defaults'.")
+  "Customize type of `harness-bedrock--model-defaults'.")
 
-(defcustom harness-bedrock-model-defaults
+(defconst harness-bedrock--model-defaults
   '(("claude-fable-5" :context-window 1000000 :max-output 128000 :thinking adaptive-only
      :thinking-levels ("low" "medium" "high" "xhigh" "max") :prompt-caching t
      :input-modalities ("text" "image")
@@ -203,7 +192,7 @@ keys:
   :input-modalities (\"text\") or (\"text\" \"image\")
   :thinking         `adaptive' (effort levels), `adaptive-only' (the
                     model always thinks adaptively) or `budget' (a
-                    token budget, see `harness-bedrock-thinking-budgets')
+                    token budget, see `harness-bedrock--thinking-budgets')
   :thinks-by-default non-nil when an `adaptive' model thinks unless told
                     otherwise
   :thinking-levels  levels the model accepts
@@ -213,9 +202,7 @@ keys:
   :request-fields   plist merged into additionalModelRequestFields
 
 Models nothing matches get the endpoint's `:default-context' and no
-price, so their calls are recorded without a cost."
-  :type harness-bedrock--model-defaults-type
-  :group 'harness)
+price, so their calls are recorded without a cost.")
 
 (defvar harness-bedrock--registered nil
   "Provider ids registered from `harness-bedrock-endpoints'.")
@@ -358,8 +345,10 @@ Every entry is a plist with these keys, all optional but `:id':
   :list-models      nil to never call the listing APIs
   :inference-profiles nil to leave inference profiles out of the listing
   :default-context  context window of models the defaults do not know
-  :max-tokens       output token limit; overrides `harness-bedrock-max-tokens'
-  :prompt-caching   overrides `harness-bedrock-prompt-caching'
+  :max-tokens       output token limit, nil for the model's own; by default
+                    32000, lowered to the model's limit where known
+  :prompt-caching   t (the default) places cache points for the models known
+                    to take them, `always' for every model, nil never
   :request-fields   plist merged into additionalModelRequestFields
   :capabilities     static capability plist
 
@@ -825,7 +814,7 @@ REGION, when given, saves looking it up."
 ;;    password is the secret key;
 ;; 6. the profile's `credential_process';
 ;; 7. `aws configure export-credentials' for the profile (see
-;;    `harness-bedrock-aws-program').
+;;    `harness-bedrock--aws-program').
 ;;
 ;; Commands run asynchronously, at most one at a time per endpoint,
 ;; and what they print is kept until it expires.  Keys 2 to 7 are used
@@ -906,16 +895,14 @@ SOURCE says where they came from."
           :source source))
    (t (error "%s returned no usable keys" source))))
 
-(defcustom harness-bedrock-aws-program (executable-find "aws")
+(defconst harness-bedrock--aws-program (executable-find "aws")
   "AWS command line program, the last place keys come from.
 When nothing else yields keys, `aws configure export-credentials'
 runs (asynchronously) for the endpoint's profile; that covers SSO
-logins, assumed roles and instance roles.  nil never runs it."
-  :type '(choice file (const nil)) :group 'harness)
+logins, assumed roles and instance roles.  nil never runs it.")
 
-(defcustom harness-bedrock-credential-timeout 60
-  "Seconds a command that prints keys may run."
-  :type 'integer :group 'harness)
+(defconst harness-bedrock--credential-timeout 60
+  "Seconds a command that prints keys may run.")
 
 (defvar harness-bedrock--kept-keys (make-hash-table :test 'equal)
   "\"ENDPOINT/PROFILE\" -> keys a command printed, kept until `:expires'.")
@@ -945,7 +932,7 @@ reaches a message or the log."
         (let ((promise
                (harness-then
                 (harness-run-command command :cwd (expand-file-name "~/")
-                                     :timeout harness-bedrock-credential-timeout
+                                     :timeout harness-bedrock--credential-timeout
                                      :name "harness-bedrock-keys")
                 (lambda (result)
                   (remhash pending-key harness-bedrock--command-pending)
@@ -1025,12 +1012,12 @@ command line runs only when ENDPOINT looks configured."
                     (harness-bedrock--command-keys
                      endpoint (format "credential_process of profile %s" profile)
                      (list shell-file-name shell-command-switch command)))))
-           (and sigv4 harness-bedrock-aws-program
+           (and sigv4 harness-bedrock--aws-program
                 (or (not quiet) (harness-bedrock--configured-p endpoint))
                 (lambda ()
                   (harness-bedrock--command-keys
                    endpoint "aws configure export-credentials"
-                   (list harness-bedrock-aws-program "configure" "export-credentials"
+                   (list harness-bedrock--aws-program "configure" "export-credentials"
                          "--profile" profile "--format" "process"))))))))
 
 (defun harness-bedrock--try-sources (sources errors)
@@ -1121,10 +1108,10 @@ headers, signed along with Host and X-Amz-Date.  The endpoint's
 
 (defun harness-bedrock--defaults-for (&rest ids)
   "Return the defaults of the first of IDS that matches.
-They come from `harness-bedrock-model-defaults'."
+They come from `harness-bedrock--model-defaults'."
   (cl-loop for id in ids
            thereis (and (stringp id)
-                        (cl-loop for (re . plist) in harness-bedrock-model-defaults
+                        (cl-loop for (re . plist) in harness-bedrock--model-defaults
                                  when (string-match-p re id) return plist))))
 
 (defun harness-bedrock--modalities (values)
@@ -1299,11 +1286,11 @@ warning, so one bad endpoint never hides the others."
        nil))))
 
 (defun harness-bedrock--models (endpoint)
-  "Return a promise of ENDPOINT's models, cached for `harness-bedrock-models-ttl'."
+  "Return a promise of ENDPOINT's models, cached for `harness-bedrock--models-ttl'."
   (let* ((id (plist-get endpoint :id))
          (cached (gethash id harness-bedrock--models-cache)))
     (cond
-     ((and cached (< (- (float-time) (car cached)) harness-bedrock-models-ttl))
+     ((and cached (< (- (float-time) (car cached)) harness-bedrock--models-ttl))
       (harness-resolved (cdr cached)))
      ((or (plist-get endpoint :models)
           (and (plist-member endpoint :list-models)
@@ -1572,7 +1559,7 @@ the output limit MAX-TOKENS above it."
                                                  level (plist-get info :thinking-levels))))
              max-tokens))
       ('budget
-       (let* ((budget (or (cdr (assoc level harness-bedrock-thinking-budgets)) 10000))
+       (let* ((budget (or (cdr (assoc level harness-bedrock--thinking-budgets)) 10000))
               (cap (plist-get info :max-output))
               (limit (max (or max-tokens 0) (+ budget 4096)))
               (limit (if cap (min limit cap) limit))
@@ -1585,14 +1572,14 @@ the output limit MAX-TOKENS above it."
   (let ((explicit (or (plist-get request :max-tokens) (plist-get endpoint :max-tokens)))
         (cap (plist-get info :max-output)))
     (if cap
-        (min (or explicit harness-bedrock-max-tokens cap) cap)
+        (min (or explicit harness-bedrock--default-max-tokens cap) cap)
       explicit)))
 
 (defun harness-bedrock--caching-p (endpoint info)
   "Non-nil when requests for model INFO at ENDPOINT carry cache points."
   (let ((setting (if (plist-member endpoint :prompt-caching)
                      (plist-get endpoint :prompt-caching)
-                   harness-bedrock-prompt-caching)))
+                   harness-bedrock--prompt-caching)))
     (cond ((memq setting '(nil :false)) nil)
           ((eq setting 'always) t)
           (t (plist-get (plist-get info :capabilities) :prompt-caching)))))
@@ -1958,10 +1945,10 @@ Usage comes first, then the tool calls, then `done'."
 (defun harness-bedrock--maybe-retry (stream type status message)
   "Retry STREAM after error TYPE or HTTP STATUS with MESSAGE, when that helps.
 Only a request that streamed nothing yet is retried, at most
-`harness-bedrock-max-retries' times.  Return non-nil when a retry was
+`harness-bedrock--max-retries' times.  Return non-nil when a retry was
 scheduled."
   (when (and (not (harness-bedrock--stream-emitted stream))
-             (< (harness-bedrock--stream-retries stream) harness-bedrock-max-retries)
+             (< (harness-bedrock--stream-retries stream) harness-bedrock--max-retries)
              (or (member type harness-bedrock--retryable)
                  (memq status '(429 500 502 503 504))))
     (let* ((retry (cl-incf (harness-bedrock--stream-retries stream)))
@@ -1971,7 +1958,7 @@ scheduled."
                     :text (format "Bedrock: %s; retrying in %d s (%d of %d)"
                                   (harness-truncate-end
                                    (harness-bedrock--redact message (harness-bedrock--stream-auth stream)) 200)
-                                  delay retry harness-bedrock-max-retries)))
+                                  delay retry harness-bedrock--max-retries)))
       (setf (harness-bedrock--stream-timer stream)
             (run-at-time delay nil (lambda ()
                                      (setf (harness-bedrock--stream-timer stream) nil)
@@ -2090,7 +2077,7 @@ at all (`:no-tools')."
           (setf (harness-bedrock--stream-http stream)
                 (harness-http-request
                  url :method "POST" :headers headers :body payload :binary t
-                 :timeout harness-bedrock-request-timeout
+                 :timeout harness-bedrock--request-timeout
                  :on-headers (lambda (status response-headers)
                                (setf (harness-bedrock--stream-status stream) status
                                      (harness-bedrock--stream-content-type stream)

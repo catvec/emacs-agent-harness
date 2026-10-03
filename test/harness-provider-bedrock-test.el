@@ -27,9 +27,9 @@
   "Run BODY without the AWS settings of the real environment, then with VARS.
 VARS is a list of (NAME VALUE) as for `with-environment-variables'."
   (declare (indent 1))
-  `(let ((harness-bedrock-aws-program nil)
+  `(let ((harness-bedrock--aws-program nil)
          (auth-sources nil)
-         (harness-bedrock-max-retries 3))
+         (harness-bedrock--max-retries 3))
      (with-environment-variables
          (("AWS_ACCESS_KEY_ID" nil) ("AWS_SECRET_ACCESS_KEY" nil) ("AWS_SESSION_TOKEN" nil)
           ("AWS_PROFILE" nil) ("AWS_DEFAULT_PROFILE" nil) ("AWS_REGION" nil) ("AWS_DEFAULT_REGION" nil)
@@ -489,7 +489,7 @@ Folded header lines continue the header above them."
           (should-not (reasons harness-bedrock-test-sonnet))
           (should (reasons harness-bedrock-test-sonnet "low"))))
       ;; Caching can be forced on or turned off.
-      (let ((harness-bedrock-prompt-caching nil))
+      (let ((harness-bedrock--prompt-caching nil))
         (should-not (string-search "cachePoint" (harness-json-encode (harness-bedrock--body endpoint sonnet request)))))
       (should (string-search "cachePoint"
                              (harness-json-encode
@@ -639,7 +639,7 @@ Folded header lines continue the header above them."
           (should (equal "finally" (harness-bedrock-test--text events)))
           (should (= 3 (length harness-bedrock-test--requests)))))
       ;; Retries run out.
-      (let ((harness-bedrock-max-retries 1))
+      (let ((harness-bedrock--max-retries 1))
         (harness-bedrock-test-with-fake
             '(("converse-stream" . (:status 503 :body "{\"message\":\"busy\"}"))
               ("converse-stream" . (:status 503 :body "{\"message\":\"still busy\"}")))
@@ -969,7 +969,7 @@ Folded header lines continue the header above them."
        (harness-bedrock-mock-stop mock))))
 
 (ert-deftest harness-provider-bedrock-end-to-end-through-curl ()
-  (skip-unless harness-http-curl-program)
+  (skip-unless harness-http--curl-program)
   (harness-bedrock-test-with-env (("AWS_ACCESS_KEY_ID" harness-bedrock-mock-key-id)
                                   ("AWS_SECRET_ACCESS_KEY" harness-bedrock-mock-key-secret)
                                   ("AWS_SESSION_TOKEN" "session-token-EXAMPLE"))
@@ -1024,7 +1024,7 @@ Folded header lines continue the header above them."
             (should-not (string-search "not-the-secret" (plist-get done :error)))))))))
 
 (ert-deftest harness-provider-bedrock-end-to-end-api-key ()
-  (skip-unless harness-http-curl-program)
+  (skip-unless harness-http--curl-program)
   (harness-bedrock-test-with-env (("AWS_BEARER_TOKEN_BEDROCK" harness-bedrock-mock-api-key))
     (harness-bedrock-test-with-mock #'harness-bedrock-mock-agent-handler
       (let ((events (car (harness-bedrock-test--complete
@@ -1039,7 +1039,7 @@ Folded header lines continue the header above them."
 
 (ert-deftest harness-provider-bedrock-agent-tool-round-trip ()
   "A session on a Bedrock model streams, calls a tool, answers, and records usage."
-  (skip-unless harness-http-curl-program)
+  (skip-unless harness-http--curl-program)
   (harness-bedrock-test-with-keys
     (harness-bedrock-test-with-mock #'harness-bedrock-mock-agent-handler
       (harness-test-with-temp-state
@@ -1154,7 +1154,7 @@ Folded header lines continue the header above them."
         (family (cadr harness-bedrock--model-defaults-type)))
     (should (null (cl-set-difference (harness-test-documented-keys 'harness-bedrock-endpoints)
                                      (harness-test-option-keys endpoint))))
-    (should (null (cl-set-difference (harness-test-documented-keys 'harness-bedrock-model-defaults)
+    (should (null (cl-set-difference (harness-test-documented-keys 'harness-bedrock--model-defaults)
                                      (harness-test-option-keys (car (last family))))))
     (harness-test-check-record-type endpoint)
     (harness-test-check-record-type (car (last family)))
@@ -1162,13 +1162,15 @@ Folded header lines continue the header above them."
     (should (eq harness-provider-tiers-type (get 'harness-bedrock-tiers 'custom-type)))
     (should (harness-test-fits-p endpoint (plist-get (cdr endpoint) :value)))
     (should (harness-test-fits-p family (plist-get (cdr family) :value)))
-    (dolist (sym '(harness-bedrock-endpoints harness-bedrock-model-defaults harness-bedrock-thinking-budgets))
+    ;; The model tables are internal constants now (`docs/configuration-audit.md'),
+    ;; so only the endpoint option still has a customize type of its own.
+    (dolist (sym '(harness-bedrock-endpoints))
       (should (harness-test-fits-p (get sym 'custom-type) (eval (car (get sym 'standard-value)) t))))
     ;; Keys set in Lisp that the type does not name still fit.
     (should (harness-test-fits-p (get 'harness-bedrock-endpoints 'custom-type)
                                  '((:id x :list-models nil :inference-profiles :false :credentials ignore
                                     :models ("m" (:name "arn" :label "Mine" :base "b" :odd 1))))))
-    (should (harness-test-fits-p (get 'harness-bedrock-model-defaults 'custom-type)
+    (should (harness-test-fits-p harness-bedrock--model-defaults-type
                                  '(("x" :thinking-levels ("unheard-of") :foo 1) ("y"))))))
 
 (provide 'harness-provider-bedrock-test)

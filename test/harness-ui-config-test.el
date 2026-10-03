@@ -7,7 +7,7 @@
 (defvar harness-model)
 (defvar harness-permission-mode)
 (defvar harness-thinking)
-(defvar harness-context-reserve)
+(defvar harness-log-level)
 (defvar harness-non-interactive)
 
 (defcustom harness-ui-config-test-api-key nil
@@ -31,6 +31,10 @@ Each is a plist with these keys:
   :url   where it is"
   :type `(repeat ,harness-ui-config-test--server-type) :group 'harness)
 
+(defcustom harness-ui-config-test-limit 20000
+  "A number option for the tests, an advanced one: no section shows it."
+  :type 'integer :group 'harness)
+
 (defun harness-ui-config-test--project ()
   "Return a fresh git project."
   (let ((root (harness-test-temp-dir)))
@@ -44,7 +48,7 @@ state directory, as they would the user's."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config acp ui ui-config))
          (harness-test-load-module m)))
      (let* ((harness-acp-token nil)
@@ -54,11 +58,12 @@ state directory, as they would the user's."
             (init-file-user "")
             (user-init-file (expand-file-name "init.el" harness-state-directory))
             (custom-file (expand-file-name "custom.el" harness-state-directory))
-            (harness-ui-config-default-scope 'global)
+            (harness-ui-config--default-scope 'global)
             (harness-model harness-model)
             (harness-permission-mode harness-permission-mode)
             (harness-thinking harness-thinking)
-            (harness-context-reserve harness-context-reserve)
+            (harness-ui-config-test-limit 20000)
+            (harness-log-level 'info)
             (harness-non-interactive harness-non-interactive)
             (harness-ui-config-test-api-key nil)
             (harness-ui-config-test-servers (copy-tree harness-ui-config-test-servers)))
@@ -150,16 +155,24 @@ state directory, as they would the user's."
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
     (with-temp-file (expand-file-name ".dir-locals.el" root)
-      (insert "((nil . ((harness-permission-mode . yolo) (harness-context-reserve . \"lots\"))))"))
+      (insert "((nil . ((harness-permission-mode . yolo) (harness-tasks-directory . 5))))"))
     (harness-ui-config-test-open root)
     (should (derived-mode-p 'harness-ui-config-mode))
-    (should-not (string-match-p "does not fit" (harness-ui-config-test-block "harness-context-reserve")))
+    (should-not (string-match-p "does not fit" (harness-ui-config-test-block "harness-tasks-directory")))
     (should (equal (format "*harness settings: %s*" (file-name-nondirectory (directory-file-name root)))
                    (buffer-name)))
     (should (eq 'global harness-ui-config--scope))
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-      (should (string-match-p "Session defaults" text))
-      ;; Options with a global value only are listed by module in the Global scope.
+      ;; The common settings come in sections named by what they are for.
+      (should (string-match-p "^ New sessions$" text))
+      (should (string-match-p "^ Files and safety$" text))
+      (should (string-match-p "^ Task board$" text))
+      ;; The advanced ones are folded into one line until asked for.
+      (should (string-match-p "^ Advanced  \\[?Show [0-9]+ more" text))
+      (should-not (string-match-p "Log level: " text)))
+    (execute-kbd-macro "a")
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      ;; Shown, they are listed by module.
       (should (string-match-p "^ Core$" text))
       (should (string-match-p "Log level: " text)))
     ;; Each setting shows its value, and where the project's comes from.
@@ -185,11 +198,12 @@ state directory, as they would the user's."
       (should (string-match-p "Remove override" mode)))
     (should (string-match-p "uses the global value" (harness-ui-config-test-block "harness-model")))
     ;; A project value the harness finds invalid is edited as Lisp, with a warning.
-    (should (string-match-p "does not fit" (harness-ui-config-test-block "harness-context-reserve")))
+    (should (string-match-p "does not fit" (harness-ui-config-test-block "harness-tasks-directory")))
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
       (should (string-match-p "more settings have a global value only" text))
+      (should-not (string-match-p "Advanced" text))
       (should-not (string-match-p "Log level: " text)))
-    ;; And back.
+    ;; And back, with the advanced settings still shown.
     (harness-ui-config-toggle-scope)
     (should (eq 'global harness-ui-config--scope))
     (should (string-match-p "Log level: " (buffer-substring-no-properties (point-min) (point-max))))))
@@ -198,30 +212,31 @@ state directory, as they would the user's."
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
     (harness-ui-config-test-open root)
+    (harness-ui-config-toggle-advanced)
     ;; Typing marks the setting edited; RET saves it through customize.
-    (harness-ui-config-test-type "harness-context-reserve" "30000")
-    (should (harness-ui-config--edited-p "harness-context-reserve"))
+    (harness-ui-config-test-type "harness-ui-config-test-limit" "30000")
+    (should (harness-ui-config--edited-p "harness-ui-config-test-limit"))
     (should (= 1 (harness-ui-config--edit-count)))
     (execute-kbd-macro (kbd "RET"))
-    (harness-ui-config-test-wait "harness-context-reserve" :global "30000")
-    (should (= 30000 harness-context-reserve))
+    (harness-ui-config-test-wait "harness-ui-config-test-limit" :global "30000")
+    (should (= 30000 harness-ui-config-test-limit))
     (harness-test-wait (lambda () (and (file-exists-p custom-file)
-                                       (string-search "(harness-context-reserve 30000"
+                                       (string-search "(harness-ui-config-test-limit 30000"
                                                       (harness-read-file custom-file))))
                        5 "custom file")
-    (should-not (harness-ui-config--edited-p "harness-context-reserve"))
+    (should-not (harness-ui-config--edited-p "harness-ui-config-test-limit"))
     (should (string-match-p "customized . default is 20000"
-                            (harness-ui-config-test-block "harness-context-reserve")))
+                            (harness-ui-config-test-block "harness-ui-config-test-limit")))
     ;; A toggle saves at once.
     (harness-ui-config-test-goto "harness-non-interactive" "[Toggle]")
     (execute-kbd-macro (kbd "RET"))
     (harness-ui-config-test-wait "harness-non-interactive" :global "t")
     (should (eq t harness-non-interactive))
     ;; d resets a customized value to its default.
-    (goto-char (harness-ui-config--setting-start "harness-context-reserve"))
+    (goto-char (harness-ui-config--setting-start "harness-ui-config-test-limit"))
     (execute-kbd-macro "d")
-    (harness-ui-config-test-wait "harness-context-reserve" :global "20000")
-    (should (= 20000 harness-context-reserve))
+    (harness-ui-config-test-wait "harness-ui-config-test-limit" :global "20000")
+    (should (= 20000 harness-ui-config-test-limit))
     ;; Nothing was written to the project.
     (should (eq 'none (harness-ui-config-test-dir-locals root)))))
 
@@ -298,15 +313,20 @@ state directory, as they would the user's."
     (should-not (harness-ui-config--edited-p "harness-model"))
     (should (equal harness-model (widget-value (harness-ui-config--widget "harness-model"))))
     ;; Invalid input is refused on the page, with the reason on the setting.
-    (harness-ui-config-test-type "harness-context-reserve" "12x")
+    (harness-ui-config-toggle-advanced)
+    (harness-ui-config-test-type "harness-ui-config-test-limit" "12x")
     (should-error (execute-kbd-macro (kbd "RET")) :type 'user-error)
-    (should (eq 'error (car-safe (harness-ui-config--state-of "harness-context-reserve"))))))
+    (should (eq 'error (car-safe (harness-ui-config--state-of "harness-ui-config-test-limit"))))
+    ;; The advanced settings do not fold away with an edit not saved.
+    (should-error (harness-ui-config-toggle-advanced) :type 'user-error)
+    (should (harness-ui-config--setting-start "harness-ui-config-test-limit"))))
 
 (ert-deftest harness-ui-config-never-shows-secrets ()
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
     (setq harness-ui-config-test-api-key "sk-already-set")
     (harness-ui-config-test-open root)
+    (harness-ui-config-toggle-advanced)
     (let ((block (harness-ui-config-test-block "harness-ui-config-test-api-key")))
       (should (string-match-p "Change" block))
       (should (string-match-p "never shown" block)))
@@ -330,10 +350,10 @@ state directory, as they would the user's."
                   ("harness-non-interactive" "config" "Non-interactive")
                   ("harness-tasks-non-interactive" "tasks" "Non-interactive")
                   ("harness-tasks-max-running" "tasks" "Max running")
-                  ("harness-tasks-btw-prompt" "tasks" "BTW prompt")
+                  ("harness-tasks-refine-model" "tasks" "Refine model")
                   ("harness-brave-api-key" "tools-web" "Brave API key")
-                  ("harness-openai-models-ttl" "provider-openai" "Models TTL")
-                  ("harness-bedrock-aws-program" "provider-bedrock" "AWS program")
+                  ("harness-openai-endpoints" "provider-openai" "Endpoints")
+                  ("harness-anthropic-admin-api-key" "usage" "Anthropic admin API key")
                   ("harness-provider-claude-program" "provider-claude" "Program")
                   ("harness-log-level" "core" "Log level")))
     (should (equal (nth 2 case)
@@ -341,6 +361,49 @@ state directory, as they would the user's."
   (should (equal "Task mode" (harness-ui-config--module-title "tasks")))
   (should (equal "AWS Bedrock" (harness-ui-config--module-title "provider-bedrock")))
   (should (equal "Some module" (harness-ui-config--module-title "some-module"))))
+
+(ert-deftest harness-ui-config-folds-advanced-settings ()
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (setq harness-log-level 'debug)
+    (harness-ui-config-test-open root)
+    (let* ((settings (plist-get harness-ui-config--data :settings))
+           (advanced (cl-remove-if-not #'harness-ui-config--advanced-p settings))
+           (text (buffer-substring-no-properties (point-min) (point-max))))
+      (should (member "harness-log-level" (mapcar (lambda (s) (plist-get s :key)) advanced)))
+      (should-not (cl-some #'harness-ui-config--advanced-p
+                           (cl-remove-if-not (lambda (s) (harness-ui-config--true (plist-get s :layered)))
+                                             settings)))
+      ;; Folded: how many there are, and how many differ from their default.
+      (should (string-match-p (format "Show %d more" (length advanced)) text))
+      (should (string-match-p "1 changed here" text))
+      (should-not (harness-ui-config--setting-start "harness-log-level"))
+      ;; The button shows them, and its label offers to hide them again.
+      (goto-char (point-min))
+      (search-forward (format "Show %d more" (length advanced)))
+      (widget-button-press (match-beginning 0))
+      (harness-test-wait (lambda () harness-ui-config--show-advanced) 2 "advanced shown")
+      (harness-test-wait (lambda () (harness-ui-config--setting-start "harness-log-level")) 2 "drawn")
+      (should (string-match-p "Hide them" (buffer-substring-no-properties (point-min) (point-max)))))
+    ;; From the Project scope, `a' shows them in the Global scope.
+    (harness-ui-config-set-scope 'project)
+    (setq harness-ui-config--show-advanced nil)
+    (execute-kbd-macro "a")
+    (should (eq 'global harness-ui-config--scope))
+    (should (harness-ui-config--setting-start "harness-log-level"))
+    ;; The interface's own options are a click away, in Customize.
+    (let (group)
+      (cl-letf (((symbol-function 'customize-group) (lambda (g &rest _) (setq group g))))
+        (goto-char (point-min))
+        (search-forward "Customize the interface")
+        (widget-button-press (match-beginning 0)))
+      (should (eq 'harness-ui group)))
+    ;; The menu lists the page's commands.
+    (let ((commands (cl-loop for column in (cdr (get 'harness-ui-config-mode 'harness-menu-group))
+                             append (cl-loop for item across column
+                                             when (consp item) collect (nth 2 item)))))
+      (should (memq 'harness-ui-config-toggle-advanced commands))
+      (should (memq 'harness-ui-config-customize-interface commands)))))
 
 (ert-deftest harness-ui-config-entry-points ()
   (harness-ui-config-test-with
@@ -362,6 +425,7 @@ state directory, as they would the user's."
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
     (harness-ui-config-test-open root)
+    (harness-ui-config-toggle-advanced)
     (let ((block (harness-ui-config-test-block "harness-ui-config-test-servers")))
       ;; One line per record, never the Lisp of a plist.
       (should (string-match-p "alpha · http://alpha +\\[?Edit" block))
@@ -401,6 +465,7 @@ state directory, as they would the user's."
   (harness-ui-config-test-with
     (setq harness-ui-config-test-servers '((:id alpha :url "http://alpha" :extra 1)))
     (harness-ui-config-test-open root)
+    (harness-ui-config-toggle-advanced)
     (harness-ui-config-test-press "harness-ui-config-test-servers" "Edit")
     (harness-ui-config-test-await-block "harness-ui-config-test-servers" "Hide")
     ;; A key the type does not name stays, to be removed if wanted.
@@ -432,6 +497,7 @@ state directory, as they would the user's."
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
     (harness-ui-config-test-open root)
+    (harness-ui-config-toggle-advanced)
     (harness-ui-config-test-press "harness-ui-config-test-servers" "INS" t)
     ;; The new record is open, filled in from the type's starting value.
     (let ((block (harness-ui-config-test-await-block "harness-ui-config-test-servers" "Hide")))
@@ -452,6 +518,7 @@ state directory, as they would the user's."
     ;; odd value, and editing the rest of the record never loses it.
     (setq harness-ui-config-test-servers '((:id alpha :port "eighty")))
     (harness-ui-config-test-open root)
+    (harness-ui-config-toggle-advanced)
     (harness-ui-config-test-press "harness-ui-config-test-servers" "Edit")
     (let ((block (harness-ui-config-test-await-block "harness-ui-config-test-servers" "Hide")))
       (should (string-match-p "\\[X\\] Port: +\"eighty\"" block))

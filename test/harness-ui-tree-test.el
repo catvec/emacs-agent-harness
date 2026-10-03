@@ -11,14 +11,14 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent usage worktree acp ui ui-tree))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-ui--sessions)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-acp-token nil)
            (default-directory dir))
        (harness-add-filter 'permission/decide

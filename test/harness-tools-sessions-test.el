@@ -4,7 +4,7 @@
 (require 'harness-test-helpers)
 
 (defvar harness-provider-demo-script-override)
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 (defvar harness-naming-auto)
 (defvar harness-sessions)
 (defvar harness-agent--turns)
@@ -36,7 +36,7 @@
      (clrhash harness-tasks--starting)
      (clrhash harness-tools-sessions--waiters)
      (setq harness-tasks--loaded t)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override harness-tools-sessions-test-script)
            (harness-naming-auto nil)
            (harness-tasks-max-running 3)
@@ -188,7 +188,7 @@
 
 (ert-deftest harness-tools-sessions-send-then-wait ()
   (harness-tools-sessions-test-with
-    (let ((harness-provider-demo-delay 0.1)
+    (let ((harness-provider-demo--delay 0.1)
           (me (harness-tools-sessions-test-session))
           (a (harness-tools-sessions-test-session))
           (b (harness-tools-sessions-test-session)))
@@ -242,7 +242,7 @@
 
 (ert-deftest harness-tools-sessions-control ()
   (harness-tools-sessions-test-with
-    (let ((harness-provider-demo-delay 0.2)
+    (let ((harness-provider-demo--delay 0.2)
           (me (harness-tools-sessions-test-session))
           (other (harness-tools-sessions-test-session)))
       (harness-tools-sessions-test-ok me "session_control" (list :session_id other :action "rename" :name "Renamed"))
@@ -260,7 +260,7 @@
 
 (ert-deftest harness-tools-sessions-tasks ()
   (harness-tools-sessions-test-with
-    (let* ((harness-provider-demo-delay 0.05)
+    (let* ((harness-provider-demo--delay 0.05)
            (me (harness-tools-sessions-test-session))
            (submitted (harness-tools-sessions-test-run me "task_submit" '(:prompt "Fix the lexer")))
            (id (plist-get (plist-get submitted :meta) :task-id)))

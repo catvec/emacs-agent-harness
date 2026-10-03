@@ -9,7 +9,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent usage worktree acp ui ui-usage))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
@@ -17,12 +17,12 @@
      (clrhash harness-agent--turns)
      (clrhash harness-ui--sessions)
      (setq harness-usage-budgets nil)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-acp-token nil)
            (default-directory dir))
        (unwind-protect
            (progn ,@body)
-         (when (get-buffer harness-ui-usage-buffer-name) (kill-buffer harness-ui-usage-buffer-name))
+         (when (get-buffer harness-ui-usage--buffer-name) (kill-buffer harness-ui-usage--buffer-name))
          (when (get-buffer "*harness budget plan*") (kill-buffer "*harness budget plan*"))
          (dolist (c (copy-sequence harness-acp--clients))
            (harness-acp--drop-client c))))))
@@ -41,18 +41,18 @@
 (defun harness-ui-usage-test-open ()
   "Open the dashboard and wait for its data."
   (harness-usage)
-  (set-buffer harness-ui-usage-buffer-name)
+  (set-buffer harness-ui-usage--buffer-name)
   (harness-test-wait (lambda () (and harness-ui-usage--data (not harness-ui-usage--loading))) 5 "usage data")
   (buffer-substring-no-properties (point-min) (point-max)))
 
 (defun harness-ui-usage-test-text ()
   "Return the dashboard text."
-  (with-current-buffer harness-ui-usage-buffer-name
+  (with-current-buffer harness-ui-usage--buffer-name
     (buffer-substring-no-properties (point-min) (point-max))))
 
 (defun harness-ui-usage-test-has-svg-p ()
   "Non-nil when the buffer holds an SVG display property."
-  (with-current-buffer harness-ui-usage-buffer-name
+  (with-current-buffer harness-ui-usage--buffer-name
     (let ((pos (point-min)) (found nil))
       (while (and (not found) pos)
         (let ((d (get-text-property pos 'display)))
@@ -129,7 +129,7 @@
         (if (and (display-graphic-p) (image-type-available-p 'svg))
             (should (harness-ui-usage-test-has-svg-p))
           (should (string-match-p "███░" text))))
-      (with-current-buffer harness-ui-usage-buffer-name
+      (with-current-buffer harness-ui-usage--buffer-name
         (goto-char (point-min))
         (should (search-forward "[remove]" nil t))
         (let ((status (harness-ui-usage--budget-at-point)))
@@ -166,7 +166,7 @@
       (should (= 12.0 (plist-get b :baseline)))
       (should (equal (harness-usage--date-key (car (harness-usage-period-bounds 'week)))
                      (plist-get b :baseline-period-start))))
-    (with-current-buffer harness-ui-usage-buffer-name
+    (with-current-buffer harness-ui-usage--buffer-name
       (harness-test-wait (lambda () (string-match-p "weekly cap" (harness-ui-usage-test-text))) 5 "budget shown")
       (should (string-match-p "/day" (harness-ui-usage-test-text)))
       (should (string-match-p "\\$12\\.00 / \\$42\\.00  incl\\. \\$12\\.00 baseline" (harness-ui-usage-test-text)))
@@ -193,7 +193,7 @@
       (harness-ui-usage-test-request "_harness/usage/set-budget"
                                      (list :budget (list :scope "period" :period "month" :amount 100 :label "monthly cap")))
       (harness-ui-usage-test-open)
-      (with-current-buffer harness-ui-usage-buffer-name
+      (with-current-buffer harness-ui-usage--buffer-name
         (should (string-match-p "\\$5\\.00 / \\$100\\.00" (harness-ui-usage-test-text)))
         (should-not (string-match-p "incl\\." (harness-ui-usage-test-text)))
         (goto-char (point-min))
@@ -250,7 +250,7 @@
         (harness-ui-usage-test-request "_harness/usage/set-budget"
                                        (list :budget (list :scope "period" :period "week" :amount 30 :label "weekly cap")))
         (harness-ui-usage-test-open)
-        (with-current-buffer harness-ui-usage-buffer-name
+        (with-current-buffer harness-ui-usage--buffer-name
           ;; Only a month budget can take a month's cost.
           (goto-char (point-min))
           (search-forward "weekly cap")
@@ -338,7 +338,7 @@
         (should (< (string-match "Subscription, covered" text) (string-match "Not recorded" text))))
       ;; An API account says it bills per token.
       (harness-ui--store-quota "claude" '(:billing "api" :auth "ANTHROPIC_API_KEY"))
-      (with-current-buffer harness-ui-usage-buffer-name
+      (with-current-buffer harness-ui-usage--buffer-name
         (let ((text (harness-ui-usage-test-text)))
           (should (string-match-p "bills per token (ANTHROPIC_API_KEY)" text))
           (should-not (string-match-p "budgets count billed cost" text)))))))

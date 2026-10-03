@@ -27,7 +27,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
@@ -35,7 +35,7 @@
      (clrhash harness-agent--turns)
      (setq harness-acp--clients nil
            harness-ui-chat-test-events nil)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-acp-token nil)
            (default-directory dir))
        (harness-add-filter 'permission/decide
@@ -1122,7 +1122,7 @@ video is redrawn, not just the first."
 group, even when its call arrived while the group was forming; the
 calls around it regroup."
   (harness-ui-chat-test-with
-    (let* ((harness-chat-coalesce-threshold 2)
+    (let* ((harness-chat--coalesce-threshold 2)
            (image (harness-ui-chat-test--png (harness-test-temp-dir) "shot.png"))
            (sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
@@ -1223,7 +1223,7 @@ calls around it regroup."
                         5)
     (harness-define-tool "grep" :label "Search files" :description "grep" :kind 'read :coalescable t
                          :handler (lambda (_input _ctx) (harness-tool-error "grep: no such file")))
-    (let* ((harness-chat-coalesce-threshold 2)
+    (let* ((harness-chat--coalesce-threshold 2)
            (sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
            (success (harness-ui-icon 'harness-icon-success))
@@ -1370,8 +1370,8 @@ calls around it regroup."
     (let ((sid (harness-ui-chat-test-session "Long"))
           (w (selected-window))
           (kept nil)
-          (harness-chat-history-limit 20)
-          (harness-chat-history-page 20))
+          (harness-chat--history-limit 20)
+          (harness-chat--history-page 20))
       (dotimes (i 100) (harness-call 'session/hint sid (format "hint number %d" i)))
       (let ((buf (harness-ui-chat-test-open sid)))
         (set-window-buffer w buf)

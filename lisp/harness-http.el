@@ -27,13 +27,11 @@
 (require 'harness-core)
 (require 'harness-util)
 
-(defcustom harness-http-curl-program (executable-find "curl")
-  "Path to curl.  When nil requests fail with an explanatory error."
-  :type '(choice file (const nil)) :group 'harness)
+(defconst harness-http--curl-program (executable-find "curl")
+  "Path to curl.  When nil requests fail with an explanatory error.")
 
-(defcustom harness-http-default-timeout 600
-  "Default maximum seconds a request may take, including streaming."
-  :type 'integer :group 'harness)
+(defconst harness-http--default-timeout 600
+  "Default maximum seconds a request may take, including streaming.")
 
 (cl-defstruct (harness-http-handle (:copier nil))
   process url config-file
@@ -151,7 +149,7 @@ soon as they arrive.  BINARY non-nil exchanges raw bytes: a multibyte
 BODY is sent encoded as UTF-8, and the response body reaches ON-CHUNK
 and CALLBACK as unibyte strings, undecoded.  Return a handle usable
 with `harness-http-cancel'."
-  (unless harness-http-curl-program
+  (unless harness-http--curl-program
     (error "harness-http: curl is not available"))
   (when json
     (setq body (harness-json-encode json))
@@ -167,11 +165,11 @@ with `harness-http-cancel'."
                                            :config-file config :started (float-time)))
          (stderr (generate-new-buffer " *harness-http-stderr*" t))
          (args (append (list "--silent" "--show-error" "--no-buffer" "--include"
-                             "--max-time" (number-to-string (or timeout harness-http-default-timeout))
+                             "--max-time" (number-to-string (or timeout harness-http--default-timeout))
                              "--config" config)
                        (when body (list "--data-binary" "@-"))))
          (process (make-process :name "harness-http"
-                                :command (cons harness-http-curl-program args)
+                                :command (cons harness-http--curl-program args)
                                 :coding (if binary 'binary '(utf-8 . utf-8))
                                 :connection-type 'pipe
                                 :noquery t

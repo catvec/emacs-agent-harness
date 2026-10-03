@@ -23,7 +23,7 @@
 (require 'harness-acp)
 
 (defvar harness-provider-demo-script-override)
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 (defvar harness-naming-auto)
 (defvar harness-model)
 (defvar harness-sessions)
@@ -35,7 +35,7 @@
 (defvar harness-tasks-model)
 (defvar harness-tasks-worktrees)
 (defvar harness-ui-default-position)
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-ui--sessions)
@@ -52,7 +52,7 @@
 (defvar harness-chat-header-functions)
 (defvar harness-compose-end)
 (defvar harness-compose--placeholder)
-(defvar harness-ui-sessions-buffer-name)
+(defvar harness-ui-sessions--buffer-name)
 (defvar transient--buffer-name)
 (declare-function harness-sessions "harness-ui-sessions")
 (declare-function harness-ui-sessions--ordered "harness-ui-sessions")
@@ -84,7 +84,7 @@ the session list; run BODY."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent tasks acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
@@ -93,7 +93,7 @@ the session list; run BODY."
      (clrhash harness-tasks--table)
      (clrhash harness-tasks--starting)
      (setq harness-tasks--loaded t harness-acp--clients nil)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override
             '((:type text :delta "Two tasks are in progress.") (:type done :stop-reason end-turn)))
            (harness-naming-auto nil)
@@ -347,7 +347,7 @@ Each row is (DEPTH . ID), top to bottom, children right under their parent."
     (harness-test-wait (lambda () done) 5 "the session cache"))
   (cl-letf (((symbol-function 'harness-ui-display-view) #'ignore))
     (harness-sessions))
-  (with-current-buffer harness-ui-sessions-buffer-name
+  (with-current-buffer harness-ui-sessions--buffer-name
     (mapcar (lambda (cell) (cons (car cell) (plist-get (cdr cell) :id))) (harness-ui-sessions--ordered))))
 
 (ert-deftest harness-ui-btw-over-a-session-is-a-new-session ()

@@ -30,17 +30,14 @@
 (require 'harness-tools)
 (require 'harness-client-tools)
 
-(defcustom harness-bash-program "bash"
-  "Shell used by the bash tool."
-  :type 'string :group 'harness)
+(defconst harness-tools-shell--program "bash"
+  "Shell used by the bash tool.")
 
-(defcustom harness-bash-default-timeout 120
-  "Seconds a bash command may run when the model gives no timeout."
-  :type 'number :group 'harness)
+(defconst harness-tools-shell--default-timeout 120
+  "Seconds a bash command may run when the model gives no timeout.")
 
-(defcustom harness-bash-max-timeout 3600
-  "Upper bound for the timeout a model may request for a bash command."
-  :type 'number :group 'harness)
+(defconst harness-tools-shell--max-timeout 3600
+  "Upper bound for the timeout a model may request for a bash command.")
 
 ;;;; bash
 
@@ -83,9 +80,9 @@
 (defun harness-tools-shell--bash (input ctx)
   "Handler for the bash tool with INPUT under CTX; returns a promise."
   (let* ((command (plist-get input :command))
-         (timeout (min harness-bash-max-timeout
+         (timeout (min harness-tools-shell--max-timeout
                        (max 1 (harness-tools-shell--number (plist-get input :timeout)
-                                                           harness-bash-default-timeout))))
+                                                           harness-tools-shell--default-timeout))))
          (cwd (harness-tools-shell--bash-cwd input ctx))
          (report (plist-get ctx :report)))
     (cond
@@ -95,7 +92,7 @@
       (harness-tool-error (format "Working directory does not exist: %s" cwd)))
      (t
       (let ((cmd (condition-case err
-                     (harness-tools-shell--wrap cwd (list harness-bash-program "-lc" command))
+                     (harness-tools-shell--wrap cwd (list harness-tools-shell--program "-lc" command))
                    (error (list :error (harness-error-message err))))))
         (if (and (consp cmd) (eq (car cmd) :error))
             (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))
@@ -109,7 +106,7 @@
                           (harness-tools-shell--format-output r timeout)
                           :meta (list :exit exit :cwd cwd
                                       :duration (- (float-time) started)
-                                      :sandboxed (not (equal (car cmd) harness-bash-program))))))))))))))
+                                      :sandboxed (not (equal (car cmd) harness-tools-shell--program))))))))))))))
 
 (harness-define-tool "bash"
   :label "Bash"

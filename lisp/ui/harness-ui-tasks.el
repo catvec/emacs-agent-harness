@@ -63,18 +63,16 @@
   "Task mode." :group 'harness-ui)
 
 
-(defcustom harness-ui-tasks-tick 15
-  "Seconds between refreshes of the elapsed times on visible boards."
-  :type 'number :group 'harness-ui-tasks)
+(defconst harness-ui-tasks--tick-interval 15
+  "Seconds between refreshes of the elapsed times on visible boards.")
 
 (defcustom harness-ui-tasks-refine-by-default nil
   "When non-nil, new boards refine tasks for the backlog, not submit them.
 Either way the toggle above the compose box switches it per board."
   :type 'boolean :group 'harness-ui-tasks)
 
-(defcustom harness-ui-tasks-notify-review t
-  "When non-nil, say in the echo area when a task waits for your review."
-  :type 'boolean :group 'harness-ui-tasks)
+(defconst harness-ui-tasks--notify-review t
+  "When non-nil, say in the echo area when a task waits for your review.")
 
 (defface harness-task-title-face '((t :inherit bold))
   "Task titles." :group 'harness-ui-tasks)
@@ -1325,7 +1323,7 @@ anything that moves a task without one, so a board never drifts.")
                                          :key (lambda (x) (plist-get x :id)) :test #'equal)))
              (harness-ui-tasks--schedule-render b))))))
     ("task/review"
-     (when harness-ui-tasks-notify-review
+     (when harness-ui-tasks--notify-review
        (message "Task %s is ready for your review"
                 (harness-ui-tasks--quote (harness-ui-tasks--title (car args))))))
     ("task/deleted"
@@ -2005,7 +2003,7 @@ BTW over the board; a failure shows on the board too."
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
-  (setq harness-ui-tasks--timer (run-with-timer harness-ui-tasks-tick harness-ui-tasks-tick #'harness-ui-tasks--tick))
+  (setq harness-ui-tasks--timer (run-with-timer harness-ui-tasks--tick-interval harness-ui-tasks--tick-interval #'harness-ui-tasks--tick))
   (define-key harness-ui-map (kbd "a") #'harness-tasks))
 
 (defun harness-ui-tasks--shutdown ()

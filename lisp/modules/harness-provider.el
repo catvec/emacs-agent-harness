@@ -21,10 +21,6 @@
 (require 'harness-core)
 (require 'harness-util)
 
-(defcustom harness-default-model "claude:claude-fable-5-1"
-  "Model used when nothing more specific is configured, as PROVIDER:NAME."
-  :type 'string :group 'harness)
-
 ;;;; Customize types of model plists
 ;;
 ;; Options that describe models by hand (an endpoint's `:models',
