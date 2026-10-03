@@ -317,6 +317,13 @@ so several tasks can work in parallel.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback.
+- When the project is the harness itself, a card in *Ready for review*
+  whose worktree is a checkout of the harness also offers
+  `[Open harness]`: it opens an Emacs running that worktree's harness
+  in an instance of its own, its frame raised, so the work can be tried
+  before it is verified. The agent has the same as the `open_harness`
+  tool, which starts such an instance for its own worktree and says how
+  to drive it (`scripts/dev.sh` with its socket).
 - To skip review, press `V` or click `[Review: on]` in the board's
   header line. Finished tasks then merge and complete without waiting
   for you, and if tasks are already waiting for review, the board offers

@@ -98,6 +98,42 @@ Signal an error mentioning MESSAGE on timeout.  Return PRED's value."
   "Create and return a fresh temporary directory."
   (file-name-as-directory (make-temp-file "harness-tmp-" t)))
 
+(defun harness-test-harness-checkout ()
+  "Make a directory that looks like a checkout of the harness.
+harness.el and an executable scripts/dev.sh are there; the script
+appends its cwd, arguments and HARNESS_DEV_SOCKET to invocation.log in
+the checkout and exits 0.  Return the directory."
+  (let* ((dir (file-name-as-directory (make-temp-file "harness-checkout-" t)))
+         (scripts (expand-file-name "scripts/" dir))
+         (script (expand-file-name "dev.sh" scripts)))
+    (make-directory scripts t)
+    (with-temp-file (expand-file-name "harness.el" dir) (insert ";; fake harness\n"))
+    (with-temp-file script
+      (insert "#!/bin/sh\n"
+              "printf '\\n' >> \"$PWD/invocation.log\"\n"
+              "printf 'cwd=%s\\n' \"$PWD\" >> \"$PWD/invocation.log\"\n"
+              "printf 'args=%s\\n' \"$*\" >> \"$PWD/invocation.log\"\n"
+              "printf 'socket=%s\\n' \"$HARNESS_DEV_SOCKET\" >> \"$PWD/invocation.log\"\n"
+              "exit 0\n"))
+    (set-file-modes script #o755)
+    dir))
+
+(defun harness-test-dev-invocations (dir)
+  "Return the fake dev loop's invocations recorded in DIR, oldest first.
+Each invocation is an alist of the script's fields (cwd, args, socket)."
+  (let ((log (expand-file-name "invocation.log" dir)))
+    (when (file-exists-p log)
+      (with-temp-buffer
+        (insert-file-contents log)
+        (let (out)
+          (dolist (block (split-string (buffer-string) "\n\n" t))
+            (push (mapcar (lambda (line)
+                            (let ((eq (string-match "=" line)))
+                              (cons (substring line 0 eq) (substring line (1+ eq)))))
+                          (split-string block "\n" t))
+                  out))
+          (nreverse out))))))
+
 ;;;; Customize types
 
 (defun harness-test-fits-p (type value)

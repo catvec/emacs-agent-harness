@@ -18,7 +18,7 @@ module needs something more, add it here first.
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
-                tools-sessions, tools-notify, tools-handin
+                tools-sessions, tools-notify, tools-handin, tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -1516,6 +1516,7 @@ TRAMP prefixes come from the session host):
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only) |
+| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus | exec (tools-dev; offered in a checkout of the harness only) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms-auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read |
 | `merge_done` | Finish merge | none | meta (merge module) |
@@ -1530,6 +1531,25 @@ no task.  Evidence is required: an image or a video (a path inside the
 session's roots), a file, code, a note, or `tool_call' naming an
 earlier call of the session, which is copied into the report as a
 snapshot so the view can show it as the link it is.
+
+`open_harness` (`tools-dev`) opens a second Emacs running the harness
+from a checkout of this project -- a task's worktree, say -- so harness
+changes can be tried live instead of only read.  It runs that
+checkout's own live development loop (`scripts/dev.sh start`) with
+`HARNESS_DEV_SOCKET=harness-dev-HASH`, a socket derived from the
+checkout's true name, so the same worktree reuses its instance and two
+worktrees never share one; the instance's state and compiled files stay
+in that checkout's `scripts/.dev/state-SOCKET`.  The result lists the
+`scripts/dev.sh` commands that drive it (shot, keys, eval, errors,
+reload, stop) prefixed with that socket.  `path` defaults to the
+session's worktree, else its cwd; a directory that is not a checkout
+(`harness.el` and `scripts/dev.sh` side by side) is refused.  The sync
+filter `agent/tools` drops the tool outside such checkouts: it is for
+this project only.  The bus method `harness-dev/open PATH &optional
+FOCUS` does the same for the UI (focus raises the frame); the task
+board's [Open harness] button on a review card calls it, and the tool
+is in `harness-perms-auto-allow-tools', so the agent needs no approval
+to use it.
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
@@ -1636,7 +1656,7 @@ the image data, since the pending question is saved with the session.
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
-`notification/`, `sandbox/status`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
+`notification/`, `sandbox/status`, `harness-dev/`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
@@ -1966,7 +1986,11 @@ whose write-up refused it as a duplicate shows it in Requires your
 input, naming the task it duplicates and saying why: `k` drops it, `r`
 writes it up anyway, `m` takes what makes it another task than the one
 it duplicates.  `I` or
-[Add session] makes an ongoing session a task.  `b` or [BTW] (or the
+[Add session] makes an ongoing session a task.  A card in Ready for
+review whose worktree is itself a checkout of the harness gets an
+[Open harness] button: it starts the worktree's own live development
+loop in an Emacs of its own, frame raised, through `harness-dev/open`,
+so the work can be tried before it is verified.  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at

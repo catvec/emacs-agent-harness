@@ -61,15 +61,19 @@
 
 (defcustom harness-perms-auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
-    "emacs_buffers" "emacs_describe" "emacs_messages" "web_search" "notify")
+    "emacs_buffers" "emacs_describe" "emacs_messages" "web_search" "notify"
+    "open_harness")
   "Tools that never need approval, in every permission mode.
 `web_search' is included because it only sends its query to the
 configured `harness-websearch-provider', so even unattended task
 sessions can look things up; `web_fetch' is not, because it reaches
 whatever URL the agent names.  `notify' only reaches the user, through
 the notification providers they set up, so unattended sessions can
-tell them when they are needed.  Standing rules in `harness-perms-rules'
-are checked first and can still deny any of these tools."
+tell them when they are needed.  `open_harness' only starts an Emacs
+running a checkout of this project's harness, in a state directory of
+its own, so verifying harness work live needs no prompt.  Standing
+rules in `harness-perms-rules' are checked first and can still deny
+any of these tools."
   :type '(repeat string) :group 'harness)
 
 (defcustom harness-perms-rules nil

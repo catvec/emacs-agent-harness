@@ -186,6 +186,16 @@
   (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'auto))
   (should (eq 'allow (harness-perms-test--behavior "notify" 'meta))))
 
+(ert-deftest harness-perms-open-harness-needs-no-approval ()
+  ;; open_harness only starts an Emacs running a checkout of the harness,
+  ;; in a state directory of its own, so verifying harness work live needs
+  ;; no prompt, in every mode.
+  (harness-perms-test--setup :permission-mode 'ask)
+  (should (member "open_harness" harness-perms-auto-allow-tools))
+  (should (eq 'allow (harness-perms-test--behavior "open_harness" 'exec)))
+  (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'auto))
+  (should (eq 'allow (harness-perms-test--behavior "open_harness" 'exec))))
+
 (ert-deftest harness-perms-rules-beat-auto-allow ()
   ;; web_search used to ask, so a user may have answered deny-always: the
   ;; rule must still hold now that the tool needs no approval.

@@ -469,9 +469,12 @@ card's title, so the prompt shows here."
        ('review (if (harness-ui-tasks--archived-p task)
                     '(("Unarchive" harness-ui-tasks-archive) ("Verify" harness-ui-tasks-verify)
                       ("Open" harness-ui-tasks-open))
-                  '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
-                    ("Open" harness-ui-tasks-open) ("Reply" harness-ui-tasks-reply)
-                    ("Archive" harness-ui-tasks-archive))))
+                  (append
+                   '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
+                     ("Open" harness-ui-tasks-open))
+                   (and (harness-ui-tasks--open-harness-p task)
+                        '(("Open harness" harness-ui-tasks-open-harness)))
+                   '(("Reply" harness-ui-tasks-reply) ("Archive" harness-ui-tasks-archive)))))
        ('done (if (harness-ui-tasks--archived-p task)
                   '(("Unarchive" harness-ui-tasks-archive) ("Open" harness-ui-tasks-open))
                 '(("Archive" harness-ui-tasks-archive) ("Reply" harness-ui-tasks-reply)
@@ -530,7 +533,12 @@ its final message and evidence, in a popout."
        (concat " " (harness-ui-tasks--button
                      "[Report]"
                      (lambda () (harness-ui-report-popout task))
-                     "What it handed in: the final message and the evidence" "report"))))))
+                     "What it handed in: the final message and the evidence" "report")))
+     (when (harness-ui-tasks--open-harness-p task)
+       (concat " " (harness-ui-tasks--button
+                    "[Open harness]"
+                    (lambda () (harness-ui-tasks--with-task id (harness-ui-tasks-open-harness)))
+                    "Open an Emacs running the harness from this task's worktree" "open-harness"))))))
 
 ;;;; Rendering
 
@@ -1834,6 +1842,18 @@ and with a backlog task the session that wrote it up."
       (user-error "This task is not waiting for your review"))
     task))
 
+(defun harness-ui-tasks--open-harness-p (task)
+  "Non-nil when TASK's worktree can be run as a harness of its own.
+That is a card waiting for review whose worktree holds harness.el and
+the live development loop scripts/dev.sh side by side: the work it
+handed in can then be tried live before verifying it."
+  (and (equal (plist-get task :state) "review")
+       (not (harness-ui-tasks--archived-p task))
+       (let ((dir (plist-get task :worktree)))
+         (and (stringp dir)
+              (file-exists-p (expand-file-name "harness.el" dir))
+              (file-exists-p (expand-file-name "scripts/dev.sh" dir))))))
+
 (defun harness-ui-tasks-verify ()
   "Accept the work of the task at point, which waits for your review.
 In a git project its branch then goes through the merge queue, and the
@@ -1862,6 +1882,20 @@ sent at once."
      (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
                                         "Sending the task back")
         (message "Sent back: its session works on your feedback")))))
+
+(defun harness-ui-tasks-open-harness ()
+  "Open an Emacs running the harness from the task's worktree."
+  (interactive)
+  (let* ((task (harness-ui-tasks--review-task))
+         (dir (plist-get task :worktree)))
+    (unless (harness-ui-tasks--open-harness-p task)
+      (user-error "This task's worktree is not a checkout of the harness"))
+    (harness-ui-tasks--request-then
+     "_harness/harness-dev/open" (list :path dir :focus t)
+     "Opening the worktree harness"
+     (lambda (info)
+       (message "Harness from %s is open in Emacs (socket %s)"
+                (abbreviate-file-name dir) (plist-get info :socket))))))
 
 (defun harness-ui-tasks--count-tasks (n)
   "N tasks in words: \"task\" for one, \"3 tasks\" for more."

@@ -14,6 +14,12 @@ scripts/test.sh [FILE [SELECTOR]]    # ERT, one clean Emacs per suite
 scripts/lint.sh [--checkdoc]         # byte-compile everything out of tree
 ```
 
+A task's worktree can be driven the same way without leaving the board:
+`[Open harness]` on a card in *Ready for review* starts that loop in
+the worktree's checkout, under a socket and state directory of its own,
+and raises its frame.  The agent's `open_harness` tool does the same
+and returns the commands above with the socket to use.
+
 The daemon runs `emacs -Q` and loads only `scripts/harness-dev.el`, so
 results are reproducible.  State lives in `scripts/.dev/state-SOCKET`
 (`HARNESS_DEV_SOCKET` picks the socket, `HARNESS_DEV_STATE` the directory),
