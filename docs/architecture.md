@@ -1969,8 +1969,10 @@ box, `C-g` closes it, and `harness-ui-popout-at-point` runs the first
 the review of a task in its session (`harness-ui-review`: a chat panel
 -- `harness-chat-panel-functions` -- that shows the board's Ready for
 review above the box, with [Verify] (`C-c C-v`), [Send back]
-(`C-c C-R`) and [Report]; while it shows, `harness-chat-send-function`
-gives the box's text to `task/reject` as the feedback), and the
+(`C-c C-x`) and [Report]; while it shows, `harness-chat-send-function`
+gives the box's text to `task/reject` as the feedback, and
+`harness-ui-review-minor-mode` puts those two keys over the chat's own,
+only for as long as it shows), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images inline, videos and files through ui-media, code as a
 block, notes, and a referenced tool call drawn as the call it links to,

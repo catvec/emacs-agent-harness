@@ -15,6 +15,11 @@
 ;; which works on it again and comes back for review (`harness-chat-send-function').
 ;; The banner disappears when the task leaves review, whoever moved it.
 ;;
+;; Its keys, C-c C-v to verify and C-c C-x to send back, are those of
+;; `harness-ui-review-minor-mode', on only while the banner shows: the
+;; rest of the time the chat's own keys stand, C-c C-v attaching the
+;; clipboard.
+;;
 ;; The banner is a panel of the chat buffer (`harness-chat-panel-functions'),
 ;; so it shows in the session's own window, in a BTW over it, and in a
 ;; task's session opened from the board -- the width is the window's.
@@ -92,6 +97,52 @@ such, so the lookup happens once per session."
        (equal (plist-get task :state) "review")
        (not (harness-json-true-p (plist-get task :archived)))))
 
+;;;; Keys
+
+(defvar harness-ui-review-minor-mode-map (make-sparse-keymap)
+  "Keys of the review banner, on in a chat buffer while it shows.")
+
+;; Filled at top level, not in the `defvar', so a reload updates the map.
+(let ((map harness-ui-review-minor-mode-map))
+  (define-key map (kbd "C-c C-v") #'harness-ui-review-verify)
+  ;; No Shift to hold: x sits next to c and two keys from v, so a slip
+  ;; does not verify (which merges) instead.
+  (define-key map (kbd "C-c C-x") #'harness-ui-review-reject))
+
+(define-minor-mode harness-ui-review-minor-mode
+  "Minor mode of a chat buffer while it shows a task's review banner.
+It adds the banner's keys, over the chat's own:
+
+\\{harness-ui-review-minor-mode-map}
+The banner turns it on and off (`harness-ui-review--panel'), so out of
+review the chat's keys are back: \\<harness-compose-map>\\[harness-compose-attach-clipboard] attaches the clipboard."
+  :lighter nil :keymap harness-ui-review-minor-mode-map :group 'harness-ui-review)
+
+;; Its keys in the harness menu.  They beat the chat's own `C-c C-v'
+;; there, in the menu as in the buffer.
+(put 'harness-ui-review-minor-mode 'harness-menu-group
+     '("Review"
+       ["Task in review"
+        ("C-c C-v" "Verify (accept)" harness-ui-review-verify)
+        ("C-c C-x" "Send back with feedback" harness-ui-review-reject)]))
+
+;; The banner's keys once sat in the chat's own map, so they acted in
+;; every session: C-c C-v hid the box's attach-the-clipboard, and C-c C-R,
+;; which Emacs reads as C-c C-r, the chat's redraw.  A reload takes them out.
+(when (boundp 'harness-chat-mode-map)
+  (dolist (key (list (kbd "C-c C-v") (kbd "C-c C-r")))
+    (when (memq (lookup-key harness-chat-mode-map key)
+                '(harness-ui-review-verify harness-ui-review-reject))
+      (define-key harness-chat-mode-map key nil t))))
+
+(defun harness-ui-review--key (command)
+  "Return \"  KEY\" for COMMAND's key in the banner, or \"\" when it has none.
+Read from `harness-ui-review-minor-mode-map': the banner shows the key
+that runs it."
+  (if-let* ((key (where-is-internal command (list harness-ui-review-minor-mode-map) t)))
+      (concat "  " (propertize (key-description key) 'face 'harness-chat-key-face))
+    ""))
+
 ;;;; The banner
 
 (defun harness-ui-review--button (label command help)
@@ -157,11 +208,11 @@ what verifying does, and the buttons, with the keys beside them."
                  'face 'harness-dim-face 'wrap-prefix "   ")
      "\n   "
      (harness-ui-review--button "[Verify]" #'harness-ui-review-verify verify-help)
-     "  " (propertize "C-c C-v" 'face 'harness-chat-key-face)
+     (harness-ui-review--key #'harness-ui-review-verify)
      "   "
      (harness-ui-review--button "[Send back]" #'harness-ui-review-reject
                                 "Type the feedback in the box below, then C-c C-c")
-     "  " (propertize "C-c C-R" 'face 'harness-chat-key-face)
+     (harness-ui-review--key #'harness-ui-review-reject)
      (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
        (concat "   " (harness-ui-review--button "[Report]" (lambda () (harness-ui-report-popout task))
                                                 "The final message and evidence it handed in")))
@@ -174,30 +225,28 @@ what verifying does, and the buttons, with the keys beside them."
   "Return the review banner when this session's task waits for review.
 On `harness-chat-panel-functions': nil for a session that is no task's,
 one that is not in review, or before the task is known.  While it
-shows, the compose box takes feedback (`harness-chat-send-function')."
+shows, the compose box takes feedback (`harness-chat-send-function')
+and the banner's keys are on (`harness-ui-review-minor-mode')."
   (let* ((sid harness-ui-session-id)
          (task (harness-ui-review--task sid))
          (review (harness-ui-review--reviewing-p task)))
     (if review
         (progn
           (setq-local harness-chat-send-function #'harness-ui-review--send)
+          (unless harness-ui-review-minor-mode (harness-ui-review-minor-mode 1))
           ;; The review background, as the board's Ready for review has it:
           ;; the chat panel's own background stays out of it.
           (let ((banner (harness-ui-review--banner task)))
             (if (fboundp 'harness-chat--face)
                 (harness-chat--face banner 'harness-chat-review-face)
               banner)))
-      ;; Not in review: the box is the session's own again.
+      ;; Not in review: the box and the keys are the session's own again.
       (when (eq harness-chat-send-function #'harness-ui-review--send)
         (setq-local harness-chat-send-function nil))
+      (when harness-ui-review-minor-mode (harness-ui-review-minor-mode -1))
       nil)))
 
-;;;; Keys and events
-
-(defun harness-ui-review--keys ()
-  "Bind the banner's keys in the chat buffer, over the chat's own."
-  (define-key harness-chat-mode-map (kbd "C-c C-v") #'harness-ui-review-verify)
-  (define-key harness-chat-mode-map (kbd "C-c C-R") #'harness-ui-review-reject))
+;;;; Events
 
 (defun harness-ui-review--on-event (event args)
   "Follow tasks: the banner of an open session follows its task, and a
@@ -223,7 +272,6 @@ session that becomes a task's, or stops being one, is looked up again."
 (defun harness-ui-review--init ()
   "Add the banner to every chat buffer and follow task events."
   (with-eval-after-load 'harness-ui-chat
-    (harness-ui-review--keys)
     (add-hook 'harness-chat-mode-hook #'harness-ui-review--setup))
   (add-hook 'harness-ui-event-functions #'harness-ui-review--on-event))
 

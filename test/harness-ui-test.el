@@ -176,6 +176,7 @@ top, whole, and leaves them as they were."
 (require 'harness-ui-dirs)
 (require 'harness-ui-btw)
 (require 'harness-ui-media)
+(require 'harness-ui-review)
 
 (defvar harness-ui-test-ran nil "Commands the menu ran, newest first: (COMMAND BUFFER POINT).")
 
@@ -274,6 +275,26 @@ KEYS default to C-g, which closes the menu."
       (should-not (string-match-p "C-c C-k +Cancel turn" text))
       (should (string-match-p "C-c C-c +Send" text)))))
 
+(ert-deftest harness-ui-menu-in-review-shows-its-keys-over-the-chats ()
+  "While a task's review banner shows, C-c C-v verifies and C-c C-x sends
+it back, in the buffer and so in the menu; the chat's C-c C-r still
+redraws.  With the banner gone, C-c C-v attaches the clipboard again."
+  (harness-ui-test-with-menu-buffer (lambda () (harness-chat-mode) (harness-ui-review-minor-mode 1))
+    (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
+    (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-x"))))
+    (should (eq 'harness-chat-redraw (key-binding (kbd "C-c C-r"))))
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "^Chat .* Review$" text))
+      (should (string-match-p "C-c C-v +Verify (accept)" text))
+      (should (string-match-p "C-c C-x +Send back with feedback" text))
+      (should (string-match-p "C-c C-r +Redraw" text))
+      (should-not (string-match-p "Attach clipboard" text)))
+    (harness-ui-review-minor-mode -1)
+    (should (eq 'harness-compose-attach-clipboard (key-binding (kbd "C-c C-v"))))
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "C-c C-v +Attach clipboard" text))
+      (should-not (string-match-p "Review\\|Send back" text)))))
+
 (ert-deftest harness-ui-menu-shows-the-board-commands-on-the-task-board ()
   (harness-ui-test-with-menu-buffer #'harness-ui-tasks-mode
     (let ((text (harness-ui-test-menu)))
@@ -356,7 +377,7 @@ leave free.  None is left out by the menu."
   ;; What every harness buffer offers is checked above; here, that each mode is there.
   (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-sessions-mode harness-ui-tree-mode
                   harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode
-                  harness-ui-btw-minor-mode harness-ui-media-recording-mode))
+                  harness-ui-btw-minor-mode harness-ui-media-recording-mode harness-ui-review-minor-mode))
     (should (get mode 'harness-menu-group))))
 
 (ert-deftest harness-ui-menu-with-buffer-commands-from-a-side-window ()
