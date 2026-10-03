@@ -381,9 +381,10 @@ your checkout itself can be submitted to the **main tree** instead (the
   code block, a note, or a link to an earlier tool call, the tests or a
   command it ran. The turn ends there and the task waits for your
   review. In the session itself a banner above the compose box offers
-  `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-R`; type the feedback
+  `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-x`; type the feedback
   in the box, `C-c C-c` sends it) and `[Report]`, so you can accept the
-  work without going back to the board.
+  work without going back to the board. The two keys work only while
+  the banner shows; otherwise `C-c C-v` attaches the clipboard as usual.
 - `[Report]` on a card that has one pops the handed-in summary and
   evidence out beside the board: images inline, videos as thumbnails,
   files as buttons, and each referenced tool call as the call it links

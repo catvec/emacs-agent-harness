@@ -33,6 +33,7 @@
 (defvar harness-compose-end)
 (defvar harness-chat--loading)
 (defvar harness-ui-popout-key)
+(defvar harness-ui-review-minor-mode)
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks--render "harness-ui-tasks")
 (declare-function harness-ui-popout-buffer "harness-ui-popout")
@@ -128,24 +129,32 @@ review with a report; BODY gets `board', `id' and `sid'."
       (with-current-buffer chat
         (should (string-match-p "this session is a task waiting for you" (buffer-string)))
         (should (string-match-p "Fix the flaky test" (buffer-string)))
-        (should (string-match-p "\[Verify\]" (buffer-string)))
-        (should (string-match-p "\[Send back\]" (buffer-string)))
-        (should (string-match-p "\[Report\]" (buffer-string)))
+        (should (string-search "[Verify]  C-c C-v" (buffer-string)))
+        (should (string-search "[Send back]  C-c C-x" (buffer-string)))
+        (should (string-search "[Report]" (buffer-string)))
         ;; It reads as the board's Ready for review: the review background,
         ;; not the chat panel's, so accepting work looks the same in both.
         (let* ((pos (string-match "Ready for review" (buffer-string)))
                (faces (get-text-property pos 'face)))
           (should (cl-some (lambda (f) (eq f 'harness-chat-review-face))
                            (if (listp faces) faces (list faces)))))
-        ;; The keys reach the banner's commands.
+        ;; The keys reach the banner's commands, with no Shift to hold,
+        ;; and leave the chat's own C-c C-r its redraw.
+        (should harness-ui-review-minor-mode)
         (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
-        (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-R"))))
+        (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-x"))))
+        (should (eq 'harness-chat-redraw (key-binding (kbd "C-c C-r"))))
         (call-interactively (key-binding (kbd "C-c C-v"))))
       (harness-test-wait (lambda () (not (eq 'review (plist-get (harness-call 'task/get id) :state))))
                          10 "the task to leave review")
       (harness-test-wait (lambda () (not (string-match-p "Ready for review"
                                                          (harness-ui-review-test--text chat))))
-                         5 "the banner to go"))))
+                         5 "the banner to go")
+      ;; With the banner gone, so are its keys: C-c C-v attaches the clipboard again.
+      (with-current-buffer chat
+        (should-not harness-ui-review-minor-mode)
+        (should (eq 'harness-compose-attach-clipboard (key-binding (kbd "C-c C-v"))))
+        (should-not (key-binding (kbd "C-c C-x")))))))
 
 (ert-deftest harness-ui-review-banner-sends-back-with-the-box ()
   "The banner's box writes the feedback: C-c C-c sends the task back to work."
