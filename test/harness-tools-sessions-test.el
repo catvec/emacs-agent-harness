@@ -288,6 +288,47 @@
       (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "delete"))
       (should-not (harness-call 'task/list)))))
 
+(ert-deftest harness-tools-sessions-task-list-marks-this-task ()
+  "task_list marks the task of the calling session, its times, and keeps the most recent with limit."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (mine (plist-get (harness-call 'task/adopt me) :id))
+           (listing (harness-tools-sessions-test-ok me "task_list" nil)))
+      (should (eq 'needs-input (plist-get (harness-call 'task/get mine) :column)))
+      (should (string-match-p (concat (regexp-quote mine) " +needs-input +Adopted session\\s-+(this task)") listing))
+      (should (string-match-p ", created " listing))
+      ;; limit keeps the most recently created, and says how many it hid.
+      (let ((newer (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Second")) :meta)
+                              :task-id)))
+        (let ((listing (harness-tools-sessions-test-ok me "task_list" '(:limit 1))))
+          (should (string-match-p (regexp-quote newer) listing))
+          (should-not (string-match-p (regexp-quote mine) listing))
+          (should (string-match-p "1 older task not shown" listing)))))))
+
+(ert-deftest harness-tools-sessions-task-list-shows-a-refused-duplicate ()
+  "task_list shows the task a write-up refused as a duplicate, and the one it named."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (first (plist-get (plist-get (harness-tools-sessions-test-run
+                                         me "task_submit" '(:prompt "CSV export for reports"))
+                                        :meta)
+                             :task-id)))
+      (let* ((harness-provider-demo-script-override
+              `((:type text :delta ,(format "Duplicate of %s\n\nThe board has it already." first))
+                (:type done :stop-reason end-turn)))
+             (second (plist-get (plist-get (harness-tools-sessions-test-run
+                                            me "task_submit" '(:prompt "export the reports as csv" :refine t))
+                                           :meta)
+                                :task-id)))
+        (harness-test-wait (lambda () (eq 'duplicate (plist-get (harness-call 'task/get second) :outcome)))
+                           5 "the refusal")
+        (let ((listing (harness-tools-sessions-test-ok me "task_list" nil)))
+          (should (string-match-p (concat (regexp-quote second) " +needs-input +export the reports as csv") listing))
+          (should (string-match-p (concat "state refining (duplicate), duplicate of " (regexp-quote first)) listing))
+          (should (string-match-p (regexp-quote first) listing)))))))
+
 (defvar harness-tasks-store-in-repository)
 (defvar harness-tasks-directory)
 

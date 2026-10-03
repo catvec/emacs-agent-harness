@@ -6,7 +6,9 @@
 ;; `tasks' module).  Its buffer is a small kanban for the current
 ;; project, one section per column, most urgent first:
 ;;
-;;   Requires your input   blocked on a permission or question, or stopped
+;;   Requires your input   blocked on a permission or question, stopped,
+;;                         or refused by its write-up as a duplicate:
+;;                         drop it, or have it written up all the same
 ;;   Ready for review      finished, waiting for you: verify it (v), which
 ;;                         merges it, or send it back with feedback (R)
 ;;   In progress           working, with its current todo and progress
@@ -181,6 +183,10 @@ into the board's drawing and loading checks this first."
 The task record says so as soon as it changes, unlike the session cache."
   (and (harness-ui-tasks--refining-p task) (null (plist-get task :outcome))))
 
+(defun harness-ui-tasks--duplicate-p (task)
+  "Non-nil when TASK's write-up refused it as a duplicate of another task."
+  (and (harness-ui-tasks--refining-p task) (equal (plist-get task :outcome) "duplicate")))
+
 (defun harness-ui-tasks--started (task)
   "When TASK started, else when it was submitted, else 0."
   (or (plist-get task :started) (plist-get task :created) 0))
@@ -263,6 +269,7 @@ Only the kind: the request itself is read in the session."
                          ("adopted" "waiting for your next message")
                          ((and "interrupted" (guard (harness-ui-tasks--refining-p task)))
                           "a restart interrupted its write-up: retry it, or edit it by hand")
+                         ((guard (harness-ui-tasks--duplicate-p task)) (harness-ui-tasks--duplicate-detail task))
                          (outcome (format "%s: %s%s"
                                           (if (harness-ui-tasks--refining-p task) "write-up stopped" "stopped")
                                           (or outcome "?")
@@ -295,6 +302,20 @@ Only the kind: the request itself is read in the session."
                                             took))
                             " · "))
                          'face 'harness-dim-face)))))
+
+(defun harness-ui-tasks--duplicate-detail (task)
+  "The second line of TASK's card once its write-up refused it as a duplicate.
+It names the task TASK duplicates, by its title when it is on the board,
+then says why, in the words of the agent that refused it."
+  (let* ((of (plist-get task :duplicate-of))
+         (original (and of (harness-ui-tasks--find of)))
+         (why (plist-get task :error)))
+    (concat (cond (original (concat "duplicate of " (harness-ui-tasks--quote (harness-ui-tasks--title original))))
+                  (of (format "duplicate of %s" of))
+                  (t "refused as a duplicate"))
+            (if (harness-string-blank-p why)
+                ""
+              (concat " — " (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " why)))))))
 
 (defun harness-ui-tasks--body-line (task)
   "The first line of TASK's prompt after its first, shortened; nil if none.
@@ -414,6 +435,11 @@ card's title, so the prompt shows here."
                           ("Open" harness-ui-tasks-open) ("Stop" harness-ui-tasks-cancel)))
           ("question" '(("Answer" harness-ui-tasks-reply) ("Open" harness-ui-tasks-open)
                         ("Stop" harness-ui-tasks-cancel)))
+          ;; The agent found the board has it already: you decide.
+          ((guard (harness-ui-tasks--duplicate-p task))
+           '(("Drop" harness-ui-tasks-cancel) ("Write it up" harness-ui-tasks-refine)
+             ("Reply" harness-ui-tasks-reply) ("Edit" harness-ui-tasks-edit)
+             ("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)))
           ((guard (harness-ui-tasks--refining-p task))
            '(("Retry" harness-ui-tasks-refine) ("Edit" harness-ui-tasks-edit)
              ("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
@@ -997,7 +1023,10 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
 (defun harness-ui-tasks--placeholder ()
   "Return the hint for the empty compose box."
   (pcase harness-ui-tasks--target
-    (`(refine . ,_) (concat "What should change in the write-up" harness-ui-tasks--ellipsis))
+    (`(refine . ,id) (concat (if (harness-ui-tasks--duplicate-p (harness-ui-tasks--find id))
+                                 "What makes it another task than the one it duplicates"
+                               "What should change in the write-up")
+                             harness-ui-tasks--ellipsis))
     (`(reject . ,_) (concat "What should change in the work" harness-ui-tasks--ellipsis))
     ((guard (and (null harness-ui-tasks--target) harness-ui-tasks--refine))
      (concat "Jot a task down: an agent writes it up for later" harness-ui-tasks--ellipsis))
@@ -1562,14 +1591,17 @@ be written by hand this way."
 
 (defun harness-ui-tasks-reply ()
   "Write a message to the session of the task at point.
-For a backlog task that is feedback on its write-up, which is written
-again (see `harness-ui-tasks-refine')."
+For a backlog task, or one whose write-up stopped or refused it as a
+duplicate, that is feedback on its write-up, which is written again (see
+`harness-ui-tasks-refine')."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (plist-get task :session) (user-error "This task has not started yet"))
     (harness-ui-tasks--set-compose
      "" (cons (cond ((equal (plist-get (harness-ui-tasks--pending task) :kind) "question") 'answer)
-                    ((equal (plist-get task :state) "pending") 'refine)
+                    ((or (equal (plist-get task :state) "pending")
+                         (and (harness-ui-tasks--refining-p task) (not (harness-ui-tasks--writing-p task))))
+                     'refine)
                     (t 'reply))
               (plist-get task :id)))))
 
@@ -1577,7 +1609,8 @@ again (see `harness-ui-tasks-refine')."
   "Have an agent write the task at point up for the backlog.
 A queued task is written up and then waits for you to start it.  For a
 backlog task the compose box takes your feedback, and the write-up is
-done again with it.  A write-up that stopped is retried."
+done again with it.  A write-up that stopped is retried, and a task
+whose write-up refused it as a duplicate is written up all the same."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (cond

@@ -215,10 +215,17 @@ first.  Finished tasks are done at once unless BODY turns
           ;; The user stopped it: they know.
           (change "t-5" 'active)
           (change "t-5" 'needs-input :outcome 'cancelled)
+          ;; Its write-up found the board has it already, and says where.
+          (change "t-6" 'pending)
+          (change "t-6" 'needs-input :state 'refining :outcome 'duplicate :duplicate-of "t-1"
+                  :error "The board has it already:\n  “Add CSV export”, in review.")
           (should (equal (list (cons "Task needs you: a task" (concat project ": has a question for you"))
                                (cons "Task needs you: a task" (concat project ": needs your permission"))
                                (cons "Task needs you: a task"
-                                     (concat project ": stopped: merge-failed, merge failed: conflict in x.el")))
+                                     (concat project ": stopped: merge-failed, merge failed: conflict in x.el"))
+                               (cons "Task needs you: a task"
+                                     (concat project ": refused as a duplicate: The board has it already: "
+                                             "“Add CSV export”, in review.")))
                          (reverse sent)))
           ;; A deleted task is forgotten.
           (harness-tasks-notify--on-deleted "t-2")

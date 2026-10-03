@@ -997,8 +997,8 @@ Task mode: one session per task.  TASK =
 :state pending|refining|active|merging|review|done
 :column pending|needs-input|active|review|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
-:session SID :outcome nil|end-turn|error|cancelled|merge-failed|merged|…
-:error "…" :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
+:session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
+:error "…" :duplicate-of ID :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...)
 :file "docs/tasks/ID-SLUG.md" :updated F :extra (RAW-ENTRY ...))`.
@@ -1022,15 +1022,35 @@ to the task's file (below); the record also keeps `:file-base` and
   `-refine-thinking` (low) -- writes it up as told by
   `harness-tasks-refine-prompt` (brief, no changes, no questions, a
   self-contained ticket: title line, what and why, what to change, how to
-  tell it is done, open questions); after `harness-tasks-refine-tool-calls`
+  tell it is done, related tasks, open questions); after
+  `harness-tasks-refine-tool-calls`
   (8) tool calls it is steered once to write up with what it has, which
-  keeps it brief.  Its final reply becomes `:prompt`
-  (the original stays in `:note`) and the task waits in `pending` with
-  `:backlog t`: the scheduler never starts it, only `task/start`, so the
-  backlog survives restarts.  A turn of a backlog task's session before
-  it starts is feedback (`task/prompt`) and rewrites the write-up; a
-  write-up that stops needs input (restarts: below).
-  `task/refine ID &optional TEXT` refines a queued task or
+  keeps it brief.  It is told to search the board first -- one `task_list`
+  (`include_archived t`, `limit 50`, the task at hand marked
+  `(this task)`) -- and to refuse a request the board already has: an
+  exact duplicate is neither written up nor added to the backlog, but
+  waits for the user.  The refusal is its final reply, first line
+  `Duplicate of ID` (`harness-tasks--refusal`, markdown and a trailing
+  full stop aside); `--finish-refinement` then sets `:outcome duplicate`,
+  `:duplicate-of` the task named when it is on this harness's board
+  (`harness-tasks--duplicate-of`: an id, or a unique id prefix, of the
+  task's project, never the task itself) and `:error` the message after
+  the first line, shown to the user.  `task/refine ID` with no TEXT
+  writes a refused task up all the same, sending
+  `harness-tasks--refine-anyway-text`; with TEXT -- or with
+  `task/prompt`, like any feedback -- the write-up is done again with
+  it.  A write-up also names the related tasks in the same code area in a
+  "Related tasks" section -- id, title, branch, session, where each
+  stands and what it changes -- and tells whoever does the task to
+  coordinate with them rather than redo their work: check where they
+  stand, message their sessions, cherry-pick their commits (see also
+  `harness-tasks-start-text`).  Otherwise its final reply becomes
+  `:prompt` (the original stays in `:note`) and the task waits in
+  `pending` with `:backlog t`: the scheduler never starts it, only
+  `task/start`, so the backlog survives restarts.  A turn of a backlog
+  task's session before it starts is feedback (`task/prompt`) and
+  rewrites the write-up; a write-up that stops needs input (restarts:
+  below).  `task/refine ID &optional TEXT` refines a queued task or
   writes one up again.  Starting continues the same session: in git it
   moves into the task's new worktree (`session/update :cwd :worktree`),
   its provider conversation is dropped (the Claude CLI keeps
@@ -1169,7 +1189,8 @@ to the task's file (below); the record also keeps `:file-base` and
 
   - Frontmatter, in this order and only when set: `id`, `title` (the
     session's name, else the prompt's first line), `state`, `column`,
-    `backlog`, `outcome`, `error` (300 characters at most), `session`,
+    `backlog`, `outcome`, `error` (300 characters at most), `duplicate-of`
+    (the task a write-up refused this one as a duplicate of), `session`,
     `branch`, `base`, `merge` (the merge status, or `merged`), `model`,
     `thinking`, `created`, `started`, `refined`, `finished`, `verified`
     (when the user verified the work), `updated` (times in ISO 8601 UTC,
@@ -1373,7 +1394,7 @@ TRAMP prefixes come from the session host):
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | List tasks | column (pending/needs-input/active/review/done), include_archived, all_projects | read |
+| `task_list` | List tasks | column (pending/needs-input/active/review/done), include_archived, all_projects, limit (the most recent) | read |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
@@ -1683,7 +1704,12 @@ Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
 or go to the backlog, written up by an agent and
 waiting in pending until you start it (`s`); `r` refines a queued task,
-retries a stopped write-up or sends feedback on a backlog task's.  `I` or
+retries a stopped write-up, writes one up all the same when it refused
+the task as a duplicate, or sends feedback on a backlog task's.  A task
+whose write-up refused it as a duplicate shows it in Requires your
+input, naming the task it duplicates and saying why: `k` drops it, `r`
+writes it up anyway, `m` takes what makes it another task than the one
+it duplicates.  `I` or
 [Add session] makes an ongoing session a task.  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  Boards reload after any

@@ -652,21 +652,32 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
           (0 (signal 'harness-error (list (format "No task %s; use task_list to find ids" ref))))
           (_ (signal 'harness-error (list (format "%s matches %d tasks; give more of the id" ref (length hits)))))))))
 
-(defun harness-tools-sessions--task-line (task)
+(defun harness-tools-sessions--task-times (task)
+  "Return when TASK was created and finished, as a task line has it."
+  (let ((created (plist-get task :created))
+        (finished (plist-get task :finished)))
+    (concat (if (numberp created) (format ", created %s" (harness-relative-time created)) "")
+            (if (numberp finished) (format ", finished %s" (harness-relative-time finished)) ""))))
+
+(defun harness-tools-sessions--task-line (task &optional self)
   "Return the listing of TASK.
 Its title on the board, the name of its session once it has one, comes
-before its prompt."
+before its prompt.  When SELF, a session id, is TASK's session, the
+line says \"(this task)\"."
   (let* ((sid (plist-get task :session))
          (session (and sid (harness-call 'session/exists-p sid) (harness-call 'session/get sid)))
          (title (plist-get session :name))
          (pending (and session (harness-tools-sessions--pending-text session))))
     (concat
-     (format "%s  %-11s %s%s" (plist-get task :id) (plist-get task :column)
+     (format "%s  %-11s %s%s%s" (plist-get task :id) (plist-get task :column)
              (if (harness-string-blank-p title) "" (format "%S: " title))
-             (harness-truncate-end (harness-first-line (or (plist-get task :prompt) "")) 100))
-     (format "\n    state %s%s%s%s%s%s%s"
+             (harness-truncate-end (harness-first-line (or (plist-get task :prompt) "")) 100)
+             (if (and self sid (equal sid self)) "  (this task)" ""))
+     (format "\n    state %s%s%s%s%s%s%s%s%s"
              (plist-get task :state)
              (if (plist-get task :outcome) (format " (%s)" (plist-get task :outcome)) "")
+             (if (plist-get task :duplicate-of) (format ", duplicate of %s" (plist-get task :duplicate-of)) "")
+             (harness-tools-sessions--task-times task)
              (if sid (format ", session %s %s" sid (if session (harness-tools-sessions--status sid) "deleted")) "")
              (if (plist-get task :branch) (format ", branch %s" (plist-get task :branch)) "")
              (cond ((plist-get task :merge-status) (format ", merge %s" (plist-get task :merge-status)))
@@ -684,22 +695,31 @@ before its prompt."
   (let* ((cwd (unless (harness-json-true-p (plist-get input :all_projects)) (plist-get ctx :cwd)))
          (column (let ((c (plist-get input :column))) (and c (intern c))))
          (archived (harness-json-true-p (plist-get input :include_archived)))
+         (limit (let ((n (plist-get input :limit))) (and (numberp n) (>= n 1) (truncate n))))
          (tasks (cl-remove-if-not
                  (lambda (task) (and (or archived (not (plist-get task :archived)))
                                      (or (null column) (eq column (plist-get task :column)))))
-                 (harness-call 'task/list cwd))))
+                 (harness-call 'task/list cwd)))
+         ;; The list is oldest first: the most recent are its end.
+         (shown (if (and limit (> (length tasks) limit)) (last tasks limit) tasks))
+         (hidden (- (length tasks) (length shown)))
+         (self (plist-get ctx :session-id)))
     (harness-tool-ok
      (if tasks
-         (mapconcat #'harness-tools-sessions--task-line tasks "\n")
+         (concat (if (> hidden 0)
+                     (format "… %d older task%s not shown; raise limit to see them\n" hidden (if (= hidden 1) "" "s"))
+                   "")
+                 (mapconcat (lambda (task) (harness-tools-sessions--task-line task self)) shown "\n"))
        "No tasks match."))))
 
 (harness-define-tool "task_list"
   :label "List tasks"
-  :description "List the task board: tasks (one session each, usually in its own worktree, done once the user verified the work and it merged) with their title (their session's name, once it has one), prompt, column (pending, needs-input, active, review, done), state, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back. Defaults to this project's unarchived tasks. Inspect a task's work with session_read on its session."
+  :description "List the task board: tasks (one session each, usually in its own worktree, done once the user verified the work and it merged) with their title (their session's name, once it has one), prompt, column (pending, needs-input, active, review, done), state, when they were created and finished, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back. Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
   :schema '(:type "object"
             :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "review" "done"))
                          :include_archived (:type "boolean" :description "Include archived tasks (default false).")
-                         :all_projects (:type "boolean" :description "Every project (default false).")))
+                         :all_projects (:type "boolean" :description "Every project (default false).")
+                         :limit (:type "integer" :description "Show only this many tasks, the most recently created (default all).")))
   :kind 'read
   :coalescable t
   :subject (lambda (input) (plist-get input :column))

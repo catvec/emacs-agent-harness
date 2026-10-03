@@ -635,6 +635,170 @@ turn `harness-tasks-require-verification' on themselves."
           (should (= 1 (length steers)))
           (should (string-match-p "enough looking" (plist-get (car steers) :content))))))))
 
+;;;; Duplicates: the write-up looks at the board first
+
+(defvar harness-tasks--refine-anyway-text)
+(declare-function harness-tasks--refusal "harness-tasks")
+(declare-function harness-tasks--duplicate-of "harness-tasks")
+
+(ert-deftest harness-tasks-refusal-is-the-first-line ()
+  "A reply refuses its task as a duplicate by its first line alone: Duplicate of ID."
+  (harness-tasks-test-with
+    (should (equal '("t-abc12345" . "The board has it: Add CSV export, in review.")
+                   (harness-tasks--refusal "Duplicate of t-abc12345\n\nThe board has it: Add CSV export, in review.")))
+    ;; Markdown around it, the word task or a full stop change nothing.
+    (should (equal '("t-abc12345" . "Same export.")
+                   (harness-tasks--refusal "  **Duplicate of `t-abc12345`.**\n\nSame export.")))
+    (should (equal "t-abc12345" (car (harness-tasks--refusal "duplicate of task t-abc12345"))))
+    ;; With nothing after it, the line is the message, without its markup.
+    (should (equal '("t-abc12345" . "Duplicate of t-abc12345: Add CSV export")
+                   (harness-tasks--refusal "# Duplicate of t-abc12345: Add CSV export")))
+    ;; Write-ups that speak of duplicates are write-ups.
+    (should-not (harness-tasks--refusal "Fix duplicate rows in the export\n\nDuplicate of t-abc12345 was wrong."))
+    (should-not (harness-tasks--refusal "Not a duplicate of t-abc12345"))
+    (should-not (harness-tasks--refusal "Duplicate of"))
+    (should-not (harness-tasks--refusal nil))))
+
+(ert-deftest harness-tasks-refine-refuses-a-duplicate ()
+  "A write-up that finds the same task on the board refuses it: the task waits for the user.
+Written up all the same, it goes to the backlog."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-max-running nil)
+           (harness-provider-demo-script-override
+            '((:type text :delta "Add CSV export to reports\n\nExport the report table as CSV.")
+              (:type done :stop-reason end-turn)))
+           (first (harness-tasks-test-refine "csv export for the reports page")))
+      (harness-tasks-test-wait-state first 'pending)
+      (let* ((why "The board has this already: “Add CSV export to reports”, waiting in the backlog.")
+             (harness-provider-demo-script-override
+              `((:type text :delta ,(format "Duplicate of %s\n\n%s" first why)) (:type done :stop-reason end-turn)))
+             (id (harness-tasks-test-refine "export the reports as csv"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        ;; It was told to look at the board first, how to refuse, and how a
+        ;; write-up names the tasks working on the same code to coordinate with.
+        (let ((system (harness-run-filter 'agent/system-prompt "" (harness-call 'session/get sid))))
+          (should (string-match-p "call task_list once" system))
+          (should (string-match-p "\"Duplicate of ID\"" system))
+          (should (string-match-p "Related tasks" system))
+          (should (string-match-p "session_send" system))
+          (should (string-match-p "cherry-pick" system)))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :outcome)) 5 "the refusal")
+        (cl-flet ((check ()
+                    (let ((task (harness-tasks-test-task id)))
+                      (should (eq 'refining (plist-get task :state)))
+                      (should (eq 'duplicate (plist-get task :outcome)))
+                      (should (eq 'needs-input (plist-get task :column)))
+                      (should (equal first (plist-get task :duplicate-of)))
+                      (should (equal why (plist-get task :error)))
+                      ;; Not written up: its prompt is still the request.
+                      (should (equal "export the reports as csv" (plist-get task :prompt)))
+                      (should-not (plist-get task :refined)))))
+          (check)
+          ;; Nothing takes it up again by itself, a restart included.
+          (harness-tasks--schedule)
+          (harness-tasks-test--restart)
+          (check))
+        ;; What a refusal names: another task, by its id or the start of it.
+        (let ((task (harness-tasks-test-task id)))
+          (should (equal first (harness-tasks--duplicate-of task (substring first 0 -1))))
+          (should-not (harness-tasks--duplicate-of task id))
+          (should-not (harness-tasks--duplicate-of task "t-nosuch00")))
+        ;; Written up all the same, it waits in the backlog like any other.
+        (let ((harness-provider-demo-script-override
+               '((:type text :delta "Export reports as CSV\n\nRelated: the CSV export in the backlog.")
+                 (:type done :stop-reason end-turn))))
+          (harness-call 'task/refine id)
+          (harness-tasks-test-wait-state id 'pending))
+        (let ((task (harness-tasks-test-task id)))
+          (should (equal "Export reports as CSV\n\nRelated: the CSV export in the backlog." (plist-get task :prompt)))
+          (should (plist-get task :backlog))
+          (should (plist-get task :refined))
+          (should-not (plist-get task :outcome))
+          (should-not (plist-get task :error))
+          (should-not (plist-get task :duplicate-of)))
+        ;; It was told that the user wants it after all.
+        (should (equal harness-tasks--refine-anyway-text (car (last (harness-tasks-test-user-texts sid)))))
+        ;; Starting the work passes the nudge to coordinate on to whoever does it.
+        (harness-call 'task/start id)
+        (harness-tasks-test-wait-state id 'done)
+        (should (string-prefix-p harness-tasks-start-text (nth 2 (harness-tasks-test-user-texts sid))))
+        (should (string-match-p "coordinate" (nth 2 (harness-tasks-test-user-texts sid))))))))
+
+(ert-deftest harness-tasks-write-up-opening-duplicate-of ()
+  "A write-up that merely opens \"Duplicate of a task …\" is written up, not refused."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "Duplicate of a task should not crash\n\nGuard the lookup.")
+             (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-refine "duplicates crash the lookup")))
+        (harness-tasks-test-wait-state id 'pending)
+        (let ((task (harness-tasks-test-task id)))
+          (should (equal "Duplicate of a task should not crash\n\nGuard the lookup." (plist-get task :prompt)))
+          (should-not (plist-get task :outcome))
+          (should-not (plist-get task :duplicate-of)))))))
+
+(ert-deftest harness-tasks-refine-refusal-naming-no-task ()
+  "A refusal naming no task on the board waits for the user all the same; dropping it drops it."
+  (harness-tasks-test-with
+    (let* ((harness-provider-demo-script-override
+            '((:type text :delta "**Duplicate of t-nosuch00**") (:type done :stop-reason end-turn)))
+           (id (harness-tasks-test-refine "an idea the board may have"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :outcome)) 5 "the refusal")
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'duplicate (plist-get task :outcome)))
+        (should (eq 'needs-input (plist-get task :column)))
+        (should-not (plist-get task :duplicate-of))
+        (should (equal "Duplicate of t-nosuch00" (plist-get task :error))))
+      (should-not (harness-call 'task/cancel id))
+      (should-not (gethash id harness-tasks--table))
+      (should-not (harness-call 'session/exists-p sid)))))
+
+(ert-deftest harness-tasks-refine-feedback-after-a-refusal ()
+  "Feedback on a refused task goes to its write-up, which may be written up then; editing it by hand works too."
+  (harness-tasks-test-with
+    (let* ((harness-provider-demo-script-override
+            '((:type text :delta "Duplicate of t-nosuch00\n\nLooks like the same.") (:type done :stop-reason end-turn)))
+           (id (harness-tasks-test-refine "an idea"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-test-wait (lambda () (eq 'duplicate (plist-get (harness-tasks-test-task id) :outcome))) 5 "the refusal")
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Do the idea\n\nIt differs.") (:type done :stop-reason end-turn))))
+        (harness-call 'task/prompt id "it is not the same: this one is about the other page")
+        (harness-tasks-test-wait-state id 'pending))
+      (should (equal "Do the idea\n\nIt differs." (plist-get (harness-tasks-test-task id) :prompt)))
+      (should (equal "it is not the same: this one is about the other page"
+                     (car (last (harness-tasks-test-user-texts sid)))))
+      ;; Refused again, then written by hand: a backlog task, nothing left of the refusal.
+      (harness-call 'task/prompt id "check again")
+      (harness-test-wait (lambda () (eq 'duplicate (plist-get (harness-tasks-test-task id) :outcome))) 5 "the refusal")
+      (harness-call 'task/update id "By hand")
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (equal "By hand" (plist-get task :prompt)))
+        (should-not (plist-get task :outcome))
+        (should-not (plist-get task :error))))))
+
+(ert-deftest harness-tasks-demo-write-up-refuses-the-same-words ()
+  "The demo provider's write-up looks at the board first and refuses a request it already has."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-sessions)
+    (let* ((harness-provider-demo-script-override nil)
+           (first (harness-tasks-test-refine "CSV export for the reports")))
+      (harness-tasks-test-wait-state first 'pending)
+      (should (string-prefix-p "CSV export for the reports\n\n" (plist-get (harness-tasks-test-task first) :prompt)))
+      (let* ((id (harness-tasks-test-refine "csv  export for the REPORTS"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :outcome)) 5 "the refusal")
+        (should (eq 'duplicate (plist-get (harness-tasks-test-task id) :outcome)))
+        (should (equal first (plist-get (harness-tasks-test-task id) :duplicate-of)))
+        ;; It searched the board, which showed it its own line too.
+        (let ((search (harness-tasks-test--node sid (lambda (n) (and (eq (plist-get n :kind) 'tool-call)
+                                                                     (equal "task_list" (plist-get n :tool))))))
+              (result (harness-tasks-test--node sid (lambda (n) (eq (plist-get n :kind) 'tool-result)))))
+          (should search)
+          (should (string-match-p (concat (regexp-quote id) " .*(this task)") (plist-get result :output))))))))
+
 (ert-deftest harness-tasks-backlog-survives-a-restart ()
   "A written-up task waits in the backlog across a restart; nothing starts it."
   (harness-tasks-test-with
@@ -1272,6 +1436,7 @@ folders: BODY reads them by listing the board."
                        :prompt "Fix nested quotes in the parser\n\n- Handle `parse-args'.\n- Done when: the tests pass. #1"
                        :note "the parser chokes on \"nested\" quotes\n\nand more"
                        :state 'pending :backlog t :session sid :outcome 'error :error "it broke:\nbadly"
+                       :duplicate-of "t-orig0001"
                        :branch "task/fix-nested-round001" :base "main" :merged t
                        :model "claude:claude-opus-5-5" :thinking "high"
                        :created 1790861242.0 :started 1790861250.0 :refined 1790861300.0
@@ -1295,9 +1460,10 @@ folders: BODY reads them by listing the board."
       (should (plist-get parsed :heading))
       (should (equal (plist-get task :note) (plist-get parsed :note)))
       (should (equal (plist-get task :extra) (plist-get parsed :extra)))
-      (should (equal '("id" "title" "state" "column" "backlog" "outcome" "error" "session" "branch" "base"
-                       "merge" "model" "thinking" "created" "started" "refined" "finished" "verified" "updated")
+      (should (equal '("id" "title" "state" "column" "backlog" "outcome" "error" "duplicate-of" "session" "branch"
+                       "base" "merge" "model" "thinking" "created" "started" "refined" "finished" "verified" "updated")
                      (mapcar #'car fields)))
+      (should (equal "t-orig0001" (cdr (assoc "duplicate-of" fields))))
       (should (equal "2026-10-01T13:30:50Z" (cdr (assoc "verified" fields))))
       (should (equal "pending" (cdr (assoc "column" fields))))
       (should (eq t (cdr (assoc "backlog" fields))))
@@ -1310,7 +1476,7 @@ folders: BODY reads them by listing the board."
       ;; Read back as a task, its store lost, it is the same task: the same file.
       (let ((back (harness-tasks--add-from-file default-directory "docs/tasks/t-round001.md" parsed nil)))
         (should (equal "t-round001" (plist-get back :id)))
-        (dolist (key '(:prompt :note :state :backlog :session :outcome :error :branch :base :merged
+        (dolist (key '(:prompt :note :state :backlog :session :outcome :error :duplicate-of :branch :base :merged
                        :model :thinking :created :started :refined :finished :updated :extra
                        :verified :verified-at :feedback))
           (should (equal (list key (plist-get task key)) (list key (plist-get back key)))))
