@@ -102,23 +102,9 @@ unless `harness-tasks-non-interactive' is on: then they start
 non-interactive anyway."
   :type 'boolean :safe #'booleanp :group 'harness)
 
-(defcustom harness-tasks-directory "docs/tasks"
-  "Folder of a git project's task files, relative to its main checkout.
-Every task on the project's board is also a markdown file there: YAML
-frontmatter with the fields the harness reads, then the task's prompt,
-the request it was written from and its plan.  The harness writes the
-files when tasks change and reads back the ones people (or other tools)
-edit or add, which then show on the board.  See the tasks module.
-
-nil keeps no task files.  A project's .dir-locals.el can pick another
-folder for that project, or nil to keep none there."
-  :type '(choice (const :tag "No task files" nil) (string :tag "Folder"))
-  :safe (lambda (v) (or (null v) (stringp v)))
-  :group 'harness)
-
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-allowed-directories
-    harness-budget harness-sandbox-policy harness-non-interactive harness-tasks-directory)
+    harness-budget harness-sandbox-policy harness-non-interactive)
   "Settings that take part in layering.")
 
 (defconst harness-config-sections
@@ -137,7 +123,7 @@ folder for that project, or nil to keep none there."
      :doc "The sessions tasks start with, and when their work counts as done."
      :keys (harness-tasks-model harness-tasks-thinking harness-tasks-permission-mode
             harness-tasks-non-interactive harness-tasks-require-verification
-            harness-tasks-max-running harness-tasks-worktrees harness-tasks-directory))
+            harness-tasks-max-running harness-tasks-worktrees))
     (notifications
      :title "Notifications"
      :doc "When the harness tells you it needs you, and where."
