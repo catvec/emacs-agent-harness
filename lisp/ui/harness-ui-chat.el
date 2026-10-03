@@ -778,22 +778,28 @@ A call that was refused reads apart from one that ran and failed."
      bg)))
 
 (defun harness-chat--rerender-media (id)
-  "Redraw the chat block whose rendering shows the media ID, if any.
-Return non-nil when a chat buffer showed it.  A block is redrawn whole,
-so its fold overlay follows the new rendering; editing the media in
-place would leave the fold covering the picture or the player."
+  "Redraw every chat block whose rendering shows the media ID, if any.
+Return non-nil when a chat buffer showed it.  Each block is redrawn
+whole, so its fold overlay follows the new rendering; editing the media
+in place would leave the fold covering the picture or the player.  Every
+block showing it is redrawn: the same video may appear in a tool result
+and in the message that attached it."
   (let (handled)
     (dolist (buf (buffer-list))
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (and harness-chat--blocks (not harness-chat--loading))
-            (save-excursion
-              (goto-char (point-min))
-              (when-let* ((m (text-property-search-forward 'harness-ui-media-id id t))
-                          (node (get-text-property (prop-match-beginning m) 'harness-chat-node))
-                          (block (gethash node harness-chat--blocks)))
+            (let (nodes m)
+              (save-excursion
+                (goto-char (point-min))
+                (while (setq m (text-property-search-forward 'harness-ui-media-id id t))
+                  (when-let* ((node (get-text-property (prop-match-beginning m) 'harness-chat-node)))
+                    (cl-pushnew node nodes :test #'equal))))
+              (when nodes
                 (setq handled t)
-                (harness-chat--rerender block)))))))
+                (dolist (node nodes)
+                  (when-let* ((block (gethash node harness-chat--blocks)))
+                    (harness-chat--rerender block)))))))))
     handled))
 
 (defun harness-chat--render-hint (block)

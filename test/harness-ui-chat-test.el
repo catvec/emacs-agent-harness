@@ -1020,10 +1020,16 @@ eyes: a real thumbnail and a known duration, so no ffmpeg or ffprobe runs."
 
 (defun harness-ui-chat-test--media-pos (mime)
   "Return the first position in the current buffer carrying media MIME."
-  (save-excursion
-    (goto-char (point-min))
-    (when-let* ((m (text-property-search-forward 'harness-ui-media-mime mime t)))
-      (prop-match-beginning m))))
+  (car (harness-ui-chat-test--media-positions mime)))
+
+(defun harness-ui-chat-test--media-positions (mime)
+  "Return every position in the current buffer carrying media MIME."
+  (let ((pos (point-min)) found)
+    (while (< pos (point-max))
+      (when (equal mime (get-text-property pos 'harness-ui-media-mime))
+        (push pos found))
+      (setq pos (next-single-property-change pos 'harness-ui-media-mime nil (point-max))))
+    (nreverse found)))
 
 (ert-deftest harness-ui-chat-shows-what-a-read-brought ()
   "An image a tool read shows in the transcript, and so does a video,
@@ -1072,7 +1078,8 @@ the call's text stays folded."
 (ert-deftest harness-ui-chat-media-rerender-keeps-it-visible ()
   "When the media module redraws a video (a thumbnail landing, or a
 player advancing), the chat redraws the block, so the fold never
-collapses onto the picture and hides it."
+collapses onto the picture and hides it.  Every block showing the
+video is redrawn, not just the first."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (video (harness-ui-chat-test--video (harness-test-temp-dir) "clip.mp4" 42)))
@@ -1082,19 +1089,27 @@ collapses onto the picture and hides it."
                                               :output "Video clip.mp4 (video/mp4, 76 B) is shown to the user."
                                               :attachments (list (list :path video :mime "video/mp4"
                                                                        :size 76 :name "clip.mp4"))))
+      ;; The same video, in the message that attached it: another block.
+      (harness-call 'session/append sid
+                    (list :kind 'user :content "and this one"
+                          :blocks (list (list :type "file" :path video :mime "video/mp4"
+                                              :size 76 :name "clip.mp4"))))
       (let ((buf (harness-ui-chat-test-open sid)))
         (with-current-buffer buf
           (let* ((block (car (harness-ui-chat-test-blocks buf "tool-call")))
                  (before (harness-ui-chat-test--media-pos "video/mp4")))
             (should before)
             (should-not (invisible-p before))
-            ;; The chat claims the redraw.
+            (should (= 2 (length (harness-ui-chat-test--media-positions "video/mp4"))))
+            ;; The chat claims the redraw, and redraws both blocks.
             (should (harness-chat--rerender-media video))
-            (let ((after (harness-ui-chat-test--media-pos "video/mp4")))
-              (should after)
-              (should-not (invisible-p after))
-              (should (< after (overlay-start (harness-chat-block-fold block))))
-              (should (harness-ui-chat-test-find buf "Play")))
+            (let ((positions (harness-ui-chat-test--media-positions "video/mp4")))
+              (should (= 2 (length positions)))
+              (dolist (pos positions) (should-not (invisible-p pos)))
+              (should (< (car positions) (overlay-start (harness-chat-block-fold block)))))
+            (should (= 2 (cl-count-if (lambda (l) (string-match-p "Play" l))
+                                      (split-string
+                                       (buffer-substring-no-properties (point-min) (point-max)) "\n"))))
             ;; Without a chat block showing it, the module edits in place.
             (should-not (harness-chat--rerender-media "/tmp/nowhere.mp4"))))))))
 
