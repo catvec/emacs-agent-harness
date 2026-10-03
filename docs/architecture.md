@@ -964,7 +964,13 @@ pending request and resolves when answered).
   group-by `project|model|day|hour|session|billing` (billing keys "api",
   "subscription", "extra-usage", "" when unrecorded); sorted by list
   cost.  `:cost` is what was billed, `:list-cost` the same usage at API
-  prices (rows from before list costs count their cost).
+  prices (rows from before list costs count their cost).  By project a
+  row also has `:main`, the main checkout its project belongs to
+  (`harness-files-owning-checkout`, resolved here so the UI never reads
+  the disk for it): a linked git worktree's, such as a task's, is its
+  repository's main checkout, also once the worktree is removed or git
+  pruned its registration; any other project's is its own root, and the
+  row without a project has "".
 - `usage/budgets`, `usage/set-budget BUDGET`, `usage/remove-budget ID`,
   `usage/budget-status ID &rest (:now)` (ID may be "session:SID" for a
   session's implicit budget) → `(:budget :spent :amount :remaining
@@ -2040,13 +2046,18 @@ The UI keeps each provider's QUOTA from `provider/quota` and
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; scoped to the current project, its
 git worktrees and so its tasks' sessions included, each session's root
-resolved to its main checkout once with `harness-files-main-checkout`;
+resolved to its main checkout once with `harness-files-owning-checkout`;
 a task's session is of kind task and goes by its task's title, as on the
 board, until the model names it after its first turn — the list loads
 the tasks with `_harness/task/list` and follows `task/changed' and
 `task/deleted'),
 conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
-svg charts via svg.el), worktrees (`harness-ui-worktree`), notifier
+svg charts via svg.el; by project, the rows of a project's git
+worktrees, its tasks' and sub-agents', fold by their `:main` into one
+line with their sum and count, folded until TAB, RET or a click unfolds
+it, `w` or `[show worktrees]` every project, the main checkout's own
+usage first, then each worktree's; a redraw keeps every window's start
+and point lines), worktrees (`harness-ui-worktree`), notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle
 counts, clickable), BTW side window (`harness-ui-btw`: a new, empty
 session listed under the session it is opened over but sharing nothing

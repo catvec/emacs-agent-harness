@@ -15,7 +15,10 @@
 ;;                 stacks on top in a lighter shade
 ;;   table         `_harness/usage/summary' rows sorted by their value at
 ;;                 API prices, with the billed cost, what a plan covered
-;;                 and a share bar
+;;                 and a share bar; by project, the git worktrees of a
+;;                 project (its tasks' and sub-agents') fold into the
+;;                 project's line, which TAB, RET or a click unfolds
+;;                 (w or [show worktrees]: every project's)
 ;;   plan          how each provider bills (per token, or a plan such as
 ;;                 Claude Max) and the plan's quota windows as meters
 ;;                 with their reset times, plus its extra usage
@@ -139,6 +142,9 @@ ROLE is `accent', `plan' (a light accent for what a plan covered),
 (defvar-local harness-ui-usage--api-cost nil
   "This month's API cost fetched for a budget, offered as its baseline.
 The answer of `_harness/usage/fetch-api-cost' plus :budget-id, or nil.")
+(defvar-local harness-ui-usage--unfolded nil
+  "Main checkouts whose git worktrees the table by project shows.
+Every other project's worktrees are folded into its one line.")
 
 ;;;; Periods
 
@@ -457,45 +463,156 @@ timer in a daemon may otherwise find a terminal frame selected."
                 (or (cdr (assoc k harness-ui-usage--billing-labels)) k)))
     (_ (format "%s" key))))
 
+;;;;; Projects and their worktrees
+
+;; A task, and a sub-agent asked for one, works in a git worktree of its
+;; own, and its usage is recorded under that worktree.  By project, each
+;; row says which main checkout it belongs to (`:main', worked out by the
+;; harness), and the table gathers a project's worktrees under it: one
+;; line with their sum, the fold icon and how many there are.  Unfolded,
+;; the main checkout's own usage comes first, then each worktree's.
+;; Every project starts folded; `harness-ui-usage--unfolded' holds the
+;; ones unfolded, across refreshes, periods and groupings.
+
+(defun harness-ui-usage--costlier-p (a b)
+  "Non-nil when table row A is worth more than row B at API prices."
+  (> (harness-usage-list-cost a) (harness-usage-list-cost b)))
+
+(defun harness-ui-usage--project-groups (rows)
+  "Return the rows by project ROWS gathered under their main checkouts.
+Each group is a row keyed by the main checkout, its usage the sum of its
+members', with `:members', the rows gathered (the main checkout's own
+first, when it has one, then the worktrees' by their value at API
+prices), and `:worktrees', how many of them are worktrees.  A row
+without `:main' is a project of its own.  The groups sort by their value
+at API prices."
+  (let ((table (make-hash-table :test 'equal)) order)
+    (dolist (r rows)
+      (let* ((key (or (plist-get r :key) ""))
+             (main (plist-get r :main))
+             (main (if (and (stringp main) (not (string-empty-p main))) main key)))
+        (unless (gethash main table) (push main order))
+        (push r (gethash main table))))
+    (sort (mapcar
+           (lambda (main)
+             (let* ((members (gethash main table))
+                    (own (cl-find main members :key (lambda (r) (plist-get r :key)) :test #'equal))
+                    (worktrees (sort (copy-sequence (remq own members)) #'harness-ui-usage--costlier-p))
+                    (sum (lambda (k) (apply #'+ (mapcar (lambda (r) (or (plist-get r k) 0)) members)))))
+               (list :key main
+                     :input (funcall sum :input) :output (funcall sum :output)
+                     :cache-read (funcall sum :cache-read) :cache-write (funcall sum :cache-write)
+                     :cost (funcall sum :cost)
+                     :list-cost (apply #'+ (mapcar #'harness-usage-list-cost members))
+                     :calls (funcall sum :calls)
+                     :members (if own (cons own worktrees) worktrees)
+                     :worktrees (length worktrees))))
+           order)
+          #'harness-ui-usage--costlier-p)))
+
+(defun harness-ui-usage--fold-icon (open)
+  "Return the fold icon of a project's line, OPEN or folded, and its gutter.
+The icon may be an image wider than a column: the space after it ends at
+the gutter's end, column 3, so the columns after it stay aligned."
+  (let ((icon (harness-ui-icon (if open 'harness-icon-expanded 'harness-icon-collapsed))))
+    (concat (propertize (if (string-empty-p icon) (if open "-" "+") icon) 'face 'harness-dim-face)
+            (propertize " " 'display '(space :align-to 3)))))
+
+(defun harness-ui-usage--member-label (key main)
+  "Return the label of KEY, a row of the project whose main checkout is MAIN.
+That is \"main checkout\" for MAIN itself, and the directory's name for
+a worktree, such as a task's task-SLUG-ID, which fits whole up to 48
+characters; its whole path is the tooltip."
+  (if (equal key main)
+      "main checkout"
+    (harness-truncate-middle (file-name-nondirectory (directory-file-name key)) 48)))
+
+(defun harness-ui-usage--project-lines (group)
+  "Return the table lines of project GROUP, as `harness-ui-usage--table-lines'."
+  (let* ((main (plist-get group :key))
+         (count (plist-get group :worktrees))
+         (path (harness-ui-usage--row-label main)))
+    (if (zerop count)
+        (list (list :row (car (plist-get group :members)) :label (concat "  " path)))
+      (let ((open (and (member main harness-ui-usage--unfolded) t))
+            (worktrees (format "%d worktree%s" count (if (= count 1) "" "s"))))
+        (cons (list :row group :project main :fold t
+                    :label (concat (harness-ui-usage--fold-icon open) path
+                                   (propertize (concat "  " worktrees) 'face 'harness-dim-face))
+                    :help (format "RET, TAB or click: %s its %s" (if open "hide" "show") worktrees))
+              (mapcar (lambda (r)
+                        (list :row r :project main :hidden (not open)
+                              :label (concat "    " (harness-ui-usage--member-label (plist-get r :key) main))
+                              :help (abbreviate-file-name (plist-get r :key))))
+                      (plist-get group :members)))))))
+
+(defun harness-ui-usage--table-lines (rows)
+  "Return the lines of the table of ROWS, in order, as plists.
+A line is (:row ROW :label STRING), and :help, its label's tooltip, when
+it has one.  By project, the lines of a project with worktrees also have
+:project, its main checkout; its own line, first, has :fold t, and its
+members' lines :hidden t while it is folded."
+  (if (eq harness-ui-usage--group 'project)
+      (cl-mapcan #'harness-ui-usage--project-lines (harness-ui-usage--project-groups rows))
+    (mapcar (lambda (r) (list :row r :label (harness-ui-usage--row-label (plist-get r :key))))
+            (sort (copy-sequence rows) #'harness-ui-usage--costlier-p))))
+
+(defun harness-ui-usage--insert-row (line fmt total)
+  "Insert table LINE with FMT, its share of TOTAL, the value at API prices."
+  (let* ((r (plist-get line :row))
+         (label (plist-get line :label))
+         (cost (float (or (plist-get r :cost) 0)))
+         (covered (harness-usage-covered r))
+         (share (if (> total 0) (/ (harness-usage-list-cost r) total) 0))
+         (start (point)))
+    (insert (format fmt
+                    (cond ((eq harness-ui-usage--group 'session)
+                           (propertize label 'face 'button 'harness-ui-usage-session (plist-get r :key)
+                                       'help-echo "RET / mouse-1: open this session"))
+                          ((plist-get line :help) (propertize label 'help-echo (plist-get line :help)))
+                          (t label))
+                    (harness-format-cost cost)
+                    (if (> covered 0) (harness-format-cost covered) "")
+                    (concat (harness-ui-usage--meter-string share (harness-ui-usage--color 'accent) 64 8
+                                                            (format "%.0f%% of the period's usage" (* 100 share)))
+                            (propertize (format " %3.0f%%" (* 100 share)) 'face 'harness-dim-face))
+                    (harness-format-tokens (plist-get r :input))
+                    (harness-format-tokens (plist-get r :output))
+                    (harness-format-tokens (plist-get r :cache-read))
+                    (harness-format-tokens (plist-get r :cache-write))
+                    (format "%d" (or (plist-get r :calls) 0))))
+    (add-text-properties start (point)
+                         (append (list 'harness-ui-usage-row r 'mouse-face 'highlight)
+                                 (when-let* ((main (plist-get line :project)))
+                                   (list 'harness-ui-usage-project main))
+                                 (when (plist-get line :fold)
+                                   (list 'harness-ui-usage-fold (plist-get line :project)))))))
+
 (defun harness-ui-usage--insert-table (summary)
   "Insert the summary table for SUMMARY rows.
 Cost is what was billed and Plan what a subscription covered, at API
-prices; rows sort by, and Share divides, their value at API prices."
-  (let* ((rows (sort (copy-sequence summary)
-                     (lambda (a b) (> (harness-usage-list-cost a) (harness-usage-list-cost b)))))
-         (total (apply #'+ (mapcar #'harness-usage-list-cost rows)))
-         (labels (mapcar (lambda (r) (harness-ui-usage--row-label (plist-get r :key))) rows))
-         (kw (max 8 (apply #'max 0 (mapcar #'string-width labels))))
-         (fmt (format " %%-%ds  %%8s  %%8s  %%-14s %%8s %%8s %%9s %%9s %%6s\n" kw)))
-    (insert " " (propertize (format "By %s" (downcase (nth 1 (assq harness-ui-usage--group harness-ui-usage--groups))))
-                            'face 'harness-usage-heading-face)
-            "\n")
-    (insert (propertize (format fmt (nth 1 (assq harness-ui-usage--group harness-ui-usage--groups))
-                                "Cost" "Plan" "Share" "Input" "Output" "Cache r" "Cache w" "Calls")
+prices; rows sort by, and Share divides, their value at API prices.
+By project, a project's worktrees fold under it.  The label column fits
+every label, folded ones too, so unfolding moves no column."
+  (let* ((lines (harness-ui-usage--table-lines summary))
+         (total (apply #'+ (mapcar #'harness-usage-list-cost summary)))
+         (kw (max 8 (apply #'max 0 (mapcar (lambda (l) (string-width (plist-get l :label))) lines))))
+         (fmt (format " %%-%ds  %%8s  %%8s  %%-14s %%8s %%8s %%9s %%9s %%6s\n" kw))
+         (title (nth 1 (assq harness-ui-usage--group harness-ui-usage--groups))))
+    (insert " " (propertize (format "By %s" (downcase title)) 'face 'harness-usage-heading-face))
+    (when (cl-some (lambda (l) (plist-get l :fold)) lines)
+      (insert "  ")
+      (harness-ui-button (if (cl-some (lambda (l) (plist-get l :hidden)) lines) "[show worktrees]" "[hide worktrees]")
+                         #'harness-ui-usage-toggle-worktrees
+                         :help "Show or hide every project's git worktrees, where its tasks work (w)"))
+    (insert "\n")
+    (insert (propertize (format fmt title "Cost" "Plan" "Share" "Input" "Output" "Cache r" "Cache w" "Calls")
                         'face 'harness-usage-table-header-face
                         'help-echo "Cost: billed.  Plan: what a subscription covered, at API prices.  Share: of the usage at API prices."))
-    (cl-loop for r in rows for label in labels do
-             (let* ((cost (float (or (plist-get r :cost) 0)))
-                    (covered (harness-usage-covered r))
-                    (share (if (> total 0) (/ (harness-usage-list-cost r) total) 0))
-                    (start (point)))
-               (insert (format fmt
-                               (if (eq harness-ui-usage--group 'session)
-                                   (propertize label 'face 'button 'harness-ui-usage-session (plist-get r :key)
-                                               'help-echo "RET / mouse-1: open this session")
-                                 label)
-                               (harness-format-cost cost)
-                               (if (> covered 0) (harness-format-cost covered) "")
-                               (concat (harness-ui-usage--meter-string share (harness-ui-usage--color 'accent) 64 8
-                                                                       (format "%.0f%% of the period's usage" (* 100 share)))
-                                       (propertize (format " %3.0f%%" (* 100 share)) 'face 'harness-dim-face))
-                               (harness-format-tokens (plist-get r :input))
-                               (harness-format-tokens (plist-get r :output))
-                               (harness-format-tokens (plist-get r :cache-read))
-                               (harness-format-tokens (plist-get r :cache-write))
-                               (format "%d" (or (plist-get r :calls) 0))))
-               (add-text-properties start (point) (list 'harness-ui-usage-row r 'mouse-face 'highlight))))
-    (when (null rows)
+    (dolist (line lines)
+      (unless (plist-get line :hidden)
+        (harness-ui-usage--insert-row line fmt total)))
+    (when (null lines)
       (insert (propertize "  nothing in this period\n" 'face 'harness-dim-face)))
     (insert "\n")))
 
@@ -655,10 +772,19 @@ prices; rows sort by, and Share divides, their value at API prices."
                         'face 'harness-dim-face)))
   (insert "\n"))
 
+(defun harness-ui-usage--line-start (line)
+  "Return the position where LINE starts, or the last line's start."
+  (save-excursion (goto-char (point-min)) (forward-line (1- line)) (line-beginning-position)))
+
 (defun harness-ui-usage--render ()
-  "Redraw the dashboard from `harness-ui-usage--data', keeping the line."
+  "Redraw the dashboard from `harness-ui-usage--data', keeping the line.
+Each window showing it keeps the lines it starts at and its point is on,
+so neither a refresh nor a fold scrolls it."
   (let ((inhibit-read-only t)
         (line (line-number-at-pos))
+        (windows (mapcar (lambda (w) (list w (line-number-at-pos (window-start w))
+                                           (line-number-at-pos (window-point w))))
+                         (get-buffer-window-list nil nil t)))
         (data harness-ui-usage--data))
     (erase-buffer)
     (setq header-line-format (harness-ui-usage--header))
@@ -679,8 +805,10 @@ prices; rows sort by, and Share divides, their value at API prices."
           (harness-ui-usage--insert-table (plist-get data :summary))))
       (harness-ui-usage--insert-plans)
       (harness-ui-usage--insert-budgets (plist-get data :statuses))))
-    (goto-char (point-min))
-    (forward-line (1- line))))
+    (goto-char (harness-ui-usage--line-start line))
+    (pcase-dolist (`(,window ,start ,point) windows)
+      (set-window-start window (harness-ui-usage--line-start start) t)
+      (set-window-point window (harness-ui-usage--line-start point)))))
 
 ;;;; Mode and commands
 
@@ -696,9 +824,10 @@ prices; rows sort by, and Share divides, their value at API prices."
     (define-key map (kbd "I") #'harness-ui-usage-import-api-cost)
     (define-key map (kbd "P") #'harness-ui-usage-plan)
     (define-key map (kbd "r") #'harness-ui-usage-refresh-plan)
+    (define-key map (kbd "w") #'harness-ui-usage-toggle-worktrees)
     (define-key map (kbd "RET") #'harness-ui-usage-open)
     (define-key map [mouse-1] #'harness-ui-usage-mouse-open)
-    (define-key map (kbd "TAB") #'forward-button)
+    (define-key map (kbd "TAB") #'harness-ui-usage-tab)
     (define-key map (kbd "<backtab>") #'backward-button)
     (define-key map (kbd "?") #'harness-menu)
     map)
@@ -716,7 +845,9 @@ prices; rows sort by, and Share divides, their value at API prices."
        ["View"
         (". t" "Next period" harness-ui-usage-cycle-period)
         (". b" "Group by next" harness-ui-usage-cycle-group)
-        (". RET" "Open at point" harness-ui-usage-open)
+        (". RET" "Open or fold at point" harness-ui-usage-open)
+        (". TAB" "Fold or unfold project" harness-ui-usage-tab)
+        (". w" "Fold or unfold all projects" harness-ui-usage-toggle-worktrees)
         (". g" "Refresh" harness-ui-usage-refresh)]
        ["Budgets and plan"
         (". a" "Add budget" harness-ui-usage-add-budget)
@@ -793,12 +924,58 @@ Usage outlives deleted sessions, so the session is looked up first."
     (harness-ui-call "_harness/session/get" (list :id sid)
                      (lambda (_) (funcall open sid)))))
 
+(defun harness-ui-usage--goto-project (main)
+  "Move to the line of the project whose main checkout is MAIN, if shown."
+  (let ((pos (point-min)))
+    (while (and pos (not (equal (get-text-property pos 'harness-ui-usage-fold) main)))
+      (setq pos (next-single-property-change pos 'harness-ui-usage-fold)))
+    (when pos (goto-char pos))))
+
+(defun harness-ui-usage-toggle-project (main)
+  "Show or hide the git worktrees of the project whose main checkout is MAIN.
+Interactively, the project at point.  Point goes to the project's line."
+  (interactive (list (or (get-text-property (point) 'harness-ui-usage-project)
+                         (user-error "No project with worktrees on this line"))))
+  (setq harness-ui-usage--unfolded
+        (if (member main harness-ui-usage--unfolded)
+            (remove main harness-ui-usage--unfolded)
+          (cons main harness-ui-usage--unfolded)))
+  (harness-ui-usage--render)
+  (harness-ui-usage--goto-project main))
+
+(defun harness-ui-usage-tab ()
+  "Fold or unfold the worktrees of the project at point.
+On a line of the table by project, its own or one of its worktrees',
+show or hide the worktrees; elsewhere move to the next button."
+  (interactive)
+  (if-let* ((main (get-text-property (point) 'harness-ui-usage-project)))
+      (harness-ui-usage-toggle-project main)
+    (call-interactively #'forward-button)))
+
+(defun harness-ui-usage-toggle-worktrees ()
+  "Show the git worktrees of every project in the table by project.
+When every project shows them already, hide them all."
+  (interactive)
+  (unless (eq harness-ui-usage--group 'project)
+    (user-error "Worktrees fold under their project: group the table by project (b)"))
+  (let ((mains (cl-loop for g in (harness-ui-usage--project-groups (plist-get harness-ui-usage--data :summary))
+                        when (> (plist-get g :worktrees) 0) collect (plist-get g :key))))
+    (unless mains (user-error "No project has worktrees in this period"))
+    (setq harness-ui-usage--unfolded
+          (if (cl-every (lambda (m) (member m harness-ui-usage--unfolded)) mains)
+              (cl-set-difference harness-ui-usage--unfolded mains :test #'equal)
+            (cl-union harness-ui-usage--unfolded mains :test #'equal)))
+    (harness-ui-usage--render)))
+
 (defun harness-ui-usage-open ()
-  "Open the session of the table row at point, or press the button at point."
+  "Open the session of the table row at point, or press the button at point.
+On the line of a project with worktrees, show or hide them."
   (interactive)
   (cond
    ((get-text-property (point) 'harness-ui-usage-session)
     (harness-ui-usage--open-session (get-text-property (point) 'harness-ui-usage-session)))
+   ((get-text-property (point) 'harness-ui-usage-fold)
+    (harness-ui-usage-toggle-project (get-text-property (point) 'harness-ui-usage-fold)))
    ((button-at (point)) (push-button))
    ((and (eq harness-ui-usage--group 'session) (get-text-property (point) 'harness-ui-usage-row))
     (harness-ui-usage--open-session (plist-get (get-text-property (point) 'harness-ui-usage-row) :key)))
