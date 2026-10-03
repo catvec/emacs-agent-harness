@@ -2266,13 +2266,25 @@ fetched: older nodes outside the fetched window are skipped."
                  (harness-chat--load (harness-chat--at-bottom-p)))))
            harness-chat--buffers))
 
+(defun harness-chat--showed-open-p (buffer)
+  "Non-nil when the chat BUFFER last heard that its session was open.
+One that has not heard of its session yet, or heard it was inactive or
+deleted, did not show it open."
+  (let ((session (buffer-local-value 'harness-chat--session buffer)))
+    (and session
+         (not (buffer-local-value 'harness-chat--dead buffer))
+         (not (equal (format "%s" (plist-get session :status)) "inactive")))))
+
 (defun harness-chat--reopen-all ()
-  "Open again the closed sessions that chat buffers show.
+  "Open again the sessions that chat buffers showed open.
 Run after connecting: a harness that just started (`harness-restart', a
-crash) has every session closed, but one on screen here is open, as
-`harness-open-session' made it."
+crash) has every session closed, but one a chat here showed open is to
+be open again.  A session a chat showed inactive stays so, and so does
+one a chat has not heard of yet, still loading as this connection came
+up: an inactive session opens as it is, and the first message sent from
+it resumes it."
   (maphash (lambda (id buf)
-             (when (buffer-live-p buf)
+             (when (and (buffer-live-p buf) (harness-chat--showed-open-p buf))
                (harness-ui-call "_harness/session/get" (list :id id)
                                 (lambda (session)
                                   (when (equal (format "%s" (plist-get session :status)) "inactive")

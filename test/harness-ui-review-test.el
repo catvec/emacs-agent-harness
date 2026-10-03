@@ -250,21 +250,62 @@ The popout goes as the task turns verified: its buffer and its window."
       (should-not (harness-ui-popout-buffer key))
       (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
 
-(ert-deftest harness-ui-review-send-back-keeps-the-report ()
-  "Sending the work back leaves its report open: only verifying closes it."
+(defun harness-ui-review-test--feedback (id)
+  "The feedback task ID was sent back with, as texts."
+  (mapcar (lambda (round) (plist-get round :text)) (plist-get (harness-call 'task/get id) :feedback)))
+
+(ert-deftest harness-ui-review-send-back-closes-the-report ()
+  "Sending the work back from the session's banner closes the report too.
+[Send back] leaves it open while the feedback is written; sending that
+closes it."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid))
+          (key (list 'report id)))
+      (harness-ui-review-test--wait-text chat "Ready for review")
+      (harness-ui-review-test--push chat "[Report]")
+      (let ((popout (harness-ui-popout-buffer key)))
+        (should popout)
+        (harness-ui-review-test--push chat "[Send back]")
+        (should (buffer-live-p popout))
+        (with-current-buffer chat
+          (goto-char harness-compose-end)
+          (insert "it still flakes on CI")
+          (call-interactively #'harness-chat-send))
+        (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
+      (should-not (harness-ui-popout-buffer key))
+      (should (equal '("it still flakes on CI") (harness-ui-review-test--feedback id))))))
+
+(ert-deftest harness-ui-review-board-send-back-closes-the-report ()
+  "Sending the work back from the board's card closes the report its [Report] popped out."
   (harness-ui-review-test-with
     (let ((key (list 'report id)))
+      (with-current-buffer board (harness-ui-tasks--render))
+      (harness-ui-review-test--push board "[Report]")
+      (let ((popout (harness-ui-popout-buffer key)))
+        (should popout)
+        (harness-ui-review-test--push board "[Send back]")
+        (should (buffer-live-p popout))
+        (with-current-buffer board
+          (goto-char harness-compose-end)
+          (insert "it still flakes on CI")
+          (harness-ui-tasks-submit))
+        (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
+      (should-not (harness-ui-popout-buffer key))
+      (should (equal '("it still flakes on CI") (harness-ui-review-test--feedback id))))))
+
+(ert-deftest harness-ui-review-report-after-send-back-stays-open ()
+  "A report opened once the task was sent back stays open as it works again.
+It follows the task back to review, and closes once that review is decided."
+  (harness-ui-review-test-with
+    (let ((key (list 'report id)))
+      (harness-call 'task/reject id "it still flakes on CI")
       (harness-ui-report-popout (harness-call 'task/get id))
       (should (harness-ui-popout-buffer key))
-      (harness-call 'task/reject id "it still flakes on CI")
       ;; The session works on the feedback and, this fixture's script
-      ;; handing in again, the task waits for review anew; the popout
-      ;; follows it all the way.
-      (harness-test-wait (lambda () (eq 'review (plist-get (harness-call 'task/get id) :state)))
-                         10 "the task to come back for review")
-      (harness-test-wait (lambda () (let ((shown (gethash key harness-ui-report--reports)))
-                                      (and (plist-get shown :feedback) (equal "review" (plist-get shown :state)))))
-                         5 "the popout to follow the task")
+      ;; handing in again, the task waits for review anew.
+      (harness-test-wait (lambda () (or (not (harness-ui-popout-buffer key))
+                                        (equal "review" (plist-get (gethash key harness-ui-report--reports) :state))))
+                         10 "the popout to follow the task back to review")
       (should (harness-ui-popout-buffer key))
       (harness-call 'task/verify id)
       (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the report to close"))))

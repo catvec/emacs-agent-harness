@@ -1897,18 +1897,28 @@ todos, lists one key per line rather than as a Lisp form."
     (should (equal (harness-chat--input-listing '(:options ("red" "green"))) "options: (\"red\" \"green\")\n"))))
 
 (ert-deftest harness-ui-chat-reopens-shown-sessions-on-connect ()
-  "A harness that starts again has every session closed; chat buffers reopen theirs."
+  "A harness that starts again has every session closed; chat buffers
+reopen those they showed open.  One a chat showed inactive, opened as it
+is, stays inactive."
   (harness-ui-chat-test-with
     (let ((shown (harness-ui-chat-test-session "shown"))
-          (hidden (harness-ui-chat-test-session "hidden")))
+          (hidden (harness-ui-chat-test-session "hidden"))
+          (asleep (harness-ui-chat-test-session "asleep")))
       (harness-ui-chat-test-open shown)
-      ;; How a restarted harness loads them.
+      (harness-call 'session/deactivate asleep)
+      (let ((buf (harness-ui-chat-test-open asleep)))
+        (harness-test-wait (lambda () (buffer-local-value 'harness-chat--inactive buf))
+                           5 "the inactive session shown as it is"))
+      ;; How the harness restarts: the UI loses it, and it comes back
+      ;; with every session closed, saying nothing of that to the UI.
+      (harness-acp-close harness-ui-connection)
       (harness-call 'session/deactivate shown)
       (harness-call 'session/deactivate hidden)
       (harness-ui-connect nil)
       (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get shown) :status)))
                          5 "the shown session to reopen")
-      (should (eq 'inactive (plist-get (harness-call 'session/get hidden) :status))))))
+      (should (eq 'inactive (plist-get (harness-call 'session/get hidden) :status)))
+      (should (eq 'inactive (plist-get (harness-call 'session/get asleep) :status))))))
 
 (ert-deftest harness-ui-chat-connect-remote-and-back ()
   "Switching to a harness over TCP with a chat buffer open opens one

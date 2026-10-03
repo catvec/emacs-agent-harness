@@ -114,7 +114,8 @@
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (harness-tools-shell-test-in-dir
     (let* ((harness-sandbox-policy 'required)
-           (r (harness-tools-shell-test--call "bash" :command (format "echo HOME=$HOME; ls %s >/dev/null 2>&1 && echo visible || echo hidden" (getenv "HOME")))))
+           (r (harness-tools-shell-test--call "bash" :command (format "echo HOME=$HOME; ls %s >/dev/null 2>&1 && echo visible || echo hidden"
+                                                                      (shell-quote-argument (harness-test-real-home))))))
       (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
         (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
       (should-not (plist-get r :is-error))
@@ -123,22 +124,26 @@
       (should (plist-get (plist-get r :meta) :sandboxed)))))
 
 (ert-deftest harness-tools-shell-bash-timeout-kills-the-process-tree ()
-  "A timed-out command takes its children with it."
+  "A timed-out command takes its children with it.
+The child is found by its command line, an unlikely `sleep': the pid the
+command prints is the sandbox's own when bash runs in one (`--unshare-pid')."
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir
     (let* ((pidfile (expand-file-name "child.pid" root))
+           (child (format "sleep %d" (+ 300000 (random 600000))))
            (r (harness-tools-shell-test--call
                "bash"
-               :command (format "sleep 300 & echo $! > %s; wait" (shell-quote-argument pidfile))
+               :command (format "%s & echo $! > %s; wait" child (shell-quote-argument pidfile))
                :timeout 2)))
       (should (eq 'timeout (plist-get (plist-get r :meta) :exit)))
+      ;; The child started ...
       (should (file-exists-p pidfile))
-      (let ((child (string-to-number (string-trim (with-temp-buffer (insert-file-contents pidfile) (buffer-string))))))
-        (should (> child 0))
-        (let ((deadline (+ (float-time) 5)))
-          (while (and (eql 0 (signal-process child 0)) (< (float-time) deadline))
-            (sleep-for 0.1)))
-        (should-not (eql 0 (signal-process child 0)))))))
+      (should (> (string-to-number (with-temp-buffer (insert-file-contents pidfile) (buffer-string))) 0))
+      ;; ... and is gone with the command.
+      (let ((deadline (+ (float-time) 5)))
+        (while (and (harness-test-processes child) (< (float-time) deadline))
+          (sleep-for 0.1)))
+      (should-not (harness-test-processes child)))))
 
 ;;;; elisp
 

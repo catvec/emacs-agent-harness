@@ -1684,8 +1684,10 @@ listener.
 `harness-ui` owns the connection (`harness-ui-connection`, local by
 default; `harness-connect-remote` swaps it, and an empty address swaps
 it back to this Emacs's own harness; `harness-ui-connected-hook`
-runs after every connect, where the chat reopens the closed sessions its
-buffers show, as a harness that just started has them all closed), the face set
+runs after every connect, where the chat reopens the sessions its
+buffers showed open, as a harness that just started has them all
+closed -- not one a buffer showed inactive, nor one a buffer still
+loading has not heard of yet), the face set
 (`harness-user-face`, `harness-agent-face`, `harness-tool-face`,
 `harness-thinking-face`, `harness-hint-face`, warning ramps), the
 session cache updated from `_harness/session` updates, the tool cache
@@ -1976,5 +1978,6 @@ evidence -- images inline, videos and files through ui-media, code as a
 block, notes, and a referenced tool call drawn as the call it links to,
 with [Open in the session]; opened from the board's [Report] button and
 from the banner, in a popout of its own, which follows `task/changed`
-and closes once the task turns verified, whatever verified it; the
-report of a task verified before it opened stays).
+and closes once the review is decided -- the task turns verified, or
+is sent back with a new round of `:feedback` -- wherever that was done;
+the report of a task decided before it opened stays).

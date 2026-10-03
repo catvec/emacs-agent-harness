@@ -98,6 +98,29 @@ Signal an error mentioning MESSAGE on timeout.  Return PRED's value."
   "Create and return a fresh temporary directory."
   (file-name-as-directory (make-temp-file "harness-tmp-" t)))
 
+(defvar harness-sandbox--home)
+
+(defun harness-test-real-home ()
+  "Return the user's real home directory, which a sandbox must hide.
+That is $HOME, except where the tests themselves run in a harness
+sandbox -- an agent running them in a task -- whose $HOME is the
+sandbox's empty one: the account's home is the real one then."
+  (let ((home (getenv "HOME")))
+    (if (and home (boundp 'harness-sandbox--home)
+             (equal (directory-file-name home) (directory-file-name harness-sandbox--home)))
+        (expand-file-name (concat "~" (user-login-name)))
+      home)))
+
+(defun harness-test-processes (command)
+  "Return the pids of the processes whose command line is COMMAND.
+The program counts by its name, whatever directory it ran from.  Unlike
+a pid a command prints, which inside a sandbox's pid namespace names
+another process out here, the command line finds it from here."
+  (cl-remove-if-not (lambda (pid)
+                      (let ((args (cdr (assq 'args (process-attributes pid)))))
+                        (and args (equal (replace-regexp-in-string "\\`[^ ]*/" "" args) command))))
+                    (list-system-processes)))
+
 ;;;; Customize types
 
 (defun harness-test-fits-p (type value)
