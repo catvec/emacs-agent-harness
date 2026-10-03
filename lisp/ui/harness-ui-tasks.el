@@ -11,6 +11,8 @@
 ;;                         drop it, or have it written up all the same
 ;;   Ready for review      finished, waiting for you: verify it (v), which
 ;;                         merges it, or send it back with feedback (R)
+;;   Merging               in the merge queue, in the order it takes them:
+;;                         queued, merging, or resolving the conflicts
 ;;   In progress           working, with its current todo and progress
 ;;   Pending               waiting for a slot, or in the backlog (refined,
 ;;                         waiting for you); editable, startable
@@ -87,6 +89,8 @@ Either way the toggle above the compose box switches it per board."
   "Tasks waiting for your review: their mark, heading and count." :group 'harness-ui-tasks)
 (defface harness-task-review-off-face '((t :inherit warning))
   "The Review switch while finished tasks merge without your review." :group 'harness-ui-tasks)
+(defface harness-task-merging-face '((t :inherit harness-dim-face))
+  "The mark of a task waiting in the merge queue." :group 'harness-ui-tasks)
 (defface harness-task-choice-face '((t :inherit bold))
   "The Submit / Refine toggle, which shows the current mode." :group 'harness-ui-tasks)
 
@@ -102,10 +106,13 @@ Either way the toggle above the compose box switches it per board."
 (define-icon harness-icon-task-review nil
   `((symbol ,(string #x2691)) (text "review"))
   "Task waiting for your review: a flag." :version "29.1")
+(define-icon harness-icon-task-merging nil
+  `((symbol ,(string #x21a3)) (text "merge"))
+  "Task in the merge queue: an arrow feeding into a line." :version "29.1")
 
 (defconst harness-ui-tasks--columns
-  '((needs-input "Requires your input" t) (review "Ready for review") (active "In progress")
-    (pending "Pending") (done "Completed"))
+  '((needs-input "Requires your input" t) (review "Ready for review") (merging "Merging" t)
+    (active "In progress") (pending "Pending") (done "Completed"))
   "Columns in display order: (COLUMN HEADING &optional SUBTITLE-SHOWN).
 SUBTITLE-SHOWN is non-nil when the cards of the column show their
 recap subtitle by default; elsewhere a card is one line until you
@@ -180,11 +187,23 @@ into the board's drawing and loading checks this first."
   "Return task ID of this board."
   (cl-find id harness-ui-tasks--tasks :key (lambda (task) (plist-get task :id)) :test #'equal))
 
+(defun harness-ui-tasks--merge-queue-p (task)
+  "Non-nil when TASK holds a place in the merge queue.
+That is queued, merging, or its session resolving the merge's conflicts;
+the task record says so through `:merge-status' as soon as it changes."
+  (and (plist-get task :merge-status) t))
+
+(defun harness-ui-tasks--merge-queued (task)
+  "When TASK joined the merge queue, else 0."
+  (or (plist-get task :merge-queued) 0))
+
 (defun harness-ui-tasks--column (task)
   "Return TASK's column as a symbol."
   (intern (or (plist-get task :column)
-              (pcase (plist-get task :state)
-                ("pending" "pending") ("review" "review") ("done" "done") (_ "active")))))
+              (cond ((harness-ui-tasks--merge-queue-p task) "merging")
+                    (t (pcase (plist-get task :state)
+                         ("pending" "pending") ("review" "review") ("merging" "merging") ("done" "done")
+                         (_ "active")))))))
 
 (defun harness-ui-tasks--archived-p (task)
   (harness-json-true-p (plist-get task :archived)))
@@ -228,8 +247,9 @@ it is by default, until they say it is off."
   "Return the tasks shown, as an alist COLUMN -> tasks in display order.
 In progress is newest first by when each task started, review by when
 it finished and completed by when it was completed, so a task arriving
-in any of them shows at the top; the other columns are oldest first,
-pending in the order its tasks start."
+in any of them shows at the top; merging is the queue's own order, from
+when each branch joined it; the other columns are oldest first, pending
+in the order its tasks start."
   (let ((groups (mapcar (lambda (c) (list (car c))) harness-ui-tasks--columns)))
     (dolist (task harness-ui-tasks--tasks)
       (unless (and (harness-ui-tasks--archived-p task) (not harness-ui-tasks--show-archived))
@@ -239,6 +259,8 @@ pending in the order its tasks start."
                       (pcase (car g)
                         ('active (lambda (a b) (> (harness-ui-tasks--started a) (harness-ui-tasks--started b))))
                         ('review (lambda (a b) (> (or (plist-get a :finished) 0) (or (plist-get b :finished) 0))))
+                        ('merging (lambda (a b) (< (harness-ui-tasks--merge-queued a)
+                                                   (harness-ui-tasks--merge-queued b))))
                         ('done (lambda (a b) (> (harness-ui-tasks--completed a) (harness-ui-tasks--completed b))))
                         (_ (lambda (a b) (< (or (plist-get a :created) 0) (or (plist-get b :created) 0))))))))))
 
@@ -285,6 +307,11 @@ marks on the same centre."
   "A space PIXELS pixels wide, an absolute pixel specification."
   (propertize " " 'display (list 'space :width (list pixels))))
 
+(defun harness-ui-tasks--merge-status (task)
+  "TASK's merge status as a string: \"queued\", \"merging\" or \"conflict\"."
+  (let ((status (plist-get task :merge-status)))
+    (and status (format "%s" status))))
+
 (defun harness-ui-tasks--icon (task column session)
   (pcase column
     ('pending (cond ((harness-ui-tasks--refining-p task) (harness-ui-status-icon "running"))
@@ -293,6 +320,9 @@ marks on the same centre."
                     (t (propertize (harness-ui-icon 'harness-icon-task-pending) 'face 'harness-dim-face))))
     ('done (propertize (harness-ui-icon 'harness-icon-task-done) 'face 'harness-task-done-face))
     ('review (propertize (harness-ui-icon 'harness-icon-task-review) 'face 'harness-task-review-face))
+    ('merging (if (equal (harness-ui-tasks--merge-status task) "queued")
+                  (propertize (harness-ui-icon 'harness-icon-task-merging) 'face 'harness-task-merging-face)
+                (harness-ui-status-icon "running")))
     ('needs-input (if (plist-get session :pending)
                       (harness-ui-status-icon "blocked")
                     (propertize (harness-ui-icon 'harness-icon-task-stopped) 'face 'harness-task-attention-face)))
@@ -318,14 +348,14 @@ marks on the same centre."
                                           (or outcome "?")
                                           (if (plist-get task :error) (concat " — " (plist-get task :error)) "")))))
                    'face 'harness-task-attention-face))
-      ((guard (and (equal (plist-get task :state) "merging") (not (equal (plist-get session :status) "running"))))
-       (propertize (pcase (plist-get task :merge-status)
+      ('merging
+       (propertize (pcase (harness-ui-tasks--merge-status task)
                      ("merging" (format "merging into %s…" (harness-ui-tasks--base task)))
+                     ("conflict" (let ((files (take 3 (plist-get task :conflicts))))
+                                  (if files
+                                      (format "resolving merge conflicts in %s" (string-join files ", "))
+                                    "resolving merge conflicts")))
                      (_ (format "queued to merge into %s" (harness-ui-tasks--base task))))
-                   'face 'harness-dim-face))
-      ((guard (equal (plist-get task :merge-status) "conflict"))
-       (propertize (format "resolving merge conflicts in %s"
-                           (string-join (take 3 (plist-get task :conflicts)) ", "))
                    'face 'harness-dim-face))
       ('active (propertize (or (nth 2 todos)
                                (cond (named (harness-first-line (plist-get task :prompt) 90))
@@ -387,7 +417,8 @@ plain text: no list, heading or emphasis markers."
 ;; A card's second line is its subtitle: the recap a short model call
 ;; wrote (`harness-tasks-recap').  It is folded away on most cards -- you
 ;; see one line per task -- except where it matters most, on a task that
-;; needs your input, and on the cards you show it on yourself.
+;; needs your input or one whose branch holds a place in the merge
+;; queue, and on the cards you show it on yourself.
 
 (defun harness-ui-tasks--subtitle-shown-p (task)
   "Non-nil when TASK's card shows its subtitle now.
@@ -403,16 +434,17 @@ Your own choice for the task wins over its column's default."
 
 (defun harness-ui-tasks--subtitle (task column session position room)
   "The text under TASK's title, at most ROOM columns wide: its recap,
-else the old detail line.  In the needs-input column the detail that
-says what blocks the task stays after the recap, since that card shows
-its subtitle by default and the recap must not hide what it waits for."
+else the old detail line.  In the needs-input and merging columns the
+detail stays after the recap, since those cards show their subtitle by
+default and the recap must not hide what the task waits for, or where
+its branch stands."
   (let* ((recap (plist-get task :recap))
          (recap (and (stringp recap) (not (harness-string-blank-p recap)) (string-trim recap)))
          (detail (harness-ui-tasks--detail task column session position))
          (sep (concat " " harness-ui-tasks--dot " ")))
     (cond
      ((null recap) (harness-ui-tasks--fit (or detail "") room))
-     ((and (eq column 'needs-input) detail)
+     ((and (memq column '(needs-input merging)) detail)
       (harness-ui-tasks--fit
        (concat (harness-ui-tasks--fit (propertize recap 'face 'harness-dim-face)
                                       (- room (string-width detail) (string-width sep)))
@@ -470,7 +502,8 @@ card's title, so the prompt shows here."
          (parts
           (delq nil
                 (list (and (harness-json-true-p (plist-get task :main-tree)) "main tree")
-                      (and todos (not (memq column '(done review))) (format "%d/%d" (nth 0 todos) (nth 1 todos)))
+                      (and todos (not (memq column '(done review merging)))
+                           (format "%d/%d" (nth 0 todos) (nth 1 todos)))
                       (pcase column
                         ('pending (cond ((harness-ui-tasks--refining-p task) nil)
                                         ((plist-get task :refined)
@@ -480,6 +513,9 @@ card's title, so the prompt shows here."
                                         (t (format "queued %s" (harness-relative-time (plist-get task :created))))))
                         ('review (and (plist-get task :finished)
                                       (format "ready %s" (harness-relative-time (plist-get task :finished)))))
+                        ('merging (let ((queued (harness-ui-tasks--merge-queued task)))
+                                    (and (> queued 0)
+                                         (format "queued %s" (harness-relative-time queued)))))
                         ('done (let ((completed (harness-ui-tasks--completed task)))
                                  (and (> completed 0) (format "done %s" (harness-relative-time completed)))))
                         (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))
@@ -535,6 +571,13 @@ card's title, so the prompt shows here."
                  ("Mark done" harness-ui-tasks-complete))))))
        ('active '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
                   ("Stop" harness-ui-tasks-cancel)))
+       ;; In the queue there is nothing to do but watch; a conflict is
+       ;; resolved by its own session, which can be stopped, and a task
+       ;; waiting for the queue's turn can be steered like a working one.
+       ('merging (if (equal (plist-get (harness-ui-tasks--session task) :status) "running")
+                     '(("Open" harness-ui-tasks-open) ("Stop" harness-ui-tasks-cancel))
+                   '(("Open" harness-ui-tasks-open) ("Reply" harness-ui-tasks-reply)
+                     ("Stop" harness-ui-tasks-cancel))))
        ('review (if (harness-ui-tasks--archived-p task)
                     '(("Unarchive" harness-ui-tasks-archive) ("Verify" harness-ui-tasks-verify)
                       ("Open" harness-ui-tasks-open))
@@ -903,6 +946,7 @@ the window is too small for."
           (insert (propertize (pcase column
                                 ('needs-input "    nothing needs you\n")
                                 ('review "    nothing to review\n")
+                                ('merging "    the merge queue is empty\n")
                                 ('active "    nothing working\n")
                                 ('pending "    no tasks waiting\n")
                                 (_ "    none yet\n"))
@@ -1560,9 +1604,9 @@ it stands out: work then merges without anyone looking at it."
 (defun harness-ui-tasks--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
 In a window too narrow for all of it, [Add session] goes first, then
-the counts of completed, pending and working tasks and the bulk-edit
-segment; the project's name shortens after those, then [BTW] and
-[Archived].  What needs you, what waits for your review, the Review
+the counts of completed, merging, pending and working tasks and the
+bulk-edit segment; the project's name shortens after those, then [BTW]
+and [Archived].  What needs you, what waits for your review, the Review
 switch, [Refresh] and a board still loading stay longest.  WIDTH is as
 `harness-ui-fit-header' takes it."
   (let* ((counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) (harness-ui-tasks--visible)))
@@ -1596,6 +1640,8 @@ switch, [Refresh] and a board still loading stay longest.  WIDTH is as
                                      'face 'harness-task-review-face))
                  88))
       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)) 45)
+      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-merging) (alist-get 'merging counts))
+            42)
       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
             40)
       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)

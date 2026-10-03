@@ -727,9 +727,9 @@ line says \"(this task)\"."
 
 (harness-define-tool "task_list"
   :label "List tasks"
-  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, once it has one), prompt, column (pending, needs-input, active, review, done), state, when they were created and finished, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back. Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
+  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, once it has one), prompt, column (pending, needs-input, active, review, merging, done), state, when they were created and finished, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
   :schema '(:type "object"
-            :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "review" "done"))
+            :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "review" "merging" "done"))
                          :include_archived (:type "boolean" :description "Include archived tasks (default false).")
                          :all_projects (:type "boolean" :description "Every project (default false).")
                          :limit (:type "integer" :description "Show only this many tasks, the most recently created (default all).")))
@@ -825,6 +825,7 @@ line says \"(this task)\"."
             ("needs-input" (eq column 'needs-input))
             ("active" (eq column 'active))
             ("review" (eq column 'review))
+            ("merging" (eq column 'merging))
             ("changed" (not (equal (list column (plist-get task :state) (plist-get task :merge-status)) baseline)))
             ;; Finished work waits for the user's review, and a backlog
             ;; task that is written up for someone to start it.
@@ -871,11 +872,11 @@ line says \"(this task)\"."
 
 (harness-define-tool "task_wait"
   :label "Wait for tasks"
-  :description "Wait for tasks without polling. until=settled (default) returns when each task is done, needs input or waits in review for the user to verify it, or is written up and waits in the backlog for someone to start it; done, needs-input, active and review wait for that column; changed waits for any change of column, state or merge status. mode=all (default) waits for every task, any for the first. Returns each task's line and its session's last reply; on timeout it returns the same report, not an error."
+  :description "Wait for tasks without polling. until=settled (default) returns when each task is done, needs input or waits in review for the user to verify it, or is written up and waits in the backlog for someone to start it; done, needs-input, active, review and merging wait for that column; changed waits for any change of column, state or merge status. mode=all (default) waits for every task, any for the first. Returns each task's line and its session's last reply; on timeout it returns the same report, not an error."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "A task id or unique prefix.")
                          :task_ids (:type "array" :items (:type "string") :description "Several tasks.")
-                         :until (:type "string" :enum ("settled" "done" "needs-input" "active" "review" "changed"))
+                         :until (:type "string" :enum ("settled" "done" "needs-input" "active" "review" "merging" "changed"))
                          :mode (:type "string" :enum ("all" "any"))
                          :timeout_seconds (:type "number" :description "Give up after this long (default 600, at most 3600).")))
   :kind 'read

@@ -1415,15 +1415,18 @@ pending request and resolves when answered).
 Task mode: one session per task.  TASK =
 `(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…)
 :state pending|refining|active|merging|review|done
-:column pending|needs-input|active|review|done
+:column pending|needs-input|active|review|merging|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
-:conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
+:merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`.
 `:column` is derived on every read: `needs-input` when the session is
-blocked on a request or the task stopped part way, `review` while its
-finished work waits for the user's verdict.
+blocked on a request or the task stopped part way, `merging` while its
+branch holds a place in the merge queue (`:merge-status` is queued,
+merging or conflict; `:merge-queued` is when it joined, which orders the
+board's section), `review` while its finished work waits for the user's
+verdict.
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
   :thinking :non-interactive :refine :main-tree)` → task; it starts when
@@ -1521,6 +1524,8 @@ finished work waits for the user's verdict.
   `merge/enqueue SID TARGET`, TARGET being the project's root session
   named `harness-tasks--merge-session-name`
   (created on demand); `merge/finished … merged` makes the task `done`.
+  While its branch holds a place in the queue the task is in the
+  `merging` column (`:merge-queued` says when it joined).
   Failures the agent can fix (uncommitted work) are steered by the merge
   queue; others, or more than `harness-tasks--merge-attempts`, set
   `:outcome merge-failed`.  Outside git, and in the main tree
@@ -1531,8 +1536,9 @@ finished work waits for the user's verdict.
   TASK`; in git, when it works on a branch, that branch waits unmerged,
   so nothing reaches the base branch unreviewed.  `task/verify ID` accepts the work (`:verified t
   :verified-at F`): its branch goes through the merge queue as above
-  and the task is `done` once merged (outside git, or when the branch
-  merged already, at once).  `task/reject ID FEEDBACK &optional
+  and the task is `done` once merged, waiting in `merging` between the
+  two (outside git, or when the branch merged already, at once).
+  `task/reject ID FEEDBACK &optional
   ATTACHMENTS` sends it back: the feedback goes to the same session, in
   its own worktree and with its provider conversation, as a prompt
   opened by `harness-tasks--reject-message`; the task is `active` again and
@@ -1747,10 +1753,10 @@ TRAMP prefixes come from the session host):
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | List tasks | column (pending/needs-input/active/review/done), include_archived, all_projects, limit (the most recent) | read |
+| `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
-| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
+| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read |
@@ -2233,10 +2239,11 @@ code expires, and when hidden, which drops the code
 one SVG path, black on white; `harness-qr-insert`, half blocks without
 images).  In corporate mode the page shows a notice only.
 
-Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in five
-sections -- requires your input, ready for review, in progress, pending,
-completed -- with each card's current todo, progress, elapsed time,
-cost and merge state, one-click answers to a blocked task's question or
+Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in six
+sections -- requires your input, ready for review, merging, in progress,
+pending, completed -- with each card's current todo, progress, elapsed
+time, cost and merge state, one-click answers to a blocked task's
+question or
 permission, and a compose box that submits a task, edits a pending one,
 messages a task's session, answers its question or takes the feedback
 that sends a task back from review (`C-g` leaves an edit, message,
@@ -2244,8 +2251,11 @@ answer or feedback for a new task again: a question stays waiting,
 never cancelled).  A task in review shows [Verify] and [Send back]: `v`
 accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
-in the minibuffer).  A card of a task that handed a report in also
-shows [Report], popping the report out; it is one of the items
+in the minibuffer).  A verified task waits in merging -- queued for the
+queue's turn, merging, or its session resolving the conflicts -- saying
+so on its card until the branch is in and it moves to completed.  A card
+of a task that handed a report in also shows [Report], popping the report
+out; it is one of the items
 `harness-ui-popout-at-point-functions' offers.  The header counts the
 tasks to review, and `task/review` says in the echo area that one is
 ready (`harness-ui-tasks--notify-review`).  The header's Review switch
@@ -2292,7 +2302,8 @@ Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
 finished first and completed the latest completed (verified, else
-finished) first; pending is the queue, in the order its tasks start,
+finished) first; merging is the queue's own order, from when each
+branch joined it; pending is the queue, in the order its tasks start,
 with the backlog among it (oldest first; only queued tasks have a place
 in line).
 

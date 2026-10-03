@@ -1099,6 +1099,58 @@ argument says which way to turn it, and turning it on asks nothing."
           (should (eq 'done (plist-get task :state)))
           (should (plist-get task :verified)))))))
 
+;;;; In the merge queue
+
+(ert-deftest harness-ui-tasks-merging-section ()
+  "Tasks the merge queue holds get a section of their own, after review.
+They keep the queue's order, say what they are doing and count in the
+header; a conflict says which files its session is resolving."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "First to merge")
+      (harness-ui-tasks-test--type-and-submit board "Second to merge")
+      (harness-ui-tasks-test--wait-text board "Pending  2")
+      (let ((first (harness-ui-tasks-test--card-id board "First to merge"))
+            (second (harness-ui-tasks-test--card-id board "Second to merge"))
+            (now (float-time)))
+        ;; The first branch waits for the queue's turn; the second resolves
+        ;; the conflicts the queue handed it (it joined later).
+        (harness-ui-tasks-test--change board first :state "merging" :column "merging"
+                                       :merge-status "queued" :merge-queued (- now 120) :base "main")
+        (harness-ui-tasks-test--change board second :state "merging" :column "merging"
+                                       :merge-status "conflict" :merge-queued (- now 5) :base "main"
+                                       :conflicts '("shared.txt" "settings.py"))
+        ;; Review on, so the empty Ready for review section shows: that the
+        ;; merging section sits after it is what this checks.
+        (with-current-buffer board
+          (setq harness-ui-tasks--settings
+                (plist-put (copy-sequence harness-ui-tasks--settings) :require-verification t)))
+        (with-current-buffer board (harness-ui-tasks--render))
+        (let ((text (harness-ui-tasks-test--board-text board)))
+          ;; Between Ready for review and In progress, and not in Pending.
+          (should (string-match-p
+                   (concat "Ready for review  0\\(.\\|\n\\)*Merging  2\\(.\\|\n\\)*In progress  0"
+                           "\\(.\\|\n\\)*Pending  0\\(.\\|\n\\)*Completed  0")
+                   text))
+          ;; The branch that joined first comes first.
+          (should (string-match-p (concat "First to merge\\(.\\|\n\\)*queued 2m ago"
+                                          "\\(.\\|\n\\)*queued to merge into main"
+                                          "\\(.\\|\n\\)*Second to merge\\(.\\|\n\\)*resolving merge conflicts in shared\\.txt, settings\\.py")
+                                  text)))
+        ;; A merge in flight says so.
+        (harness-ui-tasks-test--change board first :merge-status "merging")
+        (with-current-buffer board (harness-ui-tasks--render))
+        (should (string-match-p "First to merge\\(.\\|\n\\)*merging into main…"
+                                (harness-ui-tasks-test--board-text board)))
+        (let ((header (with-current-buffer board (harness-ui-tasks--header most-positive-fixnum))))
+          (should (string-match-p "↣ 2\\|merge 2" header)))
+        ;; Once it merged it shows under Completed, not in the queue.
+        (harness-ui-tasks-test--change board first :state "done" :column "done" :merge-status nil
+                                       :merged t :finished now)
+        (with-current-buffer board (harness-ui-tasks--render))
+        (should (string-match-p "Merging  1\\(.\\|\n\\)*In progress  0\\(.\\|\n\\)*Pending  0\\(.\\|\n\\)*Completed  1"
+                                (harness-ui-tasks-test--board-text board)))))))
+
 ;;;; Point stays where it was put
 
 ;; The board is drawn again on every change of a task or a session and

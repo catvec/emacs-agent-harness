@@ -98,8 +98,9 @@ calls a model or the network.
   three projects, and `harness-media--seed-budgets` adds three budgets,
   sized from that usage so their meters land at different levels.
 - `harness-media--build-tasks` submits tasks and drives them, as a user
-  would, into every column of the board: two verified and merged, two
-  in review (one sent back once), one asking a question, two working
+  would, into every column of the board: two verified and merged, one
+  verified and waiting in the merge queue, one in review (sent back
+  once), one asking a question, two working
   (their turns held half way), two written up for the backlog.  They
   run in real worktrees, commit and merge.
 - `harness-media--build-sessions` runs the conversations: the first
