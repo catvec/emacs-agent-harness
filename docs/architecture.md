@@ -839,7 +839,13 @@ pending request and resolves when answered).
 - Non-interactive (the user is away) is no permission policy of its
   own and refuses nothing for being unattended: the auto judge
   (stage 30, `harness-perms--judge-p`) decides what would ask the user,
-  in every mode, and its verdict stands.  A call it gives no verdict on
+  in every mode, and its verdict stands.  The judge gets two calls:
+  when the first ends at its output limit (`max-tokens`) without a
+  verdict, which a reasoning model does after spending the small first
+  budget thinking, stage 30 asks again with more room
+  (`harness-perms--judge-retry-max-tokens') before it gives the call
+  up; a verdict written before the cap is taken as it stands.  A call
+  it gives no verdict on
   (it failed, timed out or answered without one; stage 30 passes the
   `ask` on with `:no-verdict` saying why) nobody can approve, so stage
   40 denies it, with that cause as the reason and a hint that this was
