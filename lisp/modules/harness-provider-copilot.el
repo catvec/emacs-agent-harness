@@ -1620,14 +1620,15 @@ Only what follows the last assistant message is new to the CLI."
   "Non-nil when REQUEST is a side request, which leaves the conversation alone.
 A turn of a harness session brings the provider state the session has
 recorded and lets the model answer at length.  A one-off question
-caps its answer with `:max-tokens' (naming the session, a summary for
-compaction, the permission judge), may bring other state (naming
-brings a fork of the recorded one), or comes with a session record of
-its own making that has no state at all (the judge's).  Such requests
-run in throwaway Copilot sessions, beside the conversation's turn and
-beside each other."
+says so with `:ephemeral' (the permission judge), caps its answer with
+`:max-tokens' (naming the session, a summary for compaction, the
+judge), may bring other state (naming brings a fork of the recorded
+one), or comes with a session record of its own making that has no
+state at all (the judge's).  Such requests run in throwaway Copilot
+sessions, beside the conversation's turn and beside each other."
   (let ((session (plist-get request :session)))
-    (and (or (not (plist-member session :provider-state))
+    (and (or (harness-json-true-p (plist-get request :ephemeral))
+             (not (plist-member session :provider-state))
              (plist-get request :max-tokens)
              (not (equal (plist-get request :provider-state) (plist-get session :provider-state))))
          t)))
