@@ -297,16 +297,17 @@ With CONTINUATION, draw only the lanes continuing below the row."
     (_ (propertize (harness-ui-icon 'harness-icon-hint) 'face 'harness-hint-face))))
 
 (defun harness-ui-tree--excerpt (node)
-  "Return a one-line excerpt of NODE."
+  "Return a one-line excerpt of NODE.
+A tool result's excerpt starts with how the call went, as the chat
+says it: a green circle, a yellow one when it was refused, a red
+triangle when it failed.  That icon has a face of its own."
   (pcase (harness-ui-tree--kind node)
     ("tool-call" (if (plist-get node :title)
                      (harness-ui-tool-title (plist-get node :tool) (plist-get node :title))
                    (format "%s: %s" (harness-ui-tool-label (plist-get node :tool))
                            (harness-first-line (format "%S" (plist-get node :input))))))
-    ("tool-result" (concat (pcase (harness-ui-tool-outcome node)
-                             ('denied "\N{U+2298} ")
-                             ('failed "\N{U+2717} ")
-                             (_ "\N{U+2192} "))
+    ("tool-result" (concat (harness-ui-level-icon (harness-ui-tool-level (harness-ui-tool-outcome node)))
+                           " "
                            (harness-first-line (or (plist-get node :output) ""))))
     (_ (harness-first-line (or (plist-get node :content) "")))))
 
@@ -316,9 +317,8 @@ With CONTINUATION, draw only the lanes continuing below the row."
     ("thinking" 'harness-thinking-face)
     ((or "hint" "compaction" "empty") 'harness-hint-face)
     ("tool-result" (pcase (harness-ui-tool-outcome node)
-                     ('denied 'warning)
-                     ('failed 'error)
-                     (_ 'harness-dim-face)))
+                     ('ok 'harness-dim-face)
+                     (outcome (harness-ui-level-face (harness-ui-tool-level outcome)))))
     ("tool-call" 'harness-tool-title-face)
     (_ 'default)))
 
@@ -356,7 +356,10 @@ With CONTINUATION, draw only the lanes continuing below the row."
             (propertize short 'face 'harness-tree-id-face) "  "
             (harness-ui-tree--kind-icon node) " "
             (or label "")
-            (propertize excerpt 'face (harness-ui-tree--excerpt-face node))
+            ;; Under the faces it has: a tool result's icon keeps its colour.
+            (let ((s (copy-sequence excerpt)))
+              (add-face-text-property 0 (length s) (harness-ui-tree--excerpt-face node) t s)
+              s)
             (or head ""))
     (insert (propertize " " 'display `(space :align-to (- right ,(1+ (length time)))))
             (propertize time 'face 'harness-dim-face)

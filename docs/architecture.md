@@ -1735,13 +1735,19 @@ stays snappy.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
 the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
-A tool call's header says how it ended, each on a background of its
-own: a check mark (`harness-tool-face`), "failed" when it ran and
-reported an error, such as a non-zero exit or an edit whose text did
-not match (`harness-tool-error-face`), or "denied" when the permission
-system refused it, so it never ran (`harness-tool-denied-face`); a
-denied call's text is labelled as the reason rather than as output.  A
-summary block counts the failed and denied calls it folds.
+A tool call's header says how it went, marked the way a Japanese table
+marks it (`harness-ui-level-icon`), each ending on a background of
+its own: a green circle when it ran (`harness-tool-face`), a yellow
+circle and "running" while it runs, a red triangle and "failed" when it
+ran and reported an error, such as a non-zero exit or an edit whose
+text did not match (`harness-tool-error-face`), or a yellow circle and
+"denied" when the permission system refused it, so it never ran
+(`harness-tool-denied-face`); a denied call's text is labelled as the
+reason rather than as output.  The icons and their words take
+`harness-success-face`, `harness-caution-face` and
+`harness-failure-face`, which inherit the theme's `success`, `warning`
+and `error`.  A summary block counts the failed and denied calls it
+folds, and the tree starts each tool result's row with the same icon.
 The panel of a question whose options have diagrams shows one diagram
 at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
