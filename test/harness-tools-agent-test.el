@@ -327,6 +327,149 @@ and with the user away the call is denied and no child starts."
         (should (string-match-p "outside the allowed directories" (plist-get r :content))))
       (should-not (harness-call 'session/list (list :parent-id sid))))))
 
+;;;; A sub-agent forked mid-turn, against a strict OpenAI-compatible server
+
+(require 'harness-http)
+(require 'harness-provider-openai)
+
+(defconst harness-tools-agent-test--unanswered-error
+  "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message)"
+  "What DeepSeek answers a request with a tool call left unanswered.")
+
+(defconst harness-tools-agent-test--orphan-error
+  "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
+  "What DeepSeek answers a request with a tool message that answers no call.")
+
+(defvar harness-tools-agent-test--strict-endpoint
+  '(:id teststrict :label "Strict" :base-url "https://api.deepseek.example"
+    :api-key "sk-test-strict" :flavor deepseek)
+  "A DeepSeek endpoint served by `harness-tools-agent-test--strict-request'.")
+
+(defvar harness-tools-agent-test--bodies nil
+  "The chat completion bodies the strict server got, newest first.")
+
+(defun harness-tools-agent-test--strict-error (messages)
+  "Return the error a strict OpenAI-compatible server gives MESSAGES, or nil.
+Like DeepSeek, it wants the tool messages right after an assistant
+message with tool_calls to answer each of its calls, and each tool
+message to answer a call of the assistant message before it."
+  (let ((open nil))
+    (catch 'invalid
+      (dolist (m messages)
+        (if (equal (plist-get m :role) "tool")
+            (if (member (plist-get m :tool_call_id) open)
+                (setq open (remove (plist-get m :tool_call_id) open))
+              (throw 'invalid harness-tools-agent-test--orphan-error))
+          (when open (throw 'invalid harness-tools-agent-test--unanswered-error))
+          (setq open (mapcar (lambda (c) (plist-get c :id)) (plist-get m :tool_calls)))))
+      (and open harness-tools-agent-test--unanswered-error))))
+
+(defun harness-tools-agent-test--text-of (message)
+  "Return the text of OpenAI MESSAGE, whose content is a string or parts."
+  (let ((content (plist-get message :content)))
+    (if (listp content)
+        (mapconcat (lambda (part) (or (plist-get part :text) "")) content " ")
+      (or content ""))))
+
+(defun harness-tools-agent-test--sse (&rest payloads)
+  "Return one SSE chunk holding PAYLOADS, strings or plists."
+  (mapconcat (lambda (p) (format "data: %s\n\n" (if (stringp p) p (harness-json-encode p))))
+             payloads ""))
+
+(defun harness-tools-agent-test--strict-reply (body)
+  "Return (STATUS . BODY-TEXT), the strict server's answer to chat BODY.
+An invalid request gets DeepSeek's HTTP 400.  Otherwise a request that
+brings tool results gets a closing answer, one whose last message asks
+to investigate gets the sub-agent's finding, and any other one gets a
+spawn_agent call forking the session."
+  (let* ((messages (plist-get body :messages))
+         (last (car (last messages)))
+         (text (lambda (s)
+                 (harness-tools-agent-test--sse
+                  (list :choices (list (list :index 0 :delta (list :content s) :finish_reason "stop")))
+                  "[DONE]")))
+         (err (harness-tools-agent-test--strict-error messages)))
+    (cond
+     (err (cons 400 (harness-json-encode (list :error (list :message err :type "invalid_request_error")))))
+     ((equal (plist-get last :role) "tool") (cons 200 (funcall text "The sub-agent reported back.")))
+     ((string-match-p "investigate" (harness-tools-agent-test--text-of last))
+      (cons 200 (funcall text "Found it: the fork lost its tool results.")))
+     (t (cons 200 (harness-tools-agent-test--sse
+                   (list :choices
+                         (list (list :index 0
+                                     :delta (list :tool_calls
+                                                  (list (list :index 0 :id "call_spawn" :type "function"
+                                                              :function (list :name "spawn_agent"
+                                                                              :arguments "{\"prompt\":\"investigate the bug\",\"fork\":true}"))))
+                                     :finish_reason "tool_calls")))
+                   "[DONE]"))))))
+
+(defun harness-tools-agent-test--strict-request (url &rest args)
+  "Answer the request to URL with ARGS as the strict server would, soon.
+The model list is empty; chat completions are recorded and answered by
+`harness-tools-agent-test--strict-reply'."
+  (let ((handle (make-harness-http-handle :url url :callback (plist-get args :callback)
+                                          :on-chunk (plist-get args :on-chunk) :started (float-time))))
+    (harness-run-soon
+     (lambda ()
+       (unless (harness-http-handle-cancelled handle)
+         (pcase-let ((`(,status . ,text)
+                      (if (string-match-p "/models\\'" url)
+                          (cons 200 "{\"data\":[]}")
+                        (push (plist-get args :json) harness-tools-agent-test--bodies)
+                        (harness-tools-agent-test--strict-reply (plist-get args :json)))))
+           (when (plist-get args :on-headers) (funcall (plist-get args :on-headers) status nil))
+           (if (plist-get args :on-chunk)
+               (progn (funcall (plist-get args :on-chunk) text)
+                      (funcall (plist-get args :callback) status nil "" nil))
+             (funcall (plist-get args :callback) status nil text nil))))))
+    handle))
+
+(ert-deftest harness-tools-agent-spawn-fork-mid-turn-strict-server ()
+  "A sub-agent forked in the middle of a turn makes a first request that a
+strict OpenAI-compatible server accepts.  The transcript it copies ends
+with the spawn_agent call forking it, whose result only ever reaches
+the parent: left unanswered in the fork, DeepSeek refused the fork's
+first request with HTTP 400 and the sub-agent died before doing
+anything.  The fork answers that call itself, saying it is the
+sub-agent the call started."
+  (harness-tools-agent-test-with
+    (let ((harness-tools-agent-test--bodies nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-http-request) #'harness-tools-agent-test--strict-request))
+            (harness-openai-register-endpoint harness-tools-agent-test--strict-endpoint)
+            (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                 :model "teststrict:deepseek-flash")
+                                   :id))
+                   (turn (harness-test-await (harness-call 'agent/prompt sid "Please delegate this") 20))
+                   (result (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
+                                                        (equal (plist-get n :call-id) "call_spawn")))
+                                       (harness-call 'session/nodes sid)))
+                   (cid (plist-get (car (harness-call 'session/list (list :parent-id sid))) :id))
+                   (bodies (reverse harness-tools-agent-test--bodies)))
+              (should (eq 'end-turn (plist-get turn :stop-reason)))
+              ;; The sub-agent did its work, and the parent got its answer.
+              (should-not (plist-get result :is-error))
+              (should (string-match-p "Found it" (plist-get result :output)))
+              (should (eq 'subagent (plist-get (harness-call 'session/get cid) :kind)))
+              ;; Parent, sub-agent, parent again: each request a valid one.
+              (should (= 3 (length bodies)))
+              (should (equal '(nil nil nil)
+                             (mapcar (lambda (b) (harness-tools-agent-test--strict-error (plist-get b :messages)))
+                                     bodies)))
+              ;; The sub-agent's request: the parent's transcript, the call
+              ;; that forked it answered, then its task.
+              (let* ((messages (cdr (plist-get (nth 1 bodies) :messages))) ; after the system prompt
+                     (tool (cl-find "tool" messages :key (lambda (m) (plist-get m :role)) :test #'equal)))
+                (should (equal '("user" "assistant" "tool" "user")
+                               (mapcar (lambda (m) (plist-get m :role)) messages)))
+                (should (equal "Please delegate this" (harness-tools-agent-test--text-of (nth 0 messages))))
+                (should (equal "call_spawn" (plist-get (car (plist-get (nth 1 messages) :tool_calls)) :id)))
+                (should (equal "call_spawn" (plist-get tool :tool_call_id)))
+                (should (string-match-p "sub-agent" (plist-get tool :content)))
+                (should (equal "investigate the bug" (harness-tools-agent-test--text-of (nth 3 messages)))))))
+        (harness-provider-unregister 'teststrict)))))
+
 (defvar harness-non-interactive)
 
 (ert-deftest harness-tools-agent-children-keep-the-parents-switch ()

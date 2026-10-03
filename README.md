@@ -324,7 +324,10 @@ box stays available, and the first message you send resumes it.
 ### Forks and side conversations
 
 `C-c h f` forks the current session. The fork starts from the
-conversation so far and continues independently.
+conversation so far and continues independently. A session can be
+forked while it works: the tool calls still running finish in the
+original session only, so the fork records that they have no result
+there.
 
 `C-c h t` shows the conversation tree: every message of the session, its
 forks and its BTWs as a git-like graph. On a message, `f` forks the

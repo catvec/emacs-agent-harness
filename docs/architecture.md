@@ -220,6 +220,13 @@ message as a user message; UIs show the sender instead of "You".
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
 `:parent-id` / `:fork-node`, so the tree view can merge families by id.
+A tool call the fork copies without a result gets one of the fork's
+own, after the copied nodes (`:meta (:forked t)`).  That happens when
+the parent is mid-turn, as with `spawn_agent` forking it, or when its
+head was moved back between a call and its result.  The result goes
+to the parent, never to the fork, and providers that pair calls with
+results (DeepSeek and other strict OpenAI-compatible servers, Bedrock)
+reject a request with an unanswered call.
 
 A hosted-loop provider (Claude Code, Copilot) holds the conversation
 itself and only gets new user content each turn, so its conversation
@@ -380,7 +387,9 @@ come.  Every session loads `inactive` (closed until something resumes
 it).  One saved `running` or `blocked` was interrupted mid-turn by a
 harness that stopped, so loading settles it: each tool call without a
 result gets one (`:is-error t`, `:meta (:interrupted t)`) and a hint
-says what it was doing or which question it waited on.  Pending
+says what it was doing or which question it waited on.  Only calls
+from the last compaction on count, as for forks: earlier ones reach no
+provider, so a result for one would answer nothing.  Pending
 requests are not restored: the turn that would read their answers is
 gone.
 
@@ -429,15 +438,26 @@ gone.
   (closed: still listed and readable; the next message sent to it resumes it).
 - `session/fork ID &rest PLIST` — copies the ancestor chain up to
   `:node` (default the head; ID's head never moves); `:kind
-  fork|subagent`, `:name`, `:cwd` (defaults to parent's).  Asks the
-  provider to fork its state via `provider/fork` when supported: at the
-  parent's head (when that is where its provider conversation is) the
-  whole state, at an earlier node the state cut at the last checkpoint
-  up to it, and none when no checkpoint precedes the node.  Without a
-  forked state the fork has none, never the parent's own, which would
-  carry on the parent's provider conversation; the provider then starts
-  a new one from the transcript.  The fork's `:provider-node` is the
-  node.  → new session.
+  fork|subagent`, `:name`, `:cwd` (defaults to parent's).  Each copied
+  tool call without a result gets one in the fork.  It is an error
+  result, `harness-session-forked-output`, saying the session was
+  forked before the call returned and its result went to ID.
+  `:call-id` names ID's call that forks it to start a sub-agent
+  (spawn_agent passes its own).  That call's result is no error:
+  `harness-session-spawned-output` tells the fork it is the sub-agent
+  the call started, that its task is the next message, and that its
+  final message is what the call returns.  Settling keeps the whole
+  transcript, the current turn included; trimming back to the last
+  finished turn or step would drop the context a fork is for: the
+  request being worked on, the reasoning and the results already in.
+  Asks the provider to fork its state via `provider/fork` when
+  supported: at the parent's head (when that is where its provider
+  conversation is) the whole state, at an earlier node the state cut at
+  the last checkpoint up to it, and none when no checkpoint precedes
+  the node.  Without a forked state the fork has none, never the
+  parent's own, which would carry on the parent's provider
+  conversation; the provider then starts a new one from the transcript.
+  The fork's `:provider-node` is the node.  → new session.
 - `session/btw ID &optional NAME`: a BTW side conversation over ID, a
   new, empty `btw` session sharing nothing with ID or with any other
   BTW (no nodes, no fork node, no provider state, no directory grants).
@@ -481,7 +501,15 @@ gone.
 - `session/messages ID` → provider messages (content blocks) built
   from the path, tool calls paired with results.  A steering message
   marked `:delivered-after NODE-ID` stands after that node (and the
-  tool results right after it), where the model got it.
+  tool results right after it), where the model got it.  Every tool_use
+  is answered in the message right after it, whatever the path holds.
+  A call whose result is not there gets a stand-in error result
+  (`harness-session-missing-result-output`), in a user message of its
+  own when none follows.  A tool_result that answers no call of the
+  message before it becomes text.  That covers a call cancelled
+  mid-turn, a result that came after its turn ended, and a head moved
+  back between a call and its result.  The transcript itself is not
+  changed, and a message that needs no change comes out as it is.
 - `session/transcript-text ID` → searchable plain text.
 - Event `session/changed ID SESSION` fires after any of the above (for UIs
   that just want to redraw).
