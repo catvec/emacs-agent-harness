@@ -1679,7 +1679,10 @@ them, so the chat and a popout of the same request agree.  Views get one
 line about a session with `harness-ui-pending-summary` ("has a question
 for you"), a kind with `harness-ui-pending-status`, and the full request
 with `harness-ui-pending-popout` (from the session list and the task
-board, SPC, through `harness-ui-popout-at-point-functions`).
+board, SPC, through `harness-ui-popout-at-point-functions`).  Opening a
+popout brings the session's cached pending list into the store first
+(`harness-ui-pending-sync-session`), which is how a request a view
+already shows becomes answerable there when no chat has synced it.
 
 Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
 list + attachments row + compose region at the bottom.  Rendering is

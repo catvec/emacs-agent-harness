@@ -187,6 +187,15 @@ ITEM is (:id :kind :payload) in the wire shape."
             :dir (plist-get payload :dir) :reason (plist-get payload :reason)
             :options (plist-get payload :options)))))
 
+(defun harness-ui-pending-sync-session (session-id)
+  "Learn SESSION-ID's requests from its cached session plist.
+A view can know that a session waits -- the plist's `:pending' says so --
+before anything has drawn the requests into the store: no chat is open
+for it.  Bringing them in lets a view's popout show and answer them
+\(see `harness-ui-pending-popout')."
+  (when-let* ((session (harness-ui-session session-id)))
+    (harness-ui-pending-sync session-id (plist-get session :pending))))
+
 (defun harness-ui-pending-sync (session-id items)
   "Reconcile the requests of SESSION-ID with its pending ITEMS.
 Records a client owns (with a `:respond' function) keep it.  Return
@@ -683,6 +692,9 @@ A question is answered with the typed text; otherwise there is no box."
   "Show the popout of what SESSION-ID waits on, and return its buffer.
 Nothing happens, and nil is returned, when it waits on nothing.  KEEP-POS
 non-nil shows it without selecting its window (a refresh, say)."
+  ;; A view pops out a request the store may not have seen yet, when no
+  ;; chat was open to sync it: the session's own pending list has it.
+  (when session-id (harness-ui-pending-sync-session session-id))
   (when (and session-id (harness-ui-pending-items session-id))
     (unless (fboundp 'harness-ui-popout-show) (user-error "The popout module is not loaded"))
     (let ((buffer (harness-ui-popout-show
@@ -709,12 +721,12 @@ On `harness-ui-pending-changed-hook'."
 (defun harness-ui-pending-popout-at-point ()
   "Pop out what the session at point waits on, if any.
 On `harness-ui-popout-at-point-functions', so views that say which
-session point stands for get the popout with one key."
+session point stands for get the popout with one key.  The session's
+cached pending list counts too, not only the store: a view is where a
+request is first seen when no chat is open for its session."
   (when-let* ((session-id (and harness-ui-session-at-point-function
-                               (harness-ui-session-at-point t)))
-              ((harness-ui-pending-items session-id)))
-    (harness-ui-pending-popout session-id)
-    t))
+                               (harness-ui-session-at-point t))))
+    (when (harness-ui-pending-popout session-id) t)))
 
 ;;;; Module
 

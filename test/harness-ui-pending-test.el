@@ -109,11 +109,12 @@ Nothing here needs a window system."
         (setq session (plist-put session key (format "%s" (plist-get session key))))))
     (harness-ui-cache-session session)))
 
-(defun harness-ui-pending-test-block (sid kind)
-  "Cache SID as blocked on a request of KIND, a kind name string."
+(defun harness-ui-pending-test-block (sid kind &optional id)
+  "Cache SID as blocked on a request of KIND, a kind name string.
+ID names the request its pending list carries, as the wire does."
   (harness-ui-pending-test-cache
    sid (plist-put (plist-put (harness-call 'session/get sid) :status 'blocked)
-                  :pending (list (list :id "x" :kind kind))))
+                  :pending (list (list :id (or id "x") :kind kind))))
   sid)
 
 (defun harness-ui-pending-test-question (sid &optional id question)
@@ -262,6 +263,27 @@ Once nothing is left the popout closes itself."
       (should (equal (list 'question sid "q1" "purple") (car harness-ui-pending-test-answers)))
       (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the popout to close"))))
 
+(ert-deftest harness-ui-pending-popup-learns-a-cached-sessions-request ()
+  "A popout shows a request the store has only heard of from the session.
+No chat is open to sync it, which is the case the session list and the
+board pop out from: the request is in the session's cached pending list."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Cached"))
+           (key (list 'pending sid)))
+      (harness-ui-pending-test-cache
+       sid (plist-put (plist-put (harness-call 'session/get sid) :status 'blocked)
+                      :pending (list (list :id "q7" :kind "question"
+                                           :payload (list :question "Which colour?"
+                                                          :options '("red" "green"))))))
+      (should-not (harness-ui-pending-items sid))
+      (harness-ui-pending-popout sid)
+      (should (equal "q7" (plist-get (harness-ui-pending-question sid) :id)))
+      (let ((buf (harness-ui-popout-buffer key)))
+        (should (buffer-live-p buf))
+        (with-current-buffer buf
+          (should (string-match-p "Which colour?" (buffer-string)))
+          (should (string-match-p "green" (buffer-string))))))))
+
 ;;;; The views
 
 (ert-deftest harness-ui-pending-sessions-list-pops-it-out ()
@@ -272,7 +294,7 @@ The list says so in the status cell's tooltip, and answers from there."
            (key (list 'pending sid)))
       (harness-ui-pending-test-record-answers)
       (harness-ui-pending-test-permission sid "p1" "Bash: ls -la")
-      (harness-ui-pending-test-block sid "permission")
+      (harness-ui-pending-test-block sid "permission" "p1")
       ;; The seeded cache is the harness's answer: do not reload over it.
       (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
                  (lambda (&optional callback) (when callback (funcall callback nil)))))

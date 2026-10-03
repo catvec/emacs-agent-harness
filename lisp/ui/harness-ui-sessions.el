@@ -27,7 +27,7 @@
 (require 'harness-files)
 (require 'harness-ui-pending)
 
-(declare-function harness-ui-popout-at-point "harness-ui-popout")
+(declare-function harness-ui-popout-try-at-point "harness-ui-popout")
 
 (defgroup harness-ui-sessions nil
   "The session list." :group 'harness-ui)
@@ -323,9 +323,9 @@ listed, and from a task's worktree the list shows the whole project."
 A session that waits on nothing leaves the key to what it did before
 this command existed: SPC scrolls the list."
   (interactive)
-  (if (and (harness-ui-pending-items (harness-ui-sessions--id))
-           (fboundp 'harness-ui-popout-at-point))
-      (harness-ui-popout-at-point)
+  (if (and (fboundp 'harness-ui-popout-try-at-point)
+           (harness-ui-popout-try-at-point))
+      nil
     ;; Without a window (a test run) there is nothing to scroll.
     (ignore-errors (call-interactively #'scroll-up-command))))
 
