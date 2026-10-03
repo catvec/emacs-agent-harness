@@ -16,8 +16,11 @@
 ;;     popup that shows as you type (corfu, company) shows for them even
 ;;     while the host redraws around the box;
 ;;   - attachments: C-c C-a finds a project file by part of its name
-;;     (C-u C-c C-a: any file), C-c C-v pastes the clipboard (images and
-;;     other MIME types), files dropped on the window attach;
+;;     (C-u C-c C-a: any file), files dropped on the window attach, and
+;;     pasting attaches what is no text: C-y attaches the image the
+;;     clipboard holds without text (a screenshot), and `yank-media',
+;;     Emacs's own command for pasting media, attaches an image even
+;;     beside text, or the files copied in a file manager;
 ;;   - the text and attachments, kept across redraws of the host;
 ;;   - long lines that wrap under the text, never scrolling sideways;
 ;;   - optionally, the box at the bottom of the window: a buffer shorter
@@ -34,6 +37,7 @@
 (require 'subr-x)
 (require 'mailcap)
 (require 'dnd)
+(require 'yank-media)
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
@@ -62,6 +66,10 @@
 (defvar-local harness-compose-redraw-function #'ignore
   "Function the host redraws the box with, after the attachments change.")
 
+(defvar harness-compose-clipboard-image-types '(image/png image/jpeg image/webp image/gif)
+  "The image types pasting attaches from the clipboard, preferred first.
+The ones models read.  See `harness-compose-yank'.")
+
 (defun harness-compose--project ()
   (funcall harness-compose-project-function))
 
@@ -76,7 +84,11 @@
   (define-key map (kbd "S-<return>") #'harness-compose-newline)
   (define-key map (kbd "C-j") #'harness-compose-newline)
   (define-key map (kbd "C-c C-a") #'harness-compose-add-attachment)
-  (define-key map (kbd "C-c C-v") #'harness-compose-attach-clipboard))
+  ;; Pasting is yanking: C-y attaches a clipboard image (`harness-compose-yank').
+  (define-key map [remap yank] #'harness-compose-yank)
+  ;; C-c C-v, the clipboard's key once, is verify's in a chat now: unbound
+  ;; here, so a reload frees it too.
+  (define-key map (kbd "C-c C-v") nil t))
 
 (cl-defun harness-compose-setup (&key project placeholder redraw bottom)
   "Make this buffer host a compose box.
@@ -104,6 +116,11 @@ window the ones that must stay on one line."
   (add-hook 'pre-redisplay-functions #'harness-compose-unscroll nil t)
   (setq-local hl-line-range-function #'harness-compose-hl-line-range)
   (setq-local dnd-protocol-alist (cons '("^file:" . harness-compose-dnd-open) dnd-protocol-alist))
+  ;; `yank-media', Emacs's command for pasting what is not text, attaches
+  ;; here, as it inserts in message and Org buffers.
+  (yank-media-handler harness-compose-clipboard-image-types #'harness-compose--yank-media-image)
+  (yank-media-handler "\\`x-special/\\(?:gnome\\|KDE\\|mate\\)-copied-files\\'"
+                      #'harness-compose--yank-media-files)
   (add-hook 'completion-at-point-functions #'harness-compose-completion-at-point nil t)
   (add-hook 'pre-command-hook #'harness-compose--pre-command nil t)
   (add-hook 'post-command-hook #'harness-compose-update-placeholder nil t)
@@ -204,7 +221,7 @@ would hide the region too.  Never nil: `global-hl-line-mode' needs a range."
 
 (defun harness-compose--pre-command ()
   "Send typing that lands outside the box into it."
-  (when (and (memq this-command '(self-insert-command yank))
+  (when (and (memq this-command '(self-insert-command yank harness-compose-yank))
              (harness-compose-live-p)
              (not (harness-compose-in-p)))
     (goto-char harness-compose-end)))
@@ -397,19 +414,21 @@ candidates in when it returns."
                         nil t))
      root)))
 
-(defun harness-compose-add-attachment (path &optional mime)
+(defun harness-compose-add-attachment (path &optional mime &rest props)
   "Attach the file PATH (with MIME) to the next message.
-Interactively, part of its name finds a project file in any
-subdirectory; with a prefix argument, any file is read instead (see
-`harness-compose-read-file')."
+PROPS are more properties of the attachment, such as the :sha1 of a
+clipboard capture.  Interactively, part of its name finds a project
+file in any subdirectory; with a prefix argument, any file is read
+instead (see `harness-compose-read-file')."
   (interactive (list (harness-compose-read-file current-prefix-arg)))
   (let ((path (expand-file-name path)))
     (unless (cl-find path harness-compose-attachments :key (lambda (a) (plist-get a :path)) :test #'equal)
       (setq harness-compose-attachments
             (append harness-compose-attachments
-                    (list (list :path path :size (or (harness-file-size path) 0)
-                                :mime (or mime (harness-compose--mime-of path))
-                                :name (file-name-nondirectory path))))))
+                    (list (append (list :path path :size (or (harness-file-size path) 0)
+                                        :mime (or mime (harness-compose--mime-of path))
+                                        :name (file-name-nondirectory path))
+                                  props)))))
     (funcall harness-compose-redraw-function)
     (message "Attached %s" (abbreviate-file-name path))))
 
@@ -429,37 +448,163 @@ subdirectory; with a prefix argument, any file is read instead (see
 
 (defun harness-compose--save-clip (data extension)
   "Write DATA (a unibyte string) to a new file with EXTENSION; return its path."
-  (let ((path (expand-file-name (format "clip-%s.%s" (format-time-string "%Y%m%d-%H%M%S") extension)
-                                (harness-compose--clips-directory)))
-        (coding-system-for-write 'binary))
+  (let* ((dir (harness-compose--clips-directory))
+         (base (format "clip-%s" (format-time-string "%Y%m%d-%H%M%S")))
+         (path (expand-file-name (format "%s.%s" base extension) dir))
+         (n 1)
+         (coding-system-for-write 'binary))
+    ;; Two captures within a second each keep a file of their own.
+    (while (file-exists-p path)
+      (setq n (1+ n)
+            path (expand-file-name (format "%s-%d.%s" base n extension) dir)))
     (with-temp-file path (set-buffer-multibyte nil) (insert data))
     path))
 
+;;;;; Pasting: the clipboard
+
+(defun harness-compose--clipboard-types ()
+  "Return the types the clipboard offers, as a list of symbols.
+Nil without a graphical display, or with nothing in the clipboard."
+  (when (display-graphic-p)
+    (let ((targets (ignore-errors (gui-get-selection 'CLIPBOARD 'TARGETS))))
+      (cond ((vectorp targets) (append targets nil))
+            ((consp targets) targets)
+            ;; X gives a lone type as a symbol.
+            ((and targets (symbolp targets)) (list targets))))))
+
+(defun harness-compose--text-type-p (type)
+  "Non-nil when the clipboard type TYPE (a symbol) is text `yank' pastes.
+The names X and Windows give text, and text/plain."
+  (or (memq type '(UTF8_STRING STRING TEXT COMPOUND_TEXT CF_TEXT CF_UNICODETEXT CF_OEMTEXT))
+      (string-prefix-p "text/plain" (symbol-name type))))
+
+(defun harness-compose--image-type (types)
+  "Return the first of `harness-compose-clipboard-image-types' among TYPES."
+  (cl-find-if (lambda (type) (memq type types)) harness-compose-clipboard-image-types))
+
+(defun harness-compose--yank-image-type ()
+  "Return the image type pasting attaches from the clipboard, or nil.
+Only an image with no text beside it: what the clipboard offers as
+text is yanked as ever, so a spreadsheet cell, which comes as a
+picture too, still pastes as text.  Nil when `select-enable-clipboard'
+keeps the kill ring from the clipboard."
+  (when select-enable-clipboard
+    (let ((types (harness-compose--clipboard-types)))
+      (and (not (cl-some #'harness-compose--text-type-p types))
+           (harness-compose--image-type types)))))
+
+(defun harness-compose--clipboard-data (type)
+  "Return the clipboard's content of TYPE (a symbol), or nil when empty."
+  (let ((data (ignore-errors (gui-get-selection 'CLIPBOARD type))))
+    (and (stringp data) (> (length data) 0) data)))
+
+(defun harness-compose--unibyte (data)
+  "Return DATA as bytes: text a selection gave decoded is encoded as UTF-8."
+  (if (multibyte-string-p data) (encode-coding-string data 'utf-8) data))
+
+(defun harness-compose--clip-attached-p (data)
+  "Non-nil when the box holds the clipboard capture DATA already."
+  (let ((hash (secure-hash 'sha1 (harness-compose--unibyte data))))
+    (cl-some (lambda (att) (equal hash (plist-get att :sha1))) harness-compose-attachments)))
+
+(defconst harness-compose--mime-extensions
+  '(("text/plain" . "txt") ("application/octet-stream" . "bin"))
+  "Extensions of MIME types whose subtype is no extension.
+`mailcap-mime-extensions' lists many for them, in no useful order.")
+
+(defun harness-compose--mime-extension (mime)
+  "Return the extension, without the dot, a file of MIME (a string) gets.
+The subtype when it is an extension of MIME (png, jpeg, html), else the
+usual one, else the subtype.  Parameters such as a charset are left out."
+  (let* ((mime (downcase (string-trim (car (split-string mime ";")))))
+         (subtype (if (string-match-p "\\`[^/]+/[^/]+\\'" mime)
+                      (symbol-name (mailcap-mime-type-to-extension mime))
+                    "bin")))
+    (cond ((equal mime (cdr (assoc (concat "." subtype) mailcap-mime-extensions))) subtype)
+          ((cdr (assoc mime harness-compose--mime-extensions)))
+          ((cl-loop for (ext . type) in mailcap-mime-extensions
+                    when (and (equal type mime) (string-match-p "\\`\\.[[:alnum:]]+\\'" ext))
+                    return (substring ext 1)))
+          (t subtype))))
+
+(defun harness-compose-attach-data (data mime)
+  "Attach DATA, clipboard content of type MIME, saved to a file of its own.
+MIME is a symbol or a string.  The box holding the same content already,
+nothing is attached again.  Return the attachment's path, or nil."
+  (let ((mime (if (symbolp mime) (symbol-name mime) mime))
+        (data (harness-compose--unibyte data)))
+    (if (harness-compose--clip-attached-p data)
+        (progn (message "The box holds this %s already" (if (string-prefix-p "image/" mime) "image" mime))
+               nil)
+      (let ((path (harness-compose--save-clip data (harness-compose--mime-extension mime))))
+        (harness-compose-add-attachment path mime :sha1 (secure-hash 'sha1 data))
+        path))))
+
+(defun harness-compose-yank (&optional arg)
+  "Paste in the box: yank, or attach the image the clipboard holds.
+When the clipboard holds an image and no text -- a screenshot, an image
+copied in a browser -- it is attached to the next message, saved under
+the clips directory, rather than yanked as nothing.  Otherwise this is
+`yank', ARG and all: text pastes as ever, and \\[yank-pop] after it
+cycles the kill ring.  An image the box holds already is not attached
+again: pasting then yanks the kill ring.
+
+\\[yank-media], Emacs's command for pasting media, attaches the image
+even when the clipboard holds text beside it (copying a spreadsheet's
+cell gives both), and files copied in a file manager."
+  (interactive "*P")
+  ;; Typing pastes into the box, wherever point is (`harness-compose--pre-command').
+  (when (and (harness-compose-live-p) (not (harness-compose-in-p)))
+    (goto-char harness-compose-end))
+  (let* ((type (and (null arg) (harness-compose--yank-image-type)))
+         (data (and type (harness-compose--clipboard-data type))))
+    (if (and data (not (harness-compose--clip-attached-p data)))
+        (harness-compose-attach-data data type)
+      (yank arg))))
+
+;; With `delete-selection-mode', the yanked text replaces the region; an
+;; attached image leaves it be.
+(put 'harness-compose-yank 'delete-selection
+     (lambda () (unless (harness-compose--yank-image-type) 'yank)))
+
+(defun harness-compose--yank-media-image (type data)
+  "Attach the image DATA of TYPE, as `yank-media' pastes it."
+  (harness-compose-attach-data data type))
+
+(defun harness-compose--yank-media-files (_type data)
+  "Attach the files a file manager copied, DATA as `yank-media' gives them.
+DATA is the operation (copy or cut), then a file: URI a line."
+  (let ((files (delq nil (mapcar (lambda (line)
+                                   (and (string-prefix-p "file:" line)
+                                        (dnd-get-local-file-name line t)))
+                                 (split-string data "[\0\r\n]+" t)))))
+    (unless files (user-error "The clipboard names no file here"))
+    (dolist (file files) (harness-compose-add-attachment file))))
+
 (defun harness-compose-attach-clipboard ()
-  "Attach the clipboard: an image when it holds one, else a chosen MIME target.
-Plain text is inserted into the box."
+  "Attach the clipboard: an image when it holds one, else a chosen MIME type.
+Plain text is inserted into the box.  Pasting does this as well:
+\\[yank-media] attaches an image, or the files a file manager copied,
+and \\<harness-compose-map>\\[harness-compose-yank] in the box an image
+the clipboard holds without text."
   (interactive)
   (unless (display-graphic-p) (user-error "The clipboard needs a graphical display"))
-  (let ((png (ignore-errors (gui-get-selection 'CLIPBOARD 'image/png))))
-    (if (and png (> (length png) 0))
-        (harness-compose-add-attachment (harness-compose--save-clip png "png") "image/png")
-      (let* ((targets (ignore-errors (append (gui-get-selection 'CLIPBOARD 'TARGETS) nil)))
-             (mimes (cl-remove-if-not (lambda (s) (string-match-p "\\`[a-z]+/" (symbol-name s))) targets)))
+  (let* ((types (harness-compose--clipboard-types))
+         (image (harness-compose--image-type types))
+         (data (and image (harness-compose--clipboard-data image))))
+    (if data
+        (harness-compose-attach-data data image)
+      (let ((mimes (cl-remove-if-not (lambda (s) (string-match-p "\\`[a-z]+/" (symbol-name s))) types)))
         (if (null mimes)
             (let ((text (ignore-errors (gui-get-selection 'CLIPBOARD 'UTF8_STRING))))
               (if (and text (not (string-empty-p text)))
                   (progn (unless (harness-compose-in-p) (goto-char harness-compose-end))
                          (insert text))
                 (user-error "Nothing usable in the clipboard")))
-          (let* ((choice (intern (completing-read "Clipboard type: " (mapcar #'symbol-name mimes) nil t)))
-                 (data (gui-get-selection 'CLIPBOARD choice))
-                 (mime (symbol-name choice))
-                 (ext (string-remove-prefix
-                       "." (or (car (rassoc mime mailcap-mime-extensions))
-                               (cadr (split-string mime "/"))))))
-            (harness-compose-add-attachment
-             (harness-compose--save-clip (if (multibyte-string-p data) (encode-coding-string data 'utf-8) data) ext)
-             mime)))))))
+          (let ((choice (intern (completing-read "Clipboard type: " (mapcar #'symbol-name mimes) nil t))))
+            (harness-compose-attach-data (or (harness-compose--clipboard-data choice)
+                                             (user-error "The clipboard has no %s" choice))
+                                         choice)))))))
 
 (defun harness-compose-dnd-open (uri action)
   "Attach the file dropped as URI; ACTION is returned unchanged."

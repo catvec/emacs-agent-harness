@@ -31,6 +31,7 @@
 (defvar harness-ui--sessions)
 (defvar harness-compose-start)
 (defvar harness-compose-end)
+(defvar harness-compose-map)
 (defvar harness-chat--loading)
 (defvar harness-ui-popout-key)
 (declare-function harness-tasks "harness-ui-tasks")
@@ -140,6 +141,9 @@ review with a report; BODY gets `board', `id' and `sid'."
         ;; The keys reach the banner's commands.
         (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
         (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-R"))))
+        ;; C-c C-v is no longer the box's too: pasting an image is C-y.
+        (should (eq 'harness-compose-yank (key-binding (kbd "C-y"))))
+        (should-not (lookup-key harness-compose-map (kbd "C-c C-v")))
         (call-interactively (key-binding (kbd "C-c C-v"))))
       (harness-test-wait (lambda () (not (eq 'review (plist-get (harness-call 'task/get id) :state))))
                          10 "the task to leave review")

@@ -221,7 +221,7 @@ the `[menu]` button in the header line.
 | `@` | Complete a project file to attach; part of a name finds a file in any subdirectory |
 | `/` | Complete a skill |
 | `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
-| `C-c C-v` | Attach the image in the clipboard |
+| `C-y` | Paste: an image in the clipboard (a screenshot) is attached; text yanks as ever. `M-x yank-media` attaches the image even when the clipboard holds text too, and files copied in a file manager |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |

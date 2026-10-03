@@ -3008,7 +3008,7 @@ on \\[harness-menu] here, or the [menu] button in the header line.
         ("C-c C-c" "Send" harness-chat-send)
         ("C-c C-q" "Queue for next turn" harness-chat-queue)
         ("C-c C-a" "Attach file" harness-compose-add-attachment)
-        ("C-c C-v" "Attach clipboard" harness-compose-attach-clipboard)]
+        ("C-y" "Paste; an image attaches" harness-compose-yank)]
        ["Agent"
         ("C-c C-y" "Allow request" harness-chat-allow-newest)
         ("C-c C-n" "Deny request" harness-chat-deny-newest)

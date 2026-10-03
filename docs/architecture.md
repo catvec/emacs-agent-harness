@@ -1782,9 +1782,20 @@ whole host buffer wraps, so a host fits the lines it wants kept on one;
 with `:bottom` the growing box keeps its last line on the window's last
 line), a prompt that is a field of its own (`C-a` stops after it, so
 `C-a C-k` clears the line), the placeholder, @file and /skill
-completion, attachments (`C-c C-a`, clipboard `C-c C-v`, drag and
-drop), skill expansion (`harness-compose-with-expanded-text`) and ACP
-attachment blocks.
+completion, attachments (`C-c C-a`, pasting, drag and drop), skill
+expansion (`harness-compose-with-expanded-text`) and ACP attachment
+blocks.
+Pasting is yanking, so `C-c C-v` stays the review banner's [Verify]: the
+box remaps `yank` to `harness-compose-yank`, which attaches the image
+the clipboard holds when it holds no text (a screenshot), saved under
+`clips/` with its SHA-1 so the same image is not attached twice, and
+yanks otherwise (`M-y` still cycles, `delete-selection-mode` still
+replaces the region with the text).  Text beside the image wins, as a
+spreadsheet cell copies as both.  The box also registers `yank-media`
+handlers, as Org and message buffers do: Emacs's own command for
+pasting media attaches an image even beside text, and the files a file
+manager copied.  `harness-compose-attach-clipboard` picks any other MIME
+type the clipboard offers.
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
