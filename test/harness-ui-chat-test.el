@@ -1544,8 +1544,9 @@ to a waiting question still goes through the question instead."
   (harness-ui-chat-test-with
     (let ((sid (harness-ui-chat-test-session)))
       ;; The UI reopens the sessions of chat buffers that were open when it
-      ;; connected; wait for that connect to finish, or a buffer opened now
-      ;; would be resumed by it, which is not what this test is about.
+      ;; connected; an inactive session is opened here, so wait for that
+      ;; connect first or the hook would resume it, which this test is not
+      ;; about (in the UI, a session cannot be opened before it connects).
       (harness-test-wait (lambda () (harness-ui-session sid)) 5 "UI connected")
       (harness-call 'session/deactivate sid)
       (harness-open-session sid)
