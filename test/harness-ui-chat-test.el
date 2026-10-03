@@ -1662,6 +1662,11 @@ from the buffer: it shows what the next message continues."
   ;; the first message sent from it resumes it and the notice goes away.
   (harness-ui-chat-test-with
     (let ((sid (harness-ui-chat-test-session)))
+      ;; The UI reopens the sessions of chat buffers that were open when it
+      ;; connected; an inactive session is opened here, so wait for that
+      ;; connect first or the hook would resume it, which this test is not
+      ;; about (in the UI, a session cannot be opened before it connects).
+      (harness-test-wait (lambda () (harness-ui-session sid)) 5 "UI connected")
       (harness-call 'session/deactivate sid)
       (harness-open-session sid)
       (let ((buf (harness-chat--buffer-for sid)))
@@ -2083,7 +2088,6 @@ connection let go of is never reported as closed."
         (should (= (- (window-body-height window t) (frame-char-height))
                    (cdr (window-text-pixel-size window (window-start window) harness-compose-end))))))))
 
-<<<<<<< HEAD
 (ert-deftest harness-ui-chat-todos-show-in-header-and-panel ()
   "A session's todo list is conspicuous without opening its tool block:
 a progress segment in the header, the items in a panel above the box."
@@ -2173,7 +2177,6 @@ spellings; the chat used to drop it.  A long list is capped."
         (should (harness-ui-chat-test-find buf "item 20"))
         (should (harness-ui-chat-test-find buf "… 5 more"))
         (should-not (harness-ui-chat-test-find buf "item 21"))))))
-=======
 (ert-deftest harness-ui-chat-box-grows-past-a-short-window ()
   "A box grown past the window stays above its spare line, point in it.
 Measured as on a graphical frame, a transcript whose line at the
@@ -2184,7 +2187,6 @@ was forced back to the top, and redisplay moved point out of the box."
            (window (selected-window)))
       (set-window-buffer window buf)
       (harness-test-compose-grows-past-the-window buf window 1))))
->>>>>>> task/when-i-have-the-btw-k6qhylwf
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

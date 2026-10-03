@@ -657,12 +657,24 @@ shows a model writing a large input.  At most one report every
         (when (and finish (stringp finish))
           (setf (harness-openai--stream-finish-reason stream) finish))))))
 
+(defun harness-openai--deepseek-usage-p (usage)
+  "Non-nil when USAGE carries DeepSeek's own cache-token fields.
+DeepSeek reports `prompt_tokens' as the sum of
+`prompt_cache_hit_tokens' and `prompt_cache_miss_tokens' and bills the
+two apart.  A server that reports those fields is billed that way
+whatever the endpoint calls itself, so the split must not depend on
+the endpoint's label alone."
+  (and (listp usage)
+       (or (plist-member usage :prompt_cache_miss_tokens)
+           (plist-member usage :prompt_cache_hit_tokens))))
+
 (defun harness-openai--usage-event (usage endpoint)
   "Build the usage event from an OpenAI USAGE object for ENDPOINT.
 OpenAI-compatible endpoints bill per token, so the event says `api'.
 DeepSeek's `prompt_tokens' includes the cached tokens, so they are
 split: `:input' counts the cache misses, `:cache-read' the hits, and
-`:context' both."
+`:context' both.  A DeepSeek endpoint is recognized by its flavor, by
+an official host, or by the cache fields the server reports."
   (let* ((input (or (plist-get usage :prompt_tokens) 0))
          (hit (or (plist-get usage :prompt_cache_hit_tokens)
                   (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens))
@@ -670,7 +682,8 @@ split: `:input' counts the cache misses, `:cache-read' the hits, and
          (miss (or (plist-get usage :prompt_cache_miss_tokens)
                    (max 0 (- input hit))))
          (cost (plist-get usage :cost))
-         (deepseek (harness-openai--deepseek-p endpoint)))
+         (deepseek (or (harness-openai--deepseek-p endpoint)
+                       (harness-openai--deepseek-usage-p usage))))
     (list :type 'usage
           :input (if deepseek miss input)
           :output (or (plist-get usage :completion_tokens) 0)

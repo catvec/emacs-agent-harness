@@ -29,6 +29,9 @@ re-detected before BODY and restored afterwards."
   (harness-sandbox-test--setup)
   (let* ((cwd (harness-test-temp-dir))
          (extra (harness-test-temp-dir))
+         ;; The sandbox's own home must differ from the process home, or the
+         ;; "real home is never bound" check below cannot tell them apart.
+         (harness-sandbox--home (expand-file-name "sandbox-home" cwd))
          (harness-sandbox-policy 'preferred)
          (harness-sandbox-backend 'auto)
          (command '("sh" "-c" "true")))
@@ -149,31 +152,39 @@ re-detected before BODY and restored afterwards."
   (harness-sandbox-detect)
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (let* ((cwd (harness-test-temp-dir))
-         (home (getenv "HOME"))
-         (harness-sandbox-policy 'required)
-         (cmd (harness-call 'sandbox/wrap cwd
-                            (list "sh" "-c" (format "echo HOME=$HOME; ls $HOME; ls %s 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
-         (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+         ;; A home of the test's own with a file in it, so the check does not
+         ;; depend on what, if anything, the process's own home holds.
+         (home (harness-test-temp-dir))
+         ;; A distinct sandbox home, so the real home is a different path even
+         ;; when the process is started with HOME under /tmp.
+         (harness-sandbox--home (expand-file-name "sandbox-home" cwd))
+         (harness-sandbox-policy 'required))
     (unwind-protect
         (progn
-          (when (and (not (eql 0 (plist-get r :exit)))
-                     (string-match-p "bwrap:" (plist-get r :stderr)))
-            (ert-skip (format "bwrap cannot start in this environment: %s"
-                              (string-trim (plist-get r :stderr)))))
-          (should (eql 0 (plist-get r :exit)))
-          (let* ((out (plist-get r :stdout))
-                 (lines (split-string out "\n" t)))
-            (should (member "ok" lines))
-            (should (member (concat "HOME=" harness-sandbox--home) lines))
-            ;; Nothing from the real home directory shows up: not the
-            ;; empty sandbox home, not a listing of the real path.
-            (let ((real-entries (directory-files home nil "\\`[^.]" t)))
-              (should real-entries)
-              (should-not (cl-intersection real-entries lines :test #'equal))
-              (should (cl-some (lambda (l) (string-match-p "cannot access\\|No such file" l)) lines)))
-            ;; The cwd itself is writable.
-            (should (file-exists-p (expand-file-name "outside-test" cwd)))))
-      (delete-directory cwd t))))
+          (with-temp-file (expand-file-name "secret-in-real-home" home)
+            (insert "must not show\n"))
+          (let* ((cmd (harness-call 'sandbox/wrap cwd
+                                    (list "sh" "-c" (format "echo HOME=$HOME; ls $HOME; ls %s 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
+                 (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+            (when (and (not (eql 0 (plist-get r :exit)))
+                       (string-match-p "bwrap:" (plist-get r :stderr)))
+              (ert-skip (format "bwrap cannot start in this environment: %s"
+                                (string-trim (plist-get r :stderr)))))
+            (should (eql 0 (plist-get r :exit)))
+            (let* ((out (plist-get r :stdout))
+                   (lines (split-string out "\n" t)))
+              (should (member "ok" lines))
+              (should (member (concat "HOME=" harness-sandbox--home) lines))
+              ;; Nothing from the real home directory shows up: not the
+              ;; sandbox home, not a listing of the real path.
+              (let ((real-entries (directory-files home nil "\\`[^.]" t)))
+                (should real-entries)
+                (should-not (cl-intersection real-entries lines :test #'equal))
+                (should (cl-some (lambda (l) (string-match-p "cannot access\\|No such file" l)) lines)))
+              ;; The cwd itself is writable.
+              (should (file-exists-p (expand-file-name "outside-test" cwd))))))
+      (delete-directory cwd t)
+      (delete-directory home t))))
 
 ;;;; Git worktrees
 

@@ -741,7 +741,9 @@ so the whole conversation goes back to it, not just the model's own
 call.  The handling follows an official DeepSeek host, not only the
 flavor: a hand-written OpenAI-compatible endpoint at `api.deepseek.com`
 still gets it (even when it names `:flavor openai'), so its tool loops
-do not 400, while OpenAI and OpenRouter hosts still drop thinking.
+do not 400, and the cache fields it reports are split so cached input is
+billed at the cache-hit rate, while OpenAI and OpenRouter hosts still
+drop thinking.
 `harness-deepseek-*` adds registration and prices.
 The provider is created only while a key is found
 (`harness-deepseek-api-key`, DEEPSEEK_API_KEY, or auth-source), so
