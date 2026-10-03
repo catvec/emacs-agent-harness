@@ -15,8 +15,8 @@ module needs something more, add it here first.
  State          session, agent, config, project, store, usage, naming, compaction,
                 worktree, merge, tasks, tasks-notify, skills, perms, sandbox,
                 notifications
- Completion     provider, provider-openai, provider-claude, provider-bedrock,
-                provider-copilot
+ Completion     provider, provider-openai, provider-deepseek, provider-claude,
+                provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
                 tools-sessions, tools-notify
  ------------------------------- bus (lisp/harness-core.el)
@@ -242,10 +242,13 @@ project-root `.dir-locals.el` → customize default.  Variables are
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
 `harness-process`, `harness-state-directory`, the module lists, the
-`harness-server-*` and `harness-acp-*` options, minor modes) have a
-global value only.  Options named `...-api-key`, `-token`, `-secret`
-or `-password` are secrets: their values never leave the harness and
-never go to a `.dir-locals.el`.
+`harness-server-*` and `harness-acp-*` options, minor modes, and less
+`harness-corporate-mode`) have a global value only.  `config/set` and
+`config/unset` refuse the ones of `harness-config-hidden-options`,
+`harness-corporate-mode` among them, as set in the init file only.
+Options named `...-api-key`, `-token`, `-secret` or `-password` are
+secrets: their values never leave the harness and never go to a
+`.dir-locals.el`.
 
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
   or its name; layered settings only).
@@ -324,6 +327,12 @@ gone.
   `:persist t`.  `:context-window N` sets the session's own window, nil
   its model's again; a new `:model` drops a window set for the old one
   unless PLIST sets one too.  Event `session/updated ID CHANGES`.
+- `session/set-all SETTINGS &optional FILTER` — the same change on every
+  session FILTER selects (`session/list`'s filter plus `:except` ids);
+  returns the ids that changed, newest first.  A session already holding
+  the value is skipped, and each one changed gets the same event and hint
+  as `session/update`.  This is what `harness-set-model-all` uses to move
+  every session to another model or provider at once.
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
 - `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
   (closed: still listed and readable; the next message sent to it resumes it).
@@ -382,7 +391,12 @@ gone.
 MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
 :context-window N :max-output N :input-modalities ("text" "image")
 :thinking-levels (…) :pricing (:input F :output F :cache-read F :cache-write F)
-:capabilities (…))`.  Pricing is USD per million tokens.
+:pricing-fn SYMBOL :capabilities (…))`.  Pricing is USD per million
+tokens.  A model whose rates change with the clock carries `:pricing-fn`,
+a symbol called as `(MODEL USAGE AT)` that returns the pricing plist in
+effect at AT; `usage/price` uses its answer instead of `:pricing`.  This
+is how the DeepSeek provider follows its peak and off-peak tiers, and it
+keeps the catalogue plain data that crosses the wire unchanged.
 
 The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
@@ -555,6 +569,22 @@ reasoning returned with tool calls is kept and sent back with them while
 the tool loop lasts.  `harness-http-request` takes `:binary t` for such
 framings: the response then reaches `:on-chunk` as unibyte strings.
 
+The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
+OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
+harness-provider-openai.el, which splits DeepSeek's cached input out of
+`prompt_tokens` (its `:input` bills the cache misses, `:cache-read` the
+hits) and sends the reasoning efforts DeepSeek accepts, and
+`harness-deepseek-*` adds registration and prices.  The provider is
+created only while a key is found (`harness-deepseek-api-key`,
+DEEPSEEK_API_KEY, or auth-source), so nothing uncallable is listed; see
+`harness-deepseek-always-register`.  DeepSeek bills peak hours
+(01:00-04:00 and 06:00-10:00 UTC, Monday to Friday, minus Chinese public
+holidays) at double the off-peak rate, so the catalogue carries
+`:pricing' (off-peak) and `:peak-pricing' and the model's
+`:pricing-fn' picks between them; cached input, cache-miss input and
+output are priced separately.  A `provider/pricing-warning` event and a
+session hint say once per peak window that a call costs more.
+
 The Copilot provider (`copilot:` models) drives `copilot --headless
 --stdio`, the GitHub Copilot CLI's server mode that GitHub's Copilot
 SDKs use: JSON-RPC 2.0 framed by `Content-Length` headers, SDK protocol
@@ -673,6 +703,14 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   nothing runs.  Emits `permission/decided`.  The `:behavior` is allow
   or deny; a denial carries `:message`, the text `tools/execute` would
   have returned.
+- Corporate mode (`harness-corporate-mode`) turns off the tools of kind
+  `net`.  No session gets them, so `tools/builtin` never picks a
+  provider's own web search either; the list without a session still
+  has them.  `tools/execute` and `tools/authorize` deny a call to one
+  before the `permission/decide` chain, whatever the mode and the
+  standing rules: reason "corporate mode: network tools are off", a
+  hint to work with the project and the tools the session has,
+  `:denied t`, and `permission/decided` as for any decision.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.
@@ -687,8 +725,9 @@ Async filter `permission/decide`: value is a DECISION
 `(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
 :paths (…))`.  Chain (priority): 5 dir-request, 7 sandbox-guard, 10 jail,
-20 mode, 30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask`
-into a pending request and resolves when answered).
+20 mode, 25 write-up (the tasks module: a backlog write-up only reads),
+30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a
+pending request and resolves when answered).
 
 - The sandbox guard asks `sandbox/check-command` about every `exec` call
   whose input has a `:command` (the bash tool), passing the directory it
@@ -758,9 +797,20 @@ into a pending request and resolves when answered).
   `web_fetch` reaches any URL and stays with the mode (the judge in auto).
 - Jail denials are final and carry a constructive hint listing the
   allowed roots and how to widen them.
-- Non-interactive: `ask` becomes `deny` with the reason "non-interactive
-  mode: the user is away" and a hint to find another approach inside the
-  permitted scope; a steering message is sent to the agent once per call.
+- Non-interactive (the user is away) is no permission policy of its
+  own and refuses nothing for being unattended: the auto judge
+  (stage 30, `harness-perms--judge-p`) decides what would ask the user,
+  in every mode, and its verdict stands.  A call it gives no verdict on
+  (it failed, timed out or answered without one; stage 30 passes the
+  `ask` on with `:no-verdict` saying why) nobody can approve, so stage
+  40 denies it, with that cause as the reason and a hint that this was
+  no verdict on the call, which may be tried once more.  Directories are
+  still granted by a person only: the jail and the dir-request stage
+  deny.  After every denial in a non-interactive session, whoever made
+  it, the `permission/decided` handler sends the agent a steering
+  message (`harness-perms-steering-text`), once per call and only while
+  a turn runs to take it: the user is away, so respect the denial and
+  reach the goal another way.
   The session's own `:non-interactive` switch decides, off as much as
   on.  It starts from `harness-non-interactive` when the session is
   created (an explicit false turns it off whatever the setting says);
@@ -1020,12 +1070,20 @@ to the task's file (below); the record also keeps `:file-base` and
   :thinking :non-interactive)` → task; it starts when one of
   `harness-tasks-max-running` slots is free.  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
-  `-non-interactive` (on); an explicit false turns non-interactive off.
+  `-non-interactive` (off), else from what the directory configures, so
+  a task is interactive unless `harness-tasks-non-interactive` or the
+  directory's `harness-non-interactive` is on; an explicit false turns
+  non-interactive off whatever they say.  `task/settings` reports the
+  values a new task would get, the configured ones included, and the
+  board submits them with each task.
   With `:refine` the task goes to the backlog instead (below).
 - Backlog refinement (once called grooming): a `:refine` task is
   `refining` while a session at its directory -- `ask` and
-  non-interactive, so read-only, `harness-tasks-refine-model` and
-  `-refine-thinking` (low) -- writes it up as told by
+  non-interactive, `harness-tasks-refine-model` and
+  `-refine-thinking` (low), read-only through the tasks module's
+  `permission/decide` stage at 25, which denies (final) whatever the
+  mode and its rules leave undecided in a turn of a write-up, before
+  the auto judge could allow it -- writes it up as told by
   `harness-tasks-refine-prompt` (brief, no changes, no questions, a
   self-contained ticket: title line, what and why, what to change, how to
   tell it is done, open questions); after `harness-tasks-refine-tool-calls`
@@ -1049,7 +1107,7 @@ to the task's file (below); the record also keeps `:file-base` and
   like any task; an idle one waits in `needs-input` with `:outcome adopted`).
 - Starting: in a git project (`harness-tasks-worktrees`) `worktree/create`
   on branch `harness-tasks-branch-prefix` + slug + id, then a session in
-  that worktree (`harness-tasks-permission-mode`, non-interactive by
+  that worktree (`harness-tasks-permission-mode`, interactive by
   default) prompted with the task; a system-prompt section tells it to
   commit on its branch and not merge.  Outside git the session runs in CWD.
   The worktree stays locked until its branch is merged; a follow-up to
@@ -1371,7 +1429,7 @@ TRAMP prefixes come from the session host):
 | `session_info` | Session info | — | read |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
-| `spawn_agent` | Sub-agent | prompt, fork, model, name | meta |
+| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name | read |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read |
@@ -1484,7 +1542,7 @@ the image data, since the pending question is saved with the session.
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
-`notification/`, `sandbox/status`, `harness/api`, `harness/version`, `harness/reload` is callable as `_harness/NAME` with a
+`notification/`, `sandbox/status`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
@@ -1503,9 +1561,87 @@ The server writes its address to `<state>/acp-address` and, when
 to `<state>/acp-token` (mode 600); `scripts/harness-acp-stdio`
 authenticates with it on behalf of the editor it bridges.
 
+Errors follow ACP's codes.  A call before `authenticate` (when a
+client must authenticate) gets -32000, ACP's `auth_required`, which
+clients answer by offering the `authMethods` of `initialize`; so a
+method that fails gets -32603 (internal error), never -32000.  A wrong
+token is -32000 too.  Notifications under `$/` (such as `$/ping`
+heartbeats) are ignored without a log line.
+
+Other transports hand their connections to the server:
+`harness-acp-add-client KIND &key process writer remote` registers a
+client whose messages to it go through WRITER `(CLIENT JSON-TEXT)`,
+`harness-acp-client-receive CLIENT TEXT` dispatches one message it
+sent, and `harness-acp-drop-client` disconnects one.  A client with
+REMOTE, a plist describing another device
+(`harness-acp-client-remote-info`), must authenticate even when
+`harness-acp-token` is nil, unless a function of
+`harness-acp-authorize-functions` (called with the client) lets it in.
+Modules add auth methods too: `harness-acp-auth-methods-functions`
+(client → list of `AuthMethod` plists) are listed by `initialize`
+before the token, and `harness-acp-authenticate-functions` (client,
+method id, params → nil for a method not its own, else a value or a
+promise) answer `authenticate` for them; once the answer resolves the
+client is authenticated.
+
+Corporate mode (`harness-corporate-mode`): `acp/start` refuses an
+address beyond this machine whatever `harness-acp-allow-remote` says,
+`harness-acp-connect` refuses a harness elsewhere, a client with REMOTE
+is refused, and turning the mode on (`harness-corporate-mode-change-hook`)
+drops such clients and moves a server listening beyond this machine
+back to 127.0.0.1.
+
 The local transport dispatches lisp objects directly, no JSON, and
 delivers notifications through `harness-run-soon` so callers are never
 re-entered.
+
+### acp-remote
+
+ACP for phones and other devices on the network, off until
+`harness-acp-remote`.  One listener (`harness-acp-remote-host`
+0.0.0.0, `harness-acp-remote-port` 4276, binary sockets) reads the
+first bytes of each connection: `{` hands it to ACP's line framing
+(client kind `remote-tcp`), anything else is an HTTP request.  A
+WebSocket upgrade (RFC 6455, implemented in the module: handshake,
+streaming frame decoder over a unibyte buffer, ping/pong, close codes
+1002/1009) on any path, `/acp` documented, becomes a client of kind
+`websocket`; the subprotocol `acp.v1` is chosen when offered, and
+`Acp-Connection-Id` is sent, as ACP's draft transport asks.  A text
+message may carry several newline-separated JSON-RPC messages.
+`GET /pair?code=C` pairs, `GET /` explains; every answer is
+`Connection: close`, `Cache-Control: no-store`, `Referrer-Policy:
+no-referrer`.
+
+Pairing: `acp/remote-pair` → `(:url "http://ADDR:PORT/pair?code=C"
+:ws-url "ws://ADDR:PORT/acp" :address :port :expires :lifetime)` makes
+the one code in force (100 random bits, `harness-acp-remote-code-lifetime`).
+Opening the link from an address other than this machine's consumes
+it and pairs that address (devices `(:id :address :agent :paired
+:seen)`, in memory only, dropped after `harness-acp-remote-idle-timeout`
+without a connection), answers the waiting `authenticate` requests of
+that address and emits `acp/remote-changed`.  Every client the
+listener registers carries `:remote (:address A :transport T [:agent
+UA :origin O :web BOOL])`; `harness-acp-authorize-functions` lets in a
+paired address unless `:web` (an Origin naming a web page, not an
+app's own), `harness-acp-auth-methods-functions` offers `pair`, and
+`harness-acp-authenticate-functions` answers `authenticate pair` with a
+promise settled by the pairing or rejected (-32000) after the code
+lifetime.  A bearer token equal to `harness-acp-token` (subprotocol
+`bearer.T`, `Authorization: Bearer T`, `?token=T`) authenticates too.
+
+Methods (callable as `_harness/acp/remote-*`): `acp/remote-status` →
+`(:running :enabled :corporate :host :port :address :address-set
+:addresses ((:address :interface :kind lan|vpn|other) ...) :ws-url
+:code-expires :devices (... :connected N) :clients)`,
+`acp/remote-start` and `acp/remote-stop` (save `harness-acp-remote`;
+stopping drops the clients, the code and every pairing),
+`acp/remote-pair`, `acp/remote-forget-code`, `acp/remote-revoke ID`,
+`acp/remote-set-address ADDRESS` (saves `harness-acp-remote-address`,
+"" detects; drops the code).  Event `acp/remote-changed (:what
+started|stopped|connected|disconnected|paired|revoked|address|corporate
+:address A)`, forwarded to UIs.  Corporate mode refuses start and pair,
+closes connections as they are accepted, and its change hook stops the
+listener.
 
 ## Presentation contracts
 
@@ -1659,6 +1795,20 @@ The task board's function opens the board of the notification's
 (within 10 s).  `harness-test-notifications` (menu `N`) sends a test
 notification through `_harness/notification/send` and says in the
 echo area what each provider did with it.
+
+Remote control page (`harness-ui-remote`, `C-c h P`,
+`harness-remote-control`): whether the harness serves other devices
+(start or stop), the ACP address their clients connect to, the address
+of this machine that QR codes carry (chosen among the interfaces), the
+pairing QR code and the paired devices (unpair at point).  The QR code
+starts folded and unfolds with a fresh code (`acp/remote-pair`); it
+folds again once `acp/remote-changed` says a device paired, when its
+code expires, and when hidden, which drops the code
+(`acp/remote-forget-code`).  It is drawn by `harness-ui-qr`
+(`harness-qr-encode TEXT &optional LEVEL MASK` → `(:size :version
+:level :mask :modules)`, byte mode, versions 1–40; `harness-qr-image`
+one SVG path, black on white; `harness-qr-insert`, half blocks without
+images).  In corporate mode the page shows a notice only.
 
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in five
 sections -- requires your input, ready for review, in progress, pending,

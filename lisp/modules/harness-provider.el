@@ -94,6 +94,13 @@ it is asked for again when needed; other providers' models stay cached."
   "Return provider ID or nil."
   (gethash id harness-providers))
 
+(defun harness-provider-unregister (id)
+  "Remove provider ID from the registry and forget its models.
+Return non-nil when a provider was registered under ID."
+  (prog1 (and (gethash id harness-providers) t)
+    (remhash id harness-providers)
+    (harness-provider--forget id)))
+
 (defun harness-provider-parse-model (model-id)
   "Split MODEL-ID \"provider:name\" into (PROVIDER-SYMBOL . NAME)."
   (if (and model-id (string-match "\\`\\([a-z0-9_-]+\\):\\(.+\\)\\'" model-id))

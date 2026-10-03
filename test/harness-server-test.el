@@ -3,6 +3,7 @@
 
 (require 'harness-test-helpers)
 (require 'harness)
+(require 'harness-server)
 
 (defvar harness-ui--server)
 (defvar harness-ui--server-address)
@@ -97,6 +98,21 @@ so settings made later in the init file are forwarded."
           (harness-stop)
           (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit")))
         (setq harness-ui-connection-address nil harness-ui-connection nil)))))
+
+(ert-deftest harness-server-forwards-corporate-mode ()
+  "`harness-corporate-mode' turned on reaches the harness process.
+Its name ends in -mode, but it is an option, not a minor mode, so it is
+forwarded as every `harness-' option the user sets."
+  (harness-test-with-temp-state
+    (should-not (fboundp 'harness-corporate-mode))
+    (let ((harness-corporate-mode nil))
+      (should-not (assq 'harness-corporate-mode (harness-server--forwarded))))
+    (let ((harness-corporate-mode t)
+          (file (expand-file-name "server-config.el" harness-state-directory)))
+      (should (eq t (cdr (assq 'harness-corporate-mode (harness-server--forwarded)))))
+      (harness-server--write-config file)
+      (should (string-search "(customize-set-variable 'harness-corporate-mode 't)"
+                             (harness-read-file file))))))
 
 (ert-deftest harness-server-restarts-after-a-crash ()
   (harness-server-test-with-process

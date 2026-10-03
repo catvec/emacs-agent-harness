@@ -426,6 +426,27 @@ also sets one."
     (harness-session--touch s)
     (harness-session-plist s)))
 
+(harness-defmethod session/set-all (settings &optional filter)
+  "Apply SETTINGS to every session FILTER selects; return the ids changed.
+SETTINGS is a plist of keys `session/update' accepts, usually just
+`:model'.  FILTER is `session/list''s filter (`:project' `:status'
+`:kind' `:parent-id' `:active'), plus `:except', a list of session ids
+to leave alone; nil means every session.  A session whose value is
+already the one asked for is left alone, and one that changes is
+changed exactly as `session/update' would (same event, same hint).  The
+return value lists the ids that changed, newest first."
+  (let* ((except (plist-get filter :except))
+         (list-filter (harness-plist-remove filter :except))
+         (keys (cl-intersection (harness-plist-keys settings) harness-session--settings))
+         changed)
+    (dolist (s (harness-call 'session/list list-filter))
+      (let ((id (plist-get s :id)))
+        (when (and (not (member id except))
+                   (cl-some (lambda (k) (not (equal (plist-get s k) (plist-get settings k)))) keys))
+          (apply #'harness-call 'session/update id settings)
+          (push id changed))))
+    (nreverse changed)))
+
 (harness-defmethod session/set-provider-state (id state)
   "Replace the opaque provider state of session ID with STATE."
   (let ((s (harness-session--get id)))

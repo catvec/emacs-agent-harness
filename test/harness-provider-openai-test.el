@@ -73,6 +73,11 @@ RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
     :api-key "sk-test-openai")
   "A plain OpenAI-flavoured endpoint.")
 
+(defvar harness-openai-test-deepseek-endpoint
+  '(:id testdeepseek :label "Test DeepSeek" :base-url "https://api.deepseek.example"
+    :api-key "sk-test-deepseek" :flavor deepseek)
+  "A DeepSeek-flavoured endpoint.")
+
 (defun harness-openai-test--complete (endpoint request)
   "Run REQUEST directly against ENDPOINT's complete function, collecting events.
 Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
@@ -246,7 +251,45 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should-not (plist-get body :max_tokens))
       (should-not (assoc "X-Title" (plist-get (car harness-openai-test--requests) :headers))))))
 
+(ert-deftest harness-provider-openai-deepseek-dialect-body ()
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (harness-openai-test--complete harness-openai-test-deepseek-endpoint
+                                   '(:model "testdeepseek:deepseek-flash" :thinking "max" :max-tokens 321
+                                     :messages ((:role user :content ((:type "text" :text "hi"))))))
+    (let ((body (harness-openai-test--last-request-json)))
+      ;; DeepSeek takes max_tokens, and its own reasoning efforts.
+      (should (= 321 (plist-get body :max_tokens)))
+      (should-not (plist-get body :max_completion_tokens))
+      (should (equal "max" (plist-get body :reasoning_effort)))
+      (should-not (plist-get body :reasoning))
+      (should-not (plist-get body :usage)))
+    ;; A DeepSeek endpoint does not claim vision for every model.
+    (should (equal '(:thinking t)
+                   (harness-openai--capabilities harness-openai-test-deepseek-endpoint)))))
+
 ;;;; Event streams
+
+(ert-deftest harness-provider-openai-deepseek-usage-splits-cache-tokens ()
+  ;; DeepSeek's prompt_tokens includes cached tokens, which are billed
+  ;; apart, so :input is the cache misses and :cache-read the hits.
+  (harness-openai-test-with-fake
+      `(("chat/completions"
+         . (:chunks (,(harness-openai-test--sse
+                      '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                      '(:choices () :usage (:prompt_tokens 100 :completion_tokens 7
+                                            :prompt_cache_hit_tokens 80 :prompt_cache_miss_tokens 20))
+                      "[DONE]")))))
+    (let* ((events (car (harness-openai-test--complete
+                         harness-openai-test-deepseek-endpoint
+                         '(:model "testdeepseek:deepseek-flash" :max-tokens 10
+                           :messages ((:role user :content ((:type "text" :text "hi"))))))))
+           (usage (cl-find 'usage events :key (lambda (e) (plist-get e :type)))))
+      (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
+                       :cost nil :billing api :context 100)
+                     usage)))))
 
 (ert-deftest harness-provider-openai-text-answer-with-usage ()
   (harness-openai-test-with-fake

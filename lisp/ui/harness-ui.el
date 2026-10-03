@@ -271,7 +271,12 @@ Each is (METHOD PARAMS PROMISE); PROMISE is nil for notifications.")
   "Connect the UI to ADDRESS: nil for the in-process harness, `process'
 for the managed harness process, or \"host:port\".  Return the
 connection, or nil while the harness process is still starting; requests
-made meanwhile are queued and sent once it listens."
+made meanwhile are queued and sent once it listens.
+In corporate mode (`harness-corporate-mode') a \"host:port\" ADDRESS
+gives way to this Emacs's own harness: the UI connects to no other."
+  (when (and (stringp address) (harness-corporate-p))
+    (message "Harness: corporate mode is on, so the UI connects to the local harness, not %s" address)
+    (setq address (harness-ui--local-address)))
   (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
   (setq harness-ui-connection nil
         harness-ui-connection-address address)
@@ -559,22 +564,54 @@ nil when it runs in this Emacs."
 An empty or nil ADDRESS connects back to this Emacs's own harness: the
 harness process when `harness-process' is on, else the harness in this
 Emacs.  When the connection cannot be opened, for instance as ADDRESS
-has no port, the UI stays connected where it was."
+has no port, the UI stays connected where it was.  In corporate mode
+\(`harness-corporate-mode') the UI connects to its own harness only, and
+any other ADDRESS is refused."
   (interactive
    ;; Offer the remote address in use; a local harness's is `process' or nil.
    (list (read-string "Harness server (host:port, empty for the local harness): "
                       (and (stringp harness-ui-connection-address) harness-ui-connection-address))))
-  (let* ((remote (and address (not (string-blank-p address)) (string-trim address)))
-         (previous harness-ui-connection-address)
-         (failure (condition-case err
-                      (progn (harness-ui-connect (or remote (harness-ui--local-address))) nil)
-                    (error (ignore-errors (harness-ui-connect previous))
-                           err))))
-    (run-hooks 'harness-ui-redraw-hook)
-    (if failure
-        (user-error "Harness: cannot connect to %s: %s"
-                    (or remote "the local harness") (harness-error-message failure))
-      (message "Harness: connected to %s" (or remote "the local harness")))))
+  (let ((remote (and address (not (string-blank-p address)) (string-trim address))))
+    (when (and remote (harness-corporate-p))
+      (user-error "Corporate mode is on: the UI connects only to this Emacs's own harness"))
+    (let* ((previous harness-ui-connection-address)
+           (failure (condition-case err
+                        (progn (harness-ui-connect (or remote (harness-ui--local-address))) nil)
+                      (error (ignore-errors (harness-ui-connect previous))
+                             err))))
+      (run-hooks 'harness-ui-redraw-hook)
+      (if failure
+          (user-error "Harness: cannot connect to %s: %s"
+                      (or remote "the local harness") (harness-error-message failure))
+        (message "Harness: connected to %s" (or remote "the local harness"))))))
+
+(defun harness-ui--corporate-mode-changed ()
+  "Make a change of `harness-corporate-mode' reach the harness.
+Run from `harness-corporate-mode-change-hook'.  Turned on, the option
+takes the UI off a remote harness, back to this Emacs's own.  The
+harness process reads the option as it starts, so the process the UI
+uses is restarted if it is running; a harness in this Emacs reads the
+option as it goes.  While Emacs initialises the process has not started
+yet: it starts after the init file, with the value set there."
+  (let* ((on (harness-corporate-p))
+         (remote (and on (stringp harness-ui-connection-address) harness-ui-connection-address)))
+    (when remote
+      ;; Nothing more goes to the remote harness.
+      (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
+      (setq harness-ui-connection nil
+            harness-ui-connection-address (harness-ui--local-address)))
+    (cond
+     ((and (eq harness-ui-connection-address 'process)
+           harness-ui--server (process-live-p harness-ui--server))
+      (message "Harness: corporate mode is now %s%s; restarting the harness process so that it applies"
+               (if on "on" "off")
+               (if remote (format " and the UI left %s" remote) ""))
+      ;; The views redraw once the new process listens.
+      (harness-restart))
+     (remote
+      (harness-ui-connect harness-ui-connection-address)
+      (run-hooks 'harness-ui-redraw-hook)
+      (message "Harness: corporate mode is now on; the UI left %s for the local harness" remote)))))
 
 ;;;; Session cache
 
@@ -1005,7 +1042,7 @@ VALUE is as it comes over the wire: nil and `:false' are off."
 (defun harness-ui-non-interactive-help (value)
   "Return what a session's non-interactive switch VALUE means, for a tooltip."
   (if (harness-json-true-p value)
-      "Non-interactive: the agent never waits for you.  What would ask for permission is denied, and the agent is told to find another way."
+      "Non-interactive: the agent never waits for you.  The auto-mode judge decides what would ask you for permission, and after a denial the agent is told to find another way."
     "Interactive: the agent asks you for permission and waits for your answer."))
 
 (defun harness-ui-tool-outcome (result)
@@ -1209,34 +1246,64 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
                           (list :id target key (if (and (eq key :non-interactive) (not value)) :false value))
                           (lambda (_) (message "%s" label)))))))
 
+(defun harness-ui-choose-model (callback)
+  "Prompt for a model from the catalogue and call CALLBACK with (ID LABEL).
+The catalogue is refreshed first, so a provider that just became
+available is offered."
+  (harness-ui-refresh-models
+   (lambda (models)
+     (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
+            (table (cl-mapcar (lambda (m label)
+                                ;; Two models sharing a label are told apart by id.
+                                (cons (if (> (cl-count label labels :test #'equal) 1)
+                                          (format "%s (%s)" label (plist-get m :id))
+                                        label)
+                                      m))
+                              models labels))
+            (completion-extra-properties
+             (list :annotation-function
+                   (lambda (choice)
+                     (let ((m (cdr (assoc choice table))))
+                       (format "  %s · %s ctx%s"
+                               (plist-get m :id)
+                               (harness-format-tokens (plist-get m :context-window))
+                               (if-let* ((p (plist-get m :pricing)))
+                                   (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
+                                 ""))))))
+            (choice (completing-read "Model: " table nil t)))
+       (funcall callback (plist-get (cdr (assoc choice table)) :id) choice)))))
+
 ;;;###autoload
 (defun harness-set-model (&optional session-id)
   "Choose a model for SESSION-ID (default the current buffer's session)."
   (interactive)
   (let ((target (harness-ui--setting-target session-id)))
-    (harness-ui-refresh-models
-     (lambda (models)
-       (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
-              (table (cl-mapcar (lambda (m label)
-                                  ;; Two models sharing a label are told apart by id.
-                                  (cons (if (> (cl-count label labels :test #'equal) 1)
-                                            (format "%s (%s)" label (plist-get m :id))
-                                          label)
-                                        m))
-                                models labels))
-              (completion-extra-properties
-               (list :annotation-function
-                     (lambda (choice)
-                       (let ((m (cdr (assoc choice table))))
-                         (format "  %s · %s ctx%s"
-                                 (plist-get m :id)
-                                 (harness-format-tokens (plist-get m :context-window))
-                                 (if-let* ((p (plist-get m :pricing)))
-                                     (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
-                                   ""))))))
-              (choice (completing-read "Model: " table nil t))
-              (id (plist-get (cdr (assoc choice table)) :id)))
-         (harness-ui--setting-set target :model id (format "Model → %s" choice)))))))
+    (harness-ui-choose-model
+     (lambda (id label)
+       (harness-ui--setting-set target :model id (format "Model → %s" label))))))
+
+;;;###autoload
+(defun harness-set-model-all (&optional no-default)
+  "Choose a model and switch every session to it.
+The choice also becomes the default for new sessions, unless a prefix
+argument says otherwise.  Use this when a plan runs out, a provider
+fails, or a cheaper model should take over work already in flight.
+Every session of every project changes; each records it as a hint, and
+status is untouched, so nothing running is cancelled.  A session's
+provider state is kept, so switching back can still resume it."
+  (interactive "P")
+  (harness-ui-choose-model
+   (lambda (id label)
+     (unless no-default
+       (harness-ui-call "_harness/config/set"
+                        (list :key "harness-model" :value id :scope "global")
+                        (lambda (_) nil)))
+     (harness-ui-call "_harness/session/set-all"
+                      (list :settings (list :model id))
+                      (lambda (ids)
+                        (message "Model → %s for %s session%s%s"
+                                 label (length ids) (if (= 1 (length ids)) "" "s")
+                                 (if no-default "" ", and for new sessions")))))))
 
 ;;;###autoload
 (defun harness-set-thinking (&optional session-id)
@@ -1276,9 +1343,10 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
 ;;;###autoload
 (defun harness-toggle-non-interactive (&optional session-id)
   "Toggle non-interactive mode for SESSION-ID.
-A non-interactive session never waits for the user: what would ask for
-permission is denied, and the agent is told to find another way.  The
-session's header line shows which it is; clicking there toggles too."
+A non-interactive session never waits for the user: the auto-mode
+judge decides what would ask for permission, and after a denial the
+agent is told to find another way.  The session's header line shows
+which it is; clicking there toggles too."
   (interactive)
   (let* ((target (harness-ui--setting-target session-id))
          (now (harness-json-true-p (harness-ui--setting-get target :non-interactive))))
@@ -1355,6 +1423,7 @@ either the command asks for a session, so the label has no state."
     (define-key map (kbd "n") #'harness-new-session)
     (define-key map (kbd "s") #'harness-switch-session)
     (define-key map (kbd "m") #'harness-set-model)
+    (define-key map (kbd "M") #'harness-set-model-all)
     (define-key map (kbd "T") #'harness-set-thinking)
     (define-key map (kbd "p") #'harness-set-permission-mode)
     (define-key map (kbd "f") #'harness-fork-session)
@@ -1574,6 +1643,7 @@ leaves the buffer's commands out, never the whole menu."
     ("D" "Delete session" harness-delete-session)]
    ["Session settings"
     ("m" "Model" harness-set-model)
+    ("M" "Model for all sessions" harness-set-model-all)
     ("T" "Thinking" harness-set-thinking)
     ("p" "Permission mode" harness-set-permission-mode)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
@@ -1583,7 +1653,10 @@ leaves the buffer's commands out, never the whole menu."
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
-    ("c" "Connect remote" harness-connect-remote)
+    ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
+    ("P" "Remote control" harness-remote-control
+     :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
+     :inapt-if harness-corporate-p)
     ("N" "Test notifications" harness-test-notifications)
     ("R" "Reload harness" harness-reload)
     ("L" "Log" harness-show-log)]]
@@ -1600,6 +1673,7 @@ leaves the buffer's commands out, never the whole menu."
 
 (defun harness-ui--init ()
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
+  (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
   (harness-ui-connect harness-ui-connection-address)
   ;; A reload reaches the UI as the forwarded `harness/reloaded' event, for
   ;; local and remote harnesses alike, so no bus subscription is needed.

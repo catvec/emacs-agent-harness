@@ -1,8 +1,8 @@
 # Emacs Agent Harness
 
 Emacs Agent Harness runs AI coding agents in GNU Emacs. It is written
-in Emacs Lisp and supports Claude, GitHub Copilot, OpenAI-compatible
-APIs and AWS Bedrock.
+in Emacs Lisp and supports Claude, GitHub Copilot, DeepSeek,
+OpenAI-compatible APIs and AWS Bedrock.
 
 ![A session beside the code it wrote: the agent read the project, added rate limiting, ran the tests and summed up](docs/media/chat.png)
 
@@ -14,7 +14,7 @@ APIs and AWS Bedrock.
 - **Never blocks your editor.** The harness runs in a separate Emacs
   process, and your Emacs only hosts the UI.
 - **Multiple providers.** Claude through the `claude` CLI (subscription
-  or API key), GitHub Copilot through the `copilot` CLI,
+  or API key), GitHub Copilot through the `copilot` CLI, DeepSeek,
   OpenAI-compatible endpoints, and AWS Bedrock.
 - **Built-in tools.** Tools for files (read, write, edit, search), the
   shell, Emacs (buffers, documentation, `*Messages*`, Emacs Lisp
@@ -35,7 +35,8 @@ APIs and AWS Bedrock.
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
 - **Remote control.** The harness speaks the Agent Client Protocol
-  (ACP), so another Emacs or any ACP client can drive it.
+  (ACP), so another Emacs or any ACP client can drive it, including one
+  on your phone, paired by scanning a QR code.
 - **Modular and reloadable.** Every feature is a module, and the whole
   harness reloads in place without losing running sessions.
 
@@ -69,6 +70,7 @@ Optional dependencies:
 | `rg` (ripgrep) | Faster file search |
 | GitHub Copilot CLI 1.0 or later (`copilot`) | Models of a GitHub Copilot plan |
 | `OPENROUTER_API_KEY` or `OPENAI_API_KEY` | OpenRouter and OpenAI models |
+| `DEEPSEEK_API_KEY` | DeepSeek models, with off-peak pricing tracked |
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
 | `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
 | `ffmpeg`, `mpv` | Audio recording and playback, video thumbnails |
@@ -182,6 +184,7 @@ named by `harness-server-init-file`.
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
+| `C-c h M` | `harness-set-model-all` | Choose a model and switch every session to it |
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
@@ -191,6 +194,7 @@ named by `harness-server-init-file`.
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
+| `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |
@@ -243,11 +247,15 @@ The header line shows the session's status, name, model, permission
 mode, whether it is `non-interactive` or `interactive`, thinking level,
 context and cost. Click the model, the permission mode, the
 non-interactive switch or the thinking level to change it. A
-non-interactive session never waits for you: what would ask for
-permission is denied, and the agent is told to find another way, which
-suits a session you leave to work while you are away. New sessions
-start non-interactive when `harness-non-interactive` is set, and task
-sessions while `harness-tasks-non-interactive` is. From then on each
+non-interactive session never waits for you, which suits a session you
+leave to work while you are away. Whatever would ask you for
+permission, the auto-mode judge decides instead, whatever the
+permission mode. After any denial the agent is told to find another
+way. Access to directories outside the session's own still needs you,
+so it is denied while you are away. New sessions, task sessions
+included, start interactive unless `harness-non-interactive` is set.
+Setting `harness-tasks-non-interactive` makes every new task session
+start non-interactive. From then on each
 session has its own switch.
 
 Opening an inactive session shows it without resuming it. Its compose
@@ -289,7 +297,10 @@ so several tasks can work in parallel.
   restarts, until you start it with `s`.
 - `C-c h m`, `C-c h T`, `C-c h p` and `C-c h i` set the model, thinking
   level, permission mode and non-interactive mode of the next task, or
-  of the task at point.
+  of the task at point. New tasks run in auto mode and are interactive
+  unless your configuration says otherwise, so a request that needs
+  you, such as access to another directory, waits for you in *Requires
+  your input* instead of being denied.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback. With `harness-tasks-require-verification`
@@ -399,11 +410,43 @@ API as a provider, with models named `ID:MODEL`. OpenRouter
 (`OPENROUTER_API_KEY`) and OpenAI (`OPENAI_API_KEY`) are configured by
 default.
 
+### DeepSeek
+
+Set `DEEPSEEK_API_KEY` (or `harness-deepseek-api-key`, or an
+auth-source entry for `api.deepseek.com`) and `deepseek:` models appear
+in the model picker. The provider is created when a key is found and
+removed when none is; `harness-deepseek-always-register` keeps it
+regardless. Models are `deepseek-flash` (V4.1 Flash, text and images),
+`deepseek-v4-pro` and the still-accepted legacy names
+`deepseek-v4-flash` and `deepseek-v4-flash-vision-exp`.
+
+DeepSeek prices by the clock: peak hours (01:00-04:00 and 06:00-10:00
+UTC, Monday to Friday, except Chinese public holidays) cost double the
+off-peak rate. The recorded cost follows the rate in effect and cached
+input is billed at the cheaper cache-hit rate. When a call is made in a
+peak window, the session is told once, as a hint, and a
+`provider/pricing-warning` event fires; nothing is blocked.
+`harness-deepseek-pricing` holds the rates, so update it from the
+[DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing)
+when they change, and extend `harness-deepseek-off-peak-dates` each year
+with the Chinese public holiday calendar.
+
 ### AWS Bedrock
 
 `bedrock:` models run on AWS Bedrock and authenticate with an AWS
 profile or a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`). See
 `harness-bedrock-endpoints` for the configuration.
+
+### Switching model or provider
+
+`C-c h m` (`harness-set-model`) chooses the model for the current
+session. `C-c h M` (`harness-set-model-all`) chooses one model and
+switches every session of every project to it, and makes it the default
+for new sessions too; with a prefix argument (`C-u C-c h M`) the default
+is left alone. Use it when a plan runs out of credit, a provider fails,
+or a cheaper model should take over work already in flight: no running
+turn is cancelled, each session records the change as a hint, and
+provider state is kept so switching back can still resume it.
 
 ### Usage and budgets
 
@@ -418,6 +461,43 @@ that baseline, which counts until the period rolls over. Organisations
 billed per token can fetch the baseline instead: with an Anthropic Admin
 API key (`harness-anthropic-admin-api-key`), `I` on a monthly budget
 offers the month's API cost minus what the harness recorded.
+
+## Corporate mode
+
+Corporate mode turns off the harness features that could carry data off
+your machine. It is meant for work machines whose policy lets code and
+data go to the model provider in use and nowhere else.
+
+Turn it on in `config.el` (Doom) or your init file, before
+`(harness-start)`:
+
+```elisp
+(setq harness-corporate-mode t)
+```
+
+It turns off:
+
+- Remote control. The harness serves ACP on this machine only and
+  ignores `harness-acp-allow-remote`. Pairing phones and other devices
+  is refused, and the UI cannot connect to a harness elsewhere
+  (`harness-connect-remote`).
+- Network tools. Sessions do not get `web_fetch`, `web_search` or the
+  web search that Claude Code and Copilot run themselves. When a model
+  calls one anyway, the call is denied and the model is told why.
+
+It leaves alone:
+
+- The model provider. The provider you choose still receives what
+  sessions send it.
+- Shell commands. They follow the permission mode and the sandbox, as
+  always, so a command can still reach the network. Use a permission
+  mode that asks before commands run (Ask or Accept edits), and set
+  `harness-sandbox-policy` to `required` so that no command runs
+  outside the sandbox.
+
+The settings page does not list the option, and no ACP client can
+change it. If you change it later with `setopt` or Customize, the
+harness process restarts so that the change reaches it.
 
 ## Persistence
 
@@ -488,6 +568,57 @@ the token yourself.
 - `scripts/harness-acp-stdio` bridges ACP to standard input and output,
   for editors that start ACP agents as subprocesses.
 
+### Pairing a phone
+
+A phone (or any other device on the network) can drive the harness
+with an ACP client of its own, such as ACP UI, Agmente or Ferngeist.
+ACP defines no way to pair a device, so the harness pairs it with a web
+link, which works whatever client the phone uses:
+
+1. Press `C-c h P` to open the remote control page, then `[start
+   serving]` (`s`). The harness listens on port 4276 of every network
+   interface, for ACP over WebSocket and for ACP's own line framing
+   (plain TCP clients such as VACP).
+2. Unfold the pairing QR code (`TAB` or a click on its heading). It
+   starts folded because the code it carries pairs whichever device
+   scans it.
+3. Scan the code with the phone's camera and open the link. The page
+   that opens says the phone is paired and gives the address to add in
+   its ACP client, `ws://ADDRESS:4276/acp`.
+4. Add a remote agent with that address in the phone's ACP client and
+   connect.
+
+A client that supports ACP authentication can also connect first: the
+harness offers it the method "Pair with a QR code", whose answer waits
+until the QR code is opened on that device.
+
+Each code works once and expires after ten minutes; unfolding the QR
+code again or pressing `n` makes a new one, and hiding it drops it. A
+pairing belongs to the device's network address. It lasts while the
+device uses it, ends once it goes unused for eight hours, ends when the
+harness stops serving, and is never saved. The page lists the paired
+devices, and `k` or `[unpair]` unpairs one at once. A WebSocket that a
+web page opens is never let in by a pairing, since any page the phone
+shows could open one. Clients can authenticate with
+`harness-acp-token` instead, as the subprotocol `bearer.TOKEN`, an
+`Authorization: Bearer TOKEN` header or `?token=TOKEN` in the address.
+
+The connection is not encrypted. Pair on a network you trust, or over a
+VPN such as Tailscale, whose addresses also stay fixed per device. The
+page shows the address of this machine that QR codes carry, chosen
+among its network interfaces (local network first); `a` picks another.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `harness-acp-remote` | `nil` | Serve other devices; the page turns it on and off |
+| `harness-acp-remote-host` | `"0.0.0.0"` | Address the listener binds |
+| `harness-acp-remote-port` | `4276` | Port of the listener |
+| `harness-acp-remote-address` | `nil` (detect) | Address of this machine in pairing links |
+| `harness-acp-remote-code-lifetime` | `600` | Seconds a pairing code is valid |
+| `harness-acp-remote-idle-timeout` | `28800` | Seconds unused before a pairing ends |
+
+Corporate mode turns all of this off.
+
 ## Architecture
 
 The core only loads modules and passes messages between them. Every
@@ -496,10 +627,10 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` |
-| Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-bedrock` `provider-demo` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
+| Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 
 Further documentation:
 
