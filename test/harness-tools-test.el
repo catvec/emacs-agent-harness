@@ -111,5 +111,24 @@ That is words, capitalised like a name, and not the tool's own name."
       ;; No two tools share a label: people could not tell them apart.
       (should (= (length names) (length (delete-dups (mapcar #'harness-tools-label names))))))))
 
+(ert-deftest harness-tools-schemas-never-send-required-null ()
+  "A tool schema never puts JSON null where the schema needs an array.
+An empty `:required' is an empty list, which the JSON convention encodes
+as null; a provider refuses the whole request then (null is not of type
+array), as OpenAI did for hand_in, whose evidence item requires no key."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (dolist (m '(store project config provider provider-demo tools))
+      (harness-test-load-module m))
+    (clrhash harness-tools)
+    (dolist (m '(session agent tools-fs tools-shell tools-emacs tools-web tools-agent skills perms
+                 tasks tools-sessions merge notifications tools-notify tools-handin))
+      (harness-test-load-module m))
+    (let ((specs (harness-call 'tools/list)))
+      (should (member "hand_in" (mapcar (lambda (s) (plist-get s :name)) specs)))
+      (dolist (spec specs)
+        (let ((json (harness-json-encode (plist-get spec :schema))))
+          (should-not (string-match-p "\"required\":null" json)))))))
+
 (provide 'harness-tools-test)
 ;;; harness-tools-test.el ends here
