@@ -276,6 +276,44 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
     (should (equal '(:thinking t)
                    (harness-openai--capabilities harness-openai-test-deepseek-endpoint)))))
 
+(ert-deftest harness-provider-openai-deepseek-effort-ladder ()
+  ;; DeepSeek acts on three efforts, weakest first; the harness levels in
+  ;; between collapse onto the effort DeepSeek's own mapping gives them,
+  ;; so no level buys more (or less) thinking than its name promises.
+  (should (equal '("low" "high" "max") harness-openai--deepseek-efforts))
+  (should (equal "low" (harness-openai--deepseek-effort "minimal")))
+  (should (equal "low" (harness-openai--deepseek-effort "low")))
+  (should (equal "high" (harness-openai--deepseek-effort "medium")))
+  (should (equal "high" (harness-openai--deepseek-effort "high")))
+  (should (equal "high" (harness-openai--deepseek-effort "xhigh")))
+  (should (equal "max" (harness-openai--deepseek-effort "max")))
+  ;; Every effort of the ladder maps to itself, and only the ladder (plus
+  ;; the off switch) can come out.
+  (should (equal harness-openai--deepseek-efforts
+                 (mapcar #'harness-openai--deepseek-effort harness-openai--deepseek-efforts)))
+  (dolist (level '("low" "medium" "high" "xhigh" "max"))
+    (should (member (harness-openai--deepseek-effort level)
+                    (cons "none" harness-openai--deepseek-efforts))))
+  ;; A level DeepSeek does not know sends no effort at all.
+  (should-not (harness-openai--deepseek-effort "ultra"))
+  (should-not (harness-openai--deepseek-effort nil))
+  (should-not (harness-openai--deepseek-effort "bogus")))
+
+(ert-deftest harness-provider-openai-deepseek-efforts-in-the-body ()
+  "The ladder's ends, and a level collapsed between them, go out as such."
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (dolist (case '(("low" . "low") ("medium" . "high") ("high" . "high")
+                    ("xhigh" . "high") ("max" . "max")))
+      (harness-openai-test--complete
+       harness-openai-test-deepseek-endpoint
+       `(:model "testdeepseek:deepseek-flash" :thinking ,(car case)
+         :messages ((:role user :content ((:type "text" :text "hi"))))))
+      (should (equal (cdr case) (plist-get (harness-openai-test--last-request-json)
+                                            :reasoning_effort))))))
+
 (ert-deftest harness-provider-openai-deepseek-replays-reasoning-content ()
   ;; DeepSeek's thinking mode rejects a tool-using history whose assistant
   ;; messages omit reasoning_content, so the recorded thinking goes back.
@@ -587,6 +625,40 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
                      (plist-get (harness-provider--normalise-model
                                  (make-harness-provider :id 'testrouter :label "T") smart)
                                 :id))))
+    (harness-openai-clear-models-cache)))
+
+(ert-deftest harness-provider-openai-models-deepseek-effort-levels ()
+  ;; DeepSeek reports the efforts it acts on; the catalogue offers exactly
+  ;; those, so the menu and the request share the real low/high/max ladder
+  ;; instead of a five-step one two of whose steps collapse.
+  (harness-openai-test-with-fake
+      `(("/models"
+         . (:body ,(harness-json-encode
+                    '(:object "list"
+                      :data ((:id "deepseek-flash" :name "DeepSeek-V4.1-Flash"
+                              :context_window 1048576
+                              :effort (:supported_levels ("low" "high" "max")
+                                       :default_level "high"))))))))
+    (harness-openai-clear-models-cache)
+    (let* ((models (harness-test-await
+                    (harness-openai--models harness-openai-test-deepseek-host-endpoint)))
+           (model (car models)))
+      (should (equal '("low" "high" "max") (plist-get model :thinking-levels)))
+      (should (eq t (plist-get (plist-get model :capabilities) :thinking)))
+      ;; The whole ladder maps to itself, in the same order.
+      (should (equal '("low" "high" "max")
+                     (mapcar #'harness-openai--deepseek-effort
+                             (plist-get model :thinking-levels)))))
+    ;; An older or terser DeepSeek host that reports nothing about
+    ;; reasoning still gets the ladder its models think at.
+    (harness-openai-test-with-fake
+        `(("/models" . (:body ,(harness-json-encode
+                                '(:object "list" :data ((:id "deepseek-v4-pro")))))))
+      (harness-openai-clear-models-cache)
+      (let ((model (car (harness-test-await
+                         (harness-openai--models harness-openai-test-deepseek-host-endpoint)))))
+        (should (equal harness-openai--deepseek-efforts (plist-get model :thinking-levels)))
+        (should (eq t (plist-get (plist-get model :capabilities) :thinking)))))
     (harness-openai-clear-models-cache)))
 
 (ert-deftest harness-provider-openai-models-plain-and-failing ()

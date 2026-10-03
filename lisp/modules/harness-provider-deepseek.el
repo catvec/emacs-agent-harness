@@ -101,19 +101,20 @@ per year and must be extended when a new holiday calendar is published."
   :type '(repeat string) :group 'harness)
 
 (defcustom harness-deepseek-model-specs
-  '((:name "deepseek-flash" :label "DeepSeek-V4.1-Flash" :tier flash :vision t
-           :thinking-levels ("low" "high" "max"))
+  `((:name "deepseek-flash" :label "DeepSeek-V4.1-Flash" :tier flash :vision t
+           :thinking-levels ,harness-openai--deepseek-efforts)
     (:name "deepseek-v4-flash" :label "DeepSeek V4 Flash (legacy name)" :tier flash :vision t
-           :thinking-levels ("low" "high" "max"))
+           :thinking-levels ,harness-openai--deepseek-efforts)
     (:name "deepseek-v4-flash-vision-exp" :label "DeepSeek V4 Flash Vision (legacy name)"
-           :tier flash :vision t :thinking-levels ("low" "high" "max"))
+           :tier flash :vision t :thinking-levels ,harness-openai--deepseek-efforts)
     (:name "deepseek-v4-pro" :label "DeepSeek-V4-Pro" :tier pro
-           :thinking-levels ("low" "high" "max")))
+           :thinking-levels ,harness-openai--deepseek-efforts))
   "DeepSeek models the provider lists, in order.
 Each entry: (:name NAME :label LABEL :tier flash|pro :vision BOOL
 :thinking-levels LEVELS), with the shared context window and output
-limit filled in.  The tier names the rates in
-`harness-deepseek-pricing'."
+limit filled in.  LEVELS defaults to `harness-openai--deepseek-efforts',
+the low/high/max ladder DeepSeek's `reasoning_effort' acts on, weakest
+first.  The tier names the rates in `harness-deepseek-pricing'."
   :type '(repeat (plist :key-type symbol :value-type sexp))
   :set #'harness-deepseek--custom-set :group 'harness)
 
@@ -216,7 +217,7 @@ from `:peak-pricing' apply.  This is the model's `:pricing-fn', which
            :max-output (or (plist-get spec :max-output) harness-deepseek-max-output)
            :input-modalities (or (plist-get spec :input-modalities)
                                  (if (plist-get spec :vision) '("text" "image") '("text")))
-           :thinking-levels (or (plist-get spec :thinking-levels) '("high" "max"))
+           :thinking-levels (or (plist-get spec :thinking-levels) harness-openai--deepseek-efforts)
            :pricing (plist-get rates :off-peak)
            :peak-pricing (plist-get rates :peak)
            ;; Called by `usage/price' with (MODEL USAGE AT).

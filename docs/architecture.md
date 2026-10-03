@@ -602,7 +602,14 @@ harness-provider-openai.el, which splits DeepSeek's cached input out of
 `prompt_tokens` (its `:input` bills the cache misses, `:cache-read` the
 hits), sends the reasoning efforts DeepSeek accepts, and rebuilds
 `reasoning_content` on assistant messages from their recorded thinking
-(empty when there is none).  DeepSeek's thinking mode, on by default,
+(empty when there is none).  DeepSeek acts on three efforts only — low,
+high and max (`harness-openai--deepseek-efforts`) — and collapses the
+levels in between the way its own API does (minimal is low; medium and
+xhigh are high), so a model advertises that three-step ladder and the
+thinking menu offers no level DeepSeek cannot tell apart.  Its /models
+route reports the ladder (`effort.supported_levels'), which the
+catalogue takes as the model's `:thinking-levels'.  DeepSeek's thinking
+mode, on by default,
 rejects a tool-using history whose assistant messages omit that field,
 so the whole conversation goes back to it, not just the model's own
 call.  The handling follows an official DeepSeek host, not only the

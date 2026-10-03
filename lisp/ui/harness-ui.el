@@ -1373,13 +1373,38 @@ so switching back can still resume it."
                                  label (length ids) (if (= 1 (length ids)) "" "s")
                                  (if no-default "" ", and for new sessions")))))))
 
+(defconst harness-ui--thinking-level-order
+  '("none" "minimal" "low" "medium" "high" "xhigh" "max")
+  "Thinking levels from weakest to strongest, for ordering the menu.")
+
+(defconst harness-ui--thinking-levels '("low" "medium" "high" "xhigh" "max")
+  "The common thinking levels, weakest first.
+The menu offers them to a model that names no levels of its own.")
+
+(defun harness-ui--thinking-levels-for (levels)
+  "Return the levels the thinking menu offers for a model's LEVELS.
+A model that names its own levels offers exactly those, weakest first,
+so it is never offered a level it cannot act on; one that names none
+offers the common levels."
+  (let ((rank (lambda (l) (or (cl-position l harness-ui--thinking-level-order
+                                               :test #'equal)
+                              most-positive-fixnum))))
+    (sort (delete-dups (copy-sequence (or levels harness-ui--thinking-levels)))
+          (lambda (a b) (< (funcall rank a) (funcall rank b))))))
+
 (defun harness-ui-choose-thinking (callback &optional model)
   "Prompt for a thinking level and call CALLBACK with (VALUE LABEL).
 VALUE is nil for the model default.  MODEL names the levels offered;
 without one the common levels are."
   (let ((choose (lambda (levels)
-                  (let* ((levels (delete-dups (append levels '("low" "medium" "high" "xhigh" "max"))))
-                         (choice (completing-read "Thinking: " (cons "default" levels) nil t)))
+                  (let* ((levels (cons "default" (harness-ui--thinking-levels-for levels)))
+                         (collection (lambda (string pred action)
+                                       ;; Keep the weakest-first order.
+                                       (if (eq action 'metadata)
+                                           '(metadata (display-sort-function . identity)
+                                                      (cycle-sort-function . identity))
+                                         (complete-with-action action levels string pred))))
+                         (choice (completing-read "Thinking: " collection nil t)))
                     (funcall callback (unless (equal choice "default") choice) choice)))))
     (if (null model)
         (funcall choose nil)

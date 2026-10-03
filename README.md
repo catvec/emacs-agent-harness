@@ -497,7 +497,10 @@ request carries tools, so the provider replays the recorded thinking of
 each assistant message, empty when it has none.  This follows an
 official DeepSeek host, so an OpenAI-compatible endpoint you added
 yourself at `api.deepseek.com` gets it too; OpenAI and OpenRouter are
-unaffected and still drop thinking.
+unaffected and still drop thinking.  Thinking effort uses DeepSeek's own
+three-step ladder — low, high, max — which its /models route reports, so
+the thinking menu offers exactly those levels and never a `medium` or
+`xhigh` that DeepSeek would just collapse onto `high`.
 
 ### AWS Bedrock
 
