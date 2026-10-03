@@ -263,6 +263,24 @@ Only the kind: the full request is shown by `harness-ui-tasks-requests',
 or read in the session."
   (harness-ui-pending-summary session))
 
+(defun harness-ui-tasks--wide-icon-p (icon)
+  "Non-nil when ICON is drawn as an image, which is about two columns wide.
+Terminals fall back to a one-column symbol, which needs no extra room."
+  (and (> (length icon) 0)
+       (eq 'image (car-safe (get-text-property 0 'display icon)))))
+
+(defun harness-ui-tasks--mark-nudge (icon)
+  "Pixels to move a wide ICON left so it centres on the one-column grid.
+The icon is an image with its ink centred, about a column wider than the
+stopped square it stands next to; half that extra width puts the two
+marks on the same centre."
+  (let ((nudge (/ (- (string-pixel-width icon) (frame-char-width)) 2)))
+    (and (> nudge 0) nudge)))
+
+(defun harness-ui-tasks--pad (pixels)
+  "A space PIXELS pixels wide, an absolute pixel specification."
+  (propertize " " 'display (list 'space :width (list pixels))))
+
 (defun harness-ui-tasks--icon (task column session)
   (pcase column
     ('pending (cond ((harness-ui-tasks--refining-p task) (harness-ui-status-icon "running"))
@@ -629,7 +647,24 @@ whatever the columns or your own toggles say.")
          (shown (or (harness-ui-tasks--subtitle-shown-p task) narrow))
          (chevron (if narrow "" (harness-ui-tasks--subtitle-button task shown)))
          (icon (harness-ui-tasks--icon task column session))
-         (left (concat "  " (if (string-empty-p chevron) "" (concat chevron " ")) icon " "))
+         ;; The blocked mark is an image about a column wider than the
+         ;; one-column stopped square, with its ink centred in it: move
+         ;; it half that extra width left, so the two marks share a
+         ;; centre, and pad the same width after it, so the row keeps
+         ;; its columns.  A terminal's one-column pause symbol needs
+         ;; none of this.
+         (pause (and (eq column 'needs-input)
+                     (plist-get session :pending)
+                     (harness-ui-tasks--wide-icon-p icon)))
+         (nudge (and pause (harness-ui-tasks--mark-nudge icon)))
+         (left (concat (cond ((not nudge)
+                              (concat "  " (if (string-empty-p chevron) "" (concat chevron " "))))
+                             ((string-empty-p chevron)
+                              (concat " " (harness-ui-tasks--pad (- (frame-char-width) nudge))))
+                             (t (concat "  " chevron
+                                        (harness-ui-tasks--pad (- (frame-char-width) nudge)))))
+                       icon
+                       (if nudge (harness-ui-tasks--pad (+ (frame-char-width) nudge)) " ")))
          (subtitle (and shown (harness-ui-tasks--subtitle task column session position
                                                           (- width (string-width buttons) 8))))
          ;; A one-line card carries the buttons beside the facts.  When
