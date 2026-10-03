@@ -980,6 +980,12 @@ pending request and resolves when answered).
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
   `web_fetch` reaches any URL and stays with the mode (the judge in auto).
+- Switching a session that waits on a `permission` prompt into `yolo`
+  answers the prompt (a `session/updated` handler): answering it
+  allow-once lets the call run, since yolo would have allowed it without
+  asking.  Only what the mode stage now allows is answered, so a
+  standing deny rule still decides; a directory prompt keeps waiting,
+  because not even yolo grants a directory without the user.
 - Jail denials are final and carry a constructive hint listing the
   allowed roots and how to widen them.  A path elsewhere in the
   system's temporary directory (and the agent's own request for one)

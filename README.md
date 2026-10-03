@@ -286,7 +286,9 @@ The header line shows the session's status, name, todo progress while
 it has one, model, permission mode, whether it is `non-interactive` or
 `interactive`, thinking level, context and cost. Click the model, the
 permission mode, the non-interactive switch or the thinking level to
-change it. A
+change it. Switching a session that waits on a permission prompt to
+YOLO answers the prompt, since yolo would have allowed the call
+anyway; a directory prompt still waits for your answer. A
 non-interactive session never waits for you, which suits a session you
 leave to work while you are away. Whatever would ask you for
 permission, the auto-mode judge decides instead, whatever the
