@@ -181,6 +181,8 @@ Sub-agents should be able to be created by an agent as a tool call. Sub-agents j
 ## Emacs MCP/Tool
 A tool should be provided to the agent to interact with the current Emacs session. This allows the agent to view buffers, emacs variables, eval functions, control emacs, help the user drive.
 
+Like every tool call, these run in the harness (the server), never in a client: an ACP client need not be an Emacs (an app on a phone), and the harness must be able to run headless. The user's Emacs is instead a resource these tools reach, the way the file tools reach a TRAMP host: an Emacs UI lends itself to the harness when it connects, and the tools ask that one Emacs for what they need. With no Emacs lent, they say so and every other tool works. Evaluating model-written code is done in a background Emacs by default, since code that blocks would freeze the user's Emacs beyond recovery; the user can allow a call to evaluate in their Emacs, an option that says plainly that it is dangerous.
+
 ## Emacs Native Tools
 All operating system modification tools should be implemented using built in Emacs functionality. Common tools like read, write, list, search should all use the built in Emacs tools which a user might use for those workflows. An elisp terminal should also be made available as an alternative for Bash. Additional tools like a bash tool or things not implementable in Emacs are allowed by the first choice is to implement a tool in Emacs. The implementation of a tool in Emacs must be fast and not block the main UI thread.
 

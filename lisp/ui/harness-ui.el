@@ -34,7 +34,7 @@
 (require 'harness-util)
 (require 'harness-acp)
 (require 'harness-server)
-(require 'harness-client-tools)
+(require 'harness-emacs-endpoint)
 (require 'harness-files)
 (require 'harness-notifications-desktop)
 
@@ -385,7 +385,9 @@ initialize: one it let go of for another closes on purpose."
     (harness-acp-on-close conn (lambda ()
                                  (when (eq conn harness-ui-connection)
                                    (harness-ui--on-close))))
-    (harness-then (harness-acp-initialize conn)
+    ;; This Emacs lends itself to the harness: its tools about the
+    ;; user's Emacs ask it (lisp/harness-emacs-endpoint.el).
+    (harness-then (harness-acp-initialize conn (harness-emacs-endpoint-client-capabilities))
                   (lambda (_)
                     (harness-ui-refresh-sessions)
                     (harness-ui-refresh-models)
@@ -536,8 +538,25 @@ tasks among them carry on once the process is back (see
                      (lambda (_) (message "Harness process reloaded"))
                      (lambda (e) (message "Harness process: %s" (harness-error-message e))))))
 
+(defun harness-ui--advertise ()
+  "Tell the harness again what this Emacs lends it, as `initialize' did.
+After a reload, so that a connection opened by older code, which lent
+nothing, lends this Emacs from now on."
+  (when (harness-acp-open-p harness-ui-connection)
+    (harness-catch (harness-acp-initialize harness-ui-connection
+                                           (harness-emacs-endpoint-client-capabilities))
+                   (lambda (e) (harness-log 'warn "ui: advertising this Emacs failed: %s"
+                                            (harness-error-message e))))))
+
 (defun harness-ui--dispatch (method params respond)
-  "Route an incoming METHOD with PARAMS; RESPOND is non-nil for requests."
+  "Route an incoming METHOD with PARAMS; RESPOND is non-nil for requests.
+The harness's requests for this Emacs, which it lent the harness, are
+answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
+  (unless (harness-emacs-endpoint-answer method params respond)
+    (harness-ui--dispatch-ui method params respond)))
+
+(defun harness-ui--dispatch-ui (method params respond)
+  "Route METHOD with PARAMS to the UI; RESPOND is non-nil for requests."
   (pcase method
     ("session/update"
      (let ((sid (plist-get params :sessionId))
@@ -554,10 +573,8 @@ tasks among them carry on once the process is back (see
        (harness-ui--default-question params respond)))
     ("_harness/client/customize-save"
      (condition-case err
-         (funcall respond (harness-client-tools-customize-save (plist-get params :symbol) (plist-get params :value)))
+         (funcall respond (harness-emacs-endpoint-customize-save (plist-get params :symbol) (plist-get params :value)))
        (error (harness-acp-respond-error respond -32000 (error-message-string err)))))
-    ("_harness/client/tool"
-     (funcall respond (harness-client-tools-run (plist-get params :name) (plist-get params :input))))
     ("_harness/client/notify"
      (harness-then (harness-ui--show-notification params)
                    (lambda (shown) (funcall respond shown) nil)
@@ -565,12 +582,13 @@ tasks among them carry on once the process is back (see
     ("_harness/event"
      (let ((event (plist-get params :event)) (args (plist-get params :args)))
        (when (equal event "tools/file-written")
-         (harness-client-tools-revert-visiting (car args)))
+         (harness-emacs-endpoint-revert-visiting (car args)))
        (when (member event '("session/created" "session/deleted"))
          (harness-ui-refresh-sessions))
        (when (equal event "harness/reloaded")
          ;; Reloaded code may label its tools anew: views fetch them again.
          (harness-ui--forget-tools)
+         (harness-ui--advertise)
          (run-hooks 'harness-ui-redraw-hook))
        (when (member event '("provider/models-updated" "harness/reloaded"))
          (harness-ui-refresh-models))

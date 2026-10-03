@@ -81,15 +81,15 @@ Only the ACP client half is used: its TCP server stays off here.")
 They define the macros modules expand, so a change to one recompiles
 every file (see `harness--compiled-fresh-p').")
 
-(defconst harness--library-files '("lisp/harness-files.el" "lisp/harness-client-tools.el"
+(defconst harness--library-files '("lisp/harness-files.el" "lisp/harness-emacs-endpoint.el"
                                   "lisp/harness-notifications-desktop.el" "lisp/harness-server.el")
   "Libraries loaded after the core files and before any module, in order.
 Both sides of the process split use them: the UI requires them all, and
-the harness process's modules require the first three.  They are loaded
-compiled as the core files are and every `harness-reload' loads them
-again, so a reloaded module never calls a library function as it was
-before the update; they define no macros, so a change to one does not
-recompile the modules.")
+the harness process's modules require harness-files and
+harness-notifications-desktop.  They are loaded compiled as the core
+files are and every `harness-reload' loads them again, so a reloaded
+module never calls a library function as it was before the update; they
+define no macros, so a change to one does not recompile the modules.")
 
 (add-to-list 'load-path (expand-file-name "lisp" harness-directory))
 (require 'harness-core)

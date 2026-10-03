@@ -142,30 +142,34 @@ They are the keywords that start an indented line, as in
 (defvar harness-acp--server-enabled)
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")
-(declare-function harness-client-tools-run "harness-client-tools")
-(declare-function harness-client-tools-revert-visiting "harness-client-tools")
-(declare-function harness-client-tools-customize-save "harness-client-tools")
+(declare-function harness-acp-initialize "harness-acp")
+(declare-function harness-emacs-endpoint-answer "harness-emacs-endpoint")
+(declare-function harness-emacs-endpoint-client-capabilities "harness-emacs-endpoint")
+(declare-function harness-emacs-endpoint-revert-visiting "harness-emacs-endpoint")
+(declare-function harness-emacs-endpoint-customize-save "harness-emacs-endpoint")
 
 (defun harness-test-connect-ui-client ()
   "Load the acp module and connect an in-process client acting as the UI.
-It answers `_harness/client/tool' and `_harness/client/customize-save',
-and reverts buffers on
-`tools/file-written', like lisp/ui does.  Return the connection."
+Like lisp/ui, it lends this Emacs to the harness, so the tools about the
+user's Emacs ask it (`_harness/emacs/...', answered by
+`harness-emacs-endpoint-answer'); it answers
+`_harness/client/customize-save', and reverts buffers on
+`tools/file-written'.  Return the connection, initialized."
   (let ((harness-acp--server-enabled nil))
     (harness-test-load-module 'acp))
-  (require 'harness-client-tools)
+  (require 'harness-emacs-endpoint)
   (let ((conn (harness-acp-connect nil)))
     (harness-acp-set-handler
      conn
      (lambda (method params respond)
-       (pcase method
-         ("_harness/client/tool"
-          (funcall respond (harness-client-tools-run (plist-get params :name) (plist-get params :input))))
-         ("_harness/client/customize-save"
-          (funcall respond (harness-client-tools-customize-save (plist-get params :symbol) (plist-get params :value))))
-         ("_harness/event"
-          (when (equal (plist-get params :event) "tools/file-written")
-            (harness-client-tools-revert-visiting (car (plist-get params :args))))))))
+       (unless (harness-emacs-endpoint-answer method params respond)
+         (pcase method
+           ("_harness/client/customize-save"
+            (funcall respond (harness-emacs-endpoint-customize-save (plist-get params :symbol) (plist-get params :value))))
+           ("_harness/event"
+            (when (equal (plist-get params :event) "tools/file-written")
+              (harness-emacs-endpoint-revert-visiting (car (plist-get params :args)))))))))
+    (harness-test-await (harness-acp-initialize conn (harness-emacs-endpoint-client-capabilities)))
     conn))
 
 ;;;; The compose box, in each buffer that hosts it

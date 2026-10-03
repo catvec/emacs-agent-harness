@@ -13,11 +13,16 @@
 (defvar harness-server-init-file)
 (defvar harness-model)
 (defvar harness-acp-token)
+(defvar harness-acp--server-enabled)
+(defvar harness-elisp-allow-ui-eval)
 (declare-function harness-ui-request "harness-ui")
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-request "harness-acp")
 (declare-function harness-acp-close "harness-acp")
 (declare-function harness-acp-connection-pending "harness-acp")
+(declare-function harness-acp-set-handler "harness-acp")
+(declare-function harness-acp-initialize "harness-acp")
+(declare-function harness-acp-respond-error "harness-acp")
 
 ;; A batch Emacs, as the tests run in, dies of a broken pipe: a request
 ;; written to a harness process that is exiting, or was just killed,
@@ -50,10 +55,27 @@ its way out is written to a process that is exiting."
     (harness-stop)
     (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit"))))
 
+(defconst harness-server-test--init
+  (concat ";; -*- lexical-binding: t -*-\n"
+          "(with-eval-after-load 'harness-config\n"
+          "  (eval '(harness-defmethod config/test-block () \"Block 2 s.\" (sleep-for 2) \"done\") t))\n"
+          "(with-eval-after-load 'harness-tools-shell\n"
+          "  (eval '(harness-defmethod config/test-tool (name input) \"Run tool NAME with INPUT, allowed.\"\n"
+          "     (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 1)\n"
+          "     (harness-call 'tools/execute nil (list :id \"t1\" :name name :input input))) t))\n")
+  "Init file of the harness process in these tests.
+It defines `config/test-block', which blocks the process's thread for 2
+seconds, and `config/test-tool', which runs a tool, any call allowed.")
+
+(defun harness-server-test--tool (request name &rest input)
+  "Run tool NAME with INPUT in the harness process; return its result.
+REQUEST sends a request over a connection to the process, such as
+`harness-ui-request'."
+  (harness-test-await (funcall request "_harness/config/test-tool" (list :name name :input (or input :empty))) 30))
+
 (defmacro harness-server-test-with-process (&rest body)
   "Run BODY after `harness-start' in process mode against a temp state dir.
-The harness process also defines `config/test-block', which blocks its
-thread for 2 seconds."
+The harness process loads `harness-server-test--init'."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -61,15 +83,7 @@ thread for 2 seconds."
             (harness-process t)
             (harness-model "demo:scripted")
             (harness-server-init-file init))
-       (with-temp-file init
-         (insert ";; -*- lexical-binding: t -*-\n"
-                 "(with-eval-after-load 'harness-config\n"
-                 "  (eval '(harness-defmethod config/test-block () \"Block 2 s.\" (sleep-for 2) \"done\") t))\n"
-                 "(with-eval-after-load 'harness-tools-emacs\n"
-                 "  (eval '(harness-defmethod config/test-buffers () \"Run emacs_buffers.\"\n"
-                 "     (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 1)\n"
-                 "     (harness-then (harness-call 'tools/execute nil (list :id \"t1\" :name \"emacs_buffers\" :input nil))\n"
-                 "                   (lambda (r) (plist-get r :content)))) t))\n"))
+       (with-temp-file init (insert harness-server-test--init))
        (unwind-protect
            (progn (harness-start) ,@body)
          (harness-server-test--stop)))))
@@ -134,13 +148,79 @@ check runs on, for each of 20 hops."
               (should (eq status 0)))))
       (delete-file script))))
 
-(ert-deftest harness-server-emacs-tools-run-in-the-ui-emacs ()
+(ert-deftest harness-server-emacs-tools-reach-the-emacs-the-ui-lends ()
+  "The tools run in the harness process and reach the UI's Emacs, which
+lent itself when it connected: its buffers, and evaluation in it when
+it allows that."
   (harness-server-test-with-process
     (let ((buf (generate-new-buffer "harness-only-in-the-ui")))
       (unwind-protect
-          (should (string-search "harness-only-in-the-ui"
-                                 (harness-test-await (harness-ui-request "_harness/config/test-buffers") 30)))
+          (progn
+            (should (string-search "harness-only-in-the-ui"
+                                   (plist-get (harness-server-test--tool #'harness-ui-request "emacs_buffers") :content)))
+            (with-current-buffer buf (insert "first\nsecond\n"))
+            (should (string-prefix-p "     2\tsecond"
+                                     (plist-get (harness-server-test--tool #'harness-ui-request "emacs_buffer"
+                                                                           :name "harness-only-in-the-ui" :offset 2)
+                                                :content)))
+            ;; Model code stays out of the UI unless this Emacs allows it.
+            (let ((r (harness-server-test--tool #'harness-ui-request "elisp" :code "(emacs-pid)" :emacs "user")))
+              (should (harness-json-true-p (plist-get r :is-error)))
+              (should (string-search "harness-elisp-allow-ui-eval" (plist-get r :content))))
+            (let ((harness-elisp-allow-ui-eval t))
+              (should (equal (format "=> %d" (emacs-pid))
+                             (plist-get (harness-server-test--tool #'harness-ui-request "elisp"
+                                                                   :code "(emacs-pid)" :emacs "user")
+                                        :content))))
+            ;; The background Emacs is neither the UI's nor the harness's.
+            (let ((c (plist-get (harness-server-test--tool #'harness-ui-request "elisp" :code "(emacs-pid)") :content)))
+              (should (string-prefix-p "=> " c))
+              (should-not (equal (format "=> %d" (emacs-pid)) c))
+              (should-not (equal (format "=> %d" (process-id harness-ui--server)) c))))
         (kill-buffer buf)))))
+
+(ert-deftest harness-server-headless-runs-tools-with-no-emacs-lent ()
+  "A harness process no Emacs is attached to -- headless, driven by a
+client that is not an Emacs, such as a phone -- runs its tools: elisp
+evaluates in the background, the tools about the user's Emacs say none
+is attached, and the client is never sent a tool's request."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (setq harness-acp--server-enabled nil)
+    (harness-test-load-module 'acp)
+    (let* ((init (expand-file-name "server-init.el" harness-state-directory))
+           (harness-model "demo:scripted")
+           (harness-server-init-file init)
+           (address nil) (token nil) (proc nil) (phone nil) (seen nil))
+      (with-temp-file init (insert harness-server-test--init))
+      (unwind-protect
+          (progn
+            (setq proc (harness-server-spawn :on-address (lambda (a tk) (setq address a token tk))))
+            (harness-test-wait (lambda () address) 60 "the harness process's address")
+            (setq phone (let ((harness-acp-token token)) (harness-acp-connect address)))
+            (harness-acp-set-handler phone (lambda (method _params respond)
+                                             (push method seen)
+                                             (when respond (harness-acp-respond-error respond -32601 "a phone"))))
+            ;; ACP's own capabilities only: this client lends no Emacs.
+            (harness-test-await (harness-acp-initialize phone) 30)
+            (let ((request (lambda (method params) (harness-acp-request phone method params))))
+              (dolist (call '(("emacs_buffers") ("emacs_describe" :symbol "car")))
+                (let ((r (apply #'harness-server-test--tool request call)))
+                  (should (harness-json-true-p (plist-get r :is-error)))
+                  (should (string-prefix-p "No Emacs is attached to the harness" (plist-get r :content)))))
+              (let ((r (harness-server-test--tool request "elisp" :code "(+ 1 2)")))
+                (should-not (harness-json-true-p (plist-get r :is-error)))
+                (should (equal "=> 3" (plist-get r :content))))
+              (let ((r (harness-server-test--tool request "elisp" :code "(+ 1 2)" :emacs "user")))
+                (should (harness-json-true-p (plist-get r :is-error)))
+                (should (string-prefix-p "No Emacs is attached to the harness" (plist-get r :content)))))
+            (should-not (cl-some (lambda (m) (or (string-prefix-p "_harness/emacs/" m)
+                                                 (equal m "_harness/client/tool")))
+                                 seen)))
+        (when phone (harness-acp-close phone))
+        (when proc
+          (harness-server-stop proc)
+          (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit"))))))
 
 (ert-deftest harness-server-waits-for-init-to-finish ()
   "Started from an init file, the process spawns after `emacs-startup-hook',

@@ -44,7 +44,8 @@ default) the layers above are split across two Emacs processes:
  user's Emacs                         harness process (emacs --batch -Q)
  harness.el, core, lisp/ui,     ACP   harness.el, core, lisp/modules
  harness-acp (client only),  <------> (acp serves 127.0.0.1:ephemeral,
- harness-files, client-tools  TCP     token per spawn)
+ harness-files,               TCP     token per spawn; every tool runs here)
+ harness-emacs-endpoint
 ```
 
 - `harness-start` in the user's Emacs loads only the UI and the ACP client,
@@ -73,16 +74,25 @@ default) the layers above are split across two Emacs processes:
   `harness-run-soon` of a request handler, the next step of a turn --
   would otherwise wait for an unrelated timer or process output, seconds
   later.
-- Work about the user's Emacs runs there, asked for by the harness with
-  `client/request` (below): the `emacs_*` tools
-  (lisp/harness-client-tools.el), saving user options to `custom-file`
+- Every tool runs in the harness process; no client runs one, so an
+  ACP client that is not an Emacs (a phone) loses nothing, and the
+  harness works headless.  The user's Emacs is a resource some tools
+  reach, as a TRAMP host is for the file tools: the UI lends it to the
+  harness when it connects (`clientCapabilities._harness.emacs` in
+  `initialize`), and the harness sends that one Emacs the small, fixed
+  set of `_harness/emacs/*` requests of lisp/harness-emacs-endpoint.el
+  through `emacs/request` (see the tools and acp sections).  The
+  `emacs_*` tools ask it for data; the `elisp` tool evaluates in a
+  child `emacs --batch' (lisp/harness-elisp.el), and in the lent Emacs
+  only when a call asks for it and that Emacs allows it
+  (`harness-elisp-allow-ui-eval`, off by default), since a blocking
+  call there freezes it beyond recovery.
+- Chores of the UI, which any client may do, are asked for with
+  `client/request` (below): saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
   writes a file (event `tools/file-written`), and desktop notifications
   (lisp/harness-notifications-desktop.el, see notifications), so they
   show where the user is and a click on one opens what it is about.
-  The `elisp` tool is not one of them: model-written code runs in a
-  child `emacs --batch' (lisp/harness-elisp.el), never in the UI, where
-  a blocking call could freeze it beyond recovery.
 - Project roots and file lists (lisp/harness-files.el) are computed on
   both sides with the same code; the UI lists files itself so `@`
   completion uses the user's projectile cache.
@@ -92,7 +102,8 @@ non-interactive authentication (ssh agent), and auth-source secrets
 must decrypt without a minibuffer (gpg-agent pinentry, not loopback).
 
 `harness-process` nil keeps everything in one Emacs (tests, debugging);
-the same `client/request` path then runs over the local connection.
+the same `client/request` and `emacs/request` paths then run over the
+local connection.
 
 ## The bus
 
@@ -130,7 +141,7 @@ Reload safety: keep state in `defvar`s (never re-initialised), register
 subscribers with named functions, and make `:init` idempotent.
 `harness-reload` compiles every file first and refuses to load anything
 if one fails.  It loads harness.el, the core files, the libraries of
-lisp/ (`harness--library-files`: files, client tools, desktop
+lisp/ (`harness--library-files`: files, the Emacs endpoint, desktop
 notifications, server) and the modules, so a module never runs against
 a library as it was before an update; a file added to lisp/ that both
 sides load belongs in one of those lists.  Records made before a reload
@@ -1856,24 +1867,39 @@ how providers are set up.  A session sends at most
 past that it is told when it can send again.  `notification_providers`
 lists `notification/providers`: set up or not, used by default or not.
 
-The `emacs_*` tools are about the user's Emacs, so their handlers
-(`harness-tools-in-client NAME`) forward the call to the UI as
-`_harness/client/tool {name, input}`; `harness-client-tools-run` answers
-it there, under a deadline (`harness-tools--client-timeout'): a UI that
-cannot answer fails the call, logs, and shows a desktop notice, rather
+Every tool runs in the harness; none runs in a client.  The `emacs_*`
+tools are about the user's Emacs, which they reach as a resource: their
+handlers check the input, ask the Emacs a client lent to the harness
+for plain data with `harness-tools-ask-emacs METHOD PARAMS` (→ promise;
+`emacs/request` under a deadline, `harness-tools--emacs-timeout'), and
+word the result here.  The lent Emacs answers from
+lisp/harness-emacs-endpoint.el, which knows no tool: `buffers` (every
+buffer's name, mode, modified flag, size and file), `buffer` (a range of
+lines, stopping at the characters the tool names, so a long buffer comes
+in ranges), `describe` (a symbol as function, variable and face, its
+value printed in part) and `messages`.  With no Emacs lent -- a headless
+harness, or only clients such as a phone -- the call fails at once,
+saying so and pointing at read_file and the elisp tool; one that does not
+answer in time fails the call, logs, and shows a desktop notice, rather
 than leaving the turn pending.  `write_file`/`edit_file` emit
 `tools/file-written PATH`; the UI reverts unmodified buffers visiting
 PATH.
 
-The `elisp` tool evaluates in a child `emacs --batch' process, never in
-the UI: Emacs runs Lisp on one thread, so model-written code that blocks
-(a `call-process' waiting on a child, a loop that never yields) freezes
-typing and redisplay, and neither a timer nor a signal can end it.  The
-child gets the harness on its `load-path', the working directory as its
-`default-directory', a timeout, and the process tree killed when it
-overruns (lisp/harness-elisp.el); its result comes back as JSON.
-`harness-elisp-allow-ui-eval', off by default, restores in-UI
-evaluation for a user who asks for it and accepts that hazard.
+The `elisp` tool runs in the harness too, and evaluates in an Emacs it
+picks per call (input `emacs`).  `background`, the default, is a child
+`emacs --batch' process: Emacs runs Lisp on one thread, so model-written
+code that blocks (a `call-process' waiting on a child, a loop that never
+yields) would freeze the user's typing and redisplay, and neither a timer
+nor a signal can end it.  The child gets the harness on its `load-path',
+the working directory as its `default-directory', a timeout, and the
+process tree killed when it overruns (lisp/harness-elisp.el); its result
+comes back as JSON.  `user` evaluates in the lent Emacs instead, to drive
+it (`_harness/emacs/eval`), and that Emacs refuses unless its own
+`harness-elisp-allow-ui-eval` is on (off by default): the Emacs that
+would freeze decides, whatever harness asks.  So by default no model code
+touches the UI, and with the option on only calls that ask for it do;
+their title ends "(in your Emacs)".  Both report the same payload
+(`harness-elisp-payload`: value, output, messages or error).
 
 ### acp
 
@@ -1940,14 +1966,34 @@ params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
 
-Harness → UI requests for work in the user's Emacs go through the bus
+Harness → UI requests for chores any client may do go through the bus
 method `client/request METHOD PARAMS` → promise of the first client's
 answer; it rejects at once when no client is connected or all decline
-(never callable over ACP).  Methods: `_harness/client/tool {name, input}`
-→ tool result, `_harness/client/customize-save {symbol, value}` (value
-printed; only `harness-` options), `_harness/client/notify {id, title,
-body, urgency, source, kind, session, task, project, url}` -> `{backend}`
-once a desktop notification shows (see notifications), or an error.
+(never callable over ACP).  Methods: `_harness/client/customize-save
+{symbol, value}` (value printed; only `harness-` options),
+`_harness/client/notify {id, title, body, urgency, source, kind,
+session, task, project, url}` -> `{backend}` once a desktop
+notification shows (see notifications), or an error.  No tool uses it.
+
+A client lends its Emacs to the harness by adding `_harness: {emacs:
+{version, pid, host}}` to the `clientCapabilities` of `initialize`
+(`harness-emacs-endpoint-client-capabilities`; the UI does, again after
+a reload).  The bus method `emacs/request METHOD PARAMS` → promise sends
+`_harness/emacs/METHOD` to exactly one such client, never to the rest:
+the most recently active (the last to send a request or notification)
+among those that may call methods, so an unauthenticated client that
+claims an Emacs is not asked.  It rejects at once when none is
+attached, with the Emacs's message when it refuses, and when it
+disconnects first.  `emacs/attached` lists the lent Emacsen, the one
+asked first at the head.  Neither is callable over ACP.  Requests, all
+answered with plain data (lisp/harness-emacs-endpoint.el):
+`buffers {}` → `{buffers: [{name, mode, modified, size, file}]}`;
+`buffer {name, offset, limit, maxChars}` → `{exists, mode, file,
+modified, total, first, lines, truncated}`; `describe {symbol,
+maxValueChars}` → `{known, function: {kind, signature, doc}, variable:
+{kind, value, doc}, face: {doc}}`; `messages {count}` → `{text}`;
+`eval {code, timeout}` → `{value, output, messages, error}`, or an error
+when the Emacs's `harness-elisp-allow-ui-eval` is off.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token
