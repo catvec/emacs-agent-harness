@@ -1746,14 +1746,24 @@ Options with diagrams get the area showing one of them under them."
                   "\n")))
       (add-face-text-property start (point) 'harness-queue-face t))))
 
-(defvar-local harness-chat-panel-functions nil
-  "Functions returning a panel of their own to show above the box.
-Each is called with no arguments in the chat buffer on every draw of
-the tail, in order, and returns a string to insert between the pending
-panels and the compose box, or nil for nothing.  Like the pending
-panels, what they insert is read-only: a button in it pushes; anything
-editable belongs in the compose box.  The task module shows a task's
-review banner here, which is why `harness-chat-send-function' exists.")
+(defvar harness-chat-panel-functions nil
+  "Functions putting a panel of their own below the transcript.
+Each is called without arguments in the chat buffer on every render of
+the tail and returns a string, or nil for nothing.  The strings go
+between the queue and the attachments, in order, read-only and above
+the compose box.  Add to it buffer-locally, with a symbol, so a reload
+redefines it.  The task module shows its review banner this way.")
+
+(defun harness-chat--insert-panels ()
+  "Insert what `harness-chat-panel-functions' return, in order.
+Each string gets the panel background, which its own properties may
+override, as the pending panel's do."
+  (run-hook-wrapped 'harness-chat-panel-functions
+                    (lambda (fn)
+                      (when-let* ((text (funcall fn)))
+                        (unless (string-empty-p text)
+                          (insert (harness-chat--face text 'harness-chat-panel-face))))
+                      nil)))
 
 (defun harness-chat--render-tail ()
   "Render everything below the transcript, keeping the compose text."
@@ -1777,12 +1787,7 @@ review banner here, which is why `harness-chat-send-function' exists.")
               (harness-chat--insert-question-panel r)
             (harness-chat--insert-permission-panel r)))
         (harness-chat--insert-queue)
-        ;; Modules with something of their own to say about this session.
-        (dolist (fn harness-chat-panel-functions)
-          (let ((text (with-demoted-errors "harness-chat-panel-functions: %S" (funcall fn))))
-            (when (and (stringp text) (not (string-empty-p text)))
-              (insert text)
-              (unless (bolp) (insert "\n")))))
+        (harness-chat--insert-panels)
         (harness-compose-insert-attachments)
         (when harness-chat--dead
           (insert (propertize " This session was deleted; the transcript stays readable.\n" 'face 'harness-hint-face)))
@@ -2112,15 +2117,6 @@ crash) has every session closed, but one on screen here is open, as
 
 ;;;; Sending
 
-(defvar-local harness-chat-send-function nil
-  "When non-nil, where `harness-chat-send' gives the compose box instead.
-A function of TEXT and ATTACHMENTS, called in the chat buffer with what
-the box held, after it is emptied.  It sends them wherever they belong
-instead of prompting the session, for a module showing something of its
-own in the buffer (see `harness-chat-panel-functions').  An answer to a
-waiting question still goes to the question, and C-c C-q queues and
-C-c C-k cancels as usual.")
-
 (defvar harness-chat-send-functions nil
   "Functions run with the TEXT and ATTACHMENTS of each message sent.
 `harness-chat-send' and `harness-chat-queue' run them in the chat
@@ -2138,6 +2134,14 @@ module names a side conversation after its first message this way.")
                         (funcall fn text atts))
                       nil)
                     text atts))
+
+(defvar-local harness-chat-send-function nil
+  "When set, `harness-chat-send' gives the compose box's message to it.
+The function takes the TEXT and ATTACHMENTS the box held and sends them
+itself, instead of the message being prompted into the session.  An
+answer to a waiting question still goes first: while one waits, a typed
+message answers it.  A module a buffer hosts sets this when the box
+means something else there, such as feedback on a review.")
 
 (defun harness-chat--clear-compose ()
   "Empty the compose box and the attachments."
@@ -2163,37 +2167,29 @@ module names a side conversation after its first message this way.")
 
 (defun harness-chat-send ()
   "Send the compose box, or answer the active question with it.
-While the agent is running the message steers the current turn.
-A module showing something of its own in this buffer
-\(`harness-chat-send-function') gets the box instead of the session."
+While the agent is running the message steers the current turn."
   (interactive)
   (let ((question (harness-chat--active-question))
         (typed (string-trim (harness-compose-text))))
-    (cond
-     ((and question (not (string-empty-p typed)))
-      (harness-chat--answer-question (plist-get question :id) typed)
-      (harness-chat--clear-compose))
-     ;; A module whose panel owns the box takes its text.
-     (harness-chat-send-function
-      (let ((send harness-chat-send-function))
-        (pcase-let ((`(,text . ,atts) (harness-chat--take-message)))
-          (harness-chat--clear-compose)
-          (funcall send text atts))))
-     (t
+    (if (and question (not (string-empty-p typed)))
+        (progn (harness-chat--answer-question (plist-get question :id) typed)
+               (harness-chat--clear-compose))
       (pcase-let ((`(,text . ,atts) (harness-chat--take-message))
                   (buf (current-buffer))
                   (sid harness-ui-session-id))
         (harness-chat--drop-edited-queue-item)
         (harness-chat--clear-compose)
-        (harness-chat--run-send-functions text atts)
-        (harness-compose-with-expanded-text
-         text
-         (lambda (expanded)
-           (let ((blocks (append (and (not (string-empty-p expanded)) (list (list :type "text" :text expanded)))
-                                 (mapcar #'harness-compose-attachment-block atts))))
-             (harness-ui-call "session/prompt" (list :sessionId sid :prompt blocks)
-                              #'ignore
-                              (lambda (err) (harness-chat--report-error buf "send" err)))))))))))
+        (if harness-chat-send-function
+            (funcall harness-chat-send-function text atts)
+          (harness-chat--run-send-functions text atts)
+          (harness-compose-with-expanded-text
+           text
+           (lambda (expanded)
+             (let ((blocks (append (and (not (string-empty-p expanded)) (list (list :type "text" :text expanded)))
+                                   (mapcar #'harness-compose-attachment-block atts))))
+               (harness-ui-call "session/prompt" (list :sessionId sid :prompt blocks)
+                                #'ignore
+                                (lambda (err) (harness-chat--report-error buf "send" err)))))))))))
 
 (defun harness-chat-queue ()
   "Queue the compose box for the next turn."
