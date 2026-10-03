@@ -135,7 +135,12 @@ tool is answered with \"echo: TEXT\"."
       (should (plist-get caps :hosted-loop))
       (should (plist-get caps :fork))
       (should (eq 'hosted (plist-get caps :compaction)))
-      (should (plist-get caps :cost-reported)))))
+      (should (plist-get caps :cost-reported)))
+    ;; The provider names its tiers, so the judge does not sort prices.
+    (should (equal "claude:claude-haiku-4-5-20251001"
+                   (harness-call 'provider/tier-model "claude:claude-opus-5-5" 'cheap)))
+    (should (equal "claude:claude-opus-5-5"
+                   (harness-call 'provider/tier-model "claude:claude-haiku-4-5-20251001" 'frontier)))))
 
 (ert-deftest harness-provider-claude-model-known-without-a-listing ()
   "Every Claude model has its window from the moment the provider is defined.

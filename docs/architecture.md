@@ -15,8 +15,8 @@ module needs something more, add it here first.
  State          session, agent, config, project, store, usage, naming, compaction,
                 worktree, merge, tasks, tasks-notify, skills, perms, sandbox,
                 notifications
- Completion     provider, provider-openai, provider-claude, provider-bedrock,
-                provider-copilot
+ Completion     provider, provider-openai, provider-deepseek, provider-claude,
+                provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
                 tools-sessions, tools-notify
  ------------------------------- bus (lisp/harness-core.el)
@@ -249,6 +249,18 @@ Options named `...-api-key`, `-token`, `-secret` or `-password` are
 secrets: their values never leave the harness and never go to a
 `.dir-locals.el`.
 
+Where an option holds records (the provider endpoints, Bedrock's
+per-model defaults, the standing permission rules, a model plist), its
+customize type names the keys of the record in `:options`: each key
+with a `:tag`, a value type of its own, a `:doc`, and the `:value` it
+starts from.  (`harness-provider.el` holds the shared model, price,
+modality and thinking-level types; `harness-provider-model-type` adds
+a provider's own keys to the model type.)  Keys the type does not name
+stay matched, as `plist` does, so a record written in Lisp is never
+refused for having an extra key; the settings page draws them last, to
+be removed.  A key that names a value type the value does not fit is
+refused on save, where a free-form plist would have taken it.
+
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
   or its name; layered settings only).
 - `config/set KEY VALUE &key scope cwd printed` — scope
@@ -323,6 +335,12 @@ gone.
   `:persist t`.  `:context-window N` sets the session's own window, nil
   its model's again; a new `:model` drops a window set for the old one
   unless PLIST sets one too.  Event `session/updated ID CHANGES`.
+- `session/set-all SETTINGS &optional FILTER` — the same change on every
+  session FILTER selects (`session/list`'s filter plus `:except` ids);
+  returns the ids that changed, newest first.  A session already holding
+  the value is skipped, and each one changed gets the same event and hint
+  as `session/update`.  This is what `harness-set-model-all` uses to move
+  every session to another model or provider at once.
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
 - `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
   (closed: still listed and readable; the next message sent to it resumes it).
@@ -373,13 +391,30 @@ gone.
   :complete FN          ; (REQUEST) → HANDLE plist (:cancel FN)
   :fork FN              ; (MODEL PROVIDER-STATE) → promise of new state    [optional]
   :quota FN             ; (&optional REFRESH) → promise of QUOTA (below)     [optional]
-  :capabilities PLIST)  ; static defaults, merged with per-model ones
+  :capabilities PLIST   ; static defaults, merged with per-model ones
+  :tiers PLIST)         ; a model per tier, see below
 ```
 
 MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
 :context-window N :max-output N :input-modalities ("text" "image")
 :thinking-levels (…) :pricing (:input F :output F :cache-read F :cache-write F)
-:capabilities (…))`.  Pricing is USD per million tokens.
+:pricing-fn SYMBOL :capabilities (…))`.  Pricing is USD per million
+tokens.  A model whose rates change with the clock carries `:pricing-fn`,
+a symbol called as `(MODEL USAGE AT)` that returns the pricing plist in
+effect at AT; `usage/price` uses its answer instead of `:pricing`.  This
+is how the DeepSeek provider follows its peak and off-peak tiers, and it
+keeps the catalogue plain data that crosses the wire unchanged.
+
+Model tiers: `:tiers' names a model (`:cheap' `:balanced' `:frontier'
+are the common ones) by a name, id or regexp, so the harness can pick a
+model on its own - the auto-mode judge asks for the cheap one -
+without the user naming one.  A tier the provider does not name, and a
+provider that declares none, falls back to its own catalogue sorted by
+price: `provider/tier-model MODEL-ID &optional TIER' returns the `:cheap'
+one by default, or nil when the provider is unknown or lists nothing
+(the caller then uses what it has).  This is what ties the judge to the
+session's provider.  Claude, DeepSeek, Bedrock and Copilot name their
+tiers; the dynamic OpenAI-compatible catalogues fall back to price.
 
 The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
@@ -551,6 +586,28 @@ catalogue.  Claude and Nova requests carry prompt cache points; Claude
 reasoning returned with tool calls is kept and sent back with them while
 the tool loop lasts.  `harness-http-request` takes `:binary t` for such
 framings: the response then reaches `:on-chunk` as unibyte strings.
+
+The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
+OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
+harness-provider-openai.el, which splits DeepSeek's cached input out of
+`prompt_tokens` (its `:input` bills the cache misses, `:cache-read` the
+hits), sends the reasoning efforts DeepSeek accepts, and rebuilds
+`reasoning_content` on assistant messages from their recorded thinking
+(empty when there is none).  DeepSeek's thinking mode, on by default,
+rejects a tool-using history whose assistant messages omit that field,
+so the whole conversation goes back to it, not just the model's own
+call; the pass-back is gated on this flavor, and OpenAI and OpenRouter
+still drop thinking.  `harness-deepseek-*` adds registration and prices.
+The provider is created only while a key is found
+(`harness-deepseek-api-key`, DEEPSEEK_API_KEY, or auth-source), so
+nothing uncallable is listed; see `harness-deepseek-always-register`.
+DeepSeek bills peak hours
+(01:00-04:00 and 06:00-10:00 UTC, Monday to Friday, minus Chinese public
+holidays) at double the off-peak rate, so the catalogue carries
+`:pricing' (off-peak) and `:peak-pricing' and the model's
+`:pricing-fn' picks between them; cached input, cache-miss input and
+output are priced separately.  A `provider/pricing-warning` event and a
+session hint say once per peak window that a call costs more.
 
 The Copilot provider (`copilot:` models) drives `copilot --headless
 --stdio`, the GitHub Copilot CLI's server mode that GitHub's Copilot
@@ -752,7 +809,13 @@ pending request and resolves when answered).
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
   `auto` (reads inside the jail allowed; a cheap model,
   `harness-perms-auto-model`, decides the rest with a reason; falls back
-  to ask), `yolo` (allow everything; the jail still applies).  Tools in
+  to ask).  The judge model defaults to `auto', which asks the session's
+  own provider for its `:cheap' tier (`provider/tier-model'), so a
+  session on DeepSeek is judged by a DeepSeek model and one on Claude by
+  Claude Haiku; a provider without tiers is sorted by price, and the
+  session's own model is the last resort.  Naming a model, or nil for
+  the session's own, overrides it.  `yolo` allows everything; the jail
+  still applies.  Tools in
   `harness-perms-auto-allow-tools` are allowed in every mode: the meta
   tools, skill and Emacs lookups, `web_search`, which only sends its
   query to the configured search provider, so task sessions can search,
@@ -1020,8 +1083,8 @@ Task mode: one session per task.  TASK =
 :state pending|refining|active|merging|review|done
 :column pending|needs-input|active|review|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
-:session SID :outcome nil|end-turn|error|cancelled|merge-failed|merged|…
-:error "…" :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
+:session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
+:error "…" :duplicate-of ID :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...)
 :file "docs/tasks/ID-SLUG.md" :updated F :extra (RAW-ENTRY ...))`.
@@ -1037,7 +1100,12 @@ to the task's file (below); the record also keeps `:file-base` and
   :thinking :non-interactive)` → task; it starts when one of
   `harness-tasks-max-running` slots is free.  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
-  `-non-interactive` (on); an explicit false turns non-interactive off.
+  `-non-interactive` (off), else from what the directory configures, so
+  a task is interactive unless `harness-tasks-non-interactive` or the
+  directory's `harness-non-interactive` is on; an explicit false turns
+  non-interactive off whatever they say.  `task/settings` reports the
+  values a new task would get, the configured ones included, and the
+  board submits them with each task.
   With `:refine` the task goes to the backlog instead (below).
 - Backlog refinement (once called grooming): a `:refine` task is
   `refining` while a session at its directory -- `ask` and
@@ -1048,15 +1116,35 @@ to the task's file (below); the record also keeps `:file-base` and
   the auto judge could allow it -- writes it up as told by
   `harness-tasks-refine-prompt` (brief, no changes, no questions, a
   self-contained ticket: title line, what and why, what to change, how to
-  tell it is done, open questions); after `harness-tasks-refine-tool-calls`
+  tell it is done, related tasks, open questions); after
+  `harness-tasks-refine-tool-calls`
   (8) tool calls it is steered once to write up with what it has, which
-  keeps it brief.  Its final reply becomes `:prompt`
-  (the original stays in `:note`) and the task waits in `pending` with
-  `:backlog t`: the scheduler never starts it, only `task/start`, so the
-  backlog survives restarts.  A turn of a backlog task's session before
-  it starts is feedback (`task/prompt`) and rewrites the write-up; a
-  write-up that stops needs input (restarts: below).
-  `task/refine ID &optional TEXT` refines a queued task or
+  keeps it brief.  It is told to search the board first -- one `task_list`
+  (`include_archived t`, `limit 50`, the task at hand marked
+  `(this task)`) -- and to refuse a request the board already has: an
+  exact duplicate is neither written up nor added to the backlog, but
+  waits for the user.  The refusal is its final reply, first line
+  `Duplicate of ID` (`harness-tasks--refusal`, markdown and a trailing
+  full stop aside); `--finish-refinement` then sets `:outcome duplicate`,
+  `:duplicate-of` the task named when it is on this harness's board
+  (`harness-tasks--duplicate-of`: an id, or a unique id prefix, of the
+  task's project, never the task itself) and `:error` the message after
+  the first line, shown to the user.  `task/refine ID` with no TEXT
+  writes a refused task up all the same, sending
+  `harness-tasks--refine-anyway-text`; with TEXT -- or with
+  `task/prompt`, like any feedback -- the write-up is done again with
+  it.  A write-up also names the related tasks in the same code area in a
+  "Related tasks" section -- id, title, branch, session, where each
+  stands and what it changes -- and tells whoever does the task to
+  coordinate with them rather than redo their work: check where they
+  stand, message their sessions, cherry-pick their commits (see also
+  `harness-tasks-start-text`).  Otherwise its final reply becomes
+  `:prompt` (the original stays in `:note`) and the task waits in
+  `pending` with `:backlog t`: the scheduler never starts it, only
+  `task/start`, so the backlog survives restarts.  A turn of a backlog
+  task's session before it starts is feedback (`task/prompt`) and
+  rewrites the write-up; a write-up that stops needs input (restarts:
+  below).  `task/refine ID &optional TEXT` refines a queued task or
   writes one up again.  Starting continues the same session: in git it
   moves into the task's new worktree (`session/update :cwd :worktree`),
   its provider conversation is dropped (the Claude CLI keeps
@@ -1069,7 +1157,7 @@ to the task's file (below); the record also keeps `:file-base` and
   like any task; an idle one waits in `needs-input` with `:outcome adopted`).
 - Starting: in a git project (`harness-tasks-worktrees`) `worktree/create`
   on branch `harness-tasks-branch-prefix` + slug + id, then a session in
-  that worktree (`harness-tasks-permission-mode`, non-interactive by
+  that worktree (`harness-tasks-permission-mode`, interactive by
   default) prompted with the task; a system-prompt section tells it to
   commit on its branch and not merge.  Outside git the session runs in CWD.
   The worktree stays locked until its branch is merged; a follow-up to
@@ -1115,7 +1203,12 @@ to the task's file (below); the record also keeps `:file-base` and
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
-  hand), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
+  hand), `task/set-all SETTINGS &optional FILTER` (apply `:model',
+  `:thinking', `:permission-mode' and `:non-interactive' to every task
+  FILTER selects and, when started, its session; FILTER is `:columns'
+  (default `harness-tasks-bulk-columns': running, pending and blocked),
+  `:ids', `:except' and `:cwd', and review, done and archived tasks are
+  never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
   steering; reopens), `task/refine ID &optional TEXT`,
   `task/merge ID` (retry; not in review), `task/verify ID`,
   `task/reject ID FEEDBACK &optional ATTACHMENTS` (both in review only),
@@ -1199,7 +1292,8 @@ to the task's file (below); the record also keeps `:file-base` and
 
   - Frontmatter, in this order and only when set: `id`, `title` (the
     session's name, else the prompt's first line), `state`, `column`,
-    `backlog`, `outcome`, `error` (300 characters at most), `session`,
+    `backlog`, `outcome`, `error` (300 characters at most), `duplicate-of`
+    (the task a write-up refused this one as a duplicate of), `session`,
     `branch`, `base`, `merge` (the merge status, or `merged`), `model`,
     `thinking`, `created`, `started`, `refined`, `finished`, `verified`
     (when the user verified the work), `updated` (times in ISO 8601 UTC,
@@ -1403,7 +1497,7 @@ TRAMP prefixes come from the session host):
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | List tasks | column (pending/needs-input/active/review/done), include_archived, all_projects | read |
+| `task_list` | List tasks | column (pending/needs-input/active/review/done), include_archived, all_projects, limit (the most recent) | read |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
@@ -1734,11 +1828,21 @@ scopes; the other options are listed by module in the Global scope and
 folded into one line in the Project scope.  Each setting is a
 `wid-edit` widget built from its customize type, with its doc and
 where its value in effect comes from; toggles and menus save at once,
-text saves with RET (C-x C-s saves every edit).  [Remove override]
+text saves with RET (C-x C-s saves every edit).  A type whose plist
+names its keys (`:options`) is drawn as a form: one line per key,
+`[X] Base URL: …` with the key's help under it, the key's name width
+aligned, and a key the value does not set greyed out with the value it
+would start from (`harness-ui-config--present` rewrites the type; the
+values it accepts do not change).  In a list, each record folds into a
+line summing it up, `[Edit]` opens it into the form and `[Hide]` folds
+it again; `[INS]` adds a record, open, from the type's starting value.
+[More] unfolds a long documentation, whose first line shows with the
+keys' help doing the rest.  A string key of a `*-model` setting
+completes model ids, menus included.  [Remove override]
 deletes a project value, [Reset to default] a customized global one.
 Secrets show as set or not and are set through `read-passwd`; long
 texts open in `string-edit`.  The page reloads on `config/changed`,
-keeping edits not saved yet.
+keeping edits not saved yet, point, and the records left open.
 
 Session settings: `harness-set-model`, `-thinking`, `-permission-mode`
 and `harness-toggle-non-interactive` (`C-c h m` `T` `p` `i`) change what
@@ -1811,7 +1915,12 @@ Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
 or go to the backlog, written up by an agent and
 waiting in pending until you start it (`s`); `r` refines a queued task,
-retries a stopped write-up or sends feedback on a backlog task's.  `I` or
+retries a stopped write-up, writes one up all the same when it refused
+the task as a duplicate, or sends feedback on a backlog task's.  A task
+whose write-up refused it as a duplicate shows it in Requires your
+input, naming the task it duplicates and saying why: `k` drops it, `r`
+writes it up anyway, `m` takes what makes it another task than the one
+it duplicates.  `I` or
 [Add session] makes an ongoing session a task.  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  Boards reload after any
@@ -1837,7 +1946,11 @@ The UI keeps each provider's QUOTA from `provider/quota` and
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; scoped to the current project, its
 git worktrees and so its tasks' sessions included, each session's root
-resolved to its main checkout once with `harness-files-main-checkout`),
+resolved to its main checkout once with `harness-files-main-checkout`;
+a task's session is of kind task and goes by its task's title, as on the
+board, until the model names it after its first turn — the list loads
+the tasks with `_harness/task/list` and follows `task/changed' and
+`task/deleted'),
 conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
 svg charts via svg.el), worktrees (`harness-ui-worktree`), notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle

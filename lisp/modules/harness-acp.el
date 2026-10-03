@@ -97,7 +97,7 @@ is never used for any other failure.")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
 (defconst harness-acp--enum-keys
-  '(:status :kind :permission-mode :behavior :scope :group-by :period :days)
+  '(:status :kind :permission-mode :behavior :scope :group-by :period :days :tier)
   "Keys whose string values are interned back to symbols on the way in.")
 
 (defconst harness-acp--modes
@@ -125,7 +125,7 @@ is never used for any other failure.")
 (defconst harness-acp--forwarded-events
   '(session/created session/deleted session/queue-changed session/pending-changed
     session/status agent/turn-started agent/turn-ended agent/quota
-    provider/models-updated provider/quota-updated usage/budget-warning usage/budgets-changed
+    provider/models-updated provider/quota-updated provider/pricing-warning usage/budget-warning usage/budgets-changed
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
     question/answered task/changed task/deleted task/review task/done permission/dir-allowed permission/dir-revoked

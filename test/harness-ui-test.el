@@ -400,7 +400,7 @@ nothing about it and asks for nothing."
       ;; What a target function names, as the task board's new-task settings.
       (harness-ui-test-with-menu-buffer #'fundamental-mode
         (setq-local harness-ui-setting-target-function
-                    (lambda () (cons '(:non-interactive t) (lambda (key value) (push (list key value) set)))))
+                    (lambda () (list '(:non-interactive t) (lambda (key value) (push (list key value) set)))))
         (should (string-match-p " i Non-interactive: on" (harness-ui-test-menu "i")))
         (should (equal '((:non-interactive nil)) set))))
     (should-not sent)))
@@ -415,6 +415,25 @@ not refused carries `:denied' null (nil) or false."
   (should (eq 'failed (harness-ui-tool-outcome '(:output "exit 1" :is-error t))))
   (should (eq 'failed (harness-ui-tool-outcome '(:output "exit 1" :is-error t :meta (:denied nil :duration 0.1)))))
   (should (eq 'denied (harness-ui-tool-outcome '(:output "Denied: no" :is-error t :meta (:denied t))))))
+
+(defvar harness-ui--sessions)
+
+(ert-deftest harness-ui-task-title-is-the-session-name-else-the-prompt ()
+  "A task's title, on the board and in the session list, is its session's
+name once it has one, else its prompt's first line: a session is named
+after its first turn, so a task at work has none yet."
+  (let ((task '(:id "t-1" :session "s-1" :prompt "\n  Add CSV export to reports  \n\nFinance wants it.")))
+    (should (equal "Add CSV export to reports" (harness-ui-task-title task '(:id "s-1" :name nil))))
+    (should (equal "Add CSV export to reports" (harness-ui-task-title task '(:id "s-1" :name "  "))))
+    (should (equal "Export orders as CSV" (harness-ui-task-title task '(:id "s-1" :name "Export orders as CSV"))))
+    ;; Without SESSION: the task's session in the cache, if any.
+    (let ((harness-ui--sessions (make-hash-table :test 'equal)))
+      (should (equal "Add CSV export to reports" (harness-ui-task-title task)))
+      (puthash "s-1" '(:id "s-1" :name "Export orders as CSV") harness-ui--sessions)
+      (should (equal "Export orders as CSV" (harness-ui-task-title task)))
+      (should (equal "Add CSV export to reports" (harness-ui-task-title (plist-put (copy-sequence task) :session nil)))))
+    ;; A long first line is shortened.
+    (should (= 72 (length (harness-ui-task-title (list :prompt (make-string 100 ?x))))))))
 
 ;;;; The prefix key
 
@@ -699,6 +718,46 @@ once, and a change made with `setopt' reaches it."
                 (should (= 1 restarts)))
             (setopt harness-corporate-mode nil))
           (should (= 2 restarts)))))))
+
+(ert-deftest harness-ui-set-model-all-switches-and-sets-default ()
+  "`harness-set-model-all' retargets every session and the new-session default."
+  (let ((calls nil))
+    (cl-letf (((symbol-function 'harness-ui-refresh-models)
+               (lambda (&optional callback)
+                 (funcall callback
+                          (list (list :id "deepseek:deepseek-flash" :label "DeepSeek V4.1 Flash"
+                                      :provider-label "DeepSeek" :context-window 1048576
+                                      :pricing '(:input 0.15 :output 0.60))))))
+              ((symbol-function 'harness-ui-call)
+               (lambda (method params &optional callback _on-error)
+                 (push (cons method params) calls)
+                 (when callback
+                   (funcall callback (and (equal method "_harness/session/set-all") '("s1" "s2"))))))
+              ((symbol-function 'completing-read) (lambda (_prompt table &rest _) (caar table))))
+      (call-interactively #'harness-set-model-all))
+    (let ((config (cdr (assoc "_harness/config/set" calls)))
+          (bulk (cdr (assoc "_harness/session/set-all" calls))))
+      (should (equal "harness-model" (plist-get config :key)))
+      (should (equal "deepseek:deepseek-flash" (plist-get config :value)))
+      (should (equal "global" (plist-get config :scope)))
+      (should (equal "deepseek:deepseek-flash" (plist-get (plist-get bulk :settings) :model))))))
+
+(ert-deftest harness-ui-set-model-all-prefix-leaves-the-default-alone ()
+  "A prefix argument switches the sessions but keeps the new-session default."
+  (let ((calls nil))
+    (cl-letf (((symbol-function 'harness-ui-refresh-models)
+               (lambda (&optional callback)
+                 (funcall callback (list (list :id "deepseek:deepseek-flash" :label "DeepSeek V4.1 Flash"
+                                               :provider-label "DeepSeek" :context-window 1048576)))))
+              ((symbol-function 'harness-ui-call)
+               (lambda (method params &optional callback _on-error)
+                 (push (cons method params) calls)
+                 (when callback (funcall callback nil))))
+              ((symbol-function 'completing-read) (lambda (_prompt table &rest _) (caar table))))
+      (harness-set-model-all t))
+    (should-not (assoc "_harness/config/set" calls))
+    (should (equal "deepseek:deepseek-flash"
+                   (plist-get (plist-get (cdr (assoc "_harness/session/set-all" calls)) :settings) :model)))))
 
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

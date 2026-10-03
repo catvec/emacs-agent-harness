@@ -62,7 +62,11 @@ Keep exact identifiers: file paths, function and variable names, commands, error
 (defcustom harness-compaction-levels '((0.7 . ok) (0.85 . warning) (0.95 . urgent))
   "Fractions of the usable window below which each level applies.
 Anything at or above the last fraction is `critical'."
-  :type '(alist :key-type number :value-type symbol) :group 'harness)
+  :type '(alist :key-type (number :tag "Below this fraction" :value 0.9)
+                :value-type (choice :tag "Level" :value warning
+                                    (const :tag "OK" ok) (const :tag "Warning" warning)
+                                    (const :tag "Urgent" urgent) (symbol :tag "Other level")))
+  :group 'harness)
 
 (defvar harness-compaction--running (make-hash-table :test 'equal)
   "Session id -> promise of the compaction in flight.")

@@ -27,6 +27,14 @@
 ;; never reach the page: they show as set or not, and are set through
 ;; `read-passwd'.  Long texts (prompts) are edited in `string-edit'.
 ;;
+;; Records (a plist whose type names its keys, like a model endpoint)
+;; show as forms: a line for each key the type knows, with its name, a
+;; value of its own type and a line of help, ticked when the record has
+;; it and otherwise greyed out with the value it would start from.  In
+;; a list, each record folds into a line that sums it up, [Edit] opens
+;; it and [Hide] folds it again; a record added with [INS] starts open,
+;; from the type's starting value.  See `harness-ui-config--present'.
+;;
 ;; The page computes nothing itself.  It asks the harness with
 ;; `_harness/config/describe', saves with `_harness/config/set' and
 ;; `_harness/config/unset' (values travel printed, so JSON keeps their
@@ -111,6 +119,18 @@ redraw took it out of the widget.")
   "Hash of (SCOPE . KEY) to `saving' or (error . MESSAGE).")
 (defvar-local harness-ui-config--overlays nil
   "Hash of KEY to the overlay showing its edit state.")
+(defvar-local harness-ui-config--folds nil
+  "The record widgets drawn on the page that fold (`harness-ui-config-fold').")
+(defvar-local harness-ui-config--open-folds nil
+  "Records open before the page was drawn again, as (KEY . VALUE).
+A record of setting KEY whose value is VALUE is drawn open again.")
+(defvar-local harness-ui-config--docs-shown nil
+  "Keys of the settings whose whole documentation shows.")
+
+(defvar harness-ui-config--drawing nil
+  "Non-nil while the page draws its settings.
+A record drawn then is open only when it was before; one added later,
+with [INS], starts open.")
 
 ;;;; Values and types
 
@@ -172,6 +192,9 @@ redraw took it out of the widget.")
                     (string-search ":" value))
                (harness-ui-model-label value))
               ((null value) "none")
+              ;; Records by name, rather than as Lisp.
+              ((and (harness-ui-config--form-p type) (harness-ui-config--fits-p type value))
+               (harness-truncate-end (harness-ui-config--short type value) 48))
               (t (harness-truncate-end
                   (replace-regexp-in-string "\n" " " (harness-ui-config--print value)) 48))))))
 
@@ -266,7 +289,9 @@ redraw took it out of the widget.")
 (defun harness-ui-config--snapshot ()
   "Take the edits of the page's scope out of their widgets, before a redraw.
 An edit that is not a valid value yet, such as \"12x\" in a number
-field, is kept as it is: the widget shows it again."
+field, is kept as it is: the widget shows it again.  Records open stay
+open."
+  (harness-ui-config--note-open-folds)
   (dolist (cell harness-ui-config--widgets)
     (let ((ekey (harness-ui-config--edit-key (car cell))))
       (when (eq t (gethash ekey harness-ui-config--edited))
@@ -340,6 +365,8 @@ field, is kept as it is: the widget shows it again."
   (let ((key (widget-get widget :key))
         (buf (current-buffer)))
     (harness-ui-config--install-field-map)
+    ;; An entry added to a list is the setting's too.
+    (harness-ui-config--mark-setting widget)
     (if (widget-get widget :discrete)
         ;; Picking the value already saved changes nothing.
         (unless (equal (harness-ui-config--widget-value widget) (widget-get widget :original))
@@ -372,6 +399,541 @@ field, is kept as it is: the widget shows it again."
 (defconst harness-ui-config--field-help
   "RET or C-c C-c saves, C-c C-k reverts, M-TAB completes"
   "Help shown for a text field of the settings page.")
+
+;;;; Types as the page draws them
+;;
+;; A setting is drawn from its customize type, rewritten first by
+;; `harness-ui-config--present'.  Every rewrite keeps the values the
+;; type accepts: only the look changes.
+;;
+;; - A plist whose type names its keys (`:options') is a record: one
+;;   line for each key, "[X] Name:  value", the names lined up, with the
+;;   key's help (its value type's `:doc') under it.  A key the record
+;;   does not have is greyed out with the value it starts from when
+;;   ticked (the value type's `:value').  Keys the type does not name
+;;   stay at the end, where they can be removed.
+;; - A key whose value type is a `const' is a flag: ticking it sets the
+;;   key to the constant, and the constant's tag says what that means.
+;; - The records of a list fold into one line each: their first key's
+;;   value, then the others in brief, and [Edit].
+;; - Booleans read on and off, and the text fields of a model setting
+;;   complete model ids.
+
+(defun harness-ui-config--type-split (type)
+  "Return (NAME PROPS ARGS) of customize TYPE, PROPS a plist."
+  (if (symbolp type)
+      (list type nil nil)
+    (let ((rest (cdr type)) props)
+      ;; A keyword that comes last is an argument, as `widget-convert' has it.
+      (while (and rest (keywordp (car rest)) (cdr rest))
+        (setq props (append props (list (car rest) (cadr rest)))
+              rest (cddr rest)))
+      (list (car type) props rest))))
+
+(defun harness-ui-config--type-join (name props args)
+  "Return the customize type NAME with PROPS and ARGS."
+  (if (or props args) (append (list name) props args) name))
+
+(defun harness-ui-config--type-prop (type prop)
+  "Return property PROP of customize TYPE."
+  (plist-get (nth 1 (harness-ui-config--type-split type)) prop))
+
+(defun harness-ui-config--type-put (type prop value)
+  "Return customize TYPE with property PROP set to VALUE."
+  (pcase-let ((`(,name ,props ,args) (harness-ui-config--type-split type)))
+    (harness-ui-config--type-join name (plist-put (copy-sequence props) prop value) args)))
+
+(defun harness-ui-config--type-is (type &rest names)
+  "Non-nil when customize TYPE is one of the widgets NAMES or derives from one."
+  (let ((name (if (consp type) (car type) type)) found)
+    (while (and name (symbolp name) (not found))
+      (if (memq name names)
+          (setq found t)
+        (setq name (car-safe (get name 'widget-type)))))
+    found))
+
+(defun harness-ui-config--match-type (type value)
+  "Return TYPE, or the alternative of TYPE that VALUE picks.
+For a menu, that is the alternative VALUE fits."
+  (if (harness-ui-config--type-is type 'menu-choice 'radio-button-choice)
+      (or (cl-loop for a in (nth 2 (harness-ui-config--type-split type))
+                   when (harness-ui-config--fits-p a value) return a)
+          type)
+    type))
+
+(defun harness-ui-config--record-p (type)
+  "Non-nil when values of customize TYPE are records: a plist naming its keys.
+A cons with a record in it counts too (a name and its record), and a
+menu any of whose alternatives is a record."
+  (pcase-let ((`(,name ,props ,args) (harness-ui-config--type-split type)))
+    (cond ((harness-ui-config--type-is type 'plist) (and (plist-get props :options) t))
+          ((eq name 'cons) (and (cl-some #'harness-ui-config--record-p args) t))
+          ((harness-ui-config--type-is type 'menu-choice 'radio-button-choice)
+           (and (cl-some #'harness-ui-config--record-p args) t)))))
+
+(defun harness-ui-config--form-p (type)
+  "Non-nil when customize TYPE holds a record anywhere.
+The page draws such a type as a form."
+  (or (harness-ui-config--record-p type)
+      (pcase-let ((`(,_ ,props ,args) (harness-ui-config--type-split type)))
+        (or (cl-some (lambda (o) (and (consp o) (harness-ui-config--form-p (cadr o))))
+                     (plist-get props :options))
+            (and (not (harness-ui-config--type-is type 'const 'item))
+                 (cl-some (lambda (a) (and (or (consp a) (get a 'widget-type)) (harness-ui-config--form-p a)))
+                          args))))))
+
+(defun harness-ui-config--untagged-format (type)
+  "Return the format of customize TYPE without the tag it starts with.
+The value then follows a name the page writes itself."
+  (let ((format (or (ignore-errors (widget-get (widget-convert type) :format)) "%v"))
+        (case-fold-search nil))
+    (if (string-match "\\`%[{[]?%t%[]}]?:[ ]?" format)
+        (substring format (match-end 0))
+      format)))
+
+(defun harness-ui-config--key-name (key)
+  "Return how KEY, a plist key, reads when its type gives it no name."
+  (capitalize (replace-regexp-in-string "-" " " (string-remove-prefix ":" (format "%s" key)))))
+
+(defun harness-ui-config--option-tag (option)
+  "Return the name of OPTION, a (KEY VALUE-TYPE) of a record, or nil for a flag."
+  (unless (harness-ui-config--type-is (cadr option) 'const)
+    (or (harness-ui-config--type-prop (cadr option) :tag)
+        (harness-ui-config--key-name (car option)))))
+
+(defun harness-ui-config--label-width (options)
+  "Return the width of the longest name of OPTIONS, (KEY VALUE-TYPE) each."
+  (apply #'max 0 (mapcar (lambda (o) (string-width (or (harness-ui-config--option-tag o) "")))
+                         options)))
+
+(defun harness-ui-config--options (props)
+  "Return the options of a plist type with PROPS as (KEY VALUE-TYPE) each."
+  (mapcar (lambda (o) (if (consp o) o (list o (or (plist-get props :value-type) 'sexp))))
+          (plist-get props :options)))
+
+(defun harness-ui-config--present-option (key type width)
+  "Return the line of a record for KEY with a value of TYPE, its name WIDTH wide."
+  (let* ((doc (harness-ui-config--type-prop type :doc))
+         (type (if doc (harness-ui-config--type-put type :doc nil) type))
+         (tag (harness-ui-config--option-tag (list key type)))
+         (format (harness-ui-config--untagged-format type))
+         ;; A value of several lines starts under its name, after the help.
+         (block (and tag (or (harness-ui-config--type-is type 'harness-ui-config-plist)
+                             (string-prefix-p "\n" format)))))
+    `(harness-ui-config-option
+      :doc ,doc :block ,block :key ,key
+      ,(if tag
+           `(const :format ,(concat "%{%t%}:" (make-string (max 0 (- width (string-width tag))) ?\s) " ")
+                   :tag ,tag :sample-face harness-settings-label-face ,key)
+         `(const :format "" ,key))
+      ,(harness-ui-config--type-put type :format (cond ((null tag) "%t\n")
+                                                       (block (string-remove-prefix "\n" format))
+                                                       (t format))))))
+
+(defun harness-ui-config--present-record (props model &optional width)
+  "Return a record type, the plist type with PROPS as the page draws it.
+MODEL is as for `harness-ui-config--present'; WIDTH, when given, is the
+least width of the names."
+  (let* ((options (mapcar (lambda (o) (list (car o) (harness-ui-config--present (cadr o) model)))
+                          (harness-ui-config--options props)))
+         (width (max (or width 0) (harness-ui-config--label-width options)))
+         (rest props) kept)
+    (while rest
+      (unless (memq (car rest) '(:options :key-type :value-type))
+        (setq kept (append kept (list (car rest) (cadr rest)))))
+      (setq rest (cddr rest)))
+    `(harness-ui-config-plist
+      ,@kept
+      (checklist :inline t :greedy t
+                 ,@(mapcar (lambda (o) (harness-ui-config--present-option (car o) (cadr o) width)) options))
+      ;; Keys the type does not name: shown to be removed, never offered.
+      (editable-list :inline t :format "%v" :entry-format "%d %v" :offset 6
+                     (group :inline t :format "%v"
+                            ,(harness-ui-config--present (or (plist-get props :key-type) '(symbol :tag "Other key")) model)
+                            ,(harness-ui-config--present (or (plist-get props :value-type) '(sexp :tag "Value")) model))))))
+
+(defun harness-ui-config--present-entry (type model)
+  "Return TYPE, an entry of a list, as the page draws it: a record folds.
+MODEL is as for `harness-ui-config--present'."
+  (let ((presented (harness-ui-config--present type model)))
+    (if (harness-ui-config--record-p type)
+        ;; The line the record folds into names it: no tag above the form.
+        `(harness-ui-config-fold :entry-type ,type ,(harness-ui-config--type-put presented :format "%v"))
+      presented)))
+
+(defun harness-ui-config--present-cons (props args model)
+  "Return a cons type with PROPS of ARGS, a name and a record, lined up.
+The name's value starts where the record's values do.  MODEL is as for
+`harness-ui-config--present'."
+  (pcase-let* ((`(,car-type ,cdr-type) args)
+               (tag (harness-ui-config--type-prop car-type :tag))
+               (record-props (nth 1 (harness-ui-config--type-split cdr-type)))
+               (width (max (- (string-width (or tag "")) 4)
+                           (harness-ui-config--label-width (harness-ui-config--options record-props)))))
+    (harness-ui-config--type-join
+     'cons props
+     (list (if (and tag (equal (harness-ui-config--untagged-format car-type) "%v"))
+               (harness-ui-config--type-put
+                (harness-ui-config--type-put (harness-ui-config--present car-type model)
+                                             :format (concat "%{%t%}:" (make-string (- (+ width 4) (string-width tag)) ?\s)
+                                                             " %v"))
+                :sample-face 'harness-settings-label-face)
+             (harness-ui-config--present car-type model))
+           ;; The record's keys follow the name, without a tag of their own.
+           (harness-ui-config--type-put (harness-ui-config--present-record record-props model width)
+                                        :format "%v")))))
+
+(defun harness-ui-config--present (type &optional model)
+  "Return customize TYPE the way the settings page draws it.
+MODEL non-nil completes model ids in its text fields.  The type accepts
+the same values: only the look changes (see the commentary of this
+section)."
+  (pcase-let ((`(,name ,props ,args) (harness-ui-config--type-split type)))
+    (cond
+     ((and (harness-ui-config--type-is type 'plist) (plist-get props :options))
+      (harness-ui-config--present-record props model))
+     ((and (eq name 'cons) (= (length args) 2) (not (harness-ui-config--record-p (car args)))
+           (harness-ui-config--record-p (cadr args)))
+      (harness-ui-config--present-cons props args model))
+     ((harness-ui-config--type-is type 'editable-list)
+      (harness-ui-config--type-join name props (mapcar (lambda (a) (harness-ui-config--present-entry a model))
+                                                       args)))
+     ((harness-ui-config--type-is type 'plist 'alist)
+      (let ((props (copy-sequence props)))
+        (dolist (k '(:key-type :value-type))
+          (when (plist-get props k)
+            (setq props (plist-put props k (harness-ui-config--present (plist-get props k) model)))))
+        (harness-ui-config--type-join name props args)))
+     ((harness-ui-config--type-is type 'boolean)
+      (harness-ui-config--type-join name (append (list :on "on" :off "off") props) args))
+     ((and model (harness-ui-config--type-is type 'string) (not (plist-get props :completions)))
+      (harness-ui-config--type-put type :completions (harness-ui-config--model-ids)))
+     ((harness-ui-config--type-is type 'menu-choice 'radio-button-choice 'group 'checklist)
+      (harness-ui-config--type-join name props (mapcar (lambda (a) (harness-ui-config--present a model)) args)))
+     (t type))))
+
+;;;;; Records
+
+(define-widget 'harness-ui-config-plist 'list
+  "A record on the settings page: a line for each key its type names.
+Made by `harness-ui-config--present-record'."
+  :value-create #'harness-ui-config--plist-value-create
+  :default-get #'ignore)
+
+(defun harness-ui-config--plist-value-create (widget)
+  "Insert record WIDGET, without the indentation of an empty last line."
+  (widget-group-value-create widget)
+  (when (save-restriction (widen) (looking-back "^ +" (line-beginning-position)))
+    (delete-region (match-beginning 0) (point))))
+
+(define-widget 'harness-ui-config-option 'group
+  "A key of a record on the settings page: its name, value and help."
+  :inline t
+  :format "%v"
+  :value-create #'harness-ui-config--option-value-create
+  :match-inline #'harness-ui-config--option-match-inline)
+
+(defun harness-ui-config--option-match-inline (widget values)
+  "Claim the key WIDGET names at the head of VALUES, whatever its value.
+A key with a value of another type stays the key, drawn with help on
+fixing it, rather than falling to the record's other keys."
+  (if (equal (car values) (widget-get widget :key))
+      (cons (list (car values) (cadr values)) (cddr values))
+    nil))
+
+(defun harness-ui-config--insert-help (text column)
+  "Insert TEXT, the help of a key, as lines indented to COLUMN."
+  (dolist (line (split-string text "\n"))
+    (insert (make-string column ?\s) (propertize line 'face 'harness-settings-doc-face) "\n")))
+
+(defun harness-ui-config--widget-type (type)
+  "Return customize TYPE as a widget to make a child from.
+A type that is only a name is converted; `widget-create-child-value'
+needs a converted widget, not a symbol."
+  (if (symbolp type) (widget-convert type) type))
+
+(defun harness-ui-config--lisp-widget ()
+  "Return the widget a value of another type than its key's is kept in.
+A plain one: the value shows as it is, without the sexp editor's
+\"Lisp expression\" tag."
+  (widget-convert 'sexp :format "%v"))
+
+(defun harness-ui-config--option-value-create (widget)
+  "Insert option WIDGET: the key's name and value, and its help.
+The help of a value of several lines comes before it, under the name.
+A value of another type than the key's keeps its own plain editor, so
+it is never lost by editing the rest of the record."
+  (let* ((column (+ 2 (save-restriction (widen) (current-column))))
+         (doc (widget-get widget :doc))
+         (value (widget-get widget :value))
+         (given (and (consp value) (eq (car value) (widget-get widget :key))))
+         (raw (cadr value))
+         (key-type (nth 0 (widget-get widget :args)))
+         (value-type (nth 1 (widget-get widget :args)))
+         (shown (harness-ui-config--false-nil raw))
+         (fits (and given (harness-ui-config--fits-p value-type shown)))
+         (key-widget (if given (widget-create-child-value widget key-type (car value))
+                       (widget-create-child widget key-type))))
+    (when (< (widget-get key-widget :from) (widget-get key-widget :to))
+      (put-text-property (widget-get key-widget :from) (widget-get key-widget :to) 'help-echo
+                         (format "%s in Lisp" (widget-get widget :key))))
+    (when (and doc (widget-get widget :block))
+      (insert "\n")
+      (harness-ui-config--insert-help doc column)
+      (setq doc nil))
+    (widget-put widget :children
+                (list key-widget
+                      (condition-case nil
+                          (cond ((and given fits)
+                                 (widget-create-child-value widget (harness-ui-config--widget-type value-type) shown))
+                                (given (widget-create-child-value widget (harness-ui-config--lisp-widget) raw))
+                                (t (widget-create-child widget (harness-ui-config--widget-type value-type))))
+                        (error (widget-create-child-value widget (harness-ui-config--lisp-widget) raw)))))
+    (when doc
+      (unless (bolp) (insert "\n"))
+      (harness-ui-config--insert-help doc column))
+    (when (and given (not fits))
+      (unless (bolp) (insert "\n"))
+      (insert (make-string column ?\s)
+              (propertize (format "Kept as Lisp: it does not fit %s."
+                                  (or (harness-ui-config--type-prop value-type :tag)
+                                      (harness-ui-config--key-name (widget-get widget :key))))
+                          'face 'warning)
+              "\n"))))
+
+;;;;; Folded records
+
+(define-widget 'harness-ui-config-fold 'default
+  "A record in a list on the settings page: one line until opened.
+Its only argument is the record's type as drawn; `:entry-type' is its
+customize type, which sums the record up."
+  :format "%v"
+  :convert-widget #'widget-types-convert-widget
+  :copy #'widget-types-copy
+  :value-create #'harness-ui-config--fold-value-create
+  :value-delete #'widget-children-value-delete
+  :value-get #'harness-ui-config--fold-value-get
+  :default-get #'harness-ui-config--fold-default-get
+  :validate #'harness-ui-config--fold-validate
+  :match #'harness-ui-config--fold-match)
+
+(defun harness-ui-config--setting-of (widget)
+  "Return the setting widget WIDGET is part of, or nil."
+  (while (and widget (not (eq (widget-type widget) 'harness-ui-config-setting)))
+    (setq widget (widget-get widget :parent)))
+  widget)
+
+(defun harness-ui-config--setting-key-of (widget)
+  "Return the key of the setting WIDGET is part of, or nil."
+  (when-let* ((setting (harness-ui-config--setting-of widget)))
+    (widget-get setting :key)))
+
+(defun harness-ui-config--mark-setting (setting)
+  "Mark the text of SETTING, a setting widget, as its setting's.
+Text a widget inserts after the page is drawn (a record opened, an
+entry added) lacks the mark the page's commands find settings by."
+  (let ((from (widget-get setting :from))
+        (to (widget-get setting :to)))
+    (when (and (markerp from) (marker-buffer from) (< from to))
+      (with-silent-modifications
+        (put-text-property from to 'harness-ui-config-key (widget-get setting :key))))))
+
+(defun harness-ui-config--nested-fold-p (widget)
+  "Non-nil when WIDGET is a record within another record."
+  (let ((parent (widget-get widget :parent)) found)
+    (while (and parent (not found))
+      (setq found (eq (widget-type parent) 'harness-ui-config-fold)
+            parent (widget-get parent :parent)))
+    found))
+
+(defun harness-ui-config--fold-open-p (widget)
+  "Non-nil when record WIDGET is drawn open.
+A record drawn with the page is open when it was before; one added
+since, with [INS], starts open, and one within another record folded."
+  (pcase (widget-get widget :open)
+    ('yes t)
+    ('no nil)
+    (_ (or (and (member (cons (harness-ui-config--setting-key-of widget) (widget-get widget :value))
+                         harness-ui-config--open-folds)
+                t)
+           (and (not harness-ui-config--drawing)
+                (not (harness-ui-config--nested-fold-p widget)))))))
+
+(defun harness-ui-config--summary-width ()
+  "Return the columns the summary of a record may take on its line, from point."
+  (let ((window (get-buffer-window (current-buffer) t)))
+    (max 40 (- (if window (window-body-width window) 100)
+               (save-restriction (widen) (current-column))
+               10))))
+
+(defun harness-ui-config--fold-value-create (widget)
+  "Insert record WIDGET: the line summing it up, then its form when open."
+  (let* ((value (widget-get widget :value))
+         (open (harness-ui-config--fold-open-p widget)))
+    (widget-put widget :open (if open 'yes 'no))
+    (cl-pushnew widget harness-ui-config--folds :test #'eq)
+    (insert (harness-ui-config--summary (widget-get widget :entry-type) value
+                                        (harness-ui-config--summary-width))
+            "  ")
+    (widget-put widget :buttons
+                (list (widget-create-child-and-convert
+                       widget 'push-button
+                       :help-echo (if open "Fold this entry into its line" "Show every key of this entry")
+                       :notify #'harness-ui-config--fold-toggle
+                       (if open "Hide" "Edit"))))
+    (insert "\n")
+    (when open
+      (widget-put widget :children
+                  (list (widget-create-child-value widget (car (widget-get widget :args)) value))))))
+
+(defun harness-ui-config--fold-toggle (button &rest _)
+  "Open or fold the record of BUTTON, once the widget library is done with it."
+  (let ((fold (widget-get button :parent))
+        (buffer (current-buffer)))
+    (harness-run-soon
+     (lambda ()
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (when (markerp (widget-get fold :from))
+             (let ((bad (widget-apply fold :validate)))
+               (if bad
+                   (message "%s" (or (widget-get bad :error) "This entry holds an invalid value"))
+                 (widget-put fold :open (if (eq (widget-get fold :open) 'yes) 'no 'yes))
+                 (widget-value-set fold (widget-value fold))
+                 (widget-setup)
+                 (harness-ui-config--install-field-map)
+                 (when-let* ((setting (harness-ui-config--setting-of fold)))
+                   (harness-ui-config--mark-setting setting)))))))))))
+
+(defun harness-ui-config--fold-value-get (widget)
+  "Return the value of record WIDGET: its form's when open."
+  (if-let* ((child (car (widget-get widget :children))))
+      (widget-value child)
+    (widget-get widget :value)))
+
+(defun harness-ui-config--fold-default-get (widget)
+  "Return the value a new record of WIDGET's type starts with."
+  (widget-default-get (car (widget-get widget :args))))
+
+(defun harness-ui-config--fold-validate (widget)
+  "Return the widget of record WIDGET that holds no valid value, or nil."
+  (if-let* ((child (car (widget-get widget :children))))
+      (widget-apply child :validate)
+    (unless (widget-apply (car (widget-get widget :args)) :match (widget-get widget :value))
+      (widget-put widget :error "This entry holds an invalid value")
+      widget)))
+
+(defun harness-ui-config--fold-match (widget value)
+  "Non-nil when VALUE fits the type of record WIDGET."
+  (widget-apply (car (widget-get widget :args)) :match value))
+
+(defun harness-ui-config--note-open-folds ()
+  "Remember which records are open, to draw them open again.
+Without records on the page (a second snapshot before one redraw, or
+the other scope's page), what was noted before stays."
+  (when harness-ui-config--folds
+    (setq harness-ui-config--open-folds
+          (cl-loop for fold in harness-ui-config--folds
+                   when (and (eq (widget-get fold :open) 'yes)
+                             (markerp (widget-get fold :from))
+                             (marker-buffer (widget-get fold :from)))
+                   collect (cons (harness-ui-config--setting-key-of fold)
+                                 (condition-case nil (widget-value fold) (error nil))))
+          harness-ui-config--folds nil)))
+
+;;;;; Summaries
+
+(defun harness-ui-config--short-number (n)
+  "Return number N written short: thousands grouped, as 128,000."
+  (if (and (integerp n) (>= (abs n) 10000))
+      (let ((digits (number-to-string (abs n))) parts)
+        (while (> (length digits) 3)
+          (push (substring digits -3) parts)
+          (setq digits (substring digits 0 -3)))
+        (concat (if (< n 0) "-" "") (string-join (cons digits parts) ",")))
+    (format "%s" n)))
+
+(defun harness-ui-config--short (type value)
+  "Return VALUE of customize TYPE in a few words."
+  (pcase-let ((`(,_ ,props ,args) (harness-ui-config--type-split type)))
+    (cond
+     ((harness-ui-config--type-is type 'const 'item)
+      (or (plist-get props :tag) (format "%s" value)))
+     ((harness-ui-config--type-is type 'menu-choice 'radio-button-choice)
+      (or (cl-loop for a in args
+                   when (harness-ui-config--fits-p a value)
+                   return (harness-ui-config--short a value))
+          (format "%S" value)))
+     ((harness-ui-config--type-is type 'boolean) (if value "on" "off"))
+     ((harness-ui-config--record-p type) (harness-ui-config--summary type value nil t))
+     ((and (harness-ui-config--type-is type 'editable-list) (harness-ui-config--record-p (car args))
+           (listp value))
+      (mapconcat (lambda (v) (harness-ui-config--record-name (car args) v)) value ", "))
+     ((numberp value) (harness-ui-config--short-number value))
+     ((stringp value) value)
+     ((and value (listp value) (cl-every #'atom value))
+      (mapconcat (lambda (v) (format "%s" v)) value ", "))
+     ((symbolp value) (symbol-name value))
+     (t (let ((print-length 4) (print-level 2)) (prin1-to-string value))))))
+
+(defun harness-ui-config--false-nil (value)
+  "Return VALUE as Lisp: the JSON false `:false' is nil here.
+The harness reads `:false' and nil alike, so a setting that carries
+one must still be savable."
+  (if (eq value :false) nil value))
+
+(defun harness-ui-config--record-name (type value)
+  "Return the name of VALUE, a record of customize TYPE.
+That is the value of its first key, or the car of a cons."
+  (pcase-let ((`(,name ,props ,args) (harness-ui-config--type-split
+                                      (harness-ui-config--match-type type value))))
+    (if (eq name 'cons)
+        (harness-ui-config--short (car args) (car-safe value))
+      (let ((first (car (harness-ui-config--options props))))
+        (if (and first (listp value) (plist-member value (car first)))
+            (harness-ui-config--short (cadr first) (plist-get value (car first)))
+          "?")))))
+
+(defun harness-ui-config--summary-parts (type value named nested)
+  "Return the parts that sum up VALUE, a record of customize TYPE.
+NAMED non-nil: the record's first key is its name, which comes first,
+bold.  Then each key it has: text as it is (unless NESTED, within
+another record), flags by their tag, the rest after the key's name."
+  (let ((props (nth 1 (harness-ui-config--type-split type))))
+    (cl-loop for (key vtype) in (harness-ui-config--options props)
+             for first = named then nil
+             when (and (listp value) (plist-member value key))
+             collect (let* ((v (plist-get value key))
+                            (short (harness-ui-config--short vtype v))
+                            (tag (harness-ui-config--option-tag (list key vtype))))
+                       (cond (first (propertize short 'face 'harness-settings-label-face))
+                             ((null tag) short)
+                             ;; Text, and a value picked from a menu or
+                             ;; named by a tag, read well as they are.
+                             ((and (not nested)
+                                   (or (stringp v)
+                                       (harness-ui-config--type-is vtype 'const 'menu-choice
+                                                                   'radio-button-choice)))
+                              short)
+                             (t (concat tag " " short)))))))
+
+(defun harness-ui-config--summary (type value &optional width nested)
+  "Return the line that sums up VALUE, a record of customize TYPE.
+The record's name (its first key, or the car of a cons) comes first,
+then what `harness-ui-config--summary-parts' says of each key.  WIDTH,
+when given, is the most columns it may take.  NESTED non-nil sums up a
+record within another: no name, and commas between the keys."
+  (pcase-let* ((type (harness-ui-config--match-type type value))
+               (`(,name ,_ ,args) (harness-ui-config--type-split type))
+               (parts (if (eq name 'cons)
+                          (cons (propertize (harness-ui-config--short (car args) (car-safe value))
+                                            'face 'harness-settings-label-face)
+                                (harness-ui-config--summary-parts (cadr args) (cdr-safe value) nil nil))
+                        (harness-ui-config--summary-parts type value (not nested) nested)))
+               (text (replace-regexp-in-string
+                      "\n" " " (string-join (cl-remove-if #'string-empty-p parts)
+                                            (if nested ", " " · ")))))
+    (if width (truncate-string-to-width text width nil nil "…") text)))
 
 (defun harness-ui-config--install-field-map ()
   "Give every text field of the page `harness-ui-config-field-map'.
@@ -407,12 +969,34 @@ widget library is done with the button, which would be gone."
                    label)))
 
 (defun harness-ui-config--insert-doc (setting)
-  "Insert the documentation of SETTING, indented."
-  (let ((doc (string-trim (or (ignore-errors (substitute-command-keys (plist-get setting :doc)))
-                              (plist-get setting :doc) ""))))
+  "Insert the documentation of SETTING, indented.
+A setting drawn as a form, whose keys have help of their own, shows the
+first line of it and [More] for the rest."
+  (let* ((key (plist-get setting :key))
+         (doc (string-trim (or (ignore-errors (substitute-command-keys (plist-get setting :doc)))
+                               (plist-get setting :doc) "")))
+         (lines (split-string doc "\n"))
+         (foldable (and (cdr lines) (harness-ui-config--true (plist-get setting :editable))
+                        (harness-ui-config--form-p (harness-ui-config--type setting))))
+         (shown (member key harness-ui-config--docs-shown)))
     (unless (string-empty-p doc)
-      (dolist (line (split-string doc "\n"))
-        (insert "    " (propertize line 'face 'harness-settings-doc-face) "\n")))))
+      (insert "    " (propertize (car lines) 'face 'harness-settings-doc-face))
+      (when foldable
+        (insert "  ")
+        (harness-ui-config--button (if shown "Less" "More")
+                                   (if shown "Show the first line of the documentation only"
+                                     "Show the whole documentation")
+                                   (lambda ()
+                                     (setq harness-ui-config--docs-shown
+                                           (if (member key harness-ui-config--docs-shown)
+                                               (delete key harness-ui-config--docs-shown)
+                                             (cons key harness-ui-config--docs-shown)))
+                                     (harness-ui-config--render))
+                                   t))
+      (insert "\n")
+      (when (or shown (not foldable))
+        (dolist (line (cdr lines))
+          (insert "    " (propertize line 'face 'harness-settings-doc-face) "\n"))))))
 
 (defun harness-ui-config--dir-label (dir)
   "Return DIR relative to the page's project root when inside it."
@@ -529,16 +1113,13 @@ ORIGINAL is the value saved in the page's scope."
   (let* ((key (plist-get setting :key))
          ;; The saved value picks the editor, so an edit never changes it.
          (fits (harness-ui-config--fits-p type original))
-         (edit-type (if fits type 'sexp))
-         (args (append
-                (and (eq edit-type 'boolean) (list :on "on" :off "off"))
-                ;; M-TAB completes model ids from the catalogue.
-                (and (eq edit-type 'string) (string-suffix-p "-model" key)
-                     (list :completions (harness-ui-config--model-ids)))))
-         (widget (widget-create 'harness-ui-config-setting
-                                :key key :tag label :edit-type edit-type :edit-args args
-                                :value value :original original
-                                :discrete (and fits (harness-ui-config--discrete-p type)))))
+         ;; M-TAB completes model ids from the catalogue in a model setting.
+         (edit-type (if fits (harness-ui-config--present type (string-suffix-p "-model" key)) 'sexp))
+         (widget (let ((harness-ui-config--drawing t))
+                   (widget-create 'harness-ui-config-setting
+                                  :key key :tag label :edit-type edit-type
+                                  :value value :original original
+                                  :discrete (and fits (harness-ui-config--discrete-p type))))))
     (unless (bolp) (insert "\n"))
     (push (cons key widget) harness-ui-config--widgets)
     ;; Only the harness can tell: a type may name functions defined there alone.
@@ -683,7 +1264,7 @@ ORIGINAL is the value saved in the page's scope."
     (erase-buffer))
   (remove-overlays)
   (setq widget-field-new nil widget-field-list nil widget-field-last nil widget-field-was nil
-        harness-ui-config--widgets nil)
+        harness-ui-config--widgets nil harness-ui-config--folds nil)
   (clrhash harness-ui-config--overlays))
 
 (defun harness-ui-config--render ()
@@ -807,7 +1388,16 @@ FACE defaults to `harness-label-face'."
      (lambda (_)
        (when (buffer-live-p buf)
          (with-current-buffer buf
-           (remhash (harness-ui-config--edit-key key scope) harness-ui-config--edited)
+           (let* ((widget (harness-ui-config--widget key))
+                  (current (and widget (ignore-errors (harness-ui-config--widget-value widget)))))
+             ;; The widget holds what was saved, so a change that
+             ;; arrives before the redraw is not a new edit; one made
+             ;; while the save was on its way still is.
+             (when (and widget (equal current value))
+               (widget-put widget :original value)
+               (remhash (harness-ui-config--edit-key key scope) harness-ui-config--edited))
+             (unless widget
+               (remhash (harness-ui-config--edit-key key scope) harness-ui-config--edited)))
            (harness-ui-config--set-state key nil scope)
            (harness-ui-config--reload-soon buf))))
      (lambda (e)

@@ -203,6 +203,14 @@ ON-EVENT, when given, is called with each event as well."
 
 ;;;; Framing and conversions
 
+(ert-deftest harness-provider-copilot-registration ()
+  "The provider is registered with the tiers the judge picks from."
+  (harness-provider-copilot-test--setup)
+  (let ((provider (harness-provider-get 'copilot)))
+    (should provider)
+    (should (equal harness-provider-copilot-tiers (harness-provider-tiers provider)))
+    (should (plist-get (harness-provider-capabilities provider) :hosted-loop))))
+
 (ert-deftest harness-provider-copilot-framing ()
   "Messages are framed by byte length and survive any split."
   (harness-provider-copilot-test--setup)

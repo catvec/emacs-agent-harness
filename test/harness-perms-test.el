@@ -3,6 +3,8 @@
 
 (require 'harness-test-helpers)
 
+(defvar harness-providers)
+
 (defvar harness-perms-test--session nil
   "Plist returned by the fake `session/get'.")
 
@@ -274,6 +276,44 @@
     (let ((d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
       (should (eq 'allow (plist-get d :behavior)))
       (should (equal "harmless" (plist-get d :reason))))))
+
+(ert-deftest harness-perms-auto-model-takes-the-providers-cheap-tier ()
+  "`harness-perms-auto-model' `auto' judges with the session provider's cheap tier.
+A model named by the provider's `:tiers' is used; an explicit model wins."
+  (harness-perms-test--setup :permission-mode 'auto :model "judge2:big")
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let ((requests nil))
+    (harness-define-provider 'judge2
+      :label "Judge 2"
+      :models (lambda () (harness-resolved
+                          (list (list :name "big" :pricing '(:input 10.0 :output 50.0))
+                                (list :name "small" :pricing '(:input 1.0 :output 5.0))
+                                (list :name "mid" :pricing '(:input 3.0 :output 15.0)))))
+      ;; Not the cheapest: the declared tier is what decides.
+      :tiers '(:cheap "mid")
+      :complete (lambda (req)
+                  (push req requests)
+                  (let ((cb (plist-get req :on-event)))
+                    (run-at-time 0.01 nil (lambda ()
+                                            (funcall cb (list :type 'text :delta "{\"decision\":\"allow\",\"reason\":\"fine\"}"))
+                                            (funcall cb '(:type done :stop-reason end-turn)))))
+                  (list :cancel #'ignore)))
+    (unwind-protect
+        (progn
+          ;; The symbol and the string `auto' (as config JSON gives it).
+          (dolist (choice (list 'auto "auto"))
+            (setq requests nil)
+            (let ((harness-perms-auto-model choice))
+              (should (eq 'allow (plist-get (harness-perms-test--decide
+                                             (harness-perms-test--request "t_exec" 'exec))
+                                            :behavior)))
+              (should (equal "judge2:mid" (plist-get (car requests) :model)))))
+          ;; An explicit model wins.
+          (setq requests nil)
+          (let ((harness-perms-auto-model "judge2:big"))
+            (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))
+            (should (equal "judge2:big" (plist-get (car requests) :model)))))
+      (remhash 'judge2 harness-providers))))
 
 (ert-deftest harness-perms-auto-mode-falls-back-to-ask ()
   (harness-perms-test--setup :permission-mode 'auto)
@@ -1039,6 +1079,18 @@ for a request without a session record."
             (should (string-match-p "worktree/prune" (plist-get r :content)))))
         (should-not ran))
     (harness-sandbox-detect)))
+
+(ert-deftest harness-perms-rules-type-names-every-key ()
+  "The settings page offers each part of a standing rule by name."
+  (require 'harness-test-helpers)
+  (let ((type (cadr (get 'harness-perms-rules 'custom-type))))
+    (should (equal '(:tool :kind :behavior) (harness-test-option-keys type)))
+    (harness-test-check-record-type type)
+    (should (harness-test-fits-p type '(:tool "web_search" :behavior deny)))
+    (should (harness-test-fits-p type '(:kind read :behavior allow)))
+    (should (harness-test-fits-p type '(:behavior "deny")))
+    (should (harness-test-fits-p (get 'harness-perms-rules 'custom-type)
+                                 '((:tool "bash" :kind exec :behavior deny) (:behavior allow))))))
 
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here

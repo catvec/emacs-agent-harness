@@ -217,15 +217,30 @@ when DAYS is `business'."
 
 ;;;; Pricing
 
-(harness-defmethod usage/price (model-id usage)
+(defun harness-usage--pricing-at (model usage at)
+  "Return the pricing plist to price USAGE on MODEL at time AT.
+A model with `:pricing-fn' asks it, passing MODEL, USAGE and AT; the
+function returns a pricing plist, or nil for a model that has none.
+Any other model uses its static `:pricing'.  This is how a provider
+whose rates change with the clock (DeepSeek's peak and off-peak tiers)
+still records an accurate cost."
+  (let ((fn (plist-get model :pricing-fn)))
+    (cond ((null fn) (plist-get model :pricing))
+          ((symbolp fn) (and (fboundp fn) (funcall fn model usage at)))
+          ((functionp fn) (funcall fn model usage at))
+          (t (plist-get model :pricing)))))
+
+(harness-defmethod usage/price (model-id usage &optional at)
   "Return the USD cost of USAGE on MODEL-ID.
 USAGE has :input :output :cache-read :cache-write token counts; the
-model's `:pricing' is USD per million tokens.  A model without pricing
-costs 0 (logged at debug level) and a catalogue refresh is requested
-once so later calls can be priced."
+model's `:pricing' is USD per million tokens.  A model whose
+`:pricing-fn' answers uses the rates it returns for AT (default now),
+so time-of-day pricing is honoured.  A model without pricing costs 0
+\(logged at debug level) and a catalogue refresh is requested once so
+later calls can be priced."
   (let* ((model (and (harness-method-exists-p 'provider/model)
                      (harness-call 'provider/model model-id)))
-         (pricing (plist-get model :pricing)))
+         (pricing (and model (harness-usage--pricing-at model usage (or at (float-time))))))
     (if (null pricing)
         (progn
           (harness-log 'debug "usage: no pricing for %s; cost recorded as 0" model-id)

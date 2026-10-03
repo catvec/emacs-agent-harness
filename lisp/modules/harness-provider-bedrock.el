@@ -64,12 +64,54 @@ An endpoint's `:prompt-caching' overrides this."
   "Thinking token budget per thinking level, for models that take a budget.
 Claude 3.7 to 4.5 think within a fixed budget; newer Claude models
 think adaptively at an effort level named like the thinking level."
-  :type '(alist :key-type string :value-type integer) :group 'harness)
+  :type '(alist :key-type (string :tag "Thinking level" :value "high")
+                :value-type (integer :tag "Budget (tokens)" :value 16000))
+  :group 'harness)
 
 (defcustom harness-bedrock-max-retries 3
   "Times a throttled or unavailable request is retried before it fails.
 Only a request that has not streamed anything yet is retried."
   :type 'integer :group 'harness)
+
+(defcustom harness-bedrock-tiers
+  '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
+  "Model names or id regexps Bedrock names for the common tiers.
+A model of the endpoint's catalogue matching the value is used: the
+cheapest `haiku', say, for `cheap'.  The auto-mode judge runs on the
+`cheap' one.  A tier nothing matches falls back to the catalogue's
+prices."
+  :type harness-provider-tiers-type :group 'harness)
+
+(defconst harness-bedrock--model-defaults-type
+  `(repeat
+    (cons :tag "Model family"
+          ;; A new family starts small; its regexp is for the user to write.
+          :value ("model-id-regexp" :context-window 128000 :max-output 8192)
+          (regexp :tag "Model ids matching" :value "model-id-regexp")
+          (plist :tag "Defaults"
+                 :options
+                 ((:context-window (integer :tag "Context window" :value 128000
+                                            :doc "Tokens the model accepts: input plus output."))
+                  (:max-output (integer :tag "Max output" :value 8192
+                                        :doc "Most output tokens per request."))
+                  (:input-modalities ,harness-provider-modalities-type)
+                  (:thinking (choice :tag "Thinking" :value adaptive
+                                     :doc "How the model thinks at the session's thinking level."
+                                     (const :tag "Adaptive" :menu-tag "Adaptive: at an effort level" adaptive)
+                                     (const :tag "Adaptive only"
+                                            :menu-tag "Adaptive only: always thinks, at an effort level"
+                                            adaptive-only)
+                                     (const :tag "Budget" :menu-tag "Budget: within a token budget (Thinking budgets)"
+                                            budget)))
+                  (:thinks-by-default (const :tag "Thinks unless told not to (adaptive models)" t))
+                  (:thinking-levels ,harness-provider-thinking-levels-type)
+                  (:prompt-caching (const :tag "Takes prompt cache points" t))
+                  (:pricing ,harness-provider-pricing-type)
+                  (:request-fields (plist :tag "Request fields"
+                                          :key-type (symbol :tag "Field" :value :field)
+                                          :value-type (sexp :tag "Value")
+                                          :doc "Merged into each request's additionalModelRequestFields."))))))
+  "Customize type of `harness-bedrock-model-defaults'.")
 
 (defcustom harness-bedrock-model-defaults
   '(("claude-fable-5" :context-window 1000000 :max-output 128000 :thinking adaptive-only
@@ -172,7 +214,7 @@ keys:
 
 Models nothing matches get the endpoint's `:default-context' and no
 price, so their calls are recorded without a cost."
-  :type '(repeat (cons regexp (plist :key-type symbol :value-type sexp)))
+  :type harness-bedrock--model-defaults-type
   :group 'harness)
 
 (defvar harness-bedrock--registered nil
@@ -199,6 +241,83 @@ must go back unchanged while the tool loop continues.")
   (set-default symbol value)
   (when (fboundp 'harness-bedrock--register-all)
     (harness-bedrock--register-all)))
+
+(defconst harness-bedrock--endpoint-type
+  `(plist
+    :tag "Endpoint"
+    ;; A new endpoint starts as a second AWS profile.
+    :value (:id bedrock-work :label "AWS Bedrock (work)" :profile "work")
+    :options
+    ((:id (symbol :tag "ID" :value bedrock-work
+                  :doc "Names the provider: its models are ID:MODEL-ID.
+Lower-case letters, digits, - and _."))
+     (:label (string :tag "Label" :value "AWS Bedrock"
+                     :doc "Name of the provider in the model picker."))
+     (:region (string :tag "Region" :value "us-east-1"
+                      :doc "AWS region.  When not set: AWS_REGION, AWS_DEFAULT_REGION, the
+profile's region, then us-east-1."))
+     (:profile (string :tag "Profile" :value "default"
+                       :doc "AWS profile that holds the keys.  When not set: AWS_PROFILE, then
+\"default\".  Naming one here wins over the environment."))
+     (:auth (choice :tag "Authentication" :value sigv4
+                    :doc "Which keys requests are signed with."
+                    (const :tag "Automatic" :menu-tag "Automatic: an API key, else AWS keys" nil)
+                    (const :tag "AWS keys" :menu-tag "AWS keys (Signature Version 4)" sigv4)
+                    (const :tag "API key" :menu-tag "Bedrock API key (bearer token)" bearer)
+                    (const :tag "None" :menu-tag "None: the gateway authenticates (see Headers)" none)))
+     (:bearer-token-env (string :tag "API key variable" :value "AWS_BEARER_TOKEN_BEDROCK"
+                                :doc "Environment variable that holds a Bedrock API key."))
+     (:endpoint-url (string :tag "Runtime URL" :value "https://bedrock-runtime.us-east-1.amazonaws.com"
+                            :doc "For a gateway, proxy or VPC endpoint: where requests go instead
+of https://bedrock-runtime.REGION.amazonaws.com.  A path prefix is
+kept.  AWS_ENDPOINT_URL_BEDROCK_RUNTIME when not set."))
+     (:control-url (string :tag "Listing URL" :value "https://bedrock.us-east-1.amazonaws.com"
+                           :doc "Where models are listed instead of
+https://bedrock.REGION.amazonaws.com.  AWS_ENDPOINT_URL_BEDROCK when
+not set."))
+     (:headers (alist :tag "Headers" :key-type (string :tag "Header") :value-type (string :tag "Value")
+                      :doc "Extra request headers.  They replace headers of the same name and
+are not signed."))
+     (:auth-source-host (string :tag "auth-source host" :value "bedrock-runtime.us-east-1.amazonaws.com"
+                                :doc "Host the keys are looked up under in auth-source; the runtime URL's
+host when not set."))
+     (:credentials (function :tag "Credentials function"
+                             :doc "A function of no arguments returning, or returning a promise of,
+(:access-key-id :secret-access-key :session-token :expiration)
+or (:bearer-token TOKEN)."))
+     (:signing-service (string :tag "Signing service" :value "bedrock"
+                               :doc "Service name of Signature Version 4."))
+     (:signing-region (string :tag "Signing region" :value "us-east-1"
+                              :doc "Region of Signature Version 4; the endpoint's region when not set."))
+     (:models (repeat :tag "Models"
+                      :doc "Models to offer instead of listing the account's: model ids,
+inference profile ids or ARNs."
+                      (choice :tag "Model" :value "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                              (string :tag "Model id")
+                              ,(harness-provider-model-type
+                                '(:base (string :tag "Foundation model" :value "anthropic.claude-sonnet-4-5-20250929-v1:0"
+                                                :doc "Id of the model behind an inference profile, to find its defaults."))))))
+     (:tiers ,harness-provider-tiers-type)
+     (:list-models (const :tag "Never list the account's models (offer only Models)" nil))
+     (:inference-profiles (const :tag "Leave inference profiles out of the list" nil))
+     (:default-context (integer :tag "Default context" :value 128000
+                                :doc "Context window of the models the model defaults do not know."))
+     (:max-tokens (integer :tag "Max output" :value 32000
+                           :doc "Output token limit of each request; overrides Max tokens."))
+     (:prompt-caching (choice :tag "Prompt caching" :value t
+                              :doc "Replaces the global Prompt caching for this endpoint."
+                              (const :tag "Models that support it" t)
+                              (const :tag "Every model" always)
+                              (const :tag "Never" nil)))
+     (:request-fields (plist :tag "Request fields"
+                             :key-type (symbol :tag "Field" :value :field)
+                             :value-type (sexp :tag "Value")
+                             :doc "Merged into each request's additionalModelRequestFields."))
+     (:capabilities (plist :tag "Capabilities" :value (:vision t :thinking t)
+                           :doc "What the models can do, when the model list does not say."
+                           :options ((:vision (const :tag "Images" t))
+                                     (:thinking (const :tag "Thinking" t)))))))
+  "Customize type of an entry of `harness-bedrock-endpoints'.")
 
 (defcustom harness-bedrock-endpoints
   '((:id bedrock :label "AWS Bedrock"))
@@ -253,7 +372,7 @@ A Bedrock gateway with its own URL and profile, for instance:
 Keys and tokens never go in this variable: the provider reads them from
 the environment, the AWS profile, auth-source or `:credentials'.
 Changing it through customize re-registers the providers."
-  :type '(repeat (plist :key-type symbol :value-type sexp))
+  :type `(repeat ,harness-bedrock--endpoint-type)
   :set #'harness-bedrock--custom-set
   ;; Loading the file again (a reload) keeps the value; the file
   ;; registers the providers itself at its end.
@@ -2048,7 +2167,8 @@ at all (`:no-tools')."
                    (or (ignore-errors (harness-bedrock--runtime-url endpoint)) "?"))
       :models (lambda () (harness-bedrock--models (harness-bedrock-endpoint id)))
       :complete (lambda (request) (harness-bedrock--complete (harness-bedrock-endpoint id) request))
-      :capabilities (or (plist-get endpoint :capabilities) '(:vision t :thinking t)))
+      :capabilities (or (plist-get endpoint :capabilities) '(:vision t :thinking t))
+      :tiers (or (plist-get endpoint :tiers) harness-bedrock-tiers))
     id))
 
 (defun harness-bedrock--register-all ()

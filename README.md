@@ -1,8 +1,8 @@
 # Emacs Agent Harness
 
 Emacs Agent Harness runs AI coding agents in GNU Emacs. It is written
-in Emacs Lisp and supports Claude, GitHub Copilot, OpenAI-compatible
-APIs and AWS Bedrock.
+in Emacs Lisp and supports Claude, GitHub Copilot, DeepSeek,
+OpenAI-compatible APIs and AWS Bedrock.
 
 ![A session beside the code it wrote: the agent read the project, added rate limiting, ran the tests and summed up](docs/media/chat.png)
 
@@ -14,7 +14,7 @@ APIs and AWS Bedrock.
 - **Never blocks your editor.** The harness runs in a separate Emacs
   process, and your Emacs only hosts the UI.
 - **Multiple providers.** Claude through the `claude` CLI (subscription
-  or API key), GitHub Copilot through the `copilot` CLI,
+  or API key), GitHub Copilot through the `copilot` CLI, DeepSeek,
   OpenAI-compatible endpoints, and AWS Bedrock.
 - **Built-in tools.** Tools for files (read, write, edit, search), the
   shell, Emacs (buffers, documentation, `*Messages*`, Emacs Lisp
@@ -70,6 +70,7 @@ Optional dependencies:
 | `rg` (ripgrep) | Faster file search |
 | GitHub Copilot CLI 1.0 or later (`copilot`) | Models of a GitHub Copilot plan |
 | `OPENROUTER_API_KEY` or `OPENAI_API_KEY` | OpenRouter and OpenAI models |
+| `DEEPSEEK_API_KEY` | DeepSeek models, with off-peak pricing tracked |
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
 | `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
 | `ffmpeg`, `mpv` | Audio recording and playback, video thumbnails |
@@ -183,7 +184,9 @@ named by `harness-server-init-file`.
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
+| `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session to it |
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
+| `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
@@ -248,11 +251,16 @@ non-interactive switch or the thinking level to change it. A
 non-interactive session never waits for you, which suits a session you
 leave to work while you are away. Whatever would ask you for
 permission, the auto-mode judge decides instead, whatever the
-permission mode. After any denial the agent is told to find another
+permission mode. The judge runs on the session's own provider: its
+cheap tier (Claude Haiku, DeepSeek Flash, or the cheapest model that
+provider lists), so a session on one provider is never judged through
+another. Set `harness-perms-auto-model` to force one model. After any
+denial the agent is told to find another
 way. Access to directories outside the session's own still needs you,
-so it is denied while you are away. New sessions
-start non-interactive when `harness-non-interactive` is set, and task
-sessions while `harness-tasks-non-interactive` is. From then on each
+so it is denied while you are away. New sessions, task sessions
+included, start interactive unless `harness-non-interactive` is set.
+Setting `harness-tasks-non-interactive` makes every new task session
+start non-interactive. From then on each
 session has its own switch.
 
 Opening an inactive session shows it without resuming it. Its compose
@@ -285,10 +293,16 @@ so several tasks can work in parallel.
   `C-c C-c` to submit it. `C-c C-t` switches the box between **Submit**,
   which starts the task at once, and **Refine**, which has an agent
   write the task up first. A refined task waits in *Pending*, across
-  restarts, until you start it with `s`.
+  restarts, until you start it with `s`. Refining looks at the board
+  first: a task it already has is refused rather than written up (drop
+  it, or write it up anyway), and the write-up names the tasks working
+  on the same code, to coordinate with instead of redoing their work.
 - `C-c h m`, `C-c h T`, `C-c h p` and `C-c h i` set the model, thinking
   level, permission mode and non-interactive mode of the next task, or
-  of the task at point.
+  of the task at point. New tasks run in auto mode and are interactive
+  unless your configuration says otherwise, so a request that needs
+  you, such as access to another directory, waits for you in *Requires
+  your input* instead of being denied.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback.
@@ -302,6 +316,8 @@ so several tasks can work in parallel.
   BTW conversation about the tasks.
 - `RET` opens the session of the task at point. From that session,
   `C-c h a` leads back to the board.
+- A task's session shows in the session list (`C-c h l`) under the
+  task's title, of kind task, until the model names it.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
@@ -365,6 +381,14 @@ project's, and a project's over the global value.
 The settings page lists the other options too; they have a global value
 only.
 
+Settings that hold records — the OpenAI-compatible and Bedrock
+endpoints, Bedrock's per-model defaults, the standing permission rules
+— are edited as forms: every key the harness reads is named (Base URL,
+Context window, Thinking…), has a value of its own kind, and says what
+it is for. Each record in a list folds to one line; `Edit` opens it and
+`INS` adds one, filled in from what that kind of record starts as.
+Model fields complete model ids.
+
 ## Providers and billing
 
 ### Claude
@@ -402,11 +426,59 @@ API as a provider, with models named `ID:MODEL`. OpenRouter
 (`OPENROUTER_API_KEY`) and OpenAI (`OPENAI_API_KEY`) are configured by
 default.
 
+### DeepSeek
+
+Set `DEEPSEEK_API_KEY` (or `harness-deepseek-api-key`, or an
+auth-source entry for `api.deepseek.com`) and `deepseek:` models appear
+in the model picker. The provider is created when a key is found and
+removed when none is; `harness-deepseek-always-register` keeps it
+regardless. Models are `deepseek-flash` (V4.1 Flash, text and images),
+`deepseek-v4-pro` and the still-accepted legacy names
+`deepseek-v4-flash` and `deepseek-v4-flash-vision-exp`.
+
+DeepSeek prices by the clock: peak hours (01:00-04:00 and 06:00-10:00
+UTC, Monday to Friday, except Chinese public holidays) cost double the
+off-peak rate. The recorded cost follows the rate in effect and cached
+input is billed at the cheaper cache-hit rate. When a call is made in a
+peak window, the session is told once, as a hint, and a
+`provider/pricing-warning` event fires; nothing is blocked.
+`harness-deepseek-pricing` holds the rates, so update it from the
+[DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing)
+when they change, and extend `harness-deepseek-off-peak-dates` each year
+with the Chinese public holiday calendar.
+
+DeepSeek's thinking mode (on by default) requires the reasoning of
+earlier assistant turns to come back as `reasoning_content` once a
+request carries tools, so the provider replays the recorded thinking of
+each assistant message, empty when it has none; OpenAI and OpenRouter
+are unaffected and still drop thinking.
+
 ### AWS Bedrock
 
 `bedrock:` models run on AWS Bedrock and authenticate with an AWS
 profile or a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`). See
 `harness-bedrock-endpoints` for the configuration.
+
+### Switching model or provider
+
+`C-c h m` (`harness-set-model`) chooses the model for the current
+session, and `C-c h T` its thinking level. `C-c h M`
+(`harness-set-model-all`) chooses one model and switches every current
+session to it; `C-c h H` (`harness-set-thinking-all`) does the same for
+the thinking level. Both make the choice the default for new sessions
+too, unless a prefix argument (`C-u C-c h M`) says otherwise. Only idle,
+running and blocked sessions change — deactivated ones are history and
+are left alone — no running turn is cancelled, each session records the
+change as a hint, and provider state is kept so switching back can
+still resume it. Use them when a plan runs out of credit, a provider
+fails, or a cheaper model should take over work already in flight.
+
+The task board has the same thing scoped to its tasks: turn on bulk edit
+(`B`, or `[Bulk edit: N tasks]` in the board's header) and the model,
+thinking, permission-mode and interactivity buttons then change every
+running, pending and blocked task at once. A conspicuous `EDITING N
+CURRENT TASKS` banner shows while it is on, and review, done and
+archived tasks are history and are left alone.
 
 ### Usage and budgets
 
@@ -588,7 +660,7 @@ ACP, so it works the same with a local or a remote harness.
 | Area | Modules |
 |---|---|
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
-| Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-bedrock` `provider-demo` |
+| Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 

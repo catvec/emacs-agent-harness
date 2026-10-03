@@ -25,8 +25,78 @@
   "Model used when nothing more specific is configured, as PROVIDER:NAME."
   :type 'string :group 'harness)
 
+;;;; Customize types of model plists
+;;
+;; Options that describe models by hand (an endpoint's `:models',
+;; Bedrock's model defaults) share these types.  Every key has a name,
+;; a value of its own type, help, and the value it starts from, so the
+;; settings page and customize can offer each key without anyone
+;; having to know it.
+
+(defconst harness-provider-pricing-type
+  '(plist :tag "Price"
+          :doc "US dollars per million tokens; a part left out costs nothing."
+          :value (:input 0.0 :output 0.0)
+          :options ((:input (number :tag "Input" :value 0.0))
+                    (:output (number :tag "Output" :value 0.0))
+                    (:cache-read (number :tag "Cache read" :value 0.0
+                                         :doc "Input read back from the prompt cache."))
+                    (:cache-write (number :tag "Cache write" :value 0.0
+                                          :doc "Input written to the prompt cache."))))
+  "Customize type of a model's `:pricing'.")
+
+(defconst harness-provider-modalities-type
+  '(choice :tag "Input" :value ("text" "image")
+           :doc "What a prompt may hold besides text."
+           (const :tag "Text" ("text"))
+           (const :tag "Text and images" ("text" "image"))
+           (repeat :tag "Other" (string :tag "Modality")))
+  "Customize type of a model's `:input-modalities'.")
+
+(defconst harness-provider-thinking-levels-type
+  '(set :tag "Thinking levels" :format "%{%t%}: %v\n" :entry-format "%b %v"
+        :value ("low" "medium" "high")
+        :doc "Levels the model thinks at, for the session's thinking menu."
+        (const :format "%t  " "low") (const :format "%t  " "medium") (const :format "%t  " "high")
+        (const :format "%t  " "xhigh") (const :format "%t" "max"))
+  "Customize type of a model's `:thinking-levels'.")
+
+(defconst harness-provider-tiers-type
+  '(plist :tag "Tiers"
+          :value (:cheap "haiku" :balanced "sonnet" :frontier "opus")
+          :options
+          ((:cheap (string :tag "Cheap" :value "haiku"
+                           :doc "Model for work that just has to be cheap: the auto-mode judge, say."))
+           (:balanced (string :tag "Balanced" :value "sonnet"
+                              :doc "Model for everyday work: capable, at a fair price."))
+           (:frontier (string :tag "Frontier" :value "opus"
+                              :doc "The most capable model, for the hardest work."))))
+  "Customize type of the models a provider names for the common tiers
+\(see `harness-provider-tier-model').  A model name or id regexp of
+the provider's catalogue, e.g. \"haiku\"; `:tiers' in
+`harness-define-provider' and in a provider's endpoints takes the same.")
+
+(defun harness-provider-model-type (&rest options)
+  "Return the customize type of a model plist, with OPTIONS added.
+OPTIONS are more `:options' entries of the plist, for keys a provider
+reads besides those of every model."
+  `(plist :tag "Model"
+          :value (:name "model-name")
+          :options ((:name (string :tag "Name" :value "model-name"
+                                   :doc "The id the API knows the model by."))
+                    (:label (string :tag "Label" :value "Model"
+                                    :doc "Shown in the model picker instead of the name."))
+                    (:context-window (integer :tag "Context window" :value 128000
+                                              :doc "Tokens the model holds: input and output."))
+                    (:max-output (integer :tag "Max output" :value 8192
+                                          :doc "Most tokens of one reply."))
+                    (:input-modalities ,harness-provider-modalities-type)
+                    (:thinking-levels ,harness-provider-thinking-levels-type)
+                    (:pricing ,harness-provider-pricing-type)
+                    ,@options)))
+
 (cl-defstruct (harness-provider (:copier nil))
-  id label doc models-fn complete-fn fork-fn quota-fn capabilities)
+  id label doc models-fn complete-fn fork-fn quota-fn capabilities tiers)
 
 (defvar harness-providers (make-hash-table :test 'eq)
   "Provider id -> `harness-provider'.")
@@ -72,7 +142,7 @@ A provider whose listing failed maps to nil; one not asked yet is absent.")
   (remhash id harness-provider--fetching)
   (harness-provider--rebuild-cache))
 
-(cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities)
+(cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities tiers)
   "Register provider ID.
 LABEL and DOC describe it.  MODELS is a function returning a promise of
 model plists.  COMPLETE takes a request plist and returns a handle
@@ -80,12 +150,15 @@ plist with `:cancel'.  FORK, when given, takes (MODEL-ID STATE) and
 returns a promise of a new provider state.  QUOTA takes an optional
 REFRESH flag and returns a promise of billing and quota information
 \(see `provider/quota').  CAPABILITIES is the static capability plist.
-Defining ID again replaces it and forgets the models it listed, which
-it is asked for again when needed; other providers' models stay cached."
+TIERS names a model per user-facing tier (see `harness-model-tiers'
+and `harness-provider-tier-model') so the harness can pick a model on
+its own.  Defining ID again replaces it and forgets the models it
+listed, which it is asked for again when needed; other providers'
+models stay cached."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
-                                     :capabilities capabilities)
+                                     :capabilities capabilities :tiers tiers)
            harness-providers)
   (harness-provider--forget id)
   id)
@@ -94,6 +167,13 @@ it is asked for again when needed; other providers' models stay cached."
   "Return provider ID or nil."
   (gethash id harness-providers))
 
+(defun harness-provider-unregister (id)
+  "Remove provider ID from the registry and forget its models.
+Return non-nil when a provider was registered under ID."
+  (prog1 (and (gethash id harness-providers) t)
+    (remhash id harness-providers)
+    (harness-provider--forget id)))
+
 (defun harness-provider-parse-model (model-id)
   "Split MODEL-ID \"provider:name\" into (PROVIDER-SYMBOL . NAME)."
   (if (and model-id (string-match "\\`\\([a-z0-9_-]+\\):\\(.+\\)\\'" model-id))
@@ -101,12 +181,13 @@ it is asked for again when needed; other providers' models stay cached."
     (cons nil model-id)))
 
 (harness-defmethod provider/list ()
-  "Return registered providers as (:id :label :doc :capabilities) plists."
+  "Return registered providers as (:id :label :doc :capabilities :tiers) plists."
   (let (out)
     (maphash (lambda (id p)
                (push (list :id id :label (harness-provider-label p)
                            :doc (harness-provider-doc p)
-                           :capabilities (harness-provider-capabilities p))
+                           :capabilities (harness-provider-capabilities p)
+                           :tiers (harness-provider-tiers p))
                      out))
              harness-providers)
     (sort out (lambda (a b) (string< (symbol-name (plist-get a :id)) (symbol-name (plist-get b :id)))))))
@@ -225,6 +306,110 @@ stands in, with a context window of 128000."
 (harness-defmethod provider/capabilities (model-id)
   "Return the capability plist for MODEL-ID."
   (plist-get (harness-call 'provider/model model-id) :capabilities))
+
+;;;; Model tiers
+
+(defconst harness-model-tiers '(:cheap :balanced :frontier)
+  "Tiers a provider can name a model for.
+`cheap' is for the calls the harness makes on its own, such as the
+auto-mode permission judge; `balanced' and `frontier' are a middle and
+top model a user might pick for their own work.  A provider names a
+model per tier with `:tiers' in `harness-define-provider'; a tier it
+does not name is taken from its own models sorted by price.")
+
+(defun harness-provider--cached-models (id)
+  "Return the models cached for provider ID, or nil.
+Nil means the provider has not answered yet, or listed nothing."
+  (gethash id harness-provider--models-by-provider))
+
+(defun harness-provider--price-score (model)
+  "Return a comparable price for MODEL, or nil without a usable one.
+The score is its input plus output price per million tokens, the two
+numbers a call is billed by.  A model with no price, or one a provider
+marks unknown (a negative rate), has no score and is never chosen over
+one whose cost is known."
+  (let* ((p (plist-get model :pricing))
+         (in (plist-get p :input))
+         (out (plist-get p :output)))
+    (when (and (numberp in) (numberp out) (>= in 0) (>= out 0))
+      (+ in out))))
+
+(defun harness-provider--models-by-price (models)
+  "Return MODELS sorted by price, cheapest first; unpriced models last."
+  (sort (copy-sequence models)
+        (lambda (a b)
+          (let ((pa (harness-provider--price-score a))
+                (pb (harness-provider--price-score b)))
+            (cond ((and pa pb) (< pa pb))
+                  (pa t)
+                  (pb nil)
+                  (t (string< (or (plist-get a :id) "") (or (plist-get b :id) ""))))))))
+
+(defun harness-provider--by-price (models tier)
+  "Return the MODEL of MODELS that TIER names by price, or nil.
+The cheapest is `:cheap', the dearest `:frontier', the middle
+`:balanced'.  Models without `:pricing' are left out."
+  (let* ((priced (cl-remove-if-not #'harness-provider--price-score models))
+         (sorted (harness-provider--models-by-price priced))
+         (n (length sorted)))
+    (when (> n 0)
+      (pcase tier
+        (:cheap (car sorted))
+        (:frontier (car (last sorted)))
+        (:balanced (nth (/ (1- n) 2) sorted))
+        (_ nil)))))
+
+(defun harness-provider--tier-match (models matcher)
+  "Return the model in MODELS that MATCHER names, or nil.
+MATCHER is a model name or id, exactly or as a regexp."
+  (when (and matcher (stringp matcher))
+    (or (cl-find matcher models :key (lambda (m) (plist-get m :name)) :test #'equal)
+        (cl-find matcher models :key (lambda (m) (plist-get m :id)) :test #'equal)
+        (cl-find-if (lambda (m)
+                      (let ((name (plist-get m :name)) (id (plist-get m :id)))
+                        (ignore-errors
+                          (or (and (stringp name) (string-match-p matcher name))
+                              (and (stringp id) (string-match-p matcher id))))))
+                    models))))
+
+(defun harness-provider--tier (value)
+  "Return VALUE as a tier keyword, defaulting to `:cheap'.
+A provider names its tiers with keywords, so `cheap', `:cheap' and
+\":cheap\" all stand for the same one."
+  (cond ((null value) :cheap)
+        ((keywordp value) value)
+        ((symbolp value) (intern (concat ":" (symbol-name value))))
+        ((stringp value) (intern (concat ":" (string-remove-prefix ":" value))))
+        (t :cheap)))
+
+(defun harness-provider-tier-model (model-id &optional tier)
+  "Return the id of the TIER model of MODEL-ID's provider, or nil.
+TIER defaults to `cheap'.  The provider's `:tiers' names a model (a
+name, id or regexp) for it; a tier it does not name, and a provider
+that declares none, takes the provider's models sorted by price
+\(`cheap' the least expensive, `frontier' the most, `balanced' the
+middle).  Models whose cost is unknown are never chosen by price.  A
+provider not listed yet is asked for its models, which a static
+catalogue answers at once; nil comes back until one that answers later
+has."
+  (let* ((tier (harness-provider--tier tier))
+         (pid (car (harness-provider-parse-model model-id)))
+         (provider (and pid (harness-provider-get pid))))
+    (when provider
+      (when (and (harness-provider-models-fn provider)
+                 (not (harness-provider--listed-p pid)))
+        (harness-provider--fetch provider t))
+      (let* ((models (harness-provider--cached-models pid))
+             (model (and models
+                         (or (harness-provider--tier-match
+                              models (plist-get (harness-provider-tiers provider) tier))
+                             (harness-provider--by-price models tier)))))
+        (and model (plist-get model :id))))))
+
+(harness-defmethod provider/tier-model (model-id &optional tier)
+  "Return the id of the TIER model of MODEL-ID's provider, or nil.
+TIER defaults to `cheap'; see `harness-provider-tier-model'."
+  (harness-provider-tier-model model-id tier))
 
 (defun harness-provider--guard-events (on-event)
   "Wrap ON-EVENT so errors are contained and `done' is delivered once."

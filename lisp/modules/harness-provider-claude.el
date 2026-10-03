@@ -180,6 +180,11 @@ names the harness tools whose stand-ins to turn on.")
 `:builtin-tools' names the harness tools of
 `harness-provider-claude-builtin-tools'.")
 
+(defconst harness-provider-claude-tiers
+  '(:cheap "claude-haiku-4-5-20251001" :balanced "claude-sonnet-5" :frontier "claude-opus-5-5")
+  "Claude models named for the common tiers.
+The auto-mode judge, for one, runs on the `cheap' one.")
+
 (defconst harness-provider-claude--api-token-sources '("ANTHROPIC_AUTH_TOKEN" "apiKeyHelper")
   "Token sources the CLI reports for credentials billed per token.")
 
@@ -1545,7 +1550,8 @@ fetched first when REFRESH is non-nil or the last one is stale (see
   :complete #'harness-provider-claude--complete
   :fork #'harness-provider-claude--fork
   :quota #'harness-provider-claude--quota
-  :capabilities harness-provider-claude-capabilities)
+  :capabilities harness-provider-claude-capabilities
+  :tiers harness-provider-claude-tiers)
 
 (harness-define-module 'provider-claude
   :doc "Claude Code CLI as a hosted-loop completion provider."

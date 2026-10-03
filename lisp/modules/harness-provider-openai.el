@@ -54,6 +54,51 @@
   (when (fboundp 'harness-openai--register-all)
     (harness-openai--register-all)))
 
+(defconst harness-openai--endpoint-type
+  `(plist
+    :tag "Endpoint"
+    ;; A new endpoint starts as a local server.
+    :value (:id local :label "Local server" :base-url "http://localhost:11434/v1")
+    :options
+    ((:id (symbol :tag "ID" :value local
+                  :doc "Names the provider: its models are ID:MODEL.
+Lower-case letters, digits, - and _."))
+     (:label (string :tag "Label" :value "Local server"
+                     :doc "Name of the provider in the model picker."))
+     (:base-url (string :tag "Base URL" :value "http://localhost:11434/v1"
+                        :doc "Root of the API, the part before /chat/completions.  For a local
+server: Ollama http://localhost:11434/v1, llama.cpp
+http://localhost:8080/v1, vLLM http://localhost:8000/v1, LM Studio
+http://localhost:1234/v1."))
+     (:api-key-env (string :tag "API key variable" :value "OPENAI_API_KEY"
+                           :doc "Environment variable that holds the API key.  Without a key,
+auth-source is searched for the URL's host and the user \"apikey\"."))
+     (:headers (alist :tag "Headers" :key-type (string :tag "Header") :value-type (string :tag "Value")
+                      :doc "Extra request headers."))
+     (:models (repeat :tag "Models"
+                      :doc "Models to offer instead of those the server lists at /models."
+                      (choice :tag "Model" :value "model-name"
+                              (string :tag "Name")
+                              ,(harness-provider-model-type))))
+     (:default-context (integer :tag "Default context" :value 128000
+                                :doc "Context window of the models the server does not size."))
+     (:tiers ,harness-provider-tiers-type)
+     (:flavor (choice :tag "Flavor" :value openai
+                      :doc "Dialect of the API; guessed from the URL when not set.  DeepSeek
+is never guessed, so name it for an endpoint that needs it."
+                      (const :tag "OpenAI" openai)
+                      (const :tag "OpenRouter" :menu-tag "OpenRouter: prices come with the model list"
+                             openrouter)
+                      (const :tag "DeepSeek" deepseek)))
+     (:capabilities (plist :tag "Capabilities" :value (:vision t :thinking t)
+                           :doc "What the models can do, replacing what the flavor says: images
+and thinking, and for OpenRouter prices and costs too."
+                           :options ((:vision (const :tag "Images" t))
+                                     (:thinking (const :tag "Thinking" t))
+                                     (:pricing (const :tag "Prices come from the model list" dynamic))
+                                     (:cost-reported (const :tag "Replies say what they cost" t)))))))
+  "Customize type of an entry of `harness-openai-endpoints'.")
+
 (defcustom harness-openai-endpoints
   '((:id openrouter :label "OpenRouter"
      :base-url "https://openrouter.ai/api/v1" :api-key-env "OPENROUTER_API_KEY")
@@ -72,13 +117,18 @@ Every entry is a plist with these keys:
   :models          static list of model names or model plists, for servers
                    without a /models route
   :default-context context window used for models that do not report one
-  :flavor          `openrouter' or `openai'; guessed from the URL when absent
+  :flavor          `openrouter', `openai' or `deepseek'; guessed from
+                   the URL when absent (`deepseek' is never guessed, so
+                   name it for an endpoint that needs its handling)
   :capabilities    static capability plist overriding the flavor default
+  :tiers           model names per tier (:cheap :balanced :frontier), as
+                   `harness-define-provider' takes them; without one the
+                   tier comes from the catalogue's prices
 
 When neither :api-key nor :api-key-env yields a key, auth-source is
 searched with the URL's host and user \"apikey\".  Changing this
 variable through customize re-registers the providers."
-  :type '(repeat (plist :key-type symbol :value-type sexp))
+  :type `(repeat ,harness-openai--endpoint-type)
   :set #'harness-openai--custom-set
   :group 'harness)
 
@@ -103,12 +153,23 @@ variable through customize re-registers the providers."
   "Non-nil when ENDPOINT speaks the OpenRouter dialect."
   (eq (harness-openai--flavor endpoint) 'openrouter))
 
+(defun harness-openai--deepseek-p (endpoint)
+  "Non-nil when ENDPOINT speaks the DeepSeek dialect.
+DeepSeek differs from plain OpenAI in how it reports cached input (its
+`prompt_tokens' includes the cached tokens, which are billed apart), in
+the reasoning efforts it accepts, and in requiring a tool-using
+history to carry the thinking of earlier assistant turns back as
+`reasoning_content'."
+  (eq (harness-openai--flavor endpoint) 'deepseek))
+
 (defun harness-openai--capabilities (endpoint)
   "Return the static capability plist for ENDPOINT."
   (or (plist-get endpoint :capabilities)
-      (if (harness-openai--openrouter-p endpoint)
-          '(:vision t :thinking t :pricing dynamic :cost-reported t)
-        '(:vision t :thinking t))))
+      (pcase (harness-openai--flavor endpoint)
+        ('openrouter '(:vision t :thinking t :pricing dynamic :cost-reported t))
+        ;; DeepSeek reports vision per model, so the endpoint does not claim it.
+        ('deepseek '(:thinking t))
+        (_ '(:vision t :thinking t)))))
 
 (defun harness-openai--host (endpoint)
   "Return the host part of ENDPOINT's base URL."
@@ -338,12 +399,18 @@ hides the others."
         :tool_call_id (plist-get block :tool_use_id)
         :content (harness-openai--result-text (plist-get block :content))))
 
-(defun harness-openai--assistant-message (blocks)
-  "Map assistant content BLOCKS to one assistant message; thinking is dropped."
-  (let (texts calls)
+(defun harness-openai--assistant-message (blocks &optional reasoning)
+  "Map assistant content BLOCKS to one assistant message.
+Thinking is dropped unless REASONING is non-nil: DeepSeek's thinking
+mode requires the reasoning of earlier assistant turns to be sent back
+as `reasoning_content' when the request carries tools.  With REASONING
+the key is always set, empty when the message has no thinking, because
+DeepSeek rejects a tool-using history whose assistant messages omit it."
+  (let (texts calls thoughts)
     (dolist (b blocks)
       (pcase (harness-openai--block-type b)
         ("text" (push (or (plist-get b :text) "") texts))
+        ("thinking" (when reasoning (push (or (plist-get b :text) "") thoughts)))
         ("tool_use"
          (push (list :id (plist-get b :id)
                      :type "function"
@@ -359,6 +426,9 @@ hides the others."
                                               (calls nil)
                                               (t ""))))
       (when calls (setq msg (plist-put msg :tool_calls (nreverse calls))))
+      (when reasoning
+        (setq msg (plist-put msg :reasoning_content
+                             (string-join (nreverse thoughts) "\n\n"))))
       msg)))
 
 (defun harness-openai--message-blocks (msg)
@@ -366,9 +436,12 @@ hides the others."
   (let ((c (plist-get msg :content)))
     (if (stringp c) (list (list :type "text" :text c)) c)))
 
-(defun harness-openai--messages (request)
-  "Build the OpenAI messages array for REQUEST."
-  (let (out)
+(defun harness-openai--messages (request &optional endpoint)
+  "Build the OpenAI messages array for REQUEST at ENDPOINT.
+DeepSeek endpoints get the thinking of assistant messages back as
+`reasoning_content'; every other dialect drops it."
+  (let ((reasoning (and endpoint (harness-openai--deepseek-p endpoint)))
+        out)
     (when-let* ((system (plist-get request :system)))
       (unless (string-empty-p system)
         (push (list :role "system" :content system) out)))
@@ -379,7 +452,7 @@ hides the others."
           ("system"
            (push (list :role "system" :content (harness-openai--result-text blocks)) out))
           ("assistant"
-           (push (harness-openai--assistant-message blocks) out))
+           (push (harness-openai--assistant-message blocks reasoning) out))
           (_
            ;; user or tool: tool results become their own messages first
            ;; (they must follow the assistant call), the rest is user content.
@@ -411,18 +484,33 @@ hides the others."
     ("low" "low")
     (_ nil)))
 
+(defun harness-openai--deepseek-effort (level)
+  "Map the harness thinking LEVEL onto a DeepSeek reasoning effort.
+DeepSeek takes none, low, high or max; minimal is low, and medium and
+xhigh are high."
+  (pcase (harness-openai--string level)
+    ("max" "max")
+    ((or "high" "medium" "xhigh") "high")
+    ((or "low" "minimal") "low")
+    ((or "none" "off" "disabled") "none")
+    (_ nil)))
+
 (defun harness-openai--body (endpoint name request)
   "Build the chat completions body for model NAME at ENDPOINT from REQUEST."
   (let* ((openrouter (harness-openai--openrouter-p endpoint))
-         (effort (harness-openai--effort (plist-get request :thinking)))
+         (deepseek (harness-openai--deepseek-p endpoint))
+         (effort (if deepseek
+                     (harness-openai--deepseek-effort (plist-get request :thinking))
+                   (harness-openai--effort (plist-get request :thinking))))
          (tools (harness-openai--tools (plist-get request :tools)))
          (body (list :model name
-                     :messages (harness-openai--messages request)
+                     :messages (harness-openai--messages request endpoint)
                      :stream t
                      :stream_options '(:include_usage t))))
     (when tools (setq body (plist-put body :tools tools)))
     (when-let* ((max (plist-get request :max-tokens)))
-      (setq body (plist-put body (if openrouter :max_tokens :max_completion_tokens) max)))
+      (setq body (plist-put body (if (or openrouter deepseek) :max_tokens :max_completion_tokens) max)))
+    ;; OpenRouter reports the cost of each call when asked.
     (when openrouter (setq body (plist-put body :usage '(:include t))))
     (when effort
       (setq body (if openrouter
@@ -455,7 +543,7 @@ hides the others."
 
 (cl-defstruct (harness-openai--stream (:copier nil))
   "Accumulated state of one streamed completion."
-  on-event calls finish-reason usage error (finished nil) http)
+  on-event calls finish-reason usage error (finished nil) http endpoint)
 
 (defun harness-openai--stream-tool-call (stream index call)
   "Merge fragment CALL at INDEX into STREAM's accumulated tool calls."
@@ -518,19 +606,28 @@ shows a model writing a large input.  At most one report every
         (when (and finish (stringp finish))
           (setf (harness-openai--stream-finish-reason stream) finish))))))
 
-(defun harness-openai--usage-event (usage)
-  "Build the usage event from an OpenAI USAGE object.
-OpenAI-compatible endpoints bill per token, so the event says `api'."
-  (let ((input (or (plist-get usage :prompt_tokens) 0))
-        (cost (plist-get usage :cost)))
+(defun harness-openai--usage-event (usage endpoint)
+  "Build the usage event from an OpenAI USAGE object for ENDPOINT.
+OpenAI-compatible endpoints bill per token, so the event says `api'.
+DeepSeek's `prompt_tokens' includes the cached tokens, so they are
+split: `:input' counts the cache misses, `:cache-read' the hits, and
+`:context' both."
+  (let* ((input (or (plist-get usage :prompt_tokens) 0))
+         (hit (or (plist-get usage :prompt_cache_hit_tokens)
+                  (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens))
+                  0))
+         (miss (or (plist-get usage :prompt_cache_miss_tokens)
+                   (max 0 (- input hit))))
+         (cost (plist-get usage :cost))
+         (deepseek (harness-openai--deepseek-p endpoint)))
     (list :type 'usage
-          :input input
+          :input (if deepseek miss input)
           :output (or (plist-get usage :completion_tokens) 0)
-          :cache-read (or (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens)) 0)
+          :cache-read (if deepseek hit (or (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens)) 0))
           :cache-write 0
           :cost (and (numberp cost) cost)
           :billing 'api
-          :context input)))
+          :context (if deepseek (+ miss hit) input))))
 
 (defun harness-openai--stream-finish (stream reason &optional error)
   "End STREAM with stop REASON and optional ERROR text, emitting once."
@@ -540,7 +637,7 @@ OpenAI-compatible endpoints bill per token, so the event says `api'."
           (calls (harness-openai--stream-calls stream)))
       (when-let* ((usage (harness-openai--stream-usage stream)))
         (unless (eq reason 'cancelled)
-          (funcall on-event (harness-openai--usage-event usage))))
+          (funcall on-event (harness-openai--usage-event usage (harness-openai--stream-endpoint stream)))))
       (when (eq reason 'tool-use)
         (dolist (slot calls)
           (let ((call (cdr slot)))
@@ -571,7 +668,7 @@ OpenAI-compatible endpoints bill per token, so the event says `api'."
   "Start a streamed chat completion for REQUEST at ENDPOINT; return a handle."
   (pcase-let* ((`(,_ . ,name) (harness-provider-parse-model (plist-get request :model)))
                (on-event (or (plist-get request :on-event) #'ignore))
-               (stream (make-harness-openai--stream :on-event on-event))
+               (stream (make-harness-openai--stream :on-event on-event :endpoint endpoint))
                (key (harness-openai--api-key endpoint))
                (url (concat (harness-openai--base-url endpoint) "/chat/completions"))
                (status nil) (raw "")
@@ -622,16 +719,25 @@ OpenAI-compatible endpoints bill per token, so the event says `api'."
 
 ;;;; Registration
 
-(defun harness-openai--register (endpoint)
-  "Register the provider described by ENDPOINT."
+(defun harness-openai-register-endpoint (endpoint)
+  "Register ENDPOINT as an OpenAI-compatible provider and return its id.
+ENDPOINT is a plist as described by `harness-openai-endpoints'.  It
+is captured as it is, not looked up by id, so a module can register an
+endpoint of its own without adding it to that option; call this again
+to pick up a changed plist."
   (let ((id (plist-get endpoint :id)))
     (harness-define-provider id
       :label (or (plist-get endpoint :label) (symbol-name id))
       :doc (format "OpenAI-compatible endpoint at %s" (harness-openai--base-url endpoint))
-      :models (lambda () (harness-openai--models (harness-openai-endpoint id)))
-      :complete (lambda (request) (harness-openai--complete (harness-openai-endpoint id) request))
-      :capabilities (harness-openai--capabilities endpoint))
+      :models (lambda () (harness-openai--models endpoint))
+      :complete (lambda (request) (harness-openai--complete endpoint request))
+      :capabilities (harness-openai--capabilities endpoint)
+      :tiers (plist-get endpoint :tiers))
     id))
+
+(defun harness-openai--register (endpoint)
+  "Register the provider described by ENDPOINT."
+  (harness-openai-register-endpoint endpoint))
 
 (defun harness-openai--register-all ()
   "Register a provider for every endpoint; drop providers of removed ones."

@@ -233,6 +233,28 @@
       (harness-acp-test-request conn "session/set_model" (list :sessionId sid :modelId "demo:other"))
       (should (equal "demo:other" (plist-get (harness-call 'session/get sid) :model))))))
 
+(ert-deftest harness-acp-local-set-all-sessions-model ()
+  "One call retargets every session and can set the default for new ones."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (one (harness-acp-test-new-session conn))
+           (two (harness-acp-test-new-session conn)))
+      ;; A session already on the model is left alone, so it is not in the answer.
+      (harness-acp-test-request conn "session/set_model" (list :sessionId two :modelId "demo:other"))
+      (let ((changed (harness-acp-test-request conn "_harness/session/set-all"
+                                               (list :settings (list :model "demo:other")))))
+        (should (equal (list one) changed))
+        (should (equal "demo:other" (plist-get (harness-call 'session/get one) :model)))
+        (should (equal "demo:other" (plist-get (harness-call 'session/get two) :model))))
+      ;; The default for sessions created without an explicit model.
+      (harness-acp-test-request conn "_harness/config/set"
+                                (list :key "harness-model" :value "demo:other" :scope "global"))
+      (should (equal "demo:other" harness-model))
+      (let ((fresh (plist-get (harness-acp-test-request conn "session/new"
+                                                        (list :cwd (harness-test-temp-dir)))
+                              :sessionId)))
+        (should (equal "demo:other" (plist-get (harness-call 'session/get fresh) :model)))))))
+
 (ert-deftest harness-acp-local-load-replays-transcript ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))

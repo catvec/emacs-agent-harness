@@ -73,6 +73,11 @@ RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
     :api-key "sk-test-openai")
   "A plain OpenAI-flavoured endpoint.")
 
+(defvar harness-openai-test-deepseek-endpoint
+  '(:id testdeepseek :label "Test DeepSeek" :base-url "https://api.deepseek.example"
+    :api-key "sk-test-deepseek" :flavor deepseek)
+  "A DeepSeek-flavoured endpoint.")
+
 (defun harness-openai-test--complete (endpoint request)
   "Run REQUEST directly against ENDPOINT's complete function, collecting events.
 Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
@@ -246,7 +251,98 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should-not (plist-get body :max_tokens))
       (should-not (assoc "X-Title" (plist-get (car harness-openai-test--requests) :headers))))))
 
+(ert-deftest harness-provider-openai-deepseek-dialect-body ()
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (harness-openai-test--complete harness-openai-test-deepseek-endpoint
+                                   '(:model "testdeepseek:deepseek-flash" :thinking "max" :max-tokens 321
+                                     :messages ((:role user :content ((:type "text" :text "hi"))))))
+    (let ((body (harness-openai-test--last-request-json)))
+      ;; DeepSeek takes max_tokens, and its own reasoning efforts.
+      (should (= 321 (plist-get body :max_tokens)))
+      (should-not (plist-get body :max_completion_tokens))
+      (should (equal "max" (plist-get body :reasoning_effort)))
+      (should-not (plist-get body :reasoning))
+      (should-not (plist-get body :usage)))
+    ;; A DeepSeek endpoint does not claim vision for every model.
+    (should (equal '(:thinking t)
+                   (harness-openai--capabilities harness-openai-test-deepseek-endpoint)))))
+
+(ert-deftest harness-provider-openai-deepseek-replays-reasoning-content ()
+  ;; DeepSeek's thinking mode rejects a tool-using history whose assistant
+  ;; messages omit reasoning_content, so the recorded thinking goes back.
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (harness-openai-test--complete
+     harness-openai-test-deepseek-endpoint
+     '(:model "testdeepseek:deepseek-flash" :thinking "high"
+       :tools ((:name "echo"))
+       :messages ((:role user :content ((:type "text" :text "go")))
+                  (:role assistant :content ((:type "thinking" :text "first thought")
+                                             (:type "thinking" :text "second thought")
+                                             (:type "text" :text "checking")
+                                             (:type "tool_use" :id "call_1" :name "echo" :input (:value "x"))))
+                  (:role tool :content ((:type "tool_result" :tool_use_id "call_1" :content "x!")))
+                  (:role assistant :content ((:type "tool_use" :id "call_2" :name "echo" :input nil))))))
+    (let* ((msgs (plist-get (harness-openai-test--last-request-json) :messages))
+           (first (nth 1 msgs)) (second (nth 3 msgs)))
+      (should (equal "first thought\n\nsecond thought" (plist-get first :reasoning_content)))
+      (should (equal "checking" (plist-get first :content)))
+      (should (equal "call_1" (harness-plist-get-in (car (plist-get first :tool_calls)) '(:id))))
+      ;; A turn whose thinking is gone still carries the key, empty.
+      (should (equal "" (plist-get second :reasoning_content)))
+      (should (equal "call_2" (harness-plist-get-in (car (plist-get second :tool_calls)) '(:id)))))
+    ;; Other dialects drop thinking as before.
+    (let* ((msgs (harness-openai--messages
+                  '(:messages ((:role assistant :content ((:type "thinking" :text "hmm")
+                                                           (:type "text" :text "ok")))))
+                  harness-openai-test-endpoint)))
+      (should-not (plist-get (car msgs) :reasoning_content)))))
+
 ;;;; Event streams
+
+(ert-deftest harness-provider-openai-deepseek-reasoning-content-streams ()
+  ;; DeepSeek streams its chain of thought as `reasoning_content'; the
+  ;; agent records it as thinking, which the next request replays.
+  (harness-openai-test-with-fake
+      `(("chat/completions"
+         . (:chunks (,(harness-openai-test--sse
+                      '(:choices ((:index 0 :delta (:reasoning_content "weigh") :finish_reason nil)))
+                      '(:choices ((:index 0 :delta (:reasoning_content " it") :finish_reason nil)))
+                      '(:choices ((:index 0 :delta (:content "done") :finish_reason "stop")))
+                      "[DONE]")))))
+    (let* ((events (car (harness-openai-test--complete
+                         harness-openai-test-deepseek-endpoint
+                         '(:model "testdeepseek:deepseek-flash" :thinking "high"
+                           :messages ((:role user :content ((:type "text" :text "go"))))))))
+           (thought (mapconcat (lambda (e) (plist-get e :delta))
+                               (cl-remove-if-not (lambda (e) (eq (plist-get e :type) 'thinking)) events)
+                               "")))
+      (should (equal '(start thinking thinking text done) (harness-openai-test--types events)))
+      (should (equal "weigh it" thought)))))
+
+(ert-deftest harness-provider-openai-deepseek-usage-splits-cache-tokens ()
+  ;; DeepSeek's prompt_tokens includes cached tokens, which are billed
+  ;; apart, so :input is the cache misses and :cache-read the hits.
+  (harness-openai-test-with-fake
+      `(("chat/completions"
+         . (:chunks (,(harness-openai-test--sse
+                      '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                      '(:choices () :usage (:prompt_tokens 100 :completion_tokens 7
+                                            :prompt_cache_hit_tokens 80 :prompt_cache_miss_tokens 20))
+                      "[DONE]")))))
+    (let* ((events (car (harness-openai-test--complete
+                         harness-openai-test-deepseek-endpoint
+                         '(:model "testdeepseek:deepseek-flash" :max-tokens 10
+                           :messages ((:role user :content ((:type "text" :text "hi"))))))))
+           (usage (cl-find 'usage events :key (lambda (e) (plist-get e :type)))))
+      (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
+                       :cost nil :billing api :context 100)
+                     usage)))))
 
 (ert-deftest harness-provider-openai-text-answer-with-usage ()
   (harness-openai-test-with-fake
@@ -541,6 +637,25 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (equal '(:type done :stop-reason end-turn) (car (last second))))
       (should (string-match-p "ZEBRA-4242" (harness-openai-test--text second)))
       (should (cl-find 'usage second :key (lambda (e) (plist-get e :type)))))))
+
+;;;; Customize type
+
+(ert-deftest harness-openai-endpoints-type-names-every-key ()
+  "The settings page offers every key of an endpoint, with a value to start from."
+  (let ((entry harness-openai--endpoint-type))
+    ;; Every key the documentation lists, but the literal key it discourages.
+    (should (equal '(:api-key) (cl-set-difference (harness-test-documented-keys 'harness-openai-endpoints)
+                                                  (harness-test-option-keys entry))))
+    (harness-test-check-record-type entry)
+    (should (memq :tiers (harness-test-option-keys entry)))
+    (should (harness-test-fits-p entry (plist-get (cdr entry) :value)))
+    (should (harness-test-fits-p (get 'harness-openai-endpoints 'custom-type)
+                                 (eval (car (get 'harness-openai-endpoints 'standard-value)) t)))
+    ;; What the type does not name, or names with another kind of value,
+    ;; still fits: nothing set in Lisp turns invalid.
+    (should (harness-test-fits-p (get 'harness-openai-endpoints 'custom-type)
+                                 '((:id "named-by-a-string" :api-key "sk-x" :weird 3
+                                    :models ("a" (:name "b" :context-window 4096 :pricing (:input 1)))))))))
 
 (provide 'harness-provider-openai-test)
 ;;; harness-provider-openai-test.el ends here
