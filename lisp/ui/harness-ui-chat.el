@@ -102,9 +102,12 @@ Once two pages of nodes lie above every window, all but one are dropped."
   :type 'string :group 'harness-ui-chat)
 
 (defface harness-chat-panel-face
-  '((((background light)) :background "#fff1cf" :extend t)
-    (((background dark)) :background "#463a1c" :extend t))
-  "Background of the pending permission and question panel." :group 'harness-ui-chat)
+  '((((background light)) :background "#d9f7fd" :extend t)
+    (((background dark)) :background "#143c42" :extend t))
+  "Background of the pending permission and question panel.
+A cool teal of its own: it stands apart from the transcript's blocks
+and the queue under it, and asks for an answer without the alarm of a
+warning colour." :group 'harness-ui-chat)
 
 (defface harness-chat-activity-face
   '((((background light)) :background "#efe9f9" :extend t)
