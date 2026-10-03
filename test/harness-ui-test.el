@@ -471,6 +471,39 @@ bottom side window and leaves the other windows alone."
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
 
+(ert-deftest harness-ui-thinking-menu-follows-the-model ()
+  "The thinking menu offers a model's own levels, weakest first, so a
+DeepSeek model (low, high, max) is not offered a medium or an xhigh that
+DeepSeek would collapse onto high.  A model that names none gets the
+common levels."
+  (should (equal '("low" "high" "max")
+                 (harness-ui--thinking-levels-for '("low" "high" "max"))))
+  ;; Whatever order the model lists them in, the menu is weakest first.
+  (should (equal '("low" "high" "max")
+                 (harness-ui--thinking-levels-for '("max" "low" "high"))))
+  (should (equal '("none" "minimal" "low" "medium" "high" "xhigh" "max")
+                 (harness-ui--thinking-levels-for
+                  '("max" "xhigh" "high" "medium" "low" "minimal" "none"))))
+  (should (equal '("low" "medium" "high" "xhigh" "max")
+                 (harness-ui--thinking-levels-for nil)))
+  (let (offered sort chosen)
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (_method _params callback)
+                 (funcall callback '(:id "deepseek:deepseek-flash"
+                                     :thinking-levels ("low" "high" "max")))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (setq offered (all-completions "" table)
+                       sort (completion-metadata-get (completion-metadata "" table nil)
+                                                     'display-sort-function))
+                 "high")))
+      (harness-ui-choose-thinking
+       (lambda (value label) (setq chosen (cons value label)))
+       "deepseek:deepseek-flash"))
+    (should (equal '("default" "low" "high" "max") offered))
+    (should (eq 'identity sort))
+    (should (equal '("high" . "high") chosen))))
+
 (ert-deftest harness-ui-non-interactive-key-and-menu-label ()
   "C-c h i toggles non-interactive mode.  In the menu its entry says
 whether what it toggles from the buffer is non-interactive, a session

@@ -78,6 +78,12 @@ RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
     :api-key "sk-test-deepseek" :flavor deepseek)
   "A DeepSeek-flavoured endpoint.")
 
+(defvar harness-openai-test-deepseek-host-endpoint
+  '(:id testdscompat :label "DeepSeek (OpenAI-compatible)"
+    :base-url "https://api.deepseek.com/v1" :api-key "sk-test-deepseek-compat"
+    :flavor openai)
+  "An endpoint pointed at DeepSeek but labelled plain OpenAI.")
+
 (defun harness-openai-test--complete (endpoint request)
   "Run REQUEST directly against ENDPOINT's complete function, collecting events.
 Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
@@ -270,6 +276,44 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
     (should (equal '(:thinking t)
                    (harness-openai--capabilities harness-openai-test-deepseek-endpoint)))))
 
+(ert-deftest harness-provider-openai-deepseek-effort-ladder ()
+  ;; DeepSeek acts on three efforts, weakest first; the harness levels in
+  ;; between collapse onto the effort DeepSeek's own mapping gives them,
+  ;; so no level buys more (or less) thinking than its name promises.
+  (should (equal '("low" "high" "max") harness-openai--deepseek-efforts))
+  (should (equal "low" (harness-openai--deepseek-effort "minimal")))
+  (should (equal "low" (harness-openai--deepseek-effort "low")))
+  (should (equal "high" (harness-openai--deepseek-effort "medium")))
+  (should (equal "high" (harness-openai--deepseek-effort "high")))
+  (should (equal "high" (harness-openai--deepseek-effort "xhigh")))
+  (should (equal "max" (harness-openai--deepseek-effort "max")))
+  ;; Every effort of the ladder maps to itself, and only the ladder (plus
+  ;; the off switch) can come out.
+  (should (equal harness-openai--deepseek-efforts
+                 (mapcar #'harness-openai--deepseek-effort harness-openai--deepseek-efforts)))
+  (dolist (level '("low" "medium" "high" "xhigh" "max"))
+    (should (member (harness-openai--deepseek-effort level)
+                    (cons "none" harness-openai--deepseek-efforts))))
+  ;; A level DeepSeek does not know sends no effort at all.
+  (should-not (harness-openai--deepseek-effort "ultra"))
+  (should-not (harness-openai--deepseek-effort nil))
+  (should-not (harness-openai--deepseek-effort "bogus")))
+
+(ert-deftest harness-provider-openai-deepseek-efforts-in-the-body ()
+  "The ladder's ends, and a level collapsed between them, go out as such."
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (dolist (case '(("low" . "low") ("medium" . "high") ("high" . "high")
+                    ("xhigh" . "high") ("max" . "max")))
+      (harness-openai-test--complete
+       harness-openai-test-deepseek-endpoint
+       `(:model "testdeepseek:deepseek-flash" :thinking ,(car case)
+         :messages ((:role user :content ((:type "text" :text "hi"))))))
+      (should (equal (cdr case) (plist-get (harness-openai-test--last-request-json)
+                                            :reasoning_effort))))))
+
 (ert-deftest harness-provider-openai-deepseek-replays-reasoning-content ()
   ;; DeepSeek's thinking mode rejects a tool-using history whose assistant
   ;; messages omit reasoning_content, so the recorded thinking goes back.
@@ -302,6 +346,41 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
                                                            (:type "text" :text "ok")))))
                   harness-openai-test-endpoint)))
       (should-not (plist-get (car msgs) :reasoning_content)))))
+
+(ert-deftest harness-provider-openai-deepseek-host-is-recognized ()
+  ;; The dialect follows the host, not the label: an endpoint pointed at
+  ;; DeepSeek but declared `:flavor openai' still gets DeepSeek handling,
+  ;; or its tool loops would 400 for a missing reasoning_content.
+  (should (harness-openai--deepseek-p harness-openai-test-deepseek-host-endpoint))
+  (should (harness-openai--deepseek-p (list :base-url "https://api.deepseek.com")))
+  ;; A look-alike host is not DeepSeek, and plain OpenAI stays plain.
+  (should-not (harness-openai--deepseek-p (list :base-url "https://deepseek.com.evil.example/v1")))
+  (should-not (harness-openai--deepseek-p harness-openai-test-openai-endpoint))
+  (should-not (harness-openai--deepseek-p (list :base-url "https://api.openai.example/v1"))))
+
+(ert-deftest harness-provider-openai-deepseek-host-replays-reasoning-content ()
+  ;; An endpoint that only looks OpenAI-ish but talks to DeepSeek replays
+  ;; the recorded thinking, the way a `:flavor deepseek' one does.
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (harness-openai-test--complete
+     harness-openai-test-deepseek-host-endpoint
+     '(:model "testdscompat:deepseek-flash" :thinking "high" :max-tokens 321
+       :tools ((:name "echo"))
+       :messages ((:role user :content ((:type "text" :text "go")))
+                  (:role assistant :content ((:type "thinking" :text "weigh it")
+                                             (:type "tool_use" :id "call_1" :name "echo" :input (:value "x"))))
+                  (:role tool :content ((:type "tool_result" :tool_use_id "call_1" :content "x!"))))))
+    (let* ((body (harness-openai-test--last-request-json))
+           (assistant (nth 1 (plist-get body :messages))))
+      (should (equal "weigh it" (plist-get assistant :reasoning_content)))
+      ;; DeepSeek's reasoning efforts and max_tokens follow the host too.
+      (should (equal "high" (plist-get body :reasoning_effort)))
+      (should-not (plist-get body :reasoning))
+      (should (= 321 (plist-get body :max_tokens)))
+      (should-not (plist-get body :max_completion_tokens)))))
 
 ;;;; Event streams
 
@@ -546,6 +625,40 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
                      (plist-get (harness-provider--normalise-model
                                  (make-harness-provider :id 'testrouter :label "T") smart)
                                 :id))))
+    (harness-openai-clear-models-cache)))
+
+(ert-deftest harness-provider-openai-models-deepseek-effort-levels ()
+  ;; DeepSeek reports the efforts it acts on; the catalogue offers exactly
+  ;; those, so the menu and the request share the real low/high/max ladder
+  ;; instead of a five-step one two of whose steps collapse.
+  (harness-openai-test-with-fake
+      `(("/models"
+         . (:body ,(harness-json-encode
+                    '(:object "list"
+                      :data ((:id "deepseek-flash" :name "DeepSeek-V4.1-Flash"
+                              :context_window 1048576
+                              :effort (:supported_levels ("low" "high" "max")
+                                       :default_level "high"))))))))
+    (harness-openai-clear-models-cache)
+    (let* ((models (harness-test-await
+                    (harness-openai--models harness-openai-test-deepseek-host-endpoint)))
+           (model (car models)))
+      (should (equal '("low" "high" "max") (plist-get model :thinking-levels)))
+      (should (eq t (plist-get (plist-get model :capabilities) :thinking)))
+      ;; The whole ladder maps to itself, in the same order.
+      (should (equal '("low" "high" "max")
+                     (mapcar #'harness-openai--deepseek-effort
+                             (plist-get model :thinking-levels)))))
+    ;; An older or terser DeepSeek host that reports nothing about
+    ;; reasoning still gets the ladder its models think at.
+    (harness-openai-test-with-fake
+        `(("/models" . (:body ,(harness-json-encode
+                                '(:object "list" :data ((:id "deepseek-v4-pro")))))))
+      (harness-openai-clear-models-cache)
+      (let ((model (car (harness-test-await
+                         (harness-openai--models harness-openai-test-deepseek-host-endpoint)))))
+        (should (equal harness-openai--deepseek-efforts (plist-get model :thinking-levels)))
+        (should (eq t (plist-get (plist-get model :capabilities) :thinking)))))
     (harness-openai-clear-models-cache)))
 
 (ert-deftest harness-provider-openai-models-plain-and-failing ()
