@@ -538,13 +538,24 @@ again; tool calls and thinking reach it only as text), the old
 provider's own state left behind, and that a running turn finishes its
 current step first. Then choose:
 
-- **compact first**: the current model summarises the conversation, and
-  the new one starts from that summary (should the summary fail, the
-  transcript goes over instead);
+- **compact with the current model**: it summarises the conversation,
+  whose cache is warm, and the new one starts from that summary;
+- **compact with the new model, limited** (advanced): the new model
+  writes the summary itself, from only the first and last messages of
+  the session, so the whole conversation never runs through it. Use
+  this when the current provider cannot answer at all — its plan ran
+  out, it is down — or to keep the job cheap. The middle of the
+  conversation is left out, so the summary is a lossy one;
 - **full transcript**: the whole transcript is written to
   `.harness/handoff/` in the session's directory (git ignores it), and
-  the new model is told to read it before it answers;
+  the new model is told to read it before it answers; its prompt cache
+  holds it as it reads;
 - **switch without handoff**, or **cancel**.
+
+If the summariser fails, the transcript goes over instead. Whichever
+handoff you choose, the message that opens the new conversation says the
+context may be lossy and tells the model to re-investigate anything it
+is unsure of — read the files, check the state — before it acts.
 
 A switch to an API provider (which is sent the whole conversation), to
 another model of the same provider, or back to a provider before any

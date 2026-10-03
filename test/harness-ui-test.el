@@ -936,7 +936,7 @@ made, newest first, and ASKED, the arguments of each question asked."
     (pcase-let ((`(,_prompt ,choices ,help ,show) (car asked)))
       ;; Shown at once: what happens, why, the risks, the choices.
       (should show)
-      (should (equal '(?c ?t ?s ?q) (mapcar #'car choices)))
+      (should (equal '(?c ?n ?t ?s ?q) (mapcar #'car choices)))
       (should (string-match-p (concat "Switching “Fix the parser” from "
                                       (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash"))
                                       " to .* starts a new conversation")
@@ -946,13 +946,26 @@ made, newest first, and ASKED, the arguments of each question asked."
         (should (string-match-p (regexp-quote risk) help)))
       (should (string-match-p "this session's 120k tokens of context cost about \\$0\\.60 to write" help))
       (should (string-match-p "A turn is running now" help))
-      (should (string-match-p "c  compact first" help))
-      (should (string-match-p "t  full transcript" help)))
+      (should (string-match-p "c  compact with DeepSeek V4.1 Flash" help))
+      (should (string-match-p "n  compact with Claude Opus 5.5, limited" help))
+      (should (string-match-p "t  full transcript" help))
+      (should (string-match-p "may be lossy, and to re-investigate" help)))
     (let ((check (cdr (assoc "_harness/handoff/check" calls)))
           (switch (cdr (assoc "_harness/handoff/switch" calls))))
       (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5") check))
       (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5" :mode "transcript") switch)))
     (should-not (assoc "session/set_model" calls))))
+
+(ert-deftest harness-ui-set-model-compacts-with-the-new-model ()
+  "The advanced choice has the new model summarise a limited context."
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check" (harness-ui-test--lossy-check "s1" "Fix the parser" t))
+            (cons "_harness/handoff/switch"
+                  '(:mode "compact-new" :summarizer "claude:claude-opus-5-5" :context "sample")))
+      ?n
+    (harness-set-model "s1")
+    (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5" :mode "compact-new")
+                   (cdr (assoc "_harness/handoff/switch" calls))))))
 
 (ert-deftest harness-ui-set-model-cancel-or-plain ()
   "Cancelling leaves the model alone; a switch that loses nothing just happens."

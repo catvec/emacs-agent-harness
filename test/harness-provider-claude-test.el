@@ -620,6 +620,42 @@ returning the user messages every CLI got so far."
         (should (equal "claude:claude-fable-5-1" (plist-get (harness-node-handoff compaction) :to))))
       (should (equal "claude" (plist-get (plist-get (harness-call 'session/get sid) :provider-state) :provider))))))
 
+(ert-deftest harness-provider-claude-handoff-summary-by-the-new-model ()
+  "Compact-new: the new CLI session writes the summary, from a bounded context.
+The old provider cannot answer in the incident this guards (its plan ran
+out), so the new model makes the summary itself: the first and last
+messages of the session reach it inside one message, since a hosted loop
+with no state of the session is sent no ordinary transcript."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (harness-provider-claude-test--demo-session cwd))
+           (claude "claude:claude-fable-5-1")
+           (result (harness-test-await (harness-call 'handoff/switch sid claude 'compact-new))))
+      (should (eq 'compact-new (plist-get result :mode)))
+      (should (equal claude (plist-get result :summarizer)))
+      (should (eq 'sample (plist-get result :context)))
+      (should (equal claude (plist-get (harness-call 'session/get sid) :model)))
+      ;; The summarisation request: a new CLI session, one message of text.
+      (let ((got (funcall inputs)))
+        (should (= 1 (length got)))
+        (should-not (plist-get (car got) :resumed))
+        (let ((text (plist-get (car got) :text)))
+          (should (string-match-p "\\`### user" text))
+          (should (string-match-p "fix the parser" text))
+          (should (string-match-p "Summarize the conversation above" text))))
+      ;; Its summary opens the conversation, marked as a lossy handoff.
+      (harness-provider-claude-test--turn sid "carry on")
+      (let* ((got (funcall inputs))
+             (text (plist-get (cadr got) :text)))
+        (should (= 2 (length got)))
+        (should (string-match-p "\\`Summary of the conversation so far:\n\nhello" text))
+        (should (string-match-p "re-investigate" text))
+        (should (string-match-p "carry on\\'" text)))
+      (let ((compaction (cl-find 'compaction (harness-call 'session/nodes sid)
+                                 :key (lambda (n) (plist-get n :kind)))))
+        (should (equal "compact-new" (plist-get (harness-node-handoff compaction) :mode)))
+        (should (equal "sample" (plist-get (harness-node-handoff compaction) :context)))
+        (should (equal claude (plist-get (harness-node-handoff compaction) :summarizer)))))))
+
 (ert-deftest harness-provider-claude-handoff-transcript-reaches-the-new-cli-session ()
   "Full transcript: the new CLI session is told to read a file holding the conversation."
   (harness-provider-claude-test-with-handoff

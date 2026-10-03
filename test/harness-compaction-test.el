@@ -55,6 +55,22 @@
 (defun harness-compaction-test-first-text (id)
   (plist-get (car (plist-get (car (harness-call 'session/messages id)) :content)) :text))
 
+(defun harness-compaction-test-long-session ()
+  "Create a demo session with twenty alternating messages."
+  (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                     :model "demo:scripted" :context-window 8000)
+                       :id)))
+    (dotimes (i 20)
+      (harness-call 'session/append id (list :kind (if (cl-evenp i) 'user 'assistant)
+                                             :content (format "message %d" i))))
+    id))
+
+(defun harness-compaction-test-request-text (request)
+  "Return all the text of REQUEST's messages, in order."
+  (mapconcat (lambda (m)
+               (mapconcat (lambda (b) (or (plist-get b :text) "")) (plist-get m :content) "\n"))
+             (plist-get request :messages) "\n"))
+
 (ert-deftest harness-compaction-compact-appends-summary-node ()
   (harness-compaction-test-with
     (let* ((id (harness-compaction-test-session))
@@ -70,6 +86,7 @@
           (should (equal "SUMMARY TEXT" (plist-get node :content)))
           (should (equal old-head (plist-get (plist-get node :meta) :compacted-head)))
           (should (equal "demo:scripted" (plist-get (plist-get node :meta) :model)))
+          (should (eq 'full (plist-get (plist-get node :meta) :context)))
           (should (numberp (plist-get (plist-get node :meta) :input-tokens)))
           (should (equal (list (list id (plist-get node :id))) done))))
       ;; The request: no tools, no provider state, transcript then the ask.
@@ -121,12 +138,80 @@ provider is never forked."
         (should (equal '(("forky:m" (:conv "c9" :provider "forky"))) forks))
         (should (equal '(:conv "c9" :fork-pending t :provider "forky") (plist-get (car requests) :provider-state)))
         (should (equal '(:conv "c9" :provider "forky") (plist-get (harness-call 'session/get id) :provider-state)))
+        ;; A sampled context is not forked: the summariser gets the sample.
+        (setq forks nil)
+        (harness-await (harness-call 'compaction/compact id (list :context "sample")))
+        (should-not forks)
+        (should-not (plist-get (car requests) :provider-state))
         ;; Another provider's state: no fork, no state.
         (harness-call 'session/set-provider-state id '(:conv "c9" :provider "other"))
         (setq forks nil)
         (harness-await (harness-call 'compaction/compact id))
         (should-not forks)
         (should-not (plist-get (car requests) :provider-state))))))
+
+(ert-deftest harness-compaction-sample-keeps-the-start-and-the-end ()
+  "A `sample' context sends only the first and last messages, and says what it left out."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-long-session))
+           (harness-provider-demo-script-override harness-compaction-test-script)
+           (requests nil))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req))))
+        (let* ((node (harness-await (harness-call 'compaction/compact id (list :context "sample"))))
+               (text (harness-compaction-test-request-text (car requests))))
+          (should (eq 'sample (plist-get (plist-get node :meta) :context)))
+          ;; Four kept from the start, twelve from the end, an elision between.
+          (should (= 18 (length (plist-get (car requests) :messages))))
+          (dolist (i '(0 3 8 19)) (should (string-match-p (format "message %d" i) text)))
+          (dolist (i '(4 5 6 7)) (should-not (string-match-p (format "message %d" i) text)))
+          (should (string-match-p "left out the 4 messages" text))
+          (should (string-match-p "Summarize the conversation above" text)))))
+    ;; An unknown context is refused.
+    (should-error (harness-await (harness-call 'compaction/compact
+                                               (harness-compaction-test-long-session)
+                                               (list :context "sideways"))))))
+
+(ert-deftest harness-compaction-hosted-summariser-without-state-gets-text ()
+  "A hosted summariser with no provider state of the session is sent the context as one message.
+Claude Code and Copilot are sent only the newest user messages, so
+messages carrying the whole transcript would never reach one; the
+context goes inside a single message of structured text instead."
+  (harness-compaction-test-with
+    (let ((requests nil))
+      (harness-define-provider 'hostedsum
+        :complete (lambda (req)
+                    (push req requests)
+                    (let ((on-event (plist-get req :on-event)))
+                      (run-at-time 0.005 nil (lambda ()
+                                               (funcall on-event '(:type text :delta "SUMMARY"))
+                                               (funcall on-event '(:type done :stop-reason end-turn)))))
+                    (list :cancel #'ignore))
+        :capabilities '(:hosted-loop t :compaction hosted))
+      (let ((id (harness-compaction-test-long-session)))
+        (let ((node (harness-await (harness-call 'compaction/compact id (list :model "hostedsum:m"))))
+              (text (harness-compaction-test-request-text (car requests)))
+              (messages (plist-get (car requests) :messages)))
+          (should (eq 'full (plist-get (plist-get node :meta) :context)))
+          (should-not (plist-get (car requests) :provider-state))
+          (should (= 1 (length messages)))
+          (should (eq 'user (plist-get (car messages) :role)))
+          (should (string-match-p "### user" text))
+          (should (string-match-p "### assistant" text))
+          (dolist (i '(0 4 19)) (should (string-match-p (format "message %d" i) text)))
+          (should (string-match-p "Summarize the conversation above" text))))
+      ;; The same inlining carries a sampled context.
+      (setq requests nil)
+      (let* ((id (harness-compaction-test-long-session))
+             (node (harness-await (harness-call 'compaction/compact
+                                                id (list :model "hostedsum:m" :context "sample"))))
+             (text (harness-compaction-test-request-text (car requests))))
+        (should (eq 'sample (plist-get (plist-get node :meta) :context)))
+        (should (= 1 (length (plist-get (car requests) :messages))))
+        (dolist (i '(0 3 8 19)) (should (string-match-p (format "message %d" i) text)))
+        (dolist (i '(4 5 6 7)) (should-not (string-match-p (format "message %d" i) text)))
+        (should (string-match-p "left out the 4 messages" text))))))
 
 (ert-deftest harness-compaction-compact-error-rejects ()
   (harness-compaction-test-with

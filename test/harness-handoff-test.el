@@ -187,6 +187,10 @@
                      (let ((h (harness-node-handoff note)))
                        (list (plist-get h :mode) (plist-get h :file) (plist-get h :from) (plist-get h :to)))))
       (should (string-match-p (concat "read " (regexp-quote file)) (plist-get note :content)))
+      ;; The handoff is lossy, and the model is told so.
+      (should (string-match-p "Harness note: this conversation was handed over from Demo scripted"
+                              (plist-get note :content)))
+      (should (string-match-p "re-investigate" (plist-get note :content)))
       ;; It is what the new model is sent first, with the user's message after it.
       (harness-test-await (harness-call 'agent/prompt sid "go on"))
       (let ((texts (harness-handoff-test--last-user-texts (car harness-handoff-test--requests))))
@@ -217,14 +221,62 @@
       (let ((compaction (cl-find 'compaction (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
         (should (equal (plist-get compaction :id) (plist-get result :node)))
         (should (equal "hosted:m" (plist-get (harness-node-handoff compaction) :to)))
-        (should (equal "compact" (plist-get (harness-node-handoff compaction) :mode))))
+        (should (equal "compact" (plist-get (harness-node-handoff compaction) :mode)))
+        (should (equal "demo:scripted" (plist-get (harness-node-handoff compaction) :summarizer)))
+        (should (equal "full" (plist-get (harness-node-handoff compaction) :context)))
+        ;; The summary says it is a lossy handoff and to re-investigate.
+        (should (string-match-p "Harness note: this conversation was handed over from Demo scripted"
+                                (plist-get compaction :content)))
+        (should (string-match-p "re-investigate" (plist-get compaction :content))))
       ;; The new model's first message: the summary, then the user's.
       (harness-test-await (harness-call 'agent/prompt sid "go on"))
       (let ((request (car harness-handoff-test--requests)))
         (should (= 1 (length (plist-get request :messages))))
         (let ((texts (harness-handoff-test--last-user-texts request)))
           (should (string-prefix-p "Summary of the conversation so far:\n\nSUMMARY: fix the parser" (car texts)))
+          (should (string-match-p "re-investigate" (car texts)))
           (should (equal "go on" (car (last texts)))))))))
+
+(ert-deftest harness-handoff-compact-new-summarises-on-the-new-model ()
+  "The new model writes the summary when the old one cannot, from a bounded context.
+Only the first and last messages of the session go to it, and the
+summary it writes opens the new conversation with a lossy-handoff note."
+  (harness-handoff-test-with
+    (let ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                        :model "demo:scripted")
+                          :id)))
+      (dotimes (i 20)
+        (harness-call 'session/append sid (list :kind (if (cl-evenp i) 'user 'assistant)
+                                                :content (format "message %d" i))))
+      (let ((result (harness-test-await (harness-call 'handoff/switch sid "hosted:m" 'compact-new))))
+        (should (eq 'compact-new (plist-get result :mode)))
+        (should (equal "hosted:m" (plist-get result :summarizer)))
+        (should (eq 'sample (plist-get result :context)))
+        (should (equal "hosted:m" (plist-get (harness-call 'session/get sid) :model)))
+        ;; The new model got one message of text: the start and end of the
+        ;; conversation, with what was left out said so.
+        (should (= 1 (length harness-handoff-test--requests)))
+        (let* ((request (car harness-handoff-test--requests))
+               (texts (harness-handoff-test--last-user-texts request)))
+          (should (equal "hosted:m" (plist-get request :model)))
+          (should-not (plist-get request :provider-state))
+          (should (= 2 (length texts)))
+          (let ((text (car texts)))
+            (dolist (i '(0 3 8 19)) (should (string-match-p (format "message %d" i) text)))
+            (dolist (i '(4 5 6 7)) (should-not (string-match-p (format "message %d" i) text)))
+            (should (string-match-p "left out the 4 messages" text)))
+          (should (string-match-p "Summarize the conversation above" (cadr texts))))
+        ;; Its summary opens the session, marked as a lossy handoff.
+        (let ((compaction (cl-find 'compaction (harness-call 'session/nodes sid)
+                                   :key (lambda (n) (plist-get n :kind)))))
+          (should (string-prefix-p "ok" (plist-get compaction :content)))
+          (should (string-match-p "Harness note: this conversation was handed over from Demo scripted"
+                                  (plist-get compaction :content)))
+          (should (string-match-p "re-investigate" (plist-get compaction :content)))
+          (let ((handoff (harness-node-handoff compaction)))
+            (should (equal "compact-new" (plist-get handoff :mode)))
+            (should (equal "sample" (plist-get handoff :context)))
+            (should (equal "hosted:m" (plist-get handoff :summarizer)))))))))
 
 (ert-deftest harness-handoff-compact-falls-back-to-the-transcript ()
   "When the old model cannot summarise -- its plan ran out, say -- the transcript goes over."

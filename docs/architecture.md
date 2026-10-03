@@ -1089,13 +1089,22 @@ pending request and resolves when answered).
 - `compaction/compact SESSION-ID &optional OPTS` → promise; summarises
   the transcript with the session's model (OPTS `:model` another),
   appends a `compaction` node whose `:meta` points at the compacted
-  head, sets it as head, hints before/after.  `session/messages` starts
-  at the node, as a user message ("Summary of the conversation so
-  far: ..."), followed by the unanswered user messages carried over
-  after it.  A summariser whose provider keeps the conversation and can
-  fork it (a hosted loop) works on a fork of the session's provider
-  state, so it summarises the real conversation and leaves the
-  session's own alone; others get the transcript as messages.
+  head, records the summariser (`:model`), what it was given
+  (`:context`) and the size compacted, sets it as head, hints
+  before/after.  `session/messages` starts at the node, as a user
+  message ("Summary of the conversation so far: ..."), followed by the
+  unanswered user messages carried over after it.  OPTS `:context` is
+  `full` (the default) or `sample`, which keeps only the first and last
+  few messages (`harness-compaction--sample-head`/`-tail`) with a user
+  message saying how many were left out: a bound on what a summariser
+  sent the conversation as text costs.  A summariser whose provider
+  keeps the conversation and can fork it (a hosted loop) works on a
+  fork of the session's provider state, so it summarises the real
+  conversation and leaves the session's own alone; one whose provider
+  is sent the transcript anyway (an API provider) gets it as messages.
+  A summariser that keeps the conversation and has no state of this
+  session (the target of a switch) is sent only the newest user
+  messages, so the context goes inside one message as structured text.
 - Auto: `agent/before-turn` compacts when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
   reports `:compaction hosted`.
@@ -1126,19 +1135,27 @@ so switching to either loses nothing.
 - `handoff/check-all MODEL &optional FILTER` → the checks of the
   sessions `session/set-all` would change.
 - `handoff/switch SESSION-ID MODEL &optional MODE` → promise of `(:id
-  :model :from :lossy :mode :deferred :file :node :fallback :error)`.
+  :model :from :lossy :mode :summarizer :context :deferred :file :node
+  :fallback :error)`.
   The model changes at once (`session/update`); a lossy switch then
   hands over as MODE says, any other is a plain switch.  `compact`
-  summarises on the old model (`compaction/compact` with `:model`); the
-  compaction node, marked `:handoff`, opens the new conversation.  When
-  no summary can be made (the old provider fails or its plan ran out)
-  the transcript goes over instead (`:fallback` says why).  `transcript`
-  writes `session/transcript-text` to `CWD/.harness/handoff/ID-TIME.md`
-  -- in the session's directory, which its tools may read, unlike the
-  state directory, and kept out of git by a `.gitignore` of `*` there --
-  and appends a user message from the harness (`:source "model
-  handoff"`, `:meta :handoff`) telling the new model to read it before
-  it answers.  `none` only switches.
+  summarises on the old model (`compaction/compact` with `:model`, the
+  warm cache) and `compact-new` has the *new* model summarise instead,
+  from a bounded context (`:context sample`: the first and last few
+  messages): use it when the old provider cannot answer -- its plan ran
+  out, it is down -- or to keep the job small.  The compaction node,
+  marked `:handoff` with the mode, summariser and context, opens the new
+  conversation, ending in a harness note that the handoff is lossy and
+  the model should re-investigate rather than trust it.  When no summary
+  can be made (the summariser fails or its plan ran out) the transcript
+  goes over instead (`:fallback` says why).  `transcript` writes
+  `session/transcript-text` to `CWD/.harness/handoff/ID-TIME.md` -- in
+  the session's directory, which its tools may read and the new
+  provider's prompt cache holds as it reads, unlike the state directory,
+  and kept out of git by a `.gitignore` of `*` there -- and appends a
+  user message from the harness (`:source "model handoff"`, `:meta
+  :handoff`) telling the new model to read it before it answers, with
+  the same lossy warning.  `none` only switches.
 - `handoff/switch-all MODEL &optional FILTER MODE` → the ids switched;
   MODE applies to the lossy ones.
 - A handoff must land in the trailing user messages.  An idle
@@ -2090,12 +2107,15 @@ A model switch asks the harness first (`handoff/check`, or
 the whole batch).  A lossy one shows, before the question
 (`read-multiple-choice`, help shown at once in `*Harness model
 switch*`), what happens and why, the risks with the cache cost, and the
-choices: compact first, full transcript, switch without handoff,
-cancel.  The answer goes to `handoff/switch` (`handoff/switch-all`);
-cancelling changes nothing, not even the default for new sessions.  A
-switch that loses nothing goes through `session/set_model`
-(`session/set-all`) as before, and so does any switch when the harness
-cannot check.
+choices: compact with the current model (its cache is warm), compact
+with the new model from a limited context (for when the current
+provider cannot answer), full transcript, switch without handoff,
+cancel.  The help says every handoff warns the new model that the
+context may be lossy and to re-investigate.  The answer goes to
+`handoff/switch` (`handoff/switch-all`); cancelling changes nothing, not
+even the default for new sessions.  A switch that loses nothing goes
+through `session/set_model` (`session/set-all`) as before, and so does
+any switch when the harness cannot check.
 
 Desktop notifications: `harness-ui` answers `_harness/client/notify` by
 showing the notification on this Emacs's desktop
