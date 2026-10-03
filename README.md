@@ -227,6 +227,7 @@ the `[menu]` button in the header line.
 | `C-c C-k` | Cancel the running turn |
 | `TAB` | Complete in the compose box; elsewhere, fold or unfold the block at point |
 | `C-c C-s` | Search the transcript |
+| `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
 | `C-c C-e` | Jump to the bottom |
 | `C-c C-r` | Redraw the buffer |
@@ -235,6 +236,12 @@ Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list, or the waiting session itself when only one needs you.
+
+While the agent works through a todo list (`todo_write`), the list stays
+in view: the header line names the progress and the item in hand, and a
+panel above the compose box lists every item with its state. `C-c C-t`,
+a click on the header segment, or `TAB` on the panel folds the items
+away and brings them back; the list disappears when the agent clears it.
 
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
@@ -255,10 +262,11 @@ and show one at a time. Switch between them with the tabs above the
 area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
 buffer, or by moving point onto an option.
 
-The header line shows the session's status, name, model, permission
-mode, whether it is `non-interactive` or `interactive`, thinking level,
-context and cost. Click the model, the permission mode, the
-non-interactive switch or the thinking level to change it. A
+The header line shows the session's status, name, todo progress while
+it has one, model, permission mode, whether it is `non-interactive` or
+`interactive`, thinking level, context and cost. Click the model, the
+permission mode, the non-interactive switch or the thinking level to
+change it. A
 non-interactive session never waits for you, which suits a session you
 leave to work while you are away. Whatever would ask you for
 permission, the auto-mode judge decides instead, whatever the
