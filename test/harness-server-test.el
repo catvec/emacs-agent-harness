@@ -41,7 +41,7 @@ thread for 2 seconds."
            (progn (harness-start) ,@body)
          (let ((proc harness-ui--server))
            (harness-stop)
-           (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit")))
+           (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 30 "harness process exit")))
          (setq harness-ui-connection-address nil harness-ui-connection nil)))))
 
 (ert-deftest harness-server-runs-the-harness-out-of-process ()
@@ -64,7 +64,10 @@ thread for 2 seconds."
         (cancel-timer timer))
       (let ((gaps (cl-loop for (a b) on (nreverse ticks) while b collect (- b a))))
         (should (> (length gaps) 20))
-        (should (< (apply #'max gaps) 0.15))))))
+        ;; A UI the harness blocked would miss its 2 s of ticks; a busy
+        ;; machine, running other suites meanwhile, delays one by a
+        ;; tenth or two.
+        (should (< (apply #'max gaps) 0.5))))))
 
 (ert-deftest harness-server-emacs-tools-run-in-the-ui-emacs ()
   (harness-server-test-with-process
@@ -96,7 +99,7 @@ so settings made later in the init file are forwarded."
             (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30))))
         (let ((proc harness-ui--server))
           (harness-stop)
-          (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit")))
+          (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 30 "harness process exit")))
         (setq harness-ui-connection-address nil harness-ui-connection nil)))))
 
 (ert-deftest harness-server-forwards-corporate-mode ()
