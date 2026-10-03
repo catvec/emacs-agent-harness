@@ -1017,6 +1017,44 @@ answers them.  Return the events, oldest first."
     (should (equal '("web_search")
                    (plist-get (harness-call 'provider/capabilities "claude:claude-fable-5-1") :builtin-tools)))))
 
+(ert-deftest harness-provider-claude-no-thinking-turns-thinking-off ()
+  "A request with `:no-thinking' runs the CLI with extended thinking off.
+The CLI takes no output budget, so the auto-mode judge's Haiku spent
+its output thinking and stopped at max_tokens before its verdict was
+written.  Thinking is turned off both in the environment and by flag
+settings, which beat a user settings file's `env'; no effort is sent."
+  (harness-provider-claude-test--setup)
+  (cl-flet ((after (flag cmd) (nth (1+ (cl-position flag cmd :test #'equal)) cmd)))
+    (let ((cmd (harness-provider-claude--command "claude-haiku-4-5-20251001" 'off "sys" nil nil)))
+      (should-not (member "--effort" cmd))
+      (should (equal "0" (harness-plist-get-in (harness-json-parse (after "--settings" cmd))
+                                               '(:env :MAX_THINKING_TOKENS)))))
+    (should-not (member "--settings" (harness-provider-claude--command "m" "high" nil nil nil))))
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (append (list (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file))
+                                      process-environment))
+         (events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "judge" "hello" :tools nil
+                                                              :thinking "high" :no-thinking t))))
+         (dump (harness-provider-claude-test--read-argv argv-file))
+         (argv (plist-get dump :argv)))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+    (should (equal "0" (plist-get dump :max_thinking_tokens)))
+    (should (member "--settings" argv))
+    (should-not (member "--effort" argv)))
+  ;; Without it the process is started as before, thinking left alone.
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (append (list (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file))
+                                      (cl-remove-if (lambda (e) (string-prefix-p "MAX_THINKING_TOKENS=" e))
+                                                    process-environment))))
+    (harness-provider-claude-test--run
+     (harness-provider-claude-test--request "plain" "hello" :tools nil :thinking "high"))
+    (let* ((dump (harness-provider-claude-test--read-argv argv-file))
+           (argv (plist-get dump :argv)))
+      (should-not (plist-get dump :max_thinking_tokens))
+      (should-not (member "--settings" argv))
+      (should (equal "high" (nth (1+ (cl-position "--effort" argv :test #'equal)) argv))))))
+
 (ert-deftest harness-provider-claude-web-search-stands-in-for-web-search ()
   "Asked to, the CLI searches itself; the harness decides each search and hears its result.
 The call, the question and the result all name web_search, the harness

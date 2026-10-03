@@ -576,7 +576,10 @@ TOOL-SPEC = `(:name :description :schema JSON-SCHEMA-PLIST)`.  For hosted
 loops only the trailing user message is sent.  A REQUEST may also carry
 `:builtin-tools`, a list of harness tool names (from `tools/builtin`):
 the provider turns on its own tools in their place for this request,
-and `:tools` lacks them.
+and `:tools` lacks them.  `:no-thinking t` asks for no extended
+thinking (the auto-mode judge sends it); Claude Code, which takes no
+`:max-tokens`, then runs the CLI with `MAX_THINKING_TOKENS=0`, and
+other providers may ignore it.
 
 A REQUEST with `:ephemeral t` is a one-off question, such as the
 auto-mode judge's.  The provider answers it from the request alone, as
@@ -1131,7 +1134,10 @@ pending request and resolves when answered).
   verdict, which a reasoning model does after spending the small first
   budget thinking, stage 30 asks again with more room
   (`harness-perms--judge-retry-max-tokens') before it gives the call
-  up; a verdict written before the cap is taken as it stands.  A call
+  up; a verdict written before the cap is taken as it stands.  The
+  judge asks for no extended thinking (`:no-thinking`), so the verdict
+  is not left unwritten or half written behind the model's thinking.
+  A call
   it gives no verdict on
   (it failed, timed out or answered without one; stage 30 passes the
   `ask` on with `:no-verdict` saying why) nobody can approve, so stage

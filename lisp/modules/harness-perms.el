@@ -860,9 +860,13 @@ DECISION is the current value and NEXT continues the chain."
 
 ;;;; Auto mode: a cheap model judges
 
-;; The judge gets two tries when it runs out of output tokens: a
-;; reasoning model spends the first call's small budget thinking and
-;; never writes its verdict, so the second call gives it room to
+;; The judge asks for no extended thinking (`:no-thinking'): a model
+;; that thinks by default spends its output on thinking and stops at
+;; max-tokens with no verdict, or half of one.  The Claude CLI provider
+;; takes no output budget at all, so there turning thinking off is what
+;; lets the verdict finish.  A complete verdict decides whatever the
+;; stop reason; a reply without one is no verdict.  The judge gets two
+;; tries when it runs out of output tokens, the second with room to
 ;; answer.  Only a call neither call decided is denied while the user
 ;; is away.
 
@@ -1041,6 +1045,9 @@ value and NEXT continues the chain."
                                                            :content (list (list :type "text"
                                                                                 :text (harness-perms--judge-text request)))))
                                      :tools nil
+                                     ;; A verdict needs no extended thinking,
+                                     ;; which would spend the output first.
+                                     :no-thinking t
                                      :max-tokens (if (= n 1)
                                                      harness-perms--judge-max-tokens
                                                    harness-perms--judge-retry-max-tokens)

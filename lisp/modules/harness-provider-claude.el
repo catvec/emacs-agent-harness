@@ -376,9 +376,21 @@ resumes the CLI session in a new one."
                         (max (point-min) (- (point-max) 2000)) (point-max))))
       "")))
 
-(defun harness-provider-claude--environment ()
-  "Return `process-environment' without the CLAUDECODE nesting marker."
-  (cl-remove-if (lambda (e) (string-prefix-p "CLAUDECODE=" e)) process-environment))
+(defun harness-provider-claude--environment (&optional effort)
+  "Return `process-environment' without the CLAUDECODE nesting marker.
+With EFFORT `off' it also turns the CLI's extended thinking off (see
+`harness-provider-claude--effort')."
+  (append (and (eq effort 'off) (list "MAX_THINKING_TOKENS=0"))
+          (cl-remove-if (lambda (e) (string-prefix-p "CLAUDECODE=" e)) process-environment)))
+
+(defun harness-provider-claude--effort (request)
+  "Return the thinking level a CLI process serving REQUEST runs at.
+That is REQUEST's `:thinking', or `off' when it asks for no thinking
+with `:no-thinking'.  The CLI takes no output budget, so it ignores a
+request's `:max-tokens', and a model thinking by default spends its
+whole output on thinking before a short answer: the auto-mode judge
+ended at max_tokens with no verdict, or half of one."
+  (if (plist-get request :no-thinking) 'off (plist-get request :thinking)))
 
 (defun harness-provider-claude--model-window (model-id)
   "Return the context window the catalogue gives MODEL-ID, or nil."
@@ -406,9 +418,11 @@ session.  nil leaves the CLI's default."
 A session that runs below its model's context window tells the CLI to
 auto-compact at the same point (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', a
 percentage), so the CLI's own compaction matches the shorter budget the
-harness gave the session (a task's, say)."
+harness gave the session (a task's, say).  A request with
+`:no-thinking' also turns the CLI's extended thinking off."
   (let ((pct (harness-provider-claude--autocompact-pct request))
-        (env (harness-provider-claude--environment)))
+        (env (harness-provider-claude--environment
+              (harness-provider-claude--effort request))))
     (if pct
         (cons (format "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d" pct) env)
       env)))
@@ -443,13 +457,14 @@ go."
 
 (defun harness-provider-claude--command (model effort system resume fork &optional builtin resume-at)
   "Build the `claude' command line.
-MODEL is the model name, EFFORT the thinking level or nil, SYSTEM the
-system prompt or nil, RESUME a CLI session id to continue or nil, and
-FORK non-nil to fork RESUME into a new session.  BUILTIN lists the
-CLI's own tools to turn on (\"WebSearch\"); every other one is off.
-RESUME-AT, the uuid of an entry of RESUME's chain, keeps the resumed
-conversation up to and including that entry; only a fork is cut, so
-RESUME itself keeps all it has."
+MODEL is the model name, EFFORT the thinking level, `off' for no
+extended thinking, or nil, SYSTEM the system prompt or nil, RESUME a
+CLI session id to continue or nil, and FORK non-nil to fork RESUME into
+a new session.  BUILTIN lists the CLI's own tools to turn on
+\(\"WebSearch\"); every other one is off.  RESUME-AT, the uuid of an
+entry of RESUME's chain, keeps the resumed conversation up to and
+including that entry; only a fork is cut, so RESUME itself keeps all
+it has."
   (append
    (list harness-provider-claude-program
          "-p" "--input-format" "stream-json" "--output-format" "stream-json"
@@ -461,7 +476,11 @@ RESUME itself keeps all it has."
    harness-provider-claude-permission-args
    (harness-provider-claude--ask-args builtin)
    (list "--model" model)
-   (when effort (list "--effort" effort))
+   (cond ((eq effort 'off)
+          ;; Thinking off.  Flag settings beat the user's settings files,
+          ;; whose `env' would otherwise beat the process environment.
+          (list "--settings" (harness-json-encode '(:env (:MAX_THINKING_TOKENS "0")))))
+         (effort (list "--effort" effort)))
    (when (and system (not (harness-string-blank-p system)))
      (list "--system-prompt" system))
    (when resume (list "--resume" resume))
@@ -478,11 +497,13 @@ They stand in for the harness tools its `:builtin-tools' names."
 
 (defun harness-provider-claude--spawn-key (request)
   "Return the settings a CLI process must have been started with to serve REQUEST.
-That is (MODEL EFFORT SYSTEM BUILTIN PCT): the CLI tools it turns on
-\(nil when none) and the auto-compact percentage it was given (nil
-without one).  A process started otherwise is restarted."
+That is (MODEL EFFORT SYSTEM BUILTIN PCT): EFFORT `off' for no
+extended thinking (see `harness-provider-claude--effort'), the CLI
+tools it turns on (nil when none) and the auto-compact percentage it
+was given (nil without one).  A process started otherwise is
+restarted."
   (list (cdr (harness-provider-parse-model (plist-get request :model)))
-        (plist-get request :thinking)
+        (harness-provider-claude--effort request)
         (plist-get request :system)
         (harness-provider-claude--cli-tools request)
         (harness-provider-claude--autocompact-pct request)))
@@ -502,9 +523,9 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
          (host (plist-get session :host))
          (cwd (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd))
          (default-directory (file-name-as-directory (expand-file-name cwd)))
+         (effort (harness-provider-claude--effort request))
          (process-environment (harness-provider-claude--environment-for request))
          (model (cdr (harness-provider-parse-model (plist-get request :model))))
-         (effort (plist-get request :thinking))
          (system (plist-get request :system))
          (command (harness-provider-claude--command model effort system resume fork
                                                     (harness-provider-claude--cli-tools request)
