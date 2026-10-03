@@ -17,6 +17,7 @@
 (defvar harness-tasks-require-verification)
 (defvar harness-tasks-permission-mode)
 (defvar harness-tasks-non-interactive)
+(defvar harness-tasks-context-limit)
 (defvar harness-tasks-model)
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
@@ -100,6 +101,27 @@ turn `harness-tasks-require-verification' on themselves."
                      (plist-get (cl-find 'user (harness-call 'session/nodes sid)
                                          :key (lambda (n) (plist-get n :kind)))
                                 :content))))))
+
+(ert-deftest harness-tasks-session-runs-on-a-capped-context ()
+  "A task's session is capped by `harness-tasks-context-limit'.
+The demo model's window is 8000: a 4000-token limit halves the window
+the session works on, the default 256000 leaves it whole, and nil
+leaves it whole too."
+  (harness-tasks-test-with
+    (let* ((id (harness-tasks-test-submit "fix the parser"))
+           (session (harness-tasks-test-session id)))
+      (should (= 256000 (plist-get session :context-window-limit)))
+      (should (= 8000 (plist-get session :context-window))))
+    (let ((harness-tasks-context-limit 4000))
+      (let* ((id (harness-tasks-test-submit "keep it small"))
+             (session (harness-tasks-test-session id)))
+        (should (= 4000 (plist-get session :context-window-limit)))
+        (should (= 4000 (plist-get session :context-window)))))
+    (let ((harness-tasks-context-limit nil))
+      (let* ((id (harness-tasks-test-submit "and another one"))
+             (session (harness-tasks-test-session id)))
+        (should-not (plist-get session :context-window-limit))
+        (should (= 8000 (plist-get session :context-window)))))))
 
 (ert-deftest harness-tasks-limit-queues-pending ()
   (harness-tasks-test-with
@@ -433,6 +455,9 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
              (id (plist-get task :id)))
         (should (equal "Tidy the imports" (plist-get task :prompt)))
         (should (equal sid (plist-get task :session)))
+        ;; The task's shorter context applies from now on.
+        (should (= 256000 (plist-get (harness-call 'session/get sid) :context-window-limit)))
+        (should (= 8000 (plist-get (harness-call 'session/get sid) :context-window)))
         ;; An idle session is waiting for the user.
         (should (eq 'needs-input (plist-get task :column)))
         (should-not (member sid (mapcar (lambda (s) (plist-get s :id)) (harness-call 'task/adoptable default-directory))))
@@ -628,6 +653,9 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
           (should (equal default-directory (plist-get session :cwd)))
           (should-not (plist-get session :worktree))
           (should (string-match-p "## Task refinement" (harness-run-filter 'agent/system-prompt "" session))))
+        ;; A write-up runs on the task's shorter context too.
+        (should (= 256000 (plist-get (harness-call 'session/get sid) :context-window-limit)))
+        (should (= 8000 (plist-get (harness-call 'session/get sid) :context-window)))
         (harness-tasks-test-wait-state id 'pending)
         (setq task (harness-tasks-test-task id))
         (should (equal harness-tasks-test-write-up (plist-get task :prompt)))

@@ -796,6 +796,44 @@ announced, so the UI does not keep showing the old one."
             (should (= 1000000 (harness-session-test-window id)))))
       (harness-session-test-drop-provider))))
 
+(ert-deftest harness-session-window-limit-caps-the-model-window ()
+  "A session can cap its context window at a number of tokens.
+The cap follows a model change (it never raises the model's window), an
+outright window wins over it, and nil gives the model's window back."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("big" . 1000000) ("small" . 200000)))
+          (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                             :model "test-win:big" :context-window-limit 256000)
+                               :id)))
+            (should (= 256000 (harness-session-test-window id)))
+            (should (= 256000 (plist-get (harness-call 'session/get id) :context-window-limit)))
+            ;; A model with less than the limit brings its own window.
+            (harness-call 'session/update id :model "test-win:small" :silent t)
+            (should (= 200000 (harness-session-test-window id)))
+            ;; An outright window wins over the limit; unset, the limit
+            ;; applies again.
+            (harness-call 'session/update id :context-window 8000 :silent t)
+            (should (= 8000 (harness-session-test-window id)))
+            (harness-call 'session/update id :context-window nil :silent t)
+            (should (= 200000 (harness-session-test-window id)))
+            ;; It is kept across restarts, and a fork inherits it.
+            (harness-session-flush)
+            (clrhash harness-sessions)
+            (harness-session--load-all)
+            (should (= 200000 (harness-session-test-window id)))
+            (let ((fork (harness-await (harness-call 'session/fork id :kind 'fork))))
+              (should (= 256000 (plist-get fork :context-window-limit)))
+              (should (= 200000 (plist-get fork :context-window))))
+            ;; nil is the model's window, as for any session.
+            (harness-call 'session/update id :context-window-limit nil :silent t)
+            (should-not (plist-get (harness-call 'session/get id) :context-window-limit))
+            (should (= 200000 (harness-session-test-window id)))
+            (harness-call 'session/update id :model "test-win:big" :silent t)
+            (should (= 1000000 (harness-session-test-window id)))))
+      (harness-session-test-drop-provider))))
+
 (ert-deftest harness-session-record-window-copy-ignored-on-load ()
   "Records used to keep `:context-window', a copy of the model's window.
 That copy may be the 128000 stand-in; a session loads with its model's

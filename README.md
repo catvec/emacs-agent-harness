@@ -376,6 +376,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   as cleaning up uncommitted changes; those tasks show `main tree` on
   their card, and a refined task keeps the choice for when you start it.
   An agent can ask for the same thing with `task_submit`'s `main_tree`.
+- Task sessions run on at most 256k tokens of context
+  (`harness-tasks-context-limit`): they compact sooner than interactive
+  sessions, so a long task works from a smaller transcript between
+  turns. Set it to another number of tokens to tune that, or to nil to
+  give task sessions the whole window like any other session. A
+  provider that compacts on its own side keeps its own threshold,
+  except Claude Code, which the harness tells to compact at the same
+  point.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback.

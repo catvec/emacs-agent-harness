@@ -45,6 +45,14 @@
 ;; use it, the sandbox lets its commands write there, and the system
 ;; prompt names it.  /tmp is shared, so only a directory that is the
 ;; user's own is ever handed out.
+;;
+;; A session may instead cap its context window at a number of tokens
+;; (`:context-window-limit' to `session/create' or `session/update'):
+;; the window in effect is then the smaller of the model's and the
+;; limit, computed afresh so a model change moves it too.  Task
+;; sessions use this to compact earlier than interactive ones (see
+;; `harness-tasks-context-limit').  A `:context-window' set outright
+;; for the session wins over the limit, being the more explicit choice.
 
 ;;; Code:
 
@@ -63,6 +71,7 @@
   allowed-dirs (status 'idle) parent-id fork-node created updated
   (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :list-cost 0.0 :context 0 :turns 0))
   context-window                        ; one set for the session, else nil: the model's
+  context-window-limit                  ; most tokens of context, else nil: the model's
   budget head queue pending todos plan provider-state
   ;; runtime only
   (nodes (make-hash-table :test 'equal))
@@ -94,15 +103,15 @@ defaults."
 (defconst harness-session--public-keys
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
-    :context-window :context-window-override :budget :head :queue :pending :todos :plan
-    :provider-state :provider-node))
+    :context-window :context-window-override :context-window-limit :budget :head :queue :pending
+    :todos :plan :provider-state :provider-node))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
 
 (defconst harness-session--settings
   '(:name :model :permission-mode :thinking :non-interactive :allowed-dirs :budget :context-window
-    :cwd :host :worktree)
+    :context-window-limit :cwd :host :worktree)
   "Keys `session/update' accepts.")
 
 ;;;; Conversions
@@ -114,8 +123,9 @@ defaults."
 
 (defun harness-session-plist (s)
   "Return the public plist of session struct S.
-`:context-window' is the window in effect (see `harness-session--window'),
-`:context-window-override' the one set for S, or nil."
+`:context-window' is the window in effect (see `harness-session--window');
+`:context-window-override' and `:context-window-limit' are what was set
+for S, and are nil when unset."
   (list :id (harness-session-id s) :name (harness-session-name s)
         :kind (harness-session-kind s) :project (harness-session-project s)
         :cwd (harness-session-cwd s) :host (harness-session-host s)
@@ -129,6 +139,7 @@ defaults."
         :updated (harness-session-updated s) :usage (harness-session-usage s)
         :context-window (harness-session--window s)
         :context-window-override (harness-session-context-window s)
+        :context-window-limit (harness-session-context-window-limit s)
         :budget (harness-session-budget s) :head (harness-session-head s)
         :queue (harness-session-queue s) :pending (harness-session-pending s)
         :todos (harness-session-todos s) :plan (harness-session-plan s)
@@ -167,6 +178,8 @@ defaults."
           ;; Not `:context-window': that is the model's window as it was
           ;; when the record was written, and now comes from the catalogue.
           (harness-session-context-window s) (plist-get pl :context-window-override)
+          (harness-session-context-window-limit s)
+          (harness-session--context-window-limit-value (plist-get pl :context-window-limit))
           (harness-session-budget s) (plist-get pl :budget)
           (harness-session-head s) (plist-get pl :head)
           (harness-session-queue s) (plist-get pl :queue)
@@ -332,10 +345,20 @@ taken anywhere but at the head of its parent starts off it."
                     nil)))
       128000))
 
+(defun harness-session--context-window-limit-value (v)
+  "Return V when it is a usable limit on a context window, else nil.
+A limit is a positive number of tokens, kept whole."
+  (and (numberp v) (> v 0) (round v)))
+
 (defun harness-session--window (s)
-  "Return the context window of S: the one set for it, else its model's."
+  "Return the context window of S: the one set for it, else its model's.
+Its `context-window-limit' caps the model's window; a window set for S
+outright (`:context-window') wins over the limit."
   (or (harness-session-context-window s)
-      (harness-session--model-window (harness-session-model s))))
+      (let ((window (harness-session--model-window (harness-session-model s)))
+            (limit (harness-session--context-window-limit-value
+                    (harness-session-context-window-limit s))))
+        (if limit (min window limit) window))))
 
 (defun harness-session--model-levels (model)
   "Return the thinking levels the provider catalogue gives MODEL, or nil."
@@ -486,6 +509,8 @@ configured at `:cwd'."
           (harness-session-created s) (float-time)
           (harness-session-updated s) (float-time)
           (harness-session-context-window s) (plist-get plist :context-window)
+          (harness-session-context-window-limit s)
+          (harness-session--context-window-limit-value (plist-get plist :context-window-limit))
           (harness-session-budget s) (or (plist-get plist :budget) (harness-session--config 'harness-budget cwd))
           (harness-session-provider-state s) (plist-get plist :provider-state)
           (harness-session-loaded s) t)
@@ -586,6 +611,9 @@ next start settles its turn."
     (:model (format "model → %s" value))
     (:permission-mode (format "permission mode → %s" value))
     (:thinking (format "thinking → %s" (or value "default")))
+    (:context-window-limit (if value (format "context window limit → %s"
+                                             (harness-format-tokens value))
+                             "context window limit removed"))
     (:non-interactive (format "non-interactive %s" (if (harness-json-true-p value) "on" "off")))
     (:budget (if value (format "budget → %s%s" (harness-format-cost (plist-get value :amount))
                                (if (plist-get value :hard) " (hard)" ""))
@@ -599,7 +627,9 @@ With `:persist' non-nil, model, permission mode and thinking are also
 written to the configuration layer.  With `:silent' no hint is added.
 `:context-window' sets the session's own context window, nil its
 model's again; a new `:model' brings its own window too, unless PLIST
-also sets one."
+also sets one.  `:context-window-limit N' caps its model's window at N
+tokens, nil the model's again; a `:context-window' set for the session
+wins over it."
   (let* ((s (harness-session--get id))
          (persist (plist-get plist :persist))
          (silent (plist-get plist :silent))
@@ -618,6 +648,8 @@ also sets one."
                   (:allowed-dirs (setf (harness-session-allowed-dirs s) (and (listp v) v)))
                   (:budget (setf (harness-session-budget s) v))
                   (:context-window (setf (harness-session-context-window s) v))
+                  (:context-window-limit (setf (harness-session-context-window-limit s)
+                                               (harness-session--context-window-limit-value v)))
                   (:cwd (setf (harness-session-cwd s) (file-name-as-directory (expand-file-name v))))
                   (:host (setf (harness-session-host s) v))
                   (:worktree (setf (harness-session-worktree s) v)))
@@ -735,6 +767,7 @@ parent's CLI session.  A BTW is no fork; see `session/btw'."
                                                   t :false)
                              :allowed-dirs (harness-session-allowed-dirs parent)
                              :budget (harness-session-budget parent)
+                             :context-window-limit (harness-session-context-window-limit parent)
                              :kind 'fork
                              :parent-id id
                              :fork-node node)

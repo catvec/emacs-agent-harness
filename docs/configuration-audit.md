@@ -254,7 +254,7 @@ together by user story, in the order the story is told:
 |---|---|
 | New sessions | `harness-model`, `harness-thinking`, `harness-permission-mode`, `harness-non-interactive`, `harness-budget` |
 | Files and safety | `harness-allowed-directories`, `harness-sandbox-policy`, `harness-perms-rules`, `harness-perms-auto-model` |
-| Task board | `harness-tasks-model`, `harness-tasks-thinking`, `harness-tasks-permission-mode`, `harness-tasks-non-interactive`, `harness-tasks-require-verification`, `harness-tasks-max-running`, `harness-tasks-worktrees` |
+| Task board | `harness-tasks-model`, `harness-tasks-thinking`, `harness-tasks-permission-mode`, `harness-tasks-non-interactive`, `harness-tasks-context-limit`, `harness-tasks-require-verification`, `harness-tasks-max-running`, `harness-tasks-worktrees` |
 | Notifications | `harness-tasks-notify-events`, `harness-notifications-providers`, `harness-gotify-url`, `harness-gotify-token` |
 | Models and services | `harness-openai-endpoints`, `harness-bedrock-endpoints`, `harness-websearch-provider`, `harness-websearch-builtin`, `harness-brave-api-key` |
 
