@@ -124,7 +124,7 @@ Finished tasks are completed at once, without review, unless BODY turns
       (should (string-empty-p (buffer-substring-no-properties harness-compose-start
                                                               harness-compose-end))))
     (harness-ui-tasks-test--wait-text board "Completed  1\\(.\\|\n\\)*Fix the flaky test")
-    (should (string-match-p "✓ 1\\|done 1" (with-current-buffer board (harness-ui-tasks--header))))))
+    (should (string-match-p "✓ 1\\|done 1" (with-current-buffer board (harness-ui-tasks--header most-positive-fixnum))))))
 
 (ert-deftest harness-ui-tasks-compose-survives-redraws ()
   (harness-ui-tasks-test-with
@@ -1009,7 +1009,9 @@ tests that check a card's detail line show it first."
   "Return (TEXT HELP CLICK) of the Review switch in BOARD's header line, or nil.
 HELP is its tooltip, CLICK what a click on it runs."
   (with-current-buffer board
-    (let* ((header (harness-ui-tasks--header))
+    ;; The whole header: which segments a narrow window keeps is not what
+    ;; this asks about, and the switch is one a window may drop.
+    (let* ((header (harness-ui-tasks--header most-positive-fixnum))
            (start (string-search "[Review: " header)))
       (when start
         (list (substring-no-properties header start (1+ (string-search "]" header start)))
@@ -1459,6 +1461,97 @@ the desktop (stubbed here) and the click opens the board on the card."
           (should (equal id (get-text-property (point) 'harness-task-id)))
           (should-not (string-match-p "A recap line to fold"
                                       (harness-ui-tasks-test--board-text board))))))))
+
+;;;; A board taller than its window fits by capping its sections
+
+(defun harness-ui-tasks-test--fake-done (board n)
+  "Put N completed tasks on BOARD, as the harness's own store would."
+  (with-current-buffer board
+    (setq harness-ui-tasks--tasks
+          (append harness-ui-tasks--tasks
+                  (cl-loop for i below n
+                           collect (list :id (format "t-fake%03d" i)
+                                         :project harness-ui-tasks--project
+                                         :cwd harness-ui-tasks--dir
+                                         :prompt (format "Completed task %d: tidy the orders API" i)
+                                         :state "done" :column "done" :merged t
+                                         :created (- (float-time) (* 3600 i))
+                                         :started (- (float-time) (* 3600 i) -60)
+                                         :finished (- (float-time) (* 3600 i) -900)
+                                         :verified-at (- (float-time) (* 3600 i) -1000)))))))
+
+(defun harness-ui-tasks-test--fits-p (board)
+  "Non-nil when BOARD's buffer fits the window it is shown in."
+  (with-current-buffer board
+    (harness-ui-tasks--fits-p (harness-ui-tasks--window))))
+
+(ert-deftest harness-ui-tasks-long-board-caps-its-sections ()
+  "A board taller than its window holds the least urgent cards back.
+The completed section says how many it holds and offers to show them,
+the whole buffer fits the window, and [Show all] opens the section
+again with [Show fewer] to fold it back.  The frame is made taller for
+the test: a batch window is too short for the headings alone."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 60)
+    (unwind-protect
+        (progn
+          (set-frame-height nil 40)
+          (let ((window (get-buffer-window board)))
+            (should window)
+            (select-window window)
+            (with-current-buffer board
+              (harness-ui-tasks--render t)
+              (redisplay t)
+              (should (harness-ui-tasks--fits-p window))
+              (should (<= (marker-position harness-compose-end) (window-end window t)))
+              (should (string-match-p "more +\\[Show all\\]" (harness-ui-tasks-test--board-text board)))
+              (should-not (string-match-p "Completed task 59" (harness-ui-tasks-test--board-text board)))
+              ;; The line belongs to its section, and opens it whole.
+              (goto-char (point-min))
+              (search-forward "[Show all]")
+              (goto-char (line-beginning-position))
+              (call-interactively #'harness-ui-tasks-show-all)
+              (should (memq 'done harness-ui-tasks--expanded))
+              (should (string-match-p "Completed task 59" (harness-ui-tasks-test--board-text board)))
+              (should (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board)))
+              (search-forward "[Show fewer]")
+              (goto-char (line-beginning-position))
+              (call-interactively #'harness-ui-tasks-show-fewer)
+              (should-not (memq 'done harness-ui-tasks--expanded))
+              (should (string-match-p "more +\\[Show all\\]" (harness-ui-tasks-test--board-text board)))))
+      (set-frame-height nil 25)))))
+
+(ert-deftest harness-ui-tasks-typing-outlives-a-board-redraw ()
+  "The box keeps point and the window after the board is drawn again.
+The board is redrawn on every tick and on every task event; before, a
+board taller than its window read as one that fit, the window was
+scrolled to the top and point was dragged out of the box with it."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 60)
+    (unwind-protect
+        (progn
+          (set-frame-height nil 40)
+          (let ((window (get-buffer-window board)))
+            (should window)
+            (select-window window)
+            (with-current-buffer board
+              ;; A box of more than one line, to be sure the tail is measured.
+              (harness-compose-set "one\\ntwo\\nthree")
+              (goto-char harness-compose-end)
+              (harness-ui-tasks--render t)
+              (redisplay t)
+              (should (harness-ui-tasks--fits-p window))
+              (should (harness-compose-in-p (window-point window)))
+              (should (<= (marker-position harness-compose-end) (window-end window t)))
+              ;; The same with the board redrawn while the box is typed in.
+              (goto-char harness-compose-end)
+              (insert "!")
+              (harness-ui-tasks--render t)
+              (redisplay t)
+              (should (equal "one\\ntwo\\nthree!" (harness-compose-text)))
+              (should (harness-compose-in-p (window-point window)))
+              (should (<= (marker-position harness-compose-end) (window-end window t)))))
+      (set-frame-height nil 25)))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

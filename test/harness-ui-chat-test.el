@@ -207,7 +207,8 @@
         (harness-chat-copy-last-response)
         (should (string-prefix-p "# Tour" (current-kill 0)))
         ;; The header shows the session and the compose box is empty again.
-        (let ((header (harness-chat--header)))
+        ;; The whole of it: in the 80 columns of batch the spend makes room.
+        (let ((header (harness-chat--header most-positive-fixnum)))
           (should (string-match-p "Tour" header))
           (should (string-match-p "demo" header))
           (should (string-match-p "\\$0.0042" header))
@@ -318,7 +319,9 @@ on a background and bar of its own; the user's own messages are as before."
                                            (format "%s" (plist-get (plist-get (harness-ui-session sid) :usage) :billing))))
                          5 "the session update")
       (with-current-buffer buf
-        (let ((header (harness-chat--header)))
+        ;; The whole header: the plan's window is what this is about, so
+        ;; ask for a wide line rather than what an 80-column batch window keeps.
+        (let ((header (harness-chat--header most-positive-fixnum)))
           (should (string-match-p "Pro . 5h 42%" header))
           (should-not (string-match-p "\\$0\\.5" header))
           (let ((pos (string-match "Pro" header)))
@@ -353,15 +356,16 @@ moves the button under the mouse."
                          5 "the session update")
       (with-current-buffer buf
         (let ((offenders nil))
-          (dolist (text (list (buffer-string) (harness-chat--header)))
+          (dolist (text (list (buffer-string) (harness-chat--header most-positive-fixnum)))
             (let ((pos 0))
               (while (< pos (length text))
                 (let ((help (get-text-property pos 'help-echo text)))
                   (when (and (stringp help) (string-match-p "\n" help))
                     (push help offenders)))
                 (setq pos (1+ pos)))))
-          ;; The header's spend tooltip really is among them.
-          (let* ((header (harness-chat--header))
+          ;; The header's spend tooltip really is among them: the whole
+          ;; header, since a narrow window may drop the spend segment.
+          (let* ((header (harness-chat--header most-positive-fixnum))
                  (pos (string-match "Pro" header)))
             (should (string-match-p "Covered by Claude Pro" (get-text-property pos 'help-echo header))))
           (should-not offenders))))))
@@ -373,22 +377,23 @@ buffer-local function changes only its buffer's header."
   (harness-ui-chat-test-with
     (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "Mine")))
            (other (harness-ui-chat-test-open (harness-ui-chat-test-session "Other")))
-           (own (with-current-buffer buf (harness-chat--header)))
-           (other-own (with-current-buffer other (harness-chat--header))))
+           ;; Whole headers: no segment of theirs makes room for the other.
+           (own (with-current-buffer buf (harness-chat--header most-positive-fixnum)))
+           (other-own (with-current-buffer other (harness-chat--header most-positive-fixnum))))
       (should (string-match-p "Mine" own))
       (with-current-buffer buf
         (add-hook 'harness-chat-header-functions (lambda () (propertize " first" 'face 'bold)) nil t)
         (add-hook 'harness-chat-header-functions #'ignore t t)
         (add-hook 'harness-chat-header-functions (lambda () " second") t t)
-        (let ((header (harness-chat--header)))
+        (let ((header (harness-chat--header most-positive-fixnum)))
           (should (equal (concat " first second" own) header))
           (should (eq 'bold (get-text-property 1 'face header)))
           ;; The session's segments keep their clicks.
           (should (get-text-property (string-search "Mine" header) 'local-map header))))
-      (should (equal other-own (with-current-buffer other (harness-chat--header))))
+      (should (equal other-own (with-current-buffer other (harness-chat--header most-positive-fixnum))))
       (with-current-buffer buf
         (kill-local-variable 'harness-chat-header-functions)
-        (should (equal own (harness-chat--header)))))))
+        (should (equal own (harness-chat--header most-positive-fixnum)))))))
 
 (defun harness-ui-chat-test-segment (header command)
   "Return (TEXT POS) of the segment of HEADER that runs COMMAND, or nil."

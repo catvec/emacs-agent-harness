@@ -947,3 +947,42 @@ shrinks every window and moves the button under the mouse."
 
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here
+
+(ert-deftest harness-ui-fit-header-drops-the-least-important-first ()
+  "A header too wide for its window keeps what matters and loses the rest.
+Segments are given in display order; the lowest priority goes first,
+the rightmost among equals, and a segment with a shortened form shrinks
+to it once nothing is left to drop.  A segment whose priority is t
+always stays."
+  (let ((segments '(" One" (" Two" 5) (" Three" 5 " 3") (" Four" 100))))
+    (should (equal " One Two Three Four" (harness-ui-fit-header segments 200)))
+    ;; Room for the rightmost of two equal priorities only after it
+    ;; shortens: a shortened segment is worth keeping over dropping it.
+    (should (equal " One Two 3 Four" (harness-ui-fit-header segments 16)))
+    ;; Not even its shortened form fits: then it goes.
+    (should (equal " One Four" (harness-ui-fit-header segments 10)))
+    (should (equal " One" (harness-ui-fit-header segments 4)))
+    ;; What cannot be dropped stays, however little room there is.
+    (should (equal " One" (harness-ui-fit-header segments 0)))
+    ;; A flexible segment shrinks only when dropping cannot help: the
+    ;; name has priority t here, so it is never dropped, only shortened.
+    (should (equal " One Four Wide Name" (harness-ui-fit-header
+                                          '(" One" (" Four" 100) (" Wide Name" t " W…")) 40)))
+    ;; Room for the name whole once the droppable segment is gone.
+    (should (equal " One Wide Name" (harness-ui-fit-header
+                                     '(" One" (" Four" 100) (" Wide Name" t " W…")) 16)))
+    ;; Too narrow even then: the name shortens, which is all that is left.
+    (should (equal " One W…" (harness-ui-fit-header
+                              '(" One" (" Four" 100) (" Wide Name" t " W…")) 10)))
+    ;; nil segments are left out, not turned into "nil".
+    (should (equal " One" (harness-ui-fit-header (list " One" nil "" nil) 80)))))
+
+(ert-deftest harness-ui-fit-header-measures-in-the-header-face ()
+  "On a graphic frame a header is measured in pixels, icons included."
+  (skip-unless (display-graphic-p))
+  (should (> (harness-ui-header-string-width (harness-ui-icon 'harness-icon-blocked))
+             (frame-char-width)))
+  ;; The room of a named window: the default is the narrowest window
+  ;; showing the buffer, which this buffer need not be shown in.
+  (should (= (harness-ui-header-width (selected-window))
+             (- (window-pixel-width) (or (window-scroll-bar-width) 0)))))
