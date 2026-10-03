@@ -36,29 +36,127 @@ The side window is selected and not dedicated, as Doom leaves it."
       (delete-window window)
       (should (eq other (window-buffer other-window))))))
 
-(ert-deftest harness-ui-menu-with-a-window-at-the-bottom-goes-to-the-top ()
+(defun harness-ui-test--layout ()
+  "Return each window of the frame with its buffer, pixel edges and kept size."
+  (mapcar (lambda (window)
+            (list window (window-buffer window) (window-pixel-edges window)
+                  (window-parameter window 'window-preserved-size)))
+          (window-list nil 'nomini (frame-first-window))))
+
+(defun harness-ui-test--btw-window (btw)
+  "Show BTW at the bottom as `harness-btw' shows a BTW and return its window."
+  (display-buffer-in-side-window
+   btw '((side . bottom) (slot . 1) (window-height . 0.2) (preserve-size . (nil . t)))))
+
+(ert-deftest harness-ui-menu-with-a-window-at-the-bottom-goes-below-it ()
   "With a window at the bottom, as a BTW's, the menu from a side window
-goes to the top, whole, in a window of its own.  In that window's slot
-it would show in its place, and transient would delete the window as
-the menu closes; beside it, it would get its height only."
+goes below it, as wide as the frame, in a window of its own: at the
+bottom, where it opens without a BTW, never above everything.  The BTW
+keeps its height, the menu's lines coming from the windows above, and
+closed, the menu leaves every window as it was.  In the BTW's slot it
+would show in its place, and transient would delete the window as the
+menu closes; beside it, it would get its height only."
   (harness-ui-test-with-layout
     (let* ((btw (get-buffer-create " *harness-test-btw*"))
-           (btw-window (display-buffer-in-side-window
-                        btw '((side . bottom) (slot . 1) (window-height . 0.2) (preserve-size . (nil . t)))))
-           (edges (window-edges btw-window)))
+           (btw-window (harness-ui-test--btw-window btw)))
+      (with-current-buffer menu
+        (insert "Sessions\n n New session\n s Switch session\n f Fork session\n"))
       (unwind-protect
           ;; From the BTW, and from the session it was opened over.
           (dolist (from (list btw-window (get-buffer-window chat)))
             (select-window from)
-            (let ((window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
-              (should (eq 'top (window-parameter window 'window-side)))
+            (let* ((before (harness-ui-test--layout))
+                   (height (window-pixel-height btw-window))
+                   (main-height (window-pixel-height (get-buffer-window other)))
+                   (window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
+              (should (eq 'bottom (window-parameter window 'window-side)))
+              (should (eq window (window-in-direction 'below btw-window t)))
               (should (= (frame-width) (window-total-width window)))
+              (should (= (nth 3 (window-pixel-edges (frame-root-window)))
+                         (nth 3 (window-pixel-edges window))))
               (should (eq menu (window-buffer window)))
+              (should (eq from (selected-window)))
+              ;; Four lines and the mode line, from the windows above.
+              (should (= 5 (window-total-height window)))
               (should (eq btw (window-buffer btw-window)))
-              (should (equal edges (window-edges btw-window)))
+              (should (= height (window-pixel-height btw-window)))
+              (should (= (window-pixel-height window)
+                         (- main-height (window-pixel-height (get-buffer-window other)))))
               (delete-window window)
-              (should (eq btw (window-buffer btw-window)))))
+              (should-not (window-live-p window))
+              (should (equal before (harness-ui-test--layout)))))
         (kill-buffer btw)))))
+
+(ert-deftest harness-ui-menu-below-a-btw-puts-every-window-back ()
+  "Opened over a BTW from a side window, the menu fits its window below
+the BTW to its text with the lines of the windows above, and closed
+with C-g, it leaves every window as it was.  Closed by one of its
+commands, it does too: `harness-ui-btw-has-the-full-chat-header'."
+  (harness-ui-test-with-layout
+    (let* ((btw (get-buffer-create " *harness-test-btw*"))
+           (btw-window (harness-ui-test--btw-window btw))
+           (height (window-pixel-height btw-window)))
+      (unwind-protect
+          (dolist (from (list (get-buffer-window chat) btw-window))
+            (select-window from)
+            (let ((before (harness-ui-test--layout)))
+              (call-interactively #'harness-menu)
+              (unwind-protect
+                  (let ((window (get-buffer-window transient--buffer-name)))
+                    (should (eq window (window-in-direction 'below btw-window t)))
+                    (should (= (frame-width) (window-total-width window)))
+                    (should (= height (window-pixel-height btw-window)))
+                    ;; Tall enough for every line of the menu.
+                    (should (<= (with-current-buffer transient--buffer-name
+                                  (length (split-string (string-trim-right (buffer-string)) "\n")))
+                                (window-body-height window))))
+                (execute-kbd-macro (kbd "C-g")))
+              (should-not (get-buffer-window transient--buffer-name))
+              (should (equal before (harness-ui-test--layout)))
+              (should (eq from (selected-window)))))
+        (kill-buffer btw)))))
+
+(ert-deftest harness-ui-menu-goes-below-a-popup-that-splits-another-window ()
+  "A Doom popup at the bottom has a `split-window' parameter that splits
+another window instead of it.  The menu goes below the popup all the
+same, and leaves every window as it was."
+  (harness-ui-test-with-layout
+    (let* ((help (get-buffer-create " *harness-test-help*"))
+           (popup (display-buffer-in-side-window help '((side . bottom) (slot . 0) (window-height . 0.2)))))
+      (set-window-parameter popup 'split-window
+                            (lambda (_window size side)
+                              (let ((ignore-window-parameters t))
+                                (split-window (get-buffer-window other) size side))))
+      (unwind-protect
+          (let* ((before (harness-ui-test--layout))
+                 (window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
+            (should (eq window (window-in-direction 'below popup t)))
+            (should (eq 'bottom (window-parameter window 'window-side)))
+            (should (= (frame-width) (window-total-width window)))
+            (delete-window window)
+            (should (equal before (harness-ui-test--layout))))
+        (kill-buffer help)))))
+
+(ert-deftest harness-ui-menu-with-windows-sharing-the-bottom-goes-to-the-top ()
+  "With several windows at the bottom, below one of which a window would
+not be a valid side window, the menu from a side window goes to the
+top, whole, and leaves them as they were."
+  (harness-ui-test-with-layout
+    (let* ((btw (get-buffer-create " *harness-test-btw*"))
+           (bottom (get-buffer-create " *harness-test-bottom*"))
+           (windows (list (display-buffer-in-side-window bottom '((side . bottom) (slot . 0)))
+                          (harness-ui-test--btw-window btw)))
+           (edges (mapcar #'window-edges windows)))
+      (unwind-protect
+          (let ((window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
+            (should (eq 'top (window-parameter window 'window-side)))
+            (should (= (frame-width) (window-total-width window)))
+            (should (eq menu (window-buffer window)))
+            (should (equal (list bottom btw) (mapcar #'window-buffer windows)))
+            (should (equal edges (mapcar #'window-edges windows)))
+            (delete-window window)
+            (should (equal edges (mapcar #'window-edges windows))))
+        (mapc #'kill-buffer (list btw bottom))))))
 
 (ert-deftest harness-ui-menu-from-main-window-follows-transient-action ()
   (harness-ui-test-with-layout

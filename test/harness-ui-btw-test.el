@@ -477,19 +477,25 @@ and nothing else."
             (harness-ui-btw-test-choosing "YOLO"
               (call-interactively (key-binding key)))))
         (harness-ui-btw-test--wait-mode sid 'yolo)
-        ;; The harness menu opens in a window of its own, at the top, the
-        ;; BTW's at the bottom staying as it was.
-        (with-selected-window window
-          (call-interactively #'harness-menu)
-          (let ((menu (get-buffer-window transient--buffer-name)))
-            (should (window-live-p menu))
-            (should-not (eq window menu))
-            (should (eq 'top (window-parameter menu 'window-side)))
-            (should (eq buffer (window-buffer window))))
-          (harness-ui-btw-test-choosing "Ask"
-            (execute-kbd-macro (kbd "p"))))
-        (harness-ui-btw-test--wait-mode sid 'ask)
-        (should-not (get-buffer-window transient--buffer-name))
+        ;; The harness menu opens in a window of its own, below the BTW,
+        ;; whose height and buffer stay as they were.
+        (let ((edges (mapcar #'window-pixel-edges (window-list nil 'nomini (frame-first-window))))
+              (height (window-pixel-height window)))
+          (with-selected-window window
+            (call-interactively #'harness-menu)
+            (let ((menu (get-buffer-window transient--buffer-name)))
+              (should (window-live-p menu))
+              (should-not (eq window menu))
+              (should (eq 'bottom (window-parameter menu 'window-side)))
+              (should (eq menu (window-in-direction 'below window t)))
+              (should (= height (window-pixel-height window)))
+              (should (eq buffer (window-buffer window))))
+            (harness-ui-btw-test-choosing "Ask"
+              (execute-kbd-macro (kbd "p"))))
+          (harness-ui-btw-test--wait-mode sid 'ask)
+          (should-not (get-buffer-window transient--buffer-name))
+          ;; Closed, it leaves every window where it was.
+          (should (equal edges (mapcar #'window-pixel-edges (window-list nil 'nomini (frame-first-window))))))
         (should (eq buffer (window-buffer window)))
         (should (eq 'accept-edits (plist-get (harness-call 'session/get parent) :permission-mode)))
         ;; [close]: changed, the BTW is not blank any more; it is closed and
