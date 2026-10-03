@@ -27,6 +27,80 @@
       (should (= 0 (length (harness-call 'session/list (list :status 'running)))))
       (should (file-exists-p (harness-store-path (format "sessions/%s.json" (plist-get s :id))))))))
 
+(ert-deftest harness-session-tmp-dir-is-private-and-goes-with-the-session ()
+  "Every local session has its own temporary directory, private to the
+user, made again when missing and deleted with the session."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (a (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (b (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (dir (harness-call 'session/tmp-dir a)))
+      ;; Made with the session, in the root, named by the id.
+      (should (equal (file-name-as-directory (expand-file-name a harness-session--tmp-root)) dir))
+      (should (file-directory-p dir))
+      (should (= #o700 (file-modes dir)))
+      (should (= #o700 (file-modes harness-session--tmp-root)))
+      ;; Each session has its own.
+      (should-not (equal dir (harness-call 'session/tmp-dir b)))
+      ;; A reboot empties /tmp: asking makes it again.
+      (delete-directory harness-session--tmp-root t)
+      (should (equal dir (harness-call 'session/tmp-dir a)))
+      (should (file-directory-p dir))
+      ;; Deleting the session deletes it, following no link out of it.
+      (let ((outside (harness-test-temp-dir)))
+        (with-temp-file (expand-file-name "keep.txt" outside) (insert "keep"))
+        (with-temp-file (expand-file-name "scratch.txt" dir) (insert "x"))
+        (make-symbolic-link (directory-file-name outside) (expand-file-name "link" dir))
+        (harness-call 'session/delete a)
+        (should-not (file-exists-p dir))
+        (should (file-exists-p (expand-file-name "keep.txt" outside))))
+      (should (file-directory-p (harness-call 'session/tmp-dir b))))))
+
+(ert-deftest harness-session-tmp-dir-names-and-remote-sessions ()
+  "An id that is no plain name cannot reach outside the root; a remote
+session has no temporary directory."
+  (harness-session-test-with
+    (let ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir))))
+      (dolist (id '("../escape" "a/b" "" "."))
+        (let ((dir (harness-session--tmp-path (make-harness-session :id id))))
+          (should (equal (file-name-as-directory harness-session--tmp-root)
+                         (file-name-directory (directory-file-name dir))))
+          (should (string-prefix-p "id-" (file-name-nondirectory (directory-file-name dir))))))
+      (should-not (equal (harness-session--tmp-path (make-harness-session :id "a/b"))
+                         (harness-session--tmp-path (make-harness-session :id "a_b"))))
+      (should-not (harness-session--tmp-path (make-harness-session :id "r" :host "/ssh:box:")))
+      (should-not (harness-session--tmp-path (make-harness-session :id "r" :cwd "/ssh:box:/srv/")))
+      ;; The default root is the user's own, in the temporary directory.
+      (let ((harness-session--tmp-root nil)
+            (temporary-file-directory "/var/tmp/"))
+        (should (equal (format "/var/tmp/harness-%d/" (user-uid)) (harness-session-tmp-root)))))))
+
+(ert-deftest harness-session-tmp-dir-refuses-what-is-not-the-users-own ()
+  "/tmp is shared: a symbolic link, or a directory somebody else owns,
+is never handed out, nor deleted with the session."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (harness-session--tmp-warned nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (dir (harness-call 'session/tmp-dir id))
+           (elsewhere (harness-test-temp-dir)))
+      (with-temp-file (expand-file-name "precious.txt" elsewhere) (insert "mine"))
+      ;; A link planted where the session's directory goes.
+      (delete-directory dir t)
+      (make-symbolic-link (directory-file-name elsewhere) (directory-file-name dir))
+      (should-not (harness-call 'session/tmp-dir id))
+      (with-current-buffer (get-buffer-create harness-log-buffer-name)
+        (should (string-match-p "no temporary directory" (buffer-string))))
+      (harness-call 'session/delete id)
+      (should (file-exists-p (expand-file-name "precious.txt" elsewhere)))
+      (delete-file (directory-file-name dir))
+      ;; A root somebody else owns: nothing is handed out from it.
+      (let* ((other (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+             (owner (file-attribute-user-id (file-attributes harness-session--tmp-root 'integer))))
+        (cl-letf (((symbol-function 'user-uid) (lambda () (1+ owner))))
+          (should-not (harness-call 'session/tmp-dir other)))
+        (should (harness-call 'session/tmp-dir other))))))
+
 (ert-deftest harness-session-update-adds-hint-and-persists ()
   (harness-session-test-with
     (let* ((s (harness-call 'session/create :cwd (harness-test-temp-dir)))

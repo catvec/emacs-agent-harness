@@ -241,18 +241,35 @@ restart; without a session module they live in
            (gethash (plist-get session :id) harness-perms--allowed-dirs))
    :test #'equal :from-end t))
 
+(defun harness-perms--tmp-dir (session)
+  "Return SESSION's own temporary directory, made if missing, or nil.
+The session module hands it out (`session/tmp-dir'), and only when it
+is the user's own; without that module, or for a remote session, there
+is none."
+  (let ((id (plist-get session :id)))
+    (and id (harness-method-exists-p 'session/tmp-dir)
+         (condition-case err
+             (harness-call 'session/tmp-dir id)
+           (error (harness-log 'debug "perms: no temporary directory for %s: %s"
+                               id (harness-error-message err))
+                  nil)))))
+
 (defun harness-perms-dirs (session)
   "Return the directories SESSION may touch as (:dir DIR :source SOURCE).
-SOURCE is `cwd', `worktree', `config' (`harness-allowed-directories'),
-`session' (granted at runtime) or `outputs'."
+SOURCE is `cwd', `worktree', `tmp' (the session's own temporary
+directory), `config' (`harness-allowed-directories'), `session'
+\(granted at runtime) or `outputs'."
   (let* ((cwd (or (plist-get session :cwd) default-directory))
          (host (plist-get session :host))
          (expand (lambda (d) (harness-perms--with-host
                               (file-name-as-directory (expand-file-name d cwd)) host)))
          (entry (lambda (source) (lambda (d) (list :dir (funcall expand d) :source source))))
+         (tmp (harness-perms--tmp-dir session))
          (entries (append (list (funcall (funcall entry 'cwd) cwd))
                           (and (plist-get session :worktree)
                                (list (funcall (funcall entry 'worktree) (plist-get session :worktree))))
+                          ;; Always local: a remote session has none.
+                          (and tmp (list (list :dir tmp :source 'tmp)))
                           (mapcar (funcall entry 'config)
                                   (harness-perms--config 'harness-allowed-directories session))
                           (mapcar (funcall entry 'session) (harness-perms--granted session))
@@ -263,8 +280,9 @@ SOURCE is `cwd', `worktree', `config' (`harness-allowed-directories'),
 
 (defun harness-perms-roots (session)
   "Return the directories SESSION may touch.
-That is its cwd, its worktree, `harness-allowed-directories', the
-directories granted at runtime and the tool output directory."
+That is its cwd, its worktree, its own temporary directory,
+`harness-allowed-directories', the directories granted at runtime and
+the tool output directory."
   (mapcar (lambda (e) (plist-get e :dir)) (harness-perms-dirs session)))
 
 (defun harness-perms--outside (paths roots)
@@ -467,6 +485,7 @@ included, grants it to the session."
   (pcase source
     ('cwd "the working directory")
     ('worktree "the worktree")
+    ('tmp "this session's own temporary directory")
     ('config "allowed for every session")
     ('session "granted to this session")
     ('outputs "the tool output directory")
@@ -982,9 +1001,10 @@ session.  Return the session's effective roots."
 (harness-defmethod permission/revoke-dir (session-id dir)
   "Withdraw DIR from SESSION-ID.
 Removes a session grant, or else the entry in the global
-`harness-allowed-directories'.  The cwd, the worktree and directories
-set in a project's .dir-locals.el cannot be revoked here.  Return the
-session's effective roots."
+`harness-allowed-directories'.  The cwd, the worktree, the session's
+own temporary directory and directories set in a project's
+.dir-locals.el cannot be revoked here.  Return the session's effective
+roots."
   (let* ((session (harness-perms--session session-id))
          (dir (harness-perms--expand-dir session dir))
          (granted (harness-perms--granted session))
@@ -997,7 +1017,7 @@ session's effective roots."
        'harness-allowed-directories
        (cl-remove-if (lambda (d) (equal dir (harness-perms--expand-dir session d))) global)))
      (t (signal 'harness-error
-                (list (format "%s is not a grant (it comes from the cwd, the worktree or .dir-locals.el)"
+                (list (format "%s is not a grant (it comes from the cwd, the worktree, the session's temporary directory or .dir-locals.el)"
                               (abbreviate-file-name dir))))))
     (harness-emit 'permission/dir-revoked session-id dir)
     (harness-perms-roots (harness-perms--session session-id))))

@@ -10,8 +10,12 @@
 ;;   loaded and the directory is local, the command line is wrapped
 ;;   with `sandbox/wrap' so it runs confined; a `required' policy
 ;;   without a backend turns into a tool error rather than an
-;;   unconfined run.  Remote (TRAMP) directories run the command on
-;;   that host, unwrapped.
+;;   unconfined run.  The session's own temporary directory
+;;   (`session/tmp-dir') is writable in there too, at its real path:
+;;   the sandbox's /tmp is private and empty for every command, so
+;;   that directory is where commands leave files for later ones and
+;;   for the other tools.  Remote (TRAMP) directories run the command
+;;   on that host, unwrapped.
 ;;
 ;; - `elisp' evaluates Emacs Lisp in a child `emacs --batch' process,
 ;;   the Emacs-native alternative to a shell: the value of the last
@@ -58,10 +62,21 @@
          (harness-tools-resolve-path given ctx)
        (or (plist-get ctx :cwd) default-directory)))))
 
-(defun harness-tools-shell--wrap (cwd command)
-  "Return COMMAND wrapped by the sandbox for CWD when the sandbox module is loaded."
+(defun harness-tools-shell--tmp-dir (ctx)
+  "Return the temporary directory of CTX's session, made if missing, or nil."
+  (let ((sid (plist-get ctx :session-id)))
+    (and sid (harness-method-exists-p 'session/tmp-dir)
+         (condition-case err
+             (harness-call 'session/tmp-dir sid)
+           (error (harness-log 'debug "bash: no temporary directory for %s: %s"
+                               sid (harness-error-message err))
+                  nil)))))
+
+(defun harness-tools-shell--wrap (cwd command &optional writable)
+  "Return COMMAND wrapped by the sandbox for CWD when the sandbox module is loaded.
+WRITABLE lists other directories the command may write to."
   (if (and (harness-method-exists-p 'sandbox/wrap) (not (file-remote-p cwd)))
-      (harness-call 'sandbox/wrap cwd command)
+      (harness-call 'sandbox/wrap cwd command :writable writable)
     command))
 
 (defun harness-tools-shell--format-output (r timeout)
@@ -95,7 +110,8 @@
       (harness-tool-error (format "Working directory does not exist: %s" cwd)))
      (t
       (let ((cmd (condition-case err
-                     (harness-tools-shell--wrap cwd (list harness-tools-shell--program "-lc" command))
+                     (harness-tools-shell--wrap cwd (list harness-tools-shell--program "-lc" command)
+                                                (delq nil (list (harness-tools-shell--tmp-dir ctx))))
                    (error (list :error (harness-error-message err))))))
         (if (and (consp cmd) (eq (car cmd) :error))
             (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))

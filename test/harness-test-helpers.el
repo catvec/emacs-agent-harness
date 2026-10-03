@@ -31,6 +31,11 @@ may reach the user's real `harness-state-directory'.")
 
 (setq harness-state-directory harness-test-state-root)
 
+(defvar harness-session--tmp-root)
+;; So do the sessions' temporary directories: never the real
+;; /tmp/harness-UID, which the user's own harness hands out.
+(setq harness-session--tmp-root (expand-file-name "session-tmp/" harness-test-state-root))
+
 (defvar harness-tasks-store-in-repository)
 ;; Tasks stay in the throwaway state directory whatever directory a test
 ;; submits them in, so no test writes into a real repository's .git.

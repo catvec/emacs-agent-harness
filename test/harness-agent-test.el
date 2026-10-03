@@ -602,7 +602,13 @@ user message after that answer: \"No user message to send\"."
         (harness-await (harness-call 'agent/prompt id "hi")))
       (should (string-match-p "EXTRA SECTION" seen-system))
       (should (string-match-p "Working directory" seen-system))
-      (should (equal '("list_dir") seen-tools)))))
+      (should (equal '("list_dir") seen-tools))
+      ;; The Environment names the session's own temporary directory, which exists.
+      (let ((tmp (harness-call 'session/tmp-dir id)))
+        (should (string-match-p (concat "^- Temporary directory: " (regexp-quote tmp) " (") seen-system))
+        (delete-directory tmp t)
+        (harness-await (harness-call 'agent/prompt id "again"))
+        (should (file-directory-p tmp))))))
 
 (ert-deftest harness-agent-prompt-resumes-inactive-session ()
   (harness-agent-test-with

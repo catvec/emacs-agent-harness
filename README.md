@@ -236,6 +236,16 @@ the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list, or the waiting session itself when only one needs you.
 
+A session may use its working directory, its worktree, the directories
+in `harness-allowed-directories` and the ones you grant it. It also has
+a temporary directory of its own, `/tmp/harness-UID/ID/` (under
+`temporary-file-directory`), which needs no grant. The agent keeps
+scratch files, logs and screenshots there. Its shell commands can write
+there even in the sandbox, where the rest of `/tmp` is private to each
+command. The directory is made with the session, made again if it went
+missing, and deleted with the session. `C-c h d` lists all of these
+directories. Remote sessions have no temporary directory.
+
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
 the picture; so does an SVG, read as text and shown as an image, and a

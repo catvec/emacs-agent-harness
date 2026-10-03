@@ -457,9 +457,10 @@ Run INPUT's prompt in a child of the session in CTX."
          (children (harness-call 'session/list (list :parent-id sid))))
     (harness-tool-ok
      (concat
-      (format "Session: %s\nName: %s\nKind: %s\nModel: %s\nWorking directory: %s\nWorktree: %s\nPermission mode: %s\nNon-interactive: %s\nStatus: %s\n"
+      (format "Session: %s\nName: %s\nKind: %s\nModel: %s\nWorking directory: %s\nWorktree: %s\nTemporary directory: %s\nPermission mode: %s\nNon-interactive: %s\nStatus: %s\n"
               sid (or (plist-get s :name) "(unnamed)") (plist-get s :kind) (plist-get s :model)
               (plist-get s :cwd) (or (plist-get s :worktree) "none")
+              (or (ignore-errors (harness-call 'session/tmp-dir sid)) "none")
               (plist-get s :permission-mode)
               (if (harness-json-true-p (plist-get s :non-interactive))
                   "on (the user is away: the auto-mode judge decides what would ask them for permission)"
@@ -480,7 +481,7 @@ Run INPUT's prompt in a child of the session in CTX."
 
 (harness-define-tool "session_info"
   :label "Session info"
-  :description "Describe the current session: id, name, model, working directory, permission mode, non-interactive mode, status, usage and related sessions."
+  :description "Describe the current session: id, name, model, working directory, temporary directory, permission mode, non-interactive mode, status, usage and related sessions."
   :schema '(:type "object" :properties :empty)
   :kind 'read
   :coalescable t

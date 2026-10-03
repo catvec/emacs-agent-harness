@@ -25,6 +25,15 @@
 ;; catalogue's would go stale when the catalogue changes, or keep the
 ;; stand-in given for a model the catalogue had not listed yet.  When
 ;; the catalogue changes, the sessions whose window moved are announced.
+;;
+;; Every local session has a temporary directory of its own,
+;; harness-UID/ID in `temporary-file-directory' (/tmp/harness-1000/ID/).
+;; It is made with the session, made again whenever it is asked for and
+;; missing (a reboot empties /tmp), and deleted with the session.
+;; `session/tmp-dir' hands it out: the permission layer lets the session
+;; use it, the sandbox lets its commands write there, and the system
+;; prompt names it.  /tmp is shared, so only a directory that is the
+;; user's own is ever handed out.
 
 ;;; Code:
 
@@ -229,6 +238,96 @@ HEAD defaults to the session head."
   (or (harness-session-context-window s)
       (harness-session--model-window (harness-session-model s))))
 
+;;;; Temporary directories
+
+(defvar harness-session--tmp-root nil
+  "Directory holding every session's temporary directory, or nil for the default.
+The default is harness-UID in `temporary-file-directory', UID being the
+user's, so that the users of a machine never share it.  Internal, not
+an option (see docs/configuration-audit.md): TMPDIR, through
+`temporary-file-directory', already says where temporary files go.
+The tests point it into their throwaway state directory.")
+
+(defvar harness-session--tmp-warned nil
+  "Temporary directories the log already said could not be had.")
+
+(defun harness-session-tmp-root ()
+  "Return the directory holding every session's temporary directory."
+  (file-name-as-directory
+   (expand-file-name (or harness-session--tmp-root
+                         (expand-file-name (format "harness-%d" (user-uid)) temporary-file-directory)))))
+
+(defun harness-session--tmp-name (id)
+  "Return the file name of the temporary directory of session ID.
+A plain id, as a UUID is, names it; any other is hashed, so that no id
+can reach outside the root and no two ids share a directory."
+  (let ((id (format "%s" id)))
+    (if (string-match-p "\\`[A-Za-z0-9_-]+\\'" id)
+        id
+      (concat "id-" (md5 id)))))
+
+(defun harness-session--tmp-path (s)
+  "Return the name of the temporary directory of session S.
+Nil for a remote session: its tools work on another host, where the
+harness makes no directories behind the user's back.  Only the name:
+`harness-session--tmp-dir' makes the directory and checks it."
+  (unless (or (harness-session-host s)
+              (file-remote-p (or (harness-session-cwd s) "")))
+    (file-name-as-directory
+     (expand-file-name (harness-session--tmp-name (harness-session-id s))
+                       (harness-session-tmp-root)))))
+
+(defun harness-session--own-dir-p (dir)
+  "Non-nil when DIR is a directory of the user's own.
+A symbolic link is not, even to such a directory, nor is a directory
+somebody else owns."
+  (let ((attrs (file-attributes (directory-file-name dir) 'integer)))
+    (and attrs
+         (eq t (file-attribute-type attrs))
+         (eql (file-attribute-user-id attrs) (user-uid)))))
+
+(defun harness-session--tmp-warn (dir why)
+  "Log, once, that DIR cannot be had as a temporary directory because of WHY.
+Return nil."
+  (unless (member dir harness-session--tmp-warned)
+    (push dir harness-session--tmp-warned)
+    (harness-log 'warn "session: no temporary directory %s: %s" dir why))
+  nil)
+
+(defun harness-session--own-dir (dir)
+  "Return DIR when it is a directory of the user's own, made if missing.
+A directory made here is private to the user (mode 700).  Anything else
+in its place, a symbolic link or somebody else's directory, is refused:
+the log says so, once, and the value is nil."
+  (condition-case err
+      (progn
+        (unless (file-attributes (directory-file-name dir))
+          (with-file-modes #o700 (make-directory dir t)))
+        (if (harness-session--own-dir-p dir)
+            dir
+          (harness-session--tmp-warn dir "something other than a directory of the user's own is there")))
+    (error (harness-session--tmp-warn dir (harness-error-message err)))))
+
+(defun harness-session--tmp-dir (s)
+  "Return the temporary directory of session S, made if missing, or nil.
+Nil for a remote session, and when the directory or the root holding
+every session's is not the user's own (see `harness-session--own-dir')."
+  (when-let* ((dir (harness-session--tmp-path s)))
+    (and (harness-session--own-dir (harness-session-tmp-root))
+         (harness-session--own-dir dir))))
+
+(defun harness-session--delete-tmp (s)
+  "Delete the temporary directory of session S and everything in it.
+Only a directory of the user's own, in a root of the user's own, is
+deleted; symbolic links inside it are removed, never followed."
+  (when-let* ((dir (harness-session--tmp-path s)))
+    (when (and (harness-session--own-dir-p (harness-session-tmp-root))
+               (harness-session--own-dir-p dir))
+      (condition-case err
+          (delete-directory dir t)
+        (error (harness-log 'warn "session: could not delete %s: %s"
+                            dir (harness-error-message err)))))))
+
 ;;;; Methods: lifecycle
 
 (harness-defmethod session/create (&rest plist)
@@ -268,6 +367,7 @@ HEAD defaults to the session head."
           (harness-session-loaded s) t)
     (puthash (harness-session-id s) s harness-sessions)
     (harness-session--save (harness-session-id s))
+    (harness-session--tmp-dir s)
     (let ((pl (harness-session-plist s)))
       (harness-emit 'session/created (harness-session-id s) pl)
       (harness-session--announce s pl))))
@@ -279,6 +379,18 @@ HEAD defaults to the session head."
 (harness-defmethod session/exists-p (id)
   "Non-nil when session ID is known."
   (and (gethash id harness-sessions) t))
+
+(harness-defmethod session/tmp-dir (id)
+  "Return the temporary directory of session ID, made if missing.
+Every local session has one of its own, harness-UID/ID in
+`temporary-file-directory', private to the user.  It is made with the
+session, made again whenever it is asked for and missing (a reboot
+empties /tmp), and deleted with the session.  The permission layer lets
+the session use it, the sandbox lets its commands write there, and the
+system prompt names it.  Nil for a remote session, and when no
+directory of the user's own can be had there: /tmp is shared, so a
+directory somebody else made, or a symbolic link, is refused."
+  (harness-session--tmp-dir (harness-session--get id)))
 
 (harness-defmethod session/list (&optional filter)
   "Return session plists matching FILTER, newest first.
@@ -301,13 +413,14 @@ FILTER keys: :project :status :kind :parent-id :active."
     (sort out (lambda (a b) (> (plist-get a :updated) (plist-get b :updated))))))
 
 (harness-defmethod session/delete (id)
-  "Delete session ID and its files."
+  "Delete session ID and its files, its temporary directory included."
   (let ((s (harness-session--get id)))
     (harness-emit 'session/deleted id (harness-session-plist s))
     (remhash id harness-sessions)
     (remhash id harness-session--announced-windows)
     (harness-call 'store/delete (harness-session--meta-name id))
     (harness-call 'store/delete (harness-session--nodes-name id))
+    (harness-session--delete-tmp s)
     t))
 
 (harness-defmethod session/resume (id)

@@ -122,11 +122,67 @@
       (should (string-search "hidden" (plist-get r :content)))
       (should (plist-get (plist-get r :meta) :sandboxed)))))
 
+(ert-deftest harness-tools-shell-bash-lets-the-sandbox-write-the-tmp-dir ()
+  "bash asks the sandbox to let the command write the session's own
+temporary directory, and asks for nothing more without a session."
+  (harness-tools-shell-test--setup)
+  (let ((saved (mapcar (lambda (m) (cons m (gethash m harness--methods))) '(session/tmp-dir sandbox/wrap)))
+        (seen nil))
+    (harness-register-method 'session/tmp-dir (lambda (sid) (and (equal sid "s1") "/tmp/harness-0/s1/")))
+    (harness-register-method 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command))
+    (unwind-protect
+        (harness-tools-shell-test-in-dir
+          (should (equal "exit 0" (plist-get (harness-await (harness-call 'tools/execute "s1"
+                                                                          (list :id "c1" :name "bash" :input '(:command "true")))
+                                                            20)
+                                             :content)))
+          (should (equal '("/tmp/harness-0/s1/") (plist-get (cdar seen) :writable)))
+          (harness-tools-shell-test--call "bash" :command "true")
+          (should-not (plist-get (cdar seen) :writable)))
+      (dolist (m saved)
+        (if (cdr m) (puthash (car m) (cdr m) harness--methods) (remhash (car m) harness--methods))))))
+
+(ert-deftest harness-tools-shell-bwrap-keeps-files-in-the-session-tmp-dir ()
+  "Under the real bwrap a command writes the session's own temporary
+directory at its real path, where the next command and the harness
+find the file, while the rest of /tmp stays private to the command."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (dolist (m '(store project config provider session sandbox)) (harness-test-load-module m))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let* ((harness-sandbox-policy 'required)
+           (sid (plist-get (harness-call 'session/create :cwd root) :id))
+           (tmp (harness-call 'session/tmp-dir sid))
+           (stray (format "/tmp/harness-stray-%s" (harness-short-id)))
+           (run (lambda (command)
+                  (harness-await (harness-call 'tools/execute sid (list :id (harness-short-id) :name "bash"
+                                                                        :input (list :command command)))
+                                 20)))
+           (r (funcall run (format "echo made > %s; touch %s"
+                                   (shell-quote-argument (concat tmp "note.txt")) stray))))
+      (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
+        (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+      (should-not (plist-get r :is-error))
+      (should (plist-get (plist-get r :meta) :sandboxed))
+      (should (equal "made\n" (with-temp-buffer (insert-file-contents (concat tmp "note.txt")) (buffer-string))))
+      (should-not (file-exists-p stray))
+      (should (string-search "made" (plist-get (funcall run (format "cat %s" (shell-quote-argument (concat tmp "note.txt"))))
+                                               :content)))
+      (harness-call 'session/delete sid))))
+
+(defvar harness-sandbox-policy)
+
 (ert-deftest harness-tools-shell-bash-timeout-kills-the-process-tree ()
   "A timed-out command takes its children with it."
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir
     (let* ((pidfile (expand-file-name "child.pid" root))
+           ;; Unconfined, whether or not an earlier test loaded the
+           ;; sandbox: in bwrap's PID namespace $! is a number of that
+           ;; namespace, which says nothing about a process out here.
+           (harness-sandbox-policy 'off)
            (r (harness-tools-shell-test--call
                "bash"
                :command (format "sleep 300 & echo $! > %s; wait" (shell-quote-argument pidfile))

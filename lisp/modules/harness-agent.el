@@ -210,11 +210,34 @@ permission is decided and `:detail', its latest progress, and
 
 ;;;; Prompt assembly
 
+(defconst harness-agent--tmp-dir-line
+  "- Temporary directory: %s (yours alone and already allowed, bash included: put scratch files, logs and screenshots there rather than in the working directory or /tmp)\n"
+  "System prompt line naming the session's own temporary directory (%s).
+It steers scratch files there: inside the sandbox /tmp is private to
+each command and starts empty, so a file a command leaves there is gone
+by the next call, and outside the sandbox /tmp is not an allowed
+directory.")
+
+(defun harness-agent--tmp-dir (session)
+  "Return SESSION's own temporary directory, made if missing, or nil."
+  (let ((id (plist-get session :id)))
+    (and id (harness-method-exists-p 'session/tmp-dir)
+         (condition-case err
+             (harness-call 'session/tmp-dir id)
+           (error (harness-log 'debug "agent: no temporary directory for %s: %s"
+                               id (harness-error-message err))
+                  nil)))))
+
 (defun harness-agent--system-prompt (session)
-  "Return the system prompt for SESSION after the `agent/system-prompt' filter."
-  (let ((base (format "%s\n\n## Environment\n- Working directory: %s\n- Project: %s\n- Date: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
+  "Return the system prompt for SESSION after the `agent/system-prompt' filter.
+Its Environment section names the session's own temporary directory,
+made here when it is missing (see `session/tmp-dir'), so the directory
+the model is told about exists when it reads about it."
+  (let* ((tmp (harness-agent--tmp-dir session))
+         (base (format "%s\n\n## Environment\n- Working directory: %s\n%s- Project: %s\n- Date: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
                       harness-agent--base-system-prompt
                       (plist-get session :cwd)
+                      (if tmp (format harness-agent--tmp-dir-line tmp) "")
                       (or (and (harness-method-exists-p 'project/name)
                                (harness-call 'project/name (plist-get session :project)))
                           (plist-get session :project))

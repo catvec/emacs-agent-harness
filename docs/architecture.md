@@ -349,7 +349,22 @@ gone.
   `:context-window` to set the session's own window.  Fills
   project, defaults from `config/get`.  → session.  Event `session/created`.
 - `session/get ID`, `session/list &optional FILTER` (`:project :status
-  :kind :parent-id :active`), `session/delete ID`.
+  :kind :parent-id :active`), `session/delete ID` (its temporary
+  directory goes too).
+- `session/tmp-dir ID` → the session's own temporary directory, made if
+  missing, or nil.  Every local session has one:
+  `harness-UID/ID/` in `temporary-file-directory` (`/tmp/harness-1000/ID/`;
+  the internal `harness-session--tmp-root` moves the root, which the
+  tests do).  It is made with the session (mode 700, as is the root),
+  made again whenever it is asked for and missing (a reboot empties
+  /tmp), and deleted with the session.  Being made when asked for is the
+  point: callers ask right before they rely on it.  /tmp is shared, so
+  only a real directory of the user's own, in a root of the user's own,
+  is handed out; a symbolic link or somebody else's directory gives nil
+  and one warning in the log.  Remote sessions have none (nothing is
+  made on their host).  The perms jail lists it (source `tmp`), bash
+  binds it writable in the sandbox, and the system prompt and
+  `session_info` name it.
 - `session/update ID &rest PLIST` — settings and name; appends a `hint`
   node ("model → …") and persists the setting through `config/set` when
   `:persist t`.  `:context-window N` sets the session's own window, nil
@@ -820,9 +835,15 @@ pending request and resolves when answered).
   The auto judge is also told to deny calls that widen the agent's own
   permissions some other way (for example `harness-allowed-directories`
   in `.dir-locals.el`, the permission mode, or the sandbox).
+- The roots of a session are its cwd, its worktree, its own temporary
+  directory (`session/tmp-dir`, asked for on every look at the roots, so
+  it exists whenever the jail lets a call into it), the configured
+  `harness-allowed-directories`, its grants and the tool output
+  directory.  The temporary directory needs no grant and cannot be
+  revoked.
 - `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
   grants every session), `permission/revoke-dir SESSION-ID DIR`,
-  `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|config|session|outputs
+  `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|outputs
   :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
   (the full effective root list), `permission/rules SESSION-ID`
   (`(:mode :non-interactive :auto-allow :session :always :roots)`),
@@ -893,6 +914,11 @@ pending request and resolves when answered).
   command list (bwrap / systemd-run / plain).  `sandbox/status` →
   `(:backend bwrap|systemd|none :available (…) :policy …)`.  Fails closed
   when `harness-sandbox-policy` is `required` and no backend exists.
+- The bash tool passes the session's own temporary directory
+  (`session/tmp-dir`) as `:writable`.  It is bound at its real path,
+  after the private tmpfs on /tmp, so a command can leave files there
+  for the next command and the other tools, while the rest of /tmp
+  stays private to each command.
 - A CWD inside a linked git worktree also gets the repository's common
   git directory read-write (its `hooks/` and `config` stay read-only, so
   nothing planted there runs when the harness uses git unconfined) and
@@ -943,6 +969,11 @@ pending request and resolves when answered).
   `agent/stream SID NODE-ID KIND DELTA` (kind text|thinking),
   `agent/tool-call SID NODE`, `agent/tool-result SID NODE`,
   `agent/activity-changed SID ACTIVITY`.
+- The system prompt's Environment section names the working directory,
+  the session's own temporary directory (asked for with
+  `session/tmp-dir` at every step, so it exists whenever the model is
+  told about it; the line is left out when there is none), the project,
+  the date, the system and the Emacs version.
 - Turn loop: build system prompt → messages → `provider/complete`;
   stream deltas into a live assistant/thinking node (created on the
   first delta with visible text: whitespace before it is held back and

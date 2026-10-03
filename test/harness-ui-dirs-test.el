@@ -35,7 +35,22 @@
       (harness-directories sid)
       (should (derived-mode-p 'harness-ui-dirs-mode))
       (harness-test-wait (lambda () harness-ui-dirs--entries) 5 "directory rows")
-      (should (equal '("cwd" "outputs") (harness-ui-dirs-test--sources)))
+      (should (equal '("cwd" "tmp" "outputs") (harness-ui-dirs-test--sources)))
+      ;; The session's own temporary directory reads as such, and stays.
+      (let ((tmp (harness-call 'session/tmp-dir sid)))
+        (goto-char (point-min))
+        (while (and (not (eobp)) (not (equal (tabulated-list-get-id) tmp))) (forward-line 1))
+        (should (equal tmp (tabulated-list-get-id)))
+        (should (string-match-p "temporary directory" (buffer-substring (line-beginning-position) (line-end-position))))
+        (should-error (harness-ui-dirs-revoke) :type 'user-error)
+        ;; Its long path does not push its source out of line with the others.
+        (let ((columns (mapcar (lambda (label)
+                                 (goto-char (point-min))
+                                 (search-forward label)
+                                 (- (match-beginning 0) (line-beginning-position)))
+                               '("working directory" "temporary directory" "tool outputs"))))
+          (should (= 1 (length (delete-dups columns))))
+          (should (> (car columns) (length tmp)))))
       ;; Adding grants the directory to the session and the buffer follows.
       (harness-ui-dirs-add extra)
       (harness-test-wait (lambda () (member "session" (harness-ui-dirs-test--sources))) 5 "granted row")
