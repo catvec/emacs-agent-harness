@@ -343,6 +343,8 @@ so several tasks can work in parallel.
   files as buttons, and each referenced tool call as the call it links
   to, with `[Open in the session]`. The board's item-at-point key
   (`SPC`) opens it too, along with whatever else the task has to show.
+  Once you verify the task, from the board or from its session, the
+  report closes.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `RET` opens the session of the task at point. From that session,

@@ -4,7 +4,8 @@
 
 ;; A task in review, in its own session and on its board: the banner
 ;; above the compose box that verifies or sends the work back, and the
-;; report popout that shows the final message and the evidence.
+;; report popout that shows the final message and the evidence, until
+;; the work is verified.
 
 ;;; Code:
 
@@ -33,8 +34,10 @@
 (defvar harness-compose-end)
 (defvar harness-chat--loading)
 (defvar harness-ui-popout-key)
+(defvar harness-ui-report--reports)
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks--render "harness-ui-tasks")
+(declare-function harness-ui-tasks--find "harness-ui-tasks")
 (declare-function harness-ui-popout-buffer "harness-ui-popout")
 (declare-function harness-ui-popout-close "harness-ui-popout")
 (declare-function harness-ui-report-popout "harness-ui-report")
@@ -95,6 +98,7 @@ review with a report; BODY gets `board', `id' and `sid'."
                             10 "the task to wait for review")
                            (plist-get (car harness-ui-tasks--tasks) :id))))
               (sid (plist-get (harness-call 'task/get id) :session)))
+         (ignore sid)
          (unwind-protect
              (progn ,@body)
            (dolist (b (buffer-list))
@@ -119,6 +123,17 @@ review with a report; BODY gets `board', `id' and `sid'."
   "Wait until BUFFER's text matches REGEXP."
   (harness-test-wait (lambda () (string-match-p regexp (harness-ui-review-test--text buffer)))
                      5 (format "the buffer to show %s" regexp)))
+
+(defun harness-ui-review-test--push (buffer label)
+  "Push the button LABEL in BUFFER, as a click on it does."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (let (pos)
+        (while (and (not pos) (search-forward label nil t))
+          (when (button-at (match-beginning 0)) (setq pos (match-beginning 0))))
+        (unless pos (error "No %s button in %s" label (buffer-name)))
+        (push-button pos)))))
 
 (ert-deftest harness-ui-review-banner-shows-and-verifies ()
   "A task in review says so in its session, and its [Verify] accepts the work."
@@ -203,6 +218,73 @@ review with a report; BODY gets `board', `id' and `sid'."
           (search-forward "Fix the flaky test")
           (call-interactively #'harness-ui-popout-at-point))
         (should (harness-ui-popout-buffer key))))))
+
+(ert-deftest harness-ui-review-verify-closes-the-report ()
+  "[Verify] in the session's banner closes the report its [Report] popped out.
+The popout goes as the task turns verified: its buffer and its window."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid))
+          (key (list 'report id)))
+      (harness-ui-review-test--wait-text chat "Ready for review")
+      (let ((windows (length (window-list nil 'nomini))))
+        (harness-ui-review-test--push chat "[Report]")
+        (let ((popout (harness-ui-popout-buffer key)))
+          (should popout)
+          (should (get-buffer-window popout))
+          (harness-ui-review-test--push chat "[Verify]")
+          (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
+        (should-not (harness-ui-popout-buffer key))
+        (should (= windows (length (window-list nil 'nomini)))))
+      (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
+
+(ert-deftest harness-ui-review-board-verify-closes-the-report ()
+  "[Verify] on the board's card closes the report its [Report] popped out."
+  (harness-ui-review-test-with
+    (let ((key (list 'report id)))
+      (with-current-buffer board (harness-ui-tasks--render))
+      (harness-ui-review-test--push board "[Report]")
+      (let ((popout (harness-ui-popout-buffer key)))
+        (should popout)
+        (harness-ui-review-test--push board "[Verify]")
+        (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
+      (should-not (harness-ui-popout-buffer key))
+      (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
+
+(ert-deftest harness-ui-review-send-back-keeps-the-report ()
+  "Sending the work back leaves its report open: only verifying closes it."
+  (harness-ui-review-test-with
+    (let ((key (list 'report id)))
+      (harness-ui-report-popout (harness-call 'task/get id))
+      (should (harness-ui-popout-buffer key))
+      (harness-call 'task/reject id "it still flakes on CI")
+      ;; The session works on the feedback and, this fixture's script
+      ;; handing in again, the task waits for review anew; the popout
+      ;; follows it all the way.
+      (harness-test-wait (lambda () (eq 'review (plist-get (harness-call 'task/get id) :state)))
+                         10 "the task to come back for review")
+      (harness-test-wait (lambda () (let ((shown (gethash key harness-ui-report--reports)))
+                                      (and (plist-get shown :feedback) (equal "review" (plist-get shown :state)))))
+                         5 "the popout to follow the task")
+      (should (harness-ui-popout-buffer key))
+      (harness-call 'task/verify id)
+      (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the report to close"))))
+
+(ert-deftest harness-ui-review-done-report-stays-open ()
+  "The report of a task verified before it popped out stays open as the task changes."
+  (harness-ui-review-test-with
+    (let ((key (list 'report id)))
+      (harness-call 'task/verify id)
+      (with-current-buffer board
+        (harness-test-wait (lambda () (equal "done" (plist-get (harness-ui-tasks--find id) :state)))
+                           10 "the board to see the task done")
+        (harness-ui-report-popout (harness-ui-tasks--find id)))
+      (should (harness-ui-popout-buffer key))
+      (harness-call 'task/archive id)
+      (harness-test-wait (lambda () (or (not (harness-ui-popout-buffer key))
+                                        (harness-json-true-p
+                                         (plist-get (gethash key harness-ui-report--reports) :archived))))
+                         5 "the popout to follow the task")
+      (should (harness-ui-popout-buffer key)))))
 
 (provide 'harness-ui-review-test)
 ;;; harness-ui-review-test.el ends here

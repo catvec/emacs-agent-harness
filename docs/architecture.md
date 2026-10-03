@@ -1975,4 +1975,6 @@ handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images inline, videos and files through ui-media, code as a
 block, notes, and a referenced tool call drawn as the call it links to,
 with [Open in the session]; opened from the board's [Report] button and
-from the banner, in a popout of its own).
+from the banner, in a popout of its own, which follows `task/changed`
+and closes once the task turns verified, whatever verified it; the
+report of a task verified before it opened stays).
