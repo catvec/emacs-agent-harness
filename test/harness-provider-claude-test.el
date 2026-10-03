@@ -35,6 +35,7 @@
 (declare-function harness-provider-claude--make-session "harness-provider-claude")
 (declare-function harness-provider-claude--cli-tools "harness-provider-claude")
 (declare-function harness-provider-claude--environment-for "harness-provider-claude")
+(declare-function harness-provider-claude--autocompact-pct "harness-provider-claude")
 (declare-function harness-provider-claude--spawn-key "harness-provider-claude")
 (defvar harness-brave-api-key)
 (defvar harness-websearch-provider)
@@ -191,29 +192,33 @@ and the sessions created meanwhile kept that window."
     (should-not (member "--allowedTools" cmd))
     (should (equal "claude-sonnet-5" (nth (1+ (cl-position "--model" cmd :test #'equal)) cmd)))))
 
-(ert-deftest harness-provider-claude-autocompact-follows-a-context-fraction ()
-  "A session on a fraction of its window tells the CLI to compact there.
+(ert-deftest harness-provider-claude-autocompact-follows-a-capped-window ()
+  "A session below its model's window tells the CLI to compact there.
 That is the harness's shorter budget for a task's session."
   (harness-provider-claude-test--setup)
   (let* ((request (harness-provider-claude-test--request "s-ctx" "hello"))
-         (with-fraction (lambda (fraction)
-                          (plist-put (copy-sequence request) :session
-                                     (plist-put (copy-sequence (plist-get request :session))
-                                                :context-fraction fraction)))))
-    ;; No fraction: nothing is overridden, and the CLI's default stands.
-    (should-not (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50"
+         (with-window (lambda (window)
+                        (plist-put (copy-sequence request) :session
+                                   (plist-put (copy-sequence (plist-get request :session))
+                                              :context-window window)))))
+    ;; No cap: nothing is overridden, and the CLI's default stands.
+    (should-not (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=25"
                         (harness-provider-claude--environment-for request)))
     (should-not (car (last (harness-provider-claude--spawn-key request))))
-    (let ((request-half (funcall with-fraction 0.5)))
-      (should (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50"
-                      (harness-provider-claude--environment-for request-half)))
-      ;; The fraction is part of the settings a process was spawned with,
-      ;; so changing it restarts the CLI with the new override.
-      (should (equal 0.5 (car (last (harness-provider-claude--spawn-key request-half))))))
-    ;; A percentage on the other side of the CLI's scale is clamped.
+    ;; 256k of the model's 1M is 26%.
+    (let ((capped (funcall with-window 256000)))
+      (should (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=26"
+                      (harness-provider-claude--environment-for capped)))
+      ;; The percentage is part of the settings a process was spawned
+      ;; with, so changing the cap restarts the CLI with the new one.
+      (should (equal 26 (car (last (harness-provider-claude--spawn-key capped))))))
+    ;; A tiny cap is clamped to the CLI's scale, and a window at or above
+    ;; the model's is no cap at all.
     (should (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=1"
-                    (harness-provider-claude--environment-for
-                     (funcall with-fraction 0.001))))))
+                    (harness-provider-claude--environment-for (funcall with-window 1000))))
+    (should-not (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=100"
+                        (harness-provider-claude--environment-for
+                         (funcall with-window 1000000))))))
 
 (ert-deftest harness-provider-claude-turn-with-hosted-tool-call ()
   (harness-provider-claude-test--setup)

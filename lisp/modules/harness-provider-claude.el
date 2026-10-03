@@ -44,8 +44,8 @@
 ;; - `--resume ID' recreates a session after a restart and `--resume ID
 ;;   --fork-session' implements `:fork': the new session starts from
 ;;   the parent's cached prefix.
-;; - A session on a fraction of its context window (`:context-fraction',
-;;   which a task's session has by default) is spawned with
+;; - A session that runs below its model's context window (a task's is
+;;   capped by `harness-tasks-context-limit') is spawned with
 ;;   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE' set to that percentage, so the
 ;;   CLI's own compaction happens at the point the harness chose rather
 ;;   than at its default one.
@@ -329,25 +329,37 @@ resumes the CLI session in a new one."
   "Return `process-environment' without the CLAUDECODE nesting marker."
   (cl-remove-if (lambda (e) (string-prefix-p "CLAUDECODE=" e)) process-environment))
 
-(defun harness-provider-claude--context-fraction (request)
-  "Return the part of its window REQUEST's session runs on, or nil.
-That is the session's `:context-fraction' (`harness-tasks-context-fraction'
-for a task's session); a value outside (0 1] counts as none."
-  (let ((fraction (plist-get (plist-get request :session) :context-fraction)))
-    (and (numberp fraction) (> fraction 0) (<= fraction 1) fraction)))
+(defun harness-provider-claude--model-window (model-id)
+  "Return the context window the catalogue gives MODEL-ID, or nil."
+  (and (harness-method-exists-p 'provider/model)
+       (condition-case nil
+           (plist-get (harness-call 'provider/model model-id) :context-window)
+         (error nil))))
+
+(defun harness-provider-claude--autocompact-pct (request)
+  "Return the percentage the CLI should auto-compact at for REQUEST, or nil.
+A session whose context window is smaller than its model's (the harness
+caps a task's, say) is told to auto-compact at that part of the window,
+so the CLI's own compaction matches the budget the harness gave the
+session.  nil leaves the CLI's default."
+  (let* ((session (plist-get request :session))
+         (window (plist-get session :context-window))
+         (model-window (harness-provider-claude--model-window (plist-get request :model))))
+    (when (and (numberp window) (> window 0)
+               (numberp model-window) (> model-window 0)
+               (< window model-window))
+      (max 1 (min 99 (round (* 100.0 (/ window (float model-window)))))))))
 
 (defun harness-provider-claude--environment-for (request)
   "Return `process-environment' for the CLI process serving REQUEST.
-A session that runs on a fraction of its context window tells the CLI
-to auto-compact at the same point (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE',
-a percentage), so the CLI's own compaction matches the shorter budget
-the harness gave the session (a task's, say)."
-  (let ((fraction (harness-provider-claude--context-fraction request))
+A session that runs below its model's context window tells the CLI to
+auto-compact at the same point (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', a
+percentage), so the CLI's own compaction matches the shorter budget the
+harness gave the session (a task's, say)."
+  (let ((pct (harness-provider-claude--autocompact-pct request))
         (env (harness-provider-claude--environment)))
-    (if fraction
-        (cons (format "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d"
-                      (max 1 (min 100 (round (* 100 fraction)))))
-              env)
+    (if pct
+        (cons (format "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d" pct) env)
       env)))
 
 ;;;; Command line and spawning
@@ -411,14 +423,14 @@ They stand in for the harness tools its `:builtin-tools' names."
 
 (defun harness-provider-claude--spawn-key (request)
   "Return the settings a CLI process must have been started with to serve REQUEST.
-That is (MODEL EFFORT SYSTEM BUILTIN FRACTION): the CLI tools it turns
-on (nil when none) and the context fraction it auto-compacts at (nil
+That is (MODEL EFFORT SYSTEM BUILTIN PCT): the CLI tools it turns on
+\(nil when none) and the auto-compact percentage it was given (nil
 without one).  A process started otherwise is restarted."
   (list (cdr (harness-provider-parse-model (plist-get request :model)))
         (plist-get request :thinking)
         (plist-get request :system)
         (harness-provider-claude--cli-tools request)
-        (harness-provider-claude--context-fraction request)))
+        (harness-provider-claude--autocompact-pct request)))
 
 (defun harness-provider-claude--builtin-name (entry name)
   "Return the harness tool that the CLI's tool NAME stands in for on ENTRY, or nil.

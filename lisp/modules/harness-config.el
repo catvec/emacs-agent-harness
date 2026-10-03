@@ -136,7 +136,7 @@ folder for that project, or nil to keep none there."
      :title "Task board"
      :doc "The sessions tasks start with, and when their work counts as done."
      :keys (harness-tasks-model harness-tasks-thinking harness-tasks-permission-mode
-            harness-tasks-non-interactive harness-tasks-context-fraction
+            harness-tasks-non-interactive harness-tasks-context-limit
             harness-tasks-require-verification
             harness-tasks-max-running harness-tasks-worktrees harness-tasks-directory))
     (notifications
