@@ -619,6 +619,19 @@ has no port, the UI stays connected where it was."
             (or (and name (not (string-empty-p name)) name)
                 (format "unnamed (%s)" (substring (or (plist-get session :id) "????") 0 4))))))
 
+(defun harness-ui-task-title (task &optional session)
+  "Return TASK's title, as the task board shows it.
+That is the name of its SESSION, by default the cached session it works
+in, once it has one, else the first line of its prompt.  A session is
+named after its first turn, and a task works in that turn, so a task at
+work has no name yet."
+  (let ((name (plist-get (or session
+                             (and (plist-get task :session) (harness-ui-session (plist-get task :session))))
+                         :name)))
+    (if (harness-string-blank-p name)
+        (harness-first-line (plist-get task :prompt) 72)
+      name)))
+
 ;;;; Model catalogue cache
 
 (defvar harness-ui--models (make-hash-table :test 'equal)

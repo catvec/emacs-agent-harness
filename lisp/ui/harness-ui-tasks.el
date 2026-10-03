@@ -213,11 +213,9 @@ pending in the order its tasks start."
   (and (plist-get task :session) (harness-ui-session (plist-get task :session))))
 
 (defun harness-ui-tasks--title (task)
-  "The session's name once it has one, else the prompt's first line."
-  (let ((name (plist-get (harness-ui-tasks--session task) :name)))
-    (if (harness-string-blank-p name)
-        (harness-first-line (plist-get task :prompt) 72)
-      name)))
+  "The session's name once it has one, else the prompt's first line.
+The session list names a task's session the same way."
+  (harness-ui-task-title task))
 
 (defun harness-ui-tasks--todos (session)
   "Return (DONE TOTAL CURRENT-TEXT) for SESSION's todo list, or nil."
