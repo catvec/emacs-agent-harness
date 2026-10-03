@@ -440,45 +440,47 @@ a node already after it keeps its place and is left untouched."
                                                  :delivered-after (plist-get anchor :id)))))))
 
 (defun harness-agent--on-event (turn ev)
-  (let ((sid (harness-agent-turn-session-id turn)))
-    (pcase (plist-get ev :type)
-      ('start nil)
-      ('activity
-       (harness-agent--update-activity
-        sid (harness-agent--compact (list :phase (plist-get ev :phase) :tool (plist-get ev :tool)
-                                          :chars (plist-get ev :chars)))))
-      ('text (harness-agent--stream turn 'assistant (plist-get ev :delta)))
-      ('thinking (harness-agent--stream turn 'thinking (plist-get ev :delta)))
-      ('tool-call (if (plist-get ev :builtin)
-                      (harness-agent--builtin-call turn ev)
-                    (harness-agent--tool-call turn ev)))
-      ('tool-permission (harness-agent--tool-permission turn ev))
-      ;; Hosted loops echo the results of every call; the turn records
-      ;; those of the provider's own tools only, having recorded the rest.
-      ('tool-result (harness-agent--builtin-result turn ev))
-      ('usage
-       (setf (harness-agent-turn-last-usage turn) ev)
-       (harness-call 'session/usage-add sid
-                     (list :input (plist-get ev :input) :output (plist-get ev :output)
-                           :cache-read (plist-get ev :cache-read) :cache-write (plist-get ev :cache-write)
-                           :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
-                           :billing (plist-get ev :billing) :plan (plist-get ev :plan)
-                           :context (plist-get ev :context))))
-      ('provider-state (harness-call 'session/set-provider-state sid (plist-get ev :state)))
-      ('quota (harness-call 'session/runtime sid :quota (plist-get ev :windows))
-              (harness-emit 'agent/quota sid (plist-get ev :windows)))
-      ('hint (harness-call 'session/hint sid (plist-get ev :text)))
-      ('done
-       (harness-agent--finalize-live turn)
-       ;; The provider's request is over: its own tools report no more.
-       (harness-agent--close-builtins turn (plist-get ev :stop-reason))
-       (setf (harness-agent-turn-stop-reason turn) (plist-get ev :stop-reason)
-             (harness-agent-turn-error turn) (plist-get ev :error)
-             (harness-agent-turn-waiting-done turn) t)
-       (when (eq (plist-get ev :stop-reason) 'error)
-         (harness-call 'session/hint sid (format "Error: %s" (or (plist-get ev :error) "unknown"))))
-       (harness-agent--maybe-continue turn))
-      (other (harness-log 'debug "agent: unknown provider event %S" other)))))
+  "Handle EV from TURN's provider; late events of a finished turn are dropped."
+  (when (harness-agent--current-p turn)
+    (let ((sid (harness-agent-turn-session-id turn)))
+      (pcase (plist-get ev :type)
+        ('start nil)
+        ('activity
+         (harness-agent--update-activity
+          sid (harness-agent--compact (list :phase (plist-get ev :phase) :tool (plist-get ev :tool)
+                                            :chars (plist-get ev :chars)))))
+        ('text (harness-agent--stream turn 'assistant (plist-get ev :delta)))
+        ('thinking (harness-agent--stream turn 'thinking (plist-get ev :delta)))
+        ('tool-call (if (plist-get ev :builtin)
+                        (harness-agent--builtin-call turn ev)
+                      (harness-agent--tool-call turn ev)))
+        ('tool-permission (harness-agent--tool-permission turn ev))
+        ;; Hosted loops echo the results of every call; the turn records
+        ;; those of the provider's own tools only, having recorded the rest.
+        ('tool-result (harness-agent--builtin-result turn ev))
+        ('usage
+         (setf (harness-agent-turn-last-usage turn) ev)
+         (harness-call 'session/usage-add sid
+                       (list :input (plist-get ev :input) :output (plist-get ev :output)
+                             :cache-read (plist-get ev :cache-read) :cache-write (plist-get ev :cache-write)
+                             :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
+                             :billing (plist-get ev :billing) :plan (plist-get ev :plan)
+                             :context (plist-get ev :context))))
+        ('provider-state (harness-call 'session/set-provider-state sid (plist-get ev :state)))
+        ('quota (harness-call 'session/runtime sid :quota (plist-get ev :windows))
+                (harness-emit 'agent/quota sid (plist-get ev :windows)))
+        ('hint (harness-call 'session/hint sid (plist-get ev :text)))
+        ('done
+         (harness-agent--finalize-live turn)
+         ;; The provider's request is over: its own tools report no more.
+         (harness-agent--close-builtins turn (plist-get ev :stop-reason))
+         (setf (harness-agent-turn-stop-reason turn) (plist-get ev :stop-reason)
+               (harness-agent-turn-error turn) (plist-get ev :error)
+               (harness-agent-turn-waiting-done turn) t)
+         (when (eq (plist-get ev :stop-reason) 'error)
+           (harness-call 'session/hint sid (format "Error: %s" (or (plist-get ev :error) "unknown"))))
+         (harness-agent--maybe-continue turn))
+        (other (harness-log 'debug "agent: unknown provider event %S" other))))))
 
 (defun harness-agent--stream (turn kind delta)
   "Append DELTA of KIND (assistant or thinking) to the live node of TURN.
@@ -583,7 +585,10 @@ loop reads it in the content, a native one with its next request."
               (funcall respond (list :content (plist-get result :content)
                                      :is-error (plist-get result :is-error))))))
          (cl-decf (harness-agent-turn-pending turn))
-         (harness-agent--maybe-continue turn))
+         (if (plist-get result :end-turn)
+             ;; A tool finished the work (`hand_in'): no step may follow.
+             (harness-agent--finish-turn turn)
+           (harness-agent--maybe-continue turn)))
        (lambda (err)
          (harness-agent--remove-call sid call-id)
          (harness-agent--update-activity sid)
@@ -706,6 +711,18 @@ REASON is why the provider stopped (`cancelled', say)."
                t (list :interrupted t))
             (error (harness-log 'warn "agent: closing built-in call %s failed: %S" (car call) err)
                    (harness-agent--remove-call sid (car call)))))))))
+
+(defun harness-agent--finish-turn (turn)
+  "End TURN cleanly as a tool asked, then stop its provider.
+The provider may still be streaming when a tool hands the work in
+(`:end-turn' on its result): the turn ends with `end-turn' as if the
+model had stopped itself, and no further step follows.  The request is
+cancelled after that, not before, so its news cannot race the turn's
+end into `cancelled' (`harness-agent--on-event' drops it).  The
+transcript keeps everything recorded so far."
+  (harness-agent--end turn 'end-turn)
+  (when-let* ((handle (harness-agent-turn-handle turn)))
+    (ignore-errors (funcall (plist-get handle :cancel)))))
 
 (defun harness-agent--maybe-continue (turn)
   "Decide what happens once the provider is done and no tools are running."

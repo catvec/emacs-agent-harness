@@ -2152,5 +2152,151 @@ Each is a new session, never an earlier one."
           (should (harness-tasks-test--field path "verified"))
           (should (string-match-p "\n<!-- harness:review -->\n" (harness-read-file path))))))))
 
+;;;; Handing the finished work in
+;;
+;; `hand_in' is how a task's session says it is done: the tool records
+;; the summary and the evidence on the task and ends the turn, which the
+;; review step then picks up as usual.
+
+(defvar harness-tasks-test--handin-evidence nil
+  "Evidence the test's hand_in call hands in, when not the default.")
+
+(defun harness-tasks-test--handin-input ()
+  "Return the input of the test's hand_in call."
+  (list :summary "# Done\n\nThe parser handles nested quotes now."
+        :evidence (or harness-tasks-test--handin-evidence
+                      (list (list :code "(parse \"a\\\"b\")" :language "elisp"
+                                  :caption "The new case")))))
+
+(ert-deftest harness-tasks-hand-in-waits-for-review ()
+  "A task session handing its work in ends the turn and waits for the user.
+The tool alone ends the turn: the scripted provider never says done."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "All done.\n")
+             (:type tool-call :id "h1" :name "hand_in" :input (:summary "# Done" :evidence ("looks good")))
+             ;; No `done' event: without hand_in ending the turn, this never finishes.
+             (:type text :delta " this must not matter"))))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (princ (format "DIAG state=%S col=%S outcome=%S report=%S status=%S err=%S\n"
+                       (plist-get (harness-tasks-test-task id) :state)
+                       (plist-get (harness-tasks-test-task id) :column)
+                       (plist-get (harness-tasks-test-task id) :outcome)
+                       (plist-get (harness-tasks-test-task id) :report)
+                       (plist-get (harness-call 'session/get sid) :status)
+                       (plist-get (harness-tasks-test-task id) :error)))
+        (harness-tasks-test-wait-state id 'review)
+        (let* ((task (harness-tasks-test-task id))
+               (report (plist-get task :report)))
+          (should (equal "# Done" (plist-get report :summary)))
+          (should (numberp (plist-get report :at)))
+          (should (equal '((:kind "note" :text "looks good")) (plist-get report :evidence))))
+        ;; The transcript shows the call and what it said.
+        (let ((result (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
+                                                   (equal (plist-get n :call-id) "h1")))
+                                  (harness-call 'session/nodes sid))))
+          (should (string-match-p "waits for the user's review" (plist-get result :output))))
+        ;; The user can verify it as any review.
+        (harness-call 'task/verify id)
+        (harness-tasks-test-wait-state id 'done)
+        (should (plist-get (harness-tasks-test-task id) :verified))))))
+
+(ert-deftest harness-tasks-hand-in-needs-a-report ()
+  "A hand_in without a summary, without evidence, or with broken items is refused.
+The refusal says what to fix, and the task keeps working."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let* ((id (harness-tasks-test-submit "fix the parser"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (dolist (case '((:summary "" :evidence ("x"))
+                      (:summary "done" :evidence nil)
+                      (:summary "done" :evidence (1))
+                      (:summary "done" :evidence ((:image "/no/such/file.png")))
+                      (:summary "done" :evidence ((:image "shared.txt")))
+                      (:summary "done" :evidence ((:tool_call "nope")))
+                      (:summary "done" :evidence ((:code "x" :note "y")))))
+        (let* ((input (pcase case
+                        (`(:evidence (1)) (list :summary "done" :evidence (list (list :note "x" :caption 7))))
+                        (`(:evidence nil) (list :summary "done" :evidence nil))
+                        (`(:evidence ((:image ,p))) (list :summary "done" :evidence (list (list :image p))))
+                        (`(:evidence ((:tool_call ,c))) (list :summary "done" :evidence (list (list :tool_call c))))
+                        (`(:evidence ((:code "x" :note "y"))) (list :summary "done" :evidence (list (list :code "x" :note "y"))))
+                        (`(:summary "" :evidence _) (list :summary "" :evidence (list "x")))
+                        (`(:summary "done" :evidence _) (list :summary "done" :evidence (list "x")))))
+              (result (harness-test-await (harness-call-async 'tools/execute sid (list :id "bad" :name "hand_in" :input input)))))
+          (should (plist-get result :is-error))
+          (should-not (plist-get result :end-turn))))
+      (should-not (plist-get (harness-tasks-test-task id) :report))
+      (should (eq 'active (harness-tasks-test-state id))))))
+
+(ert-deftest harness-tasks-hand-in-quotes-a-tool-call ()
+  "Evidence may name an earlier tool call: the report copies what it did and showed."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (harness-define-tool "echo_tool" :label "Echo" :description "echoes" :kind 'read
+                         :handler (lambda (input _ctx) (harness-tool-ok (format "echo: %s" (plist-get input :text)))))
+    (let* ((harness-provider-demo-script-override
+            '((:type tool-call :id "c1" :name "echo_tool" :input (:text "hello"))
+              (:type tool-call :id "h1" :name "hand_in"
+                     :input (:summary "Done" :evidence ((:tool_call "c1" :caption "the command"))))
+              (:type done :stop-reason end-turn)))
+           (id (harness-tasks-test-submit "run the command")))
+      (harness-tasks-test-wait-state id 'done)
+      (let* ((report (plist-get (harness-tasks-test-task id) :report))
+             (item (car (plist-get report :evidence))))
+        (should (equal "tool-call" (plist-get item :kind)))
+        (should (equal "c1" (plist-get item :call-id)))
+        (should (equal "Echo: hello" (plist-get item :title)))
+        (should (equal "echo: hello" (plist-get item :output)))
+        (should (equal "the command" (plist-get item :caption)))
+        (should (string-match-p "hello" (plist-get item :input)))))))
+
+(ert-deftest harness-tasks-hand-in-offered-to-task-sessions-only ()
+  "Only a task's session is offered hand_in; the catalogue keeps every tool."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let* ((plain (plist-get (harness-call 'session/create :cwd default-directory) :id))
+           (id (harness-tasks-test-submit "fix the parser"))
+           (sid (plist-get (harness-tasks-test-task id) :session))
+           (names (lambda (session-id) (mapcar (lambda (s) (plist-get s :name))
+                                               (harness-call 'tools/list session-id)))))
+      (should-not (member "hand_in" (funcall names plain)))
+      (should (member "hand_in" (funcall names sid)))
+      (should (member "hand_in" (funcall names nil))))))
+
+(ert-deftest harness-tasks-hand-in-in-the-task-file ()
+  "A task's file holds the report, and the file alone brings it back."
+  (harness-tasks-test-with-files
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (harness-tasks-max-running nil)
+          (harness-provider-demo-script-override
+           '((:type tool-call :id "h1" :name "hand_in"
+                  :input (:summary "# Done" :evidence ("a note" (:code "(parse x)" :language "elisp")))))))
+      (let* ((id (harness-tasks-test-submit "Fix the parser" root)))
+        (harness-tasks-test-wait-state id 'review)
+        (harness-tasks-flush)
+        (let* ((path (harness-tasks-test--file id))
+               (text (harness-read-file path)))
+          (should (string-search "<!-- harness:report -->" text))
+          (should (string-search "## Report" text))
+          (should (string-search "```json" text))
+          ;; With its store lost, the file brings the report back.
+          (delete-file (harness-tasks-test--store root))
+          (delete-file (expand-file-name "task-stores.json" harness-state-directory))
+          (harness-tasks-test--restart)
+          (harness-call 'task/list root)
+          (let ((report (plist-get (harness-tasks-test-task id) :report)))
+            (should (equal "# Done" (plist-get report :summary)))
+            (should (equal '((:kind "note" :text "a note")
+                             (:kind "code" :language "elisp" :code "(parse x)"))
+                           (plist-get report :evidence))))
+          ;; Nothing to write: the file was right.
+          (harness-tasks-flush)
+          (should (equal text (harness-read-file path))))))))
+
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

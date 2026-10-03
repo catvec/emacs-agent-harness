@@ -1132,6 +1132,24 @@ That is a `### Sent back TIME' heading over each, quoted; nil for none."
                          "\n\n" (harness-tasks--quote (or (plist-get round :text) ""))))
                feedback "\n\n")))
 
+(defun harness-tasks--report-text (task)
+  "Return TASK's report as its file's report section has it: a JSON block.
+The JSON holds the summary and the evidence exactly as the task view
+shows them, so a hand-written file and a rendered report agree."
+  (when-let* ((report (plist-get task :report)))
+    (concat "```json\n" (harness-json-encode-text report) "\n```")))
+
+(defun harness-tasks--parse-report (text)
+  "Return the report in TEXT, a task file's report section, or nil.
+It is the JSON block the section holds; a section without a readable
+JSON report is no report."
+  (when (and (stringp text)
+             (string-match "```json[ \t]*\n\\(\\(?:.\\|\n\\)*?\\)\n```" text))
+    (condition-case err
+        (let ((report (harness-json-parse (match-string 1 text))))
+          (and (listp report) (stringp (plist-get report :summary)) report))
+      (error (harness-log 'warn "tasks: cannot parse a report: %S" err) nil))))
+
 (defun harness-tasks--parse-feedback (text)
   "Return the rounds of feedback in TEXT, a task file's review section.
 Each is (:text TEXT :at TIME), oldest first; text before the first
@@ -1162,6 +1180,9 @@ heading, and a heading over nothing, are no round."
             (if (harness-tasks--note-shown-p task)
                 (concat "\n\n<!-- harness:request -->\n## Request\n\n"
                         (harness-tasks--quote (plist-get task :note)))
+              "")
+            (if (plist-get task :report)
+                (concat "\n\n<!-- harness:report -->\n## Report\n\n" (harness-tasks--report-text task))
               "")
             (if feedback (concat "\n\n<!-- harness:review -->\n## Review\n\n" feedback) "")
             (if (and (stringp plan) (not (string-blank-p plan)))
@@ -1233,8 +1254,9 @@ is the prompt's first line, as plain text; HEADING is non-nil then."
 `:fields' maps the known frontmatter keys present (lowercase) to their
 values, the file's last of each; `:extra' lists the raw entries of the
 other keys; `:prompt' is the description with its title heading made
-plain, `:heading' non-nil when it had one; `:note', `:review' and
-`:plan' are the request, review and plan sections, nil when absent.  A
+plain, `:heading' non-nil when it had one; `:note', `:report',
+`:review' and `:plan' are the request, report, review and plan
+sections, nil when absent.  A
 file whose frontmatter never ends is just (:unterminated t)."
   (let* ((split (harness-tasks--split-frontmatter text))
          (yaml (car split)))
@@ -1252,6 +1274,7 @@ file whose frontmatter never ends is just (:unterminated t)."
         (list :fields fields :extra extra
               :prompt (car desc) :heading (cdr desc)
               :note (and request (harness-tasks--unquote (cdr request)))
+              :report (harness-tasks--parse-report (cdr (assoc "report" (cdr parts))))
               :review (cdr (assoc "review" (cdr parts)))
               :plan (cdr (assoc "plan" (cdr parts))))))))
 
@@ -1309,6 +1332,7 @@ leaves out contradict nothing."
          (file-plan (plist-get parsed :plan)))
     (and (equal prompt (plist-get task :prompt))
          (or (null note) (equal note (and (harness-tasks--note-shown-p task) (string-trim (plist-get task :note)))))
+         (or (null (plist-get parsed :report)) (equal (plist-get parsed :report) (plist-get task :report)))
          (or (null file-review) (equal file-review (harness-tasks--feedback-text task)))
          (or (null file-plan) (equal file-plan (and (stringp plan) (string-trim plan))))
          (cl-every (lambda (field)
@@ -1496,6 +1520,7 @@ user, `interrupted'.  Return nil for a file without a prompt."
                          :finished (funcall time "finished")
                          :verified (and verified t)
                          :verified-at verified
+                         :report (plist-get parsed :report)
                          :feedback (harness-tasks--parse-feedback (plist-get parsed :review))
                          :updated (funcall time "updated"))))
         (puthash id task harness-tasks--table)
@@ -2630,6 +2655,23 @@ task."
                                                 :attachments attachments)))
                      (lambda (e) (harness-tasks--fail id e)))
       (harness-call 'task/get id))))
+
+(harness-defmethod task/for-session (session-id)
+  "Return the task of SESSION-ID, or nil.
+Hand-in uses it, and the review banner: a session that is a task's has
+exactly one."
+  (let ((task (harness-tasks--by-session session-id)))
+    (and task (harness-tasks--view task))))
+
+(harness-defmethod task/hand-in (id report)
+  "Record REPORT as the work ID hands in, waiting for the user's review.
+REPORT is what the hand_in tool validated: a plist of `:summary' and
+`:evidence'.  The task writes it in its file and says `task/changed';
+the turn that handed it in then ends cleanly, which the review step
+picks up as usual (`harness-tasks--on-turn-ended')."
+  (harness-tasks--get id)               ; signals for an unknown task
+  ;; `harness-tasks--set' writes it soon and says `task/changed'.
+  (harness-tasks--set id :report report :report-at (float-time) :archived nil))
 
 (harness-defmethod task/archive (id &optional restore)
   "Archive done task ID, hiding it and deactivating its session; RESTORE undoes it.
