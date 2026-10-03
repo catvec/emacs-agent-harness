@@ -261,6 +261,18 @@ Terminals fall back to a one-column symbol, which needs no extra room."
   (and (> (length icon) 0)
        (eq 'image (car-safe (get-text-property 0 'display icon)))))
 
+(defun harness-ui-tasks--mark-nudge (icon)
+  "Pixels to move a wide ICON left so it centres on the one-column grid.
+The icon is an image with its ink centred, about a column wider than the
+stopped square it stands next to; half that extra width puts the two
+marks on the same centre."
+  (let ((nudge (/ (- (string-pixel-width icon) (frame-char-width)) 2)))
+    (and (> nudge 0) nudge)))
+
+(defun harness-ui-tasks--pad (pixels)
+  "A space PIXELS pixels wide, an absolute pixel specification."
+  (propertize " " 'display (list 'space :width (list pixels))))
+
 (defun harness-ui-tasks--icon (task column session)
   (pcase column
     ('pending (cond ((harness-ui-tasks--refining-p task) (harness-ui-status-icon "running"))
@@ -557,16 +569,21 @@ its final message and evidence, in a popout."
          (meta (harness-ui-tasks--meta task column session))
          (buttons (harness-ui-tasks--card-buttons task))
          (icon (harness-ui-tasks--icon task column session))
-         ;; The blocked mark is a wide image, about two columns, while the
-         ;; stopped square is one: start the pause a column earlier and pad
-         ;; a column after it, so the mark moves left with the text in line.
-         ;; Terminals draw the pause as a one-column symbol, already in line.
+         ;; The blocked mark is an image about a column wider than the
+         ;; one-column stopped square, its ink centred in it: move it half
+         ;; that extra width left, so the two marks share a centre, and pad
+         ;; the same width after it, so the title keeps its column.  In a
+         ;; terminal the pause is a one-column symbol and none of this
+         ;; applies.
          (pause (and (eq column 'needs-input)
                      (plist-get session :pending)
                      (harness-ui-tasks--wide-icon-p icon)))
+         (nudge (and pause (harness-ui-tasks--mark-nudge icon)))
          (detail (harness-ui-tasks--fit (or (harness-ui-tasks--detail task column session position) "")
                                         (- width (string-width buttons) 7))))
-    (insert (if pause " " "  ") icon (if pause "  " " ")
+    (insert (if nudge (concat " " (harness-ui-tasks--pad (- (frame-char-width) nudge))) "  ")
+            icon
+            (if nudge (concat (harness-ui-tasks--pad nudge) " ") " ")
             (propertize (harness-ui-tasks--fit (harness-ui-tasks--title task) (- width (string-width meta) 7))
                         'face (if (eq column 'done) 'default 'harness-task-title-face)
                         'mouse-face 'highlight

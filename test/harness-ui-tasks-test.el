@@ -178,24 +178,40 @@ Finished tasks are completed at once, without review, unless BODY turns
       (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*stopped: error")
       (should (string-match-p "1 need you" (with-current-buffer board (harness-ui-tasks--header)))))))
 
-(ert-deftest harness-ui-tasks-paused-mark-starts-a-column-left ()
-  "A wide pause mark starts a column earlier, with its text still in line.
-On a graphical frame the blocked mark is an image about two columns wide
-while the stopped square is one, so the pause would sit a column right of
-it: the card starts the pause a column earlier and pads a column after it.
-Terminals draw the pause as a one-column symbol and keep the old layout."
+(ert-deftest harness-ui-tasks-paused-mark-lines-up-with-the-square ()
+  "A wide pause mark centres on the square's column, its text in line.
+On a graphical frame the blocked mark is an image about a column wider
+than the stopped square, with its ink centred: the card moves it half
+that extra width left and pads the same width after it, so the two marks
+share a centre and the title keeps its column.  Terminals draw the pause
+as a one-column symbol, already in line, so they keep the old layout."
   (harness-ui-tasks-test-with
     (let* ((image (propertize "x" 'display '(image :type svg :file "blocked.svg")))
            (session (list :id "s1" :name "Fix the parser" :pending '((:kind "permission"))))
            (task (list :id "t1" :session "s1" :prompt "Fix the parser" :started 0)))
       (puthash "s1" session harness-ui--sessions)
       (cl-letf (((symbol-function 'harness-ui-tasks--width) (lambda () 96)))
-        (dolist (case (list (cons image "\\` x  Fix the parser")
-                            (cons "x" "\\`  x Fix the parser")))
-          (cl-letf (((symbol-function 'harness-ui-tasks--icon) (lambda (&rest _) (car case))))
-            (with-temp-buffer
-              (harness-ui-tasks--insert-card task 'needs-input nil)
-              (should (string-match-p (cdr case) (buffer-string))))))))))
+        ;; A 21px image in an 11px column is nudged by half the 10px extra.
+        (cl-letf (((symbol-function 'string-pixel-width) (lambda (&rest _) 21))
+                  ((symbol-function 'frame-char-width) (lambda (&optional _) 11)))
+          (should (= 5 (harness-ui-tasks--mark-nudge image))))
+        (cl-letf (((symbol-function 'harness-ui-tasks--icon) (lambda (&rest _) image))
+                  ((symbol-function 'harness-ui-tasks--mark-nudge) (lambda (&rest _) 5))
+                  ((symbol-function 'frame-char-width) (lambda (&optional _) 11)))
+          (with-temp-buffer
+            (harness-ui-tasks--insert-card task 'needs-input nil)
+            (should (equal "  x  Fix the parser"
+                           (buffer-substring-no-properties (point-min) (+ (point-min) 19))))
+            ;; A column and a half before the mark, half a column after it.
+            (should (equal '(space :width (6)) (get-text-property (+ (point-min) 1) 'display)))
+            (should (equal '(space :width (5)) (get-text-property (+ (point-min) 3) 'display)))))
+        ;; A one-column symbol, as a terminal draws it, is left alone.
+        (cl-letf (((symbol-function 'harness-ui-tasks--icon) (lambda (&rest _) "x")))
+          (with-temp-buffer
+            (harness-ui-tasks--insert-card task 'needs-input nil)
+            (should (equal "  x Fix the parser"
+                           (buffer-substring-no-properties (point-min) (+ (point-min) 18))))
+            (should-not (get-text-property (+ (point-min) 1) 'display))))))))
 
 (ert-deftest harness-ui-tasks-card-keys ()
   (harness-ui-tasks-test-with
