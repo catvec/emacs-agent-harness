@@ -1261,7 +1261,8 @@ finished work waits for the user's verdict.
   task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree),
   `task/for-session SESSION-ID` (the task of a session, or nil, which
-  `hand_in` and the session's review banner use) and
+  `hand_in` and the session's review banner use; the banner at the end
+  of a report popout has the task already) and
   `task/hand-in ID REPORT` (record `:summary` and `:evidence` as the
   work ID handed in; the write-up tool's `:end-turn` ends its turn, which
   the review step then picks up).
@@ -1878,7 +1879,9 @@ accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
 in the minibuffer).  A card of a task that handed a report in also
 shows [Report], popping the report out; it is one of the items
-`harness-ui-popout-at-point-functions' offers.  The header counts the
+`harness-ui-popout-at-point-functions' offers.  While the task waits
+for review, the report ends with the banner of its session, [Verify]
+and [Send back], and a box for the feedback.  The header counts the
 tasks to review, and `task/review` says in the echo area that one is
 ready (`harness-ui-tasks--notify-review`).  The header's Review switch
 ([Review: on], `V`) turns review off and on again for every project
@@ -1962,17 +1965,34 @@ window in that place, with nothing of the BTW left in its header), media
 meters, video posters that play the video, and the attachments a tool
 result or a message carries), popouts (`harness-ui-popout`: one item of
 a session or a task in a small selected bottom side window, fitted to
-its content, one buffer per KEY the owner picks; `q`/`g` on the content
-under the owner's own keys, `C-c C-c` sends its optional shared compose
-box, `C-g` closes it, and `harness-ui-popout-at-point` runs the first
-`harness-ui-popout-at-point-functions` that knows the item at point),
-the review of a task in its session (`harness-ui-review`: a chat panel
--- `harness-chat-panel-functions` -- that shows the board's Ready for
-review above the box, with [Verify] (`C-c C-v`), [Send back]
-(`C-c C-R`) and [Report]; while it shows, `harness-chat-send-function`
-gives the box's text to `task/reject` as the feedback), and the
+its content up to `harness-ui-popout-max-height` or the popout's own
+`:max-height`, one buffer per KEY the owner picks; `q`/`g` on the
+content under the owner's own keys, `C-c C-c` sends its optional shared
+compose box, `C-g` closes it, and `harness-ui-popout-at-point` runs the
+first `harness-ui-popout-at-point-functions` that knows the item at
+point; a popout opened from another (`:parent`) takes that one's
+window, says [back], and gives the window back when it closes, and
+`harness-ui-popout-pixel-width`/`-pixel-height` size what it draws for
+the window it shows, or will show, in; `harness-ui-popout-image` is
+one image as large as the frame allows, `harness-ui-popout-image-max-height`
+of it, scaled down to fit or up by `harness-ui-popout-image-max-scale`
+at most, with Emacs's image keys and [Open externally]), the review of
+a task (`harness-ui-review`: one banner, the board's Ready for review
+with [Verify] and [Send back], in two places -- above the compose box
+of the task's session, a chat panel (`harness-chat-panel-functions`)
+with [Report] too, and at the end of its report popout
+(`harness-ui-report-panel-functions`); under it the box takes the
+feedback `task/reject` sends (`harness-chat-send-function` in the
+session, `harness-ui-report-compose-functions` in the popout), and the
+minor mode `harness-ui-review-mode` binds `C-c C-v` and `C-c C-R` while
+it shows, so elsewhere `C-c C-v` attaches the clipboard), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
-evidence -- images inline, videos and files through ui-media, code as a
-block, notes, and a referenced tool call drawn as the call it links to,
-with [Open in the session]; opened from the board's [Report] button and
-from the banner, in a popout of its own).
+evidence -- images as wide as the popout and up to
+`harness-ui-report-image-max-height` of the frame high, the popout
+growing to `harness-ui-report-max-height` for them, a click or RET
+showing one larger in an image popout whose [back] returns to the
+report; videos and files through ui-media, code as a block, notes, and
+a referenced tool call drawn as the call it links to, with [Open in
+the session]; opened from the board's [Report] button and from the
+banner, in a popout of its own, to which other modules add panels and a
+box).

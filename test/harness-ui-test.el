@@ -176,6 +176,7 @@ top, whole, and leaves them as they were."
 (require 'harness-ui-dirs)
 (require 'harness-ui-btw)
 (require 'harness-ui-media)
+(require 'harness-ui-review)
 
 (defvar harness-ui-test-ran nil "Commands the menu ran, newest first: (COMMAND BUFFER POINT).")
 
@@ -333,7 +334,9 @@ leave free.  None is left out by the menu."
   (should-not (harness-ui--menu-key-taken-p "."))
   (pcase-dolist (`(,mode ,_title . ,columns) (harness-ui-test-menu-groups))
     (let ((maps (delq nil (list (let ((map (intern (format "%s-map" mode)))) (and (boundp map) (symbol-value map)))
-                                (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map))))
+                                ;; Keys on a view's content, outside its box.
+                                (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map)
+                                (and (eq mode 'harness-ui-popout-mode) harness-ui-popout-content-map))))
           (keys nil))
       (dolist (column columns)
         (dolist (item (append column nil))
@@ -356,7 +359,7 @@ leave free.  None is left out by the menu."
   ;; What every harness buffer offers is checked above; here, that each mode is there.
   (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-sessions-mode harness-ui-tree-mode
                   harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode
-                  harness-ui-btw-minor-mode harness-ui-media-recording-mode))
+                  harness-ui-btw-minor-mode harness-ui-media-recording-mode harness-ui-review-mode))
     (should (get mode 'harness-menu-group))))
 
 (ert-deftest harness-ui-menu-with-buffer-commands-from-a-side-window ()
@@ -889,6 +892,22 @@ once, and a change made with `setopt' reaches it."
     (should-not (assoc "_harness/config/set" calls))
     (should (equal "deepseek:deepseek-flash"
                    (plist-get (plist-get (cdr (assoc "_harness/session/set-all" calls)) :settings) :model)))))
+
+;;;; Mouse targets
+
+(ert-deftest harness-ui-mouse-keymap-runs-on-ret-too ()
+  "A target of `harness-ui-mouse-keymap' runs its command on RET, an event
+without a position, as it does on a click."
+  (let ((ran 0)
+        (buffer (generate-new-buffer " *harness mouse keymap*")))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (insert (propertize "target" 'keymap (harness-ui-mouse-keymap (lambda () (interactive) (cl-incf ran)))))
+          (goto-char (point-min))
+          (execute-kbd-macro (kbd "RET"))
+          (should (= 1 ran)))
+      (kill-buffer buffer))))
 
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

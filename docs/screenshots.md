@@ -47,6 +47,8 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-permission` | A chat waiting for permission to run `pip install` | `harness-media-shot-chat-permission` |
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
+| `report` | The board with a task's report popped out, at its end: the chart it handed in, the test run it quotes, the review banner and the feedback box | `harness-media-shot-report` |
+| `report-image` | That chart, clicked: shown larger in a popout of its own | `harness-media-shot-report-image` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
 | `usage` | The usage dashboard over 30 days, by model | `harness-media-shot-usage` |
@@ -98,7 +100,10 @@ calls a model or the network.
   would, into every column of the board: two verified and merged, two
   in review (one sent back once), one asking a question, two working
   (their turns held half way), two written up for the backlog.  They
-  run in real worktrees, commit and merge.
+  run in real worktrees, commit and merge.  The pagination task, in
+  review, hands its work in (`hand_in`): a latency chart it writes,
+  `docs/orders-latency.svg`, and its real test run, which the report
+  pictures show.
 - `harness-media--build-sessions` runs the conversations: the first
   picture's session, a fork of it and a BTW over it, the permission and
   question chats, and two older sessions, closed since.
@@ -128,6 +133,7 @@ names a function that returns the turn as a list of events, built with:
 | `(harness-media--tool NAME :key VALUE ...)` | A tool call; the agent runs the real tool |
 | `(harness-media--todos (TEXT . STATUS) ...)` | A `todo_write` call |
 | `(harness-media--git-commit MESSAGE)` | A `bash` call committing everything |
+| `(harness-media--tool "hand_in" :summary TEXT :evidence ITEMS)` | Hand the work in: the turn ends and the task waits for review with a report |
 | `(list :type 'hold)` | Stop here and never finish: the turn stays running |
 | `(list :type 'usage ...)` | The request's usage, when the default will not do |
 
@@ -136,7 +142,9 @@ run the tool it asks again, and the script goes on where it stopped.
 Each request reports a plausible usage (context from what was sent,
 billing by provider) unless the script gives one.
 `harness-media--task-script` builds a task's turn: todos, the changes,
-a commit and a summary, or, with HOLD, half of it and a hold.
+a commit and a summary, or, with HOLD, half of it and a hold; with
+EVIDENCE it hands the summary in with that evidence rather than saying
+it.
 
 Requests that are not a conversation get answers of their own: the
 auto-mode judge always allows, session titles come from

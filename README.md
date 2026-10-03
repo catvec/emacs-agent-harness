@@ -48,6 +48,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
 | ![The task board with tasks needing input, in review, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
+| ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
+| A task's report: verify it or send it back from there | An image of the report, clicked: shown larger |
 | ![The usage dashboard: a month of cost per day, cost by model, the plan's quota and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
 | Usage: cost per day and model, plan quota, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
@@ -338,11 +340,18 @@ so several tasks can work in parallel.
   `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-R`; type the feedback
   in the box, `C-c C-c` sends it) and `[Report]`, so you can accept the
   work without going back to the board.
-- `[Report]` on a card that has one pops the handed-in summary and
-  evidence out beside the board: images inline, videos as thumbnails,
-  files as buttons, and each referenced tool call as the call it links
-  to, with `[Open in the session]`. The board's item-at-point key
-  (`SPC`) opens it too, along with whatever else the task has to show.
+- `[Report]` on a card that has one, or on the banner, pops the
+  handed-in summary and evidence out beside the board: images large, as
+  wide as the popout, videos as thumbnails, files as buttons, and each
+  referenced tool call as the call it links to, with
+  `[Open in the session]`. Click an image, or press `RET` on it, to see
+  it larger still in a popout of its own; `q` goes back to the report.
+  While the task waits for review, the report ends with the same banner
+  as its session: `[Verify]` (`C-c C-v`) and `[Send back]` (`C-c C-R`),
+  and a box under it for the feedback (`C-c C-c` sends it), so you can
+  read the work and accept it in one place. The board's item-at-point
+  key (`SPC`) opens the report too, along with whatever else the task
+  has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `RET` opens the session of the task at point. From that session,

@@ -32,6 +32,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'text-property-search)
 
 ;;;; Settings of the run
 
@@ -91,6 +92,9 @@
 (declare-function harness-compose-set "harness-ui-compose")
 (declare-function harness-compose-repad "harness-ui-compose")
 (declare-function harness-tasks "harness-ui-tasks")
+(declare-function harness-ui-tasks--find "harness-ui-tasks")
+(declare-function harness-ui-report-popout "harness-ui-report")
+(declare-function harness-ui-popout-buffer "harness-ui-popout")
 (declare-function harness-sessions "harness-ui-sessions")
 (declare-function harness-tree "harness-ui-tree")
 (declare-function harness-usage "harness-ui-usage")
@@ -557,6 +561,51 @@ def authenticate(environ):
     return key
 ")
 
+(defconst harness-media--latency-chart "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"960\" height=\"540\" viewBox=\"0 0 960 540\" font-family=\"sans-serif\">
+  <rect width=\"960\" height=\"540\" rx=\"10\" fill=\"#181a28\"/>
+  <text x=\"90\" y=\"44\" font-size=\"24\" font-weight=\"bold\" fill=\"#e6e8f4\">GET /orders: p95 latency by orders stored</text>
+  <g stroke=\"#2e3148\" stroke-width=\"1\">
+    <line x1=\"90\" y1=\"470\" x2=\"920\" y2=\"470\"/>
+    <line x1=\"90\" y1=\"336.7\" x2=\"920\" y2=\"336.7\"/>
+    <line x1=\"90\" y1=\"203.3\" x2=\"920\" y2=\"203.3\"/>
+    <line x1=\"90\" y1=\"70\" x2=\"920\" y2=\"70\"/>
+  </g>
+  <g font-size=\"15\" fill=\"#9a9cb0\" text-anchor=\"end\">
+    <text x=\"80\" y=\"475\">10 ms</text>
+    <text x=\"80\" y=\"341.7\">100 ms</text>
+    <text x=\"80\" y=\"208.3\">1 s</text>
+    <text x=\"80\" y=\"75\">10 s</text>
+  </g>
+  <g font-size=\"15\" fill=\"#9a9cb0\" text-anchor=\"middle\">
+    <text x=\"173\" y=\"500\">1,000</text>
+    <text x=\"339\" y=\"500\">5,000</text>
+    <text x=\"505\" y=\"500\">10,000</text>
+    <text x=\"671\" y=\"500\">50,000</text>
+    <text x=\"837\" y=\"500\">100,000</text>
+    <text x=\"505\" y=\"528\">orders in the database</text>
+  </g>
+  <polyline fill=\"none\" stroke=\"#f78166\" stroke-width=\"3\" points=\"173,379.2 339,288.4 505,248.3 671,153.9 837,112.5\"/>
+  <g fill=\"#f78166\">
+    <circle cx=\"173\" cy=\"379.2\" r=\"5\"/><circle cx=\"339\" cy=\"288.4\" r=\"5\"/><circle cx=\"505\" cy=\"248.3\" r=\"5\"/>
+    <circle cx=\"671\" cy=\"153.9\" r=\"5\"/><circle cx=\"837\" cy=\"112.5\" r=\"5\"/>
+    <text x=\"837\" y=\"98\" font-size=\"15\" text-anchor=\"middle\">4.8 s</text>
+  </g>
+  <polyline fill=\"none\" stroke=\"#56d364\" stroke-width=\"3\" points=\"173,464.5 339,459.4 505,459.4 671,454.8 837,450.5\"/>
+  <g fill=\"#56d364\">
+    <circle cx=\"173\" cy=\"464.5\" r=\"5\"/><circle cx=\"339\" cy=\"459.4\" r=\"5\"/><circle cx=\"505\" cy=\"459.4\" r=\"5\"/>
+    <circle cx=\"671\" cy=\"454.8\" r=\"5\"/><circle cx=\"837\" cy=\"450.5\" r=\"5\"/>
+    <text x=\"837\" y=\"436\" font-size=\"15\" text-anchor=\"middle\">14 ms</text>
+  </g>
+  <g font-size=\"16\" fill=\"#c6c8d8\">
+    <rect x=\"110\" y=\"92\" width=\"18\" height=\"4\" fill=\"#f78166\"/>
+    <text x=\"138\" y=\"99\">every order at once (before)</text>
+    <rect x=\"110\" y=\"118\" width=\"18\" height=\"4\" fill=\"#56d364\"/>
+    <text x=\"138\" y=\"125\">limit=50, the default (after)</text>
+  </g>
+</svg>
+"
+  "docs/orders-latency.svg, the chart the pagination task hands in.")
+
 (defconst harness-media--orders-paginated "\"\"\"Order handlers.\"\"\"
 
 import json
@@ -810,10 +859,12 @@ The orders endpoints only touch a list in memory, and authentication is a set lo
    (harness-media--tool "read_file" :path "tests/test_app.py")
    (harness-media--say "`ORDERS` is module state, so `test_creates_an_order` saw the orders of whichever test ran before it. `setUp` now clears it, and the test passes in any order.")))
 
-(defun harness-media--task-script (todos changes message summary &optional hold)
+(defun harness-media--task-script (todos changes message summary &optional hold evidence)
   "A task's turn: TODOS, CHANGES (tool calls), a commit as MESSAGE, SUMMARY.
 TODOS are the item texts.  With HOLD the turn stops working half way
-and never ends, so the task stays in progress, and nothing is committed."
+and never ends, so the task stays in progress, and nothing is committed.
+With EVIDENCE, hand_in's evidence items, the turn hands its work in
+with SUMMARY rather than saying it."
   (let* ((n (length todos))
          (at (lambda (done)
                (apply #'harness-media--todos
@@ -824,8 +875,13 @@ and never ends, so the task stays in progress, and nothing is committed."
                 (list (funcall at 1)) (cl-subseq changes 1)
                 (list (list :type 'hold)))
       (append (list (funcall at 0)) changes
-              (list (funcall at (1- n)) (harness-media--git-commit message) (funcall at n)
-                    (harness-media--say summary))))))
+              (list (funcall at (1- n)) (harness-media--git-commit message) (funcall at n))
+              (if evidence
+                  ;; A word first, as models do: a session is named after
+                  ;; a first turn that said something.
+                  (list (harness-media--say "Done, and the tests pass: handing it in for review.")
+                        (harness-media--tool "hand_in" :summary summary :evidence evidence))
+                (list (harness-media--say summary)))))))
 
 (defun harness-media--task-constant-time (_request)
   "Task: constant-time key checks."
@@ -848,15 +904,22 @@ and never ends, so the task stays in progress, and nothing is committed."
    "pyproject.toml requires Python 3.12 and lists 3.12 and 3.13."))
 
 (defun harness-media--task-pagination (_request)
-  "Task: paginate GET /orders."
-  (harness-media--task-script
-   '("Read the orders handler" "Add limit and offset" "Update the tests")
-   (list (harness-media--tool "read_file" :path "acme/orders.py")
-         (harness-media--tool "write_file" :path "acme/orders.py" :content harness-media--orders-paginated)
-         (harness-media--tool "edit_file" :path "tests/test_app.py"
-                              :old_string "{\"orders\": []}" :new_string "{\"orders\": [], \"total\": 0}"))
-   "Paginate GET /orders"
-   "GET /orders takes `limit` (50 by default, 200 at most) and `offset`, and returns the total."))
+  "Task: paginate GET /orders, handed in with a chart and the test run."
+  (let ((tests (harness-media--tool "bash" :command "python3 -m unittest")))
+    (harness-media--task-script
+     '("Read the orders handler" "Add limit and offset" "Update the tests" "Chart the latency")
+     (list (harness-media--tool "read_file" :path "acme/orders.py")
+           (harness-media--tool "write_file" :path "acme/orders.py" :content harness-media--orders-paginated)
+           (harness-media--tool "edit_file" :path "tests/test_app.py"
+                                :old_string "{\"orders\": []}" :new_string "{\"orders\": [], \"total\": 0}")
+           tests
+           (harness-media--tool "write_file" :path "docs/orders-latency.svg" :content harness-media--latency-chart))
+     "Paginate GET /orders"
+     "GET /orders takes `limit` (50 by default, 200 at most) and `offset`, and returns the total, so a client pages through the orders instead of loading them all."
+     nil
+     (list (list :image "docs/orders-latency.svg"
+                 :caption "p95 latency of GET /orders: flat at 11-14 ms with pagination, where it grew to 4.8 s with every order at once")
+           (list :tool_call (plist-get tests :id) :caption "The tests pass, the total included.")))))
 
 (defun harness-media--task-slow (_request)
   "Task: log slow requests."
@@ -1039,6 +1102,10 @@ tool and asks again, and the script goes on from there."
     (list :cancel (lambda ()
                     (setq cancelled t)
                     (when timer (cancel-timer timer))
+                    ;; A turn a tool ended (hand_in cancels it) takes no
+                    ;; more of its script: the next request -- naming the
+                    ;; session, say -- must not get the rest.
+                    (remhash sid harness-media--rest)
                     (funcall on-event '(:type done :stop-reason cancelled))))))
 
 (defun harness-media--claude-models ()
@@ -1505,6 +1572,41 @@ Return the chat's buffer."
       (set-window-start window (point-min))))
   (harness-media--capture "tasks"))
 
+(defun harness-media--report-layout ()
+  "Show the board the whole frame high, the pagination task's report over it.
+Return the report's popout buffer."
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  ;; The whole height: the report grows to most of it, for its chart.
+  (set-frame-size nil harness-media-columns harness-media-lines)
+  (harness-media--settle 0.5)
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :pagination))
+         (task (with-current-buffer (window-buffer (selected-window)) (harness-ui-tasks--find id))))
+    (harness-ui-report-popout task)
+    (harness-media--settle 1)
+    (harness-ui-popout-buffer (list 'report id))))
+
+(defun harness-media-shot-report ()
+  "A task's report popped out of the board, at its end: its chart, large,
+the test run it quotes, then the banner and the box that verify the task
+or send it back."
+  (let ((popout (harness-media--report-layout)))
+    (with-selected-window (get-buffer-window popout)
+      (goto-char (point-max))
+      (recenter -1))
+    (harness-media--capture "report")))
+
+(defun harness-media-shot-report-image ()
+  "That chart shown larger, in a popout of its own: RET on it in the report."
+  (let ((popout (harness-media--report-layout)))
+    (with-selected-window (get-buffer-window popout)
+      (goto-char (point-min))
+      (let ((match (text-property-search-forward 'display nil (lambda (_ value) (eq 'image (car-safe value))))))
+        (unless match (error "The report shows no image"))
+        (goto-char (prop-match-beginning match))
+        (call-interactively (key-binding (kbd "RET")))))
+    (harness-media--settle 1)
+    (harness-media--capture "report-image")))
+
 (defun harness-media-shot-sessions ()
   "The session list."
   (harness-media--view #'harness-sessions)
@@ -1582,6 +1684,8 @@ Return the chat's buffer."
     ("chat-permission" . harness-media-shot-chat-permission)
     ("chat-question" . harness-media-shot-chat-question)
     ("tasks" . harness-media-shot-tasks)
+    ("report" . harness-media-shot-report)
+    ("report-image" . harness-media-shot-report-image)
     ("sessions" . harness-media-shot-sessions)
     ("tree" . harness-media-shot-tree)
     ("usage" . harness-media-shot-usage)
