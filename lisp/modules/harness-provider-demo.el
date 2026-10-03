@@ -17,7 +17,9 @@
 ;;   anything else echo the prompt back as markdown
 ;;
 ;; A session writing a backlog task up (the system prompt has the task
-;; refinement section) instead takes a quick look and writes it up.
+;; refinement section) instead looks at the board with task_list, takes
+;; a quick look at the project and writes it up -- or, when another task
+;; on the board asks for it in the same words, refuses it as a duplicate.
 
 ;;; Code:
 
@@ -147,10 +149,28 @@
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
 
+(defun harness-provider-demo--same-task (request note)
+  "Return another task on the board that asks for NOTE in the same words.
+That is a task of REQUEST's project, other than the one REQUEST's
+session writes up, whose request or prompt is NOTE, ignoring case and
+spacing; nil when there is none, or no task board."
+  (when (harness-method-exists-p 'task/list)
+    (let* ((session (plist-get request :session))
+           (words (lambda (s) (downcase (string-join (split-string (or s "")) " "))))
+           (key (funcall words note)))
+      (cl-find-if (lambda (task)
+                    (and (not (equal (plist-get task :session) (plist-get session :id)))
+                         (or (equal key (funcall words (plist-get task :note)))
+                             (equal key (funcall words (plist-get task :prompt))))))
+                  (ignore-errors (harness-call 'task/list (or (plist-get session :cwd) default-directory)))))))
+
 (defun harness-provider-demo--write-up (request cwd)
   "Return the script that writes a backlog task up for REQUEST in CWD.
-The title comes from the first message, the note it is written from;
-a later message is feedback and lands under Also."
+It looks at the board first, as the refinement prompt asks.  The title
+comes from the first message, the note it is written from; a later
+message is feedback and lands under Also.  A note another task on the
+board has in the same words is refused as a duplicate of it, the first
+time."
   (let* ((texts (cl-loop for m in (plist-get request :messages)
                          when (eq (plist-get m :role) 'user)
                          append (cl-loop for b in (plist-get m :content)
@@ -158,17 +178,29 @@ a later message is feedback and lands under Also."
          (note (string-trim (or (car texts) "the task")))
          (feedback (and (cdr texts) (string-trim (car (last texts)))))
          (title (let ((line (car (split-string note "\n" t))))
-                  (concat (upcase (substring line 0 1)) (substring line 1)))))
-    `((:type thinking :delta "A task for the backlog: a quick look, then the write-up.")
-      (:type tool-call :id "demo-r1" :name "list_dir" :input (:path ,cwd))
-      (:type text :delta ,(concat (truncate-string-to-width title 60) "\n\n"
-                                  "**What and why.** " note "\n\n"
-                                  "**Change.** The demo provider does not read code; a real agent names the files and functions here.\n\n"
-                                  "**Done when.** The behaviour above works and the test suite passes.\n\n"
-                                  "**Open questions.** None for the demo."
-                                  (if feedback (concat "\n\n**Also.** " feedback) "")))
-      (:type usage :input 700 :output 120 :cache-read 300 :cost 0.002 :context 900)
-      (:type done :stop-reason end-turn))))
+                  (concat (upcase (substring line 0 1)) (substring line 1))))
+         (same (and (not feedback) (harness-provider-demo--same-task request note)))
+         (search '(:type tool-call :id "demo-r0" :name "task_list" :input (:include_archived t :limit 50))))
+    (if same
+        `((:type thinking :delta "A task for the backlog: first a look at the board for the same one.")
+          ,search
+          (:type text :delta ,(format "Duplicate of %s\n\nThe board has this already: %s (%s) asks for it in the same words."
+                                      (plist-get same :id)
+                                      (concat "“" (harness-first-line (plist-get same :prompt) 60) "”")
+                                      (plist-get same :column)))
+          (:type usage :input 600 :output 40 :cache-read 300 :cost 0.0012 :context 800)
+          (:type done :stop-reason end-turn))
+      `((:type thinking :delta "A task for the backlog: a look at the board and the project, then the write-up.")
+        ,search
+        (:type tool-call :id "demo-r1" :name "list_dir" :input (:path ,cwd))
+        (:type text :delta ,(concat (truncate-string-to-width title 60) "\n\n"
+                                    "**What and why.** " note "\n\n"
+                                    "**Change.** The demo provider does not read code; a real agent names the files and functions here.\n\n"
+                                    "**Done when.** The behaviour above works and the test suite passes.\n\n"
+                                    "**Open questions.** None for the demo."
+                                    (if feedback (concat "\n\n**Also.** " feedback) "")))
+        (:type usage :input 700 :output 120 :cache-read 300 :cost 0.002 :context 900)
+        (:type done :stop-reason end-turn)))))
 
 (defvar harness-provider-demo--continuations (make-hash-table :test 'equal)
   "Session id -> remaining script after a tool call, resumed on the next request.")

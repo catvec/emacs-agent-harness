@@ -293,7 +293,10 @@ so several tasks can work in parallel.
   `C-c C-c` to submit it. `C-c C-t` switches the box between **Submit**,
   which starts the task at once, and **Refine**, which has an agent
   write the task up first. A refined task waits in *Pending*, across
-  restarts, until you start it with `s`.
+  restarts, until you start it with `s`. Refining looks at the board
+  first: a task it already has is refused rather than written up (drop
+  it, or write it up anyway), and the write-up names the tasks working
+  on the same code, to coordinate with instead of redoing their work.
 - `C-c h m`, `C-c h T`, `C-c h p` and `C-c h i` set the model, thinking
   level, permission mode and non-interactive mode of the next task, or
   of the task at point. New tasks run in auto mode and are interactive

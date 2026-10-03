@@ -644,6 +644,8 @@ told from, like a worktree git lost track of, still leads back."
 (declare-function harness-ui-tasks-start "harness-ui-tasks")
 (declare-function harness-ui-tasks--task "harness-ui-tasks")
 (declare-function harness-ui-tasks--actions "harness-ui-tasks")
+(declare-function harness-ui-tasks--placeholder "harness-ui-tasks")
+(declare-function harness-ui-tasks-compose-reset "harness-ui-tasks")
 
 (defun harness-ui-tasks-test--tail-text (board)
   "The compose end of BOARD (label, toggle, settings, box) as plain text."
@@ -754,6 +756,40 @@ told from, like a worktree git lost track of, still leads back."
         (insert "Make the shaky idea solid")
         (harness-ui-tasks-submit))
       (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Make the shaky idea solid\\(.\\|\n\\)*on hold"))))
+
+(ert-deftest harness-ui-tasks-refused-duplicate-card ()
+  "A write-up that refuses its task as a duplicate names the original; r writes it up all the same."
+  (harness-ui-tasks-test-with
+    ;; A finished task on the board for the write-up to find.
+    (harness-ui-tasks-test--type-and-submit board "CSV export for reports")
+    (harness-ui-tasks-test--wait-text board "Completed  1")
+    (let* ((first (car (harness-call 'task/list default-directory)))
+           (fid (plist-get first :id)))
+      (harness-call 'session/update (plist-get first :session) :name "CSV export" :silent t)
+      (harness-ui-tasks-test--wait-text board "CSV export")
+      (setq harness-provider-demo-script-override
+            `((:type text :delta ,(format "Duplicate of %s\n\nThe board has it already." fid))
+              (:type done :stop-reason end-turn)))
+      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (harness-ui-tasks-test--type-and-submit board "export the reports as csv")
+      (harness-ui-tasks-test--wait-text
+       board "Requires your input  1\\(.\\|\n\\)*duplicate of .CSV export. — The board has it already.")
+      (harness-ui-tasks-test--goto-card board "duplicate of")
+      (with-current-buffer board
+        (should (equal '("Drop" "Write it up")
+                       (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
+        ;; m takes feedback on it: what makes it another task than the one it duplicates.
+        (harness-ui-tasks-reply)
+        (should (eq 'refine (car harness-ui-tasks--target)))
+        (should (string-match-p "another task" (harness-ui-tasks--placeholder)))
+        (harness-ui-tasks-compose-reset))
+      ;; r has it written up all the same.
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Export the reports as CSV\n\nNot the same after all.")
+               (:type done :stop-reason end-turn))))
+        (harness-ui-tasks-test--goto-card board "duplicate of")
+        (with-current-buffer board (harness-ui-tasks-refine))
+        (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Export the reports as CSV")))))
 
 (ert-deftest harness-ui-tasks-toggle-shows-the-current-mode ()
   "The toggle is one button naming the current mode; a click switches to the other."

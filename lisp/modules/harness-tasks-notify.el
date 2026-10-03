@@ -14,8 +14,9 @@
 ;;   `finished').  A task the user verified with nothing left to merge,
 ;;   or marked done, is their own doing and needs no news.
 ;; - needs-input (off by default): a task's column turns needs-input:
-;;   its session asks a question or for a permission, or it stopped part
-;;   way.  Not when the user cancelled it.
+;;   its session asks a question or for a permission, it stopped part
+;;   way, or its write-up refused it as a duplicate of another task.
+;;   Not when the user cancelled it.
 ;;
 ;; `harness-tasks-notify-events' picks which of these notify, and
 ;; `harness-tasks-notify-providers' where they go.  Every notification
@@ -104,6 +105,10 @@ sent; steering messages within the turn do not end the search."
      (pending (if (member (format "%s" (plist-get pending :kind)) '("question"))
                   "has a question for you"
                 "needs your permission"))
+     ;; The agent writing it up found the board has it already; ERR says why.
+     ((equal (format "%s" outcome) "duplicate")
+      (concat "refused as a duplicate"
+              (if (harness-string-blank-p err) "" (concat ": " (harness-tasks-notify--squash err 120)))))
      (outcome (concat (format "stopped: %s" outcome)
                       (if (harness-string-blank-p err) ""
                         (concat ", " (harness-tasks-notify--squash err 120)))))
