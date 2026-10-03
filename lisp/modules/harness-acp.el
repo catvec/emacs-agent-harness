@@ -178,7 +178,8 @@ promise: once it resolves the client is authenticated; a rejection
   (pending (make-hash-table :test 'equal)) ; id -> (lambda (result error))
   ;; Slots added later go last, so clients made before a reload keep working.
   writer                             ; (CLIENT JSON-TEXT) for other transports
-  remote)                            ; plist of a client on another device, else nil
+  remote                             ; plist of a client on another device, else nil
+  active)                            ; `float-time' of its last request or notification
 
 (cl-defstruct (harness-acp-error-value (:constructor harness-acp--make-error-value)
                                        (:copier nil))
@@ -194,6 +195,11 @@ A reload keeps connected clients, whose records lack the slots added
 since they were made."
   (and (> (length client) (cl-struct-slot-offset 'harness-acp-client slot))
        (cl-struct-slot-value 'harness-acp-client slot client)))
+
+(defun harness-acp--client-set (client slot value)
+  "Set SLOT of CLIENT to VALUE, unless CLIENT predates the slot."
+  (when (> (length client) (cl-struct-slot-offset 'harness-acp-client slot))
+    (setf (cl-struct-slot-value 'harness-acp-client slot client) value)))
 
 (defun harness-acp-client-remote-info (client)
   "Return the plist describing CLIENT's device when it is on another one, else nil.
@@ -417,8 +423,10 @@ request is logged and stays pending on the session."
 (harness-defmethod client/request (method params)
   "Send request METHOD with PARAMS to the connected clients (the UI).
 Return a promise of the first successful answer.  It rejects at once
-when no client is connected and when every client declines, so a tool
-waiting on the UI never hangs on a missing one.  Not callable over ACP."
+when no client is connected and when every client declines.  It is for
+chores any client may do, such as showing a desktop notification; a
+tool never asks a client to do its work (see `emacs/request').  Not
+callable over ACP."
   (harness-with-promise (resolve reject)
     (let ((clients (copy-sequence harness-acp--clients)))
       (if (null clients)
@@ -436,6 +444,75 @@ waiting on the UI never hangs on a missing one.  Not callable over ACP."
                                               (format "%s: %s" method
                                                       (or (and (listp error) (plist-get error :message))
                                                           error)))))))))))))))
+
+;;;; Server: an Emacs lent to the harness
+
+;; Every tool runs here, in the harness.  The tools about the user's
+;; Emacs (its buffers, its symbols, evaluating Lisp in it when the user
+;; allows it) reach that Emacs as a resource, the way the file tools
+;; reach a TRAMP host; it is never where a tool runs.  An Emacs lends
+;; itself by advertising `_harness.emacs' among the `clientCapabilities'
+;; of `initialize' (lisp/harness-emacs-endpoint.el), the way ACP clients
+;; offer an agent their files with `fs'.  A client that lends nothing,
+;; such as a phone, is never asked; a harness no Emacs is attached to
+;; (headless) runs every other tool as usual.
+
+(defun harness-acp--emacs-info (client)
+  "Return the plist CLIENT advertised for the Emacs it lends, or nil."
+  (let ((info (plist-get (plist-get (harness-acp-client-capabilities client) :_harness) :emacs)))
+    (and (harness-json-true-p info) (if (listp info) info (list :lent t)))))
+
+(defun harness-acp--emacs-clients ()
+  "Return the clients that lend an Emacs, the most recently active first.
+Only clients that may call methods count: one that lent an Emacs but
+never authenticated would otherwise be sent model-written code, or
+answer for the user's Emacs with what it likes."
+  ;; A copy: `cl-remove-if-not' may return the list itself, and `sort'
+  ;; reorders the list it is given.
+  (sort (copy-sequence
+         (cl-remove-if-not (lambda (client)
+                             (and (harness-acp--emacs-info client)
+                                  (not (harness-acp--auth-needed-p client))))
+                           harness-acp--clients))
+        (lambda (a b) (> (or (harness-acp--client-get a 'active) 0)
+                         (or (harness-acp--client-get b 'active) 0)))))
+
+(harness-defmethod emacs/attached ()
+  "Return the Emacsen lent to the harness, the one `emacs/request' asks first.
+Each is the plist its client advertised (`:version', `:pid', `:host')
+plus `:transport' (local, tcp, ...), `:remote' (non-nil for a client on
+another device) and `:active', when it last asked the harness anything.
+Empty when the harness runs headless, or none of its clients is an Emacs."
+  (mapcar (lambda (client)
+            (append (harness-plist-remove (harness-acp--emacs-info client) :transport :remote :active)
+                    (list :transport (harness-acp-client-kind client)
+                          :remote (and (harness-acp-client-remote-info client) t)
+                          :active (harness-acp--client-get client 'active))))
+          (harness-acp--emacs-clients)))
+
+(harness-defmethod emacs/request (method params)
+  "Send `_harness/emacs/METHOD' with PARAMS to the Emacs lent to the harness.
+Return a promise of its answer.  Exactly one Emacs is asked, never every
+client: the most recently active of those that lend one, which is where
+the user is.  The promise rejects at once when none is attached, with
+the Emacs's message when it refuses, and when it disconnects first.
+The tools of tools-emacs and the elisp tool use it; see
+lisp/harness-emacs-endpoint.el for the methods.  Not callable over ACP."
+  (harness-with-promise (resolve reject)
+    (let ((client (car (harness-acp--emacs-clients))))
+      (if (null client)
+          (funcall reject (list 'harness-error
+                                "no Emacs is attached to the harness: it runs headless, or none of its clients is an Emacs"))
+        (harness-acp--client-request
+         client (concat "_harness/emacs/" method) params
+         (lambda (result error)
+           (cond
+            ((null error) (funcall resolve result))
+            ((and (listp error) (eql (plist-get error :code) harness-acp-error-transport))
+             (funcall reject (list 'harness-error "the user's Emacs disconnected before it answered")))
+            (t (funcall reject (list 'harness-error
+                                     (format "%s" (or (and (listp error) (plist-get error :message))
+                                                      error))))))))))))
 
 (defun harness-acp--drop-client (client)
   "Forget CLIENT and fail whatever it still owed."
@@ -459,6 +536,10 @@ waiting on the UI never hangs on a missing one.  Not callable over ACP."
   (let ((method (plist-get msg :method))
         (has-id (plist-member msg :id))
         (id (plist-get msg :id)))
+    ;; What a client asks for shows where the user is; its answers to
+    ;; the harness's own requests do not (see `harness-acp--emacs-clients').
+    (when (stringp method)
+      (harness-acp--client-set client 'active (float-time)))
     (cond
      ((and (stringp method) has-id) (harness-acp--handle-request client id method (plist-get msg :params)))
      ((stringp method) (harness-acp--handle-notification client method (plist-get msg :params)))
@@ -595,6 +676,9 @@ ARGLIST is (CLIENT PARAMS)."
 (harness-acp--define-standard "initialize" (client params)
   (setf (harness-acp-client-initialized client) t
         (harness-acp-client-capabilities client) (plist-get params :clientCapabilities))
+  (when-let* ((emacs (harness-acp--emacs-info client)))
+    (harness-log 'info "acp: a %s client lends its Emacs (pid %s on %s)"
+                 (harness-acp-client-kind client) (plist-get emacs :pid) (plist-get emacs :host)))
   (list :protocolVersion harness-acp-protocol-version
         :agentCapabilities (list :loadSession t
                                  :promptCapabilities (list :image t :audio t :embeddedContext t))

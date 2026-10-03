@@ -45,12 +45,13 @@
 (defconst harness-tools--timeout 600
   "Default seconds a tool may run before it is cancelled.")
 
-(defvar harness-tools--client-timeout 15
-  "Seconds a tool about the user's Emacs may wait for the UI to answer.
+(defvar harness-tools--emacs-timeout 15
+  "Seconds a tool about the user's Emacs may wait for it to answer.
 Internal, not an option (see docs/configuration-audit.md).  The
-`emacs_*' tools ask the Emacs showing the UI over `client/request'; a UI
-busy or blocked longer than this fails the tool call, with a desktop
-notice, instead of leaving the session waiting forever.")
+`emacs_*' tools ask the Emacs a client lent to the harness over
+`emacs/request' (`harness-tools-ask-emacs'); one busy or blocked longer
+than this fails the tool call, with a desktop notice, instead of
+leaving the session waiting forever.")
 
 (defconst harness-tools--ui-notice-interval 300
   "Seconds between desktop notices that the Emacs UI is not answering.")
@@ -61,12 +62,12 @@ notice, instead of leaving the session waiting forever.")
 (declare-function harness-notifications-desktop-notify "harness-notifications-desktop" (&rest params))
 
 (defun harness-tools--ui-unresponsive (what seconds)
-  "Report that the Emacs UI did not answer WHAT within SECONDS.
+  "Report that WHAT, the Emacs a tool asked, did not answer within SECONDS.
 Logs the miss, and shows a desktop notification at most every
-`harness-tools--ui-notice-interval' seconds: a UI blocked in a
+`harness-tools--ui-notice-interval' seconds: an Emacs blocked in a
 subprocess call can stay that way for hours, and nothing else would
 say so."
-  (harness-log 'warn "tools: %s did not answer within %ss; the Emacs UI may be blocked" what seconds)
+  (harness-log 'warn "tools: %s did not answer within %ss; it may be blocked" what seconds)
   (when (> (- (float-time) harness-tools--ui-notice-at) harness-tools--ui-notice-interval)
     (setq harness-tools--ui-notice-at (float-time))
     (when (or (fboundp 'harness-notifications-desktop-notify)
@@ -74,8 +75,8 @@ say so."
       (ignore-errors
         (harness-notifications-desktop-notify
          :title "Harness: the Emacs UI is not responding"
-         :body (format "%s waited %ss for an answer. The UI may be blocked; see %s."
-                       what seconds harness-log-buffer-name)
+         :body (format "A tool waited %ss for %s to answer; it may be blocked. See %s."
+                       seconds what harness-log-buffer-name)
          :urgency 'critical)))))
 
 (defun harness-tools--with-deadline (promise seconds what)
@@ -199,27 +200,48 @@ call is about nothing in particular."
   "Return an error RESULT with MESSAGE."
   (append (list :content message :is-error t) props))
 
-(defun harness-tools-in-client (name)
-  "Return a tool handler that runs client tool NAME in the user's Emacs.
-The harness may run in its own process (see harness-server.el), so tools
-about the user's Emacs are executed there by `harness-client-tools-run',
-reached through a `_harness/client/tool' request to the UI.  The request
-has a deadline (`harness-tools--client-timeout'): a UI that cannot answer
-fails the call instead of hanging the session."
-  (lambda (input _ctx)
-    (if (not (harness-method-exists-p 'client/request))
-        (harness-tool-error (format "%s needs the Emacs UI, which is not connected" name))
-      (harness-then
-       (harness-tools--with-deadline
-        (harness-call-async 'client/request "_harness/client/tool" (list :name name :input input))
-        harness-tools--client-timeout
-        (format "the Emacs UI (for %s)" name))
-       (lambda (r)
-         (if (harness-json-true-p (plist-get r :is-error))
-             (harness-tool-error (or (plist-get r :content) "failed"))
-           (harness-tool-ok (or (plist-get r :content) ""))))
-       (lambda (e)
-         (harness-tool-error (format "%s in the Emacs UI: %s" name (harness-error-message e))))))))
+;;;; The user's Emacs
+
+;; Every tool runs here, in the harness; no client runs one.  A tool
+;; about the user's Emacs reaches that Emacs as a resource, the way the
+;; file tools reach a TRAMP host: a client lends its Emacs to the
+;; harness (see lisp/harness-emacs-endpoint.el), and the tool asks it
+;; for plain data, or, for the elisp tool when the user allows it, to
+;; evaluate code.  A client that lends no Emacs, such as a phone, is
+;; never asked, and a harness with none attached (headless) runs every
+;; other tool as usual.
+
+(defun harness-tools-reason (err)
+  "Return the message of ERR, a rejection or an error, for the model to read.
+An error whose data is just a message, as `emacs/request' and the
+deadline of `harness-tools--with-deadline' reject with, gives that
+message, rather than Emacs's printed form of the whole error."
+  (if (and (consp err) (symbolp (car err)) (stringp (cadr err)) (null (cddr err)))
+      (cadr err)
+    (harness-error-message err)))
+
+(defun harness-tools-sentence (text)
+  "Return TEXT as a sentence: capitalised, with one full stop at its end."
+  (let ((text (string-trim-right (string-trim (or text "")) "[ .]+")))
+    (if (string-empty-p text)
+        "It failed."
+      (concat (upcase (substring text 0 1)) (substring text 1) "."))))
+
+(defun harness-tools-ask-emacs (method params &optional seconds)
+  "Ask the Emacs lent to the harness for METHOD with PARAMS; return a promise.
+METHOD names a request of lisp/harness-emacs-endpoint.el, such as
+\"buffers\"; `emacs/request' sends it to the one Emacs a client lent.
+The promise resolves to the answer.  It rejects when no Emacs is
+attached, when it refuses or fails (with its message; see
+`harness-tools-reason'), and when it does not answer within SECONDS
+\(default `harness-tools--emacs-timeout'), which is also reported as an
+unresponsive UI."
+  (if (not (harness-method-exists-p 'emacs/request))
+      (harness-rejected (list 'harness-error "no Emacs is attached to the harness: it serves no clients"))
+    (harness-tools--with-deadline
+     (harness-call-async 'emacs/request method params)
+     (or seconds harness-tools--emacs-timeout)
+     "the user's Emacs")))
 
 (defun harness-tools--normalise-result (value)
   (cond ((and (listp value) (plist-member value :content))
