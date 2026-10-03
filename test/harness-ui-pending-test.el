@@ -217,6 +217,59 @@ Otherwise it stays pending, and the session's own list answers it."
         (remove-hook 'harness-ui-pending-drawn-predicates
                      (lambda (sid) (member sid drawn)))))))
 
+(ert-deftest harness-ui-pending-answers-survive-a-reconnect ()
+  "A request owned before the UI connected again is still answered.
+Its RESPOND belongs to the connection the UI let go of, which the
+harness never hears, so an answer goes over ACP instead
+\(`permission/answer', `question/answer') and the session is not left
+blocked; a request still answered on its own connection uses RESPOND."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Reconnected"))
+           (drawn (list sid))
+           (answers nil)
+           (respond (lambda (r) (push r answers) t))
+           (port (plist-get (harness-call 'acp/start :port 0) :port))
+           (address (format "127.0.0.1:%d" port)))
+      (harness-ui-pending-test-record-answers)
+      (add-hook 'harness-ui-pending-drawn-predicates
+                (lambda (session-id) (member session-id drawn)))
+      (unwind-protect
+          (progn
+            ;; An answer while the connection it came on is the UI's.
+            (should (harness-ui-pending--on-question
+                     (list :sessionId sid :requestId "q0" :question "Which?" :options '("yes" "no"))
+                     respond))
+            (harness-ui-pending-answer-question sid "q0" "yes")
+            (should (equal '((:answer "yes")) answers))
+            ;; Two requests that will still wait when the UI connects again.
+            (should (harness-ui-pending--on-question
+                     (list :sessionId sid :requestId "q1" :question "Which colour?"
+                           :options '("red" "green"))
+                     respond))
+            (should (harness-ui-pending--on-permission
+                     (list :sessionId sid
+                           :toolCall (list :toolCallId "c1" :title "Bash: ls" :kind "execute")
+                           :_harness (list :pendingId "p1" :tool "bash"))
+                     respond))
+            (should (equal '("q1" "p1") (mapcar (lambda (r) (plist-get r :id))
+                                                (harness-ui-pending-items sid))))
+            ;; Over TCP to the same harness: a connection of its own, and
+            ;; the RESPOND of the records above belongs to the old one.
+            (harness-connect-remote address)
+            (should (eq 'tcp (harness-acp-connection-kind harness-ui-connection)))
+            (harness-ui-pending-answer-question sid "q1" "green")
+            (harness-ui-pending-answer-permission sid "p1" "allow-once")
+            (harness-test-wait (lambda () (= 2 (length harness-ui-pending-test-answers)))
+                               5 "the answers reach the harness")
+            (should (equal (list (list 'permission sid "p1" "allow-once")
+                                 (list 'question sid "q1" "green"))
+                           harness-ui-pending-test-answers))
+            (should-not (harness-ui-pending-items sid)))
+        (remove-hook 'harness-ui-pending-drawn-predicates
+                     (lambda (session-id) (member session-id drawn)))
+        (harness-call 'acp/stop)
+        (setq harness-ui-connection-address nil)))))
+
 ;;;; The popout
 
 (ert-deftest harness-ui-pending-popup-shows-its-request-and-answers-it ()

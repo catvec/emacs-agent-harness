@@ -66,6 +66,44 @@ thread for 2 seconds."
         (should (> (length gaps) 20))
         (should (< (apply #'max gaps) 0.15))))))
 
+(ert-deftest harness-server-loop-runs-timers-that-timers-start ()
+  "In the harness process, a timer that a timer starts runs when it is due.
+Emacs runs due timers from a copy of `timer-list' and then sleeps until
+the next timer of that copy, so `accept-process-output' alone leaves a
+timer added meanwhile -- every `harness-run-soon' of a request handler
+-- waiting for an unrelated one: here the 2-second timer the parent
+check runs on, for each of 20 hops."
+  (let ((script (make-temp-file "harness-loop-" nil ".el"))
+        (lisp (expand-file-name "lisp" harness-test-root)))
+    (unwind-protect
+        (progn
+          (with-temp-file script
+            (insert ";; -*- lexical-binding: t -*-\n"
+                    (prin1-to-string
+                     '(progn
+                        (require 'cl-lib)
+                        (require 'harness-server)
+                        (run-at-time 2 2 #'ignore)
+                        (run-at-time 0.1 nil
+                                     (lambda ()
+                                       (let ((start (float-time)))
+                                         (cl-labels ((hop (n)
+                                                       (if (> n 0)
+                                                           (run-at-time 0 nil #'hop (1- n))
+                                                         (princ (format "took %.3f\n" (- (float-time) start)))
+                                                         (kill-emacs 0))))
+                                           (hop 20)))))
+                        (run-at-time 15 nil (lambda () (princ "starved\n") (kill-emacs 1)))
+                        (harness-server--event-loop)))))
+          (with-temp-buffer
+            (let* ((status (call-process (expand-file-name invocation-name invocation-directory)
+                                         nil t nil "-Q" "--batch" "-L" lisp "-l" script))
+                   (out (buffer-string)))
+              (should (string-match "took \\([0-9.]+\\)" out))
+              (should (< (string-to-number (match-string 1 out)) 1.0))
+              (should (eq status 0)))))
+      (delete-file script))))
+
 (ert-deftest harness-server-emacs-tools-run-in-the-ui-emacs ()
   (harness-server-test-with-process
     (let ((buf (generate-new-buffer "harness-only-in-the-ui")))

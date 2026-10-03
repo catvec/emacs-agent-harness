@@ -53,7 +53,8 @@
   "Session id -> the request records it waits on, oldest first.
 A record is a plist: `:id' `:kind' (\"permission\" or \"question\"),
 `:respond' (the ACP callback, when a client owns the request, else nil),
-`:created', and what its panel draws: `:title' `:tool' `:tool-kind'
+`:connection' (the UI connection it came on, so an answer still goes out
+on it), `:created', and what its panel draws: `:title' `:tool' `:tool-kind'
 `:input' `:paths' `:pattern' `:dir' `:reason' `:options' for a
 permission (`:pattern' is the glob the answer holds for, and
 `:edited-pattern' the one the user typed), `:question' `:options'
@@ -249,9 +250,9 @@ known from the session's pending list goes over
   (when-let* ((r (harness-ui-pending-record session-id pid)))
     (let ((edited (plist-get r :edited-pattern))
           (shown (harness-ui-pending--permission-pattern r)))
-      (if-let* ((respond (plist-get r :respond)))
-          (funcall respond (append (list :outcome (list :outcome "selected" :optionId option))
-                                   (and edited (list :_harness (list :pattern edited)))))
+      (unless (harness-ui-pending--respond
+               r (append (list :outcome (list :outcome "selected" :optionId option))
+                         (and edited (list :_harness (list :pattern edited)))))
         (harness-ui-call "_harness/permission/answer"
                          (list :session-id session-id :pending-id pid
                                :answer (if edited (list :option option :pattern edited) option))
@@ -262,11 +263,29 @@ known from the session's pending list goes over
 (defun harness-ui-pending-answer-question (session-id pid answer)
   "Answer question PID of SESSION-ID with ANSWER."
   (when-let* ((r (harness-ui-pending-record session-id pid)))
-    (if-let* ((respond (plist-get r :respond)))
-        (funcall respond (list :answer answer))
+    (unless (harness-ui-pending--respond r (list :answer answer))
       (harness-ui-call "_harness/question/answer"
                        (list :session-id session-id :pid pid :answer answer) #'ignore))
     (harness-ui-pending-remove session-id pid)))
+
+(defun harness-ui-pending--respond (r value)
+  "Answer request record R through its RESPOND with VALUE.
+Non-nil when it went out.  RESPOND answers the request on the
+connection it came on, and only while that is the UI's live connection.
+After the UI connected again (`harness-connect-remote', even back to the
+same harness) the harness keeps the request pending, but would never
+hear an answer sent on the old connection, and the session would stay
+blocked: the caller then answers through the bus method instead
+\(`permission/answer', `question/answer'), which is what this returns
+nil for.  A record of the session's own pending list has no RESPOND at
+all."
+  (let ((respond (plist-get r :respond))
+        (connection (plist-get r :connection)))
+    (and respond
+         (eq connection harness-ui-connection)
+         (harness-acp-open-p connection)
+         ;; Nil when it could not go out after all (see `harness-acp-set-handler').
+         (funcall respond value))))
 
 ;;;; Patterns a prompt about paths is answered for
 ;;
@@ -764,7 +783,8 @@ clients, or the session's own pending list, answer it."
              (pid (or (plist-get extra :pendingId) (plist-get tc :toolCallId) (harness-short-id 6))))
         (harness-ui-pending-add
          session-id
-         (list :id pid :kind "permission" :respond respond :created (float-time)
+         (list :id pid :kind "permission" :respond respond :connection harness-ui-connection
+               :created (float-time)
                :title (or (plist-get tc :title) (plist-get extra :tool) "tool call")
                :tool (plist-get extra :tool) :tool-kind (format "%s" (plist-get tc :kind))
                :input (plist-get tc :rawInput) :paths (plist-get extra :paths)
@@ -780,7 +800,7 @@ clients, or the session's own pending list, answer it."
       (harness-ui-pending-add
        session-id
        (list :id (or (plist-get params :requestId) (harness-short-id 6)) :kind "question" :respond respond
-             :created (float-time)
+             :connection harness-ui-connection :created (float-time)
              :question (plist-get params :question) :options (plist-get params :options)
              :diagrams (plist-get params :diagrams)))
       t)))

@@ -2122,6 +2122,29 @@ connection let go of is never reported as closed."
         ;; Whatever failed, the next test's UI connects in-process.
         (setq harness-ui-connection-address nil)))))
 
+(ert-deftest harness-ui-chat-session-record-applies-while-loading ()
+  "The session record is no transcript: a change of it that arrives while
+the transcript reloads (every buffer does, after a reload or a
+reconnect) applies at once instead of being dropped.  A deletion that
+arrives meanwhile applies once the transcript is in."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Loading"))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let ((session (copy-sequence harness-chat--session)))
+          (setq harness-chat--loading t)
+          (harness-chat--on-update sid (list :sessionUpdate "_harness/session"
+                                             :session (plist-put session :queue '((:id "q1" :text "next")))))
+          (should (equal '((:id "q1" :text "next")) harness-chat--queue))
+          (should-not harness-chat--deferred)
+          (setq harness-chat--loading nil))
+        (harness-chat--load)
+        (should harness-chat--loading)
+        (harness-chat--on-update sid '(:sessionUpdate "_harness/session_deleted"))
+        (should-not harness-chat--dead)
+        (harness-test-wait (lambda () (not harness-chat--loading)) 5 "the transcript loaded")
+        (should harness-chat--dead)))))
+
 (ert-deftest harness-ui-chat-hl-line-skips-compose ()
   ;; hl-line would paint over the compose background, so it stops short of it.
   (harness-ui-chat-test-with

@@ -595,6 +595,48 @@ Once the turn ends the message runs as a turn of its own."
       (accept-process-output nil 0.05)
       (should (null harness-acp-test-messages)))))
 
+(ert-deftest harness-acp-local-close-says-why-and-answers-say-if-they-went ()
+  "A connection closed on purpose rejects what still waits on it with
+the reason it was given, and RESPOND reports whether an answer went
+out: one to a request that came on a closed connection cannot, and the
+harness never hears it."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (recorded nil)
+           (request (lambda (pid)
+                      (harness-emit 'permission/requested sid
+                                    (list :id pid :kind 'permission :payload (list :tool "bash" :kind 'exec)))
+                      (harness-test-wait (lambda () (cl-find-if (lambda (m) (equal pid (plist-get (plist-get (nth 1 m) :_harness) :pendingId)))
+                                                                harness-acp-test-messages)))
+                      (nth 2 (cl-find-if (lambda (m) (equal pid (plist-get (plist-get (nth 1 m) :_harness) :pendingId)))
+                                         harness-acp-test-messages))))
+           (allow (list :outcome (list :outcome "selected" :optionId "allow-once"))))
+      (harness-register-method 'permission/answer
+                               (lambda (s pid answer) (push (list s pid answer) recorded) answer))
+      (harness-register-method 'session/test-hang (lambda () (harness-make-promise)))
+      ;; Answered while the connection is open: it goes out, once.
+      (let ((respond (funcall request "p1")))
+        (should (eq t (funcall respond allow)))
+        (should-not (funcall respond allow))
+        (harness-test-wait (lambda () recorded))
+        (should (equal "p1" (nth 1 (car recorded)))))
+      (let ((respond (funcall request "p2"))
+            (rejection nil))
+        (harness-catch (harness-acp-request conn "_harness/session/test-hang" nil)
+                       (lambda (e) (setq rejection e)))
+        (harness-acp-close conn "replaced")
+        (harness-test-wait (lambda () rejection))
+        (should (equal "replaced" (harness-acp-closed-reason rejection)))
+        (should (equal "connection replaced" (harness-error-message rejection)))
+        ;; Too late to answer here.
+        (should-not (funcall respond allow))
+        (accept-process-output nil 0.05)
+        (should (= 1 (length recorded))))
+      ;; A failure of another kind has no reason to give.
+      (should-not (harness-acp-closed-reason '(acp-error -32603 "boom" nil)))
+      (should-not (harness-acp-closed-reason '(error "boom"))))))
+
 (ert-deftest harness-acp-local-callbacks-are-deferred ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))

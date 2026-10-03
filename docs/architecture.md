@@ -60,9 +60,19 @@ default) the layers above are split across two Emacs processes:
   `*harness-log*`.  Its stdin is closed, so a stray prompt fails rather
   than hangs; it exits when its parent dies.  The parent restarts it
   with backoff when it crashes and stops it with SIGTERM (which runs
-  `kill-emacs-hook`, flushing sessions, tasks and streamed text).
+  `kill-emacs-hook`, flushing sessions, tasks and streamed text); the
+  end of a process it already replaced, reported late, changes nothing.
   `M-x harness-restart` restarts it with fresh configuration;
-  `harness-reload` reloads both sides.
+  `harness-reload` reloads both sides: the UI first, then it asks the
+  process (`harness/reload`), which answers whether every file loaded,
+  some failed to, or none were loaded because one does not compile.
+- The child's event loop (`harness-server--event-loop`) never sleeps past
+  the earliest timer.  Batch Emacs runs due timers from a copy of
+  `timer-list` inside `accept-process-output` and then sleeps until the
+  next timer of that copy, so a timer a timer starts -- every
+  `harness-run-soon` of a request handler, the next step of a turn --
+  would otherwise wait for an unrelated timer or process output, seconds
+  later.
 - Work about the user's Emacs runs there, asked for by the harness with
   `client/request` (below): the `emacs_*` tools
   (lisp/harness-client-tools.el), saving user options to `custom-file`
@@ -119,8 +129,16 @@ module `NAME` and provides feature `harness-NAME`.
 Reload safety: keep state in `defvar`s (never re-initialised), register
 subscribers with named functions, and make `:init` idempotent.
 `harness-reload` compiles every file first and refuses to load anything
-if one fails.  After a reload the `harness/reloaded` event fires and the
-UI redraws every session buffer.
+if one fails.  It loads harness.el, the core files, the libraries of
+lisp/ (`harness--library-files`: files, client tools, desktop
+notifications, server) and the modules, so a module never runs against
+a library as it was before an update; a file added to lisp/ that both
+sides load belongs in one of those lists.  Records made before a reload
+keep their layout: a slot added to a struct goes last and is read in a
+way that tolerates records without it (see `harness-acp--client-get`),
+or the module drops its stale records (see
+`harness-provider-claude--drop-stale-entries`).  After a reload the
+`harness/reloaded` event fires and the UI redraws every session buffer.
 
 ## Data shapes
 
@@ -1766,7 +1784,8 @@ Client API used by every UI:
 (harness-acp-request CONN METHOD PARAMS)    ; → promise of result plist
 (harness-acp-notify CONN METHOD PARAMS)
 (harness-acp-set-handler CONN FN)           ; FN (METHOD PARAMS RESPOND); RESPOND nil for notifications
-(harness-acp-close CONN)
+(harness-acp-close CONN &optional REASON)   ; rejects what waits with REASON ("closed")
+(harness-acp-closed-reason ERR)             ; that REASON, when a close is what rejected ERR
 (harness-acp-connection-p CONN) (harness-acp-connected-p CONN)
 (harness-acp-open-p CONN)                   ; connected, or TCP still connecting
 ```
@@ -1775,6 +1794,15 @@ What is sent while a TCP connection connects waits and goes out once
 the socket is up, so a client keeps a connection while `harness-acp-open-p`
 holds rather than connecting again, which would drop it along with
 every request it carries.
+
+RESPOND returns non-nil when the answer went out and nil when it could
+not: its connection closed since the request came, or it was answered
+already.  A request answered later than it came, such as a permission
+prompt waiting for the user, belongs to the connection it came on; the
+harness keeps it pending on the session when that connection goes, and
+never sends it again on another.  An answer that cannot go out where
+the request came goes through the bus method that answers it
+(`permission/answer`, `question/answer`).
 
 Wire: JSON-RPC 2.0, one message per line.  Standard ACP methods:
 `initialize`, `authenticate`, `session/new {cwd}` → `{sessionId}`,
@@ -1955,6 +1983,20 @@ the chat) to change it in the minibuffer, more or less specific;
 the edited pattern (see perms).  For a call with paths the line also
 says which answers remember the pattern ("s, a, N remember the answer
 for it").
+
+Connecting again never strands a session.  The connection the UI swaps
+out closes with the reason `replaced`, and the requests still waiting
+on it are rejected with that reason (`harness-ui-connection-replaced-p`):
+`harness-ui-call` and the chat do not report them, since the harness
+goes on with them (a prompt's turn runs, and the redrawn transcript
+shows it).  A permission prompt or question shown from before answers
+through the bus methods (`permission/answer`, `question/answer`): the
+pending module records the connection with each request, and a RESPOND
+whose connection is gone would never be heard.  While a chat buffer
+fetches its transcript again (after every reload and reconnect) it
+holds back node updates, which the fetched nodes carry, but applies
+the session record and the activity as they come: a status, queue or
+prompt that changed meanwhile is not lost.
 
 Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
 list + attachments row + compose region at the bottom.  Rendering is

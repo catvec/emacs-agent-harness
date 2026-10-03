@@ -77,7 +77,19 @@ Only the ACP client half is used: its TCP server stays off here.")
 
 (defconst harness--core-files '("lisp/harness-core.el" "lisp/harness-util.el"
                                "lisp/harness-http.el" "lisp/harness-elisp.el")
-  "Files loaded before any module, in order, relative to `harness-directory'.")
+  "Files loaded before any module, in order, relative to `harness-directory'.
+They define the macros modules expand, so a change to one recompiles
+every file (see `harness--compiled-fresh-p').")
+
+(defconst harness--library-files '("lisp/harness-files.el" "lisp/harness-client-tools.el"
+                                  "lisp/harness-notifications-desktop.el" "lisp/harness-server.el")
+  "Libraries loaded after the core files and before any module, in order.
+Both sides of the process split use them: the UI requires them all, and
+the harness process's modules require the first three.  They are loaded
+compiled as the core files are and every `harness-reload' loads them
+again, so a reloaded module never calls a library function as it was
+before the update; they define no macros, so a change to one does not
+recompile the modules.")
 
 (add-to-list 'load-path (expand-file-name "lisp" harness-directory))
 (require 'harness-core)
@@ -129,7 +141,7 @@ Only the ACP client half is used: its TCP server stays off here.")
 Return non-nil when every module loaded and initialised."
   (interactive)
   (harness--setup-load-path)
-  (dolist (f harness--core-files)
+  (dolist (f (append harness--core-files harness--library-files))
     (condition-case err
         (harness-load-compiled (harness--path f))
       (error (harness-log 'error "compiling %s failed: %S; loading source" f err)
@@ -197,7 +209,9 @@ harness always runs compiled code, even while developing."
       (progn
         (with-temp-buffer
           (insert-file-contents file)
-          (emacs-lisp-mode)
+          ;; Only its syntax: the user's `emacs-lisp-mode-hook' (linters,
+          ;; LSP...) has no business in a buffer that lives for a check.
+          (delay-mode-hooks (emacs-lisp-mode))
           (check-parens)
           (goto-char (point-min))
           (condition-case rerr
@@ -224,7 +238,8 @@ harness always runs compiled code, even while developing."
 (defun harness--compiled-fresh-p (file)
   "Non-nil when FILE's .elc is newer than FILE, harness.el and the core files.
 Core files define the macros every module expands, so a change there
-recompiles everything."
+recompiles everything; a library file (`harness--library-files') does
+not."
   (let ((elc (harness--compiled-name file)))
     (and (file-exists-p elc)
          (cl-every (lambda (src) (file-newer-than-file-p elc src))
@@ -236,40 +251,59 @@ Used by tests and the loader."
   (load (if (harness--compiled-fresh-p file) (harness--compiled-name file) (harness--compile-file file))
         nil 'nomessage))
 
-;;;###autoload
-(defun harness-reload ()
-  "Check every harness source file, then reload all of them in place.
-Running sessions and buffers are kept: definitions are replaced under
-them and `harness-reload-hook' plus the `harness/reloaded' event let
-the UI redraw.  When any file fails to compile nothing is loaded."
-  (interactive)
+(defun harness--reload ()
+  "Check every harness source file, then load them all again in place.
+The files are this one, the core and library files, and the modules of
+this Emacs.  Return (:refused PROBLEMS) when one of them does not
+compile: then nothing was loaded.  Otherwise return (:files N :errors
+ERRORS), where ERRORS describes the files that failed to load: the
+others are loaded, modules that were not ready are initialised, and
+`harness-reload-hook' and the `harness/reloaded' event have run.  In
+the UI of a harness process, the process is asked to reload too."
   (harness--setup-load-path)
-  (let* ((files (append (mapcar #'harness--path harness--core-files)
-                        (harness--module-files)))
+  (let* ((early (mapcar #'harness--path (append harness--core-files harness--library-files)))
+         (files (append early (harness--module-files)))
          (problems (delq nil (mapcar #'harness--check-file files))))
     (if problems
         (progn
           (when (featurep 'harness-core)
             (dolist (p problems) (harness-log 'error "reload refused: %s" p)))
-          (message "Harness reload refused: %s" (string-join problems "; "))
-          nil)
+          (list :refused problems))
       (let ((errors nil))
         (load harness--self-file nil 'nomessage)
         (dolist (f files)
           (condition-case err
-              (if (member f (mapcar #'harness--path harness--core-files))
+              (if (member f early)
                   (harness-load-compiled f)
                 (harness--load-file f))
-            (error (push (format "%s: %s" (file-name-nondirectory f) (error-message-string err)) errors))))
+            (error (let ((problem (format "%s: %s" (file-name-nondirectory f) (error-message-string err))))
+                     (harness-log 'error "reload: %s" problem)
+                     (push problem errors)))))
         (harness-modules-init)
         (when (and harness-process (fboundp 'harness-ui-reload-server))
           (harness-ui-reload-server))
         (run-hooks 'harness-reload-hook)
         (harness-emit 'harness/reloaded)
-        (if errors
-            (message "Harness reloaded with errors: %s" (string-join (nreverse errors) "; "))
-          (message "Harness reloaded (%d files)" (length files)))
-        (null errors)))))
+        (list :files (length files) :errors (nreverse errors))))))
+
+;;;###autoload
+(defun harness-reload ()
+  "Check every harness source file, then reload all of them in place.
+Running sessions and buffers are kept: definitions are replaced under
+them and `harness-reload-hook' plus the `harness/reloaded' event let
+the UI redraw.  When any file fails to compile nothing is loaded.
+Return non-nil when every file loaded again."
+  (interactive)
+  (let ((result (harness--reload)))
+    (cond
+     ((plist-get result :refused)
+      (message "Harness reload refused: %s" (string-join (plist-get result :refused) "; "))
+      nil)
+     ((plist-get result :errors)
+      (message "Harness reloaded with errors: %s" (string-join (plist-get result :errors) "; "))
+      nil)
+     (t (message "Harness reloaded (%d files)" (plist-get result :files))
+        t))))
 
 ;;;; Automatic reload while developing
 

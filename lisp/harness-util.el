@@ -569,8 +569,11 @@ in use.  Returns nothing useful; failures are logged."
 ;;;; Errors
 
 (defun harness-error-message (err)
-  "Return a readable message for ERR (an error data list or string)."
+  "Return a readable message for ERR (an error data list or string).
+An ACP error, (acp-error CODE MESSAGE DATA), reads as its MESSAGE."
   (cond ((stringp err) err)
+        ((and (eq (car-safe err) 'acp-error) (stringp (nth 2 err)) (not (string-empty-p (nth 2 err))))
+         (nth 2 err))
         ((and (consp err) (symbolp (car err)))
          (condition-case nil (error-message-string err)
            (error (format "%S" err))))

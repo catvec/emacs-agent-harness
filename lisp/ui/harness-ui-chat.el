@@ -1246,8 +1246,11 @@ state the group had."
   (when-let* ((buf (harness-chat--buffer-for sid)))
     (with-current-buffer buf
       (if (and harness-chat--loading
-               ;; Activity is not transcript: it is current however it loads.
-               (not (equal (plist-get update :sessionUpdate) "_harness/activity")))
+               ;; Activity and the session record are not transcript: they
+               ;; are current however it loads.  Held back, a change of
+               ;; status, queue or pending requests that came while every
+               ;; buffer reloads (a reload, a reconnect) would be lost.
+               (not (member (plist-get update :sessionUpdate) '("_harness/activity" "_harness/session"))))
           (push update harness-chat--deferred)
         (harness-chat--apply-update update)))))
 
@@ -1978,14 +1981,7 @@ end afterwards."
                (when offset
                  (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
                (harness-chat--restore-anchors anchors)
-               (dolist (u (nreverse harness-chat--deferred))
-                 (pcase (plist-get u :sessionUpdate)
-                   ;; The list is state, not transcript: the newest wins.
-                   ("plan" (harness-chat--apply-update u))
-                   ("_harness/node"
-                    (when (harness-chat--node-current-p (plist-get u :node))
-                      (harness-chat--apply-update u)))))
-               (setq harness-chat--deferred nil)
+               (harness-chat--replay-deferred t)
                (when keep-bottom (harness-chat-scroll-to-bottom))
                (harness-chat--schedule-history))))))
      (lambda (err)
@@ -1993,9 +1989,30 @@ end afterwards."
          (with-current-buffer buf
            (when (= gen harness-chat--generation)
              (setq harness-chat--loading nil)
-             (harness-chat--render-nodes nil)
-             (harness-chat--append-local-block "error" (format "could not load the session: %s" (harness-error-message err)))
-             (harness-chat--render-top))))))))
+             ;; Not a failure when the UI connected elsewhere meanwhile:
+             ;; it redraws every buffer once it has.
+             (unless (harness-ui-connection-replaced-p err)
+               (harness-chat--render-nodes nil)
+               (harness-chat--append-local-block "error" (format "could not load the session: %s" (harness-error-message err)))
+               (harness-chat--render-top))
+             (harness-chat--replay-deferred nil))))))))
+
+(defun harness-chat--replay-deferred (loaded)
+  "Apply the updates held back while the transcript loaded, then forget them.
+With LOADED non-nil the transcript was just rendered: node updates that
+continue it are applied, the older ones are in it already, as is the
+text streamed meanwhile.  The todo list and the session being deleted
+are state, not transcript, so they apply either way; the session record
+and activity were never held back (see `harness-chat--on-update')."
+  (dolist (u (nreverse harness-chat--deferred))
+    (pcase (plist-get u :sessionUpdate)
+      ;; The list is state, not transcript: the newest wins.
+      ("plan" (harness-chat--apply-update u))
+      ("_harness/node"
+       (when (and loaded (harness-chat--node-current-p (plist-get u :node)))
+         (harness-chat--apply-update u)))
+      ("_harness/session_deleted" (harness-chat--apply-update u))))
+  (setq harness-chat--deferred nil))
 
 (defun harness-chat--node-current-p (node)
   "Non-nil when NODE is rendered already or continues the rendered transcript.
@@ -2088,8 +2105,11 @@ module names a side conversation after its first message this way.")
     (setq harness-chat--editing nil)))
 
 (defun harness-chat--report-error (buf what err)
-  "Append an error block to BUF saying WHAT failed with ERR."
-  (when (buffer-live-p buf)
+  "Append an error block to BUF saying WHAT failed with ERR.
+Nothing failed when the UI let go of the connection on purpose while
+waiting (`harness-ui-connection-replaced-p'): a message sent before it
+connected again still runs its turn, as the redrawn transcript shows."
+  (when (and (buffer-live-p buf) (not (harness-ui-connection-replaced-p err)))
     (with-current-buffer buf
       (harness-chat--append-local-block "error" (format "%s failed: %s" what (harness-error-message err))))))
 
