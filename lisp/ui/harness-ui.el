@@ -175,6 +175,7 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-collapsed "collapsed" "▸" "+" "Collapsed block.")
 (harness-ui-define-icon harness-icon-expanded "expanded" "▾" "-" "Expanded block.")
 (harness-ui-define-icon harness-icon-attach "attach" "+" "attach" "Attachment.")
+(harness-ui-define-icon harness-icon-question "question" "?" "?" "A question.")
 (harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
 
 (defun harness-ui-icon (name)
@@ -1105,6 +1106,208 @@ The bindings also work from header-line and mode-line segments."
       (define-key map key run))
     (define-key map (kbd "RET") run)
     map))
+
+;;;; Items at point
+
+;; Views that show sessions -- the session list, the task board, the tree
+;; -- say which session the item at point stands for.  One notion of "the
+;; session at point" then serves every command that acts on it, such as
+;; popping out what it waits on.
+
+(defvar-local harness-ui-session-at-point-function nil
+  "Function returning the session id of the item at point, or nil.
+A view sets it buffer-locally, so commands shared by views (the popout
+of what a session waits on) act on what point is on there.  Without it,
+`harness-ui-session-at-point' falls back to `harness-ui-session-id'.")
+
+(defun harness-ui-session-at-point (&optional noerror)
+  "Return the session id the item at point stands for.
+That is what `harness-ui-session-at-point-function' says in a view that
+sets one, else this buffer's session (`harness-ui-session-id').  Signal
+unless NOERROR when there is none."
+  (or (and harness-ui-session-at-point-function
+           (funcall harness-ui-session-at-point-function))
+      harness-ui-session-id
+      (unless noerror (user-error "No session here"))))
+
+;;;; Drawing helpers shared by the views
+;;
+;; Chat panels, popouts and the task board all draw the same kind of
+;; thing: text with action buttons in it, key hints, images, and regions
+;; that are redrawn in place without moving point or the windows.
+
+(defface harness-ui-panel-face
+  '((((background light)) :background "#fff1cf" :extend t)
+    (((background dark)) :background "#463a1c" :extend t))
+  "Background of a panel asking the user for something.
+The chat's permission and question panels, and a popout of a request." :group 'harness-ui)
+
+(defface harness-ui-key-face '((t :inherit help-key-binding))
+  "Keyboard shortcut hints in panels." :group 'harness-ui)
+
+(defface harness-ui-output-face '((t :inherit (fixed-pitch harness-md-code-block)))
+  "Fixed-width output, such as the diagram of a question's option." :group 'harness-ui)
+
+(defcustom harness-ui-image-max-height 400
+  "Maximum pixel height of inline images in harness views."
+  :type 'integer :group 'harness-ui)
+
+(defun harness-ui-add-face (string face)
+  "Return STRING with FACE added on top of its faces."
+  (let ((s (copy-sequence string)))
+    (add-face-text-property 0 (length s) face t s)
+    s))
+
+(defun harness-ui-ensure-newline (string)
+  "Return STRING ending in exactly one newline."
+  (concat (string-trim-right (or string "") "\n+") "\n"))
+
+(defun harness-ui-kbd (key)
+  "Return KEY as a key hint string."
+  (propertize key 'face 'harness-ui-key-face))
+
+(defun harness-ui-action-map (command)
+  "Return a keymap running COMMAND on mouse-1, mouse-2 and RET."
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] command)
+    (define-key map [mouse-2] command)
+    (define-key map (kbd "RET") command)
+    map))
+
+(defun harness-ui-action-button (label action &rest props)
+  "Return a button string LABEL running ACTION (a function of no arguments).
+PROPS may hold `:help' and `:face'.  Clicking or pressing RET on it
+anywhere runs the action (`harness-ui-action-push')."
+  (let ((s (copy-sequence label)))
+    (add-text-properties
+     0 (length s)
+     (list 'face (or (plist-get props :face) 'button)
+           'mouse-face 'highlight 'follow-link t
+           'help-echo (plist-get props :help)
+           'harness-ui-action action
+           'keymap (harness-ui-action-map #'harness-ui-action-push))
+     s)
+    s))
+
+(defun harness-ui-action-push (&optional event)
+  "Run the action of the button at point, or at the position of mouse EVENT."
+  (interactive (list last-input-event))
+  (when (mouse-event-p event) (mouse-set-point event))
+  (let ((action (or (get-text-property (point) 'harness-ui-action)
+                    (and (> (point) (point-min)) (get-text-property (1- (point)) 'harness-ui-action)))))
+    (if action (funcall action) (if (get-text-property (point) 'button) (push-button (point))
+                                  (user-error "No button here")))))
+
+(defun harness-ui-add-keymap (start end map)
+  "Give START..END the keymap MAP, composed under any button keymaps."
+  (let ((pos start))
+    (while (< pos end)
+      (let* ((next (min end (or (next-single-property-change pos 'keymap nil end) end)))
+             (existing (get-text-property pos 'keymap)))
+        (put-text-property pos next 'keymap (if existing (make-composed-keymap (list existing map)) map))
+        (setq pos next)))))
+
+(defun harness-ui--fix-positions (fix pt windows)
+  "Move point to (FIX PT) and every window in WINDOWS through FIX.
+WINDOWS holds (WINDOW START POINT) triples recorded before the edit."
+  (goto-char (funcall fix pt))
+  (dolist (w windows)
+    (when (window-live-p (car w))
+      (set-window-start (car w) (funcall fix (nth 1 w)) t)
+      (unless (eq (car w) (selected-window))
+        (set-window-point (car w) (funcall fix (nth 2 w)))))))
+
+(defun harness-ui--window-positions ()
+  "Return (WINDOW START POINT) for every window showing the buffer."
+  (mapcar (lambda (w) (list w (window-start w) (window-point w)))
+          (get-buffer-window-list nil nil t)))
+
+(defun harness-ui-replace-region (from to text)
+  "Replace FROM..TO with TEXT, keeping point and window starts anchored.
+Positions inside the region stay at the same offset from FROM; the
+position just after the region moves to the end of TEXT."
+  (let* ((from (if (markerp from) (marker-position from) from))
+         (to (if (markerp to) (marker-position to) to))
+         (len (length text))
+         (fix (lambda (p)
+                (cond ((< p from) p)
+                      ((< p to) (min p (+ from (max 0 (1- len)))))
+                      ((= p to) (+ from len))
+                      (t (+ p (- len (- to from)))))))
+         (windows (harness-ui--window-positions))
+         (pt (point)))
+    (let ((inhibit-read-only t) (buffer-undo-list t))
+      (delete-region from to)
+      (goto-char from)
+      (insert text))
+    (harness-ui--fix-positions fix pt windows)))
+
+(defun harness-ui-image-string (source &optional mime)
+  "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
+MIME is a hint for the image type.  Without image support a button
+opening the file is returned instead."
+  (let* ((path (and (stringp source) source))
+         (data (and (consp source) (plist-get source :data)))
+         (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]")))
+    (if (and (display-images-p) (or data (and path (file-readable-p path))))
+        (let* ((w (car (get-buffer-window-list nil nil t)))
+               (width (floor (* 0.6 (if w (window-body-width w t) 800))))
+               (img (condition-case nil
+                        (if data
+                            (create-image (base64-decode-string data) nil t
+                                          :max-width width :max-height harness-ui-image-max-height)
+                          (create-image path nil nil
+                                        :max-width width :max-height harness-ui-image-max-height))
+                      (error nil))))
+          (if img
+              (concat (propertize label 'display img 'help-echo (or path mime "image")
+                                  'keymap (and path (harness-ui-action-map
+                                                     (lambda () (interactive) (find-file-other-window path)))))
+                      "\n")
+            (concat label "\n")))
+      (if path
+          (concat (harness-ui-action-button label (lambda () (find-file-other-window path))
+                                            :help "Open the image")
+                  "\n")
+        (concat (propertize label 'face 'harness-dim-face) "\n")))))
+
+(defun harness-ui-format-value (value)
+  "Return VALUE for display in a tool input listing."
+  (cond ((stringp value) value)
+        ((eq value :false) "false")
+        ((eq value t) "true")
+        ((null value) "null")
+        ((numberp value) (number-to-string value))
+        (t (format "%S" value))))
+
+(defun harness-ui-option-label (value)
+  "Return the label of VALUE, an option of an ask_user call, or nil.
+An option is a string or an object (a plist) with a `:label'."
+  (cond ((stringp value) value)
+        ((and (consp value) (keywordp (car value)) (stringp (plist-get value :label)))
+         (plist-get value :label))))
+
+(defun harness-ui-summary-value (value)
+  "Return VALUE on one line for a tool input summary.
+A list of strings, or of objects with labels such as the options of an
+ask_user call, reads as a comma-separated list, not a Lisp form."
+  (harness-first-line
+   (if (and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
+       (mapconcat #'harness-ui-option-label value ", ")
+     (harness-ui-format-value value))
+   60))
+
+(defun harness-ui-tool-input-summary (input &optional title)
+  "Return a one-line summary of tool INPUT, or nil when it adds nothing.
+Values TITLE already shows (the command of a bash call, the question
+of an ask_user) are left out."
+  (let (parts)
+    (cl-loop for (k v) on input by #'cddr
+             do (let ((text (harness-ui-summary-value v)))
+                  (unless (and title (not (string-empty-p text))
+                               (string-search (substring text 0 (min 40 (length text))) title))
+                    (push (format "%s: %s" (substring (symbol-name k) 1) text) parts))))
+    (and parts (harness-truncate-end (string-join (nreverse parts) "  ") 110))))
 
 ;;;; Positions
 
