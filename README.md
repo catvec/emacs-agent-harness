@@ -314,6 +314,14 @@ so several tasks can work in parallel.
   unless your configuration says otherwise, so a request that needs
   you, such as access to another directory, waits for you in *Requires
   your input* instead of being denied.
+- Task sessions run on half their model's context window
+  (`harness-tasks-context-fraction`, by default 0.5): they compact
+  sooner than interactive sessions, so a long task works from a smaller
+  transcript between turns. Set it to another fraction of the window to
+  tune that, or to nil to give task sessions the whole window like any
+  other session. A provider that compacts on its own side keeps its own
+  threshold, except Claude Code, which the harness tells to compact at
+  the same point.
 - The `own worktree` switch beside those settings, in a git project,
   changes the next task to the **main tree**: no worktree and no branch,
   nothing merges, and its changes take effect in your checkout directly.

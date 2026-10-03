@@ -12,6 +12,13 @@
 ;; the task's title, so when the model names it,
 ;; `harness-tasks--naming-instructions' asks for a ticket title.
 ;;
+;; A task's session also runs on a shorter context than an interactive
+;; one by default: `harness-tasks-context-fraction' (half the model's
+;; window) is the session's context window, so the harness compacts a
+;; task sooner and hands it a smaller transcript to carry on from.  Set
+;; it to nil to give task sessions the whole window, like any other
+;; session, or to another fraction to choose how often they compact.
+;;
 ;; In a git project a task owns the whole life of its change: it starts
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
 ;; its session is told to commit there, and when the agent finishes the
@@ -177,6 +184,22 @@ own setting, from the board or `task/submit', wins over both."
 (defcustom harness-tasks-thinking nil
   "Thinking level of task sessions, or nil for the configured default."
   :type `(choice (const :tag "Configured default" nil) ,@harness-tasks--thinking-levels)
+  :group 'harness)
+
+(defcustom harness-tasks-context-fraction 0.5
+  "Part of its model's window a task session uses, or nil for the whole of it.
+A task session compacts when its context reaches this part of its
+model's context window, so unattended tasks compact earlier than
+interactive sessions: the handoff summary keeps them working from a
+smaller transcript, and the turn after a compaction starts cheap.
+The value is between 0 and 1 (`0.5' halves the effective window).  With
+nil task sessions use the whole window, like any other session, and
+compact at the usual point.  A provider that compacts on its own side
+is asked to compact at the same point where it can be (Claude Code,
+see the claude provider)."
+  :type '(choice (const :tag "The whole window" nil)
+                 (number :tag "Fraction of the window"))
+  :safe (lambda (v) (or (null v) (and (numberp v) (> v 0) (<= v 1))))
   :group 'harness)
 
 (defconst harness-tasks--naming-instructions
@@ -2022,7 +2045,9 @@ restart cut its start short keeps the worktree it got."
 (defun harness-tasks--work-settings (task)
   "Return the settings TASK's work runs with, as `session/create' keys.
 The task's own, else the `harness-tasks-' defaults; unset ones are left
-out, so the session gets what its directory configures."
+out, so the session gets what its directory configures.  The context
+fraction is `harness-tasks-context-fraction', which shortens a task's
+window and so has it compact sooner."
   (let ((mode (or (plist-get task :permission-mode) harness-tasks-permission-mode))
         (model (or (plist-get task :model) harness-tasks-model))
         (thinking (or (plist-get task :thinking) harness-tasks-thinking))
@@ -2035,7 +2060,9 @@ out, so the session gets what its directory configures."
             ;; The task's own false is set, not unset: off whatever the
             ;; directory configures.
             (cond (non-interactive (list :non-interactive t))
-                  ((plist-member task :non-interactive) (list :non-interactive :false))))))
+                  ((plist-member task :non-interactive) (list :non-interactive :false)))
+            (and harness-tasks-context-fraction
+                 (list :context-fraction harness-tasks-context-fraction)))))
 
 (defconst harness-tasks-bulk-columns '(active pending needs-input)
   "Task columns a bulk update reaches by default.
@@ -2136,7 +2163,10 @@ everything the work needs, while the transcript keeps the refinement."
                       :thinking (or (plist-get settings :thinking) (harness-tasks--config 'harness-thinking cwd))
                       :non-interactive (or (plist-get settings :non-interactive)
                                            (and (not (plist-member task :non-interactive))
-                                                (harness-tasks--config 'harness-non-interactive cwd) t)))
+                                                (harness-tasks--config 'harness-non-interactive cwd) t))
+                      ;; The task default applies from the start of the
+                      ;; work on; nil, turned off, clears an earlier one.
+                      :context-fraction (plist-get settings :context-fraction))
                 (when-let* ((model (or (plist-get settings :model) (harness-tasks--config 'harness-model cwd))))
                   (list :model model))))
         (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
@@ -2199,12 +2229,15 @@ At `harness-tasks--refine-tool-calls' calls it is steered to write up now."
   "Return the `session/create' settings of the session refining TASK.
 Ask mode allows reads, and non-interactive the session never waits for
 the user; whatever would ask `harness-tasks--write-up-gate' denies with
-a hint, which keeps a write-up a write-up."
+a hint, which keeps a write-up a write-up.  The task context fraction
+rides along, so a write-up that reads a lot compacts sooner too."
   (let ((model (or harness-tasks-refine-model (plist-get task :model) harness-tasks-model))
         (thinking (or harness-tasks-refine-thinking (plist-get task :thinking) harness-tasks-thinking)))
     (append (list :permission-mode 'ask :non-interactive t)
             (and model (list :model model))
-            (and thinking (list :thinking thinking)))))
+            (and thinking (list :thinking thinking))
+            (and harness-tasks-context-fraction
+                 (list :context-fraction harness-tasks-context-fraction)))))
 
 (defconst harness-tasks--write-up-hint
   "Write the task up from what you can read; put what you could not check in the write-up as an open question."
@@ -2619,7 +2652,8 @@ are not tasks yet, newest first."
   "Make the ongoing session SESSION-ID a task and return the task.
 Its first message becomes the task's prompt; a session in a git worktree
 keeps it and is merged through the merge queue like any task.  A running
-or blocked session is in progress; an idle one waits for the user."
+or blocked session is in progress; an idle one waits for the user.  The
+task context fraction applies from now on when there is one."
   (harness-tasks--load)
   (let ((session (harness-call 'session/get session-id)))
     (unless (harness-tasks--adoptable-p session)
@@ -2637,6 +2671,10 @@ or blocked session is in progress; an idle one waits for the user."
                        :outcome (unless (memq (plist-get session :status) '(running blocked)) 'adopted)
                        :created (plist-get session :created) :started (plist-get session :created))))
       (harness-tasks--put task)
+      ;; The task's shorter context applies from its next turn on; a
+      ;; session adopted after long work may compact on it right away,
+      ;; and nil (turned off) clears a fraction a fork carried in.
+      (harness-call 'session/update session-id :context-fraction harness-tasks-context-fraction :silent t)
       (when (and worktree (harness-method-exists-p 'worktree/branch))
         (let ((id (plist-get task :id)))
           (harness-then (harness-call-async 'worktree/branch worktree)
@@ -2945,7 +2983,7 @@ up again, merges in flight are queued again and waiting tasks start."
 (harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task, from backlog write-up or worktree through your review to merged, with a concurrency limit."
+  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)

@@ -34,6 +34,8 @@
 (declare-function harness-provider-claude--drop-stale-entries "harness-provider-claude")
 (declare-function harness-provider-claude--make-session "harness-provider-claude")
 (declare-function harness-provider-claude--cli-tools "harness-provider-claude")
+(declare-function harness-provider-claude--environment-for "harness-provider-claude")
+(declare-function harness-provider-claude--spawn-key "harness-provider-claude")
 (defvar harness-brave-api-key)
 (defvar harness-websearch-provider)
 (defvar harness-websearch-builtin)
@@ -188,6 +190,30 @@ and the sessions created meanwhile kept that window."
     (should (equal "bypassPermissions" (nth (1+ (cl-position "--permission-mode" cmd :test #'equal)) cmd)))
     (should-not (member "--allowedTools" cmd))
     (should (equal "claude-sonnet-5" (nth (1+ (cl-position "--model" cmd :test #'equal)) cmd)))))
+
+(ert-deftest harness-provider-claude-autocompact-follows-a-context-fraction ()
+  "A session on a fraction of its window tells the CLI to compact there.
+That is the harness's shorter budget for a task's session."
+  (harness-provider-claude-test--setup)
+  (let* ((request (harness-provider-claude-test--request "s-ctx" "hello"))
+         (with-fraction (lambda (fraction)
+                          (plist-put (copy-sequence request) :session
+                                     (plist-put (copy-sequence (plist-get request :session))
+                                                :context-fraction fraction)))))
+    ;; No fraction: nothing is overridden, and the CLI's default stands.
+    (should-not (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50"
+                        (harness-provider-claude--environment-for request)))
+    (should-not (car (last (harness-provider-claude--spawn-key request))))
+    (let ((request-half (funcall with-fraction 0.5)))
+      (should (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50"
+                      (harness-provider-claude--environment-for request-half)))
+      ;; The fraction is part of the settings a process was spawned with,
+      ;; so changing it restarts the CLI with the new override.
+      (should (equal 0.5 (car (last (harness-provider-claude--spawn-key request-half))))))
+    ;; A percentage on the other side of the CLI's scale is clamped.
+    (should (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=1"
+                    (harness-provider-claude--environment-for
+                     (funcall with-fraction 0.001))))))
 
 (ert-deftest harness-provider-claude-turn-with-hosted-tool-call ()
   (harness-provider-claude-test--setup)

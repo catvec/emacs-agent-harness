@@ -554,6 +554,43 @@ announced, so the UI does not keep showing the old one."
             (should (= 1000000 (harness-session-test-window id)))))
       (harness-session-test-drop-provider))))
 
+(ert-deftest harness-session-window-fraction-scales-the-model-window ()
+  "A session on a context fraction uses that part of its model's window.
+The fraction follows a model change, an outright window wins over it,
+and nil gives the whole window back."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("big" . 1000000) ("small" . 200000)))
+          (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                             :model "test-win:big" :context-fraction 0.5)
+                               :id)))
+            (should (= 500000 (harness-session-test-window id)))
+            (should (= 0.5 (plist-get (harness-call 'session/get id) :context-fraction)))
+            ;; The fraction is of the model's window, whatever the model
+            ;; is now.
+            (harness-call 'session/update id :model "test-win:small" :silent t)
+            (should (= 100000 (harness-session-test-window id)))
+            ;; An outright window wins over the fraction; unset, the
+            ;; fraction applies again.
+            (harness-call 'session/update id :context-window 8000 :silent t)
+            (should (= 8000 (harness-session-test-window id)))
+            (harness-call 'session/update id :context-window nil :silent t)
+            (should (= 100000 (harness-session-test-window id)))
+            ;; It is kept across restarts, and a fork inherits it.
+            (harness-session-flush)
+            (clrhash harness-sessions)
+            (harness-session--load-all)
+            (should (= 100000 (harness-session-test-window id)))
+            (let ((fork (harness-await (harness-call 'session/fork id :kind 'fork))))
+              (should (= 0.5 (plist-get fork :context-fraction)))
+              (should (= 100000 (plist-get fork :context-window))))
+            ;; nil is the whole window, as for any session.
+            (harness-call 'session/update id :context-fraction nil :silent t)
+            (should-not (plist-get (harness-call 'session/get id) :context-fraction))
+            (should (= 200000 (harness-session-test-window id)))))
+      (harness-session-test-drop-provider))))
+
 (ert-deftest harness-session-record-window-copy-ignored-on-load ()
   "Records used to keep `:context-window', a copy of the model's window.
 That copy may be the 128000 stand-in; a session loads with its model's

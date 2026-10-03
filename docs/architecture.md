@@ -346,8 +346,10 @@ requests are not restored: the turn that would read their answers is
 gone.
 
 - `session/create &rest PLIST` — `:cwd` required; `:name :model
-  :permission-mode :thinking :kind :parent-id :host :worktree`, and
-  `:context-window` to set the session's own window.  Fills
+  :permission-mode :thinking :kind :parent-id :host :worktree`,
+  `:context-window` to set the session's own window and
+  `:context-fraction` to run on that part of its model's window (see
+  the compaction section).  Fills
   project, defaults from `config/get`.  → session.  Event `session/created`.
 - `session/get ID`, `session/list &optional FILTER` (`:project :status
   :kind :parent-id :active`), `session/delete ID`.
@@ -355,7 +357,9 @@ gone.
   node ("model → …") and persists the setting through `config/set` when
   `:persist t`.  `:context-window N` sets the session's own window, nil
   its model's again; a new `:model` drops a window set for the old one
-  unless PLIST sets one too.  Event `session/updated ID CHANGES`.
+  unless PLIST sets one too.  `:context-fraction F` runs it on that
+  part of its model's window, nil the whole of it, the window set for
+  the session winning over it.  Event `session/updated ID CHANGES`.
 - `session/set-all SETTINGS &optional FILTER` — the same change on every
   session FILTER selects (`session/list`'s filter plus `:except` ids);
   returns the ids that changed, newest first.  A session already holding
@@ -582,6 +586,14 @@ permission prompts to the harness instead, as `can_use_tool` control
 requests; the harness allows its own tools and refuses any other.  A
 tool call the CLI refuses on its own (`system/permission_denied`)
 becomes a `hint` that names the setting.
+
+A session whose context window is a fraction of its model's
+(`:context-fraction', which task sessions have by default) is spawned
+with `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` set to that percentage, so the
+CLI auto-compacts at the shorter budget the harness gave the session
+rather than at its own default.  The fraction is part of the settings a
+process was started with, so changing it restarts the CLI with
+`--resume`, like the model and system prompt.
 
 The one exception is WebSearch, which stands in for web_search
 (`harness-provider-claude-builtin-tools`; capability `:builtin-tools`).
@@ -1007,7 +1019,11 @@ pending request and resolves when answered).
   points at the compacted head, sets it as head, hints before/after.
 - Auto: `agent/before-turn` compacts when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
-  reports `:compaction hosted`.
+  reports `:compaction hosted`.  The window is the session's
+  (`:context-window' override, else its model's); a session on a
+  `:context-fraction' of its model's window compacts at that part of
+  it, which is how task sessions compact earlier
+  (`harness-tasks-context-fraction', half the window by default).
 
 ### naming
 
@@ -1136,6 +1152,13 @@ to the task's file (below); the record also keeps `:file-base` and
   values a new task would get, the configured ones included, and the
   board submits them with each task.
   With `:refine` the task goes to the backlog instead (below).
+- A task's session also runs on `harness-tasks-context-fraction' (0.5)
+  of its model's window, so it compacts earlier than an interactive
+  session; nil gives it the whole window.  A refined task's write-up
+  session, and a session adopted by `task/adopt', get it too.  A
+  provider that compacts on its own side keeps deciding by itself,
+  except Claude Code, which is spawned with the fraction as
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE' (see the claude provider).
 - Backlog refinement (once called grooming): a `:refine` task is
   `refining` while a session at its directory -- `ask` and
   non-interactive, `harness-tasks-refine-model` and

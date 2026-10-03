@@ -25,6 +25,14 @@
 ;; catalogue's would go stale when the catalogue changes, or keep the
 ;; stand-in given for a model the catalogue had not listed yet.  When
 ;; the catalogue changes, the sessions whose window moved are announced.
+;;
+;; A session may instead run on a fraction of its model's window
+;; (`:context-fraction' to `session/create' or `session/update'): the
+;; window in effect is then that part of the model's, computed afresh
+;; so a model change moves it too.  Task sessions use this to compact
+;; earlier than interactive ones (see `harness-tasks-context-fraction').
+;; A `:context-window' set outright for the session wins over the
+;; fraction, being the more explicit choice.
 
 ;;; Code:
 
@@ -43,6 +51,7 @@
   allowed-dirs (status 'idle) parent-id fork-node created updated
   (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :list-cost 0.0 :context 0 :turns 0))
   context-window                        ; one set for the session, else nil: the model's
+  context-fraction                      ; part of the model's window to use, else nil
   budget head queue pending todos plan provider-state
   ;; runtime only
   (nodes (make-hash-table :test 'equal))
@@ -55,15 +64,15 @@
 (defconst harness-session--public-keys
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
-    :context-window :context-window-override :budget :head :queue :pending :todos :plan
-    :provider-state))
+    :context-window :context-window-override :context-fraction :budget :head :queue :pending
+    :todos :plan :provider-state))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
 
 (defconst harness-session--settings
   '(:name :model :permission-mode :thinking :non-interactive :allowed-dirs :budget :context-window
-    :cwd :host :worktree)
+    :context-fraction :cwd :host :worktree)
   "Keys `session/update' accepts.")
 
 ;;;; Conversions
@@ -75,8 +84,9 @@
 
 (defun harness-session-plist (s)
   "Return the public plist of session struct S.
-`:context-window' is the window in effect (see `harness-session--window'),
-`:context-window-override' the one set for S, or nil."
+`:context-window' is the window in effect (see `harness-session--window');
+`:context-window-override' and `:context-fraction' are what was set for
+S, and are nil when unset."
   (list :id (harness-session-id s) :name (harness-session-name s)
         :kind (harness-session-kind s) :project (harness-session-project s)
         :cwd (harness-session-cwd s) :host (harness-session-host s)
@@ -90,6 +100,7 @@
         :updated (harness-session-updated s) :usage (harness-session-usage s)
         :context-window (harness-session--window s)
         :context-window-override (harness-session-context-window s)
+        :context-fraction (harness-session-context-fraction s)
         :budget (harness-session-budget s) :head (harness-session-head s)
         :queue (harness-session-queue s) :pending (harness-session-pending s)
         :todos (harness-session-todos s) :plan (harness-session-plan s)
@@ -127,6 +138,8 @@
           ;; Not `:context-window': that is the model's window as it was
           ;; when the record was written, and now comes from the catalogue.
           (harness-session-context-window s) (plist-get pl :context-window-override)
+          (harness-session-context-fraction s) (harness-session--context-fraction-value
+                                                (plist-get pl :context-fraction))
           (harness-session-budget s) (plist-get pl :budget)
           (harness-session-head s) (plist-get pl :head)
           (harness-session-queue s) (plist-get pl :queue)
@@ -224,10 +237,21 @@ HEAD defaults to the session head."
                     nil)))
       128000))
 
+(defun harness-session--context-fraction-value (v)
+  "Return V when it is a usable part of a context window, else nil.
+A fraction is above 0 and at most 1."
+  (and (numberp v) (> v 0) (<= v 1) v))
+
 (defun harness-session--window (s)
-  "Return the context window of S: the one set for it, else its model's."
+  "Return the context window of S: the one set for it, else its model's.
+A `context-fraction' set for S uses that part of its model's window;
+a window set for it outright (`:context-window') wins over the fraction."
   (or (harness-session-context-window s)
-      (harness-session--model-window (harness-session-model s))))
+      (let ((window (harness-session--model-window (harness-session-model s))))
+        (if-let* ((fraction (harness-session--context-fraction-value
+                             (harness-session-context-fraction s))))
+            (max 1 (round (* window fraction)))
+          window))))
 
 ;;;; Methods: lifecycle
 
@@ -263,6 +287,8 @@ HEAD defaults to the session head."
           (harness-session-created s) (float-time)
           (harness-session-updated s) (float-time)
           (harness-session-context-window s) (plist-get plist :context-window)
+          (harness-session-context-fraction s) (harness-session--context-fraction-value
+                                                (plist-get plist :context-fraction))
           (harness-session-budget s) (or (plist-get plist :budget) (harness-session--config 'harness-budget cwd))
           (harness-session-provider-state s) (plist-get plist :provider-state)
           (harness-session-loaded s) t)
@@ -349,6 +375,8 @@ next start settles its turn."
     (:model (format "model → %s" value))
     (:permission-mode (format "permission mode → %s" value))
     (:thinking (format "thinking → %s" (or value "default")))
+    (:context-fraction (if value (format "context window → %d%%" (round (* 100 value)))
+                         "context window → the model's"))
     (:non-interactive (format "non-interactive %s" (if (harness-json-true-p value) "on" "off")))
     (:budget (if value (format "budget → %s%s" (harness-format-cost (plist-get value :amount))
                                (if (plist-get value :hard) " (hard)" ""))
@@ -362,7 +390,9 @@ With `:persist' non-nil, model, permission mode and thinking are also
 written to the configuration layer.  With `:silent' no hint is added.
 `:context-window' sets the session's own context window, nil its
 model's again; a new `:model' brings its own window too, unless PLIST
-also sets one."
+also sets one.  `:context-fraction' runs it on that part of its
+model's window, nil the whole of it; a `:context-window' set for the
+session wins over it."
   (let* ((s (harness-session--get id))
          (persist (plist-get plist :persist))
          (silent (plist-get plist :silent))
@@ -381,6 +411,8 @@ also sets one."
                   (:allowed-dirs (setf (harness-session-allowed-dirs s) (and (listp v) v)))
                   (:budget (setf (harness-session-budget s) v))
                   (:context-window (setf (harness-session-context-window s) v))
+                  (:context-fraction (setf (harness-session-context-fraction s)
+                                           (harness-session--context-fraction-value v)))
                   (:cwd (setf (harness-session-cwd s) (file-name-as-directory (expand-file-name v))))
                   (:host (setf (harness-session-host s) v))
                   (:worktree (setf (harness-session-worktree s) v)))
@@ -461,6 +493,7 @@ resume and write into the parent's CLI session.  A BTW is no fork; see
                                                   t :false)
                              :allowed-dirs (harness-session-allowed-dirs parent)
                              :budget (harness-session-budget parent)
+                             :context-fraction (harness-session-context-fraction parent)
                              :kind 'fork
                              :parent-id id
                              :fork-node (harness-session-head parent))
