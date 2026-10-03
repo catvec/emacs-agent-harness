@@ -47,6 +47,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-permission` | A chat waiting for permission to run `pip install` | `harness-media-shot-chat-permission` |
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
+| `tasks-search` | The board searched in words: one task matches the query, the archive it did and `[Undo]` | `harness-media-shot-tasks-search` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
 | `usage` | The usage dashboard over 30 days, by model | `harness-media-shot-usage` |
@@ -140,8 +141,11 @@ a commit and a summary, or, with HOLD, half of it and a hold.
 
 Requests that are not a conversation get answers of their own: the
 auto-mode judge always allows, session titles come from
-`harness-media--titles` (matched against the first message), and
-backlog write-ups from `harness-media--write-ups`.
+`harness-media--titles` (matched against the first message), backlog
+write-ups from `harness-media--write-ups`, and the task board's search
+from `harness-media--search-answer`, which reads the query in the board
+dump and answers the JSON the search asks for (the `tasks-search`
+picture archives the pagination task that way).
 
 ## Adding or changing a picture
 

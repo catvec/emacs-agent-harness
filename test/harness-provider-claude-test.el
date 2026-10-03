@@ -476,6 +476,26 @@ session of its own instead of resuming, and writing into, the parent's."
     (should-not (process-live-p proc))
     (should-not (gethash "s8" harness-provider-claude--sessions))))
 
+(ert-deftest harness-provider-claude-warm-starts-the-process-close-ends-it ()
+  "`provider/warm' starts the CLI a request will use, so the request that
+comes with the same settings finds it running; warming again leaves it
+alone, and `provider/close' ends it."
+  (harness-provider-claude-test--setup)
+  (let* ((request (harness-provider-claude-test--request "w1" "hi" :tools nil))
+         (warm (harness-plist-remove request :messages)))
+    (should (harness-call 'provider/warm warm))
+    (let ((proc (harness-provider-claude-session-process (gethash "w1" harness-provider-claude--sessions))))
+      (should (process-live-p proc))
+      ;; Ready already: warming again does nothing.
+      (should-not (harness-call 'provider/warm warm))
+      (let ((events (car (harness-provider-claude-test--run request))))
+        (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason))))
+      (should (eq proc (harness-provider-claude-session-process (gethash "w1" harness-provider-claude--sessions))))
+      (should (harness-call 'provider/close (plist-get request :model) "w1"))
+      (should-not (process-live-p proc))
+      (should-not (gethash "w1" harness-provider-claude--sessions))
+      (should-not (harness-call 'provider/close (plist-get request :model) "w1")))))
+
 (ert-deftest harness-provider-claude-image-blocks-and-trailing-messages ()
   (harness-provider-claude-test--setup)
   (let* ((img (make-temp-file "harness-img-" nil ".png"))

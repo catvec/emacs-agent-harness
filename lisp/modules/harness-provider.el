@@ -138,7 +138,13 @@ A provider whose listing failed maps to nil; one not asked yet is absent.")
   (remhash id harness-provider--fetching)
   (harness-provider--rebuild-cache))
 
-(cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities tiers)
+(defvar harness-provider--lifecycle (make-hash-table :test 'eq)
+  "Provider id -> (:warm FN :close FN), the hooks `harness-define-provider' got.
+Kept beside the provider records rather than in them, so records made
+before a reload need no slots they lack.")
+
+(cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities tiers
+                                      warm close)
   "Register provider ID.
 LABEL and DOC describe it.  MODELS is a function returning a promise of
 model plists.  COMPLETE takes a request plist and returns a handle
@@ -148,16 +154,24 @@ REFRESH flag and returns a promise of billing and quota information
 \(see `provider/quota').  CAPABILITIES is the static capability plist.
 TIERS names a model per user-facing tier (see `harness-model-tiers'
 and `harness-provider-tier-model') so the harness can pick a model on
-its own.  Defining ID again replaces it and forgets the models it
-listed, which it is asked for again when needed; other providers'
-models stay cached."
+its own.  WARM, when given, takes a request plist without messages and
+prepares what such a request will need, a process say, so it answers
+sooner (`provider/warm'); CLOSE takes a session id and frees what the
+provider keeps for it (`provider/close').  Defining ID again replaces
+it and forgets the models it listed, which it is asked for again when
+needed; other providers' models stay cached."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
                                      :capabilities capabilities :tiers tiers)
            harness-providers)
+  (puthash id (list :warm warm :close close) harness-provider--lifecycle)
   (harness-provider--forget id)
   id)
+
+(defun harness-provider--hook (id key)
+  "Return provider ID's lifecycle hook KEY (`:warm' or `:close'), or nil."
+  (plist-get (gethash id harness-provider--lifecycle) key))
 
 (defun harness-provider-get (id)
   "Return provider ID or nil."
@@ -168,6 +182,7 @@ models stay cached."
 Return non-nil when a provider was registered under ID."
   (prog1 (and (gethash id harness-providers) t)
     (remhash id harness-providers)
+    (remhash id harness-provider--lifecycle)
     (harness-provider--forget id)))
 
 (defun harness-provider-parse-model (model-id)
@@ -440,6 +455,36 @@ are reported through the `:on-event' callback as a `done' event with
         (error
          (funcall on-event (list :type 'done :stop-reason 'error :error (harness-error-message err)))
          (list :cancel #'ignore)))))))
+
+(harness-defmethod provider/warm (request)
+  "Have REQUEST's provider get ready for a request like it; non-nil if it did.
+REQUEST is shaped like `provider/complete''s, without messages or
+`:on-event': its `:model' picks the provider, and its `:session',
+`:system' and `:thinking' say what the coming request will be.  A
+provider that keeps a process per session (the Claude CLI) starts it
+now, so a request that comes later with the same settings is answered
+sooner; one with nothing to prepare does nothing.  A failure is
+logged, never signalled: warming is only ever a head start."
+  (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
+               (warm (and pid (harness-provider-get pid) (harness-provider--hook pid :warm))))
+    (when warm
+      (condition-case err
+          (and (funcall warm request) t)
+        (error (harness-log 'warn "provider %s: warming up failed: %s" pid (harness-error-message err))
+               nil)))))
+
+(harness-defmethod provider/close (model-id session-id)
+  "Have MODEL-ID's provider free what it keeps for SESSION-ID: a process, say.
+Requests made under ids of their own, such as a one-off question's,
+have no session whose deletion would free it.  Return non-nil when the
+provider had something to free.  A failure is logged, never signalled."
+  (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model model-id))
+               (close (and pid (harness-provider-get pid) (harness-provider--hook pid :close))))
+    (when (and close session-id)
+      (condition-case err
+          (and (funcall close session-id) t)
+        (error (harness-log 'warn "provider %s: closing %s failed: %s" pid session-id (harness-error-message err))
+               nil)))))
 
 (harness-defmethod provider/fork (model-id state)
   "Ask MODEL-ID's provider to fork provider STATE.

@@ -1472,6 +1472,22 @@ its usage report has arrived."
       (harness-provider-claude--send-user entry blocks))
     (list :cancel (lambda () (harness-provider-claude--cancel entry)))))
 
+(defun harness-provider-claude--warm (request)
+  "Start the CLI process that REQUEST's session will use; non-nil if started.
+Spawning the CLI is most of the wait of a short request, so a request
+expected soon (the next search of a task board, say) has its process
+started ahead, with the settings it will come with.  A session running
+a turn is left alone, and so is a live process with those settings."
+  (let* ((sid (or (plist-get (plist-get request :session) :id) "default"))
+         (entry (harness-provider-claude--entry sid))
+         (proc (harness-provider-claude-session-process entry)))
+    (unless (or (harness-provider-claude-session-active entry)
+                (and (process-live-p proc)
+                     (equal (harness-provider-claude--spawn-key request)
+                            (harness-provider-claude-session-spawn-key entry))))
+      (harness-provider-claude--ensure-process entry request)
+      t)))
+
 (defun harness-provider-claude--cancel (entry)
   "Interrupt the current turn on ENTRY, killing the process if it ignores us."
   (when (and (harness-provider-claude-session-active entry)
@@ -1547,7 +1563,9 @@ fetched first when REFRESH is non-nil or the last one is stale (see
   :fork #'harness-provider-claude--fork
   :quota #'harness-provider-claude--quota
   :capabilities harness-provider-claude-capabilities
-  :tiers harness-provider-claude-tiers)
+  :tiers harness-provider-claude-tiers
+  :warm #'harness-provider-claude--warm
+  :close #'harness-provider-claude-close)
 
 (harness-define-module 'provider-claude
   :doc "Claude Code CLI as a hosted-loop completion provider."

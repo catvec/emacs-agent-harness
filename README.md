@@ -46,14 +46,16 @@ OpenAI-compatible APIs and AWS Bedrock.
 |---|---|
 | ![A chat waiting for permission to run pip install, with the allow and deny buttons](docs/media/chat-permission.png) | ![A chat waiting for the answer to a question, with three options](docs/media/chat-question.png) |
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
-| ![The task board with tasks needing input, in review, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
-| The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
+| ![The task board with tasks needing input, in review, in progress, pending and completed](docs/media/tasks.png) | ![The task board filtered by a search in words: the query, one task matches, the archive it did and [Undo]](docs/media/tasks-search.png) |
+| The task board: each task has a session and a worktree | A search in words: the board shows what it is about, and acts |
+| ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) | ![A BTW side conversation open under a session](docs/media/btw.png) |
+| The conversation tree of a session, a fork and a BTW | A BTW side conversation under its session |
 | ![The usage dashboard: a month of cost per day, cost by model, the plan's quota and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
 | Usage: cost per day and model, plan quota, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
 | The session list | The worktrees of a project and their sessions |
-| ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
-| A BTW side conversation under its session | The menu, with the chat's own commands |
+| ![The harness menu opened from a chat](docs/media/menu.png) | |
+| The menu, with the chat's own commands | |
 
 ## Requirements
 
@@ -178,6 +180,7 @@ named by `harness-server-init-file`.
 | `C-c h O` | `harness-open-session` | Open a session chosen by name |
 | `C-c h l` | `harness-sessions` | Show the session list |
 | `C-c h a` | `harness-tasks` | Show the task board |
+| `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation |
@@ -353,6 +356,22 @@ so several tasks can work in parallel.
   (`SPC`) opens it too, along with whatever else the task has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
+- `/` searches the board in words: a question ("did I have a task about
+  the question button?") or an order ("restart the errored tasks", "get
+  rid of the pagination task"). The line goes with a dump of the board
+  to a quick, cheap model (`harness-tasks-search-model`, the provider's
+  cheapest tier by default), which answers with the tasks it is about
+  and what to do, never with prose. The board then shows only those
+  tasks, archived ones included, under a banner that says what it shows;
+  `C-g` or `[Clear]` shows every task again. An order that is easily
+  undone or does no harm -- archive of a task not at work, restore,
+  retry, start -- runs at once and the banner says so, with `[Undo]`;
+  one that interrupts work, merges it or sends words to an agent --
+  stop, archive of a working task, verify, mark done, message, send
+  back -- is offered instead, and an empty `/` then `RET` runs it. The
+  model may look further once, in the sessions' transcripts, when the
+  board alone does not say enough. `[Search]` in the header does the
+  same, and `C-c h /` from anywhere opens the project's board first.
 - `RET` opens the session of the task at point. From that session,
   `C-c h a` leads back to the board.
 - A task's session shows in the session list (`C-c h l`) under the

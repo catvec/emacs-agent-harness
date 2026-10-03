@@ -968,6 +968,22 @@ and never ends, so the task stays in progress, and nothing is committed."
   (let ((last (car (last (plist-get request :messages)))))
     (and last (cl-some (lambda (b) (equal (plist-get b :type) "tool_result")) (plist-get last :content)))))
 
+(defun harness-media--search-answer (text)
+  "The scripted search model's answer to TEXT, the message carrying the query.
+TEXT is the board dump the search sends; a query about the orders listing
+gets the pagination task shown and archived, so the picture has a filter,
+a toast and an [Undo]."
+  (let* ((tasks (plist-get harness-media--world :tasks))
+         (pagination (plist-get tasks :pagination))
+         (slow (plist-get tasks :slow)))
+    (cond
+     ((and pagination (string-match-p "pagination\\|limit/offset\\|orders listing" text))
+      (format "{\"show\":[\"%s\"],\"do\":[{\"task\":\"%s\",\"action\":\"archive\"}]}"
+              pagination pagination))
+     ((and slow (string-match-p "slow\\|warning\\|500 ms" text))
+      (format "{\"show\":[\"%s\",\"%s\"],\"do\":[]}" slow slow))
+     (t "{\"show\":[],\"do\":[]}"))))
+
 (defun harness-media--script (request)
   "Return the events that answer REQUEST."
   (let* ((system (or (plist-get request :system) ""))
@@ -981,6 +997,9 @@ and never ends, so the task stays in progress, and nothing is committed."
       (list (harness-media--say (or (cdr (cl-find-if (lambda (e) (string-match-p (car e) first)) harness-media--titles))
                                     "Work on the API"))))
      ((string-match-p "^## Task refinement" system) (harness-media--write-up first))
+     ;; The task board's search: answer in JSON, as the prompt asks.
+     ((string-prefix-p "You are the search box" system)
+      (list (harness-media--say (harness-media--search-answer newest))))
      (t (let ((entry (cl-find-if (lambda (e) (string-match-p (car e) newest)) harness-media--scripts)))
           (if entry
               (funcall (cdr entry) request)
@@ -1505,6 +1524,26 @@ Return the chat's buffer."
       (set-window-start window (point-min))))
   (harness-media--capture "tasks"))
 
+(defun harness-media-shot-tasks-search ()
+  "The task board after a search in words: filtered, an action done, [Undo].
+The scripted model answers a query about the orders pagination task: the
+board shows that task under the banner, archives it (the toast says so)
+and offers [Undo].  The task is put back after the picture, so the shots
+that follow see the board every other picture shows."
+  (harness-media--view
+   (lambda () (harness-tasks harness-media-project 'full))
+   (lambda ()
+     (cl-letf (((symbol-function 'read-string)
+                (lambda (&rest _) "get rid of the pagination task")))
+       (call-interactively #'harness-ui-tasks-search))
+     (harness-media--wait (lambda () (plist-get harness-ui-tasks-search--state :results))
+                          20 "the search to act")
+     (harness-media--settle 0.6)))
+  (harness-media--capture "tasks-search")
+  ;; Leave the world as the other shots expect it.
+  (let ((id (plist-get (plist-get harness-media--world :tasks) :pagination)))
+    (ignore-errors (harness-call 'task/archive id t))))
+
 (defun harness-media-shot-sessions ()
   "The session list."
   (harness-media--view #'harness-sessions)
@@ -1582,6 +1621,7 @@ Return the chat's buffer."
     ("chat-permission" . harness-media-shot-chat-permission)
     ("chat-question" . harness-media-shot-chat-question)
     ("tasks" . harness-media-shot-tasks)
+    ("tasks-search" . harness-media-shot-tasks-search)
     ("sessions" . harness-media-shot-sessions)
     ("tree" . harness-media-shot-tree)
     ("usage" . harness-media-shot-usage)

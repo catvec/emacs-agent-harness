@@ -413,6 +413,8 @@ gone.
   :complete FN          ; (REQUEST) → HANDLE plist (:cancel FN)
   :fork FN              ; (MODEL PROVIDER-STATE) → promise of new state    [optional]
   :quota FN             ; (&optional REFRESH) → promise of QUOTA (below)     [optional]
+  :warm FN              ; (REQUEST) → BOOL: get ready for a request like it  [optional]
+  :close FN             ; (SESSION-ID) → BOOL: free what it keeps for one   [optional]
   :capabilities PLIST   ; static defaults, merged with per-model ones
   :tiers PLIST)         ; a model per tier, see below
 ```
@@ -529,7 +531,13 @@ parent's would make the fork resume the parent's own CLI session.
 Methods: `provider/list`, `provider/models &optional REFRESH` (cached union
 across providers), `provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
 `provider/complete REQUEST` → HANDLE, `provider/fork MODEL-ID STATE` → promise,
-`provider/quota PROVIDER-ID &optional REFRESH`.  The model used when nothing
+`provider/quota PROVIDER-ID &optional REFRESH`,
+`provider/warm REQUEST` (ask the provider to prepare what a request like
+REQUEST, which has no messages, will need -- the Claude CLI spawns its
+process now, so the answer comes sooner; a failure is only logged) and
+`provider/close MODEL-ID SESSION-ID` (free what the provider keeps for a
+session id of a request that is not a session of its own, such as a task
+board's search; the CLI kills its process).  The model used when nothing
 more specific is configured is `harness-model`.
 
 Billing and quota: `provider/quota` (PROVIDER-ID a symbol or its name;
@@ -1253,7 +1261,13 @@ finished work waits for the user's verdict.
   `:ids', `:except' and `:cwd', and review, done and archived tasks are
   never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
   steering; reopens), `task/refine ID &optional TEXT`,
-  `task/merge ID` (retry; not in review), `task/verify ID`,
+  `task/merge ID` (retry; not in review), `task/retry ID` (have a task
+  that stopped carry on where it stopped: a failed merge is queued
+  again, a stopped write-up is written again, a pending task starts, a
+  stopped turn is prompted with `harness-tasks--retry-prompt` from
+  `harness-sender-system "tasks"`, and a task whose work never began is
+  started over; it refuses a task that is working, blocked on a
+  question, in review or done), `task/verify ID`,
   `task/reject ID FEEDBACK &optional ATTACHMENTS` (both in review only),
   `task/complete ID` (counts as verified), `task/archive ID &optional
   RESTORE` (deactivates the session; removes a merged task's worktree and
@@ -1309,6 +1323,69 @@ finished work waits for the user's verdict.
   it got; a write-up cut short is written again by its session (with
   nil: `:outcome interrupted`).  Merges in flight are queued again, and
   tasks in review wait on for the user.
+
+### tasks-search
+
+The task board's search: a query in words ("did I have a task about the
+question button?", "restart the errored tasks") finds tasks and may act
+on them, answered by a cheap model that returns JSON only.
+
+- `task/search CWD QUERY &optional (:shown IDS)` → promise of
+  `(:query QUERY :ids IDS :actions ACTIONS :model MODEL :looked LOOKED)`.
+  Nothing changes yet.  IDS are the tasks QUERY is about, best match
+  first, archived ones included; ACTIONS are what QUERY orders, each
+  `(:task ID :action NAME :text TEXT :title TITLE :confirm BOOL)`, NAME
+  one of `harness-tasks-search-actions` (`archive`, `restore`, `stop`,
+  `retry`, `start`, `verify`, `complete`, `message`, `reject`), TEXT the
+  words a message or a send-back carries, and `:confirm` t for an action
+  that interrupts work, merges it or sends words to an agent (stop,
+  verify, complete, message, reject, and archive of a working task),
+  false for the rest.  `:shown` is what the board shows now, which
+  "them" in QUERY means.  `:looked` says what the model read besides the
+  board.
+- The message to the model carries a compact dump of the board: for
+  every task (newest first, at most `harness-tasks-search--max-tasks`)
+  its id, column and state, title, the request it was asked in, the todo
+  it is on, what it waits for the user on, the summary it handed in, its
+  branch, times and errors.  The system prompt
+  (`harness-tasks-search--system`) is constant, and the model must
+  answer one line of JSON `{"show":[ID…],"do":[{"task":ID,"action":…}]}`.
+  Unknown ids are dropped and acted-on tasks are always shown.  When the
+  model asks to look further instead of answering -- `{"grep":TEXT}` over
+  the sessions' transcript logs (`sessions/*.nodes.jsonl` under the state
+  directory, searched in a subprocess) or `{"read":[ID…]}` for the latest
+  transcript, at most `harness-tasks-search--read-limit` tasks -- it gets
+  one more round (`harness-tasks-search--final-text` closes it) and must
+  answer then.
+- The model is `harness-tasks-search-model`: `auto` (the default) takes
+  the provider of the task model's `cheap` tier (`provider/tier-model`),
+  nil uses the task model itself, a string forces one.
+  `harness-tasks-search-thinking` (nil) is its thinking level, the
+  output budget is `harness-tasks-search--max-tokens`, and a call taking
+  longer than `harness-tasks-search--timeout` fails.
+  `harness-tasks-search--request` runs it as a side session in
+  `task-search/` under the state directory, so the project's Claude
+  history and CLAUDE.md stay out of it.  Every search gets its own
+  session id, and its process is closed when it ends
+  (`provider/close`).
+- `task/search-warm CWD` → `(:model MODEL :warm BOOL)`: start the model
+  process the next search of CWD's board will use (`provider/warm`), so
+  the answer comes sooner; a process left unused is closed after
+  `harness-tasks-search--warm-idle` seconds.
+- `task/search-apply ACTIONS` → promise of one result per action,
+  `(:task :action :title :ok :error :undo)`, run in order: archive stops
+  a working task first and archives it once it stopped
+  (`harness-tasks-search--stop-wait`), stop never drops a task that has
+  not started, retry is `task/retry`, message is a follow-up to the
+  task's session (or words added to the prompt of a task with no session
+  yet), and the rest are the tasks methods.  ARCHIVE and RESTORE carry
+  `:undo`, the action that undoes them.
+- Searches are not sessions: their cost is recorded with `usage/record`
+  under the board's project with `:session nil`.
+- Settings `harness-tasks-search-model`, `harness-tasks-search-thinking`;
+  the demo provider answers search requests heuristically (word match
+  plus action verbs), so the dev daemon, the tests and the screenshots
+  work offline.
 
 ### notifications
 
@@ -1917,6 +1994,28 @@ finished first and completed the latest completed (verified, else
 finished) first; pending is the queue, in the order its tasks start,
 with the backlog among it (oldest first; only queued tasks have a place
 in line).
+
+The board's search (`harness-ui-tasks-search`, `/` on the board,
+[Search] in its header, `C-c h /` anywhere, which opens the project's
+board first) reads a line in the minibuffer and sends it to
+`_harness/task/search`; the board then shows only the tasks the answer is
+about, archived ones included, under a banner that says the line, how
+many tasks it shows and what the model looked at besides the board.
+`harness-ui-tasks-filter` carries that: `:show` a predicate over a task,
+`:banner` a function returning the text above the columns, `:clear` the
+function that drops it, which `C-g` on the board runs when the compose
+box has nothing to leave ([Clear] does too).  The columns left without a
+task are hidden.  An action the answer does not need confirmed runs at
+once, and the banner and the echo area say what it did (the toast), with
+[Undo] when it can be undone (archive and restore undo each other);
+`task/search-apply` runs them.  An action that interrupts work, merges
+it or sends words to an agent is proposed instead: the banner asks, with
+a button that does it and [Skip], and `/` then RET on an empty line does
+it too (the prompt names what an empty line would do).  The header's
+[Search] segment spins while the model works, and each search opens with
+`_harness/task/search-warm` so its process is started before the line is
+typed; the model's name shows while it answers.  The best match gets
+point once the board shows it (`harness-ui-tasks--focus`).
 
 Cost display: whatever shows what a session cost goes through
 `harness-ui-format-spend`.  That is a price when calls are billed per

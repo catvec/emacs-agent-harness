@@ -176,6 +176,73 @@ turn `harness-tasks-require-verification' on themselves."
         (should (eq 'error (plist-get (harness-tasks-test-task id) :outcome)))
         (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))))))
 
+(defvar harness-tasks--retry-prompt)
+(declare-function harness-tasks--set "harness-tasks")
+
+(ert-deftest harness-tasks-retry-carries-on-a-stopped-task ()
+  "task/retry has the session of a task whose turn failed carry on, told
+so by the harness, and the task works again."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+      (let* ((id (harness-tasks-test-submit "will fail once"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :outcome)) 5 "an outcome")
+        (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+        (let ((harness-provider-demo-script-override harness-tasks-test-script))
+          ;; It is at work again at once, before its turn starts.
+          (should (eq 'active (plist-get (harness-call 'task/retry id) :column)))
+          (should-error (harness-call 'task/retry id))
+          (harness-tasks-test-wait-state id 'done))
+        (should (equal sid (plist-get (harness-tasks-test-task id) :session)))
+        (let ((retry (car (last (harness-tasks-test-user-nodes sid)))))
+          (should (string-match-p "stopped before the task was finished: it failed with an error\\. Check where"
+                                  (plist-get retry :content)))
+          (should (equal (harness-sender-system "tasks") (harness-node-sender retry))))
+        ;; Done: nothing to retry.
+        (should-error (harness-call 'task/retry id))))))
+
+(ert-deftest harness-tasks-retry-follows-where-the-task-stopped ()
+  "A pending task starts, a write-up that stopped is written again, a
+failed merge is merged again, and a task at work or in review is not
+retried."
+  (harness-tasks-test-with
+    ;; Pending: it starts, whatever the limit says.
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "waits for a slot")))
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (harness-call 'task/retry id)
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-tasks-test-wait-state id 'done)))
+    ;; A write-up that failed is written again.
+    (let ((id (let ((harness-provider-demo-script-override
+                     '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+                (prog1 (harness-tasks-test-refine "a flaky idea")))))
+      (harness-test-wait (lambda () (eq 'error (plist-get (harness-tasks-test-task id) :outcome))) 5 "the error")
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Make the flaky idea solid") (:type done :stop-reason end-turn))))
+        (harness-call 'task/retry id)
+        (harness-tasks-test-wait-state id 'pending)
+        (should (equal "Make the flaky idea solid" (plist-get (harness-tasks-test-task id) :prompt)))))
+    ;; A failed merge goes back to the merge queue: here, with no
+    ;; worktree, `task/merge' says why it cannot.
+    (let ((id (harness-tasks-test-submit "merged badly")))
+      (harness-tasks-test-wait-state id 'done)
+      (harness-tasks--set id :state 'active :outcome 'merge-failed :error "merge conflict")
+      (should (string-match-p "no worktree to merge"
+                              (cadr (should-error (harness-call 'task/retry id))))))
+    ;; At work.
+    (let* ((harness-provider-demo--delay 5)
+           (id (harness-tasks-test-submit "busy")))
+      (harness-test-wait (lambda () (eq 'active (plist-get (harness-tasks-test-task id) :column))) 5 "at work")
+      (should (string-match-p "working already" (cadr (should-error (harness-call 'task/retry id)))))
+      (harness-call 'task/cancel id))
+    ;; In review.
+    (let* ((harness-tasks-require-verification t)
+           (id (harness-tasks-test-submit "for review")))
+      (harness-tasks-test-wait-state id 'review)
+      (should (string-match-p "review" (cadr (should-error (harness-call 'task/retry id))))))))
+
 (ert-deftest harness-tasks-blocked-session-needs-input ()
   (harness-tasks-test-with
     (let ((harness-provider-demo--delay 0.3)

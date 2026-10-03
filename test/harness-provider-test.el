@@ -176,5 +176,38 @@ family names rather than whole ids."
     ;; A tier with no name of its own still fits, as a key it does not name.
     (should (harness-test-fits-p type '(:cheap "haiku" :my-tier "other")))))
 
+(ert-deftest harness-provider-warm-and-close-reach-the-provider ()
+  "`provider/warm' and `provider/close' call the hooks of the request's
+provider; a provider without them, an unknown one and a hook that fails
+make no difference to the caller."
+  (harness-provider-test-with (test-warm test-plain)
+    (let (warmed closed)
+      (harness-define-provider 'test-warm
+        :complete #'ignore
+        :warm (lambda (request) (push request warmed) t)
+        :close (lambda (sid) (push sid closed) (equal sid "s-1")))
+      (harness-define-provider 'test-plain :complete #'ignore)
+      (let ((request (list :model "test-warm:m" :session '(:id "s-1") :system "S")))
+        (should (harness-call 'provider/warm request))
+        (should (equal (list request) warmed)))
+      (should (harness-call 'provider/close "test-warm:m" "s-1"))
+      (should-not (harness-call 'provider/close "test-warm:m" "s-2"))
+      (should (equal '("s-2" "s-1") closed))
+      ;; Nothing to prepare or free.
+      (should-not (harness-call 'provider/warm '(:model "test-plain:m" :session (:id "s-1"))))
+      (should-not (harness-call 'provider/close "test-plain:m" "s-1"))
+      (should-not (harness-call 'provider/warm '(:model "nobody:m")))
+      (should-not (harness-call 'provider/close "nobody:m" "s-1"))
+      ;; A hook that fails is logged, not signalled.
+      (harness-define-provider 'test-warm
+        :complete #'ignore
+        :warm (lambda (_) (error "No CLI"))
+        :close (lambda (_) (error "No CLI")))
+      (should-not (harness-call 'provider/warm '(:model "test-warm:m")))
+      (should-not (harness-call 'provider/close "test-warm:m" "s-1"))
+      ;; Defined again without them, it has none.
+      (harness-define-provider 'test-warm :complete #'ignore)
+      (should-not (harness-call 'provider/warm '(:model "test-warm:m"))))))
+
 (provide 'harness-provider-test)
 ;;; harness-provider-test.el ends here
