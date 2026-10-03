@@ -250,7 +250,11 @@ non-interactive switch or the thinking level to change it. A
 non-interactive session never waits for you, which suits a session you
 leave to work while you are away. Whatever would ask you for
 permission, the auto-mode judge decides instead, whatever the
-permission mode. After any denial the agent is told to find another
+permission mode. The judge runs on the session's own provider: its
+cheap tier (Claude Haiku, DeepSeek Flash, or the cheapest model that
+provider lists), so a session on one provider is never judged through
+another. Set `harness-perms-auto-model` to force one model. After any
+denial the agent is told to find another
 way. Access to directories outside the session's own still needs you,
 so it is denied while you are away. New sessions, task sessions
 included, start interactive unless `harness-non-interactive` is set.

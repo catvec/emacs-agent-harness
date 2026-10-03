@@ -71,6 +71,15 @@ think adaptively at an effort level named like the thinking level."
 Only a request that has not streamed anything yet is retried."
   :type 'integer :group 'harness)
 
+(defcustom harness-bedrock-tiers
+  '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
+  "Model names or id regexps Bedrock names for the common tiers.
+A model of the endpoint's catalogue matching the value is used: the
+cheapest `haiku', say, for `cheap'.  The auto-mode judge runs on the
+`cheap' one.  A tier nothing matches falls back to the catalogue's
+prices."
+  :type '(plist :key-type symbol :value-type string) :group 'harness)
+
 (defcustom harness-bedrock-model-defaults
   '(("claude-fable-5" :context-window 1000000 :max-output 128000 :thinking adaptive-only
      :thinking-levels ("low" "medium" "high" "xhigh" "max") :prompt-caching t
@@ -2048,7 +2057,8 @@ at all (`:no-tools')."
                    (or (ignore-errors (harness-bedrock--runtime-url endpoint)) "?"))
       :models (lambda () (harness-bedrock--models (harness-bedrock-endpoint id)))
       :complete (lambda (request) (harness-bedrock--complete (harness-bedrock-endpoint id) request))
-      :capabilities (or (plist-get endpoint :capabilities) '(:vision t :thinking t)))
+      :capabilities (or (plist-get endpoint :capabilities) '(:vision t :thinking t))
+      :tiers (or (plist-get endpoint :tiers) harness-bedrock-tiers))
     id))
 
 (defun harness-bedrock--register-all ()

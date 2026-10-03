@@ -115,5 +115,57 @@ A failed refresh keeps what it listed before."
       (harness-resolve old '((:name "m" :context-window 1000)))
       (should (= 500000 (harness-provider-test-window "test-swap:m"))))))
 
+(ert-deftest harness-provider-tier-model-prefers-declared-tiers ()
+  "A provider's `:tiers' names the model each tier uses, over its price."
+  (harness-provider-test-with (test-tiered)
+    (harness-define-provider 'test-tiered
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          (list (list :name "big" :pricing '(:input 10.0 :output 50.0))
+                                (list :name "small" :pricing '(:input 1.0 :output 5.0))
+                                (list :name "mid" :pricing '(:input 3.0 :output 15.0)))))
+      ;; Deliberately not the price order, so the declaration is what decides.
+      :tiers '(:cheap "mid" :balanced "big" :frontier "small"))
+    (should (equal "test-tiered:mid" (harness-call 'provider/tier-model "test-tiered:big" :cheap)))
+    (should (equal "test-tiered:big" (harness-call 'provider/tier-model "test-tiered:big" :balanced)))
+    (should (equal "test-tiered:small" (harness-call 'provider/tier-model "test-tiered:big" :frontier)))
+    ;; The tier defaults to cheap, and an unknown provider has none.
+    (should (equal "test-tiered:mid" (harness-call 'provider/tier-model "test-tiered:big")))
+    (should-not (harness-call 'provider/tier-model "nobody:m" :cheap))))
+
+(ert-deftest harness-provider-tier-model-falls-back-to-price ()
+  "Without `:tiers', a tier is the provider's models sorted by price.
+A model whose cost is unknown is never chosen over one that is priced."
+  (harness-provider-test-with (test-sorted)
+    (harness-define-provider 'test-sorted
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          (list (list :name "free" :pricing nil)
+                                (list :name "big" :pricing '(:input 10.0 :output 50.0))
+                                (list :name "small" :pricing '(:input 1.0 :output 5.0))
+                                (list :name "mid" :pricing '(:input 3.0 :output 15.0))))))
+    (should (equal "test-sorted:small" (harness-call 'provider/tier-model "test-sorted:x" :cheap)))
+    (should (equal "test-sorted:mid" (harness-call 'provider/tier-model "test-sorted:x" :balanced)))
+    (should (equal "test-sorted:big" (harness-call 'provider/tier-model "test-sorted:x" :frontier)))
+    (should-not (equal "test-sorted:free" (harness-call 'provider/tier-model "test-sorted:x" :cheap)))))
+
+(ert-deftest harness-provider-tier-model-matches-a-regexp ()
+  "A tier names its model by a name a catalogue id matches as a regexp.
+Bedrock and Copilot model ids carry a vendor prefix, so their tiers are
+family names rather than whole ids."
+  (harness-provider-test-with (test-regexp)
+    (harness-define-provider 'test-regexp
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          (list (list :name "us.anthropic.claude-haiku-4-5" :pricing '(:input 1.0 :output 5.0))
+                                (list :name "us.anthropic.claude-sonnet-5" :pricing '(:input 3.0 :output 15.0))
+                                (list :name "us.anthropic.claude-opus-5" :pricing '(:input 5.0 :output 25.0)))))
+      ;; The regexp wins over the price: sonnet, not the cheaper haiku.
+      :tiers '(:cheap "sonnet" :frontier "opus"))
+    (should (equal "test-regexp:us.anthropic.claude-sonnet-5"
+                   (harness-call 'provider/tier-model "test-regexp:x" :cheap)))
+    (should (equal "test-regexp:us.anthropic.claude-opus-5"
+                   (harness-call 'provider/tier-model "test-regexp:x" :frontier)))))
+
 (provide 'harness-provider-test)
 ;;; harness-provider-test.el ends here

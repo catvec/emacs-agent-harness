@@ -104,6 +104,15 @@ It is listed first in the catalogue.  Copilot's own model \"auto\" lets
 Copilot choose a model for each request."
   :type 'string :group 'harness)
 
+(defcustom harness-provider-copilot-tiers
+  '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
+  "Model names or id regexps Copilot names for the common tiers.
+A model of the plan's catalogue matching the value is used: the
+cheapest `haiku', say, for `cheap'.  The auto-mode judge runs on the
+`cheap' one.  A tier nothing matches falls back to the catalogue's
+prices."
+  :type '(plist :key-type symbol :value-type string) :group 'harness)
+
 (defcustom harness-provider-copilot-extra-args nil
   "Extra command line arguments appended to every `copilot' invocation."
   :type '(repeat string) :group 'harness)
@@ -2103,7 +2112,8 @@ permission judge's (SESSION-ID-perms), lose theirs too."
   :complete #'harness-provider-copilot--complete
   :fork #'harness-provider-copilot--fork-state
   :quota #'harness-provider-copilot--quota
-  :capabilities harness-provider-copilot-capabilities)
+  :capabilities harness-provider-copilot-capabilities
+  :tiers harness-provider-copilot-tiers)
 
 (harness-define-module 'provider-copilot
   :doc "GitHub Copilot CLI as a hosted-loop completion provider."

@@ -379,7 +379,8 @@ gone.
   :complete FN          ; (REQUEST) → HANDLE plist (:cancel FN)
   :fork FN              ; (MODEL PROVIDER-STATE) → promise of new state    [optional]
   :quota FN             ; (&optional REFRESH) → promise of QUOTA (below)     [optional]
-  :capabilities PLIST)  ; static defaults, merged with per-model ones
+  :capabilities PLIST   ; static defaults, merged with per-model ones
+  :tiers PLIST)         ; a model per tier, see below
 ```
 
 MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
@@ -391,6 +392,17 @@ a symbol called as `(MODEL USAGE AT)` that returns the pricing plist in
 effect at AT; `usage/price` uses its answer instead of `:pricing`.  This
 is how the DeepSeek provider follows its peak and off-peak tiers, and it
 keeps the catalogue plain data that crosses the wire unchanged.
+
+Model tiers: `:tiers' names a model (`:cheap' `:balanced' `:frontier'
+are the common ones) by a name, id or regexp, so the harness can pick a
+model on its own - the auto-mode judge asks for the cheap one -
+without the user naming one.  A tier the provider does not name, and a
+provider that declares none, falls back to its own catalogue sorted by
+price: `provider/tier-model MODEL-ID &optional TIER' returns the `:cheap'
+one by default, or nil when the provider is unknown or lists nothing
+(the caller then uses what it has).  This is what ties the judge to the
+session's provider.  Claude, DeepSeek, Bedrock and Copilot name their
+tiers; the dynamic OpenAI-compatible catalogues fall back to price.
 
 The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
@@ -779,7 +791,13 @@ pending request and resolves when answered).
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
   `auto` (reads inside the jail allowed; a cheap model,
   `harness-perms-auto-model`, decides the rest with a reason; falls back
-  to ask), `yolo` (allow everything; the jail still applies).  Tools in
+  to ask).  The judge model defaults to `auto', which asks the session's
+  own provider for its `:cheap' tier (`provider/tier-model'), so a
+  session on DeepSeek is judged by a DeepSeek model and one on Claude by
+  Claude Haiku; a provider without tiers is sorted by price, and the
+  session's own model is the last resort.  Naming a model, or nil for
+  the session's own, overrides it.  `yolo` allows everything; the jail
+  still applies.  Tools in
   `harness-perms-auto-allow-tools` are allowed in every mode: the meta
   tools, skill and Emacs lookups, `web_search`, which only sends its
   query to the configured search provider, so task sessions can search,

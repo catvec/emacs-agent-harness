@@ -943,6 +943,7 @@ Folded header lines continue the header above them."
 (ert-deftest harness-provider-bedrock-registration ()
   (should (harness-provider-get 'bedrock))
   (should (equal "AWS Bedrock" (harness-provider-label (harness-provider-get 'bedrock))))
+  (should (equal harness-bedrock-tiers (harness-provider-tiers (harness-provider-get 'bedrock))))
   (should (memq 'provider (harness-module-requires (harness-module-get 'provider-bedrock))))
   (let ((saved harness-bedrock-endpoints))
     (unwind-protect

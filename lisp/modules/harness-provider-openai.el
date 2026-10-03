@@ -76,6 +76,9 @@ Every entry is a plist with these keys:
                    the URL when absent (`deepseek' is never guessed, so
                    name it for an endpoint that needs its handling)
   :capabilities    static capability plist overriding the flavor default
+  :tiers           model names per tier (:cheap :balanced :frontier), as
+                   `harness-define-provider' takes them; without one the
+                   tier comes from the catalogue's prices
 
 When neither :api-key nor :api-key-env yields a key, auth-source is
 searched with the URL's host and user \"apikey\".  Changing this
@@ -669,7 +672,8 @@ to pick up a changed plist."
       :doc (format "OpenAI-compatible endpoint at %s" (harness-openai--base-url endpoint))
       :models (lambda () (harness-openai--models endpoint))
       :complete (lambda (request) (harness-openai--complete endpoint request))
-      :capabilities (harness-openai--capabilities endpoint))
+      :capabilities (harness-openai--capabilities endpoint)
+      :tiers (plist-get endpoint :tiers))
     id))
 
 (defun harness-openai--register (endpoint)

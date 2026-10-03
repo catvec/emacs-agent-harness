@@ -97,7 +97,7 @@ is never used for any other failure.")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
 (defconst harness-acp--enum-keys
-  '(:status :kind :permission-mode :behavior :scope :group-by :period :days)
+  '(:status :kind :permission-mode :behavior :scope :group-by :period :days :tier)
   "Keys whose string values are interned back to symbols on the way in.")
 
 (defconst harness-acp--modes

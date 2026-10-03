@@ -82,12 +82,19 @@ when a permission request is answered with scope `always'."
                         :value-type sexp))
   :group 'harness)
 
-(defcustom harness-perms-auto-model "claude:claude-haiku-4-5-20251001"
-  "Model that judges tool calls, as PROVIDER:NAME.
+(defcustom harness-perms-auto-model 'auto
+  "Model that judges tool calls, as PROVIDER:NAME, or `auto'.
 It judges in `auto' mode, and in every mode for a non-interactive
-session, deciding what would ask the user while they are away.  When
-nil the session's own model is used."
-  :type '(choice (const nil) string) :group 'harness)
+session, deciding what would ask the user while they are away.
+`auto' (the default) asks the session's provider for its `cheap' tier
+\(see `harness-provider-tier-model'), so the judge runs on a model the
+session's provider can actually serve, falling back to the session's
+own model when the provider names none and its prices are unknown.  A
+PROVIDER:NAME forces that model, and nil uses the session's own model."
+  :type '(choice (const :tag "The session provider's cheap model" auto)
+                 (const :tag "The session's own model" nil)
+                 (string :tag "Model"))
+  :group 'harness)
 
 (defcustom harness-perms-auto-timeout 30
   "Seconds the auto-mode judge may take before it counts as giving no verdict.
@@ -625,6 +632,24 @@ one, and quotes the start of TEXT, what the judge replied."
             (if (harness-string-blank-p text) ""
               (concat "; it replied: " (harness-truncate-end text 200))))))
 
+(defun harness-perms--judge-model (session)
+  "Return the model the auto-mode judge uses for SESSION.
+`harness-perms-auto-model' names one, `auto' asks the session's own
+provider for its cheap tier (falling back to the session's model), and
+nil uses the session's model."
+  (let* ((session-model (or (plist-get session :model)
+                            (harness-perms--config 'harness-model session)))
+         (choice harness-perms-auto-model)
+         (automatic (or (eq choice 'auto)
+                        (and (stringp choice) (equal choice "auto")))))
+    (cond
+     (automatic
+      (or (and session-model (harness-method-exists-p 'provider/tier-model)
+               (harness-call 'provider/tier-model session-model 'cheap))
+          session-model))
+     ((stringp choice) choice)
+     (t session-model))))
+
 (defun harness-perms--auto (decision next request)
   "Ask a cheap model to decide REQUEST, in auto mode or for a user away.
 The judge decides what is still undecided in `auto' mode, and in every
@@ -637,8 +662,7 @@ away.  DECISION is the current value and NEXT continues the chain."
                   (harness-perms--judge-p session)
                   (harness-method-exists-p 'provider/complete)))
         (funcall next decision)
-      (let* ((model (or harness-perms-auto-model (plist-get session :model)
-                        (harness-perms--config 'harness-model session)))
+      (let* ((model (harness-perms--judge-model session))
              (text "") (settled nil) (timer nil) (handle nil)
              (failure nil)              ; why the judge gave no verdict
              ;; A verdict is a new decision: DECISION itself comes back

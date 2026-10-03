@@ -117,6 +117,13 @@ limit filled in.  The tier names the rates in
   :type '(repeat (plist :key-type symbol :value-type sexp))
   :set #'harness-deepseek--custom-set :group 'harness)
 
+(defcustom harness-deepseek-tiers
+  '(:cheap "deepseek-flash" :balanced "deepseek-flash" :frontier "deepseek-v4-pro")
+  "DeepSeek models named for the common tiers.
+The auto-mode judge, for one, runs on the `cheap' one."
+  :type '(plist :key-type symbol :value-type string)
+  :set #'harness-deepseek--custom-set :group 'harness)
+
 (defconst harness-deepseek-host "api.deepseek.com"
   "Host of the DeepSeek API; also the auth-source host of the key.")
 
@@ -228,6 +235,7 @@ from `:peak-pricing' apply.  This is the model's `:pricing-fn', which
         :api-key-env "DEEPSEEK_API_KEY"
         :flavor 'deepseek
         :models (harness-deepseek--models)
+        :tiers harness-deepseek-tiers
         :capabilities '(:thinking t)))
 
 ;;;; Registration
