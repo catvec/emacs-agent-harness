@@ -106,6 +106,7 @@ Either way the toggle above the compose box switches it per board."
 (defvar harness-ui-btw-about)
 (declare-function harness-btw "harness-ui-btw")
 (declare-function harness-ui-popout-at-point "harness-ui-popout")
+(declare-function harness-ui-popout-try-at-point "harness-ui-popout")
 
 (defmacro harness-ui-tasks--with-task (id &rest body)
   "Run BODY with point on task ID's card.
@@ -1272,7 +1273,7 @@ anything that moves a task without one, so a board never drifts.")
         (". s" "Start now" harness-ui-tasks-start)
         (". e" "Edit prompt" harness-ui-tasks-edit)
         (". m" "Message session" harness-ui-tasks-reply)
-        (". SPC" "View what it waits on" harness-ui-tasks-requests)
+        (". SPC" "View what point needs" harness-ui-tasks-requests)
         (". r" "Refine" harness-ui-tasks-refine)
         (". y" "Allow tool call" harness-ui-tasks-allow)
         (". n" "Deny tool call" harness-ui-tasks-deny)]
@@ -1603,19 +1604,23 @@ done again with it.  A write-up that stopped is retried."
         (message "An agent is writing the task up")))))
 
 (defun harness-ui-tasks-requests ()
-  "Pop out what the task at point waits on, to read and answer it.
-The popout shows the permission prompt or question in full, with its
-buttons, keys and diagrams, and can answer it.  The task board itself
-takes a typed answer in its compose box too (m).
-\<harness-ui-tasks-mode-map>\[harness-ui-tasks-requests] runs this from the board."
+  "Pop out what the task at point needs, to read and act on it.
+That is the permission prompt or question its session waits on, shown in
+full -- buttons, keys and diagrams -- and answered there; the board's
+compose box takes a typed answer too (m).  A task that handed work in
+shows its report instead, through the shared
+`harness-ui-popout-at-point-functions'.  The card offers the request as
+[Answer…] / [Request…]; SPC does this."
   (interactive)
   (let* ((task (harness-ui-tasks--task))
          (sid (plist-get task :session)))
     (unless sid (user-error "This task has not started yet"))
-    (unless (harness-ui-pending-items sid)
-      (user-error "This task is not waiting on anything"))
-    (unless (fboundp 'harness-ui-popout-at-point) (user-error "The popout module is not loaded"))
-    (harness-ui-popout-at-point)))
+    (unless (fboundp 'harness-ui-popout-at-point)
+      (user-error "The popout module is not loaded"))
+    ;; The request is the pending module's and a report the review module's;
+    ;; both register with the shared hook, which knows the task at point.
+    (unless (harness-ui-popout-try-at-point)
+      (user-error "This task is not waiting on anything"))))
 
 (defun harness-ui-tasks--answer (task answer)
   "Answer the question TASK's session is waiting on with ANSWER."
