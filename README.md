@@ -332,11 +332,26 @@ test notification and says what each provider did with it.
 
 ## Configuration
 
-`C-c h S` (`M-x harness-settings`) opens the settings page, which lists
-every harness option and edits it like a Customize buffer. A toggle at
-the top switches between the global value, saved with Customize, and
-the value for the current project, saved in its `.dir-locals.el`. Each
-setting shows where its effective value comes from.
+`C-c h S` (`M-x harness-settings`) opens the settings page, which edits
+every harness setting like a Customize buffer. A toggle at the top
+switches between the global value, saved with Customize, and the value
+for the current project, saved in its `.dir-locals.el`. Each setting
+shows where its effective value comes from.
+
+The page leads with the settings most people change, grouped by what
+they are for: **New sessions** (model, thinking, permission mode,
+non-interactive, budget), **Files and safety** (directory access,
+sandbox policy, standing permission rules), **Task board** (what task
+sessions start with, and when their work counts as done),
+**Notifications** (which task events notify you, and through which
+providers) and **Models and services** (extra providers, web search,
+keys).
+
+Everything else is under **Advanced**, one click away (`a`), listed by
+module, with a count of how many differ from their defaults. The
+options of the interface itself (where windows open, the prefix key,
+labels, faces) are in Customize, through the button at the end of the
+page.
 
 The following settings can be set per project and per directory through
 `.dir-locals.el`. A directory's value takes precedence over its
@@ -349,11 +364,15 @@ project's, and a project's over the global value.
 - `harness-budget`
 - `harness-sandbox-policy`
 - `harness-non-interactive`
-- `harness-context-reserve`
 - `harness-tasks-directory`
 
-The settings page lists the other options too; they have a global value
-only.
+The rest of the settings have a global value only.
+
+The number of settings is now small on purpose: prompts, timeouts,
+polling intervals, per-tool limits and other details of how the harness
+works are constants, not options, so they can change without breaking
+anyone's configuration. [docs/configuration-audit.md](docs/configuration-audit.md)
+is the audit behind that, and the rule for adding a setting.
 
 ## Providers and billing
 

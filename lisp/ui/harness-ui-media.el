@@ -59,9 +59,8 @@ Nil auto-detects pw-record, arecord or ffmpeg (PulseAudio input)."
   "Playback volume in percent for external players."
   :type 'integer :group 'harness-ui-media)
 
-(defcustom harness-ui-media-thumbnail-width 320
-  "Width in pixels of generated video thumbnails."
-  :type 'integer :group 'harness-ui-media)
+(defconst harness-ui-media--thumbnail-width 320
+  "Width in pixels of generated video thumbnails.")
 
 (defvar harness-ui-media-attach-function nil
   "Function called with an ATTACHMENT plist when a recording finishes.
@@ -322,10 +321,10 @@ Unknown durations are probed once with ffprobe and cached."
 (defun harness-ui-media--thumbnail-command (path out)
   "Return the command producing thumbnail OUT of video PATH, or nil."
   (cond ((executable-find "ffmpegthumbnailer")
-         (list "ffmpegthumbnailer" "-i" path "-o" out "-s" (number-to-string harness-ui-media-thumbnail-width) "-q" "8"))
+         (list "ffmpegthumbnailer" "-i" path "-o" out "-s" (number-to-string harness-ui-media--thumbnail-width) "-q" "8"))
         ((executable-find "ffmpeg")
          (list "ffmpeg" "-loglevel" "error" "-y" "-ss" "1" "-i" path "-frames:v" "1"
-               "-vf" (format "scale=%d:-1" harness-ui-media-thumbnail-width) out))))
+               "-vf" (format "scale=%d:-1" harness-ui-media--thumbnail-width) out))))
 
 (defun harness-ui-media--make-thumbnail (path)
   "Generate the thumbnail of PATH in the background, then redraw its renderings."
@@ -355,8 +354,8 @@ Unknown durations are probed once with ffprobe and cached."
     (concat
      (cond
       ((and ready (display-graphic-p) (image-type-available-p 'png))
-       (propertize " " 'display (create-image thumb 'png nil :max-width harness-ui-media-thumbnail-width
-                                              :max-height (/ (* 9 harness-ui-media-thumbnail-width) 16))
+       (propertize " " 'display (create-image thumb 'png nil :max-width harness-ui-media--thumbnail-width
+                                              :max-height (/ (* 9 harness-ui-media--thumbnail-width) 16))
                    'help-echo "Video thumbnail (mouse-1: open)"
                    'keymap (let ((m (make-sparse-keymap)))
                              (define-key m [mouse-1] (lambda () (interactive) (harness-ui-media-open path)))

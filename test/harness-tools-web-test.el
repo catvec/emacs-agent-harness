@@ -56,7 +56,7 @@
         (harness-tools-web-test--call "web_search" :query "x")
         (should (string-search "count=5" (caar calls)))
         (harness-tools-web-test--call "web_search" :query "x" :count 999)
-        (should (string-search (format "count=%d" harness-web-search-max-count) (caar calls)))
+        (should (string-search (format "count=%d" harness-tools-web--search-max-count) (caar calls)))
         ;; No results.
         (cl-letf (((symbol-function 'harness-http-request-json)
                    (lambda (&rest _) (harness-resolved '(:web (:results nil))))))

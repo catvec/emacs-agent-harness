@@ -10,7 +10,7 @@
 (require 'harness-test-helpers)
 
 (defvar harness-provider-demo-script-override)
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 (defvar harness-naming-auto)
 (defvar harness-sessions)
 (defvar harness-tools)
@@ -24,7 +24,7 @@
 (defvar harness-tasks-permission-mode)
 (defvar harness-tasks-non-interactive)
 (defvar harness-tasks-model)
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-notifications-providers)
@@ -44,7 +44,7 @@ first.  Finished tasks are done at once unless BODY turns
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent tasks acp
                           notifications tasks-notify))
          (harness-test-load-module m)))
@@ -58,7 +58,7 @@ first.  Finished tasks are done at once unless BODY turns
      (setq harness-tasks--loaded t
            harness-tasks--dirty nil
            harness-acp--clients nil)
-     (let* ((harness-provider-demo-delay 0.005)
+     (let* ((harness-provider-demo--delay 0.005)
             (harness-provider-demo-script-override
              '((:type text :delta "Fixed the parser:\n\n- the   tests pass") (:type done :stop-reason end-turn)))
             (harness-naming-auto nil)

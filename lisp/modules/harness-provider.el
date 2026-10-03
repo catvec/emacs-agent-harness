@@ -21,10 +21,6 @@
 (require 'harness-core)
 (require 'harness-util)
 
-(defcustom harness-default-model "claude:claude-fable-5-1"
-  "Model used when nothing more specific is configured, as PROVIDER:NAME."
-  :type 'string :group 'harness)
-
 (cl-defstruct (harness-provider (:copier nil))
   id label doc models-fn complete-fn fork-fn quota-fn capabilities)
 

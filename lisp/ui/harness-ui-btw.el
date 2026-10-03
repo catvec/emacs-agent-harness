@@ -44,10 +44,9 @@
 (defgroup harness-ui-btw nil
   "BTW side conversations." :group 'harness-ui)
 
-(defcustom harness-ui-btw-window-parameters
+(defconst harness-ui-btw--window-parameters
   '((side . bottom) (slot . 1) (window-height . 0.35) (preserve-size . (nil . t)))
-  "Where the BTW window appears."
-  :type 'sexp :group 'harness-ui-btw)
+  "Where the BTW window appears.")
 
 (defconst harness-ui-btw-blank-name "btw"
   "Name of a BTW until its first message names it.")
@@ -118,7 +117,7 @@ once; otherwise the first message sent from the box names the BTW."
    (lambda (_)
      (unless harness-ui-open-session-function (user-error "No chat module loaded"))
      (let* ((buf (funcall harness-ui-open-session-function id))
-            (window (display-buffer-in-side-window buf harness-ui-btw-window-parameters)))
+            (window (display-buffer-in-side-window buf harness-ui-btw--window-parameters)))
        (select-window window)
        (with-current-buffer buf
          (setq-local harness-ui-position 'btw)

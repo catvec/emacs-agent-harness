@@ -4,7 +4,7 @@
 (require 'harness-test-helpers)
 
 (defvar harness-provider-demo-script-override)
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 (defvar harness-naming-auto)
 (defvar harness-sessions)
 (defvar harness-tools)
@@ -18,7 +18,7 @@
 (defvar harness-tasks-permission-mode)
 (defvar harness-tasks-non-interactive)
 (defvar harness-tasks-model)
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (declare-function harness-tasks--save "harness-tasks")
@@ -38,7 +38,7 @@ turn `harness-tasks-require-verification' on themselves."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent tasks acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
@@ -51,7 +51,7 @@ turn `harness-tasks-require-verification' on themselves."
      (setq harness-tasks--loaded t
            harness-tasks--dirty nil
            harness-acp--clients nil)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override harness-tasks-test-script)
            (harness-naming-auto nil)
            (harness-tasks-max-running 3)
@@ -140,7 +140,7 @@ turn `harness-tasks-require-verification' on themselves."
 
 (ert-deftest harness-tasks-blocked-session-needs-input ()
   (harness-tasks-test-with
-    (let ((harness-provider-demo-delay 0.3)
+    (let ((harness-provider-demo--delay 0.3)
           (columns nil))
       (harness-on 'task/changed (lambda (task) (push (plist-get task :column) columns)))
       (let* ((id (harness-tasks-test-submit "slow one"))
@@ -341,7 +341,7 @@ turn `harness-tasks-require-verification' on themselves."
 
 (defvar harness-provider-demo--continuations)
 (defvar harness-tasks-resume-interrupted)
-(defvar harness-tasks-resume-prompt)
+(defvar harness-tasks--resume-prompt)
 (declare-function harness-agent-turn-handle "harness-agent")
 (declare-function harness-session-flush "harness-session")
 (declare-function harness-session--load-all "harness-session")
@@ -422,7 +422,7 @@ turn `harness-tasks-require-verification' on themselves."
       (should (harness-tasks-test--node sid (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
                                                              (plist-get (plist-get n :meta) :interrupted)))))
       (should (harness-tasks-test--node sid (lambda (n) (and (eq (plist-get n :kind) 'user)
-                                                             (equal harness-tasks-resume-prompt (plist-get n :content))))))
+                                                             (equal harness-tasks--resume-prompt (plist-get n :content))))))
       (should (= 2 (cl-count 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))))
 
 (ert-deftest harness-tasks-interrupted-task-waits-when-resume-is-off ()
@@ -461,7 +461,7 @@ turn `harness-tasks-require-verification' on themselves."
 (ert-deftest harness-tasks-recover-leaves-working-tasks-alone ()
   "Tasks this process works on are not interrupted, whatever their state says."
   (harness-tasks-test-with
-    (let* ((harness-provider-demo-delay 0.2)
+    (let* ((harness-provider-demo--delay 0.2)
            (id (harness-tasks-test-submit "busy"))
            (sid (plist-get (harness-tasks-test-task id) :session)))
       (harness-tasks--recover)
@@ -475,7 +475,7 @@ turn `harness-tasks-require-verification' on themselves."
 ;; Submitted with :refine, a task is written up by a read-only session
 ;; and waits in pending until task/start, which hands it to that session.
 
-(defvar harness-tasks-start-text)
+(defvar harness-tasks--start-message)
 
 (defconst harness-tasks-test-write-up
   "Fix nested quotes in the parser\n\n- Handle nested quotes in `parse-args'.\n- Done when the quote tests pass.")
@@ -613,12 +613,12 @@ turn `harness-tasks-require-verification' on themselves."
           (should (plist-get task :session)))
         (should-error (harness-call 'task/refine "t-nonexistent"))))))
 
-(defvar harness-tasks-refine-tool-calls)
+(defvar harness-tasks--refine-tool-calls)
 
 (ert-deftest harness-tasks-refine-told-to-finish-after-enough-calls ()
   "A write-up that keeps looking around is steered, once, to write it up."
   (harness-tasks-test-with
-    (let ((harness-tasks-refine-tool-calls 2)
+    (let ((harness-tasks--refine-tool-calls 2)
           (harness-provider-demo-script-override
            '((:type tool-call :id "r1" :name "peek" :input (:n 1))
              (:type tool-call :id "r2" :name "peek" :input (:n 2))
@@ -709,22 +709,22 @@ turn `harness-tasks-require-verification' on themselves."
       ;; It got the work, not the message that resumes work cut short.
       (let ((texts (harness-tasks-test-user-texts sid)))
         (should (= 2 (length texts)))
-        (should (string-prefix-p harness-tasks-start-text (cadr texts)))))))
+        (should (string-prefix-p harness-tasks--start-message (cadr texts)))))))
 
 ;;;; Naming: task sessions are titled like tickets
 
-(defvar harness-tasks-naming-prompt)
-(defvar harness-naming-system-prompt)
+(defvar harness-tasks--naming-instructions)
+(defvar harness-naming--base-system-prompt)
 
 (ert-deftest harness-tasks-naming-prompt-for-task-sessions-only ()
   (harness-tasks-test-with
     (let* ((id (harness-tasks-test-submit "fix the parser"))
            (task-session (harness-call 'session/get (plist-get (harness-tasks-test-task id) :session)))
            (plain (harness-call 'session/create :cwd default-directory :model "demo:scripted")))
-      (should (equal (concat "Name it.\n\n" harness-tasks-naming-prompt)
+      (should (equal (concat "Name it.\n\n" harness-tasks--naming-instructions)
                      (harness-run-filter 'naming/system-prompt "Name it." task-session)))
       (should (equal "Name it." (harness-run-filter 'naming/system-prompt "Name it." plain)))
-      (let ((harness-tasks-naming-prompt nil))
+      (let ((harness-tasks--naming-instructions nil))
         (should (equal "Name it." (harness-run-filter 'naming/system-prompt "Name it." task-session))))
       (harness-tasks-test-wait-state id 'done))))
 
@@ -742,7 +742,7 @@ turn `harness-tasks-require-verification' on themselves."
           (harness-test-wait (lambda () (plist-get (harness-call 'session/get sid) :name)) 5 "the task's name")
           (should (equal "Working on it" (plist-get (harness-call 'session/get sid) :name)))
           (harness-tasks-test-wait-state id 'done)))
-      (should (member (concat harness-naming-system-prompt "\n\n" harness-tasks-naming-prompt) systems)))))
+      (should (member (concat harness-naming--base-system-prompt "\n\n" harness-tasks--naming-instructions) systems)))))
 
 ;;;; Git: worktree, merge queue, done only when merged
 
@@ -750,7 +750,7 @@ turn `harness-tasks-require-verification' on themselves."
 (defvar harness-merge--locks)
 (defvar harness-merge--holds)
 (defvar harness-tasks-worktrees)
-(defvar harness-tasks-merge-session-name)
+(defvar harness-tasks--merge-session-name)
 
 (defun harness-tasks-test--git (dir &rest args)
   "Run git ARGS synchronously in DIR; signal on failure, return stdout."
@@ -851,7 +851,7 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (should (equal "two\n" (harness-tasks-test--main-text root)))
       (should (plist-get (harness-tasks-test-task id) :merged))
       (should (string-match-p "Merge branch" (harness-tasks-test--git root "log" "-1" "--format=%s")))
-      (should (cl-find harness-tasks-merge-session-name (harness-call 'session/list)
+      (should (cl-find harness-tasks--merge-session-name (harness-call 'session/list)
                        :key (lambda (s) (plist-get s :name)) :test #'equal))
       ;; Its record is in the main repository's git directory, out of every
       ;; working tree: the checkout the merge went into only has its task file.
@@ -1146,7 +1146,7 @@ commits from call `harness-tasks-test--commit-on-call' on."
 ;;;; Task files: the board as markdown files in docs/tasks
 
 (defvar harness-tasks-directory)
-(defvar harness-tasks-directory-poll)
+(defvar harness-tasks--directory-poll)
 (defvar harness-tasks-directory-archive)
 (defvar harness-tasks--file-stamps)
 (declare-function harness-tasks--render "harness-tasks")
@@ -1164,7 +1164,7 @@ folders: BODY reads them by listing the board."
   `(harness-tasks-test-with
      (let* ((harness-tasks-store-in-repository t)
             (harness-tasks-directory "docs/tasks")
-            (harness-tasks-directory-poll nil)
+            (harness-tasks--directory-poll nil)
             (harness-tasks-max-running 0)
             (root (harness-tasks-test--make-repo))
             (default-directory root))
@@ -1364,7 +1364,7 @@ folders: BODY reads them by listing the board."
         (should-not (harness-tasks-test--field claims "session")))
       ;; The timer reads the folder too, without a board listing it.
       (harness-tasks-test--write root "polled.md" "# Picked up by the timer\n")
-      (let ((harness-tasks-directory-poll 2)) (harness-tasks--poll))
+      (let ((harness-tasks--directory-poll 2)) (harness-tasks--poll))
       (should (cl-find "Picked up by the timer" (hash-table-values harness-tasks--table)
                        :key (lambda (task) (plist-get task :prompt)) :test #'equal)))))
 
@@ -1687,7 +1687,7 @@ folders: BODY reads them by listing the board."
 
 ;;;; BTW: side conversations about the board
 
-(defvar harness-tasks-btw-prompt)
+(defvar harness-tasks--btw-prompt)
 
 (defun harness-tasks-test--ids (sessions)
   "Return the ids of SESSIONS."
@@ -1711,13 +1711,13 @@ Each is a new session, never an earlier one."
       (should (eq 'btw (plist-get again :kind)))
       (should-not (harness-call 'session/nodes (plist-get again :id)))
       (should-not (plist-get again :provider-state))
-      (should (equal (concat "Base.\n\n" harness-tasks-btw-prompt "\n")
+      (should (equal (concat "Base.\n\n" harness-tasks--btw-prompt "\n")
                      (harness-run-filter 'agent/system-prompt "Base." btw)))
       ;; Task sessions, other sessions and a BTW over a session are left alone.
       (should (equal (plist-get plain :id) (plist-get side :parent-id)))
       (dolist (s (list task-session plain side))
         (should (equal "Base." (harness-run-filter 'agent/system-prompt "Base." s))))
-      (let ((harness-tasks-btw-prompt nil))
+      (let ((harness-tasks--btw-prompt nil))
         (should (equal "Base." (harness-run-filter 'agent/system-prompt "Base." btw))))
       ;; A conversation about the board is no task to onboard.
       (should (member (plist-get plain :id) (harness-tasks-test--ids (harness-call 'task/adoptable default-directory))))
@@ -1742,7 +1742,7 @@ Each is a new session, never an earlier one."
           (should (equal default-directory (plist-get btw :cwd)))
           (should (eq 'end-turn (plist-get (harness-test-await (harness-call-async 'agent/prompt sid "how are the tasks?"))
                                            :stop-reason)))
-          (should (cl-some (lambda (s) (string-match-p (regexp-quote harness-tasks-btw-prompt) s)) systems)))))))
+          (should (cl-some (lambda (s) (string-match-p (regexp-quote harness-tasks--btw-prompt) s)) systems)))))))
 
 (ert-deftest harness-tasks-btw-starts-at-the-project-root ()
   "From anywhere in a repository, or one of its task worktrees, the BTW sits at the main checkout."
@@ -1761,7 +1761,7 @@ Each is a new session, never an earlier one."
 ;; cleanly waits in review; `task/verify' merges it (in git) and
 ;; completes it, `task/reject' sends it back to its session with feedback.
 
-(defvar harness-tasks-reject-text)
+(defvar harness-tasks--reject-message)
 
 (ert-deftest harness-tasks-review-then-verify ()
   "Finished work waits in review, not done, until the user verifies it."
@@ -1835,7 +1835,7 @@ Each is a new session, never an earlier one."
         ;; The session got the feedback as a new prompt, opened by the reject text.
         (let ((texts (harness-tasks-test-user-texts sid)))
           (should (= 2 (length texts)))
-          (should (string-prefix-p harness-tasks-reject-text (cadr texts)))
+          (should (string-prefix-p harness-tasks--reject-message (cadr texts)))
           (should (string-suffix-p "\n\nNested quotes still break." (cadr texts))))
         ;; A second round adds to the first; then the work is accepted.
         (harness-call 'task/reject id "And the docs.")

@@ -25,9 +25,8 @@
 (defgroup harness-ui-sessions nil
   "The session list." :group 'harness-ui)
 
-(defcustom harness-ui-sessions-buffer-name "*harness sessions*"
-  "Name of the session list buffer."
-  :type 'string :group 'harness-ui-sessions)
+(defconst harness-ui-sessions--buffer-name "*harness sessions*"
+  "Name of the session list buffer.")
 
 (defvar-local harness-ui-sessions--project nil
   "Main checkout the list is scoped to, or nil for all projects.")
@@ -186,7 +185,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
 
 (defun harness-ui-sessions--redraw ()
   "Redraw the list buffer if it exists, keeping point on the same session."
-  (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))
+  (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     (with-current-buffer buf
       (let ((id (tabulated-list-get-id)))
         (harness-ui-sessions--refresh)
@@ -208,7 +207,7 @@ listed, and from a task's worktree the list shows the whole project."
   (interactive "P")
   (let ((project (unless all-projects
                    (harness-files-main-root default-directory)))
-        (buf (get-buffer-create harness-ui-sessions-buffer-name)))
+        (buf (get-buffer-create harness-ui-sessions--buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-sessions-mode) (harness-ui-sessions-mode))
       (setq harness-ui-sessions--project project)
@@ -293,7 +292,7 @@ listed, and from a task's worktree the list shows the whole project."
 (defun harness-ui-sessions-reload ()
   "Reload sessions from the harness and resolve their projects again."
   (interactive)
-  (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name)))
+  (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     (with-current-buffer buf (setq harness-ui-sessions--main-roots nil)))
   (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw))))
 

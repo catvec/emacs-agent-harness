@@ -23,11 +23,11 @@
 ;; region delimited by two markers, streaming text is appended at the
 ;; end of the live node's region, and a block is rendered through the
 ;; Markdown renderer only when it is finalised or at most every
-;; `harness-chat-render-interval' seconds.  Thinking, tool calls,
+;; `harness-chat--render-interval' seconds.  Thinking, tool calls,
 ;; compaction summaries and runs of coalescable tools collapse under
 ;; overlays that isearch opens, so every word of the conversation stays
 ;; searchable.  History loads lazily: the newest
-;; `harness-chat-history-limit' nodes at open, an older page whenever a
+;; `harness-chat--history-limit' nodes at open, an older page whenever a
 ;; window scrolls near the top, and blocks far above every window are
 ;; dropped again so a long session never fills the buffer.
 ;;
@@ -64,34 +64,27 @@
 
 ;;;; Customisation
 
-(defcustom harness-chat-history-limit 60
-  "Number of nodes rendered when a session buffer opens."
-  :type 'integer :group 'harness-ui-chat)
+(defconst harness-chat--history-limit 60
+  "Number of nodes rendered when a session buffer opens.")
 
-(defcustom harness-chat-history-page 100
+(defconst harness-chat--history-page 100
   "Number of older nodes loaded when a window scrolls near the top.
-Once two pages of nodes lie above every window, all but one are dropped."
-  :type 'integer :group 'harness-ui-chat)
+Once two pages of nodes lie above every window, all but one are dropped.")
 
-(defcustom harness-chat-compose-max-lines 8
-  "Lines the compose box grows to before the window scrolls instead."
-  :type 'integer :group 'harness-ui-chat)
+(defconst harness-chat--compose-max-lines 8
+  "Lines the compose box grows to before the window scrolls instead.")
 
-(defcustom harness-chat-tool-output-limit 3000
-  "Characters of tool output shown before a \"show all\" button."
-  :type 'integer :group 'harness-ui-chat)
+(defconst harness-chat--tool-output-limit 3000
+  "Characters of tool output shown before a \"show all\" button.")
 
-(defcustom harness-chat-render-interval 0.3
-  "Seconds between Markdown re-renders of a streaming block."
-  :type 'number :group 'harness-ui-chat)
+(defconst harness-chat--render-interval 0.3
+  "Seconds between Markdown re-renders of a streaming block.")
 
-(defcustom harness-chat-coalesce-threshold 3
-  "Consecutive coalescable tool calls needed to fold into one summary block."
-  :type 'integer :group 'harness-ui-chat)
+(defconst harness-chat--coalesce-threshold 3
+  "Consecutive coalescable tool calls needed to fold into one summary block.")
 
-(defcustom harness-chat-image-max-height 400
-  "Maximum pixel height of inline images."
-  :type 'integer :group 'harness-ui-chat)
+(defconst harness-chat--image-max-height 400
+  "Maximum pixel height of inline images.")
 
 (defcustom harness-chat-user-label "You"
   "Sender name shown above the user's messages."
@@ -470,9 +463,9 @@ opening the file is returned instead."
                (img (condition-case nil
                         (if data
                             (create-image (base64-decode-string data) nil t
-                                          :max-width width :max-height harness-chat-image-max-height)
+                                          :max-width width :max-height harness-chat--image-max-height)
                           (create-image path nil nil
-                                        :max-width width :max-height harness-chat-image-max-height))
+                                        :max-width width :max-height harness-chat--image-max-height))
                       (error nil))))
           (if img
               (concat (propertize label 'display img 'help-echo (or path mime "image")
@@ -690,7 +683,7 @@ A call that was refused reads apart from one that ran and failed."
                ('failed 'harness-tool-error-face)
                (_ 'harness-tool-face)))
          (indent (propertize "  " 'face bg))
-         (limit harness-chat-tool-output-limit)
+         (limit harness-chat--tool-output-limit)
          (long (and (not (harness-chat-block-show-all block)) (> (length output) limit)))
          (shown (if long (substring output 0 limit) output))
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
@@ -987,11 +980,11 @@ draws it, so carrying that over would keep drawing the old image."
     (harness-chat--follow windows)))
 
 (defun harness-chat--schedule-render (block)
-  "Re-render BLOCK after `harness-chat-render-interval' unless already scheduled."
+  "Re-render BLOCK after `harness-chat--render-interval' unless already scheduled."
   (let ((id (harness-chat-block-id block))
         (buf (current-buffer)))
     (unless (gethash id harness-chat--render-timers)
-      (puthash id (run-at-time harness-chat-render-interval nil
+      (puthash id (run-at-time harness-chat--render-interval nil
                                (lambda ()
                                  (when (buffer-live-p buf)
                                    (with-current-buffer buf
@@ -1092,7 +1085,7 @@ arriving for one of them changes it."
           (while (and rest (harness-chat--coalescable-block-p (car rest)))
             (push (car rest) run)
             (setq rest (cdr rest)))
-          (when (>= (length run) harness-chat-coalesce-threshold)
+          (when (>= (length run) harness-chat--coalesce-threshold)
             (harness-chat--make-group run)))))))
 
 (defun harness-chat--clear-groups ()
@@ -1112,7 +1105,7 @@ arriving for one of them changes it."
   "Recompute every coalesced run over the rendered transcript."
   (harness-chat--clear-groups)
   (let ((run nil))
-    (cl-flet ((flush () (when (>= (length run) harness-chat-coalesce-threshold)
+    (cl-flet ((flush () (when (>= (length run) harness-chat--coalesce-threshold)
                           (harness-chat--make-group (nreverse run)))
                       (setq run nil)))
       (dolist (id (reverse harness-chat--order))
@@ -1885,14 +1878,14 @@ own.  The BTW module says what a side conversation is for with it.")
         (gen harness-chat--generation))
     (setq harness-chat--fetching t)
     (harness-ui-call "_harness/session/nodes"
-                     (list :id harness-ui-session-id :opts (list :limit harness-chat-history-page :before before))
+                     (list :id harness-ui-session-id :opts (list :limit harness-chat--history-page :before before))
                      (lambda (nodes)
                        (when (buffer-live-p buf)
                          (with-current-buffer buf
                            (setq harness-chat--fetching nil)
                            (when (and (= gen harness-chat--generation) (equal before (harness-chat--oldest-id)))
                              (harness-chat--prepend-keeping-view nodes)
-                             (setq harness-chat--has-more (>= (length nodes) harness-chat-history-page))
+                             (setq harness-chat--has-more (>= (length nodes) harness-chat--history-page))
                              (harness-chat--render-top)
                              ;; A page shorter than the window leaves it near the top still.
                              (harness-chat--schedule-history)))))
@@ -1924,9 +1917,9 @@ page from its top, and land near the top again."
          (above (cl-loop for id in oldest
                          while (<= (harness-chat-block-end (gethash id harness-chat--blocks)) top)
                          count t))
-         (drop (min (- above harness-chat-history-page)
-                    (- (length oldest) harness-chat-history-limit))))
-    (when (and (>= above (* 2 harness-chat-history-page)) (> drop 0))
+         (drop (min (- above harness-chat--history-page)
+                    (- (length oldest) harness-chat--history-limit))))
+    (when (and (>= above (* 2 harness-chat--history-page)) (> drop 0))
       (let ((victims (seq-take oldest drop))
             (keep (gethash (nth drop oldest) harness-chat--blocks)))
         (harness-chat--clear-groups)
@@ -2014,7 +2007,7 @@ end afterwards."
      ;; of tools it no longer has, and they too go by their labels.
      (harness-all (list (harness-ui-fetch-tools)
                         (harness-ui-request "_harness/session/nodes"
-                                            (list :id sid :opts (list :limit harness-chat-history-limit)))))
+                                            (list :id sid :opts (list :limit harness-chat--history-limit)))))
      (lambda (results)
        (when (buffer-live-p buf)
          (with-current-buffer buf
@@ -2028,7 +2021,7 @@ end afterwards."
              (let ((nodes (cadr results))
                    (anchors (harness-chat--window-anchors))
                    (offset (and (harness-compose-in-p) (- (point) harness-compose-start))))
-               (setq harness-chat--has-more (>= (length nodes) harness-chat-history-limit)
+               (setq harness-chat--has-more (>= (length nodes) harness-chat--history-limit)
                      harness-chat--loading nil)
                (harness-chat--render-nodes nodes)
                (when offset

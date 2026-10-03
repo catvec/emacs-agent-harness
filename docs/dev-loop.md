@@ -29,8 +29,8 @@ The harness always runs byte-compiled code: `harness-start` and
 file fails.  Interpreted closures over large values (a parsed model
 catalogue, a 30k-character tool output) can exceed Emacs's evaluation
 depth, so loading sources directly is not supported.  Set
-`harness-debug-backtraces` to log a backtrace whenever a promise handler
-signals.
+`harness-log-level` to `debug` to log a backtrace whenever a promise
+handler signals.
 Integration suites that talk to real models run only with
 `HARNESS_INTEGRATION=1`; the local ACP suites and the TCP suites both
 run by default so both transports stay green.

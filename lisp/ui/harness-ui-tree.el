@@ -40,20 +40,17 @@
 (defgroup harness-ui-tree nil
   "The conversation tree." :group 'harness-ui)
 
-(defcustom harness-ui-tree-lane-width 16
-  "Horizontal pixels per lane in the graph."
-  :type 'integer :group 'harness-ui-tree)
+(defconst harness-ui-tree--lane-width 16
+  "Horizontal pixels per lane in the graph.")
 
-(defcustom harness-ui-tree-lane-colors
+(defconst harness-ui-tree--lane-colors
   '(("#2a78d6" . "#3987e5") ("#eb6834" . "#d95926") ("#1baf7a" . "#199e70")
     ("#eda100" . "#c98500") ("#e87ba4" . "#d55181") ("#008300" . "#008300")
     ("#4a3aa7" . "#9085e9") ("#e34948" . "#e66767"))
-  "Lane colours as (LIGHT . DARK) pairs, assigned to sessions in order."
-  :type '(repeat (cons color color)) :group 'harness-ui-tree)
+  "Lane colours as (LIGHT . DARK) pairs, assigned to sessions in order.")
 
-(defcustom harness-ui-tree-expand-limit 6000
-  "Characters of node content shown when a row is expanded."
-  :type 'integer :group 'harness-ui-tree)
+(defconst harness-ui-tree--expand-limit 6000
+  "Characters of node content shown when a row is expanded.")
 
 (defface harness-tree-id-face '((t :inherit shadow :family "Monospace"))
   "Short node ids." :group 'harness-ui-tree)
@@ -86,7 +83,7 @@
 
 (defun harness-ui-tree--color (index)
   "Return the lane colour for lane INDEX in the current theme."
-  (let ((pair (nth (mod index (length harness-ui-tree-lane-colors)) harness-ui-tree-lane-colors)))
+  (let ((pair (nth (mod index (length harness-ui-tree--lane-colors)) harness-ui-tree--lane-colors)))
     (if (eq (frame-parameter nil 'background-mode) 'dark) (cdr pair) (car pair))))
 
 (defun harness-ui-tree--nodes-with-placeholders (data)
@@ -224,7 +221,7 @@ NLANES lanes of HEIGHT pixels; SEGMENTS, JOINS, DOT-LANE, DOT-COLOR and
 HEAD-P are as in a layout row (DOT-LANE nil draws no dot)."
   (let ((key (list nlanes height segments joins dot-lane dot-color head-p)))
     (or (gethash key harness-ui-tree--svg-cache)
-        (let* ((lw harness-ui-tree-lane-width)
+        (let* ((lw harness-ui-tree--lane-width)
                (width (+ 4 (* lw nlanes)))
                (svg (svg-create width height))
                (cy (/ height 2.0))
@@ -272,7 +269,7 @@ With CONTINUATION, draw only the lanes continuing below the row."
          (color (plist-get row :color))
          (head-p (plist-get row :head-p)))
     (if (harness-ui-tree--graphic-p)
-        (propertize (make-string (max 1 (ceiling (+ 4 (* nlanes harness-ui-tree-lane-width))
+        (propertize (make-string (max 1 (ceiling (+ 4 (* nlanes harness-ui-tree--lane-width))
                                                  (max 1 (frame-char-width (harness-ui-tree--frame)))))
                                  ?\s)
                     'display (harness-ui-tree--svg-rails nlanes (harness-ui-tree--line-height)
@@ -372,7 +369,7 @@ With CONTINUATION, draw only the lanes continuing below the row."
 
 (defun harness-ui-tree--expansion-text (node)
   "Return the full content of NODE rendered for the expanded view."
-  (let ((clip (lambda (s) (harness-truncate-end (or s "") harness-ui-tree-expand-limit))))
+  (let ((clip (lambda (s) (harness-truncate-end (or s "") harness-ui-tree--expand-limit))))
     (pcase (harness-ui-tree--kind node)
       ("tool-call" (concat (harness-ui-tool-title-string (plist-get node :tool) (plist-get node :title))
                            "\n" (propertize (funcall clip (pp-to-string (plist-get node :input))) 'face 'harness-tool-face)))

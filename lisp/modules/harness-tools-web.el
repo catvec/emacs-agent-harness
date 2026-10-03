@@ -48,21 +48,17 @@ When nil the BRAVE_API_KEY environment variable and auth-source (host
 api.search.brave.com) are consulted."
   :type '(choice (const nil) string) :group 'harness)
 
-(defcustom harness-web-fetch-max-chars 20000
-  "Default number of characters web_fetch returns."
-  :type 'integer :group 'harness)
+(defconst harness-tools-web--fetch-max-chars 20000
+  "Default number of characters web_fetch returns.")
 
-(defcustom harness-web-fetch-timeout 30
-  "Seconds a web_fetch may take."
-  :type 'number :group 'harness)
+(defconst harness-tools-web--fetch-timeout 30
+  "Seconds a web_fetch may take.")
 
-(defcustom harness-web-user-agent "Mozilla/5.0 (X11; Linux x86_64) emacs-agent-harness/3.0"
-  "User-Agent header sent by web_fetch."
-  :type 'string :group 'harness)
+(defconst harness-tools-web--user-agent "Mozilla/5.0 (X11; Linux x86_64) emacs-agent-harness/3.0"
+  "User-Agent header sent by web_fetch.")
 
-(defcustom harness-web-search-max-count 20
-  "Largest number of results web_search asks a provider for."
-  :type 'integer :group 'harness)
+(defconst harness-tools-web--search-max-count 20
+  "Largest number of results web_search asks a provider for.")
 
 (defcustom harness-websearch-builtin 'fallback
   "When a session searches the web with its model provider's own search.
@@ -189,7 +185,7 @@ have passed since it was last asked."
                 harness-brave-search-host (url-hexify-string query) count)
         :headers (list (cons "Accept" "application/json")
                        (cons "X-Subscription-Token" key))
-        :timeout harness-web-fetch-timeout)
+        :timeout harness-tools-web--fetch-timeout)
        (lambda (json)
          (mapcar (lambda (r)
                    (list :title (harness-tools-web--strip-html (plist-get r :title))
@@ -219,7 +215,7 @@ have passed since it was last asked."
   "Handler for web_search with INPUT; returns a promise."
   (let* ((query (plist-get input :query))
          (count (let ((c (plist-get input :count)))
-                  (min harness-web-search-max-count (max 1 (if (numberp c) (truncate c) 5)))))
+                  (min harness-tools-web--search-max-count (max 1 (if (numberp c) (truncate c) 5)))))
          (fn (alist-get harness-websearch-provider harness-websearch-providers)))
     (cond
      ((or (not (stringp query)) (string-blank-p query)) (harness-tool-error "Missing query"))
@@ -301,7 +297,7 @@ filter on `agent/builtin-tools' (see `tools/builtin')."
   "Handler for web_fetch with INPUT; returns a promise."
   (let ((url (plist-get input :url))
         (max-chars (let ((m (plist-get input :max_chars)))
-                     (if (and (numberp m) (> m 0)) (truncate m) harness-web-fetch-max-chars))))
+                     (if (and (numberp m) (> m 0)) (truncate m) harness-tools-web--fetch-max-chars))))
     (cond
      ((or (not (stringp url)) (string-blank-p url)) (harness-tool-error "Missing url"))
      ((not (string-match-p "\\`https?://" url)) (harness-tool-error (format "Only http and https URLs are supported: %s" url)))
@@ -309,9 +305,9 @@ filter on `agent/builtin-tools' (see `tools/builtin')."
       (harness-with-promise (resolve reject)
         (harness-http-request
          url
-         :headers (list (cons "User-Agent" harness-web-user-agent)
+         :headers (list (cons "User-Agent" harness-tools-web--user-agent)
                         (cons "Accept" "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8"))
-         :timeout harness-web-fetch-timeout
+         :timeout harness-tools-web--fetch-timeout
          :callback
          (lambda (status headers body err)
            (funcall

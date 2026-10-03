@@ -57,13 +57,11 @@
 (defgroup harness-ui-usage nil
   "The usage and cost dashboard." :group 'harness-ui)
 
-(defcustom harness-ui-usage-buffer-name "*harness usage*"
-  "Name of the dashboard buffer."
-  :type 'string :group 'harness-ui-usage)
+(defconst harness-ui-usage--buffer-name "*harness usage*"
+  "Name of the dashboard buffer.")
 
-(defcustom harness-ui-usage-chart-height 150
-  "Pixel height of the cost chart."
-  :type 'integer :group 'harness-ui-usage)
+(defconst harness-ui-usage--chart-height 150
+  "Pixel height of the cost chart.")
 
 (defcustom harness-ui-usage-default-period '7d
   "Period shown when the dashboard opens: `today', `7d', `30d' or `all'."
@@ -261,7 +259,7 @@ PROPS are passed to `svg-node'."
 The image is WIDTH pixels wide.  A column is the bucket's usage at API
 prices: the billed part in the accent colour, what a subscription
 covered stacked on top in the lighter plan colour."
-  (let* ((height harness-ui-usage-chart-height)
+  (let* ((height harness-ui-usage--chart-height)
          (left 52) (right 8) (top 10) (bottom 22)
          (plot-w (- width left right))
          (plot-h (- height top bottom))
@@ -739,7 +737,7 @@ prices; rows sort by, and Share divides, their value at API prices."
 (defun harness-usage ()
   "Show the usage and cost dashboard."
   (interactive)
-  (let ((buf (get-buffer-create harness-ui-usage-buffer-name)))
+  (let ((buf (get-buffer-create harness-ui-usage--buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-usage-mode)
         (harness-ui-usage-mode)
@@ -1000,7 +998,7 @@ Defaults come from the budget on the current line when there is one."
 
 (defun harness-ui-usage--refresh-soon ()
   "Reload the dashboard buffer if it exists, debounced."
-  (when-let* ((buf (get-buffer harness-ui-usage-buffer-name)))
+  (when-let* ((buf (get-buffer harness-ui-usage--buffer-name)))
     (harness-debounce 'harness-ui-usage 1.0
                       (lambda () (when (buffer-live-p buf) (harness-ui-usage--load buf))))))
 
@@ -1011,14 +1009,14 @@ Defaults come from the budget on the current line when there is one."
 
 (defun harness-ui-usage--on-quota (_provider _quota)
   "Redraw the dashboard, whose plan section shows the providers' quota."
-  (when-let* ((buf (get-buffer harness-ui-usage-buffer-name)))
+  (when-let* ((buf (get-buffer harness-ui-usage--buffer-name)))
     (with-current-buffer buf
       (when (and (derived-mode-p 'harness-ui-usage-mode) harness-ui-usage--data)
         (harness-ui-usage--render)))))
 
 (defun harness-ui-usage--redraw ()
   "Rebuild the dashboard after a reload or reconnect."
-  (when-let* ((buf (get-buffer harness-ui-usage-buffer-name)))
+  (when-let* ((buf (get-buffer harness-ui-usage--buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-usage-mode)
         (harness-ui-usage-mode)

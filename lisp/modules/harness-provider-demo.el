@@ -26,9 +26,8 @@
 (require 'harness-util)
 (require 'harness-provider)
 
-(defcustom harness-provider-demo-delay 0.03
-  "Seconds between scripted events."
-  :type 'number :group 'harness)
+(defconst harness-provider-demo--delay 0.03
+  "Seconds between scripted events.")
 
 (defvar harness-provider-demo-script-override nil
   "When non-nil, a list of events used instead of the built-in scripts.")
@@ -196,13 +195,13 @@ a later message is feedback and lands under Also."
                               (funcall on-event '(:type done :stop-reason tool-use)))
                           (funcall on-event ev)
                           (unless (eq (plist-get ev :type) 'done)
-                            (setq timer (run-at-time harness-provider-demo-delay nil #'step)))))))))
+                            (setq timer (run-at-time harness-provider-demo--delay nil #'step)))))))))
       (when (and (gethash sid harness-provider-demo--continuations)
                  (harness-provider-demo--has-tool-results-p request))
         (setq script (gethash sid harness-provider-demo--continuations))
         (remhash sid harness-provider-demo--continuations))
       (funcall on-event '(:type start))
-      (setq timer (run-at-time harness-provider-demo-delay nil #'step)))
+      (setq timer (run-at-time harness-provider-demo--delay nil #'step)))
     (list :cancel (lambda ()
                     (setq cancelled t)
                     (when timer (cancel-timer timer))

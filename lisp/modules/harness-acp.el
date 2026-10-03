@@ -62,13 +62,11 @@ before any other method (except `initialize'); a TCP client made with
 Local in-process connections never need it."
   :type '(choice (const :tag "None" nil) string) :group 'harness)
 
-(defcustom harness-acp-server-enabled t
-  "Start the TCP server when the module initialises."
-  :type 'boolean :group 'harness)
+(defvar harness-acp--server-enabled t
+  "Start the TCP server when the module initialises.")
 
-(defcustom harness-acp-session-debounce 0.05
-  "Seconds of quiet before a changed session is pushed as `_harness/session'."
-  :type 'number :group 'harness)
+(defconst harness-acp--session-debounce 0.05
+  "Seconds of quiet before a changed session is pushed as `_harness/session'.")
 
 ;;;; Constants
 
@@ -723,7 +721,7 @@ Nil means the turn ended; see `agent/activity' for the shape."
 (defun harness-acp--on-session-changed (sid session)
   "Debounce `session/changed' for SID and push SESSION when it settles."
   (when harness-acp--clients
-    (harness-debounce (concat "acp-session-" sid) harness-acp-session-debounce
+    (harness-debounce (concat "acp-session-" sid) harness-acp--session-debounce
                       #'harness-acp--send-session sid session)))
 
 (defun harness-acp--on-session-updated (sid changes)
@@ -1192,7 +1190,7 @@ Return a promise of the initialize result."
 (defun harness-acp--init ()
   "Subscribe to bus events and start the TCP server when enabled."
   (harness-acp--subscribe)
-  (when harness-acp-server-enabled
+  (when harness-acp--server-enabled
     (condition-case err
         (harness-call 'acp/start)
       (error (harness-log 'warn "acp: TCP server not started: %s" (harness-error-message err))))))

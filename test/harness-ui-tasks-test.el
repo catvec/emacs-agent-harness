@@ -13,7 +13,7 @@
 (require 'harness-acp)
 
 (defvar harness-provider-demo-script-override)
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 (defvar harness-naming-auto)
 (defvar harness-sessions)
 (defvar harness-tools)
@@ -26,7 +26,7 @@
 (defvar harness-tasks-model)
 (defvar harness-tasks-worktrees)
 (defvar harness-ui-default-position)
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-ui--sessions)
@@ -51,7 +51,7 @@ Finished tasks are completed at once, without review, unless BODY turns
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent tasks acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
@@ -60,7 +60,7 @@ Finished tasks are completed at once, without review, unless BODY turns
      (clrhash harness-tasks--table)
      (clrhash harness-tasks--starting)
      (setq harness-tasks--loaded t harness-acp--clients nil)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override
             '((:type text :delta "Working on it.") (:type done :stop-reason end-turn)))
            (harness-naming-auto nil)

@@ -60,13 +60,11 @@ nil sends notifications nowhere."
                          (symbol :tag "Other provider")))
   :group 'harness)
 
-(defcustom harness-notifications-timeout 30
-  "Seconds a provider may take to deliver a notification."
-  :type 'number :group 'harness)
+(defconst harness-notifications--timeout 30
+  "Seconds a provider may take to deliver a notification.")
 
-(defcustom harness-notifications-max-body 1000
-  "Characters of a notification's text kept; the rest is cut."
-  :type 'integer :group 'harness)
+(defconst harness-notifications--max-body 1000
+  "Characters of a notification's text kept; the rest is cut.")
 
 ;;;; Providers
 
@@ -145,7 +143,7 @@ Signal when it has neither a title nor a body."
                    (concat "n-" (harness-short-id)))
            :ts (or (plist-get notification :ts) (float-time))
            :title title
-           :body (and body (harness-truncate-end body harness-notifications-max-body))
+           :body (and body (harness-truncate-end body harness-notifications--max-body))
            :urgency (harness-notifications--urgency (plist-get notification :urgency))))))
 
 (defun harness-notifications--within (promise seconds what)
@@ -182,7 +180,7 @@ It never rejects: a failure is a result with status `failed'."
         (condition-case err
             (harness-as-promise (funcall (harness-notifications-provider-send provider) notification))
           (error (harness-rejected err)))
-        harness-notifications-timeout (format "Notification provider %s" name))
+        harness-notifications--timeout (format "Notification provider %s" name))
        (lambda (value)
          (harness-notifications--result name 'sent
                                         :detail (and (consp value) (keywordp (car value))
@@ -326,13 +324,10 @@ auth-source entry for the server's host with the login \"harness\",
 such as \"machine push.example.com login harness password TOKEN\"."
   :type '(choice (const :tag "Not set" nil) string) :group 'harness)
 
-(defcustom harness-gotify-priorities '((low . 2) (normal . 5) (critical . 8))
+(defconst harness-notifications--gotify-priorities '((low . 2) (normal . 5) (critical . 8))
   "Gotify priority of each urgency.
 Gotify's Android app shows priorities from 1 in the status bar, makes
-a sound from 4 and pops up from 8; 0 shows nothing."
-  :type '(alist :key-type (choice (const low) (const normal) (const critical))
-                :value-type integer)
-  :group 'harness)
+a sound from 4 and pops up from 8; 0 shows nothing.")
 
 (defconst harness-notifications--auth-source-ttl 300
   "Seconds what auth-source said about the Gotify token is trusted.
@@ -382,10 +377,10 @@ environment, then for the token auth-source."
   (let* ((title (plist-get notification :title))
          (body (plist-get notification :body))
          (url (harness-notifications--text (plist-get notification :url)))
-         (priority (or (alist-get (plist-get notification :urgency) harness-gotify-priorities)
-                       (alist-get 'normal harness-gotify-priorities)
+         (priority (or (alist-get (plist-get notification :urgency) harness-notifications--gotify-priorities)
+                       (alist-get 'normal harness-notifications--gotify-priorities)
                        5)))
-    (list :title (or title harness-notifications-desktop-app-name)
+    (list :title (or title harness-notifications-desktop--app-name)
           :message (or body title)
           :priority priority
           :extras (append (list :client::display (list :contentType "text/plain"))
@@ -421,7 +416,7 @@ environment, then for the token auth-source."
                                 :headers (list (cons "X-Gotify-Key" token)
                                                (cons "Accept" "application/json"))
                                 :json (harness-notifications--gotify-message notification)
-                                :timeout harness-notifications-timeout)
+                                :timeout harness-notifications--timeout)
      (lambda (json)
        (list :detail (if (plist-get json :id) (format "message %s" (plist-get json :id)) "pushed")))
      (lambda (err)

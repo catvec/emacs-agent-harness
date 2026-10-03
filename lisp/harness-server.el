@@ -42,7 +42,7 @@
 (defvar harness-acp-token)
 (defvar harness-acp-port)
 (defvar harness-acp-host)
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-compile-subdirectory)
 (defvar harness-process)
 (declare-function harness-reload "harness")
@@ -99,7 +99,7 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
           harness-acp-token (getenv "HARNESS_SERVER_TOKEN")
           harness-acp-host "127.0.0.1"
           harness-acp-port 0
-          harness-acp-server-enabled t)
+          harness-acp--server-enabled t)
     (require 'harness)
     (with-no-warnings
       (harness-defmethod harness/reload ()
@@ -143,7 +143,7 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
 
 (defconst harness-server--own-variables
   '(harness-process harness-module-directories harness-compile-subdirectory
-    harness-acp-server-enabled harness-acp-token harness-acp-host harness-acp-port
+    harness-acp-token harness-acp-host harness-acp-port
     harness-server-forward-variables)
   "Variables the harness process sets for itself; never forwarded.")
 

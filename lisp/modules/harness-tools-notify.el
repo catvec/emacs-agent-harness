@@ -9,13 +9,13 @@
 ;;   Gotify -- marked with the calling session, so that clicking it opens
 ;;   the session.  An agent reaches a user who is away with it: long work
 ;;   finished, or a decision only they can make.  A session sends at most
-;;   `harness-tools-notify-rate-limit' of them in a while, so a runaway
+;;   `harness-tools-notify--rate-limit' of them in a while, so a runaway
 ;;   loop cannot flood the user.
 ;; - `notification_providers' lists the providers, whether each is set
 ;;   up and whether it is used by default, so an agent can pick providers
 ;;   or tell the user how to set one up.
 ;;
-;; `notify' needs no approval (it is in `harness-perms-auto-allow-tools'):
+;; `notify' needs no approval (it is in `harness-perms--auto-allow-tools'):
 ;; it only reaches the user, through channels they configured themselves.
 
 ;;; Code:
@@ -26,12 +26,9 @@
 (require 'harness-util)
 (require 'harness-tools)
 
-(defcustom harness-tools-notify-rate-limit '(10 . 600)
+(defconst harness-tools-notify--rate-limit '(10 . 600)
   "At most COUNT `notify' calls per session in SECONDS, as (COUNT . SECONDS).
-nil sets no limit."
-  :type '(choice (const :tag "No limit" nil)
-                 (cons :tag "Limit" (integer :tag "Notifications") (number :tag "Seconds")))
-  :group 'harness)
+nil sets no limit.")
 
 (defvar harness-tools-notify--sent (make-hash-table :test 'equal)
   "Session id -> times of its recent `notify' calls, newest first.")
@@ -43,8 +40,8 @@ nil sets no limit."
 (defun harness-tools-notify--throttle (session-id)
   "Count a notification of SESSION-ID; return nil, or the seconds to wait.
 The wait is how long until the session may notify again, when it has
-sent `harness-tools-notify-rate-limit' notifications already."
-  (let ((limit harness-tools-notify-rate-limit)
+sent `harness-tools-notify--rate-limit' notifications already."
+  (let ((limit harness-tools-notify--rate-limit)
         (key (or session-id "")))
     (when (and (consp limit) (integerp (car limit)) (numberp (cdr limit)))
       (let* ((now (float-time))
@@ -118,8 +115,8 @@ sent `harness-tools-notify-rate-limit' notifications already."
         (if wait
             (harness-tool-error
              (format "Too many notifications: this session sent %d in the last %s. The next one can go in %s; send fewer, or gather news into one."
-                     (car harness-tools-notify-rate-limit)
-                     (harness-format-duration (cdr harness-tools-notify-rate-limit))
+                     (car harness-tools-notify--rate-limit)
+                     (harness-format-duration (cdr harness-tools-notify--rate-limit))
                      (harness-format-duration wait)))
           (harness-then
            (harness-call-async 'notification/send

@@ -3,11 +3,11 @@
 
 (require 'harness-test-helpers)
 
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 (defvar harness-merge--queues)
 (defvar harness-merge--locks)
 (defvar harness-merge--holds)
-(defvar harness-merge-hold-timeout)
+(defvar harness-merge--hold-timeout)
 
 (defun harness-merge-test--git (dir &rest args)
   "Run git ARGS synchronously in DIR; signal on failure, return stdout."
@@ -63,7 +63,7 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
                           :handler (lambda (input _ctx) (format "listing of %s" (plist-get input :path))))
      (harness-add-filter 'permission/decide
                          (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-     (let* ((harness-provider-demo-delay 0.005)
+     (let* ((harness-provider-demo--delay 0.005)
             (default-directory dir)
             (repo (harness-merge-test--make-repo))
             (base (car repo))
@@ -203,7 +203,7 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
   (harness-merge-test-with
     (harness-merge-test--write wt "feature.txt" "new feature\n")
     (harness-merge-test--commit wt "add feature" "feature.txt")
-    (let* ((harness-provider-demo-delay 0.05)
+    (let* ((harness-provider-demo--delay 0.05)
            (finished nil)
            (enqueued nil))
       (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
@@ -274,7 +274,7 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
     (harness-merge-test--commit wt "child edit" "README")
     (harness-merge-test--write root "README" "parent version\n")
     (harness-merge-test--commit root "parent edit" "README")
-    (let ((harness-merge-hold-timeout 0.2) (finished nil))
+    (let ((harness-merge--hold-timeout 0.2) (finished nil))
       (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
       (harness-call 'merge/enqueue child parent)
       (harness-test-wait (lambda () finished) 10 "aborted")

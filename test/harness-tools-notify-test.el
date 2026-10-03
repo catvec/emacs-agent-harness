@@ -11,7 +11,7 @@
 
 (defvar harness-notifications-providers)
 (defvar harness-notifications--providers)
-(defvar harness-tools-notify-rate-limit)
+(defvar harness-tools-notify--rate-limit)
 (defvar harness-tools-notify--sent)
 (defvar harness-sessions)
 (declare-function harness-notifications-define-provider "harness-notifications")
@@ -32,7 +32,7 @@ received, oldest first."
              (mapcar (lambda (cell) (cons (car cell) (cdr cell))) harness-notifications--providers))
             (received nil)
             (harness-notifications-providers '(capture))
-            (harness-tools-notify-rate-limit '(10 . 600))
+            (harness-tools-notify--rate-limit '(10 . 600))
             (sid (plist-get (harness-call 'session/create :cwd dir :name "Fix the parser") :id)))
        (harness-notifications-define-provider 'capture :label "Capture"
                                               :send (lambda (n) (push n received) '(:detail "kept")))
@@ -101,9 +101,9 @@ received, oldest first."
       (should (string-prefix-p "Missing message" (plist-get r :content)))
       (should (null (got))))))
 
-(ert-deftest harness-tools-notify-rate-limit ()
+(ert-deftest harness-tools-notify--rate-limit ()
   (harness-tools-notify-test-with
-    (let ((harness-tools-notify-rate-limit '(2 . 600))
+    (let ((harness-tools-notify--rate-limit '(2 . 600))
           (other (plist-get (harness-call 'session/create :cwd dir :name "Other") :id)))
       (should-not (plist-get (harness-tools-notify-test--call sid "notify" :message "one") :is-error))
       (should-not (plist-get (harness-tools-notify-test--call sid "notify" :message "two") :is-error))
@@ -119,7 +119,7 @@ received, oldest first."
                harness-tools-notify--sent)
       (should-not (plist-get (harness-tools-notify-test--call sid "notify" :message "five") :is-error))
       ;; No limit at all.
-      (let ((harness-tools-notify-rate-limit nil))
+      (let ((harness-tools-notify--rate-limit nil))
         (dotimes (_ 5)
           (should-not (plist-get (harness-tools-notify-test--call sid "notify" :message "more") :is-error)))))))
 

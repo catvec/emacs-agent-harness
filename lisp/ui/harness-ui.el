@@ -947,9 +947,13 @@ Signal unless NOERROR when none can be found."
 
 ;;;; Formatting
 
+(defconst harness-ui--context-reserve 20000
+  "Tokens the harness keeps free below a context window for compaction.
+The same as `harness-compaction--context-reserve' in the harness process.")
+
 (defun harness-ui-context-face (context window)
   "Return the warning face for CONTEXT tokens against WINDOW."
-  (let* ((reserve (if (boundp 'harness-context-reserve) harness-context-reserve 20000))
+  (let* ((reserve harness-ui--context-reserve)
          (limit (max 1 (- (or window 128000) reserve)))
          (f (/ (float (or context 0)) limit)))
     (cond ((>= f 0.95) 'harness-context-critical-face)

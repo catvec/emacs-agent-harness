@@ -12,8 +12,8 @@
 (require 'harness-provider)
 
 (defvar harness-provider-copilot-program)
-(defvar harness-provider-copilot-interrupt-timeout)
-(defvar harness-provider-copilot-startup-timeout)
+(defvar harness-provider-copilot--interrupt-timeout)
+(defvar harness-provider-copilot--startup-timeout)
 (defvar harness-provider-copilot-default-model)
 (defvar harness-provider-copilot--sessions)
 (defvar harness-provider-copilot--status)
@@ -714,7 +714,7 @@ ON-EVENT, when given, is called with each event as well."
 
 (ert-deftest harness-provider-copilot-cancel-kills-when-abort-ignored ()
   (harness-provider-copilot-test--setup)
-  (let* ((harness-provider-copilot-interrupt-timeout 0.3)
+  (let* ((harness-provider-copilot--interrupt-timeout 0.3)
          (log (harness-provider-copilot-test--log-file))
          events
          (request (plist-put (harness-provider-copilot-test--request "s8" "hang ignore")
@@ -951,7 +951,7 @@ events, oldest first."
   "A throwaway session that ignores its abort ends its request, not the process.
 The session, which may never be idle again, is deleted at once."
   (harness-provider-copilot-test--setup)
-  (let ((harness-provider-copilot-interrupt-timeout 0.3)
+  (let ((harness-provider-copilot--interrupt-timeout 0.3)
         (log (harness-provider-copilot-test--log-file))
         events)
     (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
@@ -1169,7 +1169,7 @@ So a summary for compaction sees the real conversation."
 A stale abort would keep the next cancel in that conversation from
 sending any abort, or arming any timer."
   (harness-provider-copilot-test--setup)
-  (let ((harness-provider-copilot-interrupt-timeout 1.0)
+  (let ((harness-provider-copilot--interrupt-timeout 1.0)
         (log (harness-provider-copilot-test--log-file))
         side-respond)
     (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
@@ -1361,10 +1361,10 @@ found\"; a new conversation must not replace the old one for that."
       (should (eq 'end-turn (harness-provider-copilot-test--done events)))))
   (harness-provider-copilot-close "s16"))
 
-(ert-deftest harness-provider-copilot-startup-timeout ()
+(ert-deftest harness-provider-copilot--startup-timeout ()
   "A program that never answers is given up on instead of hanging the turn."
   (harness-provider-copilot-test--setup)
-  (let ((harness-provider-copilot-startup-timeout 0.5))
+  (let ((harness-provider-copilot--startup-timeout 0.5))
     (harness-provider-copilot-test--with-env '("HARNESS_FAKE_COPILOT_SILENT=1")
       (let* ((events (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s17" "hi") 10)))
              (done (harness-provider-copilot-test--find events 'done)))
@@ -1386,7 +1386,7 @@ found\"; a new conversation must not replace the old one for that."
                                    (harness-provider-copilot-test--request
                                     "s43" "hi" :provider-state '(:copilot-session-id "old-43")))))))
       (let ((proc (harness-provider-copilot-test--process "s43")))
-        (let* ((harness-provider-copilot-startup-timeout 0.3)
+        (let* ((harness-provider-copilot--startup-timeout 0.3)
                (events (car (harness-provider-copilot-test--run
                              (harness-provider-copilot-test--request "s43" "allow?" :tools nil :max-tokens 50))))
                (done (harness-provider-copilot-test--find events 'done)))
@@ -1410,7 +1410,7 @@ found\"; a new conversation must not replace the old one for that."
                                     (setq respond (plist-get ev :respond))))))))
     ;; While the turn waits on its tool, the fake answers no other send.
     (harness-test-wait (lambda () respond) 10 "the turn's tool call")
-    (let* ((harness-provider-copilot-startup-timeout 0.3)
+    (let* ((harness-provider-copilot--startup-timeout 0.3)
            (events (car (harness-provider-copilot-test--run
                          (harness-provider-copilot-test--request "s44" "allow?" :tools nil :max-tokens 50)))))
       (should (eq 'error (harness-provider-copilot-test--done events)))
@@ -1522,7 +1522,7 @@ found\"; a new conversation must not replace the old one for that."
 (ert-deftest harness-provider-copilot-done-starts-a-request-during-a-kill ()
   "A request that the done event of a killed one starts at once is left alone by the kill."
   (harness-provider-copilot-test--setup)
-  (let ((harness-provider-copilot-interrupt-timeout 0.3)
+  (let ((harness-provider-copilot--interrupt-timeout 0.3)
         (log (harness-provider-copilot-test--log-file))
         (first nil) (second nil))
     (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))

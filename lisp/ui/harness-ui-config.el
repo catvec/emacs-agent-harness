@@ -11,11 +11,18 @@
 ;;            current buffer (in a chat buffer: of the session's working
 ;;            directory), which overrides the global value there.
 ;;
-;; The settings that layer (model, permission mode, thinking, allowed
-;; directories, budget, sandbox policy, non-interactive, context
-;; reserve) come first, under Session defaults, in both scopes.  Every
-;; other harness option has a global value only: the Global scope lists
-;; them by module, the Project scope folds them into one line.
+;; The page leads with the settings most people change, in the sections
+;; the harness names (`harness-config-sections'): new sessions, files
+;; and safety, the task board, notifications, models and services.
+;; Everything else is advanced: the Global scope folds it into one line
+;; saying how many there are and how many were changed, and `a' (or the
+;; button there) shows them, by module.  The Project scope shows only
+;; the settings that layer (model, permission mode, thinking, allowed
+;; directories, budget, sandbox policy, non-interactive, task files),
+;; in their sections, and folds the rest, which have a global value
+;; only, into one line.  The options of the interface itself live in
+;; this Emacs, not the harness: a button at the end opens Customize on
+;; them.
 ;;
 ;; Each setting is a `wid-edit' widget built from the option's customize
 ;; type, its documentation, and a line saying where the value in effect
@@ -49,10 +56,8 @@
 (defgroup harness-ui-config nil
   "The settings page." :group 'harness-ui)
 
-(defcustom harness-ui-config-default-scope 'global
-  "Scope the settings page opens in: `global' or `project'."
-  :type '(choice (const :tag "Global" global) (const :tag "Project" project))
-  :group 'harness-ui-config)
+(defconst harness-ui-config--default-scope 'global
+  "Scope the settings page opens in: `global' or `project'.")
 
 (defface harness-settings-title-face '((t :inherit bold :height 1.3))
   "The title of the settings page." :group 'harness-ui-config)
@@ -103,6 +108,8 @@
 (defvar-local harness-ui-config--error nil "Message of the last failed fetch.")
 (defvar-local harness-ui-config--generation 0 "Counter that drops stale answers.")
 (defvar-local harness-ui-config--widgets nil "Alist of KEY and its setting widget, as drawn.")
+(defvar-local harness-ui-config--show-advanced nil
+  "Non-nil when the page shows the advanced settings, not just their count.")
 (defvar-local harness-ui-config--edited nil
   "Hash of (SCOPE . KEY) for settings edited but not saved.
 The value is t while the edit lives in the widget, or (VALUE) once a
@@ -618,41 +625,117 @@ ORIGINAL is the value saved in the page's scope."
                    `(item :tag ,(harness-ui-config--scope-label 'project) :format "%t" :value project))
     (insert "\n " (propertize (harness-ui-config--scope-help) 'face 'harness-settings-doc-face) "\n\n")))
 
+(defconst harness-ui-config--fallback-section
+  '(:name "sessions" :title "Session defaults"
+    :doc "New sessions start with these.  Each project can override them in its .dir-locals.el.")
+  "The one section of a harness that names none: its layered settings.")
+
+(defun harness-ui-config--sections ()
+  "Return the sections of the page, plists of :name :title :doc, in order."
+  (or (plist-get harness-ui-config--data :sections)
+      (list harness-ui-config--fallback-section)))
+
+(defun harness-ui-config--section-of (setting)
+  "Return the name of the section SETTING is shown in, or nil when advanced."
+  (let ((section (plist-get setting :section)))
+    (cond ((and (stringp section) (not (string-empty-p section))) section)
+          ;; A harness from before sections listed its layered settings first.
+          ((and (null (plist-get harness-ui-config--data :sections))
+                (harness-ui-config--true (plist-get setting :layered)))
+           (plist-get harness-ui-config--fallback-section :name)))))
+
+(defun harness-ui-config--advanced-p (setting)
+  "Non-nil when SETTING is an advanced one, folded away at first."
+  (null (harness-ui-config--section-of setting)))
+
+(defun harness-ui-config--customized-p (setting)
+  "Non-nil when the global value of SETTING is not its default."
+  (if (harness-ui-config--true (plist-get setting :secret))
+      (harness-ui-config--true (plist-get setting :has-value))
+    (not (equal (plist-get setting :global) (plist-get setting :standard)))))
+
+(defun harness-ui-config--insert-sections (settings)
+  "Insert the sections of SETTINGS that the page's scope shows."
+  (let ((project (eq harness-ui-config--scope 'project)))
+    (dolist (section (harness-ui-config--sections))
+      (let ((members (cl-remove-if-not
+                      (lambda (s) (and (equal (harness-ui-config--section-of s) (plist-get section :name))
+                                       (or (not project) (harness-ui-config--true (plist-get s :layered)))))
+                      settings)))
+        (when members
+          (harness-ui-config--insert-heading (plist-get section :title) (plist-get section :doc))
+          (mapc #'harness-ui-config--insert-setting members))))))
+
+(defun harness-ui-config--insert-by-module (settings)
+  "Insert SETTINGS under the title of the module of each."
+  (let ((modules (delete-dups (mapcar (lambda (s) (plist-get s :module)) settings))))
+    (setq modules (sort modules (lambda (a b)
+                                  (cond ((equal a "core") nil)
+                                        ((equal b "core") t)
+                                        (t (string< (harness-ui-config--module-title a)
+                                                    (harness-ui-config--module-title b)))))))
+    (dolist (module modules)
+      (harness-ui-config--insert-heading
+       (harness-ui-config--module-title module)
+       (plist-get (cl-find module (plist-get harness-ui-config--data :modules)
+                           :key (lambda (m) (plist-get m :name)) :test #'equal)
+                  :doc))
+      (dolist (s settings)
+        (when (equal module (plist-get s :module))
+          (harness-ui-config--insert-setting s))))))
+
+(defun harness-ui-config--insert-advanced (advanced)
+  "Insert the line about the ADVANCED settings, and them when they are shown."
+  (when advanced
+    (let ((changed (cl-count-if #'harness-ui-config--customized-p advanced)))
+      (insert " " (propertize "Advanced" 'face 'harness-settings-heading-face) "  ")
+      (harness-ui-config--button (if harness-ui-config--show-advanced
+                                     "Hide them"
+                                   (format "Show %d more" (length advanced)))
+                                 "Show or hide the settings few people need (a)"
+                                 #'harness-ui-config-toggle-advanced t)
+      (insert "\n "
+              (propertize "Settings few people need: programs, provider details, how tasks are kept."
+                          'face 'harness-settings-doc-face)
+              (if (> changed 0)
+                  (concat "  " (propertize (format "%d changed here." changed)
+                                           'face 'harness-settings-global-face))
+                "")
+              "\n\n")
+      (when harness-ui-config--show-advanced
+        (harness-ui-config--insert-by-module advanced)))))
+
+(defun harness-ui-config--insert-global-only (others)
+  "Insert the line about OTHERS, the settings with a global value only."
+  (when others
+    (harness-ui-config--insert-heading "Other settings")
+    (insert " " (propertize (format "%d more settings have a global value only, the same in every project."
+                                    (length others))
+                            'face 'harness-settings-doc-face)
+            "\n ")
+    (harness-ui-config--button "Edit global settings" "Show the Global scope (s)"
+                               (lambda () (harness-ui-config-set-scope 'global)) t)
+    (insert "\n")))
+
+(defun harness-ui-config--insert-interface ()
+  "Insert where the options of the interface are set."
+  (harness-ui-config--insert-heading
+   "Interface"
+   "Where windows open, the prefix key, labels and faces: options of this Emacs, set with Customize.")
+  (insert " ")
+  (harness-ui-config--button "Customize the interface" "M-x customize-group harness-ui (C)"
+                             #'harness-ui-config-customize-interface)
+  (insert "\n"))
+
 (defun harness-ui-config--insert-settings ()
-  "Insert the sections of settings for the page's scope."
-  (let* ((settings (plist-get harness-ui-config--data :settings))
-         (layered (cl-remove-if-not (lambda (s) (harness-ui-config--true (plist-get s :layered))) settings))
-         (others (cl-remove-if (lambda (s) (harness-ui-config--true (plist-get s :layered))) settings)))
-    (harness-ui-config--insert-heading
-     "Session defaults"
-     "New sessions start with these.  Each project can override them in its .dir-locals.el.")
-    (mapc #'harness-ui-config--insert-setting layered)
-    (when others
-      (if (eq harness-ui-config--scope 'project)
-          (progn
-            (harness-ui-config--insert-heading "Other settings")
-            (insert " " (propertize (format "%d more settings have a global value only, the same in every project."
-                                            (length others))
-                                    'face 'harness-settings-doc-face)
-                    "\n ")
-            (harness-ui-config--button "Edit global settings" "Show the Global scope (s)"
-                                       (lambda () (harness-ui-config-set-scope 'global)) t)
-            (insert "\n"))
-        (let ((modules (delete-dups (mapcar (lambda (s) (plist-get s :module)) others))))
-          (setq modules (sort modules (lambda (a b)
-                                        (cond ((equal a "core") nil)
-                                              ((equal b "core") t)
-                                              (t (string< (harness-ui-config--module-title a)
-                                                          (harness-ui-config--module-title b)))))))
-          (dolist (module modules)
-            (harness-ui-config--insert-heading
-             (harness-ui-config--module-title module)
-             (plist-get (cl-find module (plist-get harness-ui-config--data :modules)
-                                 :key (lambda (m) (plist-get m :name)) :test #'equal)
-                        :doc))
-            (dolist (s others)
-              (when (equal module (plist-get s :module))
-                (harness-ui-config--insert-setting s)))))))))
+  "Insert the sections of settings for the page's scope, then the others."
+  (let ((settings (plist-get harness-ui-config--data :settings)))
+    (harness-ui-config--insert-sections settings)
+    (if (eq harness-ui-config--scope 'project)
+        (harness-ui-config--insert-global-only
+         (cl-remove-if (lambda (s) (harness-ui-config--true (plist-get s :layered))) settings))
+      (harness-ui-config--insert-advanced (cl-remove-if-not #'harness-ui-config--advanced-p settings))
+      (harness-ui-config--insert-interface))))
 
 (defun harness-ui-config--position ()
   "Return where point is as (KEY . OFFSET), or the plain position."
@@ -957,6 +1040,39 @@ FACE defaults to `harness-label-face'."
   (interactive)
   (harness-ui-config--load (current-buffer)))
 
+(defun harness-ui-config--advanced-edits ()
+  "Return the keys of advanced settings with an edit not saved, globally."
+  (let (keys)
+    (when harness-ui-config--edited
+      (maphash (lambda (ekey _)
+                 (when (eq (car ekey) 'global)
+                   (let ((setting (harness-ui-config--setting (cdr ekey))))
+                     (when (and setting (harness-ui-config--advanced-p setting))
+                       (push (cdr ekey) keys)))))
+               harness-ui-config--edited))
+    keys))
+
+(defun harness-ui-config-toggle-advanced ()
+  "Show the advanced settings, or fold them back into one line.
+They have a global value only, so showing them shows the Global scope."
+  (interactive)
+  (cond
+   ((eq harness-ui-config--scope 'project)
+    (setq harness-ui-config--show-advanced t)
+    (harness-ui-config-set-scope 'global))
+   ((and harness-ui-config--show-advanced (harness-ui-config--advanced-edits))
+    (user-error "Save or revert the edits of advanced settings first"))
+   (t
+    (setq harness-ui-config--show-advanced (not harness-ui-config--show-advanced))
+    (harness-ui-config--render)
+    (message (if harness-ui-config--show-advanced "Showing the advanced settings"
+               "Advanced settings folded away")))))
+
+(defun harness-ui-config-customize-interface ()
+  "Customize the options of the harness interface, which live in this Emacs."
+  (interactive)
+  (customize-group 'harness-ui))
+
 (defun harness-ui-config--setting-starts ()
   "Return the start of every setting on the page, in order."
   (save-excursion
@@ -1011,6 +1127,8 @@ FACE defaults to `harness-label-face'."
     (define-key map [remap self-insert-command] #'harness-ui-config-no-edit)
     (define-key map (kbd "RET") #'harness-ui-config-ret)
     (define-key map (kbd "s") #'harness-ui-config-toggle-scope)
+    (define-key map (kbd "a") #'harness-ui-config-toggle-advanced)
+    (define-key map (kbd "C") #'harness-ui-config-customize-interface)
     (define-key map (kbd "g") #'harness-ui-config-refresh)
     (define-key map (kbd "q") #'quit-window)
     (define-key map (kbd "n") #'harness-ui-config-next-setting)
@@ -1026,13 +1144,26 @@ FACE defaults to `harness-label-face'."
     map)
   "Keymap of `harness-ui-config-mode'.")
 
+(put 'harness-ui-config-mode 'harness-menu-group
+     '("Settings"
+       ["Page"
+        (". s" "Global or project scope" harness-ui-config-toggle-scope)
+        (". a" "Show or hide advanced settings" harness-ui-config-toggle-advanced)
+        (". C" "Customize the interface" harness-ui-config-customize-interface)
+        (". g" "Reload" harness-ui-config-refresh)]
+       ["Setting at point"
+        ("C-c C-c" "Save it" harness-ui-config-save-setting)
+        ("C-c C-k" "Drop the edit" harness-ui-config-revert-setting)
+        (". d" "Remove override or reset" harness-ui-config-unset-setting)]))
+
 (define-derived-mode harness-ui-config-mode nil "Settings"
   "Major mode of the harness settings page.
 \\<harness-ui-config-mode-map>\\[harness-ui-config-toggle-scope] switches between the Global and the Project scope,
 TAB moves between values, RET or \\[harness-ui-config-save-setting] saves the
 setting at point and \\[harness-ui-config-save-all] every edit, \\[harness-ui-config-revert-setting] drops an
 edit, \\[harness-ui-config-unset-setting] removes the project's value or resets a global
-one, and \\[harness-ui-config-refresh] reloads.
+one, and \\[harness-ui-config-refresh] reloads.  \\[harness-ui-config-toggle-advanced] shows or hides the
+advanced settings, and \\[harness-ui-config-customize-interface] customizes the interface.
 
 \\{harness-ui-config-mode-map}"
   (setq truncate-lines nil
@@ -1089,7 +1220,7 @@ In a chat buffer that is the session's working directory and project."
 DIRECTORY defaults to the current buffer's directory, or in a chat
 buffer to the session's working directory.  SCOPE, `global' or
 `project', defaults to the page's current scope, else
-`harness-ui-config-default-scope'."
+`harness-ui-config--default-scope'."
   (interactive)
   (pcase-let* ((`(,cwd . ,root) (if directory
                                     (let ((dir (file-name-as-directory (expand-file-name directory))))
@@ -1100,7 +1231,7 @@ buffer to the session's working directory.  SCOPE, `global' or
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-config-mode)
         (harness-ui-config-mode)
-        (setq harness-ui-config--scope harness-ui-config-default-scope))
+        (setq harness-ui-config--scope harness-ui-config--default-scope))
       (when (and scope (not (eq scope harness-ui-config--scope)))
         ;; The edits shown belong to the scope being left.
         (harness-ui-config--snapshot)

@@ -195,7 +195,7 @@
     (should (string-search "is empty" (plist-get (harness-tools-fs-test--call "list_dir" :path (progn (make-directory "e") "e")) :content)))
     (should (plist-get (harness-tools-fs-test--call "list_dir" :path "a.txt") :is-error))
     (should (plist-get (harness-tools-fs-test--call "list_dir" :path "nope") :is-error))
-    (let ((harness-tools-fs-list-limit 1))
+    (let ((harness-tools-fs--list-limit 1))
       (should (string-search "Listing stopped" (plist-get (harness-tools-fs-test--call "list_dir") :content))))))
 
 (ert-deftest harness-tools-fs-glob ()
@@ -223,7 +223,7 @@
       (should (string-search "src/deep/d.el" c))
       (should (string-search "(1 match" c)))
     (should (string-search "No files match" (plist-get (harness-tools-fs-test--call "glob" :pattern "*.zip") :content)))
-    (let ((harness-tools-fs-glob-limit 2))
+    (let ((harness-tools-fs--glob-limit 2))
       (should (string-search "showing 2" (plist-get (harness-tools-fs-test--call "glob" :pattern "**/*.el") :content))))
     (should (plist-get (harness-tools-fs-test--call "glob" :pattern "*" :path "nope") :is-error))
     (should (equal "Find files: **/*.el in src" (harness-tool-title "glob" '(:pattern "**/*.el" :path "src"))))))

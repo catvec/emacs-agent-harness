@@ -4,8 +4,8 @@
 (require 'harness-test-helpers)
 
 (defvar harness-provider-demo-script-override)
-(defvar harness-provider-demo-delay)
-(defvar harness-context-reserve)
+(defvar harness-provider-demo--delay)
+(defvar harness-compaction--context-reserve)
 (defvar harness-sessions)
 (defvar harness-tools)
 (defvar harness-agent--turns)
@@ -25,9 +25,9 @@
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-compaction--running)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override nil)
-           (harness-context-reserve 1000)
+           (harness-compaction--context-reserve 1000)
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
@@ -141,7 +141,7 @@
 
 (ert-deftest harness-compaction-status-caps-reserve-for-small-windows ()
   (harness-compaction-test-with
-    (let* ((harness-context-reserve 20000)
+    (let* ((harness-compaction--context-reserve 20000)
            (id (harness-compaction-test-session))
            (s (harness-call 'compaction/status id)))
       (should (= 4000 (plist-get s :usable)))

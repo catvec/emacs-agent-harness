@@ -50,15 +50,16 @@
 ;;;; Logging
 
 (defcustom harness-log-level 'info
-  "Minimum level of messages kept in the harness log buffer."
+  "Minimum level of messages kept in the harness log buffer.
+At `debug' an error caught in a promise callback is logged with a
+backtrace too."
   :type '(choice (const debug) (const info) (const warn) (const error))
   :group 'harness)
 
 (defconst harness-log-buffer-name "*harness-log*")
 (defconst harness--log-levels '((debug . 0) (info . 1) (warn . 2) (error . 3)))
-(defcustom harness-log-max-lines 5000
-  "Maximum number of lines kept in the log buffer."
-  :type 'integer :group 'harness)
+(defconst harness--log-max-lines 5000
+  "Maximum number of lines kept in the log buffer.")
 
 (defvar harness-log-hook nil
   "Functions called with (LEVEL MESSAGE) for every log entry.")
@@ -74,9 +75,9 @@
           (insert (format-time-string "%H:%M:%S.%3N ")
                   (format "%-5s " (upcase (symbol-name level)))
                   msg "\n")
-          (when (> (count-lines (point-min) (point-max)) harness-log-max-lines)
+          (when (> (count-lines (point-min) (point-max)) harness--log-max-lines)
             (goto-char (point-min))
-            (forward-line (/ harness-log-max-lines 4))
+            (forward-line (/ harness--log-max-lines 4))
             (delete-region (point-min) (point)))))
       (run-hook-with-args 'harness-log-hook level msg)
       msg)))
@@ -127,13 +128,13 @@ and a callback that waits synchronously cannot deadlock the rest."
   (let ((fn (if (eq (harness-promise-state promise) 'resolved) (car cb) (cdr cb))))
     (when fn
       (condition-case err
-          (if (and harness-debug-backtraces (fboundp 'handler-bind))
+          (if (and (harness--debug-p) (fboundp 'handler-bind))
               (handler-bind ((error #'harness--capture-backtrace))
                 (funcall fn (harness-promise-value promise)))
             (funcall fn (harness-promise-value promise)))
         (error
          (harness-log 'error "promise callback failed: %S%s" err
-                      (if (and harness-debug-backtraces harness--last-backtrace)
+                      (if (and (harness--debug-p) harness--last-backtrace)
                           (format "\n  frames: %s" (string-join (seq-take (cdr harness--last-backtrace) 40) " < "))
                         "")))))))
 
@@ -150,11 +151,11 @@ and a callback that waits synchronously cannot deadlock the rest."
   "Reject PROMISE with ERROR (any object, usually an error data list)."
   (harness--promise-settle promise 'rejected error))
 
-(defcustom harness-debug-backtraces nil
-  "When non-nil, log a backtrace for errors caught in promise callbacks."
-  :type 'boolean :group 'harness)
-
 (defvar harness--last-backtrace nil)
+
+(defun harness--debug-p ()
+  "Non-nil when `harness-log-level' asks for debugging detail."
+  (eq harness-log-level 'debug))
 
 (defun harness--capture-backtrace (err)
   "Remember a compact backtrace for ERR before the stack unwinds."
@@ -170,8 +171,8 @@ and a callback that waits synchronously cannot deadlock the rest."
 
 (defun harness--call-handler (fn value)
   "Call promise handler FN with VALUE.
-When `harness-debug-backtraces' is on, capture a backtrace on error."
-  (if (and harness-debug-backtraces (fboundp 'handler-bind))
+When `harness-log-level' is `debug', capture a backtrace on error."
+  (if (and (harness--debug-p) (fboundp 'handler-bind))
       (handler-bind ((error #'harness--capture-backtrace))
         (funcall fn value))
     (funcall fn value)))
@@ -184,7 +185,7 @@ produces may never be observed, so it is logged here."
                (let ((print-length 12) (print-level 3))
                  (truncate-string-to-width (prin1-to-string fn) 400 nil nil "…"))
                err
-               (if (and harness-debug-backtraces harness--last-backtrace)
+               (if (and (harness--debug-p) harness--last-backtrace)
                    (format "\n  frames: %s" (string-join (seq-take (cdr harness--last-backtrace) 40) " < "))
                  "")))
 

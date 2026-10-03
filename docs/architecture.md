@@ -100,8 +100,8 @@ handler returns and calls NEXT with its value.  A handler that stores
 NEXT to call later (merge holds, budget prompts) must return nil.
 
 An error signalled inside a `harness-then` handler rejects the derived
-promise *and* is logged (with a backtrace when `harness-debug-backtraces`
-is on), because a rejection nobody observes would otherwise vanish.
+promise *and* is logged (with a backtrace when `harness-log-level` is
+`debug`), because a rejection nobody observes would otherwise vanish.
 Explicit rejections (`harness-reject`, `harness-rejected`) are not logged.
 
 Promises: `harness-make-promise`, `harness-resolve`, `harness-reject`,
@@ -235,8 +235,8 @@ project-root `.dir-locals.el` → customize default.  Variables are
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`,
 `harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
-`harness-non-interactive`, `harness-context-reserve`,
-`harness-tasks-directory` (the tasks module's folder of task files).
+`harness-non-interactive`, `harness-tasks-directory` (the tasks
+module's folder of task files).
 
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
@@ -245,6 +245,15 @@ ones that decide how the harness starts or reaches the UI:
 global value only.  Options named `...-api-key`, `-token`, `-secret`
 or `-password` are secrets: their values never leave the harness and
 never go to a `.dir-locals.el`.
+
+`harness-config-sections` names the options most people change, in
+sections by what they are for (new sessions, files and safety, task
+board, notifications, models and services); `config/describe` lists
+them first, each with its `:section`, then the advanced ones.  A
+setting a page should not lead with but must keep working stays a
+global `defcustom` and is advanced; what only the harness's own code
+has an opinion about is a `defconst`/`defvar` named `MODULE--thing`.
+See docs/configuration-audit.md for the rule and the audit behind it.
 
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
   or its name; layered settings only).
@@ -469,8 +478,8 @@ parent's would make the fork resume the parent's own CLI session.
 Methods: `provider/list`, `provider/models &optional REFRESH` (cached union
 across providers), `provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
 `provider/complete REQUEST` → HANDLE, `provider/fork MODEL-ID STATE` → promise,
-`provider/quota PROVIDER-ID &optional REFRESH`.  `harness-default-model` is
-"claude:claude-fable-5-1".
+`provider/quota PROVIDER-ID &optional REFRESH`.  The model used when nothing
+more specific is configured is `harness-model`.
 
 Billing and quota: `provider/quota` (PROVIDER-ID a symbol or its name;
 REFRESH asks for fresh data first) returns a promise of QUOTA, nil when
@@ -500,7 +509,7 @@ process's initialize answer:
 
 Quota comes from the CLI's `get_usage` control request (the data behind
 `/usage`, no model call) and from `rate_limit_event` messages.  It is
-asked for again after a turn once `harness-provider-claude-quota-ttl`
+asked for again after a turn once `harness-provider-claude--quota-ttl`
 (60 s) has passed.  With no CLI process running, a short-lived probe
 process answers instead, sending no message.
 
@@ -542,7 +551,7 @@ Each entry of `harness-bedrock-endpoints` is a provider (default
 `bedrock`); model ids are `ID:MODEL-ID`.  Its catalogue comes from
 ListFoundationModels and ListInferenceProfiles; context windows and
 prices, which Bedrock does not report, come from
-`harness-bedrock-model-defaults`.  Usage events carry tokens and
+`harness-bedrock--model-defaults`.  Usage events carry tokens and
 `:billing api` but no cost, so `session/usage-add` prices them from the
 catalogue.  Claude and Nova requests carry prompt cache points; Claude
 reasoning returned with tool calls is kept and sent back with them while
@@ -577,7 +586,7 @@ version 3 or newer.  Per harness session one CLI process:
   `assistant.usage` reports each model call, `session.idle` ends the
   turn, and `session.abort` cancels it (the process is killed when it
   stays busy).  A request the CLI leaves unanswered (opening a session,
-  forking one, sending) fails after `harness-provider-copilot-startup-timeout`
+  forking one, sending) fails after `harness-provider-copilot--startup-timeout`
   (30 s) instead of hanging.
 - The provider state is `(:copilot-session-id ID :model NAME)`; a fork's
   is `(:copilot-session-id PARENT :fork-pending t)`, which the first
@@ -629,7 +638,7 @@ its `:label`, a short name in sentence case for people ("Read file",
 "Bash", "Web search").  The label is required (`harness-define-tool`
 signals without one) and every UI shows it wherever it names a tool;
 the identifier stays for the model, for configuration (permission
-rules, `harness-perms-auto-allow-tools`) and in the text agents read
+rules, `harness-perms--auto-allow-tools`) and in the text agents read
 about other sessions (`session_read`).  `harness-tools-label NAME`
 returns the label, or NAME for a tool nobody registered.
 `harness-tool-title NAME INPUT` titles a call: the label, then a colon
@@ -649,7 +658,7 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   SESSION-ID every registered tool: how UIs learn the labels.
 - `tools/execute SESSION-ID CALL` (CALL = `(:id :name :input)`) → promise of
   RESULT.  Pipeline: lookup → `permission/decide` (async filter) →
-  handler (with `harness-tools-timeout`) → context-bomb guard → sync
+  handler (with `harness-tools--timeout`) → context-bomb guard → sync
   filter `tools/result` → events `tools/started`, `tools/finished`.
 - `tools/builtin SESSION-ID` returns the names of the harness tools
   that the session's provider runs a tool of its own for, and
@@ -706,7 +715,7 @@ into a pending request and resolves when answered).
 - Agents ask for a directory themselves with the `request_directory_access`
   tool (`path`, `reason`).  The dir-request stage owns that tool's
   decision and always makes it final, so the mode, standing rules,
-  `harness-perms-auto-allow-tools` and the auto judge never see it.
+  `harness-perms--auto-allow-tools` and the auto judge never see it.
   In every mode, auto and yolo included, a directory is granted only
   by a person answering the prompt.  A directory that is already
   reachable is allowed at once and nothing is granted.  Non-interactive
@@ -741,7 +750,7 @@ into a pending request and resolves when answered).
   `auto` (reads inside the jail allowed; a cheap model,
   `harness-perms-auto-model`, decides the rest with a reason; falls back
   to ask), `yolo` (allow everything; the jail still applies).  Tools in
-  `harness-perms-auto-allow-tools` are allowed in every mode: the meta
+  `harness-perms--auto-allow-tools` are allowed in every mode: the meta
   tools, skill and Emacs lookups, `web_search`, which only sends its
   query to the configured search provider, so task sessions can search,
   and `notify`, which only reaches the user through the notification
@@ -835,7 +844,7 @@ into a pending request and resolves when answered).
   events and the deltas), or `tool` while calls run: the oldest is
   `:tool` with `:title`, `:checking` until its permission is decided
   (its time then starts again), `:detail` the last line of its
-  `tools/progress` (at most every `harness-agent-progress-interval`,
+  `tools/progress` (at most every `harness-agent--progress-interval`,
   0.5 s), and `:count` when several run.  Every change is announced as
   `agent/activity-changed`, with nil when the turn ends.  The state
   lives beside the turn records, so a reload keeps it.
@@ -891,8 +900,8 @@ into a pending request and resolves when answered).
 - `compaction/compact SESSION-ID` → promise; summarises the transcript
   with the session's model, appends a `compaction` node whose `:meta`
   points at the compacted head, sets it as head, hints before/after.
-- Auto: `agent/before-turn` compacts when
-  `context > window - harness-context-reserve` unless the provider
+- Auto: `agent/before-turn` compacts when the context comes within
+  `harness-compaction--context-reserve` of the window unless the provider
   reports `:compaction hosted`.
 
 ### naming
@@ -901,7 +910,7 @@ into a pending request and resolves when answered).
   turn ends when the session has no name: forks provider state when
   possible so the cached prefix is reused; hints "naming…" then the result.
 - Sync filter `naming/system-prompt` (value string, args session) lets
-  modules add to `harness-naming-system-prompt` per session (tasks ask
+  modules add to `harness-naming--base-system-prompt` per session (tasks ask
   for ticket titles).
 
 ### skills
@@ -1020,9 +1029,9 @@ to the task's file (below); the record also keeps `:file-base` and
   `refining` while a session at its directory -- `ask` and
   non-interactive, so read-only, `harness-tasks-refine-model` and
   `-refine-thinking` (low) -- writes it up as told by
-  `harness-tasks-refine-prompt` (brief, no changes, no questions, a
+  `harness-tasks--refine-prompt` (brief, no changes, no questions, a
   self-contained ticket: title line, what and why, what to change, how to
-  tell it is done, open questions); after `harness-tasks-refine-tool-calls`
+  tell it is done, open questions); after `harness-tasks--refine-tool-calls`
   (8) tool calls it is steered once to write up with what it has, which
   keeps it brief.  Its final reply becomes `:prompt`
   (the original stays in `:note`) and the task waits in `pending` with
@@ -1035,7 +1044,7 @@ to the task's file (below); the record also keeps `:file-base` and
   moves into the task's new worktree (`session/update :cwd :worktree`),
   its provider conversation is dropped (the Claude CLI keeps
   conversations per directory) and it is prompted with
-  `harness-tasks-start-text`, the write-up and the quoted note, under the
+  `harness-tasks--start-message`, the write-up and the quoted note, under the
   task's own settings.  Dropping a backlog task deletes its session.
 - `task/adoptable &optional CWD` lists the project's open sessions that
   are not tasks; `task/adopt SESSION-ID` makes one a task (its first
@@ -1049,14 +1058,14 @@ to the task's file (below); the record also keeps `:file-base` and
   The worktree stays locked until its branch is merged; a follow-up to
   a merged task locks it again (see worktree).
 - The session's name is the task's title: `naming/system-prompt` adds
-  `harness-tasks-naming-prompt` (nil for none) so the model titles task
+  `harness-tasks--naming-instructions` (nil for none) so the model titles task
   sessions like tickets.
 - With nothing to review (below), a turn ending `end-turn` queues
   `merge/enqueue SID TARGET`, TARGET being the project's root session
-  named `harness-tasks-merge-session-name`
+  named `harness-tasks--merge-session-name`
   (created on demand); `merge/finished … merged` makes the task `done`.
   Failures the agent can fix (uncommitted work) are steered by the merge
-  queue; others, or more than `harness-tasks-merge-attempts`, set
+  queue; others, or more than `harness-tasks--merge-attempts`, set
   `:outcome merge-failed`.  Outside git `end-turn` makes it `done`.
 - Review (`harness-tasks-require-verification`, default t): finished
   work is not done until the user has looked at it.  A turn ending
@@ -1068,7 +1077,7 @@ to the task's file (below); the record also keeps `:file-base` and
   merged already, at once).  `task/reject ID FEEDBACK &optional
   ATTACHMENTS` sends it back: the feedback goes to the same session, in
   its own worktree and with its provider conversation, as a prompt
-  opened by `harness-tasks-reject-text`; the task is `active` again and
+  opened by `harness-tasks--reject-message`; the task is `active` again and
   returns to `review` when that turn ends.  Each round is appended to
   `:feedback`.  Any other new turn of work (a follow-up, a message from
   the chat) clears the verification, so it is reviewed again; the merge
@@ -1192,7 +1201,7 @@ to the task's file (below); the record also keeps `:file-base` and
     makes.  A file keeps its name, and `:file` follows a file renamed by
     hand.  `README.md`, `index.md`, `template.md` and names starting
     with `.`, `_`, `#` or `~` are no tasks
-    (`harness-tasks-directory-ignore`); subfolders are not read.
+    (`harness-tasks--directory-ignore`); subfolders are not read.
   - Writing: each save first reads what changed in the folder, then
     writes the file of every task whose rendering (without `updated`)
     changed since its file was last in step (`:file-synced`), before the
@@ -1204,7 +1213,7 @@ to the task's file (below); the record also keeps `:file-base` and
   - Reading: the files whose mtime or size changed are read on load (the
     folders of the loaded tasks' projects), by `task/list` (its
     project's folder; every known one without CWD), before each save,
-    and every `harness-tasks-directory-poll` seconds (default 2; nil for
+    and every `harness-tasks--directory-poll` seconds (default 2; nil for
     none, as file notifications never reach the batch harness process).
     An edit is what differs from what the file said last (`:file-base`),
     so a file the harness has yet to write again is no edit.  Taken are
@@ -1237,7 +1246,7 @@ to the task's file (below); the record also keeps `:file-base` and
   that nothing in this process works on was interrupted.  Without a
   session it starts over (as pending, or in its worktree when it has
   one); otherwise, with `harness-tasks-resume-interrupted` (default t),
-  its session is resumed and sent `harness-tasks-resume-prompt` (the task
+  its session is resumed and sent `harness-tasks--resume-prompt` (the task
   itself when it never got it), past the concurrency limit since it held
   a slot before; with nil it waits in needs-input with `:outcome
   interrupted`.  A backlog task cut short before its session got the
@@ -1266,7 +1275,7 @@ fills in `:id` and `:ts`.
   and may change it, or drop it by returning nil (the result is then
   `(:id ID :dropped t :results nil)`).  Every provider that is set up
   gets it at once; one that signals, rejects or takes longer than
-  `harness-notifications-timeout` (30 s) is `failed`, one not set up, or
+  `harness-notifications--timeout` (30 s) is `failed`, one not set up, or
   unknown, is `skipped`, and neither holds up the others.  It never
   rejects for a provider, and signals when the notification has neither
   a title nor a body.  Event `notification/sent NOTIFICATION RESULTS`.
@@ -1307,7 +1316,7 @@ fills in `:id` and `:ts`.
 - `gotify`: `POST URL/message` through harness-http, the application
   token in `X-Gotify-Key` (so never on a command line), with `title`,
   `message` (the title when there is no body), `priority` (from
-  `harness-gotify-priorities`: low 2, normal 5, critical 8) and `extras`
+  `harness-notifications--gotify-priorities`: low 2, normal 5, critical 8) and `extras`
   (`client::display` `text/plain`; `client::notification` `click.url`
   for `:url`).  Ready once an address and a token are found:
   `harness-gotify-url` and `harness-gotify-token` (a secret), else the
@@ -1377,7 +1386,7 @@ TRAMP prefixes come from the session host):
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
-| `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms-auto-allow-tools`) |
+| `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read |
 | `merge_done` | Finish merge | none | meta (merge module) |
 
@@ -1408,7 +1417,7 @@ so transcripts are not loaded into memory to be searched.  `session_send`
 prefixes the message with `[Message from session ID "NAME"]` and goes
 through `agent/prompt` (a turn, steering, or the queue).  Waits are
 entries re-checked on session and task events, settled by their
-condition, their timeout (`harness-tools-sessions-wait-default`, at most
+condition, their timeout (`harness-tools-sessions--wait-default`, at most
 `-wait-max`) or the end of the waiting turn; a timeout is a report, not
 an error.  Nothing here grants permissions: permission requests and
 permission modes stay with the user, and `task_submit` uses the task
@@ -1421,7 +1430,7 @@ session; its title defaults to the session's name.  The result names
 the providers that delivered it, failed (and why) or were skipped as
 not set up; it is an error only when none delivered it, and then says
 how providers are set up.  A session sends at most
-`harness-tools-notify-rate-limit` notifications (default 10 in 600 s);
+`harness-tools-notify--rate-limit` notifications (default 10 in 600 s);
 past that it is told when it can send again.  `notification_providers`
 lists `notification/providers`: set up or not, used by default or not.
 
@@ -1435,7 +1444,7 @@ reverts unmodified buffers visiting PATH.
 
 Server: `acp/start &key host port` (default 127.0.0.1, port from
 `harness-acp-port`, 0 = ephemeral) → `(:host :port)`, `acp/stop`,
-`acp/status`.  Started by `:init` when `harness-acp-server-enabled`.
+`acp/status`.  Started by `:init` when `harness-acp--server-enabled`.
 
 Client API used by every UI:
 
@@ -1667,7 +1676,7 @@ accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
 in the minibuffer).  The header counts the tasks to review, and
 `task/review` says in the echo area that one is ready
-(`harness-ui-tasks-notify-review`).  RET opens the session, and
+(`harness-ui-tasks--notify-review`).  RET opens the session, and
 `C-c h a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  Redraws, after

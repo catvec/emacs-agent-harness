@@ -19,7 +19,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
@@ -27,7 +27,7 @@
      (clrhash harness-agent--turns)
      (setq harness-acp--clients nil
            harness-acp-tcp-test-messages nil)
-     (let* ((harness-provider-demo-delay 0.005)
+     (let* ((harness-provider-demo--delay 0.005)
             (harness-acp-token nil)
             (default-directory dir)
             (contact (harness-call 'acp/start :port 0))

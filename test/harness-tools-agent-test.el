@@ -3,7 +3,7 @@
 
 (require 'harness-test-helpers)
 
-(defvar harness-provider-demo-delay)
+(defvar harness-provider-demo--delay)
 (defvar harness-tools-agent--questions)
 (defvar harness-tools-agent-planning-section)
 
@@ -17,7 +17,7 @@
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
      (clrhash harness-tools-agent--questions)
-     (let ((harness-provider-demo-delay 0.005)
+     (let ((harness-provider-demo--delay 0.005)
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)

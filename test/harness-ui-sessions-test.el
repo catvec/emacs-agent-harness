@@ -48,7 +48,7 @@
                      ((symbol-function 'harness-ui-display-view) #'ignore))
              ,@body))
        (clrhash harness-ui--sessions)
-       (when-let* ((buf (get-buffer harness-ui-sessions-buffer-name))) (kill-buffer buf))
+       (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name))) (kill-buffer buf))
        (ignore-errors (delete-directory base t)))))
 
 (defun harness-ui-sessions-test--add (id project)
@@ -60,7 +60,7 @@
 
 (defun harness-ui-sessions-test--shown ()
   "Return the sorted ids the list buffer shows."
-  (with-current-buffer harness-ui-sessions-buffer-name
+  (with-current-buffer harness-ui-sessions--buffer-name
     (sort (mapcar #'car tabulated-list-entries) #'string<)))
 
 (ert-deftest harness-ui-sessions-project-includes-its-worktrees ()
@@ -72,7 +72,7 @@
     (let ((default-directory root)) (harness-sessions))
     (should (equal '("main" "task") (harness-ui-sessions-test--shown)))
     ;; `a' toggles every project, and back.
-    (with-current-buffer harness-ui-sessions-buffer-name
+    (with-current-buffer harness-ui-sessions--buffer-name
       (harness-ui-sessions-toggle-scope)
       (should (equal '("elsewhere" "main" "task") (harness-ui-sessions-test--shown)))
       (harness-ui-sessions-toggle-scope)
@@ -98,7 +98,7 @@
       (make-directory default-directory t)
       (harness-sessions))
     (should (equal root (buffer-local-value 'harness-ui-sessions--project
-                                            (get-buffer harness-ui-sessions-buffer-name))))
+                                            (get-buffer harness-ui-sessions--buffer-name))))
     (should (equal '("main" "task") (harness-ui-sessions-test--shown)))))
 
 (ert-deftest harness-ui-sessions-removed-worktree-stays-with-its-project ()
@@ -121,7 +121,7 @@
       (harness-ui-sessions-test--add "remote" remote)
       (let ((default-directory root)) (harness-sessions))
       (should (equal '("main") (harness-ui-sessions-test--shown)))
-      (with-current-buffer harness-ui-sessions-buffer-name
+      (with-current-buffer harness-ui-sessions--buffer-name
         (cl-letf (((symbol-function 'harness-files-main-checkout) (lambda (&rest _) (error "Looked at")))
                   ((symbol-function 'harness-files-main-root) (lambda (&rest _) (error "Looked at")))
                   ((symbol-function 'file-directory-p) (lambda (&rest _) (error "Looked at"))))
@@ -147,7 +147,7 @@
         (should (= 4 calls))
         (dotimes (_ 3) (harness-ui-sessions--redraw))
         (should (= 4 calls))
-        (with-current-buffer harness-ui-sessions-buffer-name (harness-ui-sessions-reload))
+        (with-current-buffer harness-ui-sessions--buffer-name (harness-ui-sessions-reload))
         (should (= 7 calls))
         (should (equal '("main" "task" "task-again") (harness-ui-sessions-test--shown)))))))
 

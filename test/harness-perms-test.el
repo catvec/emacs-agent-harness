@@ -157,19 +157,19 @@
   (should (eq 'allow (harness-perms-test--behavior "write_file" 'write
                                                    (expand-file-name "f" (plist-get harness-perms-test--session :cwd))))))
 
-(ert-deftest harness-perms-auto-allow-tools ()
+(ert-deftest harness-perms--auto-allow-tools ()
   (harness-perms-test--setup :permission-mode 'ask)
-  (dolist (tool harness-perms-auto-allow-tools)
+  (dolist (tool harness-perms--auto-allow-tools)
     (should (eq 'allow (harness-perms-test--behavior tool 'meta))))
   (should (eq 'deny (harness-perms-test--behavior "spawn_agent" 'meta)))
-  (let ((harness-perms-auto-allow-tools '("spawn_agent")))
+  (let ((harness-perms--auto-allow-tools '("spawn_agent")))
     (should (eq 'allow (harness-perms-test--behavior "spawn_agent" 'meta)))))
 
 (ert-deftest harness-perms-web-search-needs-no-approval ()
   ;; web_search only sends its query to the configured search provider,
   ;; so it is allowed in every mode; web_fetch reaches any host and asks.
   (harness-perms-test--setup :permission-mode 'ask)
-  (should (member "web_search" harness-perms-auto-allow-tools))
+  (should (member "web_search" harness-perms--auto-allow-tools))
   (should (eq 'allow (harness-perms-test--behavior "web_search" 'net)))
   (should (eq 'deny (harness-perms-test--behavior "web_fetch" 'net)))
   (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'accept-edits))
@@ -179,7 +179,7 @@
   ;; notify only reaches the user, through the providers they set up, so
   ;; unattended sessions can tell them they are needed.
   (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
-  (should (member "notify" harness-perms-auto-allow-tools))
+  (should (member "notify" harness-perms--auto-allow-tools))
   (should (eq 'allow (harness-perms-test--behavior "notify" 'meta)))
   (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'auto))
   (should (eq 'allow (harness-perms-test--behavior "notify" 'meta))))
@@ -287,7 +287,7 @@
   ;; Timeout: the handle is cancelled and the chain proceeds.
   (let* ((probe (harness-perms-test--judge-provider '((:type start))))
          (harness-perms-auto-model "judge:x")
-         (harness-perms-auto-timeout 0.2)
+         (harness-perms--auto-timeout 0.2)
          (start (float-time))
          (d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
     (should (eq 'deny (plist-get d :behavior)))
@@ -701,7 +701,7 @@ for a request without a session record."
                      (:type done :stop-reason end-turn))))
            (harness-perms-auto-model "judge:x")
            (harness-perms-rules '((:behavior allow)))
-           (harness-perms-auto-allow-tools (cons harness-perms-dir-tool harness-perms-auto-allow-tools))
+           (harness-perms--auto-allow-tools (cons harness-perms-dir-tool harness-perms--auto-allow-tools))
            (outside (harness-test-temp-dir))
            (started (harness-perms-test--start-request outside "need it")))
       ;; The call waits for the user, whatever the mode says.

@@ -29,25 +29,20 @@
 (require 'harness-util)
 (require 'harness-tools)
 
-(defcustom harness-tools-fs-glob-limit 500
-  "Maximum number of paths returned by the glob tool."
-  :type 'integer :group 'harness)
+(defconst harness-tools-fs--glob-limit 500
+  "Maximum number of paths returned by the glob tool.")
 
-(defcustom harness-tools-fs-list-limit 2000
-  "Maximum number of entries listed by list_dir before it stops."
-  :type 'integer :group 'harness)
+(defconst harness-tools-fs--list-limit 2000
+  "Maximum number of entries listed by list_dir before it stops.")
 
-(defcustom harness-tools-fs-grep-timeout 60
-  "Seconds a grep may run before it is killed."
-  :type 'number :group 'harness)
+(defconst harness-tools-fs--grep-timeout 60
+  "Seconds a grep may run before it is killed.")
 
-(defcustom harness-tools-fs-binary-probe-bytes 8000
-  "How many leading bytes are inspected to decide whether a file is binary."
-  :type 'integer :group 'harness)
+(defconst harness-tools-fs--binary-probe-bytes 8000
+  "How many leading bytes are inspected to decide whether a file is binary.")
 
-(defcustom harness-tools-fs-line-count-limit (* 20 1024 1024)
-  "Byte size above which file_info stops counting lines."
-  :type 'integer :group 'harness)
+(defconst harness-tools-fs--line-count-limit (* 20 1024 1024)
+  "Byte size above which file_info stops counting lines.")
 
 ;;;; Helpers
 
@@ -90,7 +85,7 @@
   (with-temp-buffer
     (set-buffer-multibyte nil)
     (condition-case nil
-        (insert-file-contents-literally path nil 0 harness-tools-fs-binary-probe-bytes)
+        (insert-file-contents-literally path nil 0 harness-tools-fs--binary-probe-bytes)
       (error nil))
     (goto-char (point-min))
     (and (search-forward "\0" nil t) t)))
@@ -353,7 +348,7 @@ PREFIX is the relative path shown for entries; LIMIT caps the total."
       (harness-tool-error (format "%s is a file, not a directory; use read_file or file_info" shown)))
      (t
       (let ((acc (list nil)))
-        (harness-tools-fs--list-entries path depth "" acc harness-tools-fs-list-limit)
+        (harness-tools-fs--list-entries path depth "" acc harness-tools-fs--list-limit)
         (let* ((entries (nreverse (car acc)))
                (n (length entries))
                (lines (mapcar (lambda (e)
@@ -366,7 +361,7 @@ PREFIX is the relative path shown for entries; LIMIT caps the total."
            (if (zerop n)
                (format "%s is empty" shown)
              (format "%s%s\n%s" (string-join lines "\n")
-                     (if (>= n harness-tools-fs-list-limit)
+                     (if (>= n harness-tools-fs--list-limit)
                          (format "\n\n[Listing stopped at %d entries; narrow the path or lower depth]" n)
                        "")
                      (format "(%d entr%s in %s, depth %d)" n (if (= n 1) "y" "ies") shown depth))))))))))
@@ -439,15 +434,15 @@ A predicate for `directory-files-recursively'."
       (let* ((matches (harness-tools-fs--glob-matches pattern base))
              (total (length matches))
              (sorted (sort matches (lambda (a b) (> (harness-tools-fs--mtime a) (harness-tools-fs--mtime b)))))
-             (kept (seq-take sorted harness-tools-fs-glob-limit))
+             (kept (seq-take sorted harness-tools-fs--glob-limit))
              (rel (mapcar (lambda (f) (concat (file-relative-name f base) (if (file-directory-p f) "/" ""))) kept)))
         (harness-tool-ok
          (if (zerop total)
              (format "No files match %s in %s" pattern shown)
            (format "%s\n(%d match%s%s, newest first)" (string-join rel "\n") total
                    (if (= total 1) "" "es")
-                   (if (> total harness-tools-fs-glob-limit)
-                       (format ", showing %d" harness-tools-fs-glob-limit) "")))))))))
+                   (if (> total harness-tools-fs--glob-limit)
+                       (format ", showing %d" harness-tools-fs--glob-limit) "")))))))))
 
 (harness-define-tool "glob"
   :label "Find files"
@@ -516,12 +511,12 @@ TARGET is a path local to the host CWD lives on."
              (cmd (harness-tools-fs--grep-command pattern target (and (stringp glob) (not (string-empty-p glob)) glob)
                                                   case-sensitive cwd)))
         (harness-then
-         (harness-run-command cmd :cwd cwd :timeout harness-tools-fs-grep-timeout :name "harness-grep")
+         (harness-run-command cmd :cwd cwd :timeout harness-tools-fs--grep-timeout :name "harness-grep")
          (lambda (r)
            (let ((exit (plist-get r :exit)))
              (cond
               ((eq exit 'timeout)
-               (harness-tool-error (format "grep timed out after %ss; narrow the pattern or path" harness-tools-fs-grep-timeout)))
+               (harness-tool-error (format "grep timed out after %ss; narrow the pattern or path" harness-tools-fs--grep-timeout)))
               ((and (integerp exit) (> exit 1))
                (harness-tool-error (format "%s failed (exit %d): %s" (car cmd) exit
                                            (string-trim (plist-get r :stderr)))))
@@ -574,7 +569,7 @@ TARGET is a path local to the host CWD lives on."
              (mtime (file-attribute-modification-time attrs))
              (binary (and (string= kind "file") (harness-tools-fs--binary-p path)))
              (lines (and (string= kind "file") (not binary)
-                         (<= size harness-tools-fs-line-count-limit)
+                         (<= size harness-tools-fs--line-count-limit)
                          (harness-tools-fs--count-lines path)))
              (mime (and (string= kind "file") (harness-tools-fs--mime path))))
         (harness-tool-ok

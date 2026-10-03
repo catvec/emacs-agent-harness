@@ -4,7 +4,7 @@
 (require 'harness-test-helpers)
 
 (defvar harness-skills-directories)
-(defvar harness-skills-prompt-limit)
+(defvar harness-skills--prompt-limit)
 (defvar harness-skills--cache)
 
 (defun harness-skills-test--write-skill (base name content)
@@ -165,7 +165,7 @@ BODY receives the global directory, the project directory and the cwd."
       (should (string-match-p "skill_load" prompt))
       (should-not (string-match-p "more; use skill_search" prompt)))
     ;; The limit truncates the index and says so.
-    (let* ((harness-skills-prompt-limit 2)
+    (let* ((harness-skills--prompt-limit 2)
            (prompt (harness-run-filter 'agent/system-prompt "" (list :cwd cwd))))
       (should (string-prefix-p "## Available skills" prompt))
       (should (string-match-p "(2 more; use skill_search)" prompt)))

@@ -118,7 +118,7 @@
       (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
         (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
       (should-not (plist-get r :is-error))
-      (should (string-search (concat "HOME=" harness-sandbox-home) (plist-get r :content)))
+      (should (string-search (concat "HOME=" harness-sandbox--home) (plist-get r :content)))
       (should (string-search "hidden" (plist-get r :content)))
       (should (plist-get (plist-get r :meta) :sandboxed)))))
 
@@ -143,7 +143,7 @@
       (should (string-search "--- messages ---\nhello 42" c)))
     ;; Strings and long values.
     (should (equal "=> \"s\"" (plist-get (harness-tools-shell-test--call "elisp" :code "\"s\"") :content)))
-    (let ((harness-elisp-max-value-chars 20))
+    (let ((harness-client-tools--elisp-max-value-chars 20))
       (should (<= (length (plist-get (harness-tools-shell-test--call "elisp" :code "(make-string 500 ?x)") :content)) 24)))
     (should (eq 'exec (harness-tool-kind (harness-tool-get "elisp"))))
     (should (equal "Emacs Lisp: (+ 1 2)" (harness-tool-title "elisp" '(:code "(+ 1 2)\n(more)"))))))
@@ -163,7 +163,7 @@
       (should (string-search "End of file" (plist-get r :content))))
     (should (plist-get (harness-tools-shell-test--call "elisp" :code "  ") :is-error))
     ;; The timeout interrupts code that yields to the event loop.
-    (let* ((harness-elisp-timeout 0.3)
+    (let* ((harness-client-tools--elisp-timeout 0.3)
            (r (harness-tools-shell-test--call "elisp" :code "(sit-for 5) 'never")))
       (should (plist-get r :is-error))
       (should (string-search "exceeded" (plist-get r :content))))))

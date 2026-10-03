@@ -30,17 +30,14 @@
 
 ;;;; Customisation
 
-(defcustom harness-openai-models-ttl 3600
-  "Seconds a fetched model list stays cached per endpoint."
-  :type 'integer :group 'harness)
+(defconst harness-openai--models-ttl 3600
+  "Seconds a fetched model list stays cached per endpoint.")
 
-(defcustom harness-openai-request-timeout 600
-  "Maximum seconds a completion request may take, including streaming."
-  :type 'integer :group 'harness)
+(defconst harness-openai--request-timeout 600
+  "Maximum seconds a completion request may take, including streaming.")
 
-(defcustom harness-openai-progress-interval 0.25
-  "Seconds between reports of how much of a tool call's arguments has streamed."
-  :type 'number :group 'harness)
+(defconst harness-openai--progress-interval 0.25
+  "Seconds between reports of how much of a tool call's arguments has streamed.")
 
 (defvar harness-openai--registered nil
   "Provider ids registered from `harness-openai-endpoints'.")
@@ -244,11 +241,11 @@ hides the others."
     (_ (harness-error-message err))))
 
 (defun harness-openai--models (endpoint)
-  "Return a promise of ENDPOINT's models, cached for `harness-openai-models-ttl'."
+  "Return a promise of ENDPOINT's models, cached for `harness-openai--models-ttl'."
   (let* ((id (plist-get endpoint :id))
          (cached (gethash id harness-openai--models-cache)))
     (cond
-     ((and cached (< (- (float-time) (car cached)) harness-openai-models-ttl))
+     ((and cached (< (- (float-time) (car cached)) harness-openai--models-ttl))
       (harness-resolved (cdr cached)))
      ((plist-get endpoint :models)
       (let ((models (harness-openai--static-models endpoint)))
@@ -478,12 +475,12 @@ hides the others."
   "Report the size of the arguments STREAM has received for the call in SLOT.
 The calls themselves go out once the response ends, so this is all that
 shows a model writing a large input.  At most one report every
-`harness-openai-progress-interval' seconds per call."
+`harness-openai--progress-interval' seconds per call."
   (let ((call (cdr slot))
         (now (float-time)))
     (when (and (plist-get call :name)
                (let ((sent (plist-get call :sent-at)))
-                 (or (null sent) (>= (- now sent) harness-openai-progress-interval))))
+                 (or (null sent) (>= (- now sent) harness-openai--progress-interval))))
       (setcdr slot (plist-put call :sent-at now))
       (funcall (harness-openai--stream-on-event stream)
                (list :type 'activity :phase 'tool-input :tool (plist-get call :name)
@@ -592,7 +589,7 @@ OpenAI-compatible endpoints bill per token, so the event says `api'."
                  :method "POST"
                  :headers (harness-openai--headers endpoint key)
                  :json (harness-openai--body endpoint name request)
-                 :timeout harness-openai-request-timeout
+                 :timeout harness-openai--request-timeout
                  :on-headers (lambda (s _headers) (setq status s))
                  :on-chunk (lambda (chunk)
                              (if (and status (or (< status 200) (>= status 300)))

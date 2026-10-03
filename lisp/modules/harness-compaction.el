@@ -4,7 +4,7 @@
 
 ;; A conversation cannot grow past the model's context window, and it
 ;; must stop well before that: the summary that replaces it has to be
-;; generated with room to spare (`harness-context-reserve').  This
+;; generated with room to spare (`harness-compaction--context-reserve').  This
 ;; module asks the session's own model for a thorough handoff summary,
 ;; appends it as a `compaction' node and lets `session/messages' restart
 ;; the transcript from there.  The earlier nodes stay in the DAG (the
@@ -32,9 +32,7 @@
 (require 'harness-core)
 (require 'harness-util)
 
-(defvar harness-context-reserve)
-
-(defcustom harness-compaction-system-prompt
+(defconst harness-compaction--system-prompt
   "You are writing a handoff summary so that a fresh agent can continue this work without access to the conversation above.
 
 Write a thorough, factual summary in Markdown with these sections:
@@ -47,34 +45,32 @@ Write a thorough, factual summary in Markdown with these sections:
 6. Pending user request: the most recent user message(s) verbatim if they have not been answered yet.
 
 Keep exact identifiers: file paths, function and variable names, commands, error messages, URLs, ids and numbers.  Prefer precise statements over prose.  Do not add commentary about the summary itself."
-  "System prompt for the compaction summariser."
-  :type 'string :group 'harness)
+  "System prompt for the compaction summariser.")
 
-(defcustom harness-compaction-request-text
+(defconst harness-compaction--request-text
   "Summarize the conversation above for a fresh agent that will take over from here.  Follow the section list from your instructions and keep every exact identifier."
-  "Final user message that asks the model for the summary."
-  :type 'string :group 'harness)
+  "Final user message that asks the model for the summary.")
 
-(defcustom harness-compaction-max-tokens 4000
-  "Output budget for a compaction summary, in tokens."
-  :type 'integer :group 'harness)
+(defconst harness-compaction--max-tokens 4000
+  "Output budget for a compaction summary, in tokens.")
 
-(defcustom harness-compaction-levels '((0.7 . ok) (0.85 . warning) (0.95 . urgent))
+(defconst harness-compaction--context-reserve 20000
+  "Tokens kept free below the context window before compaction.
+The room the summary request and the summary itself need, with some to
+spare: `harness-compaction--max-tokens' of output plus the prompt.")
+
+(defconst harness-compaction--levels '((0.7 . ok) (0.85 . warning) (0.95 . urgent))
   "Fractions of the usable window below which each level applies.
-Anything at or above the last fraction is `critical'."
-  :type '(alist :key-type number :value-type symbol) :group 'harness)
+Anything at or above the last fraction is `critical'.")
 
 (defvar harness-compaction--running (make-hash-table :test 'equal)
   "Session id -> promise of the compaction in flight.")
 
 ;;;; Status
 
-(defun harness-compaction--reserve (session)
+(defun harness-compaction--reserve (_session)
   "Return the context reserve that applies to SESSION."
-  (or (and (harness-method-exists-p 'config/get) (plist-get session :cwd)
-           (ignore-errors (harness-call 'config/get 'harness-context-reserve (plist-get session :cwd))))
-      (and (boundp 'harness-context-reserve) harness-context-reserve)
-      0))
+  harness-compaction--context-reserve)
 
 (defun harness-compaction--window (session)
   "Return the context window of SESSION's model."
@@ -90,7 +86,7 @@ The reserve is capped at half the window so tiny models still work."
 
 (defun harness-compaction--level (fraction)
   "Return the warning level for FRACTION of the usable window."
-  (or (cdr (cl-find-if (lambda (cell) (< fraction (car cell))) harness-compaction-levels))
+  (or (cdr (cl-find-if (lambda (cell) (< fraction (car cell))) harness-compaction--levels))
       'critical))
 
 (harness-defmethod compaction/status (session-id)
@@ -130,7 +126,7 @@ where L is one of `ok', `warning', `urgent' and `critical'."
 (defun harness-compaction--messages (session-id)
   "Return the summarisation messages for SESSION-ID."
   (let* ((messages (harness-call 'session/messages session-id))
-         (ask (list :type "text" :text harness-compaction-request-text))
+         (ask (list :type "text" :text harness-compaction--request-text))
          (last (car (last messages))))
     (if (and last (eq (plist-get last :role) 'user))
         (append (butlast messages)
@@ -198,9 +194,9 @@ is running returns the running promise."
             (harness-call
              'provider/complete
              (list :model model :session session
-                   :system harness-compaction-system-prompt
+                   :system harness-compaction--system-prompt
                    :messages messages :tools nil :provider-state nil
-                   :max-tokens harness-compaction-max-tokens
+                   :max-tokens harness-compaction--max-tokens
                    :on-event
                    (lambda (ev)
                      (pcase (plist-get ev :type)

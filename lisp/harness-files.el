@@ -106,9 +106,8 @@ see `harness-files-main-checkout'."
 (defvar projectile-projects-cache-time)
 (defvar projectile-files-cache-expire)
 
-(defcustom harness-files-timeout 30
-  "Seconds a file-listing process may run before it is killed."
-  :type 'number :group 'harness)
+(defconst harness-files--timeout 30
+  "Seconds a file-listing process may run before it is killed.")
 
 (defvar harness-files--listings (make-hash-table :test 'equal)
   "Root -> promise of the file listing in flight for that root.
@@ -138,7 +137,7 @@ failing command resolves to what it printed; a timeout kills it."
                                           (split-string (buffer-string) "\0" t)))))
                         (when (buffer-live-p out) (kill-buffer out))
                         (funcall resolve files)))))))
-      (setq timer (run-at-time harness-files-timeout nil
+      (setq timer (run-at-time harness-files--timeout nil
                                (lambda ()
                                  (harness-log 'warn "project: listing %s timed out" root)
                                  (when (process-live-p proc) (delete-process proc))))))))

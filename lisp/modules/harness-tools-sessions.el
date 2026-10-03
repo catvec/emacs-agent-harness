@@ -46,17 +46,14 @@
 
 (defvar harness-state-directory)
 
-(defcustom harness-tools-sessions-wait-default 600
-  "Seconds `session_wait' and `task_wait' wait when the call gives no timeout."
-  :type 'number :group 'harness)
+(defconst harness-tools-sessions--wait-default 600
+  "Seconds `session_wait' and `task_wait' wait when the call gives no timeout.")
 
-(defcustom harness-tools-sessions-wait-max 3600
-  "Longest wait, in seconds, a `session_wait' or `task_wait' call may ask for."
-  :type 'number :group 'harness)
+(defconst harness-tools-sessions--wait-max 3600
+  "Longest wait, in seconds, a `session_wait' or `task_wait' call may ask for.")
 
-(defcustom harness-tools-sessions-grep-program "grep"
-  "Program `session_search' runs over the transcript logs."
-  :type 'string :group 'harness)
+(defconst harness-tools-sessions--grep-program "grep"
+  "Program `session_search' runs over the transcript logs.")
 
 ;;;; Formatting
 
@@ -300,7 +297,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
        (if (null files)
            (harness-resolved (list :exit 1 :stdout ""))
          (harness-run-command
-          (append (list harness-tools-sessions-grep-program "-i" "-H" (format "--max-count=%d" (* 4 per-session))
+          (append (list harness-tools-sessions--grep-program "-i" "-H" (format "--max-count=%d" (* 4 per-session))
                         (if regexp "-E" "-F") "-e"
                         ;; In the log, text sits inside JSON strings.
                         (if regexp query (harness-tools-sessions--json-fragment query))
@@ -571,8 +568,8 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
 (defun harness-tools-sessions--timeout (input)
   "Return the wait timeout in seconds INPUT asks for, clamped."
   (let ((v (plist-get input :timeout_seconds)))
-    (max 1 (min harness-tools-sessions-wait-max
-                (if (numberp v) v harness-tools-sessions-wait-default)))))
+    (max 1 (min harness-tools-sessions--wait-max
+                (if (numberp v) v harness-tools-sessions--wait-default)))))
 
 (defun harness-tools-sessions--reached-p (sid until baseline)
   "Non-nil when session SID satisfies UNTIL; BASELINE is its state at the start."

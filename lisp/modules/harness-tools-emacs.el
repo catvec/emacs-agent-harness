@@ -64,7 +64,7 @@
             :properties (:count (:type "integer" :description "Number of lines. Default 50")))
   :kind 'read
   :coalescable t
-  :subject (lambda (input) (format "last %s lines" (or (plist-get input :count) harness-tools-emacs-messages-default)))
+  :subject (lambda (input) (format "last %s lines" (or (plist-get input :count) harness-client-tools--messages-default)))
   :handler (harness-tools-in-client "emacs_messages"))
 
 (harness-define-module 'tools-emacs

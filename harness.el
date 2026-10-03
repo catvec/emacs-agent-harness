@@ -118,7 +118,7 @@ Only the ACP client half is used: its TCP server stays off here.")
     (harness-load-compiled file)))
 
 (defvar harness--defining-module)
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-ui-connection-address)
 (declare-function harness-ui-reload-server "harness-ui")
 
@@ -141,7 +141,7 @@ Return non-nil when every module loaded and initialised."
                (harness-log 'error "loading %s failed: %S" f err))))
     (when harness-process
       ;; The harness process serves ACP; this Emacs only connects to it.
-      (setq harness-acp-server-enabled nil)
+      (setq harness-acp--server-enabled nil)
       (when (and (boundp 'harness-ui-connection-address)
                  (not (stringp harness-ui-connection-address)))
         (setq harness-ui-connection-address 'process)))

@@ -16,13 +16,13 @@
 
 (defvar harness-notifications-providers)
 (defvar harness-notifications--providers)
-(defvar harness-notifications-timeout)
-(defvar harness-notifications-max-body)
+(defvar harness-notifications--timeout)
+(defvar harness-notifications--max-body)
 (defvar harness-notifications--auth-source-seen)
 (defvar harness-gotify-url)
 (defvar harness-gotify-token)
-(defvar harness-gotify-priorities)
-(defvar harness-acp-server-enabled)
+(defvar harness-notifications--gotify-priorities)
+(defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (declare-function harness-notifications-define-provider "harness-notifications")
@@ -48,7 +48,7 @@ The script finds DIR in $D; it writes its arguments to $D/args."
 `dir' is the script's directory, and `args' reads the arguments it got."
   (declare (indent 1))
   `(let* ((dir (harness-test-temp-dir))
-          (harness-notifications-desktop-notify-send-program
+          (harness-notifications-desktop--notify-send
            (harness-notifications-test--script dir ,script))
           (harness-notifications-desktop-backend 'notify-send)
           (harness-notifications-desktop--legacy nil)
@@ -76,7 +76,7 @@ The script finds DIR in $D; it writes its arguments to $D/args."
       (should (= 1 (length harness-notifications-desktop--waiting)))
       (harness-test-wait (lambda () (= clicks 1)) 5 "the click")
       (harness-test-wait (lambda () (null harness-notifications-desktop--waiting)) 5 "the process to end")
-      (should (equal (list (concat "--app-name=" harness-notifications-desktop-app-name)
+      (should (equal (list (concat "--app-name=" harness-notifications-desktop--app-name)
                            "--urgency=critical"
                            (concat "--icon=" (harness-notifications-desktop--icon))
                            "--print-id" "--action=default=Open" "--"
@@ -135,7 +135,7 @@ The script finds DIR in $D; it writes its arguments to $D/args."
 
 (ert-deftest harness-notifications-desktop-backend-choice ()
   (cl-letf (((symbol-function 'harness-notifications-desktop--dbus-session-p) #'ignore))
-    (let ((harness-notifications-desktop-notify-send-program "harness-test-no-such-program"))
+    (let ((harness-notifications-desktop--notify-send "harness-test-no-such-program"))
       (let ((harness-notifications-desktop-backend 'auto))
         (unless (eq system-type 'darwin)
           (should-not (harness-notifications-desktop-backend))
@@ -152,7 +152,7 @@ The script finds DIR in $D; it writes its arguments to $D/args."
       (let ((harness-notifications-desktop-backend 'dbus))
         (should-not (harness-notifications-desktop-backend))))
     (let* ((dir (harness-test-temp-dir))
-           (harness-notifications-desktop-notify-send-program (harness-notifications-test--script dir "exit 0"))
+           (harness-notifications-desktop--notify-send (harness-notifications-test--script dir "exit 0"))
            (harness-notifications-desktop-backend 'auto))
       (unwind-protect (should (eq 'notify-send (harness-notifications-desktop-backend)))
         (delete-directory dir t)))
@@ -171,8 +171,8 @@ The script finds DIR in $D; it writes its arguments to $D/args."
 ;;;; Desktop: D-Bus
 
 (ert-deftest harness-notifications-desktop-dbus-arguments ()
-  (let ((harness-notifications-desktop-app-name "App")
-        (harness-notifications-desktop-icon "icon"))
+  (let ((harness-notifications-desktop--app-name "App")
+        (harness-notifications-desktop--icon-name "icon"))
     (should (equal '(:string "App" :uint32 0 :string "icon" :string "T" :string "x &amp; y"
                      (:array "default" "Open")
                      (:array (:dict-entry "urgency" (:variant :byte 2)))
@@ -313,7 +313,7 @@ Providers BODY defines go when it ends."
 (ert-deftest harness-notifications-a-hanging-provider-times-out ()
   (harness-notifications-test-with
     (let ((one (harness-notifications-test--capture 'one))
-          (harness-notifications-timeout 0.2))
+          (harness-notifications--timeout 0.2))
       (harness-notifications-define-provider 'stuck :send (lambda (_) (harness-make-promise)))
       (let ((results (plist-get (harness-notifications-test--send '(:title "T") '(stuck one)) :results)))
         (should (equal '(:provider one :status sent :detail "kept") (cadr results)))
@@ -342,7 +342,7 @@ Providers BODY defines go when it ends."
   (harness-notifications-test-with
     (let ((one (harness-notifications-test--capture 'one))
           (harness-notifications-providers '(one))
-          (harness-notifications-max-body 10))
+          (harness-notifications--max-body 10))
       (should-error (harness-call 'notification/send '(:title "  " :body "")))
       (should-error (harness-call 'notification/send "just text"))
       (harness-notifications-test--send '(:title "T" :body "0123456789abcdef"))
@@ -430,7 +430,7 @@ Providers BODY defines go when it ends."
                               :client::notification (:click (:url "https://example.com/pr/1"))))
                    (harness-notifications--gotify-message
                     '(:title "T" :body "B" :urgency critical :url "https://example.com/pr/1"))))
-    (let ((harness-gotify-priorities '((low . 0) (normal . 4) (critical . 10))))
+    (let ((harness-notifications--gotify-priorities '((low . 0) (normal . 4) (critical . 10))))
       (should (= 0 (plist-get (harness-notifications--gotify-message '(:title "T" :urgency low)) :priority)))
       (should (= 4 (plist-get (harness-notifications--gotify-message '(:title "T" :urgency normal)) :priority))))
     ;; The message is required by Gotify: the title stands in for a missing body.
@@ -438,7 +438,7 @@ Providers BODY defines go when it ends."
       (should (equal "Only a title" (plist-get m :message)))
       (should (= 5 (plist-get m :priority)))
       (should-not (plist-get (plist-get m :extras) :client::notification)))
-    (should (equal harness-notifications-desktop-app-name
+    (should (equal harness-notifications-desktop--app-name
                    (plist-get (harness-notifications--gotify-message '(:body "Just text")) :title)))))
 
 (defun harness-notifications-test--serve (respond)
@@ -541,7 +541,7 @@ requests seen, newest first, kept in its cdr."
 HANDLER answers its `_harness/client/notify' requests: it gets the
 params and the respond function.  The client goes when BODY ends."
   (declare (indent 1))
-  `(let ((harness-acp-server-enabled nil)
+  `(let ((harness-acp--server-enabled nil)
          (harness-acp-token nil))
      (harness-test-load-module 'acp)
      (setq harness-acp--clients nil)

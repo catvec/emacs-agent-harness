@@ -27,9 +27,9 @@
   "Run BODY without the AWS settings of the real environment, then with VARS.
 VARS is a list of (NAME VALUE) as for `with-environment-variables'."
   (declare (indent 1))
-  `(let ((harness-bedrock-aws-program nil)
+  `(let ((harness-bedrock--aws-program nil)
          (auth-sources nil)
-         (harness-bedrock-max-retries 3))
+         (harness-bedrock--max-retries 3))
      (with-environment-variables
          (("AWS_ACCESS_KEY_ID" nil) ("AWS_SECRET_ACCESS_KEY" nil) ("AWS_SESSION_TOKEN" nil)
           ("AWS_PROFILE" nil) ("AWS_DEFAULT_PROFILE" nil) ("AWS_REGION" nil) ("AWS_DEFAULT_REGION" nil)
@@ -489,7 +489,7 @@ Folded header lines continue the header above them."
           (should-not (reasons harness-bedrock-test-sonnet))
           (should (reasons harness-bedrock-test-sonnet "low"))))
       ;; Caching can be forced on or turned off.
-      (let ((harness-bedrock-prompt-caching nil))
+      (let ((harness-bedrock--prompt-caching nil))
         (should-not (string-search "cachePoint" (harness-json-encode (harness-bedrock--body endpoint sonnet request)))))
       (should (string-search "cachePoint"
                              (harness-json-encode
@@ -639,7 +639,7 @@ Folded header lines continue the header above them."
           (should (equal "finally" (harness-bedrock-test--text events)))
           (should (= 3 (length harness-bedrock-test--requests)))))
       ;; Retries run out.
-      (let ((harness-bedrock-max-retries 1))
+      (let ((harness-bedrock--max-retries 1))
         (harness-bedrock-test-with-fake
             '(("converse-stream" . (:status 503 :body "{\"message\":\"busy\"}"))
               ("converse-stream" . (:status 503 :body "{\"message\":\"still busy\"}")))
@@ -968,7 +968,7 @@ Folded header lines continue the header above them."
        (harness-bedrock-mock-stop mock))))
 
 (ert-deftest harness-provider-bedrock-end-to-end-through-curl ()
-  (skip-unless harness-http-curl-program)
+  (skip-unless harness-http--curl-program)
   (harness-bedrock-test-with-env (("AWS_ACCESS_KEY_ID" harness-bedrock-mock-key-id)
                                   ("AWS_SECRET_ACCESS_KEY" harness-bedrock-mock-key-secret)
                                   ("AWS_SESSION_TOKEN" "session-token-EXAMPLE"))
@@ -1023,7 +1023,7 @@ Folded header lines continue the header above them."
             (should-not (string-search "not-the-secret" (plist-get done :error)))))))))
 
 (ert-deftest harness-provider-bedrock-end-to-end-api-key ()
-  (skip-unless harness-http-curl-program)
+  (skip-unless harness-http--curl-program)
   (harness-bedrock-test-with-env (("AWS_BEARER_TOKEN_BEDROCK" harness-bedrock-mock-api-key))
     (harness-bedrock-test-with-mock #'harness-bedrock-mock-agent-handler
       (let ((events (car (harness-bedrock-test--complete
@@ -1038,7 +1038,7 @@ Folded header lines continue the header above them."
 
 (ert-deftest harness-provider-bedrock-agent-tool-round-trip ()
   "A session on a Bedrock model streams, calls a tool, answers, and records usage."
-  (skip-unless harness-http-curl-program)
+  (skip-unless harness-http--curl-program)
   (harness-bedrock-test-with-keys
     (harness-bedrock-test-with-mock #'harness-bedrock-mock-agent-handler
       (harness-test-with-temp-state
