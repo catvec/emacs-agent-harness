@@ -354,7 +354,9 @@ leave free.  None is left out by the menu."
   (should-not (harness-ui--menu-key-taken-p "."))
   (pcase-dolist (`(,mode ,_title . ,columns) (harness-ui-test-menu-groups))
     (let ((maps (delq nil (list (let ((map (intern (format "%s-map" mode)))) (and (boundp map) (symbol-value map)))
-                                (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map))))
+                                ;; Keys on a view's content, outside its box.
+                                (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map)
+                                (and (eq mode 'harness-ui-popout-mode) harness-ui-popout-content-map))))
           (keys nil))
       (dolist (column columns)
         (dolist (item (append column nil))
@@ -944,6 +946,22 @@ shrinks every window and moves the button under the mouse."
   (should (equal "a b c" (harness-ui-one-line "a\n\tb  c")))
   (should (equal "path mouse-1: open" (harness-ui-one-line " path\nmouse-1: open ")))
   (should (equal "" (harness-ui-one-line nil))))
+
+;;;; Mouse targets
+
+(ert-deftest harness-ui-mouse-keymap-runs-on-ret-too ()
+  "A target of `harness-ui-mouse-keymap' runs its command on RET, an event
+without a position, as it does on a click."
+  (let ((ran 0)
+        (buffer (generate-new-buffer " *harness mouse keymap*")))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (insert (propertize "target" 'keymap (harness-ui-mouse-keymap (lambda () (interactive) (cl-incf ran)))))
+          (goto-char (point-min))
+          (execute-kbd-macro (kbd "RET"))
+          (should (= 1 ran)))
+      (kill-buffer buffer))))
 
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

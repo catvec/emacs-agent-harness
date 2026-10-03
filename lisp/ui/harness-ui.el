@@ -1234,8 +1234,10 @@ PROPS are extra text properties; `:help' sets the tooltip."
   "Return a keymap running COMMAND on mouse-1, mouse-2 and RET.
 The bindings also work from header-line and mode-line segments."
   (let ((map (make-sparse-keymap))
+        ;; Not (interactive "e"), which signals for RET, an event without
+        ;; parameters.
         (run (lambda (&optional event)
-               (interactive "e")
+               (interactive (list last-input-event))
                (when (and event (mouse-event-p event))
                  (ignore-errors (select-window (posn-window (event-start event)))))
                (call-interactively command))))
