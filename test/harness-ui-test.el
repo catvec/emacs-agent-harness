@@ -758,6 +758,32 @@ reconnection."
     (let ((harness-corporate-mode nil)) (should-not (inapt-p)))
     (let ((harness-corporate-mode t)) (should (inapt-p)))))
 
+(ert-deftest harness-ui-server-exit-of-a-replaced-process-is-ignored ()
+  "The end of a harness process the UI no longer runs changes nothing.
+A process stopped for a restart can be reported gone after its
+successor started: the UI keeps the successor and starts no third one.
+The end of the process it runs is news, and restarts it."
+  (let ((old (make-pipe-process :name "harness-ui-test-old" :noquery t))
+        (current (make-pipe-process :name "harness-ui-test-current" :noquery t))
+        (scheduled nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-at-time) (lambda (&rest args) (push args scheduled) nil))
+                  ((symbol-function 'message) #'ignore))
+          (let ((harness-ui--server current)
+                (harness-ui--server-address '("127.0.0.1:1" . "token"))
+                (harness-ui--server-stopping nil)
+                (harness-ui--server-restarts nil))
+            (harness-ui--on-server-exit 15 old)
+            (should (eq current harness-ui--server))
+            (should harness-ui--server-address)
+            (should-not scheduled)
+            (harness-ui--on-server-exit 9 current)
+            (should-not harness-ui--server)
+            (should-not harness-ui--server-address)
+            (should (= 1 (length scheduled)))))
+      (delete-process old)
+      (delete-process current))))
+
 (defmacro harness-ui-test-with-corporate-change (&rest body)
   "Run BODY with `harness-restart' and `harness-ui-connect' recorded, not run.
 RESTARTS counts the restarts, CONNECTED lists the addresses connected

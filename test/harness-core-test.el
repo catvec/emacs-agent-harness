@@ -196,6 +196,7 @@
                (lambda (rel) (expand-file-name rel dir))))
       (let ((harness-module-directories '("lisp/modules"))
             (harness--core-files nil)
+            (harness--library-files nil)
             (harness-process nil))
         (should (harness-start))
         (should (eq 'pong (harness-call 'demo/ping)))
@@ -210,6 +211,47 @@
         (should (harness-reload))
         (should (eq 'pong2 (harness-call 'demo/ping)))))
     (delete-directory dir t)))
+
+(ert-deftest harness-loader-reloads-library-files ()
+  "Library files load compiled at start and again at every reload.
+A module reloaded after an update must find the libraries it requires
+as they are now, not as this Emacs first loaded them, and a library
+that does not compile refuses the reload like a module does."
+  (harness-test-reset-bus)
+  (let* ((dir (harness-test-temp-dir))
+         (lib (expand-file-name "lisp/harness-testlib.el" dir))
+         (moddir (expand-file-name "lisp/modules" dir))
+         (version (lambda (n)
+                    (with-temp-file lib
+                      (insert (format ";;; -*- lexical-binding: t -*-\n(defun harness-testlib-answer () %d)\n(provide 'harness-testlib)\n" n))))))
+    (make-directory moddir t)
+    (funcall version 1)
+    (with-temp-file (expand-file-name "harness-libuser.el" moddir)
+      (insert ";;; -*- lexical-binding: t -*-\n(require 'harness-testlib)\n(harness-define-module 'libuser)\n"
+              "(harness-register-method 'libuser/answer (lambda () (harness-testlib-answer)))\n(provide 'harness-libuser)\n"))
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness--path)
+                   (lambda (rel) (expand-file-name rel dir))))
+          (let ((harness-module-directories '("lisp/modules"))
+                (harness--core-files nil)
+                (harness--library-files '("lisp/harness-testlib.el"))
+                (harness-process nil))
+            (should (harness-start))
+            (should (equal 1 (harness-call 'libuser/answer)))
+            (should (funcall (if (fboundp 'compiled-function-p) #'compiled-function-p #'byte-code-function-p)
+                             (symbol-function 'harness-testlib-answer)))
+            ;; Broken, it refuses the reload and the old definitions stay.
+            (with-temp-file lib (insert "(defun harness-testlib-answer () (oops"))
+            (should-not (harness-reload))
+            (should (equal 1 (harness-call 'libuser/answer)))
+            ;; Updated, the reload loads it again.
+            (funcall version 2)
+            (should (harness-reload))
+            (should (equal 2 (harness-call 'libuser/answer)))))
+      (makunbound 'harness-testlib-answer)
+      (fmakunbound 'harness-testlib-answer)
+      (setq features (delq 'harness-testlib features))
+      (delete-directory dir t))))
 
 (ert-deftest harness-util-run-command ()
   (let ((r (harness-await (harness-run-command '("sh" "-c" "echo out; echo err >&2; exit 3")))))

@@ -1148,7 +1148,12 @@ established, so a connection still connecting need not be replaced."
   "Deliver what arrives on CONN to FN, called as (METHOD PARAMS RESPOND).
 For a notification RESPOND is nil.  For a request from the agent
 RESPOND is a function taking the result plist; answer an error with
-`harness-acp-respond-error'.  Requests without a handler are refused."
+`harness-acp-respond-error'.  Requests without a handler are refused.
+RESPOND returns non-nil when the answer went out, and nil when it could
+not: CONN closed since the request came, as when the UI connects again,
+or the request was answered already.  An answer kept for later (a
+permission prompt waiting for the user) must then reach the harness
+another way, such as the bus method that answers it."
   (setf (harness-acp-connection-handler conn) fn))
 
 (defun harness-acp-on-close (conn fn)
@@ -1156,7 +1161,8 @@ RESPOND is a function taking the result plist; answer an error with
   (push fn (harness-acp-connection-on-close conn)))
 
 (defun harness-acp-respond-error (respond code message &optional data)
-  "Answer the request behind RESPOND with a JSON-RPC error CODE, MESSAGE and DATA."
+  "Answer the request behind RESPOND with a JSON-RPC error CODE, MESSAGE and DATA.
+Return what RESPOND does: non-nil when the answer went out."
   (funcall respond (harness-acp--make-error-value :code code :message message :data data)))
 
 (defun harness-acp--conn-send (conn msg)
@@ -1214,26 +1220,43 @@ Return a promise of the initialize result."
   "Send `authenticate' with TOKEN over CONN; return a promise."
   (harness-acp-request conn "authenticate" (list :methodId "token" :token token)))
 
-(defun harness-acp-close (conn)
-  "Close CONN.  Pending requests are rejected and on-close functions run."
+(defun harness-acp-close (conn &optional reason)
+  "Close CONN.  Pending requests are rejected and on-close functions run.
+REASON, a short string such as \"replaced\" (default \"closed\"), says
+why: the rejections carry it (see `harness-acp-closed-reason'), so a
+client that let go of CONN on purpose can tell them from failures."
   (when (harness-acp-connection-open conn)
-    (pcase (harness-acp-connection-kind conn)
-      ('local (let ((client (harness-acp-connection-client conn)))
-                (when client (harness-acp--drop-client client))))
-      ('tcp (let ((proc (harness-acp-connection-process conn)))
-              (when (and proc (process-live-p proc)) (delete-process proc)))))
-    (harness-acp--conn-shutdown conn "closed")))
+    (let ((kind (harness-acp-connection-kind conn))
+          (client (harness-acp-connection-client conn))
+          (proc (harness-acp-connection-process conn)))
+      ;; Shut down first: deleting the socket runs its sentinel, whose
+      ;; reason would otherwise be the one the rejections carry.
+      (harness-acp--conn-shutdown conn (or reason "closed"))
+      (pcase kind
+        ('local (when client (harness-acp--drop-client client)))
+        ('tcp (when (and proc (process-live-p proc)) (delete-process proc)))))))
+
+(defun harness-acp-closed-reason (err)
+  "Return why the connection closed when that is what rejected ERR, else nil.
+ERR is the rejection of a request that was pending as its connection
+closed: the REASON of `harness-acp-close', or what the socket reported
+when it closed by itself, such as \"connection broken by remote peer\"."
+  (and (eq (car-safe err) 'acp-error)
+       (eql (nth 1 err) harness-acp-error-transport)
+       (plist-get (nth 3 err) :closed)))
 
 (defun harness-acp--conn-shutdown (conn reason)
   "Mark CONN closed for REASON, reject its pending requests and run on-close."
   (when (harness-acp-connection-open conn)
     (setf (harness-acp-connection-open conn) nil)
-    (let ((pending (harness-acp-connection-pending conn)) promises)
+    (let ((pending (harness-acp-connection-pending conn))
+          (message (if (string-prefix-p "connection" reason) reason (format "connection %s" reason)))
+          promises)
       (maphash (lambda (_ p) (push p promises)) pending)
       (clrhash pending)
       (dolist (p promises)
         (harness-run-soon #'harness-reject p
-                          (list 'acp-error harness-acp-error-transport (format "connection %s" reason) nil))))
+                          (list 'acp-error harness-acp-error-transport message (list :closed reason)))))
     (dolist (fn (harness-acp-connection-on-close conn))
       (harness-run-soon (lambda ()
                           (condition-case err (funcall fn)
@@ -1290,19 +1313,23 @@ Return a promise of the initialize result."
   "Hand METHOD with PARAMS to CONN's handler; ID non-nil means a request."
   (let* ((handler (harness-acp-connection-handler conn))
          (done nil)
+         ;; Returns non-nil when the answer went out (see `harness-acp-set-handler').
          (respond (and id
                        (lambda (value)
                          (unless done
                            (setq done t)
                            (condition-case err
-                               (harness-acp--conn-send
-                                conn (if (harness-acp-error-value-p value)
-                                         (harness-acp--message id nil (list (harness-acp-error-value-code value)
-                                                                            (harness-acp-error-value-message value)
-                                                                            (harness-acp-error-value-data value)))
-                                       (harness-acp--message id value)))
+                               (progn
+                                 (harness-acp--conn-send
+                                  conn (if (harness-acp-error-value-p value)
+                                           (harness-acp--message id nil (list (harness-acp-error-value-code value)
+                                                                              (harness-acp-error-value-message value)
+                                                                              (harness-acp-error-value-data value)))
+                                         (harness-acp--message id value)))
+                                 t)
                              (error (harness-log 'warn "acp: could not send response: %s"
-                                                 (harness-error-message err)))))))))
+                                                 (harness-error-message err))
+                                    nil)))))))
     (cond
      ((null handler)
       (when respond

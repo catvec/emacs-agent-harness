@@ -331,15 +331,35 @@ gives way to this Emacs's own harness: the UI connects to no other."
   (when (and (stringp address) (harness-corporate-p))
     (message "Harness: corporate mode is on, so the UI connects to the local harness, not %s" address)
     (setq address (harness-ui--local-address)))
-  (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
-  (setq harness-ui-connection nil
-        harness-ui-connection-address address)
+  (harness-ui--let-go)
+  (setq harness-ui-connection-address address)
   (if (eq address 'process)
       (if harness-ui--server-address
           (harness-ui--open (car harness-ui--server-address) (cdr harness-ui--server-address))
         (harness-ui--ensure-server)
         nil)
     (harness-ui--open address nil)))
+
+(defun harness-ui--let-go ()
+  "Close the UI's connection, if any, as one replaced on purpose.
+What was pending on it is rejected with the reason \"replaced\" (see
+`harness-ui-connection-replaced-p'): the harness keeps running it, the
+UI just no longer hears the answer, so nobody reports it as failed.  A
+request from the harness that waits for an answer, such as a
+permission prompt, cannot be answered through its old RESPOND any
+more; the session keeps it pending, and the chat answers it with
+`permission/answer' instead."
+  (when harness-ui-connection
+    (ignore-errors (harness-acp-close harness-ui-connection "replaced")))
+  (setq harness-ui-connection nil))
+
+(defun harness-ui-connection-replaced-p (err)
+  "Non-nil when ERR failed a request only because the UI replaced its connection.
+The UI connects again on purpose (`harness-connect-remote', a corporate
+mode change): requests still waiting for an answer on the connection
+it let go of are rejected with this, and are no failure to report.
+They reached the harness or never left, as the transcript shows."
+  (equal (harness-acp-closed-reason err) "replaced"))
 
 (defun harness-ui--open (address token)
   "Open the connection to ADDRESS (nil: in-process) authenticating with TOKEN.
@@ -402,11 +422,16 @@ drop it along with every request it carries."
 
 (defun harness-ui-call (method params callback &optional on-error)
   "Request METHOD with PARAMS and call CALLBACK with the result.
-Errors are shown in the echo area unless ON-ERROR handles them."
+Errors are shown in the echo area unless ON-ERROR handles them, but
+for those of a connection the UI replaced on purpose
+\(`harness-ui-connection-replaced-p'), which are not failures."
   (harness-then (harness-ui-request method params)
                 callback
                 (or on-error
-                    (lambda (e) (message "Harness: %s failed: %s" method (harness-error-message e)) nil))))
+                    (lambda (e)
+                      (unless (harness-ui-connection-replaced-p e)
+                        (message "Harness: %s failed: %s" method (harness-error-message e)))
+                      nil))))
 
 (defun harness-ui-notify (method &optional params)
   "Send notification METHOD with PARAMS."
@@ -428,18 +453,30 @@ later in the init file still reach the process."
    (t
     (remove-hook 'emacs-startup-hook #'harness-ui--ensure-server)
     (setq harness-ui--server-address nil
-          harness-ui--server-stopping nil
-          harness-ui--server
-          (harness-server-spawn
-           :on-address (lambda (address token)
-                         (setq harness-ui--server-address (cons address token))
-                         (when (eq harness-ui-connection-address 'process)
-                           (harness-ui--open address token)
-                           (run-hooks 'harness-ui-redraw-hook)))
-           :on-exit #'harness-ui--on-server-exit)))))
+          harness-ui--server-stopping nil)
+    (let (proc)
+      (setq proc (harness-server-spawn
+                  :on-address (lambda (address token)
+                                ;; One replaced before it listened is nobody to talk to.
+                                (when (eq proc harness-ui--server)
+                                  (setq harness-ui--server-address (cons address token))
+                                  (when (eq harness-ui-connection-address 'process)
+                                    (harness-ui--open address token)
+                                    (run-hooks 'harness-ui-redraw-hook))))
+                  :on-exit #'harness-ui--on-server-exit)
+            harness-ui--server proc)))))
 
-(defun harness-ui--on-server-exit (status)
-  "React to the harness process ending with STATUS: restart it unless stopped."
+(defun harness-ui--on-server-exit (status &optional proc)
+  "React to the harness process PROC ending with STATUS: restart it unless stopped.
+The end of a process the UI no longer runs is not news: a process
+stopped for a restart may be reported gone after its successor
+started, and must neither make the UI forget that one nor start a
+third."
+  (when (or (null proc) (eq proc harness-ui--server))
+    (harness-ui--on-current-server-exit status)))
+
+(defun harness-ui--on-current-server-exit (status)
+  "React to the UI's harness process ending with STATUS: restart it unless stopped."
   (setq harness-ui--server nil harness-ui--server-address nil)
   (unless harness-ui--server-stopping
     (let* ((now (float-time))
@@ -485,7 +522,8 @@ tasks among them carry on once the process is back (see
   "Ask the harness process to reload its modules in place."
   (when (eq harness-ui-connection-address 'process)
     (harness-ui-call "_harness/harness/reload" nil
-                     (lambda (_) (message "Harness process reloaded")))))
+                     (lambda (_) (message "Harness process reloaded"))
+                     (lambda (e) (message "Harness process: %s" (harness-error-message e))))))
 
 (defun harness-ui--dispatch (method params respond)
   "Route an incoming METHOD with PARAMS; RESPOND is non-nil for requests."
@@ -651,9 +689,8 @@ yet: it starts after the init file, with the value set there."
          (remote (and on (stringp harness-ui-connection-address) harness-ui-connection-address)))
     (when remote
       ;; Nothing more goes to the remote harness.
-      (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
-      (setq harness-ui-connection nil
-            harness-ui-connection-address (harness-ui--local-address)))
+      (harness-ui--let-go)
+      (setq harness-ui-connection-address (harness-ui--local-address)))
     (cond
      ((and (eq harness-ui-connection-address 'process)
            harness-ui--server (process-live-p harness-ui--server))

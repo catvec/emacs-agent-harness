@@ -1304,8 +1304,11 @@ state the group had."
   (when-let* ((buf (harness-chat--buffer-for sid)))
     (with-current-buffer buf
       (if (and harness-chat--loading
-               ;; Activity is not transcript: it is current however it loads.
-               (not (equal (plist-get update :sessionUpdate) "_harness/activity")))
+               ;; Activity and the session record are not transcript: they
+               ;; are current however it loads.  Held back, a change of
+               ;; status, queue or pending requests that came while every
+               ;; buffer reloads (a reload, a reconnect) would be lost.
+               (not (member (plist-get update :sessionUpdate) '("_harness/activity" "_harness/session"))))
           (push update harness-chat--deferred)
         (harness-chat--apply-update update)))))
 
@@ -1501,14 +1504,16 @@ Return non-nil when something changed."
 
 (defun harness-chat--on-permission (params respond)
   "Own permission request PARAMS when its session has a buffer.
-The panel answers through RESPOND."
+The panel answers through RESPOND while the connection it came on is
+the UI's (see `harness-chat--respond')."
   (when-let* ((buf (harness-chat--buffer-for (plist-get params :sessionId))))
     (with-current-buffer buf
       (let* ((tc (plist-get params :toolCall))
              (extra (plist-get params :_harness))
              (pid (or (plist-get extra :pendingId) (plist-get tc :toolCallId) (harness-short-id 6))))
         (harness-chat--add-pending
-         (list :id pid :kind "permission" :respond respond :created (float-time)
+         (list :id pid :kind "permission" :respond respond :connection harness-ui-connection
+               :created (float-time)
                :title (or (plist-get tc :title) (plist-get extra :tool) "tool call")
                :tool (plist-get extra :tool) :tool-kind (plist-get tc :kind)
                :input (plist-get tc :rawInput) :paths (plist-get extra :paths)
@@ -1517,21 +1522,38 @@ The panel answers through RESPOND."
     t))
 
 (defun harness-chat--on-question (params respond)
-  "Own the question PARAMS for a session with a buffer; answer via RESPOND."
+  "Own the question PARAMS for a session with a buffer; answer via RESPOND.
+See `harness-chat--respond' for when RESPOND can answer it."
   (when-let* ((buf (harness-chat--buffer-for (plist-get params :sessionId))))
     (with-current-buffer buf
       (harness-chat--add-pending
        (list :id (or (plist-get params :requestId) (harness-short-id 6)) :kind "question" :respond respond
-             :created (float-time)
+             :connection harness-ui-connection :created (float-time)
              :question (plist-get params :question) :options (plist-get params :options)
              :diagrams (plist-get params :diagrams))))
     t))
 
+(defun harness-chat--respond (record value)
+  "Answer pending RECORD through its RESPOND with VALUE; non-nil when it went out.
+RESPOND answers the request on the connection it came on, and only
+while that is the UI's live connection.  After the UI connected again
+-- `harness-connect-remote', even back to the same harness -- the
+harness keeps the request pending but would never hear an answer sent
+there, and the session would stay blocked: the caller then answers
+through the bus method instead.  A record of a session's pending list
+has no RESPOND at all."
+  (let ((respond (plist-get record :respond))
+        (connection (plist-get record :connection)))
+    (and respond
+         (eq connection harness-ui-connection)
+         (harness-acp-open-p connection)
+         ;; Nil when it could not go out after all (see `harness-acp-set-handler').
+         (funcall respond value))))
+
 (defun harness-chat--answer-permission (pid option)
   "Answer permission request PID with OPTION (an option id such as \"allow-once\")."
   (when-let* ((r (harness-chat--pending-record pid)))
-    (if-let* ((respond (plist-get r :respond)))
-        (funcall respond (list :outcome (list :outcome "selected" :optionId option)))
+    (unless (harness-chat--respond r (list :outcome (list :outcome "selected" :optionId option)))
       (harness-ui-call "_harness/permission/answer"
                        (list :session-id harness-ui-session-id :pending-id pid :answer option)
                        #'ignore))
@@ -1545,8 +1567,7 @@ The panel answers through RESPOND."
 (defun harness-chat--answer-question (pid answer)
   "Answer question PID with ANSWER."
   (when-let* ((r (harness-chat--pending-record pid)))
-    (if-let* ((respond (plist-get r :respond)))
-        (funcall respond (list :answer answer))
+    (unless (harness-chat--respond r (list :answer answer))
       (harness-ui-call "_harness/question/answer"
                        (list :session-id harness-ui-session-id :pid pid :answer answer)
                        #'ignore))
@@ -2219,11 +2240,7 @@ end afterwards."
                (when offset
                  (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
                (harness-chat--restore-anchors anchors)
-               (dolist (u (nreverse harness-chat--deferred))
-                 (when (and (equal (plist-get u :sessionUpdate) "_harness/node")
-                            (harness-chat--node-current-p (plist-get u :node)))
-                   (harness-chat--apply-update u)))
-               (setq harness-chat--deferred nil)
+               (harness-chat--replay-deferred t)
                (when keep-bottom (harness-chat-scroll-to-bottom))
                (harness-chat--schedule-history))))))
      (lambda (err)
@@ -2231,9 +2248,28 @@ end afterwards."
          (with-current-buffer buf
            (when (= gen harness-chat--generation)
              (setq harness-chat--loading nil)
-             (harness-chat--render-nodes nil)
-             (harness-chat--append-local-block "error" (format "could not load the session: %s" (harness-error-message err)))
-             (harness-chat--render-top))))))))
+             ;; Not a failure when the UI connected elsewhere meanwhile:
+             ;; it redraws every buffer once it has.
+             (unless (harness-ui-connection-replaced-p err)
+               (harness-chat--render-nodes nil)
+               (harness-chat--append-local-block "error" (format "could not load the session: %s" (harness-error-message err)))
+               (harness-chat--render-top))
+             (harness-chat--replay-deferred nil))))))))
+
+(defun harness-chat--replay-deferred (loaded)
+  "Apply the updates held back while the transcript loaded, then forget them.
+With LOADED non-nil the transcript was just rendered: node updates that
+continue it are applied, the older ones are in it already, as is the
+text streamed meanwhile.  Either way the session being deleted
+meanwhile is applied; the session record and activity were never held
+back (see `harness-chat--on-update')."
+  (dolist (u (nreverse harness-chat--deferred))
+    (pcase (plist-get u :sessionUpdate)
+      ("_harness/node"
+       (when (and loaded (harness-chat--node-current-p (plist-get u :node)))
+         (harness-chat--apply-update u)))
+      ("_harness/session_deleted" (harness-chat--apply-update u))))
+  (setq harness-chat--deferred nil))
 
 (defun harness-chat--node-current-p (node)
   "Non-nil when NODE is rendered already or continues the rendered transcript.
@@ -2325,8 +2361,11 @@ means something else there, such as feedback on a review.")
     (setq harness-chat--editing nil)))
 
 (defun harness-chat--report-error (buf what err)
-  "Append an error block to BUF saying WHAT failed with ERR."
-  (when (buffer-live-p buf)
+  "Append an error block to BUF saying WHAT failed with ERR.
+Nothing failed when the UI let go of the connection on purpose while
+waiting (`harness-ui-connection-replaced-p'): a message sent before it
+connected again still runs its turn, as the redrawn transcript shows."
+  (when (and (buffer-live-p buf) (not (harness-ui-connection-replaced-p err)))
     (with-current-buffer buf
       (harness-chat--append-local-block "error" (format "%s failed: %s" what (harness-error-message err))))))
 

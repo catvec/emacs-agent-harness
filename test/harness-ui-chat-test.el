@@ -1600,6 +1600,11 @@ to a waiting question still goes through the question instead."
   ;; the first message sent from it resumes it and the notice goes away.
   (harness-ui-chat-test-with
     (let ((sid (harness-ui-chat-test-session)))
+      ;; The UI's own connection settles first: once it has connected it
+      ;; reopens the closed sessions that chat buffers show, as after a
+      ;; restart, and this one would be among them.
+      (harness-test-await (harness-ui-request "_harness/harness/version"))
+      (accept-process-output nil 0.1)
       (harness-call 'session/deactivate sid)
       (harness-open-session sid)
       (let ((buf (harness-chat--buffer-for sid)))
@@ -1966,6 +1971,91 @@ connection let go of is never reported as closed."
         (harness-call 'acp/stop)
         ;; Whatever failed, the next test's UI connects in-process.
         (setq harness-ui-connection-address nil)))))
+
+(ert-deftest harness-ui-chat-pending-answers-survive-a-reconnect ()
+  "A permission prompt or question shown before the UI connects again is
+still answered: its RESPOND belongs to the connection let go of, which
+the harness no longer hears, so the panel answers through the bus
+methods instead of leaving the session blocked.  Requests cut off by the
+switch are no failures to report."
+  (harness-ui-chat-test-with
+    (let* ((port (plist-get (harness-call 'acp/start :port 0) :port))
+           (address (format "127.0.0.1:%d" port))
+           (sid (harness-ui-chat-test-session "Waiting"))
+           (buf (harness-ui-chat-test-open sid))
+           (permissions nil) (questions nil) (messages nil)
+           (record (lambda (format-string &rest args)
+                     (when format-string (push (apply #'format format-string args) messages))))
+           (ask (lambda (kind payload)
+                  (let ((pid (harness-call 'session/pending-add sid (list :kind kind :payload payload))))
+                    (harness-emit (if (eq kind 'question) 'question/asked 'permission/requested)
+                                  sid (list :id pid :kind kind :payload payload))
+                    pid))))
+      (harness-register-method 'permission/answer
+                               (lambda (session-id pending-id answer)
+                                 (push (list session-id pending-id (format "%s" answer)) permissions)
+                                 (harness-call 'session/pending-resolve session-id pending-id answer)
+                                 answer))
+      (harness-register-method 'question/answer
+                               (lambda (session-id pid answer)
+                                 (push (list session-id pid answer) questions)
+                                 (harness-call 'session/pending-resolve session-id pid answer)
+                                 answer))
+      ;; Requests that will still wait when the UI lets go of the connection.
+      (harness-register-method 'session/test-hang (lambda () (harness-make-promise)))
+      (advice-add 'message :before record)
+      (unwind-protect
+          (let* ((perm (funcall ask 'permission '(:tool "bash" :title "Bash: ls" :kind exec :input (:command "ls"))))
+                 (question (funcall ask 'question '(:question "Which colour?" :options ("red" "green")))))
+            (harness-test-wait (lambda () (= 2 (length (with-current-buffer buf harness-chat--pending))))
+                               5 "both requests in the panel")
+            (with-current-buffer buf
+              (should (cl-every (lambda (r) (plist-get r :respond)) harness-chat--pending)))
+            (harness-ui-call "_harness/session/test-hang" nil #'ignore
+                             (lambda (err) (harness-chat--report-error buf "send" err)))
+            (harness-ui-call "_harness/session/test-hang" nil #'ignore)
+            ;; Over TCP to the same harness: a new connection.
+            (harness-connect-remote address)
+            (should (eq 'tcp (harness-acp-connection-kind harness-ui-connection)))
+            (harness-test-wait (lambda () (with-current-buffer buf (not harness-chat--loading))) 5 "the chat redrawn")
+            (with-current-buffer buf
+              (should (= 2 (length harness-chat--pending)))
+              (harness-chat--answer-permission perm "allow-once")
+              (harness-chat--answer-question question "green"))
+            (harness-test-wait (lambda () (and permissions questions)) 5 "the answers reach the harness")
+            (should (equal (list (list sid perm "allow-once")) permissions))
+            (should (equal (list (list sid question "green")) questions))
+            (should-not (plist-get (harness-call 'session/get sid) :pending))
+            (accept-process-output nil 0.2)
+            ;; The requests the switch cut off are not reported as failed.
+            (should-not (harness-ui-chat-test-find buf "send failed"))
+            (should-not (cl-find-if (lambda (m) (string-match-p "failed\\|could not" m)) messages)))
+        (advice-remove 'message record)
+        (harness-call 'acp/stop)
+        (setq harness-ui-connection-address nil)))))
+
+(ert-deftest harness-ui-chat-session-record-applies-while-loading ()
+  "The session record is no transcript: a change of it that arrives while
+the transcript reloads (every buffer does, after a reload or a
+reconnect) applies at once instead of being dropped.  A deletion that
+arrives meanwhile applies once the transcript is in."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Loading"))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let ((session (copy-sequence harness-chat--session)))
+          (setq harness-chat--loading t)
+          (harness-chat--on-update sid (list :sessionUpdate "_harness/session"
+                                             :session (plist-put session :queue '((:id "q1" :text "next")))))
+          (should (equal '((:id "q1" :text "next")) harness-chat--queue))
+          (should-not harness-chat--deferred)
+          (setq harness-chat--loading nil))
+        (harness-chat--load)
+        (should harness-chat--loading)
+        (harness-chat--on-update sid '(:sessionUpdate "_harness/session_deleted"))
+        (should-not harness-chat--dead)
+        (harness-test-wait (lambda () (not harness-chat--loading)) 5 "the transcript loaded")
+        (should harness-chat--dead)))))
 
 (ert-deftest harness-ui-chat-hl-line-skips-compose ()
   ;; hl-line would paint over the compose background, so it stops short of it.

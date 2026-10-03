@@ -651,7 +651,9 @@ the token yourself.
 
 - From another Emacs, `M-x harness-connect-remote` (`C-c h c`) with a
   `host:port` address connects the UI to that harness. An empty address
-  connects it back to the local harness.
+  connects it back to the local harness. Switching leaves running
+  sessions alone. Turns go on, and a permission prompt or question
+  already on screen can still be answered after you come back.
 - `scripts/harness-acp-stdio` bridges ACP to standard input and output,
   for editors that start ACP agents as subprocesses.
 
@@ -744,7 +746,9 @@ set. See [docs/dev-loop.md](docs/dev-loop.md) for the full workflow.
 
 `M-x harness-reload` (`C-c h R`) checks and byte-compiles every source
 file, then reloads the harness in place, keeping running sessions. If
-any file fails to compile, nothing is reloaded.
+any file fails to compile, nothing is reloaded. The UI reloads first,
+then the harness process. The echo area says whether the process
+reloaded every file, some failed to load, or it refused the reload.
 `harness-auto-reload-mode` reloads the harness whenever one of its
 source files changes.
 
