@@ -33,10 +33,10 @@
 ;; project.  `task/verify' accepts it: its branch goes through the merge
 ;; queue and the task is done once merged (outside git, at once).
 ;; `task/reject' sends it back with feedback: the feedback goes to the
-;; same session, in its own worktree, as a new prompt, and the task
-;; comes back to review when that turn ends.  Every round of feedback is
-;; kept with the task (`:feedback'), and so is the verification
-;; (`:verified', `:verified-at').
+;; same session, in its own worktree (or the main tree, see below), as a
+;; new prompt, and the task comes back to review when that turn ends.
+;; Every round of feedback is kept with the task (`:feedback'), and so
+;; is the verification (`:verified', `:verified-at').
 ;;
 ;; Backlog refinement (once called grooming): a task submitted with
 ;; `:refine' is jotted down for later, not started.  An agent writes it
@@ -49,6 +49,13 @@
 ;; starting moves that session into the task's worktree and tells it to
 ;; do the work.  A message to a backlog task's session is feedback on
 ;; the write-up, which the agent rewrites.
+;;
+;; Main tree: a task submitted with `:main-tree' (the `task_submit'
+;; tool's `main_tree', or the board's worktree switch) gets no worktree
+;; and no branch.  Its session works in the project's main checkout, so
+;; the task can touch the checkout itself -- cleaning up uncommitted
+;; changes, say -- and nothing merges when its turn ends.  A refined
+;; task keeps the declaration for when it starts.
 ;;
 ;; Duplicates: the agent first looks for related tasks on the board
 ;; (task_list).  When one already asks for exactly the same change it
@@ -383,6 +390,14 @@ so a board opened from a task's session shows the project's tasks."
 (defun harness-tasks--backlog-p (task)
   "Non-nil when TASK is a backlog task: only `task/start' starts it."
   (harness-json-true-p (plist-get task :backlog)))
+
+(defun harness-tasks--main-tree-p (task)
+  "Non-nil when TASK works in the project's main tree, without a worktree.
+Set at submission (`task/submit' with `:main-tree'), for work that has
+to touch the main checkout itself, such as cleaning up uncommitted
+changes: the task runs where the project is checked out, on no branch,
+and nothing merges when its turn ends."
+  (harness-json-true-p (plist-get task :main-tree)))
 
 (defun harness-tasks--refinement-p (task)
   "Non-nil when a turn of TASK's session refines it rather than doing it.
@@ -841,7 +856,8 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
   "Tell a task's SESSION what its turns are for (PROMPT filter).
 Before the task starts they write it up (`harness-tasks--refine-prompt');
 afterwards they learn how to hand the finished work in, and, in a
-worktree, how it reaches the main branch."
+worktree, how it reaches the main branch -- or, in the main tree
+(`harness-tasks--main-tree-p'), that the work takes effect there."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
      ((and task (harness-tasks--refinement-p task)
@@ -850,10 +866,14 @@ worktree, how it reaches the main branch."
      ((not task) prompt)
      (t
       (concat prompt "\n\n## Task mode\n"
-              (if (plist-get task :worktree)
-                  (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
-                          (plist-get task :worktree) (plist-get task :branch))
-                "You are working on one task of a board, unattended. ")
+              (cond
+               ((plist-get task :worktree)
+                (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
+                        (plist-get task :worktree) (plist-get task :branch)))
+               ((harness-tasks--main-tree-p task)
+                (format "You are working on one task, unattended, directly in the project's main working tree %s.  There is no worktree and no branch, and nothing merges your work: what you change, commit or delete takes effect right there.  Do not create a branch or a worktree, and commit only if the task asks for it. "
+                        (abbreviate-file-name (or (plist-get task :project) (plist-get task :cwd)))))
+               (t "You are working on one task of a board, unattended. "))
               "Do the whole task there. "
               (if (plist-get task :worktree)
                   (concat "When you are done, commit all of your changes on that branch "
@@ -945,7 +965,9 @@ harness.  The task's prompt and the user's feedback are the user's."
   "Start TASK: make its worktree in a git project, then its session.
 A backlog task already has the session that wrote it up; that session
 moves into the worktree and does the work.  A task started again after a
-restart cut its start short keeps the worktree it got."
+restart cut its start short keeps the worktree it got.  A task that
+declared `:main-tree' gets no worktree: its session works in the
+project's main checkout, where it was submitted from (`task/submit')."
   (let ((id (plist-get task :id))
         (worktree (plist-get task :worktree))
         (launch (if (harness-tasks--session task)
@@ -955,6 +977,9 @@ restart cut its start short keeps the worktree it got."
     (harness-tasks--set id :state 'active :outcome nil :error nil :duplicate-of nil
                         :started (float-time) :finished nil)
     (cond
+     ((harness-tasks--main-tree-p task)
+      ;; No worktree even where the project has them: the main checkout.
+      (funcall launch id (plist-get task :project) nil))
      ((not (harness-tasks--git-p (plist-get task :project)))
       (funcall launch id (plist-get task :cwd) nil))
      ((and worktree (not (plist-get task :worktree-removed)) (file-directory-p worktree))
@@ -1091,10 +1116,12 @@ everything the work needs, while the transcript keeps the refinement."
         (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
           (harness-call 'session/resume sid))
         (harness-call 'session/hint sid
-                      (if worktree
-                          (format "Task started in %s on branch %s"
-                                  (abbreviate-file-name worktree) (plist-get task :branch))
-                        "Task started"))
+                      (cond
+                       (worktree (format "Task started in %s on branch %s"
+                                         (abbreviate-file-name worktree) (plist-get task :branch)))
+                       ((harness-tasks--main-tree-p task)
+                        (format "Task started in the main tree %s" (abbreviate-file-name cwd)))
+                       (t "Task started")))
         (harness-catch (harness-call-async 'agent/prompt sid
                                            (harness-tasks--blocks
                                             (list :prompt (harness-tasks--start-text task)
@@ -1329,8 +1356,9 @@ task's worktree is locked again for the new work."
   "Advance SESSION-ID's task when its turn ended with REASON.
 `end-turn' puts the work in review (`harness-tasks-require-verification')
 until the user verified it; after that, or without review, it completes
-the task outside git and queues its merge inside.  A refinement turn
-puts its write-up in the backlog."
+the task outside git -- in the main tree too, which has nothing to
+merge -- and queues its merge inside.  A refinement turn puts its
+write-up in the backlog."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (let ((id (plist-get task :id)))
@@ -1483,18 +1511,22 @@ records.  Each step leaves alone the tasks something already works on."
   "Submit PROMPT as a new task in directory CWD; return the task.
 It starts at once when a slot is free, otherwise it waits as pending.
 OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
-`:thinking' and `:non-interactive' (an explicit false turns it off);
-missing ones come from the `harness-tasks-' defaults, else from what the
-directory configures: a task is interactive unless
-`harness-tasks-non-interactive' or the directory's
-`harness-non-interactive' is on.  With `:refine'
+`:thinking', `:non-interactive' (an explicit false turns it off) and
+`:main-tree' (work in the project's main checkout, with no worktree,
+no branch and nothing to merge; for work that has to touch the checkout
+itself, such as cleaning up uncommitted changes); missing ones come
+from the `harness-tasks-' defaults, else from what the directory
+configures: a task is interactive unless `harness-tasks-non-interactive'
+or the directory's `harness-non-interactive' is on.  With `:refine'
 the task goes to the backlog instead: an agent writes it up (state
 refining), then it waits in pending until `task/start' -- unless the
-agent finds the board has it already, and refuses it as a duplicate."
+agent finds the board has it already, and refuses it as a duplicate.
+A refined task keeps `:main-tree' for when it finally starts."
   (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
   (harness-tasks--load)
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
          (refine (harness-json-true-p (plist-get opts :refine)))
+         (main-tree (and (harness-json-true-p (plist-get opts :main-tree)) t))
          (task (list :id (concat "t-" (harness-short-id 8))
                      :project (harness-tasks--project cwd) :cwd cwd
                      :prompt (string-trim prompt)
@@ -1507,6 +1539,8 @@ agent finds the board has it already, and refuses it as a duplicate."
     (when (plist-member opts :non-interactive)
       (setq task (plist-put task :non-interactive
                             (if (harness-json-true-p (plist-get opts :non-interactive)) t :false))))
+    (when main-tree
+      (setq task (append task (list :main-tree t))))
     (when refine
       (setq task (append task (list :backlog t :note (string-trim prompt)))))
     (harness-tasks--put task)

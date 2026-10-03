@@ -1134,7 +1134,7 @@ Task mode: one session per task.  TASK =
 :column pending|needs-input|active|review|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
-:error "…" :duplicate-of ID :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
+:error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`.
 `:column` is derived on every read: `needs-input` when the session is
@@ -1142,8 +1142,8 @@ blocked on a request or the task stopped part way, `review` while its
 finished work waits for the user's verdict.
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
-  :thinking :non-interactive)` → task; it starts when one of
-  `harness-tasks-max-running` slots is free.  Missing options come from
+  :thinking :non-interactive :refine :main-tree)` → task; it starts when
+  one of `harness-tasks-max-running` slots is free.  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
   `-non-interactive` (off), else from what the directory configures, so
   a task is interactive unless `harness-tasks-non-interactive` or the
@@ -1152,6 +1152,14 @@ finished work waits for the user's verdict.
   values a new task would get, the configured ones included, and the
   board submits them with each task.
   With `:refine` the task goes to the backlog instead (below).
+  With `:main-tree` it works in the project's main checkout: no worktree
+  is made, it gets no branch, and nothing merges when its turn ends, so
+  it can touch the checkout itself -- cleaning up uncommitted changes,
+  say.  The flag is explicit, never the default; the `task_submit` tool
+  offers it as `main_tree` and the board as a worktree switch beside the
+  other new-task settings.  A refined (`:refine`) task keeps it for when
+  it starts, and its session, made at the task's directory for the
+  write-up, then stays there rather than moving into a worktree.
 - Backlog refinement (once called grooming): a `:refine` task is
   `refining` while a session at its directory -- `ask` and
   non-interactive, `harness-tasks-refine-model` and
@@ -1209,8 +1217,11 @@ finished work waits for the user's verdict.
   that worktree (`harness-tasks-permission-mode`, interactive by
   default) prompted with the task; a system-prompt section tells it to
   commit on its branch and not merge.  Outside git the session runs in CWD.
-  The worktree stays locked until its branch is merged; a follow-up to
-  a merged task locks it again (see worktree).
+  A `:main-tree` task skips the worktree: its session runs at the
+  project's main root, and the system prompt says the work takes effect
+  there, with no branch to make and nothing to merge.  The worktree
+  stays locked until its branch is merged; a follow-up to a merged task
+  locks it again (see worktree).
 - The session's name is the task's title: `naming/system-prompt` adds
   `harness-tasks--naming-instructions` (nil for none) so the model titles task
   sessions like tickets.
@@ -1220,12 +1231,13 @@ finished work waits for the user's verdict.
   (created on demand); `merge/finished … merged` makes the task `done`.
   Failures the agent can fix (uncommitted work) are steered by the merge
   queue; others, or more than `harness-tasks--merge-attempts`, set
-  `:outcome merge-failed`.  Outside git `end-turn` makes it `done`.
+  `:outcome merge-failed`.  Outside git, and in the main tree
+  (`:main-tree`), `end-turn` makes it `done`.
 - Review (`harness-tasks-require-verification`, default t): finished
   work is not done until the user has looked at it.  A turn ending
   `end-turn` puts the task in `review` instead, and emits `task/review
-  TASK`; in git its branch waits unmerged, so nothing reaches the base
-  branch unreviewed.  `task/verify ID` accepts the work (`:verified t
+  TASK`; in git, when it works on a branch, that branch waits unmerged,
+  so nothing reaches the base branch unreviewed.  `task/verify ID` accepts the work (`:verified t
   :verified-at F`): its branch goes through the merge queue as above
   and the task is `done` once merged (outside git, or when the branch
   merged already, at once).  `task/reject ID FEEDBACK &optional
@@ -1444,7 +1456,7 @@ TRAMP prefixes come from the session host):
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
 | `task_list` | List tasks | column (pending/needs-input/active/review/done), include_archived, all_projects, limit (the most recent) | read |
-| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog) | meta |
+| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only) |
@@ -1922,7 +1934,11 @@ box; never on another button.  Any click on a button pushes it, a slow
 one too, rather than reaching the board's own click, which opens the
 session.  The session setting commands change the task at point, or
 from the compose box the settings the next task starts with (shown as
-buttons under the New task label).  A
+buttons under the New task label), and so does the worktree switch
+beside them: `own worktree` (the default in a git project) or `main
+tree`, where the next task works in the project's own checkout, with
+nothing to merge (`harness-ui-tasks-toggle-main-tree`; new tasks only,
+never bulk).  A
 Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
 or go to the backlog, written up by an agent and

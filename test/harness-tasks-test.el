@@ -1293,6 +1293,78 @@ commits from call `harness-tasks-test--commit-on-call' on."
         (should (plist-get task :merged)))
       (should (equal "two\n" (harness-tasks-test--main-text root))))))
 
+(ert-deftest harness-tasks-git-main-tree-task-works-in-the-checkout ()
+  "A task submitted with :main-tree runs at the root, with no branch and nothing to merge."
+  (harness-tasks-test-with-git
+    (let* ((id (plist-get (harness-call 'task/submit root "Change the shared file" (list :main-tree t)) :id))
+           (task nil))
+      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :session)) 5 "a session")
+      (setq task (harness-tasks-test-task id))
+      (should (harness-json-true-p (plist-get task :main-tree)))
+      (should-not (plist-get task :worktree))
+      (should-not (plist-get task :branch))
+      (let ((session (harness-call 'session/get (plist-get task :session))))
+        (should (equal root (plist-get session :cwd)))
+        (should-not (plist-get session :worktree))
+        (should (string-match-p "main working tree"
+                                (harness-run-filter 'agent/system-prompt "" session))))
+      (harness-tasks-test-wait-state id 'done)
+      (setq task (harness-tasks-test-task id))
+      (should-not (plist-get task :merged))
+      (should-not (plist-get task :worktree-removed))
+      ;; The agent's commit landed on main itself: no merge, no merge session.
+      (should (equal "change shared" (string-trim (harness-tasks-test--git root "log" "-1" "--format=%s"))))
+      (should (equal "two\n" (harness-tasks-test--main-text root)))
+      (should-not (cl-find harness-tasks--merge-session-name (harness-call 'session/list)
+                           :key (lambda (s) (plist-get s :name)) :test #'equal)))))
+
+(ert-deftest harness-tasks-git-refined-main-tree-task-stays-at-the-root ()
+  "A backlog task that needs the main tree keeps its session at the root and merges nothing."
+  (harness-tasks-test-with-git
+    (let* ((harness-provider-demo-script-override
+            '((:type text :delta "Change shared.txt to two\n\nWrite two into shared.txt.")
+              (:type done :stop-reason end-turn)))
+           (id (plist-get (harness-call 'task/submit root "shared.txt should say two"
+                                        (list :refine t :main-tree t))
+                          :id))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-tasks-test-wait-state id 'pending)
+      (should (harness-json-true-p (plist-get (harness-tasks-test-task id) :main-tree)))
+      (setq harness-provider-demo-script-override
+            '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
+              (:type text :delta "Changed it.")
+              (:type done :stop-reason end-turn)))
+      (harness-call 'task/start id)
+      (harness-tasks-test-wait-state id 'done)
+      (let ((task (harness-tasks-test-task id))
+            (session (harness-call 'session/get sid)))
+        (should (equal sid (plist-get task :session)))
+        (should-not (plist-get task :worktree))
+        (should-not (plist-get task :branch))
+        (should-not (plist-get task :merged))
+        (should (equal root (plist-get session :cwd)))
+        (should-not (plist-get session :worktree)))
+      (should (equal "two\n" (harness-tasks-test--main-text root)))
+      (should (equal "change shared" (string-trim (harness-tasks-test--git root "log" "-1" "--format=%s")))))))
+
+(ert-deftest harness-tasks-main-tree-survives-a-restart ()
+  "The main-tree declaration is kept in the project's store across a restart."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-store-in-repository t)
+           (harness-tasks-max-running 0)
+           (root (harness-tasks-test--make-repo))
+           (id (plist-get (harness-call 'task/submit root "clean the checkout" (list :main-tree t)) :id)))
+      (harness-tasks-flush)
+      (harness-tasks-test--restart)
+      (let ((task (harness-tasks-test-task id)))
+        (should (harness-json-true-p (plist-get task :main-tree)))
+        (should (eq 'pending (plist-get task :state))))
+      ;; The stored record names it too, so a harness that reads the store
+      ;; without the files gets it.
+      (let* ((store (harness-tasks-test--read (harness-tasks-test--store root)))
+             (record (car (plist-get store :tasks))))
+        (should (harness-json-true-p (plist-get record :main-tree)))))))
+
 ;;;; Where tasks are kept
 
 (declare-function harness-tasks--repository-store "harness-tasks")
