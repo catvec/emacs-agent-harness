@@ -314,6 +314,12 @@ so several tasks can work in parallel.
   unless your configuration says otherwise, so a request that needs
   you, such as access to another directory, waits for you in *Requires
   your input* instead of being denied.
+- The `own worktree` switch beside those settings, in a git project,
+  changes the next task to the **main tree**: no worktree and no branch,
+  nothing merges, and its changes take effect in your checkout directly.
+  Submit a task that way when it has to touch the checkout itself, such
+  as cleaning up uncommitted changes. A refined task keeps the choice
+  for when you start it.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback.
