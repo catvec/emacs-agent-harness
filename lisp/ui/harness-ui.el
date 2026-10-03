@@ -115,6 +115,17 @@ default, so the text keeps the face of what it is drawn on."
 (defface harness-status-inactive-face '((t :inherit shadow))
   "Inactive sessions." :group 'harness-ui)
 
+(defface harness-success-face '((t :inherit success))
+  "Success: the green circle of a tool call that ran, and its word."
+  :group 'harness-ui)
+(defface harness-caution-face '((t :inherit warning))
+  "A warning, or work in progress: the yellow circle and its word.
+A tool call that is running, or that the permission system refused."
+  :group 'harness-ui)
+(defface harness-failure-face '((t :inherit error))
+  "Failure: the red triangle of a tool call that failed, and its word."
+  :group 'harness-ui)
+
 (defface harness-context-ok-face '((t :inherit default))
   "Context usage comfortably below the limit." :group 'harness-ui)
 (defface harness-context-warning-face '((t :inherit warning))
@@ -176,6 +187,10 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-expanded "expanded" "▾" "-" "Expanded block.")
 (harness-ui-define-icon harness-icon-attach "attach" "+" "attach" "Attachment.")
 (harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
+(harness-ui-define-icon harness-icon-success "success" "●" "ok" "Success: a circle, green.")
+(harness-ui-define-icon harness-icon-caution "caution" "●" "~"
+                        "A warning, or work in progress: a circle, yellow.")
+(harness-ui-define-icon harness-icon-failure "failure" "▲" "!" "A failure: a triangle, red.")
 
 (defun harness-ui-icon (name)
   "Return the string for icon NAME (a symbol such as `harness-icon-idle').
@@ -210,6 +225,28 @@ solaire-mode, bake the buffer's base colour into every image."
     ('blocked 'harness-status-blocked-face)
     ('inactive 'harness-status-inactive-face)
     (_ 'harness-status-idle-face)))
+
+;; How something went reads the way a Japanese table marks it: a green
+;; circle for success, a yellow one for a warning or work in progress,
+;; a red triangle for a failure.
+
+(defun harness-ui-level-icon (level)
+  "Return the icon string for LEVEL, with face.
+LEVEL says how something went: `success' (a green circle), `caution'
+\(a yellow circle: a warning, or work in progress) or `failure' (a red
+triangle).  Words that go with the icon take `harness-ui-level-face'."
+  (propertize (harness-ui-icon (pcase level
+                                 ('success 'harness-icon-success)
+                                 ('failure 'harness-icon-failure)
+                                 (_ 'harness-icon-caution)))
+              'face (harness-ui-level-face level)))
+
+(defun harness-ui-level-face (level)
+  "Return the face for LEVEL (see `harness-ui-level-icon')."
+  (pcase level
+    ('success 'harness-success-face)
+    ('failure 'harness-failure-face)
+    (_ 'harness-caution-face)))
 
 ;;;; Connection
 
@@ -1018,6 +1055,16 @@ text did not match.  `ok' otherwise, and nil without RESULT."
         ((harness-json-true-p (harness-plist-get-in result '(:meta :denied))) 'denied)
         ((harness-json-true-p (plist-get result :is-error)) 'failed)
         (t 'ok)))
+
+(defun harness-ui-tool-level (outcome)
+  "Return the level (see `harness-ui-level-icon') of a tool call's OUTCOME.
+OUTCOME is what `harness-ui-tool-outcome' returns.  A call that ran is a
+`success', one that failed a `failure', and one the permission system
+refused, so it never ran, a `caution'."
+  (pcase outcome
+    ('ok 'success)
+    ('failed 'failure)
+    (_ 'caution)))
 
 (defun harness-ui-model-label (model-id)
   "Return a short, readable \"model (provider)\" label for MODEL-ID.

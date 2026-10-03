@@ -185,20 +185,42 @@
         (harness-test-wait (lambda () (equal n1 (plist-get (harness-call 'session/get sid) :head))) 5 "head restored")))))
 
 (ert-deftest harness-ui-tree-tells-denied-results-from-failed-ones ()
-  ;; A result the permission system refused reads apart from a failure.
+  ;; A result the permission system refused reads apart from a failure,
+  ;; with the chat's icons: a yellow circle, a red triangle, and a green
+  ;; circle for a call that ran.
   (harness-ui-tree-test-with
     (let ((denied '(:kind "tool-result" :output "Denied: the user said no" :is-error t :meta (:denied t)))
           (failed '(:kind "tool-result" :output "exit 1" :is-error t :meta (:denied nil)))
           (ok '(:kind "tool-result" :output "fine" :is-error :false)))
-      (should (equal "\N{U+2298} Denied: the user said no" (harness-ui-tree--excerpt denied)))
-      (should (equal "\N{U+2717} exit 1" (harness-ui-tree--excerpt failed)))
-      (should (equal "\N{U+2192} fine" (harness-ui-tree--excerpt ok)))
-      (should (eq 'warning (harness-ui-tree--excerpt-face denied)))
-      (should (eq 'error (harness-ui-tree--excerpt-face failed)))
+      (should (equal (concat (harness-ui-icon 'harness-icon-caution) " Denied: the user said no")
+                     (harness-ui-tree--excerpt denied)))
+      (should (equal (concat (harness-ui-icon 'harness-icon-failure) " exit 1") (harness-ui-tree--excerpt failed)))
+      (should (equal (concat (harness-ui-icon 'harness-icon-success) " fine") (harness-ui-tree--excerpt ok)))
+      (should (eq 'harness-caution-face (get-text-property 0 'face (harness-ui-tree--excerpt denied))))
+      (should (eq 'harness-failure-face (get-text-property 0 'face (harness-ui-tree--excerpt failed))))
+      (should (eq 'harness-success-face (get-text-property 0 'face (harness-ui-tree--excerpt ok))))
+      (should (eq 'harness-caution-face (harness-ui-tree--excerpt-face denied)))
+      (should (eq 'harness-failure-face (harness-ui-tree--excerpt-face failed)))
       (should (eq 'harness-dim-face (harness-ui-tree--excerpt-face ok)))
       (should (eq 'harness-tool-denied-face (get-text-property 0 'face (harness-ui-tree--expansion-text denied))))
       (should (eq 'harness-tool-error-face (get-text-property 0 'face (harness-ui-tree--expansion-text failed))))
-      (should (eq 'harness-tool-face (get-text-property 0 'face (harness-ui-tree--expansion-text ok)))))))
+      (should (eq 'harness-tool-face (get-text-property 0 'face (harness-ui-tree--expansion-text ok))))
+      ;; Drawn in a row, the icon keeps its colour over the excerpt's face.
+      (pcase-dolist (`(,result ,icon-face ,text-face) `((,denied harness-caution-face harness-caution-face)
+                                                         (,failed harness-failure-face harness-failure-face)
+                                                         (,ok harness-success-face harness-dim-face)))
+        (let* ((data (list :sessions (list (list :id "A" :name "main" :kind "main" :head "a2"))
+                           :nodes (list (list :id "a1" :session "A" :ts 1.0 :kind "tool-call"
+                                              :tool "bash" :title "Bash: make")
+                                        (append (list :id "a2" :session "A" :ts 2.0) result))))
+               (row (car (harness-ui-tree--layout data))))
+          (with-temp-buffer
+            (harness-ui-tree--insert-row row 1 80)
+            (goto-char (point-min))
+            (should (search-forward (harness-ui-tree--excerpt result) nil t))
+            (let ((start (match-beginning 0)))
+              (should (eq icon-face (car (ensure-list (get-text-property start 'face)))))
+              (should (eq text-face (car (ensure-list (get-text-property (+ start 2) 'face))))))))))))
 
 (provide 'harness-ui-tree-test)
 ;;; harness-ui-tree-test.el ends here

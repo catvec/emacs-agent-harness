@@ -651,27 +651,35 @@ an ask_user option, goes under its key, indented."
          (body (harness-chat--foldable (harness-chat--face (harness-chat--plain content) 'harness-thinking-face))))
     (harness-chat--margin (concat header body))))
 
+(defun harness-chat--status (level word help)
+  "Return a tool call's status: the icon of LEVEL, then WORD in its face.
+LEVEL is a level of `harness-ui-level-icon'; WORD is nil for the icon
+alone.  HELP is the tooltip."
+  (propertize (concat (harness-ui-level-icon level)
+                      (if word (concat " " (propertize word 'face (harness-ui-level-face level))) ""))
+              'help-echo help))
+
 (defun harness-chat--outcome-status (outcome &optional count)
   "Return the status text of a tool call that ended with OUTCOME.
-OUTCOME is `failed', the call ran and reported an error, or `denied',
-the permission system refused it, so it never ran.  With COUNT, say
-how many calls ended so, as a group summary does."
-  (let ((denied (eq outcome 'denied)))
-    (propertize (format "%s %s%s" (if denied "\N{U+2298}" "\N{U+2717}")
-                        (if count (format "%d " count) "") outcome)
-                'face (if denied 'warning 'error)
-                'help-echo (if denied "The permission system refused this call, so it never ran"
-                             "The tool ran and reported an error"))))
+OUTCOME is `failed', the call ran and reported an error (a red
+triangle), or `denied', the permission system refused it, so it never
+ran (a yellow circle).  With COUNT, say how many calls ended so, as a
+group summary does."
+  (harness-chat--status (harness-ui-tool-level outcome)
+                        (format "%s%s" (if count (format "%d " count) "") outcome)
+                        (if (eq outcome 'denied) "The permission system refused this call, so it never ran"
+                          "The tool ran and reported an error")))
 
 (defun harness-chat--tool-status (result)
   "Return the status string for a tool call with RESULT (a node or nil).
-A call that was refused reads apart from one that ran and failed."
-  (cond ((and (null result) (member (plist-get (harness-chat--session) :status) '("running" "blocked")))
-         (propertize "⋯ running" 'face 'harness-dim-face))
-        ((null result) (propertize "– no result" 'face 'harness-dim-face))
-        ((memq (harness-ui-tool-outcome result) '(failed denied))
-         (harness-chat--outcome-status (harness-ui-tool-outcome result)))
-        (t (propertize "✓" 'face 'success))))
+A green circle when it ran, a yellow one while it runs or when it was
+refused, a red triangle when it ran and failed."
+  (let ((outcome (harness-ui-tool-outcome result)))
+    (cond ((and (null result) (member (plist-get (harness-chat--session) :status) '("running" "blocked")))
+           (harness-chat--status 'caution "running" "The call has not finished yet"))
+          ((null result) (propertize "– no result" 'face 'harness-dim-face))
+          ((memq outcome '(failed denied)) (harness-chat--outcome-status outcome))
+          (t (harness-chat--status 'success nil "The tool ran and reported no error")))))
 
 (defun harness-chat--render-tool (block)
   "Return the body of tool-call BLOCK (its result rendered with it)."

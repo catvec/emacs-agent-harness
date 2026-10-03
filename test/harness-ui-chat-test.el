@@ -172,7 +172,11 @@
                                           (buffer-substring-no-properties (line-beginning-position) (line-end-position)))))
               (should (string-match-p "List directory /" header))
               (should-not (string-match-p "list_dir" header))))
-          (should (harness-ui-chat-test-find buf "✓"))
+          ;; It ran: a green circle.
+          (let ((mark (harness-ui-chat-test-find buf (harness-ui-icon 'harness-icon-success)
+                                                 (harness-ui-chat-test-find buf "List directory"))))
+            (should mark)
+            (should (harness-ui-chat-test-face-at (1- mark) 'harness-success-face)))
           (let ((out (harness-ui-chat-test-find buf "list_dir of")))
             (should out)
             (should (invisible-p (1- out)))))
@@ -1013,10 +1017,12 @@ opening it where images cannot show or the file is remote."
     (ensure-list (get-text-property pos 'face))))
 
 (ert-deftest harness-ui-chat-tells-denied-calls-from-failed-ones ()
-  ;; A call the permission system refused never ran: it reads "denied",
-  ;; in the warning face on a background of its own, while a call that
-  ;; ran and reported an error reads "failed".  A coalesced group counts
-  ;; both, also when a member's result arrives after the group formed.
+  ;; A call the permission system refused never ran: it reads "denied"
+  ;; behind a yellow circle, on a background of its own, while a call
+  ;; that ran and reported an error reads "failed" behind a red
+  ;; triangle, and one that ran has a green circle.  A coalesced group
+  ;; counts the failed and denied ones, also when a member's result
+  ;; arrives after the group formed.
   (harness-ui-chat-test-with
     (harness-add-filter 'permission/decide
                         (lambda (decision next request)
@@ -1028,7 +1034,10 @@ opening it where images cannot show or the file is remote."
                          :handler (lambda (_input _ctx) (harness-tool-error "grep: no such file")))
     (let* ((harness-chat-coalesce-threshold 2)
            (sid (harness-ui-chat-test-session))
-           (buf (harness-ui-chat-test-open sid)))
+           (buf (harness-ui-chat-test-open sid))
+           (success (harness-ui-icon 'harness-icon-success))
+           (caution (harness-ui-icon 'harness-icon-caution))
+           (failure (harness-ui-icon 'harness-icon-failure)))
       ;; glob is denied, grep fails, bash runs.
       (harness-ui-chat-test-prompt buf "run the tools")
       (with-current-buffer buf
@@ -1042,41 +1051,77 @@ opening it where images cannot show or the file is remote."
                       (should (eq 'denied (harness-ui-tool-outcome (harness-chat-block-result glob))))
                       (should (eq 'failed (harness-ui-tool-outcome (harness-chat-block-result grep))))
                       (should (eq 'ok (harness-ui-tool-outcome (harness-chat-block-result bash))))
-                      ;; The denied call: its status, its background, and the
-                      ;; permission system's reason where output would be.
+                      ;; The old check mark, cross and circled slash are gone.
+                      (dolist (b (list glob grep bash))
+                        (should-not (string-match-p "[\N{U+2713}\N{U+2717}\N{U+2298}]"
+                                                    (harness-ui-chat-test-block-text b))))
+                      ;; The denied call: a yellow circle, its background, and
+                      ;; the permission system's reason where output would be.
                       (let ((text (harness-ui-chat-test-block-text glob)))
-                        (should (string-search "\N{U+2298} denied" text))
-                        (should-not (string-search "failed" text))
+                        (should (string-search (concat caution " denied") text))
+                        ;; (Not "failed" anywhere: the temporary path in the
+                        ;; title may hold that word.)
+                        (should-not (string-search (concat failure " failed") text))
                         (should (string-match-p "^ *reason$" text))
                         (should-not (string-search "output (" text))
                         (should (string-search "Denied: the test refuses glob" text)))
-                      (should (memq 'warning (harness-ui-chat-test-faces-in glob "\N{U+2298} denied")))
+                      (should (eq 'harness-caution-face
+                                  (car (harness-ui-chat-test-faces-in glob (concat caution " denied")))))
+                      (should (eq 'harness-caution-face (car (harness-ui-chat-test-faces-in glob "denied\n"))))
                       (should (memq 'harness-tool-denied-face (harness-ui-chat-test-faces-in glob "Find files")))
                       (should-not (memq 'harness-tool-error-face (harness-ui-chat-test-faces-in glob "Find files")))
-                      ;; The failed call keeps its red status and background.
+                      ;; The failed call: a red triangle, a red status and background.
                       (let ((text (harness-ui-chat-test-block-text grep)))
-                        (should (string-search "\N{U+2717} failed" text))
-                        (should-not (string-search "denied" text))
+                        (should (string-search (concat failure " failed") text))
+                        (should-not (string-search (concat caution " denied") text))
                         (should (string-search "output (" text))
                         (should (string-search "grep: no such file" text)))
-                      (should (memq 'error (harness-ui-chat-test-faces-in grep "\N{U+2717} failed")))
+                      (should (eq 'harness-failure-face
+                                  (car (harness-ui-chat-test-faces-in grep (concat failure " failed")))))
+                      (should (eq 'harness-failure-face (car (harness-ui-chat-test-faces-in grep "failed\n"))))
                       (should (memq 'harness-tool-error-face (harness-ui-chat-test-faces-in grep "Search files")))
-                      ;; The call that ran is a success, as before.
-                      (should (string-search "\N{U+2713}" (harness-ui-chat-test-block-text bash)))
+                      ;; The call that ran: a green circle, alone.
+                      (should (string-search (concat success "\n") (harness-ui-chat-test-block-text bash)))
+                      (should (eq 'harness-success-face
+                                  (car (harness-ui-chat-test-faces-in bash (concat success "\n")))))
                       (should (memq 'harness-tool-face (harness-ui-chat-test-faces-in bash "Bash")))
                       ;; glob and grep fold into a group whose summary counts both.
                       (should (= 1 (hash-table-count harness-chat--groups)))
                       (let ((summary (harness-ui-chat-test-find buf "2 tool calls: Find files, Search files")))
                         (should summary)
-                        (should (harness-ui-chat-test-find buf "\N{U+2717} 1 failed" summary))
-                        (should (harness-ui-chat-test-find buf "\N{U+2298} 1 denied" summary))
-                        (should (< (harness-ui-chat-test-find buf "\N{U+2298} 1 denied" summary)
+                        (should (harness-ui-chat-test-find buf (concat failure " 1 failed") summary))
+                        (should (harness-ui-chat-test-find buf (concat caution " 1 denied") summary))
+                        (should (< (harness-ui-chat-test-find buf (concat caution " 1 denied") summary)
                                    (harness-ui-chat-test-find buf "[expand]" summary)))))))
           (check)
           ;; A redraw renders the same from the fetched history.
           (harness-chat-redraw)
           (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn")
           (check))))))
+
+(ert-deftest harness-ui-chat-tool-status-reads-like-a-japanese-table ()
+  ;; A green circle when the call ran, a yellow one while it runs or
+  ;; when it was refused, a red triangle when it failed; the word after
+  ;; the icon takes its colour.  A call left without a result once the
+  ;; session stopped has a neutral dash.
+  (harness-ui-chat-test-with
+    (let ((status "running"))
+      (cl-letf (((symbol-function 'harness-chat--session) (lambda () (list :status status))))
+        (pcase-dolist (`(,result ,icon ,face ,word)
+                       '((nil harness-icon-caution harness-caution-face "running")
+                         ((:output "fine" :is-error :false) harness-icon-success harness-success-face nil)
+                         ((:output "exit 1" :is-error t) harness-icon-failure harness-failure-face "failed")
+                         ((:output "Denied: no" :is-error t :meta (:denied t))
+                          harness-icon-caution harness-caution-face "denied")))
+          (let ((s (harness-chat--tool-status result)))
+            (should (equal (if word (concat (harness-ui-icon icon) " " word) (harness-ui-icon icon)) s))
+            (should (eq face (get-text-property 0 'face s)))
+            (should (eq face (get-text-property (1- (length s)) 'face s)))
+            (should (stringp (get-text-property 0 'help-echo s)))))
+        (setq status "idle")
+        (let ((s (harness-chat--tool-status nil)))
+          (should (equal "\N{U+2013} no result" s))
+          (should (eq 'harness-dim-face (get-text-property 0 'face s))))))))
 
 ;;;; History
 
