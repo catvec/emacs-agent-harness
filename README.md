@@ -316,8 +316,27 @@ so several tasks can work in parallel.
   your input* instead of being denied.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
-  its session with feedback. With `harness-tasks-require-verification`
-  set to nil, tasks complete without review.
+  its session with feedback.
+- To skip review, press `V` or click `[Review: on]` in the board's
+  header line. Finished tasks then merge and complete without waiting
+  for you, and if tasks are already waiting for review, the board offers
+  to verify them. The switch sets `harness-tasks-require-verification`,
+  so it applies to every project and is saved for later sessions. Press
+  `V` again to turn review back on.
+- A task's session finishes by *handing its work in* (`hand_in`): the
+  agent gives a final summary and the evidence for it -- an image or a
+  video of what it built whenever there is anything to see, a file, a
+  code block, a note, or a link to an earlier tool call, the tests or a
+  command it ran. The turn ends there and the task waits for your
+  review. In the session itself a banner above the compose box offers
+  `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-R`; type the feedback
+  in the box, `C-c C-c` sends it) and `[Report]`, so you can accept the
+  work without going back to the board.
+- `[Report]` on a card that has one pops the handed-in summary and
+  evidence out beside the board: images inline, videos as thumbnails,
+  files as buttons, and each referenced tool call as the call it links
+  to, with `[Open in the session]`. The board's item-at-point key
+  (`SPC`) opens it too, along with whatever else the task has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `RET` opens the session of the task at point. From that session,

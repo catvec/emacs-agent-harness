@@ -18,7 +18,7 @@ module needs something more, add it here first.
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
-                tools-sessions, tools-notify
+                tools-sessions, tools-notify, tools-handin
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -1193,6 +1193,10 @@ to the task's file (below); the record also keeps `:file-base` and
   puts the task in review, merged.  `task/archive` works in review too;
   `task/archive-done` leaves those tasks alone.  With the option nil a
   task is done once merged, or outside git once its turn ends.
+  `task/settings` reports the option as `:require-verification` (t, or
+  false rather than nil), and a board's Review switch turns it off and
+  on with `config/set`, globally and saved; tasks already in review wait
+  on until verified.
 - A turn starting in a task's session makes the task active again, so a
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.
@@ -1212,7 +1216,12 @@ to the task's file (below); the record also keeps `:file-base` and
   RESTORE` (deactivates the session; removes a merged task's worktree and
   branch), `task/archive-done &optional CWD`, `task/cancel ID` (drops a
   task that has not started, stops a running turn or write-up),
-  `task/delete ID &optional DELETE-SESSION` (keeps the worktree).
+  `task/delete ID &optional DELETE-SESSION` (keeps the worktree),
+  `task/for-session SESSION-ID` (the task of a session, or nil, which
+  `hand_in` and the session's review banner use) and
+  `task/hand-in ID REPORT` (record `:summary` and `:evidence` as the
+  work ID handed in; the write-up tool's `:end-turn` ends its turn, which
+  the review step then picks up).
 - Events `task/changed TASK`, `task/deleted ID`, `task/review TASK` (its
   work waits for the user's review), `task/done TASK HOW` (it became
   done; HOW is `merged` when the merge queue merged its branch,
@@ -1280,6 +1289,13 @@ to the task's file (below); the record also keeps `:file-base` and
 
   > csv export for the reports page
 
+  <!-- harness:report -->
+  ## Report
+
+  ```json
+  {"summary": "Added CSV export...", "evidence": [{"kind": "image", ...}]}
+  ```
+
   <!-- harness:plan -->
   ## Plan
 
@@ -1301,7 +1317,9 @@ to the task's file (below); the record also keeps `:file-base` and
   - Body: the prompt, its first line a level-1 heading when it reads as
     a title (short, and no markdown of its own); then, each behind a
     `<!-- harness:NAME -->` marker line, the sections the harness keeps:
-    `request` (`:note` quoted, once a write-up replaced it), `review`
+    `request` (`:note` quoted, once a write-up replaced it), `report`
+    (the JSON the work was handed in with: `summary` and `evidence`,
+    which comes back with it) and `review`
     (each round of `:feedback`, quoted under a `### Sent back TIME`
     heading, oldest first; read back only when the file brings a lost
     task back) and `plan` (the session's plan, never read back).
@@ -1459,7 +1477,7 @@ TITLE is the session's name, else the prompt's first line without its
 leading `#`, at most 80 characters; PROJECT is `project/name` of the
 task's project.
 
-### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify
+### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -1497,9 +1515,21 @@ TRAMP prefixes come from the session host):
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
+| `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms-auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read |
 | `merge_done` | Finish merge | none | meta (merge module) |
+
+`hand_in` (tools-handin) is how a task's session finishes: the tool
+records the summary and evidence on the task (`task/hand-in'`) and asks
+the turn to end via the result's `:end-turn' -- `harness-agent--finish-turn'
+cancels the provider and ends the turn with `end-turn', as if the model
+had stopped itself -- so the review step puts the task in front of the
+user.  The filter `agent/tools' drops it where `task/for-session' finds
+no task.  Evidence is required: an image or a video (a path inside the
+session's roots), a file, code, a note, or `tool_call' naming an
+earlier call of the session, which is copied into the report as a
+snapshot so the view can show it as the link it is.
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
@@ -1904,9 +1934,17 @@ answer or feedback for a new task again: a question stays waiting,
 never cancelled).  A task in review shows [Verify] and [Send back]: `v`
 accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
-in the minibuffer).  The header counts the tasks to review, and
-`task/review` says in the echo area that one is ready
-(`harness-ui-tasks-notify-review`).  RET opens the session, and
+in the minibuffer).  A card of a task that handed a report in also
+shows [Report], popping the report out; it is one of the items
+`harness-ui-popout-at-point-functions' offers.  The header counts the
+tasks to review, and `task/review` says in the echo area that one is
+ready (`harness-ui-tasks-notify-review`).  The header's Review switch
+([Review: on], `V`) turns review off and on again for every project
+(`harness-tasks-require-verification`, saved through `config/set`):
+off, finished tasks merge and complete by themselves, and Ready for
+review shows only while tasks from before still wait there; turning it
+off while tasks of the board wait for review offers to verify them.
+`config/changed` brings every board the new value.  RET opens the session, and
 `C-c h a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  Redraws, after
@@ -1980,4 +2018,19 @@ and an idle one is closed.  Keeping it makes it a normal session
 window in that place, with nothing of the BTW left in its header), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video posters that play the video, and the attachments a tool
-result or a message carries).
+result or a message carries), popouts (`harness-ui-popout`: one item of
+a session or a task in a small selected bottom side window, fitted to
+its content, one buffer per KEY the owner picks; `q`/`g` on the content
+under the owner's own keys, `C-c C-c` sends its optional shared compose
+box, `C-g` closes it, and `harness-ui-popout-at-point` runs the first
+`harness-ui-popout-at-point-functions` that knows the item at point),
+the review of a task in its session (`harness-ui-review`: a chat panel
+-- `harness-chat-panel-functions` -- that shows the board's Ready for
+review above the box, with [Verify] (`C-c C-v`), [Send back]
+(`C-c C-R`) and [Report]; while it shows, `harness-chat-send-function`
+gives the box's text to `task/reject` as the feedback), and the
+handed-in report (`harness-ui-report`: the summary as markdown and the
+evidence -- images inline, videos and files through ui-media, code as a
+block, notes, and a referenced tool call drawn as the call it links to,
+with [Open in the session]; opened from the board's [Report] button and
+from the banner, in a popout of its own).

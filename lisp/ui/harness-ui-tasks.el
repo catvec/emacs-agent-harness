@@ -32,8 +32,15 @@
 ;; about the tasks in a BTW side conversation over the board, whose agent
 ;; answers with the task and session tools (`task/btw').
 ;;
-;; Everything comes over ACP (`_harness/task/…' plus the session cache),
-;; so the board works against a remote harness too.  The list region is
+;; Review can be turned off (V, or the [Review: on] switch in the header
+;; line): finished tasks then merge and complete by themselves, and Ready
+;; for review shows only while tasks from before still wait there.  The
+;; switch is the harness option `harness-tasks-require-verification', so
+;; it holds for every board and across restarts.
+;;
+;; Everything comes over ACP (`_harness/task/…', `_harness/config/set'
+;; for the Review switch, plus the session cache), so the board works
+;; against a remote harness too.  The list region is
 ;; redrawn as a whole when anything changes -- a board holds tens of
 ;; tasks, not a transcript -- while the compose box is never touched.
 ;; Point and every window showing the board stay where they were through
@@ -79,6 +86,8 @@ Either way the toggle above the compose box switches it per board."
   "The completed mark." :group 'harness-ui-tasks)
 (defface harness-task-review-face '((t :inherit success :weight bold))
   "Tasks waiting for your review: their mark, heading and count." :group 'harness-ui-tasks)
+(defface harness-task-review-off-face '((t :inherit warning))
+  "The Review switch while finished tasks merge without your review." :group 'harness-ui-tasks)
 (defface harness-task-choice-face '((t :inherit bold))
   "The Submit / Refine toggle, which shows the current mode." :group 'harness-ui-tasks)
 
@@ -184,6 +193,12 @@ into the board's drawing and loading checks this first."
   "Non-nil while an agent writes TASK up: refining and not stopped.
 The task record says so as soon as it changes, unlike the session cache."
   (and (harness-ui-tasks--refining-p task) (null (plist-get task :outcome))))
+
+(defun harness-ui-tasks--review-p ()
+  "Non-nil when finished tasks wait for your review before they merge.
+That is the harness's `task/settings' as last fetched: review is on, as
+it is by default, until they say it is off."
+  (not (eq (plist-get harness-ui-tasks--settings :require-verification) :false)))
 
 (defun harness-ui-tasks--duplicate-p (task)
   "Non-nil when TASK's write-up refused it as a duplicate of another task."
@@ -499,15 +514,23 @@ a button whose label changes, a setting's value say, needs one."
   (car (plist-get (harness-ui-tasks--session task) :pending)))
 
 (defun harness-ui-tasks--card-buttons (task)
-  "Buttons for TASK's two most useful actions besides opening it."
+  "Buttons for TASK's two most useful actions besides opening it.
+A task that handed a report in (`hand_in') gets a [Report] button too:
+its final message and evidence, in a popout."
   (let ((id (plist-get task :id)))
-    (mapconcat (lambda (a)
-                 (harness-ui-tasks--button
-                  (format "[%s]" (car a))
-                  (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
-                  (car a) (nth 1 a)))
-               (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))
-               " ")))
+    (concat
+     (mapconcat (lambda (a)
+                  (harness-ui-tasks--button
+                   (format "[%s]" (car a))
+                   (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
+                   (car a) (nth 1 a)))
+                (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))
+                " ")
+     (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
+       (concat " " (harness-ui-tasks--button
+                     "[Report]"
+                     (lambda () (harness-ui-report-popout task))
+                     "What it handed in: the final message and the evidence" "report"))))))
 
 ;;;; Rendering
 
@@ -597,7 +620,11 @@ a button whose label changes, a setting's value say, needs one."
           (insert (propertize "  No tasks yet.  Describe one below: it gets a session of its own\n  and works on it while you do something else.\n\n"
                               'face 'harness-dim-face 'wrap-prefix "  "))
         (dolist (c harness-ui-tasks--columns)
-          (harness-ui-tasks--insert-section (car c) (cadr c) (cdr (assq (car c) groups)))))))))
+          (let ((tasks (cdr (assq (car c) groups))))
+            ;; With review off nothing comes to review: the column shows
+            ;; only while tasks from before still wait there.
+            (unless (and (eq (car c) 'review) (null tasks) (not (harness-ui-tasks--review-p)))
+              (harness-ui-tasks--insert-section (car c) (cadr c) tasks)))))))))
 
 ;;;; Point across redraws
 
@@ -948,7 +975,9 @@ them all; otherwise they are the new task's."
          (let ((notes (if harness-ui-tasks--refine
                           (list "an agent writes it up; you start it")
                         (delq nil (list (and (harness-json-true-p (plist-get s :worktrees))
-                                             "own worktree, merged when done")
+                                             (if (harness-ui-tasks--review-p)
+                                                 "own worktree, merged once you verify it"
+                                               "own worktree, merged when done"))
                                         (and (plist-get s :max-running)
                                              (format "%s at a time" (plist-get s :max-running))))))))
            (if notes
@@ -1124,6 +1153,29 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
   (propertize text 'mouse-face 'mode-line-highlight 'help-echo help
               'keymap (harness-ui-mouse-keymap command)))
 
+(defun harness-ui-tasks--review-help (window _object _pos)
+  "The tooltip of the Review switch in WINDOW's header line.
+It says what the switch does now and how to turn it.  A `help-echo'
+function, so the keymaps are searched on hover, not on every redisplay
+of the header line."
+  (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
+    (let ((keys (substitute-command-keys
+                 "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-review]" t)))
+      (if (harness-ui-tasks--review-p)
+          (format "Review is on: finished tasks wait in Ready for review until you verify them, which merges them, or send them back.  Click or %s to turn it off, for every project: finished tasks then merge and complete by themselves."
+                  keys)
+        (format "Review is off: finished tasks merge and complete by themselves, without waiting for you to verify them.  Click or %s to turn it on again, for every project."
+                keys)))))
+
+(defun harness-ui-tasks--review-segment ()
+  "The header's Review switch: whether finished tasks wait for your review.
+A click turns it the other way (`harness-ui-tasks-toggle-review').  Off,
+it stands out: work then merges without anyone looking at it."
+  (harness-ui-tasks--segment (if (harness-ui-tasks--review-p)
+                                 "[Review: on]"
+                               (propertize "[Review: off]" 'face 'harness-task-review-off-face))
+                             #'harness-ui-tasks-toggle-review #'harness-ui-tasks--review-help))
+
 (defun harness-ui-tasks--header ()
   (let* ((counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) (harness-ui-tasks--visible)))
          (needs (alist-get 'needs-input counts))
@@ -1157,6 +1209,8 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
                       "Bulk edit: apply the model, effort, permission mode and interactivity to every running, pending and blocked task")))
        (if harness-ui-tasks--bulk (propertize segment 'face 'harness-task-attention-face) segment))
      "   "
+     ;; Shown once the harness said how it is, so it never shows the wrong way.
+     (if harness-ui-tasks--settings (concat (harness-ui-tasks--review-segment) " ") "")
      (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
                                 "Ask about the tasks in a side conversation")
      " "
@@ -1189,7 +1243,14 @@ QUIET refreshes in the background, without the loading indicator."
         (harness-ui-call "_harness/task/settings" (list :cwd dir)
                          (lambda (s) (when (buffer-live-p buffer)
                                        (with-current-buffer buffer
-                                         (setq harness-ui-tasks--settings s)
+                                         (let ((review (harness-ui-tasks--review-p)))
+                                           (setq harness-ui-tasks--settings s)
+                                           ;; The Review switch decides whether the board
+                                           ;; shows Ready for review when it is empty.
+                                           (unless (eq review (harness-ui-tasks--review-p))
+                                             (harness-ui-tasks--render)))
+                                         ;; The header shows the switch.
+                                         (force-mode-line-update)
                                          (unless harness-ui-tasks--new
                                            (setq harness-ui-tasks--new
                                                  (list :model (plist-get s :model)
@@ -1323,6 +1384,7 @@ anything that moves a task without one, so a board never drifts.")
   (define-key map (kbd "X") #'harness-ui-tasks-archive-done)
   (define-key map (kbd "D") #'harness-ui-tasks-delete)
   (define-key map (kbd "A") #'harness-ui-tasks-toggle-archived)
+  (define-key map (kbd "V") #'harness-ui-tasks-toggle-review)
   (define-key map (kbd "B") #'harness-ui-tasks-toggle-bulk)
   (define-key map (kbd "I") #'harness-ui-tasks-adopt)
   (define-key map (kbd "b") #'harness-ui-tasks-btw)
@@ -1392,6 +1454,7 @@ anything that moves a task without one, so a board never drifts.")
         (". I" "Adopt a session" harness-ui-tasks-adopt)
         (". X" "Archive completed" harness-ui-tasks-archive-done)
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
+        (". V" "Review on or off" harness-ui-tasks-toggle-review)
         (". B" "Bulk edit current tasks" harness-ui-tasks-toggle-bulk)
         (". g" "Refresh" harness-ui-tasks-refresh)]
        ["Compose box"
@@ -1799,6 +1862,62 @@ sent at once."
      (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
                                         "Sending the task back")
         (message "Sent back: its session works on your feedback")))))
+
+(defun harness-ui-tasks--count-tasks (n)
+  "N tasks in words: \"task\" for one, \"3 tasks\" for more."
+  (if (= n 1) "task" (format "%d tasks" n)))
+
+(defun harness-ui-tasks--show-review (on)
+  "Show review as ON (non-nil) or off on this board, as the harness has it now.
+Its `config/changed' brings every board the settings again shortly;
+this one does not wait for them."
+  (when harness-ui-tasks--settings
+    (setq harness-ui-tasks--settings
+          (plist-put (copy-sequence harness-ui-tasks--settings) :require-verification (if on t :false)))
+    (harness-ui-tasks--render)
+    (harness-ui-tasks--refit-tail)))
+
+(defun harness-ui-tasks-toggle-review (&optional arg)
+  "Turn the review of finished tasks off, or back on.
+With review on, a task whose work is finished waits in Ready for review
+until you verify it (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-verify]), which merges it, or send it back
+\(\\[harness-ui-tasks-reject]).  With review off it needs nobody: its branch merges as soon
+as it is finished, and the task is done.  The board then shows no Ready
+for review column, unless tasks still wait there.  Turning review off
+while tasks of this board wait for it offers to verify them too.
+
+The switch is the harness option `harness-tasks-require-verification',
+saved as the settings page saves it: for every project, and across
+restarts.  With a prefix ARG, turn review on when ARG is positive and
+off otherwise."
+  (interactive "P")
+  (let* ((buffer (current-buffer))
+         (on (if arg (> (prefix-numeric-value arg) 0) (not (harness-ui-tasks--review-p))))
+         (waiting (and (not on)
+                       (cl-remove-if-not (lambda (task) (and (equal (plist-get task :state) "review")
+                                                             (not (harness-ui-tasks--archived-p task))))
+                                         harness-ui-tasks--tasks)))
+         (verify (and waiting
+                      (y-or-n-p (format "Verify the %s waiting for your review too? "
+                                        (harness-ui-tasks--count-tasks (length waiting)))))))
+    (harness-ui-tasks--request-then
+     "_harness/config/set"
+     (list :key "harness-tasks-require-verification" :value (if on "t" "nil") :printed t
+           :scope "global" :cwd harness-ui-tasks--dir)
+     (if on "Turning review on" "Turning review off")
+     (lambda (_)
+       (when (harness-ui-tasks--board-p buffer)
+         (with-current-buffer buffer
+           (harness-ui-tasks--show-review on)
+           (when verify
+             (dolist (task waiting)
+               (harness-ui-tasks--request-then "_harness/task/verify" (list :id (plist-get task :id))
+                                               "Verifying the task")))))
+       (message "%s"
+                (cond (on "Review on: finished tasks wait for you to verify them, in every project")
+                      (verify (format "Review off: finished tasks merge and complete by themselves, in every project; verifying the %s that waited"
+                                      (harness-ui-tasks--count-tasks (length waiting))))
+                      (t "Review off: finished tasks merge and complete by themselves, in every project")))))))
 
 (defun harness-ui-tasks-archive ()
   "Archive the task at point, completed or in review, or restore it when archived."

@@ -1475,6 +1475,69 @@ calls around it regroup."
           (harness-chat-send)))
       (should-not seen))))
 
+(ert-deftest harness-ui-chat-panel-functions-show-a-panel ()
+  "A buffer-local panel function puts its string in the tail, read-only.
+It runs on every render, right above the attachments and the box, and
+buttons in it work.  Clearing the hook takes the panel away again."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (clicked nil))
+      (with-current-buffer buf
+        (should-not (harness-ui-chat-test-find buf "review banner"))
+        (add-hook 'harness-chat-panel-functions
+                  (lambda ()
+                    (concat " review banner  "
+                            (propertize "[Verify]" 'harness-chat-action (lambda () (setq clicked t)))
+                            "\n"))
+                  nil t)
+        (harness-chat--render-tail)
+        (let ((pos (harness-ui-chat-test-find buf "review banner")))
+          (should pos)
+          (should (< pos harness-compose-start))
+          (should (harness-ui-chat-test-face-at pos 'harness-chat-panel-face))
+          (should (get-text-property pos 'read-only))
+          (goto-char (1- (harness-ui-chat-test-find buf "[Verify]")))
+          (harness-chat-push))
+        (should clicked)
+        (setq-local harness-chat-panel-functions nil)
+        (harness-chat--render-tail)
+        (should-not (harness-ui-chat-test-find buf "review banner"))))))
+
+(ert-deftest harness-ui-chat-send-function-takes-the-message ()
+  "A buffer-local send function takes the box's message, not the session.
+It gets the text and attachments as typed and the box empties; an answer
+to a waiting question still goes through the question instead."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (file (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
+           (sent nil)
+           (answers nil))
+      (with-current-buffer buf
+        (setq-local harness-chat-send-function (lambda (text atts) (push (list text atts) sent)))
+        (harness-ui-chat-test-type buf "  looks good  ")
+        (harness-compose-add-attachment file)
+        (harness-chat-send)
+        (should (equal "looks good" (car (car sent))))
+        (should (equal (list file) (mapcar (lambda (a) (plist-get a :path)) (cadr (car sent)))))
+        (should (equal "" (harness-compose-text)))
+        (should-not harness-compose-attachments)
+        ;; Nothing reached the session, not even a first message.
+        (accept-process-output nil 0.2)
+        (should-not (harness-call 'session/nodes sid))
+        ;; An empty box still signals.
+        (should-error (harness-chat-send) :type 'user-error)
+        ;; A waiting question wins over the send function.
+        (cl-letf (((symbol-function 'harness-chat--answer-question)
+                   (lambda (pid answer) (push (list pid answer) answers)))
+                  ((symbol-function 'harness-chat--remove-pending) #'ignore))
+          (harness-chat--add-pending (list :id "q1" :kind "question" :question "Which?"))
+          (harness-ui-chat-test-type buf "red")
+          (harness-chat-send))
+        (should (equal '(("q1" "red")) answers))
+        (should (= 1 (length sent)))))))
+
 (ert-deftest harness-ui-chat-inactive-session-reanimates-on-send ()
   ;; An inactive session opens as it is, with a notice and its compose box;
   ;; the first message sent from it resumes it and the notice goes away.

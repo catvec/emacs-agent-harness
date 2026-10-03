@@ -1868,6 +1868,25 @@ Options with diagrams get the area showing one of them under them."
                   "\n")))
       (add-face-text-property start (point) 'harness-queue-face t))))
 
+(defvar harness-chat-panel-functions nil
+  "Functions putting a panel of their own below the transcript.
+Each is called without arguments in the chat buffer on every render of
+the tail and returns a string, or nil for nothing.  The strings go
+between the queue and the attachments, in order, read-only and above
+the compose box.  Add to it buffer-locally, with a symbol, so a reload
+redefines it.  The task module shows its review banner this way.")
+
+(defun harness-chat--insert-panels ()
+  "Insert what `harness-chat-panel-functions' return, in order.
+Each string gets the panel background, which its own properties may
+override, as the pending panel's do."
+  (run-hook-wrapped 'harness-chat-panel-functions
+                    (lambda (fn)
+                      (when-let* ((text (funcall fn)))
+                        (unless (string-empty-p text)
+                          (insert (harness-chat--face text 'harness-chat-panel-face))))
+                      nil)))
+
 (defun harness-chat--render-tail ()
   "Render everything below the transcript, keeping the compose text."
   (harness-chat--with-display (harness-chat--render-tail-1)))
@@ -1890,6 +1909,7 @@ Options with diagrams get the area showing one of them under them."
               (harness-chat--insert-question-panel r)
             (harness-chat--insert-permission-panel r)))
         (harness-chat--insert-queue)
+        (harness-chat--insert-panels)
         (harness-compose-insert-attachments)
         (when harness-chat--dead
           (insert (propertize " This session was deleted; the transcript stays readable.\n" 'face 'harness-hint-face)))
@@ -2237,6 +2257,14 @@ module names a side conversation after its first message this way.")
                       nil)
                     text atts))
 
+(defvar-local harness-chat-send-function nil
+  "When set, `harness-chat-send' gives the compose box's message to it.
+The function takes the TEXT and ATTACHMENTS the box held and sends them
+itself, instead of the message being prompted into the session.  An
+answer to a waiting question still goes first: while one waits, a typed
+message answers it.  A module a buffer hosts sets this when the box
+means something else there, such as feedback on a review.")
+
 (defun harness-chat--clear-compose ()
   "Empty the compose box and the attachments."
   (setq harness-chat--editing nil)
@@ -2273,15 +2301,17 @@ While the agent is running the message steers the current turn."
                   (sid harness-ui-session-id))
         (harness-chat--drop-edited-queue-item)
         (harness-chat--clear-compose)
-        (harness-chat--run-send-functions text atts)
-        (harness-compose-with-expanded-text
-         text
-         (lambda (expanded)
-           (let ((blocks (append (and (not (string-empty-p expanded)) (list (list :type "text" :text expanded)))
-                                 (mapcar #'harness-compose-attachment-block atts))))
-             (harness-ui-call "session/prompt" (list :sessionId sid :prompt blocks)
-                              #'ignore
-                              (lambda (err) (harness-chat--report-error buf "send" err))))))))))
+        (if harness-chat-send-function
+            (funcall harness-chat-send-function text atts)
+          (harness-chat--run-send-functions text atts)
+          (harness-compose-with-expanded-text
+           text
+           (lambda (expanded)
+             (let ((blocks (append (and (not (string-empty-p expanded)) (list (list :type "text" :text expanded)))
+                                   (mapcar #'harness-compose-attachment-block atts))))
+               (harness-ui-call "session/prompt" (list :sessionId sid :prompt blocks)
+                                #'ignore
+                                (lambda (err) (harness-chat--report-error buf "send" err)))))))))))
 
 (defun harness-chat-queue ()
   "Queue the compose box for the next turn."

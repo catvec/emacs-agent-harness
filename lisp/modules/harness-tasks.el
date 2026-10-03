@@ -141,7 +141,11 @@ A task whose turn ends cleanly goes to review instead of done, in a git
 project with its branch not merged yet.  Verifying it (`task/verify')
 merges the branch and completes the task; sending it back with
 feedback (`task/reject') has its session work on it again.  With nil a
-task is done once its branch merges, or outside git once its turn ends."
+task is done once its branch merges, or outside git once its turn ends.
+
+The task board turns review off and on again with its Review switch,
+for every project.  Turning it off leaves the tasks that already wait
+for review where they are, for the user to verify."
   :type 'boolean :group 'harness)
 
 (defcustom harness-tasks-permission-mode 'auto
@@ -1160,6 +1164,24 @@ That is a `### Sent back TIME' heading over each, quoted; nil for none."
                          "\n\n" (harness-tasks--quote (or (plist-get round :text) ""))))
                feedback "\n\n")))
 
+(defun harness-tasks--report-text (task)
+  "Return TASK's report as its file's report section has it: a JSON block.
+The JSON holds the summary and the evidence exactly as the task view
+shows them, so a hand-written file and a rendered report agree."
+  (when-let* ((report (plist-get task :report)))
+    (concat "```json\n" (harness-json-encode-text report) "\n```")))
+
+(defun harness-tasks--parse-report (text)
+  "Return the report in TEXT, a task file's report section, or nil.
+It is the JSON block the section holds; a section without a readable
+JSON report is no report."
+  (when (and (stringp text)
+             (string-match "```json[ \t]*\n\\(\\(?:.\\|\n\\)*?\\)\n```" text))
+    (condition-case err
+        (let ((report (harness-json-parse (match-string 1 text))))
+          (and (listp report) (stringp (plist-get report :summary)) report))
+      (error (harness-log 'warn "tasks: cannot parse a report: %S" err) nil))))
+
 (defun harness-tasks--parse-feedback (text)
   "Return the rounds of feedback in TEXT, a task file's review section.
 Each is (:text TEXT :at TIME), oldest first; text before the first
@@ -1190,6 +1212,9 @@ heading, and a heading over nothing, are no round."
             (if (harness-tasks--note-shown-p task)
                 (concat "\n\n<!-- harness:request -->\n## Request\n\n"
                         (harness-tasks--quote (plist-get task :note)))
+              "")
+            (if (plist-get task :report)
+                (concat "\n\n<!-- harness:report -->\n## Report\n\n" (harness-tasks--report-text task))
               "")
             (if feedback (concat "\n\n<!-- harness:review -->\n## Review\n\n" feedback) "")
             (if (and (stringp plan) (not (string-blank-p plan)))
@@ -1261,8 +1286,9 @@ is the prompt's first line, as plain text; HEADING is non-nil then."
 `:fields' maps the known frontmatter keys present (lowercase) to their
 values, the file's last of each; `:extra' lists the raw entries of the
 other keys; `:prompt' is the description with its title heading made
-plain, `:heading' non-nil when it had one; `:note', `:review' and
-`:plan' are the request, review and plan sections, nil when absent.  A
+plain, `:heading' non-nil when it had one; `:note', `:report',
+`:review' and `:plan' are the request, report, review and plan
+sections, nil when absent.  A
 file whose frontmatter never ends is just (:unterminated t)."
   (let* ((split (harness-tasks--split-frontmatter text))
          (yaml (car split)))
@@ -1280,6 +1306,7 @@ file whose frontmatter never ends is just (:unterminated t)."
         (list :fields fields :extra extra
               :prompt (car desc) :heading (cdr desc)
               :note (and request (harness-tasks--unquote (cdr request)))
+              :report (harness-tasks--parse-report (cdr (assoc "report" (cdr parts))))
               :review (cdr (assoc "review" (cdr parts)))
               :plan (cdr (assoc "plan" (cdr parts))))))))
 
@@ -1337,6 +1364,7 @@ leaves out contradict nothing."
          (file-plan (plist-get parsed :plan)))
     (and (equal prompt (plist-get task :prompt))
          (or (null note) (equal note (and (harness-tasks--note-shown-p task) (string-trim (plist-get task :note)))))
+         (or (null (plist-get parsed :report)) (equal (plist-get parsed :report) (plist-get task :report)))
          (or (null file-review) (equal file-review (harness-tasks--feedback-text task)))
          (or (null file-plan) (equal file-plan (and (stringp plan) (string-trim plan))))
          (cl-every (lambda (field)
@@ -1525,6 +1553,7 @@ user, `interrupted'.  Return nil for a file without a prompt."
                          :finished (funcall time "finished")
                          :verified (and verified t)
                          :verified-at verified
+                         :report (plist-get parsed :report)
                          :feedback (harness-tasks--parse-feedback (plist-get parsed :review))
                          :updated (funcall time "updated"))))
         (puthash id task harness-tasks--table)
@@ -1870,25 +1899,38 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
 
 ;;;; The task prompts
 
+(defconst harness-tasks-hand-in-prompt
+  "Finish with the hand_in tool rather than a plain reply: it hands your summary and your evidence to the user and ends the turn, so the task waits for their review.  The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id.  A file, a code block or a note is evidence for what cannot be shown.  Then stop; do not start more work."
+  "What a task's session is told about handing its finished work in.")
+
 (defun harness-tasks--system-prompt (prompt session)
   "Tell a task's SESSION what its turns are for (PROMPT filter).
 Before the task starts they write it up (`harness-tasks-refine-prompt');
-afterwards, in a worktree, they learn how the work reaches the main branch."
+afterwards they learn how to hand the finished work in, and, in a
+worktree, how it reaches the main branch."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
      ((and task (harness-tasks--refinement-p task)
            (not (harness-string-blank-p harness-tasks-refine-prompt)))
       (concat prompt "\n\n" harness-tasks-refine-prompt "\n"))
-     ((not (and task (plist-get task :worktree))) prompt)
+     ((not task) prompt)
      (t
       (concat prompt "\n\n## Task mode\n"
-              (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
-                      (plist-get task :worktree) (plist-get task :branch))
-              "Do the whole task there. When you are done, commit all of your changes on that branch "
-              "(git add -A, then git commit with a message saying what the change does). "
-              (format "Do not merge, rebase onto or push %s yourself: when your turn ends the harness merges "
-                      (or (plist-get task :base) "the main branch"))
-              "your branch through the merge queue, and it will come back to you if the merge needs anything.\n")))))
+              (if (plist-get task :worktree)
+                  (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
+                          (plist-get task :worktree) (plist-get task :branch))
+                "You are working on one task of a board, unattended. ")
+              "Do the whole task there. "
+              (if (plist-get task :worktree)
+                  (concat "When you are done, commit all of your changes on that branch "
+                          "(git add -A, then git commit with a message saying what the change does). "
+                          (format "Do not merge, rebase onto or push %s yourself: when your turn ends the harness merges "
+                                  (or (plist-get task :base) "the main branch"))
+                          "your branch through the merge queue, and it will come back to you if the merge needs anything. ")
+                "")
+              harness-tasks-hand-in-prompt)))))
+
+
 
 (defun harness-tasks--naming-prompt (prompt session)
   "Ask for a ticket title when naming a task's SESSION (PROMPT filter)."
@@ -2634,13 +2676,17 @@ CWD) is read first, so tasks written by hand show."
 Model, thinking and non-interactive are the values a new task would
 really get: the task defaults, else what the project configures.  So
 non-interactive is on only when `harness-tasks-non-interactive' is, or
-`harness-non-interactive' for the project."
+`harness-non-interactive' for the project.  `:require-verification'
+is t while finished work waits for the user's review, else false (not
+nil, which JSON could not tell from a harness that does not say):
+`harness-tasks-require-verification'."
   (let ((root (and cwd (harness-tasks--project cwd))))
     (list :max-running harness-tasks-max-running
           :permission-mode harness-tasks-permission-mode
           :non-interactive (and (or harness-tasks-non-interactive
                                     (harness-json-true-p (harness-tasks--config 'harness-non-interactive root)))
                                 t)
+          :require-verification (if harness-tasks-require-verification t :false)
           :model (or harness-tasks-model (harness-tasks--config 'harness-model root)
                      (and (boundp 'harness-default-model) harness-default-model))
           :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
@@ -2787,6 +2833,23 @@ task."
                                                 :attachments attachments)))
                      (lambda (e) (harness-tasks--fail id e)))
       (harness-call 'task/get id))))
+
+(harness-defmethod task/for-session (session-id)
+  "Return the task of SESSION-ID, or nil.
+Hand-in uses it, and the review banner: a session that is a task's has
+exactly one."
+  (let ((task (harness-tasks--by-session session-id)))
+    (and task (harness-tasks--view task))))
+
+(harness-defmethod task/hand-in (id report)
+  "Record REPORT as the work ID hands in, waiting for the user's review.
+REPORT is what the hand_in tool validated: a plist of `:summary' and
+`:evidence'.  The task writes it in its file and says `task/changed';
+the turn that handed it in then ends cleanly, which the review step
+picks up as usual (`harness-tasks--on-turn-ended')."
+  (harness-tasks--get id)               ; signals for an unknown task
+  ;; `harness-tasks--set' writes it soon and says `task/changed'.
+  (harness-tasks--set id :report report :report-at (float-time) :archived nil))
 
 (harness-defmethod task/archive (id &optional restore)
   "Archive done task ID, hiding it and deactivating its session; RESTORE undoes it.

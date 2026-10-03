@@ -223,8 +223,13 @@ time."
                             ;; agent executes it and calls us again; the rest of the script
                             ;; continues on the next request.
                             (progn
-                              (funcall on-event ev)
+                              ;; Stored before the call runs: the call may
+                              ;; end the turn (a tool handing its work in
+                              ;; with `:end-turn'), and the cancel must find
+                              ;; this to drop it, rather than leave the rest
+                              ;; of the script for the next turn.
                               (puthash sid script harness-provider-demo--continuations)
+                              (funcall on-event ev)
                               (funcall on-event '(:type done :stop-reason tool-use)))
                           (funcall on-event ev)
                           (unless (eq (plist-get ev :type) 'done)
@@ -238,6 +243,10 @@ time."
     (list :cancel (lambda ()
                     (setq cancelled t)
                     (when timer (cancel-timer timer))
+                    ;; Whatever came after a tool call belongs to the turn
+                    ;; that just stopped: a turn a tool ended early
+                    ;; (`hand_in') must not leave it for the next one.
+                    (remhash sid harness-provider-demo--continuations)
                     (funcall on-event '(:type done :stop-reason cancelled))))))
 
 (defun harness-provider-demo--has-tool-results-p (request)
