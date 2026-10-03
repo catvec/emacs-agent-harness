@@ -224,8 +224,10 @@ A malformed call returns an error saying what to fix, and ends nothing."
                                                          :language (:type "string" :description "Language of code, for its highlighting.")
                                                          :note (:type "string" :description "Markdown text as evidence.")
                                                          :tool_call (:type "string" :description "Call id of an earlier tool call of this session, shown to the user as a link to that call.")
-                                                         :caption (:type "string" :description "What this item shows, under it."))
-                                            :required ())
+                                                         :caption (:type "string" :description "What this item shows, under it.")))
+                                    ;; No `:required' here: any one key is enough.  An empty
+                                    ;; `:required ()' would encode as JSON null, which providers
+                                    ;; refuse ("null is not of type array").
                                     :description "At least one piece of evidence. Prefer an image or a video whenever the work has anything to see; a tool_call for claims about commands or tests."))
             :required ("summary" "evidence"))
   :kind 'meta
