@@ -191,6 +191,36 @@ its own web_search, as Claude Code does."
       (should (equal '(user assistant user assistant) (harness-agent-test-kinds id)))
       (should-not (harness-agent-test-steering-nodes id)))))
 
+(ert-deftest harness-agent-message-filters-see-each-delivered-message ()
+  "`agent/message' filters see a message as it is delivered; what they return goes out.
+A message is delivered when it starts a turn or steers one, a queued
+one when its queue goes out, never while it waits there.  Task mode
+sends a task waiting for review back this way."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (seen nil)
+          (ended 0))
+      (harness-on 'agent/turn-ended (lambda (&rest _) (cl-incf ended)))
+      (harness-add-filter 'agent/message
+                          (lambda (blocks sid info)
+                            (push (list (equal sid id) (plist-get (car blocks) :text)
+                                        (and (plist-get info :steering) t)
+                                        (harness-sender-kind (plist-get info :from)))
+                                  seen)
+                            (cons (list :type "text" :text "[seen]") blocks)))
+      (harness-call 'agent/prompt id "first")
+      (harness-call 'agent/prompt id "steer it" (list :from (harness-sender-system "test")))
+      (harness-call 'agent/prompt id "queued one" '(:queue t))
+      (should (equal '((t "steer it" t system) (t "first" nil nil)) seen))
+      (should (equal '("queued one") (mapcar (lambda (it) (plist-get it :text))
+                                             (plist-get (harness-call 'session/get id) :queue))))
+      (harness-test-wait (lambda () (= ended 2)) 5 "the queued turn")
+      (should (equal '((t "queued one" nil nil) (t "steer it" t system) (t "first" nil nil)) seen))
+      ;; What the filter returned is what each message became.
+      (should (equal '("[seen] first" "[seen] queued one" "[seen] steer it")
+                     (sort (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-user-nodes id))
+                           #'string<))))))
+
 (ert-deftest harness-agent-queue-during-turn-is-not-steering ()
   "A message queued while a turn runs waits for it to end, then is a turn of its own.
 It is never added to the running turn: no steering node, no

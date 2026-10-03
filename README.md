@@ -322,7 +322,12 @@ so several tasks can work in parallel.
   for when you start it.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
-  its session with feedback.
+  its session with feedback. Any message you send to a task waiting
+  for review sends it back the same way, with your message as the
+  feedback, wherever you write it: in the task's session (no need to
+  press `[Send back]` first), with `m` on the board, from another
+  device, or from another session. The task goes back to work at once
+  and comes back for review when it is done.
 - To skip review, press `V` or click `[Review: on]` in the board's
   header line. Finished tasks then merge and complete without waiting
   for you, and if tasks are already waiting for review, the board offers

@@ -2306,7 +2306,8 @@ The function takes the TEXT and ATTACHMENTS the box held and sends them
 itself, instead of the message being prompted into the session.  An
 answer to a waiting question still goes first: while one waits, a typed
 message answers it.  A module a buffer hosts sets this when the box
-means something else there, such as feedback on a review.")
+means something else there.  Feedback on a task in review is no such
+thing: the harness takes any message to the task's session for it.")
 
 (defun harness-chat--clear-compose ()
   "Empty the compose box and the attachments."

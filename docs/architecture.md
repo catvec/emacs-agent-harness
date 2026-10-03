@@ -933,6 +933,12 @@ pending request and resolves when answered).
 - `agent/send-queue SESSION-ID` — sends every queued item as one turn;
   the message is the user's when any item is, else from the first
   item's sender.
+- Sync filter `agent/message` (value the message's blocks; args SID
+  and `(:from FROM :steering BOOL)`) on every message as it is
+  delivered: when it starts a turn or steers one, a queued message when
+  its queue goes out, never while it waits there.  What it returns is
+  the message (nil leaves it as it was); the tasks module sends a task
+  waiting for review back this way.
 - Sync filter `agent/system-prompt` (value string, args session); sync
   filter `agent/tools`; sync filter `agent/builtin-tools` (see
   `tools/builtin`); async filter `agent/before-turn` (value
@@ -1223,12 +1229,21 @@ finished work waits for the user's verdict.
   :verified-at F`): its branch goes through the merge queue as above
   and the task is `done` once merged (outside git, or when the branch
   merged already, at once).  `task/reject ID FEEDBACK &optional
-  ATTACHMENTS` sends it back: the feedback goes to the same session, in
-  its own worktree and with its provider conversation, as a prompt
-  opened by `harness-tasks--reject-message`; the task is `active` again and
-  returns to `review` when that turn ends.  Each round is appended to
-  `:feedback`.  Any other new turn of work (a follow-up, a message from
-  the chat) clears the verification, so it is reviewed again; the merge
+  ATTACHMENTS` sends it back: the feedback (words, attachments or both)
+  goes to the same session, in its own worktree and with its provider
+  conversation, as a prompt opened by `harness-tasks--reject-message`;
+  the task is `active` again and returns to `review` when that turn
+  ends.  Each round is appended to `:feedback`.  Any other message that
+  reaches the session while its task waits for review sends it back the
+  same way, with the message as the feedback: typed in its chat,
+  `task/prompt` (`task_control` message), another ACP client, another
+  session's agent (`session_send`), its queue going out once the turn
+  ended.  The tasks module's `agent/message` filter
+  (`harness-tasks--on-message`) makes the task active at once, keeps
+  the round and opens the message with the reject text; only the
+  harness's own messages (`:from` system) do not count.  Any other new
+  turn of work (a follow-up to a done task) clears the verification, so
+  it is reviewed again; the merge
   queue's own steering (commit first) does not.  Only clean ends go to
   review: a turn that stops needs input as before, and `task/complete`
   (Mark done) counts as accepting the work.  A merge that finishes for
@@ -1252,7 +1267,7 @@ finished work waits for the user's verdict.
   (default `harness-tasks-bulk-columns': running, pending and blocked),
   `:ids', `:except' and `:cwd', and review, done and archived tasks are
   never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
-  steering; reopens), `task/refine ID &optional TEXT`,
+  steering; reopens; in review it sends the task back, as above), `task/refine ID &optional TEXT`,
   `task/merge ID` (retry; not in review), `task/verify ID`,
   `task/reject ID FEEDBACK &optional ATTACHMENTS` (both in review only),
   `task/complete ID` (counts as verified), `task/archive ID &optional
@@ -1876,8 +1891,9 @@ answer or feedback for a new task again: a question stays waiting,
 never cancelled).  A task in review shows [Verify] and [Send back]: `v`
 accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
-in the minibuffer).  A card of a task that handed a report in also
-shows [Report], popping the report out; it is one of the items
+in the minibuffer); `m`, a message, opens the same box, since any
+message to a task in review sends it back.  A card of a task that
+handed a report in also shows [Report], popping the report out; it is one of the items
 `harness-ui-popout-at-point-functions' offers.  The header counts the
 tasks to review, and `task/review` says in the echo area that one is
 ready (`harness-ui-tasks--notify-review`).  The header's Review switch
@@ -1969,8 +1985,11 @@ box, `C-g` closes it, and `harness-ui-popout-at-point` runs the first
 the review of a task in its session (`harness-ui-review`: a chat panel
 -- `harness-chat-panel-functions` -- that shows the board's Ready for
 review above the box, with [Verify] (`C-c C-v`), [Send back]
-(`C-c C-R`) and [Report]; while it shows, `harness-chat-send-function`
-gives the box's text to `task/reject` as the feedback), and the
+(`C-c C-R`, which only points to the box) and [Report]; the box sends
+as always and the harness takes the message for the feedback that sends
+the task back, and the banner follows `task/changed`, finding the
+chat buffer by session id with `equal`, since an id from the harness
+process is a fresh string), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images inline, videos and files through ui-media, code as a
 block, notes, and a referenced tool call drawn as the call it links to,

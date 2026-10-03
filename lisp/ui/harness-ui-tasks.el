@@ -26,8 +26,9 @@
 ;; pending task (e), replies to a task's session (m) -- for a backlog
 ;; task that is feedback on its write-up (r) -- without leaving the
 ;; board, answers a task's question (m or [Answer]) and takes the
-;; feedback that sends a task back from review (R); C-g leaves such a
-;; box for a new task again, the question still waiting.
+;; feedback that sends a task back from review (R, or m: any message to
+;; a task in review sends it back); C-g leaves such a box for a new task
+;; again, the question still waiting.
 ;; RET or a click on a task opens its session in full.  b or [BTW] asks
 ;; about the tasks in a BTW side conversation over the board, whose agent
 ;; answers with the task and session tools (`task/btw').
@@ -467,9 +468,9 @@ card's title, so the prompt shows here."
        ('review (if (harness-ui-tasks--archived-p task)
                     '(("Unarchive" harness-ui-tasks-archive) ("Verify" harness-ui-tasks-verify)
                       ("Open" harness-ui-tasks-open))
+                  ;; No Reply: a message to a task in review sends it back.
                   '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
-                    ("Open" harness-ui-tasks-open) ("Reply" harness-ui-tasks-reply)
-                    ("Archive" harness-ui-tasks-archive))))
+                    ("Open" harness-ui-tasks-open) ("Archive" harness-ui-tasks-archive))))
        ('done (if (harness-ui-tasks--archived-p task)
                   '(("Unarchive" harness-ui-tasks-archive) ("Open" harness-ui-tasks-open))
                 '(("Archive" harness-ui-tasks-archive) ("Reply" harness-ui-tasks-reply)
@@ -1741,12 +1742,15 @@ be written by hand this way."
   "Write a message to the session of the task at point.
 For a backlog task, or one whose write-up stopped or refused it as a
 duplicate, that is feedback on its write-up, which is written again (see
-`harness-ui-tasks-refine')."
+`harness-ui-tasks-refine').  For a task waiting for your review it is
+the feedback that sends it back, as any message to its session is (see
+`harness-ui-tasks-reject')."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (plist-get task :session) (user-error "This task has not started yet"))
     (harness-ui-tasks--set-compose
      "" (cons (cond ((equal (plist-get (harness-ui-tasks--pending task) :kind) "question") 'answer)
+                    ((equal (plist-get task :state) "review") 'reject)
                     ((or (equal (plist-get task :state) "pending")
                          (and (harness-ui-tasks--refining-p task) (not (harness-ui-tasks--writing-p task))))
                      'refine)

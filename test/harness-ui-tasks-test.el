@@ -893,7 +893,19 @@ told from, like a worktree git lost track of, still leads back."
               (call-interactively #'harness-ui-tasks-reject)))
           (should-not harness-ui-tasks--target))
         (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*sent back twice")
-        (should (string-suffix-p "And on macOS" (car (last (harness-ui-tasks-test--user-texts sid))))))
+        (should (string-suffix-p "And on macOS" (car (last (harness-ui-tasks-test--user-texts sid)))))
+        ;; A message to a task in review is feedback too: m opens the same
+        ;; box, and there is no Reply beside Send back.
+        (harness-ui-tasks-test--goto-card board "Fix the flaky test")
+        (with-current-buffer board
+          (should-not (assoc "Reply" (harness-ui-tasks--actions (harness-ui-tasks--task))))
+          (call-interactively (key-binding (kbd "m")))
+          (should (eq 'reject (car harness-ui-tasks--target)))
+          (should (string-match-p "Send back .Fix the flaky test. with feedback" (harness-ui-tasks-test--tail-text board)))
+          (insert "And on Windows")
+          (harness-ui-tasks-submit))
+        (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*sent back 3 times")
+        (should (string-suffix-p "And on Windows" (car (last (harness-ui-tasks-test--user-texts sid))))))
       ;; v accepts it.
       (harness-ui-tasks-test--goto-card board "Fix the flaky test")
       (with-current-buffer board (call-interactively (key-binding (kbd "v"))))
