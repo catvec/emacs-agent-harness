@@ -280,7 +280,10 @@ Past `harness-notifications-desktop-max-waiting' the oldest stops."
         (when-let* ((ep (get-buffer-process stderr)))
           (set-process-query-on-exit-flag ep nil)
           (set-process-sentinel ep #'ignore))
-        (process-send-eof proc)))))
+        ;; It reads nothing.  A quick one may have exited already: the
+        ;; sentinel says how that went, not "Process ... not running".
+        (when (process-live-p proc)
+          (ignore-errors (process-send-eof proc)))))))
 
 ;;;; D-Bus
 
