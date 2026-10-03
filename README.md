@@ -54,6 +54,8 @@ APIs and AWS Bedrock.
 | The session list | The worktrees of a project and their sessions |
 | ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
 | A BTW side conversation under its session | The menu, with the chat's own commands |
+| ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) | |
+| Messaging a task's session: the box says so, in its colours | |
 
 ## Requirements
 

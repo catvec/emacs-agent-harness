@@ -67,6 +67,7 @@
 (defvar harness-ui-positions)
 (defvar harness-ui-default-position)
 (defvar harness-ui--position-buffers)
+(defvar harness-ui-tasks--target)
 (defvar harness-chat--blocks)
 (defvar harness-chat--loading)
 (defvar harness-chat--order)
@@ -91,6 +92,7 @@
 (declare-function harness-compose-set "harness-ui-compose")
 (declare-function harness-compose-repad "harness-ui-compose")
 (declare-function harness-tasks "harness-ui-tasks")
+(declare-function harness-ui-tasks-reply "harness-ui-tasks")
 (declare-function harness-sessions "harness-ui-sessions")
 (declare-function harness-tree "harness-ui-tree")
 (declare-function harness-usage "harness-ui-usage")
@@ -1135,6 +1137,16 @@ Give up after TIMEOUT seconds (default 90)."
   "Submit PROMPT as a task of the demo project with OPTS; return its id."
   (plist-get (harness-call 'task/submit harness-media-project prompt opts) :id))
 
+(defun harness-media--goto-task-card (id)
+  "Put point in the current board buffer on the card of task ID.
+Return non-nil when the card is there, nil while the board still loads."
+  (let ((found (save-excursion
+                 (goto-char (point-min))
+                 (text-property-search-forward 'harness-task-id id #'equal))))
+    (when found
+      (goto-char (prop-match-beginning found))
+      t)))
+
 (defun harness-media--build-tasks ()
   "Fill the task board: done, in review, in progress, stuck and in the backlog."
   (let* ((constant (harness-media--submit "use hmac.compare_digest when checking API keys, so a key check takes the same time whatever the key"))
@@ -1505,6 +1517,24 @@ Return the chat's buffer."
       (set-window-start window (point-min))))
   (harness-media--capture "tasks"))
 
+(defun harness-media-shot-tasks-message ()
+  "The task board writing a message to the session of a task at work.
+The compose box wears the message colours and names the session it
+sends to, so it cannot be taken for the one that writes a new task."
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :settings))
+         (window (selected-window)))
+    (with-current-buffer (window-buffer window)
+      (harness-media--wait (lambda () (harness-media--goto-task-card id)) 15 "the task's card")
+      (harness-ui-tasks-reply)
+      (unless (eq 'reply (car harness-ui-tasks--target))
+        (error "The board did not open a message box (target %S)" harness-ui-tasks--target))
+      (harness-compose-set "Keep the old settings module as a thin wrapper for one release, so the deploy can roll back.")
+      (set-window-point window (point-max))
+      (harness-media--settle 1)
+      (set-window-start window (point-min))))
+  (harness-media--capture "tasks-message"))
+
 (defun harness-media-shot-sessions ()
   "The session list."
   (harness-media--view #'harness-sessions)
@@ -1582,6 +1612,7 @@ Return the chat's buffer."
     ("chat-permission" . harness-media-shot-chat-permission)
     ("chat-question" . harness-media-shot-chat-question)
     ("tasks" . harness-media-shot-tasks)
+    ("tasks-message" . harness-media-shot-tasks-message)
     ("sessions" . harness-media-shot-sessions)
     ("tree" . harness-media-shot-tree)
     ("usage" . harness-media-shot-usage)

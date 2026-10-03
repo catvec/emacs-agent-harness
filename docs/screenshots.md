@@ -47,6 +47,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-permission` | A chat waiting for permission to run `pip install` | `harness-media-shot-chat-permission` |
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
+| `tasks-message` | The task board writing a message to a task's session: the box in its message colours | `harness-media-shot-tasks-message` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
 | `usage` | The usage dashboard over 30 days, by model | `harness-media-shot-usage` |
