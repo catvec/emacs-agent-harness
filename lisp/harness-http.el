@@ -136,14 +136,18 @@
   (if (multibyte-string-p data) (encode-coding-string data 'binary t) data))
 
 (defun harness-http--write-config (url method headers)
-  "Write a curl config file for URL, METHOD and HEADERS; return its path."
+  "Write a curl config file for URL, METHOD and HEADERS; return its path.
+Every line is written without text properties: a propertized URL (a
+link off a selection) would be printed as #(\"https://...\" 0 84
+\(foreign-selection STRING)) and read as a fragment by curl."
   (let ((file (make-temp-file "harness-http-" nil ".curlrc")))
     (with-temp-file file
       (set-file-modes file #o600)
-      (insert (format "url = %S\n" url))
-      (insert (format "request = %S\n" method))
+      (insert (format "url = %S\n" (substring-no-properties url)))
+      (insert (format "request = %S\n" (substring-no-properties method)))
       (dolist (h headers)
-        (insert (format "header = %S\n" (format "%s: %s" (car h) (cdr h))))))
+        (insert (format "header = %S\n"
+                        (substring-no-properties (format "%s: %s" (car h) (cdr h)))))))
     file))
 
 (cl-defun harness-http-request (url &key (method "GET") headers body json binary
@@ -277,7 +281,11 @@ goes too, as does surrounding whitespace."
       (setq clean
             (replace-regexp-in-string
              "[\ufeff\u00a0\u00ad\u1680\u2000-\u200f\u2028-\u202f\u205f\u2060-\u206f\u3000]+" "" clean)))
-    (string-trim clean)))
+    ;; Text properties go too: a link off a selection carries
+    ;; `foreign-selection', and `%S' (the curl config, say) would print it
+    ;; as #("https://..." 0 84 (foreign-selection STRING)), which curl
+    ;; reads as nothing but a fragment.
+    (substring-no-properties (string-trim clean))))
 
 (defun harness-http--host-ok-p (url)
   "Non-nil when the host of URL is made of characters a host may hold.

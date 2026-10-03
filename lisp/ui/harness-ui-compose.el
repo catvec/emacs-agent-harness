@@ -709,10 +709,15 @@ host to fetch is refused, shown with %S so that what was wrong with it
 shows."
   (interactive (list (read-string "Download and attach the link: ")))
   (let ((raw url))
+    (when (and (stringp raw) (> (length raw) 0) (text-properties-at 0 raw))
+      ;; A link off a selection carries `foreign-selection'; worth a line,
+      ;; since it is what used to make curl read a whole address as a
+      ;; fragment.
+      (harness-log 'info "compose: link arrived with text properties %S" (text-properties-at 0 raw)))
     (setq url (harness-http-clean-url url))
     (unless (equal raw url)
-      ;; The junk a drop hides: worth a line in the log, since it is what
-      ;; makes curl disagree with what the box shows.
+      ;; The junk a drop hides: it is what makes curl disagree with what
+      ;; the box shows.
       (harness-log 'info "compose: link arrived as %S, cleaned to %S" raw url)))
   (harness-log 'debug "compose: link to download: %S" url)
   (unless (and (string-match-p "\\`\\(?:https?\\|ftps?\\)://" url) (harness-http-link-p url))

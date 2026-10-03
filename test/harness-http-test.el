@@ -178,23 +178,41 @@ oldest first."
 
 (ert-deftest harness-http-download-takes-a-link-with-junk-around-it ()
   ;; The whole class of "URL rejected: No host present": the URL the drop
-  ;; gave is scrubbed, so the file arrives all the same.
+  ;; gave is scrubbed -- junk bytes and, just as importantly, the text
+  ;; properties a foreign selection carries -- so the file arrives all
+  ;; the same.
   (skip-unless (executable-find "curl"))
   (let* ((server (harness-test-http-serve
                   '(("/pic.png" 200 (("Content-Type" . "image/png")) "PNG!"))))
          (file (expand-file-name "x.part" (harness-test-temp-dir))))
     (unwind-protect
-        (pcase-let ((`(,dl ,err . ,_)
-                     (harness-http-test--download
-                      (concat "\ufeff\t" (harness-test-http-url server "/pic.png") "\r\n\0") file)))
-          (should-not err)
-          (should (equal "image/png" (harness-download-mime dl)))
-          (should (equal (harness-test-http-url server "/pic.png") (harness-download-url dl)))
-          (should (equal "PNG!" (with-temp-buffer (insert-file-contents-literally file) (buffer-string)))))
+        (dolist (dirty (list (concat "\ufeff\t" (harness-test-http-url server "/pic.png") "\r\n\0")
+                             (propertize (harness-test-http-url server "/pic.png")
+                                         'foreign-selection 'STRING)))
+          (delete-file file)
+          (pcase-let ((`(,dl ,err . ,_) (harness-http-test--download dirty file)))
+            (should-not err)
+            (should (equal "image/png" (harness-download-mime dl)))
+            (should (equal (harness-test-http-url server "/pic.png") (harness-download-url dl)))
+            (should-not (text-properties-at 0 (harness-download-url dl)))
+            (should (equal "PNG!" (with-temp-buffer (insert-file-contents-literally file) (buffer-string))))))
       (delete-process server)))
   ;; A link with no host is refused before curl runs, with the link shown
   ;; as it really is.
   (should-error (harness-http-download "https://" (make-temp-name "/tmp/x")) :type 'error))
+
+(ert-deftest harness-http-config-has-no-text-properties ()
+  ;; `%S' prints a propertized string as #("https://..." ...), which curl
+  ;; reads as a fragment: the config must never hold that.
+  (let ((file (harness-http--write-config (propertize "https://example.com/x" 'foreign-selection 'STRING)
+                                          "GET" '(("X-A" . "b")))))
+    (unwind-protect
+        (with-temp-buffer
+          (insert-file-contents file)
+          (should (string-match-p "url = \"https://example.com/x\"" (buffer-string)))
+          (should-not (string-match-p "#(" (buffer-string)))
+          (should (string-match-p "header = \"X-A: b\"" (buffer-string))))
+      (delete-file file))))
 
 (ert-deftest harness-http-cancel-settles-before-the-kill ()
   ;; Cancelling settles the download first, so nothing the kill or a
