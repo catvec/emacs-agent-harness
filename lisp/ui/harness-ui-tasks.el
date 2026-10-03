@@ -255,6 +255,12 @@ Only the kind: the request itself is read in the session."
         "has a question for you"
       "needs your permission")))
 
+(defun harness-ui-tasks--wide-icon-p (icon)
+  "Non-nil when ICON is drawn as an image, which is about two columns wide.
+Terminals fall back to a one-column symbol, which needs no extra room."
+  (and (> (length icon) 0)
+       (eq 'image (car-safe (get-text-property 0 'display icon)))))
+
 (defun harness-ui-tasks--icon (task column session)
   (pcase column
     ('pending (cond ((harness-ui-tasks--refining-p task) (harness-ui-status-icon "running"))
@@ -550,9 +556,17 @@ its final message and evidence, in a popout."
          (width (harness-ui-tasks--width))
          (meta (harness-ui-tasks--meta task column session))
          (buttons (harness-ui-tasks--card-buttons task))
+         (icon (harness-ui-tasks--icon task column session))
+         ;; The blocked mark is a wide image, about two columns, while the
+         ;; stopped square is one: start the pause a column earlier and pad
+         ;; a column after it, so the mark moves left with the text in line.
+         ;; Terminals draw the pause as a one-column symbol, already in line.
+         (pause (and (eq column 'needs-input)
+                     (plist-get session :pending)
+                     (harness-ui-tasks--wide-icon-p icon)))
          (detail (harness-ui-tasks--fit (or (harness-ui-tasks--detail task column session position) "")
                                         (- width (string-width buttons) 7))))
-    (insert "  " (harness-ui-tasks--icon task column session) " "
+    (insert (if pause " " "  ") icon (if pause "  " " ")
             (propertize (harness-ui-tasks--fit (harness-ui-tasks--title task) (- width (string-width meta) 7))
                         'face (if (eq column 'done) 'default 'harness-task-title-face)
                         'mouse-face 'highlight

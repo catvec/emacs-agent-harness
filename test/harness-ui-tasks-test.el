@@ -178,6 +178,25 @@ Finished tasks are completed at once, without review, unless BODY turns
       (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*stopped: error")
       (should (string-match-p "1 need you" (with-current-buffer board (harness-ui-tasks--header)))))))
 
+(ert-deftest harness-ui-tasks-paused-mark-starts-a-column-left ()
+  "A wide pause mark starts a column earlier, with its text still in line.
+On a graphical frame the blocked mark is an image about two columns wide
+while the stopped square is one, so the pause would sit a column right of
+it: the card starts the pause a column earlier and pads a column after it.
+Terminals draw the pause as a one-column symbol and keep the old layout."
+  (harness-ui-tasks-test-with
+    (let* ((image (propertize "x" 'display '(image :type svg :file "blocked.svg")))
+           (session (list :id "s1" :name "Fix the parser" :pending '((:kind "permission"))))
+           (task (list :id "t1" :session "s1" :prompt "Fix the parser" :started 0)))
+      (puthash "s1" session harness-ui--sessions)
+      (cl-letf (((symbol-function 'harness-ui-tasks--width) (lambda () 96)))
+        (dolist (case (list (cons image "\\` x  Fix the parser")
+                            (cons "x" "\\`  x Fix the parser")))
+          (cl-letf (((symbol-function 'harness-ui-tasks--icon) (lambda (&rest _) (car case))))
+            (with-temp-buffer
+              (harness-ui-tasks--insert-card task 'needs-input nil)
+              (should (string-match-p (cdr case) (buffer-string))))))))))
+
 (ert-deftest harness-ui-tasks-card-keys ()
   (harness-ui-tasks-test-with
     (let ((harness-tasks-max-running 0))
