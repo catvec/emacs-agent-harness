@@ -312,6 +312,19 @@ so several tasks can work in parallel.
   to verify them. The switch sets `harness-tasks-require-verification`,
   so it applies to every project and is saved for later sessions. Press
   `V` again to turn review back on.
+- A task's session finishes by *handing its work in* (`hand_in`): the
+  agent gives a final summary and the evidence for it -- an image or a
+  video of what it built whenever there is anything to see, a file, a
+  code block, a note, or a link to an earlier tool call, the tests or a
+  command it ran. The turn ends there and the task waits for your
+  review. In the session itself a banner above the compose box offers
+  `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-R`; type the feedback
+  in the box, `C-c C-c` sends it) and `[Report]`, so you can accept the
+  work without going back to the board.
+- `[Report]` on a card, or `SPC` over it, pops the handed-in summary and
+  evidence out beside the board: images inline, videos as thumbnails,
+  files as buttons, and each referenced tool call as the call it links
+  to, with `[Open in the session]`.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `RET` opens the session of the task at point. From that session,
