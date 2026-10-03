@@ -52,8 +52,11 @@ re-detected before BODY and restored afterwards."
         (should (harness-sandbox-test--subseq-p (list "--setenv" "HOME" harness-sandbox--home) cmd))
         ;; Network stays on by default.
         (should-not (member "--unshare-net" cmd))
-        ;; The real home is never bound.
-        (should-not (member (directory-file-name (getenv "HOME")) cmd))
+        ;; The real home is never bound (setting HOME to the sandbox's
+        ;; own empty home is not binding it; the two paths can coincide).
+        (let ((home (directory-file-name (getenv "HOME"))))
+          (dolist (flag '("--bind" "--ro-bind"))
+            (should-not (harness-sandbox-test--subseq-p (list flag home) cmd))))
         ;; The command follows the separator untouched.
         (should (equal command (cdr (member "--" cmd)))))
       ;; Options: network off and extra writable/readable directories.
@@ -149,11 +152,15 @@ re-detected before BODY and restored afterwards."
   (harness-sandbox-detect)
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (let* ((cwd (harness-test-temp-dir))
-         (home (getenv "HOME"))
+         ;; A home of our own, so the check means the same thing wherever
+         ;; the tests run: on the host, HOME may be the sandbox's own home.
+         (home (harness-test-temp-dir))
+         (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment))
          (harness-sandbox-policy 'required)
          (cmd (harness-call 'sandbox/wrap cwd
                             (list "sh" "-c" (format "echo HOME=$HOME; ls $HOME; ls %s 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
-         (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+         (r (progn (with-temp-file (expand-file-name "secret" home) (insert "x"))
+                   (harness-await (harness-run-command cmd :cwd cwd :timeout 20)))))
     (unwind-protect
         (progn
           (when (and (not (eql 0 (plist-get r :exit)))
@@ -173,7 +180,8 @@ re-detected before BODY and restored afterwards."
               (should (cl-some (lambda (l) (string-match-p "cannot access\\|No such file" l)) lines)))
             ;; The cwd itself is writable.
             (should (file-exists-p (expand-file-name "outside-test" cwd)))))
-      (delete-directory cwd t))))
+      (delete-directory cwd t)
+      (delete-directory home t))))
 
 ;;;; Git worktrees
 

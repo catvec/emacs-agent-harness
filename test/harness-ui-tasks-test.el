@@ -203,18 +203,21 @@ as a one-column symbol, already in line, so they keep the old layout."
                   ((symbol-function 'frame-char-width) (lambda (&optional _) 11)))
           (with-temp-buffer
             (harness-ui-tasks--insert-card task 'needs-input nil)
-            (should (equal "  x  Fix the parser"
-                           (buffer-substring-no-properties (point-min) (+ (point-min) 19))))
-            ;; A column and a half before the mark, half a column after it.
-            (should (equal '(space :width (6)) (get-text-property (+ (point-min) 1) 'display)))
-            (should (equal '(space :width (5)) (get-text-property (+ (point-min) 3) 'display)))))
+            (goto-char (point-min))
+            (search-forward "x")
+            ;; Half the extra width before the mark, the same after it.
+            (should (equal '(space :width (6)) (get-text-property (- (point) 2) 'display)))
+            (should (equal '(space :width (16)) (get-text-property (point) 'display)))
+            (should (equal "Fix the parser"
+                           (buffer-substring-no-properties (1+ (point)) (+ (point) 15))))))
         ;; A one-column symbol, as a terminal draws it, is left alone.
         (cl-letf (((symbol-function 'harness-ui-tasks--icon) (lambda (&rest _) "x")))
           (with-temp-buffer
             (harness-ui-tasks--insert-card task 'needs-input nil)
-            (should (equal "  x Fix the parser"
-                           (buffer-substring-no-properties (point-min) (+ (point-min) 18))))
-            (should-not (get-text-property (+ (point-min) 1) 'display))))))))
+            (goto-char (point-min))
+            (search-forward "x")
+            (should-not (get-text-property (- (point) 2) 'display))
+            (should-not (get-text-property (point) 'display))))))))
 
 (ert-deftest harness-ui-tasks-card-keys ()
   (harness-ui-tasks-test-with

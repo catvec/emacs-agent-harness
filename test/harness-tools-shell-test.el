@@ -113,14 +113,21 @@
   (harness-sandbox-detect)
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (harness-tools-shell-test-in-dir
-    (let* ((harness-sandbox-policy 'required)
-           (r (harness-tools-shell-test--call "bash" :command (format "echo HOME=$HOME; ls %s >/dev/null 2>&1 && echo visible || echo hidden" (getenv "HOME")))))
-      (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
-        (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
-      (should-not (plist-get r :is-error))
-      (should (string-search (concat "HOME=" harness-sandbox--home) (plist-get r :content)))
-      (should (string-search "hidden" (plist-get r :content)))
-      (should (plist-get (plist-get r :meta) :sandboxed)))))
+    (let* ((home (harness-test-temp-dir))
+           ;; A home of our own, so the check means the same thing
+           ;; wherever the tests run: HOME may be the sandbox's own home.
+           (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment))
+           (harness-sandbox-policy 'required)
+           (r (harness-tools-shell-test--call "bash" :command (format "echo HOME=$HOME; ls %s >/dev/null 2>&1 && echo visible || echo hidden" home))))
+      (unwind-protect
+          (progn
+            (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
+              (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+            (should-not (plist-get r :is-error))
+            (should (string-search (concat "HOME=" harness-sandbox--home) (plist-get r :content)))
+            (should (string-search "hidden" (plist-get r :content)))
+            (should (plist-get (plist-get r :meta) :sandboxed)))
+        (delete-directory home t)))))
 
 (ert-deftest harness-tools-shell-bash-lets-the-sandbox-write-the-tmp-dir ()
   "bash asks the sandbox to let the command write the session's own

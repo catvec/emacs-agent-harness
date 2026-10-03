@@ -2026,7 +2026,11 @@ Run after connecting: a harness that just started (`harness-restart', a
 crash) has every session closed, but one on screen here is open, as
 `harness-open-session' made it."
   (maphash (lambda (id buf)
-             (when (buffer-live-p buf)
+             (when (and (buffer-live-p buf)
+                        ;; A buffer still loading was opened by this very
+                        ;; connection: it opens the session as it is, and
+                        ;; sending from it resumes it.
+                        (not (buffer-local-value 'harness-chat--loading buf)))
                (harness-ui-call "_harness/session/get" (list :id id)
                                 (lambda (session)
                                   (when (equal (format "%s" (plist-get session :status)) "inactive")
