@@ -303,6 +303,20 @@ so the prompt has to name the directory a grant really opens."
           (file-name-as-directory path)
         (or (file-name-directory path) path)))))
 
+(defun harness-perms--scratch-hint (session path)
+  "Return a sentence sending SESSION's scratch files at PATH to its own dir.
+When PATH lies in the system's temporary directory but outside the
+session's own temporary directory, the agent most likely wanted a
+scratch file, which belongs in its own directory, already allowed, so
+it carries on there instead of stopping.  Otherwise return \"\"."
+  (let ((tmp (and (not (file-remote-p path)) (harness-perms--tmp-dir session))))
+    (if (and tmp
+             (harness-perms--within-p temporary-file-directory path)
+             (not (harness-perms--within-p tmp path)))
+        (format " For scratch files use your own temporary directory, %s: it is already allowed, bash included."
+                (abbreviate-file-name tmp))
+      "")))
+
 (defun harness-perms--jail (decision next request)
   "Pass REQUEST on when its paths lie inside the session's roots.
 Otherwise ask the user for access to the directory, or deny when
@@ -324,9 +338,10 @@ for this call only."
           (funcall next
                    (list :behavior 'deny :final t
                          :reason (format "%s is outside the allowed directories" bad)
-                         :hint (format "Allowed roots: %s. Work inside them, or ask the user to grant access to %s with the allow-dir command."
+                         :hint (format "Allowed roots: %s. Work inside them, or ask the user to grant access to %s with the allow-dir command.%s"
                                        (mapconcat #'abbreviate-file-name roots ", ")
-                                       (abbreviate-file-name (harness-perms--dir-of bad)))))))))))
+                                       (abbreviate-file-name (harness-perms--dir-of bad))
+                                       (harness-perms--scratch-hint session bad))))))))))
 
 (defun harness-perms--pend-dir (request next dir reason options &rest waiting)
   "Ask the user of REQUEST's session for access to DIR.
@@ -451,9 +466,10 @@ user, who grants the directory or not."
                                             (if (harness-perms--non-interactive-p session)
                                                 "the session is non-interactive and the user is away"
                                               "no user is available"))
-                            :hint (format "Work inside the allowed directories (%s). If the task cannot be done without %s, finish what you can and say so in your answer; the user can grant it with M-x harness-directories."
+                            :hint (format "Work inside the allowed directories (%s). If the task cannot be done without %s, finish what you can and say so in your answer; the user can grant it with M-x harness-directories.%s"
                                           (mapconcat #'abbreviate-file-name roots ", ")
-                                          (abbreviate-file-name dir)))))
+                                          (abbreviate-file-name dir)
+                                          (harness-perms--scratch-hint session dir)))))
        (t
         ;; The prompt shows the directory and the agent's reason; the
         ;; input keeps only the path so the reason is not shown twice.

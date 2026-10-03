@@ -879,7 +879,10 @@ pending request and resolves when answered).
   and the same auto-allow apply to it.
   `web_fetch` reaches any URL and stays with the mode (the judge in auto).
 - Jail denials are final and carry a constructive hint listing the
-  allowed roots and how to widen them.
+  allowed roots and how to widen them.  A path elsewhere in the
+  system's temporary directory (and the agent's own request for one)
+  also sends the agent to the session's own temporary directory, where
+  scratch files go without stopping the session.
 - Non-interactive (the user is away) is no permission policy of its
   own and refuses nothing for being unattended: the auto judge
   (stage 30, `harness-perms--judge-p`) decides what would ask the user,
