@@ -157,7 +157,8 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :pending ((:id "p1" :kind permission|question :payload PLIST :created FLOAT) …)
  :todos ((:id :text :status pending|in-progress|done) …)
  :plan nil|"markdown"
- :provider-state PLIST)                ; opaque, owned by the provider (e.g. CLI session id)
+ :provider-state PLIST                 ; opaque, owned by the provider (e.g. CLI session id)
+ :provider-node nil|"node-id")         ; the node that provider conversation reached
 ```
 
 `:usage :context` is the input size of the last request (prompt tokens
@@ -185,6 +186,7 @@ catalogue changes, the sessions whose window moved get `session/changed`.
  ;; tool-result:
  :call-id "toolu_…" :output "text" :is-error BOOL :attachments (ATTACHMENT…)
  :usage PLIST        ; assistant nodes: this response's usage
+ :checkpoint PLIST   ; where a hosted provider's conversation stood after this node
  :meta PLIST)        ; anything else (model, duration, cost …)
 ```
 
@@ -200,6 +202,25 @@ message as a user message; UIs show the sender instead of "You".
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
 `:parent-id` / `:fork-node`, so the tree view can merge families by id.
+
+A hosted-loop provider (Claude Code, Copilot) holds the conversation
+itself and only gets new user content each turn, so its conversation
+and the transcript must agree.  `:checkpoint` is opaque provider data
+saying where that conversation stood once the node's content was in it
+(for Claude Code `(:cli-session-id ID :uuid UUID)`, the CLI session and
+the entry of its chain holding the node).  `:provider-node` is the node
+the session's provider conversation reached: the head when its last
+turn ended.  When the head is not at or after it (checked out at an
+earlier node, or on another branch), the next turn first cuts the
+conversation at the last checkpoint on the head's path, or starts a new
+one, seeded with the transcript, when there is none
+(`session/provider-continuation`, `harness-agent--follow-head`).  A fork
+at an earlier node does the same for its first turn.  Either way the
+model never knows what came after the node.  A session from before
+`:provider-node` is taken to be where its conversation is, unless its
+head has a later node of its own (it was moved back) or it is a fork
+made at an earlier node of its parent, when the old forks got the
+parent's whole conversation; such a session starts a new one.
 
 ### Content blocks (provider messages, prompts, attachments)
 
@@ -365,11 +386,17 @@ gone.
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
 - `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
   (closed: still listed and readable; the next message sent to it resumes it).
-- `session/fork ID &rest PLIST` — copies ancestor chain; `:kind fork|subagent`,
-  `:name`, `:cwd` (defaults to parent's).  Asks the provider to fork its
-  state via `provider/fork` when supported; without a forked state the
-  fork has none, never the parent's own, which would carry on the
-  parent's provider conversation.  → new session.
+- `session/fork ID &rest PLIST` — copies the ancestor chain up to
+  `:node` (default the head; ID's head never moves); `:kind
+  fork|subagent`, `:name`, `:cwd` (defaults to parent's).  Asks the
+  provider to fork its state via `provider/fork` when supported: at the
+  parent's head (when that is where its provider conversation is) the
+  whole state, at an earlier node the state cut at the last checkpoint
+  up to it, and none when no checkpoint precedes the node.  Without a
+  forked state the fork has none, never the parent's own, which would
+  carry on the parent's provider conversation; the provider then starts
+  a new one from the transcript.  The fork's `:provider-node` is the
+  node.  → new session.
 - `session/btw ID &optional NAME`: a BTW side conversation over ID, a
   new, empty `btw` session sharing nothing with ID or with any other
   BTW (no nodes, no fork node, no provider state, no directory grants).
@@ -384,7 +411,18 @@ gone.
   Event `session/node-added ID NODE`.
 - `session/update-node ID NODE-ID PLIST` (tool result streaming, titles).
   Event `session/node-updated ID NODE`.
-- `session/set-head ID NODE-ID`.
+- `session/set-head ID NODE-ID` — time travel: the next message
+  continues from NODE-ID, with a provider conversation cut to match (see
+  "Node").  Refused while ID runs a turn.  Event `session/head-moved ID NODE-ID`.
+- `session/set-provider-state ID STATE`.  Event
+  `session/provider-state-changed ID STATE` when STATE differs from the
+  one held, so a provider whose live process holds the old conversation
+  lets it go.
+- `session/set-provider-node ID NODE-ID` (the agent, when a turn ends);
+  `session/provider-continuation ID &optional NODE-ID` → `(:mode
+  current)`, `(:mode checkpoint :checkpoint CP :node ID)` or `(:mode
+  fresh)`: how the provider conversation goes on from NODE-ID (default
+  the head).
 - `session/hint ID TEXT` → appends hint node.
 - `session/queue ID TEXT &optional ATTACHMENTS FROM` (FROM, when
   non-nil, is who sent it, not the user: the item keeps it as `:from'),
@@ -412,7 +450,7 @@ gone.
   :label "Claude Code" :doc "…"
   :models FN            ; () → promise of MODEL plists
   :complete FN          ; (REQUEST) → HANDLE plist (:cancel FN)
-  :fork FN              ; (MODEL PROVIDER-STATE) → promise of new state    [optional]
+  :fork FN              ; (MODEL PROVIDER-STATE &optional CHECKPOINT) → promise of new state [optional]
   :quota FN             ; (&optional REFRESH) → promise of QUOTA (below)     [optional]
   :capabilities PLIST   ; static defaults, merged with per-model ones
   :tiers PLIST)         ; a model per tier, see below
@@ -475,10 +513,11 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type start)
 (:type text :delta "…")
 (:type thinking :delta "…")
-(:type tool-call :id "…" :name "…" :input PLIST :respond FN-OR-NIL)
+(:type tool-call :id "…" :name "…" :input PLIST :respond FN-OR-NIL :checkpoint PLIST)
    ;; :respond present ⇒ hosted loop; call it with a tool result
    ;; (:content "…" :is-error BOOL) and the provider continues the turn.
 (:type tool-result :id "…" :content "…" :is-error BOOL)  ; hosted loops echo results
+(:type checkpoint :checkpoint PLIST :call-id "…")  ; hosted loops: where the conversation stands
 (:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N
        :list-cost F-OR-NIL :billing api|subscription|extra-usage|nil :plan ID)  ; see Usage record
 (:type provider-state :state PLIST)     ; persist on the session
@@ -527,11 +566,34 @@ agent persists, replacing the pending one.  When it returns nil or
 fails, the fork starts without provider state: copied as is, the
 parent's would make the fork resume the parent's own CLI session.
 
+Checkpoints: a hosted loop says where its conversation stands as
+content lands in it, so that a fork or a checkout at a node can cut the
+conversation there later.  A `checkpoint` event without `:call-id`
+marks the text or thinking node the turn wrote last (unless a tool call
+came after it), one with `:call-id` that call's result, and a
+`tool-call` brings its own `:checkpoint`; the agent stores each as the
+node's `:checkpoint`.  `provider/fork MODEL STATE CHECKPOINT` returns a
+state holding the conversation as it was at CHECKPOINT and nothing
+after it (Claude Code: `(:cli-session-id ID :resume-at UUID
+:fork-pending t)`, a fork of that CLI session cut with
+`--resume-session-at`), or nil when the provider cannot cut there: a
+fork function of two arguments, another provider's checkpoint, or
+Copilot, whose events carry no checkpoints yet.
+
+Replay: a hosted loop that starts a new conversation for a request whose
+`:messages` have messages before the new one (a cut before any
+checkpoint, a conversation another provider held, one the CLI could not
+resume) sends them first, as text, with the new message
+(`harness-provider-split-history`, `harness-provider-history-text`: tool
+inputs and results cut at `harness-provider-history-block-limit`, the
+oldest messages but the first dropped past
+`harness-provider-history-limit`, thinking left out).
+
 Methods: `provider/list`, `provider/models &optional REFRESH` (cached union
 across providers), `provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
-`provider/complete REQUEST` → HANDLE, `provider/fork MODEL-ID STATE` → promise,
-`provider/quota PROVIDER-ID &optional REFRESH`.  The model used when nothing
-more specific is configured is `harness-model`.
+`provider/complete REQUEST` → HANDLE, `provider/fork MODEL-ID STATE &optional
+CHECKPOINT` → promise, `provider/quota PROVIDER-ID &optional REFRESH`.  The
+model used when nothing more specific is configured is `harness-model`.
 
 Billing and quota: `provider/quota` (PROVIDER-ID a symbol or its name;
 REFRESH asks for fresh data first) returns a promise of QUOTA, nil when
@@ -595,6 +657,36 @@ permission chain answers (allow, or deny with the message for the
 model), and the echoed `tool_result` a `tool-result`.  The process
 records which tools it was started with, so a request that turns
 WebSearch on or off restarts it with `--resume`.
+
+Every `assistant` message and tool-result echo of the CLI carries the
+uuid of its entry in the CLI session's chain; messages of a sub-agent's
+chain (`parent_tool_use_id`) do not count.  The provider reports them
+as checkpoints `(:cli-session-id ID :uuid UUID)`: a message with a
+`tool_use` on that call's `tool-call` event (the call is served later),
+any other at once, and an echo once per result it holds.  A fork at a
+checkpoint is `(:cli-session-id ID :resume-at UUID :fork-pending t)`,
+which spawns `--resume ID --fork-session --resume-session-at UUID`: the
+CLI keeps the chain up to and including that entry (print mode only,
+which the provider uses).  A running process is reused only when it was
+started with the request's settings and holds the CLI session the
+request's state names; a `:fork-pending` state always gets a new one.
+`session/provider-state-changed` to a state naming another CLI session,
+or none, closes the session's idle process.
+
+A process told to resume or fork that exits before it announces its
+session (`system/init`) could not open that conversation: the CLI
+session is gone, the uuid lies before a compaction of the CLI's (a
+resume loads only the chain since the last one), or the CLI is too old
+for `--resume-session-at`.  The turn then goes on in a new CLI session,
+which gets the transcript and the turn's message, and a hint says so; a
+session never gets stuck on a conversation the CLI cannot resume.  A
+new CLI session opened for a transcript that has messages before the
+new one gets them the same way.
+
+A request whose provider state is not the one its session has recorded
+(naming sends a fork of it) runs in a CLI process of its own, closed
+when it is done.  It never restarts the session's process with its own
+settings or writes into the session's CLI session.
 
 The Bedrock provider (`provider-bedrock`) is a native loop over the
 Converse API: one ConverseStream request per call, its binary event
@@ -664,7 +756,11 @@ version 3 or newer.  Per harness session one CLI process:
   (30 s) instead of hanging.
 - The provider state is `(:copilot-session-id ID :model NAME)`; a fork's
   is `(:copilot-session-id PARENT :fork-pending t)`, which the first
-  turn turns into `sessions.fork`.
+  turn turns into `sessions.fork`.  A fork at a checkpoint is nil:
+  Copilot reports none yet (`sessions.fork` takes a `toEventId` it
+  could use), so a fork or a checkout at an earlier node starts a new
+  Copilot session.  The first message to a session created for a
+  transcript with messages carries them (see "Replay").
 - Side requests are one-off questions: naming, compaction and the
   permission judge.  A request is one when it sets `:max-tokens` (a turn
   of the conversation never caps its answer), when its provider state
@@ -941,6 +1037,15 @@ pending request and resolves when answered).
   `max-turns` (`harness-agent-max-steps`, 200) ends runaway loops.
 - Streaming updates of the live node are not persisted one by one; on
   exit (`kill-emacs-hook`) and shutdown the text streamed so far is.
+- Provider conversation and head: before a turn's gate,
+  `harness-agent--follow-head` asks `session/provider-continuation`.
+  When the head moved off the provider conversation, it stores the
+  provider's fork cut at the last checkpoint on the head's path
+  (`provider/fork` with that checkpoint), or no state, and the head as
+  `:provider-node`.  The turn then runs on the cut conversation, or a
+  new one seeded with the transcript.  Every turn's end records the
+  head as `:provider-node`.  `checkpoint` events and a `tool-call`'s
+  `:checkpoint` are stored on their nodes (see "provider").
 - Activity: `agent/activity SID` returns what the running turn does now,
   nil when none runs: `(:phase PHASE :since FLOAT ...)`, `:since` being
   when the phase began.  PHASE is `waiting` (for the model: at every
@@ -1014,6 +1119,9 @@ pending request and resolves when answered).
 - `naming/name SESSION-ID` → promise of name.  Auto after the first
   turn ends when the session has no name: forks provider state when
   possible so the cached prefix is reused; hints "naming…" then the result.
+  The hosted providers run that request beside the session's
+  conversation (a CLI process of its own for Claude Code, a throwaway
+  session for Copilot), so the question never lands in it.
 - Sync filter `naming/system-prompt` (value string, args session) lets
   modules add to `harness-naming--base-system-prompt` per session (tasks ask
   for ticket titles).
@@ -1177,7 +1285,8 @@ to the task's file (below); the record also keeps `:file-base` and
   writes one up again.  Starting continues the same session: in git it
   moves into the task's new worktree (`session/update :cwd :worktree`),
   its provider conversation is dropped (the Claude CLI keeps
-  conversations per directory) and it is prompted with
+  conversations per directory; the new one gets the transcript, the
+  write-up's conversation, as text: see "Replay") and it is prompted with
   `harness-tasks--start-message`, the write-up and the quoted note, under the
   task's own settings.  Dropping a backlog task deletes its session.
   The messages task mode composes itself (starting a written-up task,
@@ -1818,7 +1927,9 @@ Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
 list + attachments row + compose region at the bottom.  Rendering is
 incremental (append and in-place update by node id using markers);
 older history renders in chunks on demand so a million-token session
-stays snappy.  Markdown is rendered by the built-in renderer in
+stays snappy.  A checkout (`session/head-moved`) makes the transcript
+another path, so the buffer loads it again rather than leave the
+branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
 the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.

@@ -44,6 +44,26 @@
 ;; - `--resume ID' recreates a session after a restart and `--resume ID
 ;;   --fork-session' implements `:fork': the new session starts from
 ;;   the parent's cached prefix.
+;; - Every assistant message and tool-result echo carries the uuid of
+;;   its entry in the CLI session's chain.  They go out as checkpoints
+;;   (`checkpoint' events, and `:checkpoint' on tool calls), which the
+;;   agent keeps on the nodes holding that content.  A fork or a
+;;   checkout at a node then cuts the CLI conversation there: `--resume
+;;   ID --fork-session --resume-session-at UUID' keeps the chain up to
+;;   and including UUID and nothing after it, so the model never knows
+;;   what came later.  A process whose provider state is replaced by
+;;   another (`session/provider-state-changed') goes.
+;; - A new CLI session opened for a transcript that already has
+;;   messages (a cut before any checkpoint, a resume the CLI refused, a
+;;   conversation another provider held) gets that transcript as text
+;;   with its first message (`harness-provider-history-text').  A CLI
+;;   that exits before it starts, when told to resume or fork, gets the
+;;   same, in a new CLI session, so a conversation it cannot resume
+;;   never leaves the session stuck.
+;; - A one-off request whose provider state is not the one its session
+;;   has recorded (naming brings a fork of it) runs in a CLI process of
+;;   its own, closed once it is done, so it never writes into the
+;;   session's CLI session or restarts its process.
 ;; - Every new process is sent an `initialize' and a `get_usage' control
 ;;   request.  The initialize answer names the account the CLI is logged
 ;;   in with, which decides how turns are billed; the usage report (the
@@ -250,6 +270,24 @@ Each is a plist (:id TOOL-USE-ID :name HARNESS-NAME :input INPUT :asked
 BOOL), `:asked' once the CLI asked whether it may run.  Kept beside the
 session records, as `harness-provider-claude--blocks' is.")
 
+(defvar harness-provider-claude--call-checkpoints (make-hash-table :test 'equal)
+  "Harness session id -> alist (TOOL-USE-ID . CHECKPOINT) of the current turn.
+The assistant message holding a tool call arrives before the call is
+served; its checkpoint goes out with the call's `tool-call' event.
+Kept beside the session records, as `harness-provider-claude--blocks' is.")
+
+(defvar harness-provider-claude--spawns (make-hash-table :test 'equal)
+  "Harness session id -> how its CLI process was started, as a plist.
+`:resume' is the CLI session it resumes or forks (nil for a new one),
+`:started' is non-nil once the process announced its session, and
+`:blocks' are the content blocks of the turn's first message.  A
+process told to resume that exits before it starts is replaced by a new
+CLI session, which gets the blocks again with the transcript.  Kept
+beside the session records, as `harness-provider-claude--blocks' is.")
+
+(defvar harness-provider-claude--side-count 0
+  "Counter that keeps the ids of side requests' CLI processes unique.")
+
 (defun harness-provider-claude--drop-stale-entries ()
   "Stop the CLI processes of records older than the current record layout.
 A reload keeps live records; one made before slots were added has no
@@ -296,6 +334,7 @@ resumes the CLI session in a new one."
       (cancel-timer timer))
     (harness-provider-claude--end-block entry)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--builtin-calls)
+    (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-checkpoints)
     (let ((fn (harness-provider-claude-session-on-event entry)))
       (setf (harness-provider-claude-session-active entry) nil
             (harness-provider-claude-session-cancel-timer entry) nil
@@ -352,12 +391,15 @@ go."
                (append harness-provider-claude-permission-args harness-provider-claude-extra-args)))
     (list "--permission-prompt-tool" "stdio")))
 
-(defun harness-provider-claude--command (model effort system resume fork &optional builtin)
+(defun harness-provider-claude--command (model effort system resume fork &optional builtin resume-at)
   "Build the `claude' command line.
 MODEL is the model name, EFFORT the thinking level or nil, SYSTEM the
 system prompt or nil, RESUME a CLI session id to continue or nil, and
 FORK non-nil to fork RESUME into a new session.  BUILTIN lists the
-CLI's own tools to turn on (\"WebSearch\"); every other one is off."
+CLI's own tools to turn on (\"WebSearch\"); every other one is off.
+RESUME-AT, the uuid of an entry of RESUME's chain, keeps the resumed
+conversation up to and including that entry; only a fork is cut, so
+RESUME itself keeps all it has."
   (append
    (list harness-provider-claude-program
          "-p" "--input-format" "stream-json" "--output-format" "stream-json"
@@ -374,6 +416,7 @@ CLI's own tools to turn on (\"WebSearch\"); every other one is off."
      (list "--system-prompt" system))
    (when resume (list "--resume" resume))
    (when (and resume fork) (list "--fork-session"))
+   (when (and resume fork resume-at) (list "--resume-session-at" resume-at))
    harness-provider-claude-extra-args))
 
 (defun harness-provider-claude--cli-tools (request)
@@ -400,9 +443,9 @@ Only the tools ENTRY's process was started with count."
        (member name (nth 3 (harness-provider-claude-session-spawn-key entry)))
        (car (rassoc name harness-provider-claude-builtin-tools))))
 
-(defun harness-provider-claude--spawn (entry request resume fork)
+(defun harness-provider-claude--spawn (entry request resume fork &optional resume-at)
   "Start a CLI process for ENTRY serving REQUEST.
-RESUME and FORK are passed to `harness-provider-claude--command'."
+RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
   (let* ((session (plist-get request :session))
          (cwd (or (plist-get session :cwd) default-directory))
          (host (plist-get session :host))
@@ -413,7 +456,8 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
          (effort (plist-get request :thinking))
          (system (plist-get request :system))
          (command (harness-provider-claude--command model effort system resume fork
-                                                    (harness-provider-claude--cli-tools request)))
+                                                    (harness-provider-claude--cli-tools request)
+                                                    resume-at))
          (stderr (generate-new-buffer " *harness-claude-stderr*" t))
          (proc (make-process :name (format "harness-claude-%s" (harness-provider-claude-session-id entry))
                              :command command
@@ -430,9 +474,13 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
     (harness-log 'info "provider-claude: spawned for %s%s%s%s"
                  (harness-provider-claude-session-id entry)
                  (if resume (format " (resume %s)" resume) "")
-                 (if fork " forked" "")
+                 (cond ((and fork resume-at) (format " forked at %s" resume-at))
+                       (fork " forked")
+                       (t ""))
                  (let ((builtin (harness-provider-claude--cli-tools request)))
                    (if builtin (format " with %s" (string-join builtin ", ")) "")))
+    (puthash (harness-provider-claude-session-id entry) (list :resume resume :started nil :blocks nil)
+             harness-provider-claude--spawns)
     (setf (harness-provider-claude-session-process entry) proc
           (harness-provider-claude-session-stderr entry) stderr
           (harness-provider-claude-session-buffer entry) ""
@@ -569,7 +617,9 @@ RESUME and FORK are passed to `harness-provider-claude--command'."
                                      :isError (if is-error t :false)))))))))
     (if (harness-provider-claude-session-active entry)
         (harness-provider-claude--emit
-         entry (list :type 'tool-call :id tool-id :name name :input input :respond respond))
+         entry (append (list :type 'tool-call :id tool-id :name name :input input :respond respond)
+                       (when-let* ((checkpoint (harness-provider-claude--call-checkpoint entry tool-id)))
+                         (list :checkpoint checkpoint))))
       (funcall respond (list :content "The harness is not running a turn" :is-error t)))))
 
 (defun harness-provider-claude--handle-mcp (entry request-id message)
@@ -657,7 +707,9 @@ marked `:builtin'.  Return the call's record."
         (puthash sid (append (gethash sid harness-provider-claude--builtin-calls) (list call))
                  harness-provider-claude--builtin-calls)
         (harness-provider-claude--emit
-         entry (list :type 'tool-call :id id :name name :input input :builtin t))
+         entry (append (list :type 'tool-call :id id :name name :input input :builtin t)
+                       (when-let* ((checkpoint (harness-provider-claude--call-checkpoint entry id)))
+                         (list :checkpoint checkpoint))))
         call)))
 
 (defun harness-provider-claude--ask-builtin (entry request-id request name)
@@ -814,19 +866,48 @@ block has ended by then, so a report never follows the call it is about."
             (when (stringp json)
               (harness-provider-claude--input-progress entry (length json))))))))))
 
-(defun harness-provider-claude--handle-assistant (entry message)
+(defun harness-provider-claude--checkpoint (entry msg)
+  "Return the checkpoint of the stdout message MSG on ENTRY, or nil.
+That is (:cli-session-id ID :uuid UUID): the CLI session and the entry
+of its chain holding MSG, the point up to which `--resume-session-at'
+keeps a fork.  A message of a sub-agent's chain (`parent_tool_use_id')
+is not in the session's chain, and a CLI that sends no uuid gives none."
+  (let ((uuid (plist-get msg :uuid))
+        (id (or (plist-get msg :session_id) (harness-provider-claude-session-cli-session-id entry))))
+    (and (stringp uuid) (not (string-empty-p uuid)) (stringp id)
+         (not (plist-get msg :parent_tool_use_id))
+         (list :cli-session-id id :uuid uuid))))
+
+(defun harness-provider-claude--handle-assistant (entry message &optional checkpoint)
   "Remember tool_use ids from the authoritative assistant MESSAGE on ENTRY.
 A call of the CLI's own tools that stands in for a harness tool is
-reported to the turn here, where its input is complete."
-  (dolist (block (plist-get message :content))
-    (when (equal (plist-get block :type) "tool_use")
-      (harness-provider-claude--remember-tool-use
-       entry (plist-get block :id) (plist-get block :name))
-      (when-let* ((name (harness-provider-claude--builtin-name entry (plist-get block :name))))
-        (harness-provider-claude--announce-builtin
-         entry (plist-get block :id) name (plist-get block :input)))))
+reported to the turn here, where its input is complete.  CHECKPOINT is
+the message's (see `harness-provider-claude--checkpoint'): it goes out
+with the message's tool calls when it has any, which the turn records
+later, and else at once, for the text or thinking the turn has just
+recorded from it."
+  (let ((calls nil))
+    (dolist (block (plist-get message :content))
+      (when (equal (plist-get block :type) "tool_use")
+        (push (plist-get block :id) calls)
+        (harness-provider-claude--remember-tool-use
+         entry (plist-get block :id) (plist-get block :name))
+        (when checkpoint
+          (let ((sid (harness-provider-claude-session-id entry)))
+            (puthash sid (cons (cons (plist-get block :id) checkpoint)
+                               (gethash sid harness-provider-claude--call-checkpoints))
+                     harness-provider-claude--call-checkpoints)))
+        (when-let* ((name (harness-provider-claude--builtin-name entry (plist-get block :name))))
+          (harness-provider-claude--announce-builtin
+           entry (plist-get block :id) name (plist-get block :input)))))
+    (when (and checkpoint (null calls))
+      (harness-provider-claude--emit entry (list :type 'checkpoint :checkpoint checkpoint))))
   (when-let* ((ctx (harness-provider-claude--usage-context (plist-get message :usage))))
     (setf (harness-provider-claude-session-context entry) ctx)))
+
+(defun harness-provider-claude--call-checkpoint (entry id)
+  "Return the checkpoint of the assistant message holding tool call ID on ENTRY."
+  (cdr (assoc id (gethash (harness-provider-claude-session-id entry) harness-provider-claude--call-checkpoints))))
 
 (defun harness-provider-claude--result-text (content)
   "Flatten a tool_result CONTENT (string or list of blocks) into text."
@@ -835,10 +916,12 @@ reported to the turn here, where its input is complete."
          (mapconcat (lambda (b) (or (plist-get b :text) "")) content "\n"))
         (t (format "%s" content))))
 
-(defun harness-provider-claude--handle-user-echo (entry message)
+(defun harness-provider-claude--handle-user-echo (entry message &optional checkpoint)
   "Emit tool results from an echoed user MESSAGE on ENTRY, unless they are ours.
 The result of a call of the CLI's own tools that the turn has not heard
-of yet comes after the call itself."
+of yet comes after the call itself.  CHECKPOINT, the message's (see
+`harness-provider-claude--checkpoint'), goes out for each result it
+holds, once the turn has recorded that result."
   (dolist (block (plist-get message :content))
     (when (equal (plist-get block :type) "tool_result")
       (let ((id (plist-get block :tool_use_id)))
@@ -851,7 +934,9 @@ of yet comes after the call itself."
           (harness-provider-claude--emit
            entry (list :type 'tool-result :id id
                        :content (harness-provider-claude--result-text (plist-get block :content))
-                       :is-error (harness-json-true-p (plist-get block :is_error)))))))))
+                       :is-error (harness-json-true-p (plist-get block :is_error)))))
+        (when checkpoint
+          (harness-provider-claude--emit entry (list :type 'checkpoint :checkpoint checkpoint :call-id id)))))))
 
 (defun harness-provider-claude--handle-denial (entry msg)
   "Report that the CLI refused to run a tool, from the system MSG on ENTRY.
@@ -1297,6 +1382,8 @@ its usage report has arrived."
         (model (plist-get msg :model)))
     (setf (harness-provider-claude-session-cli-session-id entry) id
           (harness-provider-claude-session-model entry) model)
+    (when-let* ((spawn (gethash (harness-provider-claude-session-id entry) harness-provider-claude--spawns)))
+      (plist-put spawn :started t))
     (harness-log 'info "provider-claude: session %s is CLI session %s (%s)"
                  (harness-provider-claude-session-id entry) id model)
     ;; CLIs whose initialize answer has no account still name an API key here.
@@ -1326,7 +1413,12 @@ its usage report has arrived."
          (is-error (or (harness-json-true-p (plist-get msg :is_error))
                        (string-prefix-p "error" subtype))))
     (when-let* ((id (plist-get msg :session_id)))
-      (setf (harness-provider-claude-session-cli-session-id entry) id))
+      (unless (equal id (harness-provider-claude-session-cli-session-id entry))
+        (setf (harness-provider-claude-session-cli-session-id entry) id)
+        ;; The session follows, or its next turn would resume the old one.
+        (harness-provider-claude--emit
+         entry (list :type 'provider-state
+                     :state (list :cli-session-id id :model (harness-provider-claude-session-model entry))))))
     (setf (harness-provider-claude-session-seen-output entry) t)
     (harness-provider-claude--emit
      entry (append (list :type 'usage :input input
@@ -1378,8 +1470,10 @@ its usage report has arrived."
       ("stream_event" (harness-provider-claude--handle-stream entry (plist-get msg :event)))
       ("assistant"
        (setf (harness-provider-claude-session-seen-output entry) t)
-       (harness-provider-claude--handle-assistant entry (plist-get msg :message)))
-      ("user" (harness-provider-claude--handle-user-echo entry (plist-get msg :message)))
+       (harness-provider-claude--handle-assistant entry (plist-get msg :message)
+                                                  (harness-provider-claude--checkpoint entry msg)))
+      ("user" (harness-provider-claude--handle-user-echo entry (plist-get msg :message)
+                                                         (harness-provider-claude--checkpoint entry msg)))
       ("rate_limit_event"
        (harness-provider-claude--handle-rate-limit entry (plist-get msg :rate_limit_info)))
       ("result" (harness-provider-claude--handle-result entry msg))
@@ -1401,23 +1495,61 @@ its usage report has arrived."
     (setf (harness-provider-claude-session-buffer entry) (substring data start))))
 
 (defun harness-provider-claude--sentinel (entry proc _event)
-  "Handle the death of ENTRY's process PROC."
+  "Handle the death of ENTRY's process PROC.
+A process told to resume or fork a CLI session that exits during a
+turn before it started could not open that conversation (the CLI
+session is gone, or a cut before the CLI compacted it): the turn goes
+on in a new CLI session instead (`harness-provider-claude--restart-fresh')."
   (unless (process-live-p proc)
     (when (eq proc (harness-provider-claude-session-process entry))
       (let ((code (process-exit-status proc))
-            (tail (harness-provider-claude--stderr-tail entry)))
+            (tail (harness-provider-claude--stderr-tail entry))
+            (spawn (gethash (harness-provider-claude-session-id entry) harness-provider-claude--spawns)))
         (harness-log 'info "provider-claude: process for %s exited %s"
                      (harness-provider-claude-session-id entry) code)
-        (harness-provider-claude--finish
-         entry
-         (if (harness-provider-claude-session-cancelled entry)
-             '(:type done :stop-reason cancelled)
-           (list :type 'done :stop-reason 'error
-                 :error (format "claude exited with status %s%s" code
-                                (if (string-empty-p tail) "" (concat ": " tail))))))
         (let ((buf (harness-provider-claude-session-stderr entry)))
           (when (buffer-live-p buf) (kill-buffer buf)))
-        (setf (harness-provider-claude-session-stderr entry) nil)))))
+        (setf (harness-provider-claude-session-stderr entry) nil)
+        (if (and (harness-provider-claude-session-active entry)
+                 (not (harness-provider-claude-session-cancelled entry))
+                 (plist-get spawn :resume)
+                 (not (plist-get spawn :started)))
+            (harness-provider-claude--restart-fresh entry spawn code tail)
+          (harness-provider-claude--finish
+           entry
+           (if (harness-provider-claude-session-cancelled entry)
+               '(:type done :stop-reason cancelled)
+             (list :type 'done :stop-reason 'error
+                   :error (format "claude exited with status %s%s" code
+                                  (if (string-empty-p tail) "" (concat ": " tail)))))))))))
+
+(defun harness-provider-claude--with-history (request blocks)
+  "Return BLOCKS, the new message of REQUEST, after the transcript before it.
+A new CLI session knows nothing of the conversation REQUEST continues;
+the transcript (`harness-provider-history-text') tells it.  A request
+with nothing before its new message gets BLOCKS as they are."
+  (let ((text (harness-provider-history-text
+               (car (harness-provider-split-history (plist-get request :messages))))))
+    (if text (cons (list :type "text" :text text) blocks) blocks)))
+
+(defun harness-provider-claude--restart-fresh (entry spawn code tail)
+  "Carry the turn of ENTRY on in a new CLI session; its process could not resume.
+SPAWN says how the process that exited with CODE was started and what
+the turn sent it, TAIL is the end of its stderr.  The new CLI session
+gets the turn's message again, after the transcript."
+  (let ((request (harness-provider-claude-session-request entry))
+        (why (if (string-empty-p tail) (format "exit status %s" code)
+               (harness-truncate-end (harness-first-line tail) 200))))
+    (harness-log 'warn "provider-claude: %s could not resume CLI session %s (%s); starting a new one"
+                 (harness-provider-claude-session-id entry) (plist-get spawn :resume) why)
+    (harness-provider-claude--emit
+     entry (list :type 'hint
+                 :text (format "Claude Code could not resume its conversation (%s); this turn goes on in a new one, which gets the transcript"
+                               why)))
+    (setf (harness-provider-claude-session-cli-session-id entry) nil)
+    (harness-provider-claude--spawn entry request nil nil)
+    (harness-provider-claude--send-user
+     entry (harness-provider-claude--with-history request (plist-get spawn :blocks)))))
 
 ;;;; Provider entry points
 
@@ -1428,34 +1560,75 @@ its usage report has arrived."
                harness-provider-claude--sessions)))
 
 (defun harness-provider-claude--ensure-process (entry request)
-  "Make sure ENTRY has a live process suitable for REQUEST, spawning if needed."
+  "Make sure ENTRY has a live process suitable for REQUEST, spawning if needed.
+Return `live' when the running process serves REQUEST, else how the
+one started for it opens its conversation: `fresh', `resume' or
+`fork'.  The running process serves REQUEST when it was started with
+the settings REQUEST needs (`harness-provider-claude--spawn-key') and
+holds the CLI session REQUEST's provider state names, or any when the
+state names none.  A state marked `:fork-pending' always gets a new
+process, which forks the CLI session it names, cut at its `:resume-at'
+when it has one; otherwise the state's CLI session is resumed, else
+the one the entry last held."
   (let* ((state (plist-get request :provider-state))
          (key (harness-provider-claude--spawn-key request))
          (proc (harness-provider-claude-session-process entry))
-         (live (process-live-p proc)))
-    (cond
-     ((and live (equal key (harness-provider-claude-session-spawn-key entry))) proc)
-     (t
-      (let* ((fork (and (not live) (harness-json-true-p (plist-get state :fork-pending))))
-             (resume (or (harness-provider-claude-session-cli-session-id entry)
-                         (plist-get state :cli-session-id))))
+         (live (process-live-p proc))
+         (want (plist-get state :cli-session-id))
+         (have (harness-provider-claude-session-cli-session-id entry))
+         (fork (and want (harness-json-true-p (plist-get state :fork-pending)))))
+    (if (and live (not fork)
+             (equal key (harness-provider-claude-session-spawn-key entry))
+             (or (null want) (equal want have)))
+        'live
+      (let ((resume (or want have)))
         (when live
-          (harness-log 'info "provider-claude: settings changed for %s; restarting with --resume"
-                       (harness-provider-claude-session-id entry)))
+          (harness-log 'info "provider-claude: %s for %s; restarting%s"
+                       (if fork "forking" "settings or conversation changed")
+                       (harness-provider-claude-session-id entry)
+                       (if resume (format " with --resume %s" resume) "")))
         (harness-provider-claude--kill entry)
-        (harness-provider-claude--spawn entry request resume fork))))))
+        (harness-provider-claude--spawn entry request resume fork (and fork (plist-get state :resume-at)))
+        (cond (fork 'fork) (resume 'resume) (t 'fresh))))))
+
+(defun harness-provider-claude--side-request-p (request)
+  "Non-nil when REQUEST is a one-off request beside its session's conversation.
+Its provider state is not the one its session has recorded: naming
+brings a fork of it, a summary none.  Such a request runs in a CLI
+process of its own, so that it neither writes into the session's CLI
+session nor restarts the session's process with its own settings.  A
+request for a session record without a recorded state, as the
+permission judge makes, is none: it has its own process already."
+  (let ((session (plist-get request :session)))
+    (and (plist-member session :provider-state)
+         (not (equal (plist-get request :provider-state) (plist-get session :provider-state))))))
+
+(defun harness-provider-claude--closing (id on-event)
+  "Return ON-EVENT wrapped so that the CLI process ID is closed when done."
+  (lambda (event)
+    (unwind-protect
+        (when on-event (funcall on-event event))
+      (when (eq (plist-get event :type) 'done)
+        (harness-run-soon #'harness-provider-claude-close id)))))
 
 (defun harness-provider-claude--complete (request)
-  "Run REQUEST through the Claude Code CLI; return a handle with `:cancel'."
+  "Run REQUEST through the Claude Code CLI; return a handle with `:cancel'.
+A new CLI session opened for a transcript that has messages before the
+new one gets them first, as text (`harness-provider-claude--with-history')."
   (let* ((session (plist-get request :session))
          (sid (or (plist-get session :id) "default"))
-         (entry (harness-provider-claude--entry sid))
-         (on-event (plist-get request :on-event))
-         (blocks (harness-provider-claude--user-blocks request)))
+         (side (harness-provider-claude--side-request-p request))
+         (id (if side (format "%s#side-%d" sid (cl-incf harness-provider-claude--side-count)) sid))
+         (entry (harness-provider-claude--entry id))
+         (on-event (if side
+                       (harness-provider-claude--closing id (plist-get request :on-event))
+                     (plist-get request :on-event)))
+         (blocks (harness-provider-claude--user-blocks request))
+         (mode nil))
     (when (harness-provider-claude-session-active entry)
       (harness-provider-claude--finish
        entry '(:type done :stop-reason error :error "superseded by a new request")))
-    (harness-provider-claude--ensure-process entry request)
+    (setq mode (harness-provider-claude--ensure-process entry request))
     (setf (harness-provider-claude-session-request entry) request
           (harness-provider-claude-session-on-event entry) on-event
           (harness-provider-claude-session-active entry) t
@@ -1464,12 +1637,17 @@ its usage report has arrived."
           (harness-provider-claude-session-pending-tools entry) nil
           (harness-provider-claude-session-own-results entry) nil
           (harness-provider-claude-session-context entry) nil)
-    (remhash sid harness-provider-claude--builtin-calls)
+    (remhash id harness-provider-claude--builtin-calls)
+    (remhash id harness-provider-claude--call-checkpoints)
     (harness-provider-claude--emit entry '(:type start))
     (if (null blocks)
         (harness-provider-claude--finish
          entry '(:type done :stop-reason error :error "No user message to send"))
-      (harness-provider-claude--send-user entry blocks))
+      ;; Kept for a process that cannot resume, which a new one replaces.
+      (when-let* ((spawn (and (memq mode '(resume fork)) (gethash id harness-provider-claude--spawns))))
+        (plist-put spawn :blocks blocks))
+      (harness-provider-claude--send-user
+       entry (if (eq mode 'fresh) (harness-provider-claude--with-history request blocks) blocks)))
     (list :cancel (lambda () (harness-provider-claude--cancel entry)))))
 
 (defun harness-provider-claude--cancel (entry)
@@ -1494,12 +1672,23 @@ its usage report has arrived."
     (harness-provider-claude--kill entry)
     (harness-provider-claude--finish entry '(:type done :stop-reason cancelled))))
 
-(defun harness-provider-claude--fork (_model-id state)
+(defun harness-provider-claude--fork (_model-id state &optional checkpoint)
   "Return a promise of provider state for a fork of STATE.
 The child starts from the parent's CLI session id; its first turn
-resumes it with --fork-session so the cached prefix is reused."
-  (let ((id (plist-get state :cli-session-id)))
-    (harness-resolved (and id (list :cli-session-id id :fork-pending t)))))
+resumes it with --fork-session so the cached prefix is reused.  With
+CHECKPOINT, one this provider put on a node (see
+`harness-provider-claude--checkpoint'), the fork is of the CLI session
+the checkpoint names, cut at its entry: the first turn adds
+--resume-session-at, which keeps the chain up to and including that
+entry, so the fork knows nothing that came after.  Another provider's
+checkpoint gives nil."
+  (if checkpoint
+      (let ((id (plist-get checkpoint :cli-session-id))
+            (uuid (plist-get checkpoint :uuid)))
+        (harness-resolved (and (stringp id) (stringp uuid)
+                               (list :cli-session-id id :resume-at uuid :fork-pending t))))
+    (let ((id (plist-get state :cli-session-id)))
+      (harness-resolved (and id (list :cli-session-id id :fork-pending t))))))
 
 (defun harness-provider-claude--quota (&optional refresh)
   "Return a promise of how the account is billed and of its plan quota.
@@ -1520,6 +1709,8 @@ fetched first when REFRESH is non-nil or the last one is stale (see
     (harness-provider-claude--finish entry '(:type done :stop-reason cancelled))
     (harness-provider-claude--kill entry)
     (remhash session-id harness-provider-claude--sessions)
+    (remhash session-id harness-provider-claude--spawns)
+    (remhash session-id harness-provider-claude--call-checkpoints)
     t))
 
 (defun harness-provider-claude-close-all ()
@@ -1531,13 +1722,36 @@ fetched first when REFRESH is non-nil or the last one is stale (see
   (harness-provider-claude--settle-refresh))
 
 (defun harness-provider-claude--on-session-gone (session-id &rest _)
-  "Close the process for SESSION-ID when its session is deleted or deactivated."
-  (harness-provider-claude-close session-id))
+  "Close the process for SESSION-ID when its session is deleted or deactivated.
+The processes of its side requests go too."
+  (harness-provider-claude-close session-id)
+  (let ((prefix (concat session-id "#side-")))
+    (dolist (id (hash-table-keys harness-provider-claude--sessions))
+      (when (string-prefix-p prefix id)
+        (harness-provider-claude-close id)))))
+
+(defun harness-provider-claude--on-state-changed (session-id state)
+  "Close the process of SESSION-ID when its provider STATE is another conversation.
+The agent replaces the state when the session's head moved off the
+conversation the process holds: with a fork of it cut at a checkpoint,
+or with none, for a new one.  The next turn starts the process the new
+state calls for, rather than going on in the old conversation.  A
+state naming the CLI session the process holds, as the one its own
+start announces, keeps it, and so does a turn in flight."
+  (when-let* ((entry (gethash session-id harness-provider-claude--sessions)))
+    (unless (or (harness-provider-claude-session-active entry)
+                (and (plist-get state :cli-session-id)
+                     (not (harness-json-true-p (plist-get state :fork-pending)))
+                     (equal (plist-get state :cli-session-id)
+                            (harness-provider-claude-session-cli-session-id entry))))
+      (harness-log 'info "provider-claude: the conversation of %s changed; closing its process" session-id)
+      (harness-provider-claude-close session-id))))
 
 (defun harness-provider-claude--init ()
   "Register the provider and subscribe to session lifecycle events."
   (harness-on 'session/deleted #'harness-provider-claude--on-session-gone)
-  (harness-on 'session/deactivated #'harness-provider-claude--on-session-gone))
+  (harness-on 'session/deactivated #'harness-provider-claude--on-session-gone)
+  (harness-on 'session/provider-state-changed #'harness-provider-claude--on-state-changed))
 
 (harness-define-provider 'claude
   :label "Claude Code"
@@ -1554,6 +1768,11 @@ fetched first when REFRESH is non-nil or the last one is stale (see
   :requires '(provider)
   :init #'harness-provider-claude--init
   :shutdown #'harness-provider-claude-close-all)
+
+;; A reload does not initialise a running module again: subscribe the
+;; handlers this version adds now.
+(when (harness-module-ready-p 'provider-claude)
+  (harness-provider-claude--init))
 
 (provide 'harness-provider-claude)
 ;;; harness-provider-claude.el ends here

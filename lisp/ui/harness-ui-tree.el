@@ -22,6 +22,11 @@
 ;; session that shares nothing with it), TAB expand the node, n/p move
 ;; within the lane, g refresh, q quit.  Every key has a header-line
 ;; button or a mouse target on the row.
+;;
+;; A checkout or a fork at a node rewinds what the model knows, not only
+;; what the chat shows: the next message continues from the node, and
+;; the model knows nothing that came after it (see
+;; `session/provider-continuation').
 
 ;;; Code:
 
@@ -426,8 +431,10 @@ The rails of the NLANES lanes continue as the line prefix."
                 (harness-ui-tree--error (propertize (format "error: %s " harness-ui-tree--error) 'face 'error))
                 (t ""))
           (funcall btn "[RET open]" #'harness-ui-tree-open "Open the session at this node")
-          (funcall btn "[c checkout]" #'harness-ui-tree-checkout "Move the session head to this node (time travel)")
-          (funcall btn "[f fork]" #'harness-ui-tree-fork "Fork the session at this node")
+          (funcall btn "[c checkout]" #'harness-ui-tree-checkout
+                   "Move the session head to this node (time travel): the next message continues from here")
+          (funcall btn "[f fork]" #'harness-ui-tree-fork
+                   "Fork the session at this node: a new session that knows the conversation up to here")
           (funcall btn "[b btw]" #'harness-ui-tree-btw "Start a BTW side conversation over this node's session")
           (funcall btn "[TAB expand]" #'harness-ui-tree-toggle "Show the full node")
           (funcall btn "[n/p lane]" #'harness-ui-tree-next-in-lane "Move within this session's rows")
@@ -635,13 +642,17 @@ Every window showing the buffer keeps its own row too."
   (harness-ui-call "_harness/session/set-head" (list :id sid :node-id node-id) callback))
 
 (defun harness-ui-tree-checkout ()
-  "Move the head of the node's session to the node at point (time travel)."
+  "Move the head of the node's session to the node at point (time travel).
+The session's next message continues from that node: the model knows
+the conversation up to it and nothing that came after, which stays in
+the tree on its own branch.  A session running a turn refuses."
   (interactive)
   (let* ((node (harness-ui-tree-node-at-point))
          (sid (plist-get node :session))
          (id (plist-get node :id)))
     (when (string-prefix-p "session:" id) (user-error "Nothing to check out yet"))
-    (when (yes-or-no-p (format "Move the head of %s to %s? " (harness-ui-tree--session-name sid)
+    (when (yes-or-no-p (format "Move the head of %s to %s, so that its next message continues from there? "
+                               (harness-ui-tree--session-name sid)
                                (substring id (max 0 (- (length id) 6)))))
       (harness-ui-tree--set-head sid id
                                  (lambda (_)
@@ -654,39 +665,25 @@ Every window showing the buffer keeps its own row too."
                       :key (lambda (s) (plist-get s :id)) :test #'equal)
              :head))
 
-(defun harness-ui-tree--at-node (node fn)
-  "Call FN with the session of NODE positioned at NODE.
-When NODE is not the head, the head is moved there first and moved back
-once FN's request settles.  FN receives (SID DONE) and must call DONE."
-  (let* ((sid (plist-get node :session))
-         (id (plist-get node :id))
-         (head (harness-ui-tree--head-of sid))
-         (buffer (current-buffer))
-         (restore (lambda ()
-                    (when (and head (not (equal head id)))
-                      (harness-ui-tree--set-head sid head #'ignore))
-                    (when (buffer-live-p buffer) (harness-ui-tree--refresh-buffer buffer)))))
-    (when (string-prefix-p "session:" id) (user-error "This fork has no nodes yet"))
-    (if (or (null head) (equal head id))
-        (funcall fn sid restore)
-      (harness-ui-tree--set-head sid id (lambda (_) (funcall fn sid restore))))))
-
 (defun harness-ui-tree-fork ()
-  "Fork the node's session at the node at point and open the fork."
+  "Fork the node's session at the node at point and open the fork.
+The fork knows the conversation up to the node and nothing after it;
+the node's session is left as it is, its head included."
   (interactive)
-  (let ((open (harness-ui-session-opener)))
-    (harness-ui-tree--at-node
-     (harness-ui-tree-node-at-point)
-     (lambda (sid done)
-       (harness-ui-call "_harness/session/fork" (list :id sid :kind "fork")
-                        (lambda (child)
-                          (funcall done)
-                          (harness-ui-refresh-sessions
-                           (lambda (_)
-                             (message "Forked %s" (substring (plist-get child :id) 0 8))
-                             (when harness-ui-open-session-function
-                               (funcall open (plist-get child :id))))))
-                        (lambda (e) (funcall done) (message "Fork failed: %s" (harness-error-message e))))))))
+  (let* ((node (harness-ui-tree-node-at-point))
+         (id (plist-get node :id))
+         (buffer (current-buffer))
+         (open (harness-ui-session-opener)))
+    (when (string-prefix-p "session:" id) (user-error "This fork has no nodes yet"))
+    (harness-ui-call "_harness/session/fork" (list :id (plist-get node :session) :kind "fork" :node id)
+                     (lambda (child)
+                       (when (buffer-live-p buffer) (harness-ui-tree--refresh-buffer buffer))
+                       (harness-ui-refresh-sessions
+                        (lambda (_)
+                          (message "Forked %s" (substring (plist-get child :id) 0 8))
+                          (when harness-ui-open-session-function
+                            (funcall open (plist-get child :id))))))
+                     (lambda (e) (message "Fork failed: %s" (harness-error-message e))))))
 
 (defun harness-ui-tree-btw ()
   "Start a BTW side conversation over the session of the node at point.

@@ -453,6 +453,264 @@ session of its own instead of resuming, and writing into, the parent's."
           (should-not (equal parent-cli (harness-provider-claude-test--cli-id other))))
         (should (equal parent-cli (harness-provider-claude-test--cli-id parent)))))))
 
+;;;; Forks and checkouts at an earlier node: what the model remembers
+
+(defmacro harness-provider-claude-test-with-store (&rest body)
+  "Run BODY with sessions on the fake CLI, which keeps its conversations.
+The fake CLI's sessions live in a store directory, so a process resumes
+or forks what an earlier one said, and its \"recall\" prompt answers
+with the user prompts its conversation holds."
+  (declare (indent 0))
+  `(harness-provider-claude-test-with-sessions
+     (let ((process-environment (cons (concat "HARNESS_FAKE_CLAUDE_STORE=" (harness-test-temp-dir))
+                                      process-environment)))
+       ,@body)))
+
+(defun harness-provider-claude-test--reply (sid)
+  "Return the text of the last assistant node of session SID."
+  (plist-get (cl-find 'assistant (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)) :from-end t)
+             :content))
+
+(defun harness-provider-claude-test--node (sid kind content)
+  "Return the id of the last KIND node of SID whose content is CONTENT."
+  (plist-get (cl-find-if (lambda (n) (and (eq kind (plist-get n :kind)) (equal content (plist-get n :content))))
+                         (harness-call 'session/nodes sid) :from-end t)
+             :id))
+
+(defun harness-provider-claude-test--three-turns (sid)
+  "Run the turns \"one\", \"two\" and \"three\" in SID; return the ids of their replies."
+  (mapcar (lambda (text)
+            (harness-provider-claude-test--turn sid text)
+            (plist-get (car (last (harness-call 'session/nodes sid))) :id))
+          '("one" "two" "three")))
+
+(defun harness-provider-claude-test--flag (argv flag)
+  "Return the value after FLAG in ARGV, or nil."
+  (let ((i (cl-position flag argv :test #'equal)))
+    (and i (nth (1+ i) argv))))
+
+(ert-deftest harness-provider-claude-fork-at-an-earlier-node-forgets-what-came-after ()
+  "A fork taken at an earlier node knows the conversation up to it, nothing after.
+The parent says \"one\", \"two\" and \"three\"; a fork at the reply to
+\"one\" remembers only \"one\": its CLI session is the parent's, cut at
+that reply with --resume-session-at.  The parent keeps its head, its
+CLI session and all three."
+  (harness-provider-claude-test-with-store
+    (let* ((parent (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (replies (harness-provider-claude-test--three-turns parent))
+           (parent-cli (harness-provider-claude-test--cli-id parent))
+           (parent-state (plist-get (harness-call 'session/get parent) :provider-state))
+           (parent-head (plist-get (harness-call 'session/get parent) :head))
+           (first-reply (harness-call 'session/node parent (car replies))))
+      ;; Every reply carries where the CLI session stood after it.
+      (dolist (id replies)
+        (let ((checkpoint (plist-get (harness-call 'session/node parent id) :checkpoint)))
+          (should (equal parent-cli (plist-get checkpoint :cli-session-id)))
+          (should (stringp (plist-get checkpoint :uuid)))))
+      (let* ((fork (plist-get (harness-test-await (harness-call 'session/fork parent :node (car replies))) :id))
+             (state (plist-get (harness-call 'session/get fork) :provider-state)))
+        ;; The fork's transcript ends at the node, and so does its CLI session.
+        (should (equal (car replies) (plist-get (car (last (harness-call 'session/nodes fork))) :id)))
+        (should (equal (car replies) (plist-get (harness-call 'session/get fork) :fork-node)))
+        (should (equal (list :cli-session-id parent-cli
+                             :resume-at (plist-get (plist-get first-reply :checkpoint) :uuid)
+                             :fork-pending t)
+                       state))
+        (let ((argv (harness-provider-claude-test--turn fork "recall")))
+          (should (equal parent-cli (harness-provider-claude-test--flag argv "--resume")))
+          (should (member "--fork-session" argv))
+          (should (equal (plist-get state :resume-at) (harness-provider-claude-test--flag argv "--resume-session-at"))))
+        (should (equal "I remember: one | recall" (harness-provider-claude-test--reply fork)))
+        (should (string-prefix-p "forked-" (harness-provider-claude-test--cli-id fork)))
+        ;; The parent is untouched, and still remembers everything.
+        (should (equal parent-head (plist-get (harness-call 'session/get parent) :head)))
+        (should (equal parent-state (plist-get (harness-call 'session/get parent) :provider-state)))
+        (harness-provider-claude-test--turn parent "recall")
+        (should (equal "I remember: one | two | three | recall" (harness-provider-claude-test--reply parent)))))))
+
+(ert-deftest harness-provider-claude-checkout-rewinds-the-conversation ()
+  "Checking out an earlier node rewinds what the model knows, in place.
+After \"one\", \"two\" and \"three\", the head goes back to the reply to
+\"one\": the next turn forks the session's CLI session there, so the
+model remembers \"one\" alone, and later turns go on in that new CLI
+session.  Back at the reply to \"three\", the model knows the first
+branch again, and nothing of the second."
+  (harness-provider-claude-test-with-store
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (replies (harness-provider-claude-test--three-turns sid))
+           (first-cli (harness-provider-claude-test--cli-id sid))
+           (proc (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions))))
+      (should (process-live-p proc))
+      (should (equal (car (last replies)) (plist-get (harness-call 'session/get sid) :provider-node)))
+      (harness-call 'session/set-head sid (car replies))
+      (let ((argv (harness-provider-claude-test--turn sid "recall")))
+        ;; The process holding all three turns went; a fork cut at "one" took over.
+        (should-not (process-live-p proc))
+        (should (equal first-cli (harness-provider-claude-test--flag argv "--resume")))
+        (should (member "--fork-session" argv))
+        (should (equal (plist-get (plist-get (harness-call 'session/node sid (car replies)) :checkpoint) :uuid)
+                       (harness-provider-claude-test--flag argv "--resume-session-at"))))
+      (should (equal "I remember: one | recall" (harness-provider-claude-test--reply sid)))
+      (let ((second-cli (harness-provider-claude-test--cli-id sid))
+            (proc (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions))))
+        (should-not (equal first-cli second-cli))
+        ;; The next turn goes on in the same process and conversation.
+        (should-not (harness-provider-claude-test--turn sid "recall again"))
+        (should (eq proc (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions))))
+        (should (equal "I remember: one | recall | recall again" (harness-provider-claude-test--reply sid)))
+        ;; Back on the first branch: its conversation, without the second's.
+        (harness-call 'session/set-head sid (car (last replies)))
+        (let ((argv (harness-provider-claude-test--turn sid "recall")))
+          (should (equal first-cli (harness-provider-claude-test--flag argv "--resume"))))
+        (should (equal "I remember: one | two | three | recall" (harness-provider-claude-test--reply sid)))))))
+
+(ert-deftest harness-provider-claude-fork-at-a-tool-result-keeps-the-call ()
+  "Tool calls and their results carry checkpoints of their own.
+A fork at a tool result keeps the call and its result, and nothing the
+model said after them."
+  (harness-provider-claude-test-with-store
+    (harness-define-tool "echo" :label "Echo" :description "Echo TEXT back." :kind 'read
+                         :schema (plist-get harness-provider-claude-test--echo-tool :schema)
+                         :handler (lambda (input _ctx) (format "echo: %s" (plist-get input :text))))
+    (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1"
+                                         :permission-mode 'yolo)
+                           :id))
+           (_ (harness-provider-claude-test--turn sid "please call echo"))
+           (nodes (harness-call 'session/nodes sid))
+           (call (cl-find 'tool-call nodes :key (lambda (n) (plist-get n :kind))))
+           (result (cl-find 'tool-result nodes :key (lambda (n) (plist-get n :kind))))
+           (reply (cl-find 'assistant nodes :key (lambda (n) (plist-get n :kind)))))
+      (should (equal "echo: ping" (plist-get result :output)))
+      (dolist (n (list call result reply))
+        (should (plist-get (plist-get n :checkpoint) :uuid)))
+      (should (= 3 (length (delete-dups (mapcar (lambda (n) (plist-get (plist-get n :checkpoint) :uuid))
+                                                (list call result reply))))))
+      (let ((fork (plist-get (harness-test-await (harness-call 'session/fork sid :node (plist-get result :id))) :id)))
+        (should (equal (plist-get (plist-get result :checkpoint) :uuid)
+                       (plist-get (plist-get (harness-call 'session/get fork) :provider-state) :resume-at)))
+        (harness-provider-claude-test--turn fork "recall")
+        (should (equal "I remember: please call echo | recall" (harness-provider-claude-test--reply fork)))))))
+
+(ert-deftest harness-provider-claude-fork-before-any-reply-starts-a-new-conversation ()
+  "A fork at a node before any checkpoint starts a CLI session of its own.
+Forked at the first message, before the model answered, nothing can be
+cut: the fork's first turn starts a new CLI session with that message
+and the new one, and the parent's later turns stay out of it."
+  (harness-provider-claude-test-with-store
+    (let* ((parent (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (_ (harness-provider-claude-test--three-turns parent))
+           (first (plist-get (car (harness-call 'session/nodes parent)) :id))
+           (fork (plist-get (harness-test-await (harness-call 'session/fork parent :node first)) :id)))
+      (should-not (plist-get (harness-call 'session/get fork) :provider-state))
+      (let ((argv (harness-provider-claude-test--turn fork "recall")))
+        (should-not (member "--resume" argv)))
+      ;; The first message and the new one go out together.
+      (should (equal "I remember: one recall" (harness-provider-claude-test--reply fork))))))
+
+(ert-deftest harness-provider-claude-rewind-without-checkpoints-replays-the-transcript ()
+  "Without a checkpoint to cut at, a new CLI session gets the transcript.
+A session from before checkpoints has none on its nodes.  Checked out
+at the reply to \"one\", its next turn starts a new CLI session whose
+first message carries the transcript up to that reply, and nothing
+after it."
+  (harness-provider-claude-test-with-store
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (replies (harness-provider-claude-test--three-turns sid)))
+      (dolist (n (harness-call 'session/nodes sid))
+        (harness-call 'session/update-node sid (plist-get n :id) :checkpoint nil))
+      (harness-call 'session/set-head sid (car replies))
+      (let ((argv (harness-provider-claude-test--turn sid "recall")))
+        (should-not (member "--resume" argv)))
+      (let ((reply (harness-provider-claude-test--reply sid)))
+        (should (string-match-p "<conversation_history>" reply))
+        (should (string-match-p "<user>\none\n</user>" reply))
+        (should (string-match-p "<assistant>\nhello\n</assistant>" reply))
+        (should-not (string-match-p "two\\|three" reply))
+        (should (string-suffix-p "</conversation_history> recall" reply))))))
+
+(ert-deftest harness-provider-claude-unresumable-conversation-starts-anew ()
+  "A CLI session the CLI cannot resume gives way to a new one with the transcript.
+The session's provider state names a CLI session the CLI does not
+know: the process exits before it starts, and the turn goes on in a new
+CLI session that gets the transcript, saying so in a hint."
+  (harness-provider-claude-test-with-store
+    (let ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1"
+                                        :provider-state '(:cli-session-id "gone-1"))
+                          :id)))
+      (harness-call 'session/append sid '(:kind user :content "an earlier question"))
+      (harness-call 'session/append sid '(:kind assistant :content "an earlier answer"))
+      (let ((argv (harness-provider-claude-test--turn sid "recall")))
+        (should-not (member "--resume" argv)))
+      (let ((reply (harness-provider-claude-test--reply sid)))
+        (should (string-match-p "<user>\nan earlier question\n</user>" reply))
+        (should (string-match-p "<assistant>\nan earlier answer\n</assistant>" reply)))
+      (should (string-prefix-p "fake-" (harness-provider-claude-test--cli-id sid)))
+      (should (cl-find-if (lambda (n) (and (eq 'hint (plist-get n :kind))
+                                           (string-match-p "could not resume" (plist-get n :content))))
+                          (harness-call 'session/nodes sid))))))
+
+(ert-deftest harness-provider-claude-side-request-leaves-the-conversation-alone ()
+  "A request with a provider state of its own runs beside the session's CLI process.
+Naming sends a fork of the session's state: it runs in a CLI process of
+its own, which is closed afterwards, so the session's process keeps
+running and its conversation never hears the question."
+  (harness-provider-claude-test-with-store
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (_ (harness-provider-claude-test--turn sid "hi"))
+           (proc (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions)))
+           (session (harness-call 'session/get sid))
+           (state (harness-test-await (harness-call 'provider/fork (plist-get session :model)
+                                                    (plist-get session :provider-state))))
+           (argv-file (harness-provider-claude-test--argv-file))
+           (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+           (events (car (harness-provider-claude-test--run
+                         (list :model (plist-get session :model) :session session
+                               :system "Name it" :max-tokens 40 :provider-state state
+                               :messages '((:role user :content ((:type "text" :text "Give it a title")))))))))
+      (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+      (should (member "--fork-session" (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+      ;; The session's own process is the one it had, and its side process went.
+      (should (eq proc (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions))))
+      (should (process-live-p proc))
+      (harness-test-wait (lambda () (not (cl-find-if (lambda (k) (string-prefix-p (concat sid "#side-") k))
+                                                      (hash-table-keys harness-provider-claude--sessions))))
+                         5 "side process closed")
+      (harness-provider-claude-test--turn sid "recall")
+      (should (equal "I remember: hi | recall" (harness-provider-claude-test--reply sid))))))
+
+(ert-deftest harness-provider-claude-new-state-lets-the-old-process-go ()
+  "A provider state naming another conversation closes the process; the same keeps it."
+  (harness-provider-claude-test-with-sessions
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (_ (harness-provider-claude-test--turn sid "hi"))
+           (state (plist-get (harness-call 'session/get sid) :provider-state))
+           (proc (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions))))
+      (harness-call 'session/set-provider-state sid (copy-sequence state))
+      (should (process-live-p proc))
+      (harness-call 'session/set-provider-state sid (append state '(:extra t)))
+      (should (process-live-p proc))
+      (harness-call 'session/set-provider-state sid (list :cli-session-id (plist-get state :cli-session-id)
+                                                          :resume-at "u-1" :fork-pending t))
+      (should-not (process-live-p proc))
+      (should-not (gethash sid harness-provider-claude--sessions)))))
+
+(ert-deftest harness-provider-claude-fork-at-checkpoint-command-line ()
+  "`provider/fork' with a checkpoint cuts the fork there; another provider's gives nil."
+  (harness-provider-claude-test--setup)
+  (should (equal '(:cli-session-id "s-1" :resume-at "u-2" :fork-pending t)
+                 (harness-test-await (harness-call 'provider/fork "claude:claude-fable-5-1"
+                                                   '(:cli-session-id "s-9")
+                                                   '(:cli-session-id "s-1" :uuid "u-2")))))
+  (should-not (harness-test-await (harness-call 'provider/fork "claude:claude-fable-5-1"
+                                                '(:cli-session-id "s-9") '(:copilot-session-id "c-1"))))
+  (let ((cmd (harness-provider-claude--command "claude-opus-5-5" nil nil "s-1" t nil "u-2")))
+    (should (equal "u-2" (nth (1+ (cl-position "--resume-session-at" cmd :test #'equal)) cmd)))
+    (should (< (cl-position "--fork-session" cmd :test #'equal)
+               (cl-position "--resume-session-at" cmd :test #'equal))))
+  ;; Only a fork is cut: a resume keeps the session whole.
+  (should-not (member "--resume-session-at" (harness-provider-claude--command "claude-opus-5-5" nil nil "s-1" nil nil "u-2"))))
+
 (ert-deftest harness-provider-claude-resume-after-close ()
   (harness-provider-claude-test--setup)
   (let* ((argv-file (harness-provider-claude-test--argv-file))

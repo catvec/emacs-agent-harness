@@ -1595,6 +1595,27 @@ to a waiting question still goes through the question instead."
         (should (equal '(("q1" "red")) answers))
         (should (= 1 (length sent)))))))
 
+(ert-deftest harness-ui-chat-shows-the-path-after-a-checkout ()
+  "A chat whose session's head moves shows the path to the new head.
+After a checkout at an earlier message, the branch left behind goes
+from the buffer: it shows what the next message continues."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (first (plist-get (harness-call 'session/append sid '(:kind user :content "the first question")) :id))
+           (reply (plist-get (harness-call 'session/append sid '(:kind assistant :content "the first answer")) :id)))
+      (ignore first)
+      (harness-call 'session/append sid '(:kind user :content "a question left behind"))
+      (harness-call 'session/append sid '(:kind assistant :content "an answer left behind"))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (should (harness-ui-chat-test-find buf "an answer left behind"))
+        (harness-call 'session/set-head sid reply)
+        (harness-test-wait (lambda () (and (not (harness-ui-chat-test-find buf "left behind"))
+                                           (not (buffer-local-value 'harness-chat--loading buf))))
+                           5 "the chat to show the new path")
+        (should (harness-ui-chat-test-find buf "the first question"))
+        (should (harness-ui-chat-test-find buf "the first answer"))
+        (with-current-buffer buf (should (harness-compose-live-p)))))))
+
 (ert-deftest harness-ui-chat-inactive-session-reanimates-on-send ()
   ;; An inactive session opens as it is, with a notice and its compose box;
   ;; the first message sent from it resumes it and the notice goes away.

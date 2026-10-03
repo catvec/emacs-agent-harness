@@ -1420,13 +1420,17 @@ state the group had."
   (force-mode-line-update))
 
 (defun harness-chat--on-event (event args)
-  "React to bus EVENT with ARGS."
-  (when-let* ((buf (and (member event '("agent/turn-started" "agent/turn-ended"))
+  "React to bus EVENT with ARGS.
+A head moved by a checkout makes the transcript another path: the
+buffer loads it again, so it shows the conversation the next message
+continues, not the branch left behind."
+  (when-let* ((buf (and (member event '("agent/turn-started" "agent/turn-ended" "session/head-moved"))
                         (harness-chat--buffer-for (car args)))))
     (with-current-buffer buf
       (pcase event
         ("agent/turn-started" (setq harness-chat--turn-start (float-time)) (harness-chat--start-spinner))
-        ("agent/turn-ended" (setq harness-chat--turn-start nil)))
+        ("agent/turn-ended" (setq harness-chat--turn-start nil))
+        ("session/head-moved" (harness-chat--load t)))
       (force-mode-line-update))))
 
 (defun harness-chat--append-local-block (kind text)
