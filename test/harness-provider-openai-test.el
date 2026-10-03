@@ -270,7 +270,60 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
     (should (equal '(:thinking t)
                    (harness-openai--capabilities harness-openai-test-deepseek-endpoint)))))
 
+(ert-deftest harness-provider-openai-deepseek-replays-reasoning-content ()
+  ;; DeepSeek's thinking mode rejects a tool-using history whose assistant
+  ;; messages omit reasoning_content, so the recorded thinking goes back.
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (harness-openai-test--complete
+     harness-openai-test-deepseek-endpoint
+     '(:model "testdeepseek:deepseek-flash" :thinking "high"
+       :tools ((:name "echo"))
+       :messages ((:role user :content ((:type "text" :text "go")))
+                  (:role assistant :content ((:type "thinking" :text "first thought")
+                                             (:type "thinking" :text "second thought")
+                                             (:type "text" :text "checking")
+                                             (:type "tool_use" :id "call_1" :name "echo" :input (:value "x"))))
+                  (:role tool :content ((:type "tool_result" :tool_use_id "call_1" :content "x!")))
+                  (:role assistant :content ((:type "tool_use" :id "call_2" :name "echo" :input nil))))))
+    (let* ((msgs (plist-get (harness-openai-test--last-request-json) :messages))
+           (first (nth 1 msgs)) (second (nth 3 msgs)))
+      (should (equal "first thought\n\nsecond thought" (plist-get first :reasoning_content)))
+      (should (equal "checking" (plist-get first :content)))
+      (should (equal "call_1" (harness-plist-get-in (car (plist-get first :tool_calls)) '(:id))))
+      ;; A turn whose thinking is gone still carries the key, empty.
+      (should (equal "" (plist-get second :reasoning_content)))
+      (should (equal "call_2" (harness-plist-get-in (car (plist-get second :tool_calls)) '(:id)))))
+    ;; Other dialects drop thinking as before.
+    (let* ((msgs (harness-openai--messages
+                  '(:messages ((:role assistant :content ((:type "thinking" :text "hmm")
+                                                           (:type "text" :text "ok")))))
+                  harness-openai-test-endpoint)))
+      (should-not (plist-get (car msgs) :reasoning_content)))))
+
 ;;;; Event streams
+
+(ert-deftest harness-provider-openai-deepseek-reasoning-content-streams ()
+  ;; DeepSeek streams its chain of thought as `reasoning_content'; the
+  ;; agent records it as thinking, which the next request replays.
+  (harness-openai-test-with-fake
+      `(("chat/completions"
+         . (:chunks (,(harness-openai-test--sse
+                      '(:choices ((:index 0 :delta (:reasoning_content "weigh") :finish_reason nil)))
+                      '(:choices ((:index 0 :delta (:reasoning_content " it") :finish_reason nil)))
+                      '(:choices ((:index 0 :delta (:content "done") :finish_reason "stop")))
+                      "[DONE]")))))
+    (let* ((events (car (harness-openai-test--complete
+                         harness-openai-test-deepseek-endpoint
+                         '(:model "testdeepseek:deepseek-flash" :thinking "high"
+                           :messages ((:role user :content ((:type "text" :text "go"))))))))
+           (thought (mapconcat (lambda (e) (plist-get e :delta))
+                               (cl-remove-if-not (lambda (e) (eq (plist-get e :type) 'thinking)) events)
+                               "")))
+      (should (equal '(start thinking thinking text done) (harness-openai-test--types events)))
+      (should (equal "weigh it" thought)))))
 
 (ert-deftest harness-provider-openai-deepseek-usage-splits-cache-tokens ()
   ;; DeepSeek's prompt_tokens includes cached tokens, which are billed

@@ -567,11 +567,17 @@ The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
 OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
 harness-provider-openai.el, which splits DeepSeek's cached input out of
 `prompt_tokens` (its `:input` bills the cache misses, `:cache-read` the
-hits) and sends the reasoning efforts DeepSeek accepts, and
-`harness-deepseek-*` adds registration and prices.  The provider is
-created only while a key is found (`harness-deepseek-api-key`,
-DEEPSEEK_API_KEY, or auth-source), so nothing uncallable is listed; see
-`harness-deepseek-always-register`.  DeepSeek bills peak hours
+hits), sends the reasoning efforts DeepSeek accepts, and rebuilds
+`reasoning_content` on assistant messages from their recorded thinking
+(empty when there is none).  DeepSeek's thinking mode, on by default,
+rejects a tool-using history whose assistant messages omit that field,
+so the whole conversation goes back to it, not just the model's own
+call; the pass-back is gated on this flavor, and OpenAI and OpenRouter
+still drop thinking.  `harness-deepseek-*` adds registration and prices.
+The provider is created only while a key is found
+(`harness-deepseek-api-key`, DEEPSEEK_API_KEY, or auth-source), so
+nothing uncallable is listed; see `harness-deepseek-always-register`.
+DeepSeek bills peak hours
 (01:00-04:00 and 06:00-10:00 UTC, Monday to Friday, minus Chinese public
 holidays) at double the off-peak rate, so the catalogue carries
 `:pricing' (off-peak) and `:peak-pricing' and the model's

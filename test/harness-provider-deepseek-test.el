@@ -235,5 +235,61 @@
       (harness-provider-unregister 'deepseek)
       (setq harness-deepseek--registered nil))))
 
+(defun harness-deepseek-test--deltas (events type)
+  "Concatenate the TYPE deltas (`text' or `thinking') in EVENTS."
+  (mapconcat (lambda (e) (if (eq (plist-get e :type) type) (plist-get e :delta) "")) events ""))
+
+(ert-deftest harness-deepseek-integration-tool-round-trip ()
+  ;; DeepSeek's thinking mode wants the reasoning of the tool-calling turn
+  ;; back on the next request; without it, the API answers 400.
+  :tags '(integration)
+  (harness-test-skip-unless-integration)
+  (skip-unless (getenv "DEEPSEEK_API_KEY"))
+  (let ((harness-deepseek-api-key nil) (auth-sources nil))
+    (unwind-protect
+        (progn
+          (harness-deepseek-refresh)
+          (let* ((tools '((:name "echo" :description "Echo VALUE back through the tool runtime."
+                           :schema (:type "object" :properties (:value (:type "string" :description "Text to echo"))
+                                    :required ("value")))))
+                 (user (list :role 'user
+                             :content (list (list :type "text" :text "Call the echo tool with the value \"marble\". Then report the tool's exact output back to me."))))
+                 (run (lambda (messages)
+                        (let ((events nil))
+                          (harness-call 'provider/complete
+                                        (list :model "deepseek:deepseek-flash" :tools tools :max-tokens 2000
+                                              :messages messages
+                                              :on-event (lambda (e) (push e events))))
+                          (harness-test-wait (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type))))
+                                             120 "deepseek done")
+                          (reverse events))))
+                 (first (funcall run (list user)))
+                 (call (cl-find 'tool-call first :key (lambda (e) (plist-get e :type)))))
+            (should call)
+            (should (equal "marble" (plist-get (plist-get call :input) :value)))
+            (should (equal '(:type done :stop-reason tool-use) (car (last first))))
+            ;; Replay the assistant turn the way `session/messages' does:
+            ;; thinking, text and the call in one message.  If the thinking
+            ;; did not stream back as `reasoning_content', this 400s.
+            (let* ((assistant (list :role 'assistant
+                                    :content (append
+                                              (let ((thought (harness-deepseek-test--deltas first 'thinking)))
+                                                (unless (string-empty-p thought)
+                                                  (list (list :type "thinking" :text thought))))
+                                              (let ((text (harness-deepseek-test--deltas first 'text)))
+                                                (unless (string-empty-p text)
+                                                  (list (list :type "text" :text text))))
+                                              (list (list :type "tool_use" :id (plist-get call :id)
+                                                          :name "echo" :input (plist-get call :input))))))
+                   (result (list :role 'tool
+                                 :content (list (list :type "tool_result" :tool_use_id (plist-get call :id)
+                                                      :content "ZEBRA-4242"))))
+                   (second (funcall run (list user assistant result))))
+              (should (equal '(:type done :stop-reason end-turn) (car (last second))))
+              (should (string-match-p "ZEBRA-4242"
+                                      (harness-deepseek-test--deltas second 'text))))))
+      (harness-provider-unregister 'deepseek)
+      (setq harness-deepseek--registered nil))))
+
 (provide 'harness-provider-deepseek-test)
 ;;; harness-provider-deepseek-test.el ends here

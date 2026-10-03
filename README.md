@@ -424,6 +424,12 @@ peak window, the session is told once, as a hint, and a
 when they change, and extend `harness-deepseek-off-peak-dates` each year
 with the Chinese public holiday calendar.
 
+DeepSeek's thinking mode (on by default) requires the reasoning of
+earlier assistant turns to come back as `reasoning_content` once a
+request carries tools, so the provider replays the recorded thinking of
+each assistant message, empty when it has none; OpenAI and OpenRouter
+are unaffected and still drop thinking.
+
 ### AWS Bedrock
 
 `bedrock:` models run on AWS Bedrock and authenticate with an AWS
