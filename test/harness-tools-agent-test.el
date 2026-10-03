@@ -296,6 +296,8 @@ option, is an error saying what to fix, and asks nothing."
         (should (string-match-p (concat "Session: " sid) text))
         (should (string-match-p "Name: main work" text))
         (should (string-match-p "Model: demo:scripted" text))
+        (should (string-match-p (concat "^Temporary directory: " (regexp-quote (harness-call 'session/tmp-dir sid)) "$")
+                                text))
         (should (string-match-p "Permission mode: ask" text))
         (should (string-match-p "^Non-interactive: off$" text))
         (should (string-match-p "Status: idle" text))

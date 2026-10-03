@@ -1071,6 +1071,79 @@ for a request without a session record."
       ;; Debounced saves of these sessions must not outlive the store.
       (clrhash harness-sessions))))
 
+(ert-deftest harness-perms-session-tmp-dir-is-allowed-from-the-start ()
+  "A session's own temporary directory is one of its roots: listed after
+the working directory, never revocable, reachable without a prompt, and
+made again when it went missing."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (dolist (m '(store project config provider session tools perms))
+      (harness-test-load-module m))
+    (clrhash harness-sessions)
+    (clrhash harness-perms--waiting)
+    (clrhash harness-perms--allowed-dirs)
+    (unwind-protect
+        (let* ((harness-allowed-directories nil)
+               (sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode 'ask) :id))
+               (tmp (harness-call 'session/tmp-dir sid))
+               (dirs (harness-call 'permission/dirs sid)))
+          (should tmp)
+          (should (equal '(cwd tmp outputs) (mapcar (lambda (e) (plist-get e :source)) dirs)))
+          (should (equal tmp (plist-get (nth 1 dirs) :dir)))
+          (should-not (plist-get (nth 1 dirs) :revocable))
+          (should (string-match-p "temporary directory"
+                                  (harness-error-message (should-error (harness-call 'permission/revoke-dir sid tmp)))))
+          ;; A read there is allowed in ask mode with nothing asked.
+          (harness-define-tool "t_read" :label "Read" :kind 'read :paths (lambda (in) (list (plist-get in :path)))
+                               :handler (lambda (in _ctx) (format "read %s" (plist-get in :path))))
+          (let ((r (harness-test-await (harness-call 'tools/execute sid (list :id "c1" :name "t_read"
+                                                                              :input (list :path (concat tmp "notes.md")))))))
+            (should-not (plist-get r :is-error)))
+          (should-not (harness-call 'session/pending sid))
+          ;; Asking for it grants nothing: it is already there.
+          (let ((r (harness-test-await (harness-call 'tools/execute sid
+                                                     (list :id "c2" :name "request_directory_access"
+                                                           :input (list :path tmp :reason "scratch"))))))
+            (should (string-match-p "this session's own temporary directory" (plist-get r :content))))
+          (should-not (plist-get (harness-call 'session/get sid) :allowed-dirs))
+          ;; Gone (a reboot empties /tmp): the roots bring it back.
+          (delete-directory tmp t)
+          (should (member tmp (harness-call 'permission/allowed-dirs sid)))
+          (should (file-directory-p tmp)))
+      (clrhash harness-sessions))))
+
+(ert-deftest harness-perms-denied-scratch-files-go-to-the-tmp-dir ()
+  "A session the jail refuses a scratch file elsewhere in /tmp is sent
+to its own temporary directory, so it carries on rather than stops."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (dolist (m '(store project config provider session tools perms))
+      (harness-test-load-module m))
+    (clrhash harness-sessions)
+    (clrhash harness-perms--allowed-dirs)
+    (unwind-protect
+        (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode 'yolo
+                                             :non-interactive t)
+                               :id))
+               (tmp (harness-call 'session/tmp-dir sid))
+               (run (lambda (tool input)
+                      (plist-get (harness-test-await (harness-call 'tools/execute sid (list :id (harness-short-id)
+                                                                                           :name tool :input input)))
+                                 :content)))
+               (scratch (expand-file-name "scratch.txt" temporary-file-directory)))
+          (harness-define-tool "t_write" :label "Write" :kind 'write :paths (lambda (in) (list (plist-get in :path)))
+                               :handler (lambda (in _ctx) (format "wrote %s" (plist-get in :path))))
+          (let ((denied (funcall run "t_write" (list :path scratch))))
+            (should (string-match-p "\\`Denied: " denied))
+            (should (string-search (concat "use your own temporary directory, " (abbreviate-file-name tmp)) denied)))
+          (should (string-search "use your own temporary directory"
+                                 (funcall run "request_directory_access"
+                                          (list :path temporary-file-directory :reason "scratch"))))
+          ;; Only for /tmp: elsewhere the agent may really need that file.
+          (should-not (string-search "temporary directory" (funcall run "t_write" (list :path "/etc/harness-x"))))
+          (should (equal (concat "wrote " tmp "x") (funcall run "t_write" (list :path (concat tmp "x"))))))
+      (clrhash harness-sessions))))
+
 (ert-deftest harness-perms-describe-and-reload ()
   (harness-perms-test--setup)
   (harness-define-tool "t_titled" :label "Run" :kind 'exec :subject (lambda (in) (plist-get in :cmd)) :handler #'ignore)

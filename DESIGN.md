@@ -140,7 +140,7 @@ If a name is not provided when a session is made (not mandatory) then an agent w
 Tool calls should have a permission hook which is responsible for performing some process (be it asking the user, automatically approving due to the tool, or a more advanced decision) to determine if the tool is allowed to run or not. Using this many advanced permission systems can be created. 
 
 ### Directory Jail
-By default session should not be given permission to files outside of the current directory. Enforce this with read, write, search, ect commands. If a session wants to add another directory to its allow list the user must give permission. If an automatic tool call deny is required provide constructive information to the agent so it succeeds and doesn't require user intervention to use the correct directories, work with what you have.
+By default session should not be given permission to files outside of the current directory. Enforce this with read, write, search, ect commands. Every session also gets its own directory in tmp, which is on its allow list from the start, so scratch files never need permission nor land in the project. If a session wants to add another directory to its allow list the user must give permission. If an automatic tool call deny is required provide constructive information to the agent so it succeeds and doesn't require user intervention to use the correct directories, work with what you have.
 
 ### Auto Mode
 User a cheap LLM to determine if a tool call is allowed. Give the details of the tool call (description as seen by agent) as well as the parameters and any other supporting context. The cheap LLM outputs a decision along with a reason.

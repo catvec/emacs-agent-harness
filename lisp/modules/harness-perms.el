@@ -241,18 +241,35 @@ restart; without a session module they live in
            (gethash (plist-get session :id) harness-perms--allowed-dirs))
    :test #'equal :from-end t))
 
+(defun harness-perms--tmp-dir (session)
+  "Return SESSION's own temporary directory, made if missing, or nil.
+The session module hands it out (`session/tmp-dir'), and only when it
+is the user's own; without that module, or for a remote session, there
+is none."
+  (let ((id (plist-get session :id)))
+    (and id (harness-method-exists-p 'session/tmp-dir)
+         (condition-case err
+             (harness-call 'session/tmp-dir id)
+           (error (harness-log 'debug "perms: no temporary directory for %s: %s"
+                               id (harness-error-message err))
+                  nil)))))
+
 (defun harness-perms-dirs (session)
   "Return the directories SESSION may touch as (:dir DIR :source SOURCE).
-SOURCE is `cwd', `worktree', `config' (`harness-allowed-directories'),
-`session' (granted at runtime) or `outputs'."
+SOURCE is `cwd', `worktree', `tmp' (the session's own temporary
+directory), `config' (`harness-allowed-directories'), `session'
+\(granted at runtime) or `outputs'."
   (let* ((cwd (or (plist-get session :cwd) default-directory))
          (host (plist-get session :host))
          (expand (lambda (d) (harness-perms--with-host
                               (file-name-as-directory (expand-file-name d cwd)) host)))
          (entry (lambda (source) (lambda (d) (list :dir (funcall expand d) :source source))))
+         (tmp (harness-perms--tmp-dir session))
          (entries (append (list (funcall (funcall entry 'cwd) cwd))
                           (and (plist-get session :worktree)
                                (list (funcall (funcall entry 'worktree) (plist-get session :worktree))))
+                          ;; Always local: a remote session has none.
+                          (and tmp (list (list :dir tmp :source 'tmp)))
                           (mapcar (funcall entry 'config)
                                   (harness-perms--config 'harness-allowed-directories session))
                           (mapcar (funcall entry 'session) (harness-perms--granted session))
@@ -263,8 +280,9 @@ SOURCE is `cwd', `worktree', `config' (`harness-allowed-directories'),
 
 (defun harness-perms-roots (session)
   "Return the directories SESSION may touch.
-That is its cwd, its worktree, `harness-allowed-directories', the
-directories granted at runtime and the tool output directory."
+That is its cwd, its worktree, its own temporary directory,
+`harness-allowed-directories', the directories granted at runtime and
+the tool output directory."
   (mapcar (lambda (e) (plist-get e :dir)) (harness-perms-dirs session)))
 
 (defun harness-perms--outside (paths roots)
@@ -284,6 +302,20 @@ so the prompt has to name the directory a grant really opens."
       (if (file-directory-p path)
           (file-name-as-directory path)
         (or (file-name-directory path) path)))))
+
+(defun harness-perms--scratch-hint (session path)
+  "Return a sentence sending SESSION's scratch files at PATH to its own dir.
+When PATH lies in the system's temporary directory but outside the
+session's own temporary directory, the agent most likely wanted a
+scratch file, which belongs in its own directory, already allowed, so
+it carries on there instead of stopping.  Otherwise return \"\"."
+  (let ((tmp (and (not (file-remote-p path)) (harness-perms--tmp-dir session))))
+    (if (and tmp
+             (harness-perms--within-p temporary-file-directory path)
+             (not (harness-perms--within-p tmp path)))
+        (format " For scratch files use your own temporary directory, %s: it is already allowed, bash included."
+                (abbreviate-file-name tmp))
+      "")))
 
 (defun harness-perms--jail (decision next request)
   "Pass REQUEST on when its paths lie inside the session's roots.
@@ -306,9 +338,10 @@ for this call only."
           (funcall next
                    (list :behavior 'deny :final t
                          :reason (format "%s is outside the allowed directories" bad)
-                         :hint (format "Allowed roots: %s. Work inside them, or ask the user to grant access to %s with the allow-dir command."
+                         :hint (format "Allowed roots: %s. Work inside them, or ask the user to grant access to %s with the allow-dir command.%s"
                                        (mapconcat #'abbreviate-file-name roots ", ")
-                                       (abbreviate-file-name (harness-perms--dir-of bad)))))))))))
+                                       (abbreviate-file-name (harness-perms--dir-of bad))
+                                       (harness-perms--scratch-hint session bad))))))))))
 
 (defun harness-perms--pend-dir (request next dir reason options &rest waiting)
   "Ask the user of REQUEST's session for access to DIR.
@@ -433,9 +466,10 @@ user, who grants the directory or not."
                                             (if (harness-perms--non-interactive-p session)
                                                 "the session is non-interactive and the user is away"
                                               "no user is available"))
-                            :hint (format "Work inside the allowed directories (%s). If the task cannot be done without %s, finish what you can and say so in your answer; the user can grant it with M-x harness-directories."
+                            :hint (format "Work inside the allowed directories (%s). If the task cannot be done without %s, finish what you can and say so in your answer; the user can grant it with M-x harness-directories.%s"
                                           (mapconcat #'abbreviate-file-name roots ", ")
-                                          (abbreviate-file-name dir)))))
+                                          (abbreviate-file-name dir)
+                                          (harness-perms--scratch-hint session dir)))))
        (t
         ;; The prompt shows the directory and the agent's reason; the
         ;; input keeps only the path so the reason is not shown twice.
@@ -467,6 +501,7 @@ included, grants it to the session."
   (pcase source
     ('cwd "the working directory")
     ('worktree "the worktree")
+    ('tmp "this session's own temporary directory")
     ('config "allowed for every session")
     ('session "granted to this session")
     ('outputs "the tool output directory")
@@ -982,9 +1017,10 @@ session.  Return the session's effective roots."
 (harness-defmethod permission/revoke-dir (session-id dir)
   "Withdraw DIR from SESSION-ID.
 Removes a session grant, or else the entry in the global
-`harness-allowed-directories'.  The cwd, the worktree and directories
-set in a project's .dir-locals.el cannot be revoked here.  Return the
-session's effective roots."
+`harness-allowed-directories'.  The cwd, the worktree, the session's
+own temporary directory and directories set in a project's
+.dir-locals.el cannot be revoked here.  Return the session's effective
+roots."
   (let* ((session (harness-perms--session session-id))
          (dir (harness-perms--expand-dir session dir))
          (granted (harness-perms--granted session))
@@ -997,7 +1033,7 @@ session's effective roots."
        'harness-allowed-directories
        (cl-remove-if (lambda (d) (equal dir (harness-perms--expand-dir session d))) global)))
      (t (signal 'harness-error
-                (list (format "%s is not a grant (it comes from the cwd, the worktree or .dir-locals.el)"
+                (list (format "%s is not a grant (it comes from the cwd, the worktree, the session's temporary directory or .dir-locals.el)"
                               (abbreviate-file-name dir))))))
     (harness-emit 'permission/dir-revoked session-id dir)
     (harness-perms-roots (harness-perms--session session-id))))
