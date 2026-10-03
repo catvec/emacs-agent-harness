@@ -1685,7 +1685,9 @@ listener.
 default; `harness-connect-remote` swaps it, and an empty address swaps
 it back to this Emacs's own harness; `harness-ui-connected-hook`
 runs after every connect, where the chat reopens the closed sessions its
-buffers show, as a harness that just started has them all closed), the face set
+buffers showed open, as a harness that just started has them all closed;
+one a buffer showed inactive, or opened as the UI connected, stays as it
+is until a message resumes it), the face set
 (`harness-user-face`, `harness-agent-face`, `harness-tool-face`,
 `harness-thinking-face`, `harness-hint-face`, warning ramps), the
 session cache updated from `_harness/session` updates, the tool cache

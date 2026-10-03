@@ -53,7 +53,7 @@ re-detected before BODY and restored afterwards."
         ;; Network stays on by default.
         (should-not (member "--unshare-net" cmd))
         ;; The real home is never bound.
-        (should-not (member (directory-file-name (getenv "HOME")) cmd))
+        (should-not (member (harness-test-real-home) cmd))
         ;; The command follows the separator untouched.
         (should (equal command (cdr (member "--" cmd)))))
       ;; Options: network off and extra writable/readable directories.
@@ -149,7 +149,7 @@ re-detected before BODY and restored afterwards."
   (harness-sandbox-detect)
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (let* ((cwd (harness-test-temp-dir))
-         (home (getenv "HOME"))
+         (home (harness-test-real-home))
          (harness-sandbox-policy 'required)
          (cmd (harness-call 'sandbox/wrap cwd
                             (list "sh" "-c" (format "echo HOME=$HOME; ls $HOME; ls %s 2>&1; touch outside-test 2>&1 || true; echo ok" home))))

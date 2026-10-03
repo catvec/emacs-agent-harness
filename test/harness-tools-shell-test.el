@@ -114,7 +114,8 @@
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (harness-tools-shell-test-in-dir
     (let* ((harness-sandbox-policy 'required)
-           (r (harness-tools-shell-test--call "bash" :command (format "echo HOME=$HOME; ls %s >/dev/null 2>&1 && echo visible || echo hidden" (getenv "HOME")))))
+           (r (harness-tools-shell-test--call "bash" :command (format "echo HOME=$HOME; ls %s >/dev/null 2>&1 && echo visible || echo hidden"
+                                                                     (shell-quote-argument (harness-test-real-home))))))
       (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
         (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
       (should-not (plist-get r :is-error))
@@ -123,22 +124,26 @@
       (should (plist-get (plist-get r :meta) :sandboxed)))))
 
 (ert-deftest harness-tools-shell-bash-timeout-kills-the-process-tree ()
-  "A timed-out command takes its children with it."
+  "A timed-out command takes its children with it.
+A child that outlived it would leave a file behind once its sleep ends.
+That holds wherever the command ran: in the sandbox's pid namespace the
+pid it could print is not one this Emacs can signal."
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir
-    (let* ((pidfile (expand-file-name "child.pid" root))
+    (let* ((started (expand-file-name "started" root))
+           (survived (expand-file-name "survived" root))
+           (start (float-time))
            (r (harness-tools-shell-test--call
                "bash"
-               :command (format "sleep 300 & echo $! > %s; wait" (shell-quote-argument pidfile))
-               :timeout 2)))
+               :command (format "(touch %s; sleep 3; touch %s) & wait"
+                                (shell-quote-argument started) (shell-quote-argument survived))
+               :timeout 1)))
       (should (eq 'timeout (plist-get (plist-get r :meta) :exit)))
-      (should (file-exists-p pidfile))
-      (let ((child (string-to-number (string-trim (with-temp-buffer (insert-file-contents pidfile) (buffer-string))))))
-        (should (> child 0))
-        (let ((deadline (+ (float-time) 5)))
-          (while (and (eql 0 (signal-process child 0)) (< (float-time) deadline))
-            (sleep-for 0.1)))
-        (should-not (eql 0 (signal-process child 0)))))))
+      (should (file-exists-p started))
+      ;; Well past the time the child would have left its file.
+      (while (< (float-time) (+ start 5))
+        (accept-process-output nil 0.1))
+      (should-not (file-exists-p survived)))))
 
 ;;;; elisp
 
