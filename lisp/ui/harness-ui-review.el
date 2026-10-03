@@ -24,9 +24,12 @@
 ;;
 ;; Under the banner the compose box writes the feedback that sends the
 ;; task back: C-c C-c takes what the box holds to the task's session,
-;; which works on it again and comes back for review
-;; (`harness-chat-send-function' in the session,
-;; `harness-ui-report-compose-functions' in the report).  Its keys,
+;; which works on it again and comes back for review.  The session's box
+;; needs nothing of its own: the harness takes any message to the
+;; session of a task in review for the feedback that sends it back,
+;; whoever wrote it (`harness-tasks--on-message').  The report's box
+;; sends it back itself (`harness-ui-review--send' through
+;; `harness-ui-report-compose-functions').  Its keys,
 ;; C-c C-v to verify and C-c C-x to send back, are those of
 ;; `harness-ui-review-minor-mode', on only while the banner shows: the
 ;; rest of the time the buffer's own keys stand, C-c C-v attaching the
@@ -138,7 +141,9 @@ its report popout, while it waits for review."
   "Send the work of the task this buffer shows back: say what should change.
 Point goes to the compose box, whose C-c C-c sends what you write there
 back to the task.  In a task's session or in its report popout, while
-it waits for review."
+it waits for review.  Any message sent to the session while its task
+waits for review sends the task back with it as the feedback; this
+takes you to the box."
   (interactive)
   (harness-ui-review--current-task)
   ;; A report's box asks for the feedback already; a session's says so now.
@@ -154,8 +159,10 @@ it waits for review."
 
 (defun harness-ui-review--send (text attachments)
   "Send the task this buffer shows back, TEXT and ATTACHMENTS its feedback.
-What the compose box sends while the banner shows: a session's through
-`harness-chat-send-function', a report popout's as the box's SUBMIT."
+The report popout's box under the banner sends this way
+\(`harness-ui-report-compose-functions'); a session's box is the
+session's own, the harness taking any message to the task's session for
+the feedback that sends it back (`harness-tasks--on-message')."
   (let ((task (harness-ui-review--current-task)))
     (if (and (harness-string-blank-p text) (null attachments))
         (user-error "Sending the work back needs feedback: type what should change")
@@ -334,19 +341,21 @@ The board's Ready for review has it: a panel's own background stays out."
   "Return the review banner when this session's task waits for review.
 On `harness-chat-panel-functions': nil for a session that is no task's,
 one that is not in review, or before the task is known.  While it
-shows, the compose box takes feedback (`harness-chat-send-function')
-and the banner's keys are on (`harness-ui-review-minor-mode')."
+shows, the banner's keys are on (`harness-ui-review-minor-mode'); the
+box is the session's own, since the harness takes any message to the
+task's session for the feedback that sends it back
+\(`harness-tasks--on-message')."
   (let* ((sid harness-ui-session-id)
          (task (harness-ui-review--task sid))
          (review (harness-ui-review--reviewing-p task)))
     (harness-ui-review--keys review)
+    ;; A buffer drawn by an earlier version may still have its box routed
+    ;; to `harness-ui-review--send'; the harness takes the message now.
+    (when (eq harness-chat-send-function #'harness-ui-review--send)
+      (kill-local-variable 'harness-chat-send-function))
     (if review
-        (progn
-          (setq-local harness-chat-send-function #'harness-ui-review--send)
-          (harness-ui-review--face (harness-ui-review--banner task (harness-ui-review--report task))))
-      ;; Not in review: the box and the keys are the session's own again.
-      (when (eq harness-chat-send-function #'harness-ui-review--send)
-        (setq-local harness-chat-send-function nil))
+        (harness-ui-review--face (harness-ui-review--banner task (harness-ui-review--report task)))
+      ;; Not in review: the box asks for a message again, not feedback.
       (when (equal harness-chat-placeholder harness-ui-review--feedback-hint)
         (kill-local-variable 'harness-chat-placeholder))
       nil)))

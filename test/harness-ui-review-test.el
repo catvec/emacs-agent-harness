@@ -61,6 +61,15 @@
 (declare-function harness-ui-review--on-event "harness-ui-review")
 (declare-function harness-chat-buffer "harness-ui-chat")
 (declare-function harness-compose-text "harness-ui-compose")
+(defvar harness-chat-placeholder)
+(defvar harness-chat-send-function)
+(defvar harness-ui-review--feedback-hint)
+(defvar harness-tasks--reject-message)
+(defvar harness-ui-session-id)
+(declare-function harness-acp--normalise "harness-acp")
+(declare-function harness-chat-send "harness-ui-chat")
+(declare-function harness-ui-review--chat-buffer "harness-ui-review")
+(declare-function harness-ui-review--on-event "harness-ui-review")
 
 (defconst harness-ui-review-test--image
   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"180\"><rect width=\"320\" height=\"180\" fill=\"#1f3a22\"/></svg>\n"
@@ -182,27 +191,71 @@ review with a report, an image among its evidence; BODY gets `board',
         (should-not (key-binding (kbd "C-c C-x")))))))
 
 (ert-deftest harness-ui-review-banner-sends-back-with-the-box ()
-  "The banner's box writes the feedback: C-c C-c sends the task back to work."
+  "The banner's box writes the feedback: C-c C-c sends the task back to work.
+The box sends as it always does: the harness takes a message to a task
+in review for the feedback that sends it back, [Send back] pressed or
+not.  The banner goes as soon as the task is back at work."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
       (with-current-buffer chat
+        ;; [Send back] says what the box is for; the box itself is the chat's.
+        (harness-ui-review-reject)
+        (should (equal harness-ui-review--feedback-hint harness-chat-placeholder))
+        (should-not harness-chat-send-function)
+        ;; An empty box sends nothing.
+        (should-error (harness-chat-send) :type 'user-error)
+        ;; A slower turn, so the test sees the session at work on the feedback.
+        (setq harness-provider-demo--delay 0.3)
         (goto-char harness-compose-end)
         (insert "it still flakes on CI")
         (call-interactively #'harness-chat-send))
-      ;; The feedback reaches the task; the session works on it and, this
-      ;; fixture's script handing in again, the task waits for review anew.
+      ;; The feedback reaches the task, which is at work again: the banner
+      ;; goes, and the box asks for a message again.
       (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :feedback))
                          10 "the feedback to reach the task")
+      (harness-test-wait (lambda () (not (string-match-p "Ready for review" (harness-ui-review-test--text chat))))
+                         5 "the banner to go while the session works")
+      (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+      (with-current-buffer chat (should-not harness-chat-placeholder))
       (should (equal '("it still flakes on CI")
                      (mapcar (lambda (round) (plist-get round :text))
                              (plist-get (harness-call 'task/get id) :feedback))))
+      ;; The agent got it as the user sending the work back.
+      (harness-test-wait (lambda () (harness-ui-review-test--last-user sid "it still flakes on CI"))
+                         5 "the feedback in the transcript")
+      (should (string-prefix-p harness-tasks--reject-message
+                               (harness-ui-review-test--last-user sid "it still flakes on CI")))
+      ;; This fixture's script hands in again: the task waits for review anew.
       (harness-test-wait (lambda () (eq 'review (plist-get (harness-call 'task/get id) :state)))
                          10 "the task to come back for review")
+      (harness-ui-review-test--wait-text chat "Ready for review"))))
+
+(defun harness-ui-review-test--last-user (sid text)
+  "The content of SID's last user message when it ends in TEXT, else nil."
+  (let ((content (plist-get (car (last (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                                         (harness-call 'session/nodes sid))))
+                            :content)))
+    (and (stringp content) (string-suffix-p text content) content)))
+
+(ert-deftest harness-ui-review-banner-follows-events-from-another-process ()
+  "The banner follows a `task/changed' whose session id is a string of its own.
+From a harness in its own process every event is parsed afresh, so the
+id it carries is never the very string the chat buffer holds: the buffer
+is found all the same, and the banner goes once the task leaves review."
+  (harness-ui-review-test-with
+    (let* ((chat (harness-ui-review-test--open-session sid))
+           (fresh (copy-sequence sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
-      ;; An empty box cannot send it back.
-      (with-current-buffer chat
-        (should-error (harness-ui-review--send "  " nil) :type 'user-error)))))
+      (should-not (eq fresh (buffer-local-value 'harness-ui-session-id chat)))
+      (should (eq chat (harness-ui-review--chat-buffer fresh)))
+      ;; The task goes back to work elsewhere; the news arrives as over TCP.
+      (let ((task (copy-sequence (harness-acp--normalise (harness-call 'task/get id)))))
+        (setq task (plist-put task :session fresh))
+        (setq task (plist-put task :state "active"))
+        (setq task (plist-put task :column "active"))
+        (harness-ui-review--on-event "task/changed" (list task)))
+      (should-not (string-match-p "Ready for review" (harness-ui-review-test--text chat))))))
 
 (ert-deftest harness-ui-review-report-popout ()
   "[Report], and the board's item at point, show the report: the summary and the evidence."

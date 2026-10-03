@@ -2076,7 +2076,9 @@ the box held, after it is emptied.  It sends them wherever they belong
 instead of prompting the session, for a module showing something of its
 own in the buffer (see `harness-chat-panel-functions').  An answer to a
 waiting question still goes to the question, and C-c C-q queues and
-C-c C-k cancels as usual.")
+C-c C-k cancels as usual.  A task in review is no such thing: the
+harness takes any message to its session for the feedback that sends it
+back (`harness-tasks--on-message').")
 
 (defvar harness-chat-send-functions nil
   "Functions run with the TEXT and ATTACHMENTS of each message sent.

@@ -1753,6 +1753,101 @@ With nil it starts at the level the project configures instead."
         (should (= 2 (length (plist-get (harness-tasks-test-task id) :feedback))))
         (should (= 3 (length (harness-tasks-test-user-texts sid))))))))
 
+(ert-deftest harness-tasks-review-any-message-sends-it-back ()
+  "A message to the session of a task in review sends it back, as `task/reject' does.
+Whoever wrote it -- the user in the session's chat, without [Send back]
+(`agent/prompt'), an agent's task_control message (`task/prompt'),
+another session's agent -- the task is active at once, the round of
+feedback is kept and the agent gets the message opened by the reject
+text.  The harness's own messages do not count."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session))
+             (rounds (lambda () (mapcar (lambda (round) (plist-get round :text))
+                                        (plist-get (harness-tasks-test-task id) :feedback))))
+             (last-user (lambda () (car (last (harness-tasks-test-user-nodes sid))))))
+        (harness-tasks-test-wait-state id 'review)
+        ;; Typed in the session's own chat.
+        (harness-call 'agent/prompt sid "  Nested quotes still break.  ")
+        ;; Sent back at once: the board and the banner need not wait for the turn.
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'active (plist-get task :state)))
+          (should (eq 'active (plist-get task :column))))
+        (should (equal '("Nested quotes still break.") (funcall rounds)))
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal (harness-tasks--reject-text "Nested quotes still break.")
+                       (plist-get (funcall last-user) :content)))
+        (should-not (harness-node-sender (funcall last-user)))
+        ;; A message through `task/prompt', as task_control sends it.
+        (harness-call 'task/prompt id "And the docs.")
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal '("Nested quotes still break." "And the docs.") (funcall rounds)))
+        (should (equal (harness-tasks--reject-text "And the docs.") (plist-get (funcall last-user) :content)))
+        ;; Another session's agent, which stays the sender.
+        (let ((from (harness-sender-session (list :id "s-other" :name "orchestrator"))))
+          (harness-call 'agent/prompt sid "Ship it." (list :from from))
+          (should (eq 'active (harness-tasks-test-state id)))
+          (harness-tasks-test-wait-state id 'review)
+          (should (equal "Ship it." (car (last (funcall rounds)))))
+          (should (equal (harness-tasks--reject-text "Ship it.") (plist-get (funcall last-user) :content)))
+          (should (equal from (harness-node-sender (funcall last-user)))))
+        ;; The harness's own message is not feedback: no round, as it was sent.
+        (harness-call 'agent/prompt sid "Carry on." (harness-tasks--from-harness))
+        (harness-tasks-test-wait-state id 'review)
+        (should (= 3 (length (funcall rounds))))
+        (should (equal "Carry on." (plist-get (funcall last-user) :content)))
+        ;; Sent back three times, then accepted as any review.
+        (harness-call 'task/verify id)
+        (should (eq 'done (harness-tasks-test-state id)))
+        ;; Done, a message is a follow-up again, not feedback.
+        (harness-call 'agent/prompt sid "One more thing.")
+        (harness-tasks-test-wait-state id 'review)
+        (should (= 3 (length (funcall rounds))))
+        (should (equal "One more thing." (plist-get (funcall last-user) :content)))))))
+
+(ert-deftest harness-tasks-review-queued-message-sends-it-back ()
+  "A message queued while the task works goes out when it finishes, and sends it back."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo--delay 0.05)
+          (reviews 0))
+      (harness-on 'task/review (lambda (_) (cl-incf reviews)))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (should (harness-call 'agent/running sid))
+        (harness-call 'agent/prompt sid "Also the README." '(:queue t))
+        ;; It waits for review once, goes back to work on the queued
+        ;; message, then waits for review again.
+        (harness-test-wait (lambda () (and (= reviews 2) (eq 'review (harness-tasks-test-state id))))
+                           10 "the task back in review after the queued message")
+        (should (equal '("Also the README.")
+                       (mapcar (lambda (round) (plist-get round :text))
+                               (plist-get (harness-tasks-test-task id) :feedback))))
+        (should (equal (harness-tasks--reject-text "Also the README.")
+                       (car (last (harness-tasks-test-user-texts sid)))))))))
+
+(ert-deftest harness-tasks-review-reject-with-attachments-only ()
+  "Feedback may be attachments alone, a screenshot say, but not nothing."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (shot (expand-file-name "after.png" default-directory)))
+      (with-temp-file shot (insert "not really a png"))
+      (let* ((id (harness-tasks-test-submit "fix the layout"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-tasks-test-wait-state id 'review)
+        (should-error (harness-call 'task/reject id "" nil))
+        (should-error (harness-call 'task/reject id "  " nil))
+        (harness-call 'task/reject id "" (list (list :path shot :mime "image/png" :name "after.png" :size 16)))
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal '("[image]") (mapcar (lambda (round) (plist-get round :text))
+                                            (plist-get (harness-tasks-test-task id) :feedback))))
+        (let ((message (car (last (harness-tasks-test-user-nodes sid)))))
+          (should (string-prefix-p harness-tasks--reject-message (plist-get message :content)))
+          (should (equal '("text" "image") (mapcar (lambda (b) (plist-get b :type)) (plist-get message :blocks)))))))))
+
 (ert-deftest harness-tasks-review-failed-work-is-not-reviewed ()
   "Only work that finished cleanly goes to review; work that stopped needs the user as before."
   (harness-tasks-test-with
