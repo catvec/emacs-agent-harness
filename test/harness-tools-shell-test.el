@@ -114,6 +114,9 @@
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (harness-tools-shell-test-in-dir
     (let* ((harness-sandbox-policy 'required)
+           ;; A distinct sandbox home, so listing the process home stays
+           ;; hidden even when the process is started with HOME under /tmp.
+           (harness-sandbox--home (expand-file-name "sandbox-home" (harness-test-temp-dir)))
            (r (harness-tools-shell-test--call "bash" :command (format "echo HOME=$HOME; ls %s >/dev/null 2>&1 && echo visible || echo hidden" (getenv "HOME")))))
       (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
         (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))

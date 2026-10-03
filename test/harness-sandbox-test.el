@@ -29,6 +29,9 @@ re-detected before BODY and restored afterwards."
   (harness-sandbox-test--setup)
   (let* ((cwd (harness-test-temp-dir))
          (extra (harness-test-temp-dir))
+         ;; The sandbox's own home must differ from the process home, or the
+         ;; "real home is never bound" check below cannot tell them apart.
+         (harness-sandbox--home (expand-file-name "sandbox-home" cwd))
          (harness-sandbox-policy 'preferred)
          (harness-sandbox-backend 'auto)
          (command '("sh" "-c" "true")))
@@ -150,6 +153,9 @@ re-detected before BODY and restored afterwards."
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (let* ((cwd (harness-test-temp-dir))
          (home (getenv "HOME"))
+         ;; A distinct sandbox home, so the real home is a different path even
+         ;; when the process is started with HOME under /tmp.
+         (harness-sandbox--home (expand-file-name "sandbox-home" cwd))
          (harness-sandbox-policy 'required)
          (cmd (harness-call 'sandbox/wrap cwd
                             (list "sh" "-c" (format "echo HOME=$HOME; ls $HOME; ls %s 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
@@ -168,8 +174,9 @@ re-detected before BODY and restored afterwards."
             ;; Nothing from the real home directory shows up: not the
             ;; empty sandbox home, not a listing of the real path.
             (let ((real-entries (directory-files home nil "\\`[^.]" t)))
-              (should real-entries)
-              (should-not (cl-intersection real-entries lines :test #'equal))
+              ;; An empty real home (a temp HOME) has nothing to leak.
+              (when real-entries
+                (should-not (cl-intersection real-entries lines :test #'equal)))
               (should (cl-some (lambda (l) (string-match-p "cannot access\\|No such file" l)) lines)))
             ;; The cwd itself is writable.
             (should (file-exists-p (expand-file-name "outside-test" cwd)))))

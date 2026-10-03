@@ -1543,6 +1543,10 @@ to a waiting question still goes through the question instead."
   ;; the first message sent from it resumes it and the notice goes away.
   (harness-ui-chat-test-with
     (let ((sid (harness-ui-chat-test-session)))
+      ;; The UI reopens the sessions of chat buffers that were open when it
+      ;; connected; wait for that connect to finish, or a buffer opened now
+      ;; would be resumed by it, which is not what this test is about.
+      (harness-test-wait (lambda () (harness-ui-session sid)) 5 "UI connected")
       (harness-call 'session/deactivate sid)
       (harness-open-session sid)
       (let ((buf (harness-chat--buffer-for sid)))
