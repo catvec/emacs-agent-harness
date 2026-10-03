@@ -293,6 +293,11 @@ so several tasks can work in parallel.
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback. With `harness-tasks-require-verification`
   set to nil, tasks complete without review.
+- `m` on a task writes a message to its session without leaving the
+  board; when its session asks a question, `m` answers that instead.
+  The compose box then turns amber, bar and all, and names the session
+  it sends to, so it cannot be taken for the box that writes a new
+  task; `C-g` returns to that one.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `RET` opens the session of the task at point. From that session,

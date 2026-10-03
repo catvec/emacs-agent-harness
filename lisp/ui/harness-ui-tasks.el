@@ -92,6 +92,8 @@ Either way the toggle above the compose box switches it per board."
 (define-icon harness-icon-task-review nil
   `((symbol ,(string #x2691)) (text "review"))
   "Task waiting for your review: a flag." :version "29.1")
+(harness-ui-define-icon harness-icon-message "message" "→" "msg"
+  "A message to the session of an existing task.")
 
 (defconst harness-ui-tasks--columns
   '((needs-input "Requires your input") (review "Ready for review") (active "In progress")
@@ -803,19 +805,29 @@ On `harness-ui-notification-functions': non-nil when it was a task's."
                                                                           harness-ui-tasks-board-map))))
         (setq pos next)))))
 
+(defun harness-ui-tasks--messaging-p ()
+  "Non-nil when the compose box sends to the session of an existing task.
+That is a message, an answer, feedback on a write-up or feedback that
+sends a task back from review: anything but composing a task, new or
+edited."
+  (memq (car harness-ui-tasks--target) '(reply answer refine reject)))
+
 (defun harness-ui-tasks--compose-label ()
   (pcase harness-ui-tasks--target
     (`(edit . ,id) (format "Edit pending task “%s”"
                            (harness-first-line (plist-get (harness-ui-tasks--find id) :prompt) 50)))
-    (`(reply . ,id) (format "Message “%s”"
+    (`(reply . ,id) (format "Message to session “%s”"
                             (let ((task (harness-ui-tasks--find id))) (if task (harness-ui-tasks--title task) id))))
-    (`(answer . ,id) (format "Answer “%s”"
-                             (or (plist-get (plist-get (harness-ui-tasks--pending (harness-ui-tasks--find id)) :payload)
-                                            :question)
-                                 "the question")))
+    (`(answer . ,id) (format "Answer the session's question “%s”"
+                             (harness-first-line
+                              (or (plist-get (plist-get (harness-ui-tasks--pending (harness-ui-tasks--find id)) :payload)
+                                             :question)
+                                  "the question")
+                              60)))
     (`(refine . ,id) (concat "Refine "
                              (harness-ui-tasks--quote
-                              (let ((task (harness-ui-tasks--find id))) (if task (harness-ui-tasks--title task) id)))))
+                              (let ((task (harness-ui-tasks--find id))) (if task (harness-ui-tasks--title task) id)))
+                             " with feedback"))
     (`(reject . ,id) (concat "Send back "
                              (harness-ui-tasks--quote
                               (let ((task (harness-ui-tasks--find id))) (if task (harness-ui-tasks--title task) id)))
@@ -879,13 +891,22 @@ so it counts as not started."
   "Insert the error line, the compose label, the settings and the attachments.
 Each line is fitted to the window, like the board's: the buffer wraps
 for the compose box, so a longer line would take two.  A new task's
-label carries the Submit / Refine toggle, which the label makes room for."
-  (let ((room (1- (harness-ui-tasks--width))))
+label carries the Submit / Refine toggle, which the label makes room
+for.  A box that sends to a session wears its message colours here too,
+the label, bar and band around it, so what submitting will do is plain
+before a key is pressed."
+  (let* ((room (1- (harness-ui-tasks--width)))
+         (messaging (harness-ui-tasks--messaging-p))
+         (band (and messaging 'harness-compose-message-face))
+         (bar (if messaging
+                  (harness-compose-bar 'harness-compose-message-accent-face 'harness-compose-message-face)
+                " ")))
     (when harness-ui-tasks--error
       (harness-ui-tasks--insert-tail-line
        'error (harness-ui-tasks--fit (propertize (concat "  " harness-ui-tasks--error)
                                                  'face 'harness-tool-error-face)
-                                     room)))
+                                     room)
+       band))
     (let* ((cancel (if harness-ui-tasks--target
                        (concat "  " (harness-ui-tasks--button
                                      "[cancel]" #'harness-ui-tasks-compose-reset
@@ -895,26 +916,41 @@ label carries the Submit / Refine toggle, which the label makes room for."
                                      'harness-ui-tasks-compose-reset))
                      ""))
            (toggle (if harness-ui-tasks--target "" (concat "   " (harness-ui-tasks--mode-toggle))))
-           (label (harness-ui-tasks--fit (concat " " (harness-ui-tasks--compose-label))
+           (icon (if messaging (concat (harness-ui-icon 'harness-icon-message) " ") ""))
+           (body (concat icon (harness-ui-tasks--compose-label)))
+           (label (harness-ui-tasks--fit (concat bar body)
                                          (- room (string-width cancel) (string-width toggle)))))
-      ;; Appended, so the dim settings note keeps its own face.
-      (add-face-text-property 0 (length label) 'harness-label-face t label)
+      ;; The bar, the icon and the label each keep their own look: the
+      ;; band behind them all, the accent on bar and icon, the label face
+      ;; on the text.
+      (let ((head (if messaging (+ (length bar) (length icon)) 0)))
+        (add-face-text-property head (length label) 'harness-label-face t label)
+        (when messaging
+          (add-face-text-property (length bar) (length label) 'harness-compose-message-accent-face t label)))
       ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
-      (harness-ui-tasks--insert-tail-line 'label (harness-ui-tasks--fit (concat label toggle cancel) room)))
+      (harness-ui-tasks--insert-tail-line 'label (harness-ui-tasks--fit (concat label toggle cancel) room)
+                                          band))
     (unless harness-ui-tasks--target
       (let ((line (harness-ui-tasks--new-settings-line)))
         (unless (string-empty-p line)
           (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
     (let ((start (point)))
+      ;; The bar only when there is a line to carry it.
+      (when (and messaging harness-compose-attachments) (insert bar))
       (harness-compose-insert-attachments)
-      (put-text-property start (point) 'harness-task-tail 'attachments))))
+      (put-text-property start (point) 'harness-task-tail 'attachments)
+      (when band (add-face-text-property start (point) band t)))))
 
-(defun harness-ui-tasks--insert-tail-line (key text)
+(defun harness-ui-tasks--insert-tail-line (key text &optional band)
   "Insert TEXT as a line above the compose box, named KEY for redraws.
-A redraw keeps point on the line of the same KEY (`harness-ui-tasks--anchor')."
+A redraw keeps point on the line of the same KEY (`harness-ui-tasks--anchor').
+BAND, when given, is a face put behind the whole line, its final newline
+included, so the line's background reaches the window's edge like the
+compose box's."
   (let ((start (point)))
     (insert text "\n")
-    (put-text-property start (point) 'harness-task-tail key)))
+    (put-text-property start (point) 'harness-task-tail key)
+    (when band (add-face-text-property start (point) band t))))
 
 (defun harness-ui-tasks--refit-tail ()
   "Fit the lines between the board and the compose box to the window again.
@@ -989,7 +1025,12 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
         (goto-char list-end)
         (harness-ui-tasks--insert-tail-head)
         (put-text-property list-end (point) 'read-only t)
-        (harness-compose-insert text))
+        (if (harness-ui-tasks--messaging-p)
+            ;; A message to a session, not a task being composed: the box's
+            ;; own colours say so, with the band and bar around it.
+            (harness-compose-insert text nil :face 'harness-compose-message-face
+                                    :accent 'harness-compose-message-accent-face)
+          (harness-compose-insert text)))
       (set-marker harness-ui-tasks--list-end list-end)
       (harness-ui-tasks--restore places)
       (set-buffer-modified-p nil))))

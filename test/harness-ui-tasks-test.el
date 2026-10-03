@@ -773,6 +773,99 @@ told from, like a worktree git lost track of, still leads back."
         (delete-window side)
         (set-window-buffer window board)))))
 
+;;;; Sending to a session is not composing a task
+
+;; The same box does both, so what C-c C-c will do has to be plain: a
+;; box that sends to a session wears the message colours, band, bar and
+;; all, and names the session it sends to.
+
+(defvar harness-compose--accent)
+(defvar harness-compose--face)
+(defvar harness-compose--placeholder)
+(defvar harness-compose-overlay)
+(declare-function harness-ui-tasks--messaging-p "harness-ui-tasks")
+(declare-function harness-ui-tasks--set-compose "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--tail-line-faces (path)
+  "The faces of the tail line PATH belongs to, as (BAR . EOL)."
+  (save-excursion
+    (goto-char harness-ui-tasks--list-end)
+    (re-search-forward path (overlay-start harness-compose-overlay))
+    (goto-char (match-beginning 0))
+    (cons (get-text-property (point) 'face)
+          (get-text-property (line-end-position) 'face))))
+
+(ert-deftest harness-ui-tasks-only-messages-wear-the-message-colours ()
+  "Every target that sends to a session colours the box; a new task does not."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (pcase-dolist (`(,target ,messaging)
+                     '((nil nil) ((edit . "t1") nil)
+                       ((reply . "t1") t) ((answer . "t1") t)
+                       ((refine . "t1") t) ((reject . "t1") t)))
+        (harness-ui-tasks--set-compose "" target)
+        (should (eq (and (harness-ui-tasks--messaging-p) t) messaging))
+        (should (eq (overlay-get harness-compose-overlay 'face)
+                    (if messaging 'harness-compose-message-face 'harness-compose-face)))
+        (should (eq (and harness-compose--accent t) messaging))
+        (should (eq harness-compose--face (if messaging 'harness-compose-message-face
+                                            'harness-compose-face)))
+        (should (equal (if messaging
+                           '(harness-compose-message-accent-face harness-compose-message-face)
+                         '(harness-dim-face harness-compose-face))
+                       (get-text-property (1- harness-compose-start) 'face)))))))
+
+(ert-deftest harness-ui-tasks-message-box-names-its-session ()
+  "The message box says which session it sends to, with a band and a bar."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--type-and-submit board "Waiting task")
+    (harness-ui-tasks-test--wait-text board "Completed  1")
+    (harness-ui-tasks-test--goto-card board "Waiting task")
+    (with-current-buffer board
+      ;; A new task's box: a plain label and no bar.
+      (should (string-match-p " New task" (harness-ui-tasks-test--tail-text board)))
+      (harness-ui-tasks-reply)
+      (should (eq 'reply (car harness-ui-tasks--target)))
+      (should (string-match-p "Message to session .Waiting task." (harness-ui-tasks-test--tail-text board)))
+      ;; The label line is a band the bar opens, reaching the window's edge.
+      (pcase-let ((`(,bar . ,eol) (harness-ui-tasks-test--tail-line-faces "Message to session")))
+        (should (memq 'harness-compose-message-accent-face (ensure-list bar)))
+        (should (memq 'harness-compose-message-face (ensure-list bar)))
+        (should (memq 'harness-compose-message-face (ensure-list eol))))
+      ;; The box under it follows, prompt and placeholder included.
+      (should (string-match-p "▌ ❯ " (harness-ui-tasks-test--tail-text board)))
+      (should (memq 'harness-compose-message-accent-face
+                    (ensure-list (get-text-property (1- harness-compose-start) 'face))))
+      (should (memq 'harness-compose-message-face
+                    (ensure-list (get-text-property
+                                  0 'face (overlay-get harness-compose--placeholder 'before-string)))))
+      ;; C-g puts the plain new-task box back.
+      (harness-ui-tasks-compose-reset)
+      (should-not (harness-ui-tasks--messaging-p))
+      (should (eq 'harness-compose-face (overlay-get harness-compose-overlay 'face)))
+      (should (string-match-p " New task" (harness-ui-tasks-test--tail-text board))))))
+
+(ert-deftest harness-ui-tasks-message-tail-fits-the-window ()
+  "The message band, bar and icon included, fits a narrow window."
+  (harness-ui-tasks-test-with
+    (let* ((window (get-buffer-window board))
+           (side (split-window window 40 'right)))
+      (unwind-protect
+          (with-current-buffer board
+            (set-window-buffer side board)
+            (set-window-buffer window (get-buffer-create "*scratch*"))
+            (harness-ui-tasks--set-compose "" (cons 'reply "t1"))
+            (harness-ui-tasks--refit-tail)
+            (should (string-match-p "Message to session" (harness-ui-tasks-test--tail-text board)))
+            (save-excursion
+              (goto-char harness-ui-tasks--list-end)
+              (while (< (point) (overlay-start harness-compose-overlay))
+                (should (< (string-width (buffer-substring (point) (line-end-position)))
+                           (window-body-width side)))
+                (forward-line 1))))
+        (delete-window side)
+        (set-window-buffer window board)))))
+
 ;;;; Review: finished work waits for you
 
 (declare-function harness-ui-tasks-reject "harness-ui-tasks")
