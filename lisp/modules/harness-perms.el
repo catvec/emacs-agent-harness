@@ -789,7 +789,10 @@ it goes out once per call, and only while a turn runs to take it."
       (condition-case err
           (harness-call 'agent/prompt session-id
                         (list (list :type "text"
-                                    :text (format harness-perms-steering-text (plist-get request :tool)))))
+                                    :text (format harness-perms-steering-text (plist-get request :tool))))
+                        ;; The user is away: the harness steers the agent,
+                        ;; and the message says so.
+                        (list :from (harness-sender-system "non-interactive mode")))
         (error (harness-log 'warn "perms: steering failed: %S" err))))))
 
 (defun harness-perms--on-decided (session-id request decision)

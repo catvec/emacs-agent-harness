@@ -185,6 +185,15 @@ catalogue changes, the sessions whose window moved get `session/changed`.
  :meta PLIST)        ; anything else (model, duration, cost …)
 ```
 
+A user message the user did not write says who sent it in its `:meta`
+`:from`: `(:kind system :source "tasks")` for the harness itself, from
+`harness-sender-system', or `(:kind session :id "uuid" :name "…")` for
+another session's agent, from `harness-sender-session' (name as it was
+then).  No `:from` means the user; read it with `harness-node-sender'
+and `harness-sender-kind' (harness-util, both sides of ACP), which
+tolerate a kind that travelled as a string.  The model still gets the
+message as a user message; UIs show the sender instead of "You".
+
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
 `:parent-id` / `:fork-node`, so the tree view can merge families by id.
@@ -374,7 +383,9 @@ gone.
   Event `session/node-updated ID NODE`.
 - `session/set-head ID NODE-ID`.
 - `session/hint ID TEXT` → appends hint node.
-- `session/queue ID TEXT &optional ATTACHMENTS`, `session/queue-update ID QID TEXT`,
+- `session/queue ID TEXT &optional ATTACHMENTS FROM` (FROM, when
+  non-nil, is who sent it, not the user: the item keeps it as `:from'),
+  `session/queue-update ID QID TEXT`,
   `session/queue-remove ID QID`, `session/queue-take ID` → items, cleared.
   Event `session/queue-changed ID ITEMS`.
 - `session/pending-add ID REQUEST` → id; `session/pending-resolve ID PID ANSWER`;
@@ -848,8 +859,9 @@ pending request and resolves when answered).
   deny.  After every denial in a non-interactive session, whoever made
   it, the `permission/decided` handler sends the agent a steering
   message (`harness-perms-steering-text`), once per call and only while
-  a turn runs to take it: the user is away, so respect the denial and
-  reach the goal another way.
+  a turn runs to take it, marked as from
+  `harness-sender-system "non-interactive mode"`: the user is away, so
+  respect the denial and reach the goal another way.
   The session's own `:non-interactive` switch decides, off as much as
   on.  It starts from `harness-non-interactive` when the session is
   created (an explicit false turns it off whatever the setting says);
@@ -894,11 +906,15 @@ pending request and resolves when answered).
   steering — the text is queued and injected at the next step boundary
   (appended to the next tool result, or sent as the next user turn if
   the model stops first), and only once.  OPTS `:queue` true only
-  queues, even while a turn runs.  An empty message is refused.  An
+  queues, even while a turn runs.  OPTS `:from`, when the user is not
+  the sender, is the sender plist (see "Node") kept on the message's
+  node (and on a queued item).  An empty message is refused.  An
   inactive session is resumed first (`session/resume`), so a message
   sent to a closed session brings it back; queueing leaves it closed.
 - `agent/cancel SESSION-ID`.
-- `agent/send-queue SESSION-ID` — sends every queued item as one turn.
+- `agent/send-queue SESSION-ID` — sends every queued item as one turn;
+  the message is the user's when any item is, else from the first
+  item's sender.
 - Sync filter `agent/system-prompt` (value string, args session); sync
   filter `agent/tools`; sync filter `agent/builtin-tools` (see
   `tools/builtin`); async filter `agent/before-turn` (value
@@ -1076,7 +1092,8 @@ pending request and resolves when answered).
   (`agent/step` filter) or is idle, the head of the queue gets the lock:
   the harness runs `git merge --no-ff` of the child's branch in the
   parent's cwd; on conflict the child session receives a steering
-  message describing the conflicts and its jail is widened to the
+  message describing the conflicts (from
+  `harness-sender-system "merge queue"`) and its jail is widened to the
   parent's cwd until it resolves; then the lock passes on.  A merged
   child's worktree loses the harness's lock (`worktree/unlock`; see
   worktree).
@@ -1160,6 +1177,10 @@ to the task's file (below); the record also keeps `:file-base` and
   conversations per directory) and it is prompted with
   `harness-tasks--start-message`, the write-up and the quoted note, under the
   task's own settings.  Dropping a backlog task deletes its session.
+  The messages task mode composes itself (starting a written-up task,
+  the restart resume, the nudge to finish a write-up) are marked as
+  from `harness-sender-system "tasks"`; the task's prompt, a
+  `task/prompt` follow-up and `task/reject` feedback are the user's.
 - `task/adoptable &optional CWD` lists the project's open sessions that
   are not tasks; `task/adopt SESSION-ID` makes one a task (its first
   message is the prompt; a worktree session keeps its worktree and merges
@@ -1573,7 +1594,10 @@ Listing and search default to the current project (worktrees included).
 `session_search` greps the `sessions/*.nodes.jsonl` logs in a subprocess,
 so transcripts are not loaded into memory to be searched.  `session_send`
 prefixes the message with `[Message from session ID "NAME"]` and goes
-through `agent/prompt` (a turn, steering, or the queue).  Waits are
+through `agent/prompt` (a turn, steering, or the queue) with
+`:from` naming the calling session, so that session's chat shows the
+message as coming from here rather than from the user; `session_read`
+and `session_search` tag such nodes the same way.  Waits are
 entries re-checked on session and task events, settled by their
 condition, their timeout (`harness-tools-sessions--wait-default`, at most
 `-wait-max`) or the end of the waiting turn; a timeout is a report, not

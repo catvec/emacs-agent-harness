@@ -186,6 +186,29 @@
         (should (plist-get r :is-error))
         (should (string-match-p "cannot message itself" (plist-get r :content)))))))
 
+(ert-deftest harness-tools-sessions-send-says-who-sent-it ()
+  "A message session_send delivers is the sending session's, not the user's.
+Its node says so, a queued one too, and session_read and session_search
+tell it from the user's messages."
+  (harness-tools-sessions-test-with
+    (let ((me (harness-tools-sessions-test-session :name "Boss"))
+          (other (harness-tools-sessions-test-session :name "Worker"))
+          (third (harness-tools-sessions-test-session :name "Onlooker")))
+      (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "status?" :wait t))
+      (let ((user (cl-find 'user (harness-call 'session/nodes other) :key (lambda (n) (plist-get n :kind)))))
+        (should (equal (list :kind 'session :id me :name "Boss") (harness-node-sender user))))
+      (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "later" :mode "queue"))
+      (let ((item (car (plist-get (harness-call 'session/get other) :queue))))
+        (should (string-suffix-p "later" (plist-get item :text)))
+        (should (equal me (plist-get (plist-get item :from) :id))))
+      (harness-call 'session/queue-take other)
+      (harness-call 'session/append other '(:kind user :content "from the user"))
+      (let ((tag (regexp-quote (format ", from session %s \"Boss\"]" me))))
+        (let ((text (harness-tools-sessions-test-ok third "session_read" (list :session_id other))))
+          (should (string-match-p (concat tag (regexp-quote " [Message from session")) text))
+          (should (string-match-p "\\[user n-[a-z0-9]+\\] from the user" text)))
+        (should (string-match-p tag (harness-tools-sessions-test-ok third "session_search" '(:query "status?"))))))))
+
 (ert-deftest harness-tools-sessions-send-then-wait ()
   (harness-tools-sessions-test-with
     (let ((harness-provider-demo--delay 0.1)

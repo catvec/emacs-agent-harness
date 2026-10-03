@@ -620,10 +620,13 @@ With `:transient' non-nil the change is announced but not persisted
 
 ;;;; Methods: queue, pending, usage, todos, plan
 
-(harness-defmethod session/queue (id text &optional attachments)
-  "Queue TEXT with ATTACHMENTS for the next turn of session ID; return the item."
+(harness-defmethod session/queue (id text &optional attachments from)
+  "Queue TEXT with ATTACHMENTS for the next turn of session ID; return the item.
+FROM, when non-nil, is who sent it, when that was not the user (see
+`harness-node-sender'); the item keeps it as `:from'."
   (let* ((s (harness-session--get id))
-         (item (list :id (harness-short-id 6) :text text :attachments attachments :ts (float-time))))
+         (item (append (list :id (harness-short-id 6) :text text :attachments attachments :ts (float-time))
+                       (and (harness-sender-kind from) (list :from from)))))
     (setf (harness-session-queue s) (append (harness-session-queue s) (list item)))
     (harness-emit 'session/queue-changed id (harness-session-queue s))
     (harness-session--touch s)
@@ -849,11 +852,15 @@ the tool results right after that, not where it was sent mid-step."
     (nreverse messages)))
 
 (harness-defmethod session/transcript-text (id)
-  "Return the transcript of session ID as searchable plain text."
+  "Return the transcript of session ID as searchable plain text.
+A user message the user did not write says who sent it."
   (mapconcat (lambda (n)
                (pcase (plist-get n :kind)
                  ('tool-call (format "[tool %s] %s" (plist-get n :tool) (or (plist-get n :title) "")))
                  ('tool-result (format "[result] %s" (or (plist-get n :output) "")))
+                 ((and 'user (guard (harness-node-sender n)))
+                  (format "[user, from %s] %s" (harness-sender-description (harness-node-sender n))
+                          (or (plist-get n :content) "")))
                  (k (format "[%s] %s" k (or (plist-get n :content) "")))))
              (harness-session--path (harness-session--get id)) "\n"))
 

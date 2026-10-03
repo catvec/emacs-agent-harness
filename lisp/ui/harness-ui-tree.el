@@ -283,9 +283,21 @@ With CONTINUATION, draw only the lanes continuing below the row."
   "Return NODE's kind as a string."
   (format "%s" (or (plist-get node :kind) "")))
 
+(defun harness-ui-tree--sender (node)
+  "Return the kind of whoever sent user NODE other than the user, or nil.
+That is `system' for the harness and `session' for another session's
+agent (see `harness-node-sender')."
+  (and (equal (harness-ui-tree--kind node) "user")
+       (harness-sender-kind (harness-node-sender node))))
+
 (defun harness-ui-tree--kind-icon (node)
-  "Return the icon string for NODE's kind, with face."
+  "Return the icon string for NODE's kind, with face.
+A user message the user did not write shows who sent it instead."
   (pcase (harness-ui-tree--kind node)
+    ((and "user" (guard (eq (harness-ui-tree--sender node) 'session)))
+     (propertize (harness-ui-icon 'harness-icon-agent) 'face 'harness-system-label-face))
+    ((and "user" (guard (harness-ui-tree--sender node)))
+     (propertize (harness-ui-icon 'harness-icon-system) 'face 'harness-system-label-face))
     ("user" (propertize (harness-ui-icon 'harness-icon-user) 'face 'bold))
     ((or "assistant" "plan") (harness-ui-icon 'harness-icon-agent))
     ("thinking" (propertize (harness-ui-icon 'harness-icon-thinking) 'face 'harness-thinking-face))
@@ -311,6 +323,7 @@ triangle when it failed.  That icon has a face of its own."
 (defun harness-ui-tree--excerpt-face (node)
   "Return the face for NODE's excerpt."
   (pcase (harness-ui-tree--kind node)
+    ((and "user" (guard (harness-ui-tree--sender node))) 'harness-dim-face)
     ("thinking" 'harness-thinking-face)
     ((or "hint" "compaction" "empty") 'harness-hint-face)
     ("tool-result" (pcase (harness-ui-tool-outcome node)

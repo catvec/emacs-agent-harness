@@ -59,6 +59,22 @@
 (defface harness-user-bar-face '((t :inherit font-lock-keyword-face))
   "Bar down the left edge of the user's messages (foreground only)." :group 'harness-ui)
 
+(defface harness-system-face
+  '((((background light)) :inherit shadow :background "#eeeeee" :extend t)
+    (((background dark)) :inherit shadow :background "#2b2b2b" :extend t))
+  "Messages the user did not write, on a background of their own.
+The harness sent them on its own (a task carrying on after a restart,
+non-interactive mode after a denied call, the merge queue), or the
+agent of another session did.  Their text is muted, like a hint's."
+  :group 'harness-ui)
+
+(defface harness-system-label-face '((t :inherit (bold shadow)))
+  "Sender name above messages the user did not write." :group 'harness-ui)
+
+(defface harness-system-bar-face '((t :inherit shadow))
+  "Bar down the left edge of messages the user did not write (foreground only)."
+  :group 'harness-ui)
+
 (defface harness-agent-face '((t :inherit default))
   "Face of the agent's text." :group 'harness-ui)
 
@@ -181,6 +197,7 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-inactive "inactive" "○" "off" "Inactive session.")
 (harness-ui-define-icon harness-icon-user "user" "◆" "you" "The user.")
 (harness-ui-define-icon harness-icon-agent "agent" "◇" "agent" "The agent.")
+(harness-ui-define-icon harness-icon-system "system" "⚙" "sys" "The harness, sending a message on its own.")
 (harness-ui-define-icon harness-icon-tool "tool" "◈" "tool" "A tool call.")
 (harness-ui-define-icon harness-icon-thinking "thinking" "…" "think" "Thinking.")
 (harness-ui-define-icon harness-icon-collapsed "collapsed" "▸" "+" "Collapsed block.")

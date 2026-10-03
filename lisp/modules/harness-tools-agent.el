@@ -398,7 +398,8 @@ Run INPUT's prompt in a child of the session in CTX."
                        (format "sub-agent %s started%s" (harness-tools-agent--short-id cid)
                                (if worktree (format " in worktree %s" (abbreviate-file-name worktree)) ""))))
             (harness-then
-             (harness-call-async 'agent/prompt cid prompt)
+             ;; The parent's agent wrote the prompt, not the user.
+             (harness-call-async 'agent/prompt cid prompt (list :from (harness-sender-session parent)))
              (lambda (result)
                (remhash cid harness-tools-agent--children)
                (let ((text (harness-tools-agent--child-summary cid)))

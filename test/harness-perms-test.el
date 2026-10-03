@@ -563,6 +563,26 @@ once per call, whoever made it: the judge, the jail or a rule."
     (should (plist-get (funcall run "c7" "t_exec" '(:command "z")) :denied))
     (should (= 4 (funcall count)))))
 
+(ert-deftest harness-perms-non-interactive-steering-comes-from-the-harness ()
+  "The steering after a denial is marked as the harness's, not the user's:
+the chat shows it as a system message, never as the user's own words."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler (lambda (_in _ctx) "ran"))
+  (let ((sent nil)
+        (harness-perms-auto-model "judge:small"))
+    (harness-register-method 'agent/prompt
+                             (lambda (sid blocks &optional opts)
+                               (push (list sid blocks opts) sent)
+                               (harness-resolved nil)))
+    (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"not that\"}")
+                                          (:type done :stop-reason end-turn)))
+    (should (plist-get (harness-test-await (harness-call 'tools/execute "s1" (list :id "c1" :name "t_exec"
+                                                                                   :input '(:command "x"))))
+                       :denied))
+    (should (= 1 (length sent)))
+    (should (equal (harness-sender-system "non-interactive mode")
+                   (plist-get (nth 2 (car sent)) :from)))))
+
 (ert-deftest harness-perms-non-interactive-is-the-sessions-own-switch ()
   "A session record's switch decides, off as much as on; the setting
 `harness-non-interactive' only starts new sessions, and decides alone
@@ -602,7 +622,7 @@ for a request without a session record."
          (harness-websearch-providers nil)
          (harness-websearch-provider 'fake)
          (prompts nil))
-    (harness-register-method 'agent/prompt (lambda (sid blocks) (push (cons sid blocks) prompts) (harness-resolved nil)))
+    (harness-register-method 'agent/prompt (lambda (sid blocks &rest _) (push (cons sid blocks) prompts) (harness-resolved nil)))
     (harness-websearch-register-provider
      'fake (lambda (query _count) (list (list :title (concat "About " query) :url "https://example.org/"))))
     (let ((r (harness-test-await (harness-call 'tools/execute "s1"

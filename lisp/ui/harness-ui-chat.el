@@ -95,6 +95,19 @@ Once two pages of nodes lie above every window, all but one are dropped.")
   "Sender name shown at the start of each agent turn."
   :type 'string :group 'harness-ui-chat)
 
+(defcustom harness-chat-system-label "System"
+  "Sender name shown above the messages the harness sent on its own.
+A task carrying on after a restart, non-interactive mode after a denied
+call and the merge queue send them; the part of the harness that sent
+one follows the name."
+  :type 'string :group 'harness-ui-chat)
+
+(defcustom harness-chat-session-label "Session"
+  "Sender name shown above the messages the agent of another session sent.
+`session_send' and a sub-agent's parent send them; the name of the
+session follows, a button that opens it."
+  :type 'string :group 'harness-ui-chat)
+
 (defface harness-chat-panel-face
   '((((background light)) :background "#d9f7fd" :extend t)
     (((background dark)) :background "#143c42" :extend t))
@@ -646,15 +659,52 @@ an ask_user option, goes under its key, indented."
   "Return a sender line naming TEXT in FACE."
   (concat (propertize text 'face face) "\n"))
 
+(defun harness-chat--session-name (id &optional name)
+  "Return the name of session ID to show: its name now, else NAME, else a short id."
+  (let ((name (or (plist-get (and id (harness-ui-session id)) :name) name))
+        (id (or id "?")))
+    (if (and (stringp name) (not (string-blank-p name)))
+        name
+      (substring id 0 (min 8 (length id))))))
+
+(defun harness-chat--from-line (from)
+  "Return the sender line of a message FROM sent, rather than the user.
+The harness reads \"System · SOURCE\", another session's agent
+\"Session · NAME\", NAME a button that opens that session."
+  (pcase-let ((`(,label . ,which)
+               (pcase (harness-sender-kind from)
+                 ('session
+                  (let* ((id (plist-get from :id))
+                         (name (harness-chat--session-name id (plist-get from :name))))
+                    (cons harness-chat-session-label
+                          (if id
+                              (harness-chat--button name (lambda () (harness-open-session id))
+                                                    :face 'harness-dim-face
+                                                    :help (format "Open the session %s" name))
+                            (propertize name 'face 'harness-dim-face)))))
+                 (_ (let ((source (plist-get from :source)))
+                      (cons harness-chat-system-label
+                            (and (stringp source) (not (string-blank-p source))
+                                 (propertize source 'face 'harness-dim-face))))))))
+    (concat (propertize label 'face 'harness-system-label-face)
+            (if which (concat (propertize " · " 'face 'harness-dim-face) which) "")
+            "\n")))
+
 (defun harness-chat--render-user (block)
-  "Return the body of user BLOCK."
+  "Return the body of user BLOCK.
+A message the user did not write names who sent it instead of the user
+and sits on the system background (see `harness-node-sender')."
   (let* ((node (harness-chat-block-node block))
+         (from (harness-node-sender node))
+         (face (if from 'harness-system-face 'harness-user-face))
          (text (harness-chat--plain (plist-get node :content)))
-         (body (concat (harness-chat--sender harness-chat-user-label 'harness-user-label-face)
+         (body (concat (if from
+                           (harness-chat--from-line from)
+                         (harness-chat--sender harness-chat-user-label 'harness-user-label-face))
                        (if (string-blank-p text) "" text)
                        (harness-chat--blocks-string (plist-get node :blocks)))))
-    (harness-chat--margin (harness-chat--face body 'harness-user-face) 'harness-user-face
-                          'harness-user-bar-face)))
+    (harness-chat--margin (harness-chat--face body face) face
+                          (if from 'harness-system-bar-face 'harness-user-bar-face))))
 
 (defconst harness-chat--agent-kinds '("assistant" "thinking" "tool-call" "tool-result" "plan")
   "Block kinds the agent produces; a run of them is one agent turn.")
