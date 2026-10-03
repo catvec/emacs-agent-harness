@@ -87,6 +87,9 @@ Once two pages of nodes lie above every window, all but one are dropped.")
 (defconst harness-chat--coalesce-threshold 3
   "Consecutive coalescable tool calls needed to fold into one summary block.")
 
+(defconst harness-chat--image-max-height 400
+  "Maximum pixel height of inline images.")
+
 (defcustom harness-chat-user-label "You"
   "Sender name shown above the user's messages."
   :type 'string :group 'harness-ui-chat)
@@ -285,11 +288,32 @@ COLLAPSED picks the icon; HELP is the tooltip."
                 'follow-link t
                 'keymap (harness-chat--mouse-map action))))
 
-(defalias 'harness-chat--button #'harness-ui-action-button
-  "Alias of `harness-ui-action-button'.")
+(defun harness-chat--button (label action &rest props)
+  "Return a button string LABEL running ACTION (a function of no arguments).
+PROPS may hold `:help' and `:face'."
+  (let ((s (copy-sequence label)))
+    (add-text-properties
+     0 (length s)
+     (list 'face (or (plist-get props :face) 'button)
+           'mouse-face 'highlight 'follow-link t 'pointer 'hand
+           'help-echo (plist-get props :help)
+           'harness-chat-action action
+           'keymap (harness-chat--mouse-map #'harness-chat-push))
+     s)
+    s))
 
-(defalias 'harness-chat-push #'harness-ui-action-push
-  "Alias of `harness-ui-action-push'.")
+(defun harness-chat-push (&optional event)
+  "Run the action of the button at point, or at the position of mouse EVENT.
+Knows the chat's own `harness-chat-action' buttons and the shared
+`harness-ui-action' ones the pending module draws."
+  (interactive (list last-input-event))
+  (when (mouse-event-p event) (mouse-set-point event))
+  (let ((action (or (get-text-property (point) 'harness-chat-action)
+                    (get-text-property (point) 'harness-ui-action)
+                    (and (> (point) (point-min))
+                         (or (get-text-property (1- (point)) 'harness-chat-action)
+                             (get-text-property (1- (point)) 'harness-ui-action))))))
+    (if action (funcall action) (push-button (point)))))
 
 ;;;; Region editing that keeps windows still
 
@@ -445,8 +469,33 @@ here.  Nil when ATT is not media, or the media module is not loaded."
              (let ((s (ignore-errors (harness-ui-media-render-attachment att))))
                (and (stringp s) (not (string-blank-p s)) (harness-chat--ensure-newline s)))))
       (_ nil))))
-(defalias 'harness-chat--image-string #'harness-ui-image-string
-  "Alias of `harness-ui-image-string'.")
+(defun harness-chat--image-string (source &optional mime)
+  "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
+MIME is a hint for the image type.  Without image support, and for a
+path on a remote host, which reading here would block on, a button
+opening the file is returned instead."
+  (let* ((path (and (stringp source) source))
+         (data (and (consp source) (plist-get source :data)))
+         (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
+         (local (and path (not (file-remote-p path))))
+         (open (and path (lambda () (interactive) (find-file-other-window path))))
+         (img (and (display-images-p) (or data (and local (file-readable-p path)))
+                   (let* ((w (car (harness-chat--windows)))
+                          (width (floor (* 0.6 (if w (window-body-width w t) 800)))))
+                     (condition-case nil
+                         (if data
+                             (create-image (base64-decode-string data) nil t
+                                           :max-width width :max-height harness-chat--image-max-height)
+                           (create-image path nil nil
+                                         :max-width width :max-height harness-chat--image-max-height))
+                       (error nil))))))
+    (cond
+     (img (concat (propertize label 'display img 'pointer 'hand
+                              'help-echo (format "mouse-1 or RET: open %s" (or path mime "the image"))
+                              'keymap (and open (harness-chat--mouse-map open)))
+                  "\n"))
+     (open (concat (harness-chat--button label open :help (format "Open %s" path)) "\n"))
+     (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
 
 (defun harness-chat--file-button (path name size)
   "Return a button line opening PATH, labelled NAME with SIZE bytes."
@@ -1412,6 +1461,15 @@ On `harness-ui-pending-changed-hook'."
 The pending module owns an ACP request only when some buffer draws it."
   (and (harness-chat--buffer-for sid) t))
 
+(defun harness-chat--add-pending (record)
+  "Add or replace pending RECORD, stored by the pending module.
+The store is the one source of truth; the chat's mirror follows it."
+  (harness-ui-pending-add harness-ui-session-id record))
+
+(defun harness-chat--remove-pending (id)
+  "Forget the request ID of this session, in the shared store."
+  (harness-ui-pending-remove harness-ui-session-id id))
+
 (defvaralias 'harness-chat-panel-map 'harness-ui-pending-permission-map)
 (defvaralias 'harness-chat-question-map 'harness-ui-pending-question-map)
 (defvaralias 'harness-chat-diagram-question-map 'harness-ui-pending-diagram-map)
@@ -2058,7 +2116,7 @@ A module showing something of its own in this buffer
                                    (mapcar #'harness-compose-attachment-block atts))))
                (harness-ui-call "session/prompt" (list :sessionId sid :prompt blocks)
                                 #'ignore
-                                (lambda (err) (harness-chat--report-error buf "send" err)))))))))))
+                                (lambda (err) (harness-chat--report-error buf "send" err))))))))))))
 
 
 (defun harness-chat-queue ()

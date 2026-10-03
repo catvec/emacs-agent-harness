@@ -615,6 +615,15 @@ told from, like a worktree git lost track of, still leads back."
         (harness-compose-pad-window window)
         (should (= (point-min) (window-start window)))))))
 
+(ert-deftest harness-ui-tasks-box-grows-past-a-short-window ()
+  "A board taller than its window keeps the box on its last line, point in it.
+A BTW under the board makes its window that short.  Measured as on a
+graphical frame, a board a line or so too tall once seemed to fit: its
+window was forced back to the top, and redisplay moved point out of the
+box, up a line or onto the board, whose letters are commands."
+  (harness-ui-tasks-test-with
+    (harness-test-compose-grows-past-the-window board (get-buffer-window board) 0)))
+
 (ert-deftest harness-ui-tasks-padding-leaves-with-its-window ()
   "A window that stops showing the board takes its padding along."
   (harness-ui-tasks-test-with

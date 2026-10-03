@@ -209,6 +209,16 @@ would hide the region too.  Never nil: `global-hl-line-mode' needs a range."
              (not (harness-compose-in-p)))
     (goto-char harness-compose-end)))
 
+(defun harness-compose--height (window from limit)
+  "Return how many pixels high WINDOW's text is from FROM to the box's end.
+Text taller than LIMIT pixels measures more than LIMIT.  It is measured
+up to a window's height past LIMIT, which is cheap however long the
+buffer: `window-text-pixel-size' leaves out the line that crosses its
+Y-LIMIT, so measured up to LIMIT itself, text a line too tall would
+measure less than LIMIT, as if it fit."
+  (cdr (window-text-pixel-size window from harness-compose-end nil
+                               (+ limit (window-body-height window t)))))
+
 (defun harness-compose-pad-window (window)
   "Keep the box at the bottom of WINDOW.
 A buffer shorter than WINDOW is padded so it ends at its bottom, each
@@ -241,7 +251,7 @@ from `pre-redisplay-functions'."
         ;; box, where a host following the end (chat) puts the bottom of
         ;; the window; padding inside the buffer puts the box on the last line.
         (let* ((line (frame-char-height (window-frame window)))
-               (used (cdr (window-text-pixel-size window (point-min) harness-compose-end nil body)))
+               (used (harness-compose--height window (point-min) body))
                (lines (/ (- body used (if harness-compose--pad-at 0 line)) line)))
           (when (and (= (window-start window) (point-min)) (> lines 0))
             ;; An explicit face: bare newlines would take the height of the
@@ -276,7 +286,12 @@ scrolls just enough to keep the box's last line on its last line (above
 the spare line of a host padding its top), the way a chat app's input
 grows upwards.  A buffer that fits shows from its start, for the
 padding.  Only after the text or the window's size changed: scrolling
-is left to the user."
+is left to the user.
+
+The window's start is never forced: were point's line to fall outside
+the window from there, redisplay would move point, out of the box, to
+the window's last whole line or its middle, where a host's keys may be
+commands, rather than scroll."
   (let ((key (list (current-buffer) (buffer-chars-modified-tick)
                    (window-body-width window t) (window-body-height window t))))
     (unless (equal key (window-parameter window 'harness-compose-follow))
@@ -287,14 +302,13 @@ is left to the user."
         (let* ((body (window-body-height window t))
                (line (frame-char-height (window-frame window)))
                (room (- body (if harness-compose--pad-at 0 line)))
-               (height (lambda (from)
-                         (cdr (window-text-pixel-size window from harness-compose-end nil (1+ body)))))
+               (height (lambda (from) (harness-compose--height window from room)))
                (start (window-start window))
                (pt (window-point window))
                (anchor (if harness-compose--pad-at harness-compose-end (point-max))))
           (cond
            ((<= (funcall height (point-min)) room)
-            (unless (= start (point-min)) (set-window-start window (point-min))))
+            (unless (= start (point-min)) (set-window-start window (point-min) t)))
            ;; Grown past the bottom.  Point's line goes there instead when
            ;; the box from point on is taller than the window.
            ((not (pos-visible-in-window-p pt window))

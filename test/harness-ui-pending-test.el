@@ -27,11 +27,11 @@
 (defvar harness-tasks-model)
 (defvar harness-tasks-worktrees)
 (defvar harness-ui-default-position)
-(defvar harness-acp-server-enabled)
+(defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-ui--sessions)
-(defvar harness-ui-sessions-buffer-name)
+(defvar harness-ui-sessions--buffer-name)
 (defvar harness-ui-popout--buffers)
 (defvar harness-chat--buffers)
 (defvar harness-ui-tasks--tasks)
@@ -63,7 +63,7 @@ Nothing here needs a window system."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (let ((harness-acp-server-enabled nil))
+     (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
@@ -299,7 +299,7 @@ The list says so in the status cell's tooltip, and answers from there."
       (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
                  (lambda (&optional callback) (when callback (funcall callback nil)))))
         (harness-sessions))
-      (with-current-buffer harness-ui-sessions-buffer-name
+      (with-current-buffer harness-ui-sessions--buffer-name
         (goto-char (point-min))
         (should (equal sid (tabulated-list-get-id)))
         (should (equal sid (harness-ui-session-at-point)))
@@ -323,7 +323,7 @@ The list says so in the status cell's tooltip, and answers from there."
   (harness-ui-pending-test-with
     (let ((sid (harness-ui-pending-test-session "Busy")))
       (harness-sessions)
-      (with-current-buffer harness-ui-sessions-buffer-name
+      (with-current-buffer harness-ui-sessions--buffer-name
         (goto-char (point-min))
         (should (equal sid (tabulated-list-get-id)))
         (harness-ui-sessions-requests)

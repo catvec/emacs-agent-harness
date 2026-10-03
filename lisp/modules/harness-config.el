@@ -125,8 +125,8 @@ non-interactive anyway."
   '((sessions
      :title "New sessions"
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
-     :keys (harness-model harness-thinking harness-permission-mode harness-non-interactive
-            harness-budget))
+     :keys (harness-model harness-thinking harness-btw-thinking harness-permission-mode
+            harness-non-interactive harness-budget))
     (safety
      :title "Files and safety"
      :doc "What sessions may reach, and what may run without asking you."

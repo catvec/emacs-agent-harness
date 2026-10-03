@@ -1817,7 +1817,9 @@ the bottom of the window) from its mode and
 editing whose lines wrap under the text and never scroll sideways (the
 whole host buffer wraps, so a host fits the lines it wants kept on one;
 with `:bottom` the growing box keeps its last line on the window's last
-line), a prompt that is a field of its own (`C-a` stops after it, so
+line, in a window shorter than the buffer too, a board under a BTW say,
+by scrolling that never moves point out of the box), a prompt that is a
+field of its own (`C-a` stops after it, so
 `C-a C-k` clears the line), the placeholder, @file and /skill
 completion, attachments (`C-c C-a`, clipboard `C-c C-v`, drag and
 drop), skill expansion (`harness-compose-with-expanded-text`) and ACP
