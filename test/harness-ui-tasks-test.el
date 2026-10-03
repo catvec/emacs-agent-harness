@@ -673,6 +673,28 @@ told from, like a worktree git lost track of, still leads back."
     (goto-char (point-min))
     (search-forward text)))
 
+(declare-function harness-ui-tasks-toggle-main-tree "harness-ui-tasks")
+(declare-function harness-ui-tasks--render-tail "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-main-tree-switch ()
+  "The worktree switch makes the next task work in the main tree, on the card too."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      ;; A git project, where the switch applies; this test's dir is not one.
+      (setq harness-ui-tasks--settings (plist-put (copy-sequence harness-ui-tasks--settings) :worktrees t))
+      (harness-ui-tasks--render-tail)
+      (should (string-match-p "own worktree" (harness-ui-tasks-test--tail-text board)))
+      (harness-ui-tasks-toggle-main-tree)
+      (should (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree)))
+      (let ((tail (harness-ui-tasks-test--tail-text board)))
+        (should (string-match-p "main tree" tail))
+        ;; The line is fitted to the window, so only its start shows.
+        (should (string-match-p "no worktree" tail))))
+    (harness-ui-tasks-test--type-and-submit board "Clean the checkout")
+    (harness-ui-tasks-test--wait-text board "main tree")
+    (let ((task (car (harness-call 'task/list default-directory))))
+      (should (harness-json-true-p (plist-get task :main-tree))))))
+
 (ert-deftest harness-ui-tasks-refine-toggle-fills-the-backlog ()
   "With the toggle on Refine a new task is written up and waits in Pending for its start."
   (harness-ui-tasks-test-with

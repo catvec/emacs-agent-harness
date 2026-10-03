@@ -2020,12 +2020,13 @@ project's main checkout, where it was submitted from (`task/submit')."
     (harness-tasks--set id :state 'active :outcome nil :error nil :duplicate-of nil
                         :started (float-time) :finished nil)
     (cond
+     ((harness-tasks--main-tree-p task)
+      ;; No worktree even where the project has them: the main checkout.
+      (funcall launch id (plist-get task :project) nil))
      ((not (harness-tasks--git-p (plist-get task :project)))
       (funcall launch id (plist-get task :cwd) nil))
      ((and worktree (not (plist-get task :worktree-removed)) (file-directory-p worktree))
       (funcall launch id worktree worktree))
-     ((harness-tasks--main-tree-p task)
-      (funcall launch id (plist-get task :project) nil))
      (t
       (harness-then (harness-tasks--make-worktree task)
                     (lambda (wt)

@@ -316,10 +316,10 @@ your checkout itself can be submitted to the **main tree** instead (the
   unless your configuration says otherwise, so a request that needs
   you, such as access to another directory, waits for you in *Requires
   your input* instead of being denied.
-- Beside those settings a worktree switch picks where the next task
-  works: **own worktree**, on its own branch, merged back when it is
-  done, or **main tree**, the project's checkout itself, with no branch
-  and nothing to merge. Use the main tree for work that has to touch
+- Beside those settings, in a git project, a worktree switch picks where
+  the next task works: **own worktree**, on its own branch, merged back
+  when it is done, or **main tree**, the project's checkout itself, with
+  no branch and nothing to merge. Use the main tree for work that has to touch
   the checkout directly, such as cleaning up uncommitted changes; those
   tasks show `main tree` on their card. An agent can ask for the same
   thing with `task_submit`'s `main_tree`.
