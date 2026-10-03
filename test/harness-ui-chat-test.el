@@ -266,7 +266,48 @@
           (should-not (string-match-p "\\$0\\.5" header))
           (let ((pos (string-match "Pro" header)))
             (should (string-match-p "Covered by Claude Pro" (get-text-property pos 'help-echo header)))
+            ;; One line: showing it in the echo area must not move the header.
+            (should-not (string-match-p "\n" (get-text-property pos 'help-echo header)))
             (should (get-text-property pos 'local-map header))))))))
+
+(ert-deftest harness-ui-chat-hover-help-is-one-line ()
+  "Every tooltip of a rendered session fits one echo-area line.
+With tooltips off (`tooltip-mode' nil) the help shows in the echo area,
+where a second line grows the mini window, shrinks every window and
+moves the button under the mouse."
+  (harness-ui-chat-test-with
+    (clrhash harness-ui--quotas)
+    (let* ((sid (harness-ui-chat-test-session "Hover"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-prompt buf "give me the tour")
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (let ((last (car (last (harness-ui-chat-test-blocks buf "assistant")))))
+                                        (and last (string-prefix-p "# Tour" (harness-chat-block-content last))))))
+                         5 "the tour")
+      ;; A plan with a quota gives the header's spend segment its long tooltip.
+      (harness-call 'session/usage-add sid '(:input 100 :output 10 :cost 0.0 :list-cost 0.5
+                                             :billing subscription :plan "pro"))
+      (harness-ui--store-quota "demo" '(:billing "subscription" :plan "pro" :plan-label "Claude Pro"
+                                        :extra (:enabled t :used 0.4 :limit 10.0)
+                                        :windows ((:name "5h" :label "Current session (5 hours)" :used 0.42)
+                                                  (:name "7d" :label "Weekly (7 days)" :used 0.7))))
+      (harness-test-wait (lambda () (equal "subscription"
+                                           (format "%s" (plist-get (plist-get (harness-ui-session sid) :usage) :billing))))
+                         5 "the session update")
+      (with-current-buffer buf
+        (let ((offenders nil))
+          (dolist (text (list (buffer-string) (harness-chat--header)))
+            (let ((pos 0))
+              (while (< pos (length text))
+                (let ((help (get-text-property pos 'help-echo text)))
+                  (when (and (stringp help) (string-match-p "\n" help))
+                    (push help offenders)))
+                (setq pos (1+ pos)))))
+          ;; The header's spend tooltip really is among them.
+          (let* ((header (harness-chat--header))
+                 (pos (string-match "Pro" header)))
+            (should (string-match-p "Covered by Claude Pro" (get-text-property pos 'help-echo header))))
+          (should-not offenders))))))
 
 (ert-deftest harness-ui-chat-header-functions-come-first ()
   "What `harness-chat-header-functions' return leads the header, in order.

@@ -857,5 +857,13 @@ once, and a change made with `setopt' reaches it."
     (should (equal "deepseek:deepseek-flash"
                    (plist-get (plist-get (cdr (assoc "_harness/session/set-all" calls)) :settings) :model)))))
 
+(ert-deftest harness-ui-one-line-collapses-hover-help ()
+  "Hover help becomes one line: a second line grows the echo area.
+With tooltips off the help shows there, where the echo area's growth
+shrinks every window and moves the button under the mouse."
+  (should (equal "a b c" (harness-ui-one-line "a\n\tb  c")))
+  (should (equal "path mouse-1: open" (harness-ui-one-line " path\nmouse-1: open ")))
+  (should (equal "" (harness-ui-one-line nil))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here
