@@ -17,7 +17,6 @@
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-model)
-(defvar harness-elisp-allow-ui-eval)
 (defvar harness-tools-max-output-chars)
 (declare-function harness-acp-add-client "harness-acp")
 (declare-function harness-acp-client-receive "harness-acp")
@@ -95,9 +94,13 @@ in the background as always, and the client gets no tool request."
             (let ((r (harness-emacs-endpoint-test--call "elisp" :code "(+ 1 2)")))
               (should (equal "=> 3" (plist-get r :content)))
               (should (equal "background" (plist-get (plist-get r :meta) :emacs))))
+            ;; No Emacs to ask, and no request that evaluates in one
+            ;; even if there were: a call that asks is refused for that
+            ;; reason first.
             (let ((r (harness-emacs-endpoint-test--call "elisp" :code "(+ 1 2)" :emacs "user")))
               (should (plist-get r :is-error))
-              (should (string-search "No Emacs is attached" (plist-get r :content))))
+              (should (string-search "never evaluates in the user's Emacs" (plist-get r :content)))
+              (should (string-search "emacs_* tools" (plist-get r :content))))
             (should-not (harness-emacs-endpoint-test--asked-p (cdr phone))))
         (harness-acp-close (car phone))))))
 
@@ -124,39 +127,35 @@ in the background as always, and the client gets no tool request."
         (harness-acp-close (car phone))
         (harness-acp-close (car emacs))))))
 
-(ert-deftest harness-emacs-endpoint-exactly-one-emacs-evaluates ()
-  "Two Emacsen lent at once: a call goes to one of them, the most
-recently active, never to both.  A broadcast would evaluate the
-model's code twice."
+(ert-deftest harness-emacs-endpoint-exactly-one-emacs-answers ()
+  "Two Emacsen lent at once: a request goes to one of them, the most
+recently active, never to both.  A broadcast would, for instance, open
+the same file in every connected Emacs."
   (harness-emacs-endpoint-test--setup)
   (harness-test-with-temp-state
     (let ((a (harness-emacs-endpoint-test--connect t))
-          (b (harness-emacs-endpoint-test--connect t))
-          (harness-elisp-allow-ui-eval t)
-          (code "(setq harness-emacs-endpoint-test--evaluations (1+ harness-emacs-endpoint-test--evaluations))"))
+          (b (harness-emacs-endpoint-test--connect t)))
       (unwind-protect
           (progn
-            (setq harness-emacs-endpoint-test--evaluations 0)
             ;; A is where the user is now.
             (harness-test-await (harness-acp-request (car a) "_harness/harness/version" nil))
-            (should (equal "=> 1" (plist-get (harness-emacs-endpoint-test--call "elisp" :code code :emacs "user")
-                                             :content)))
-            (should (= 1 harness-emacs-endpoint-test--evaluations))
-            (should (member "_harness/emacs/eval" (car (cdr a))))
-            (should-not (member "_harness/emacs/eval" (car (cdr b))))
-            ;; Then B.
+            (let ((r (harness-emacs-endpoint-test--call "emacs_windows")))
+              (should-not (plist-get r :is-error))
+              (should (string-search "FRAME" (plist-get r :content))))
+            (should (member "_harness/emacs/windows" (car (cdr a))))
+            (should-not (member "_harness/emacs/windows" (car (cdr b))))
+            ;; Then B: the request follows the user, still to one Emacs.
             (harness-test-await (harness-acp-request (car b) "_harness/harness/version" nil))
-            (harness-emacs-endpoint-test--call "elisp" :code code :emacs "user")
-            (should (= 2 harness-emacs-endpoint-test--evaluations))
-            (should (member "_harness/emacs/eval" (car (cdr b))))
-            (should (= 1 (cl-count "_harness/emacs/eval" (car (cdr a)) :test #'equal))))
+            (harness-emacs-endpoint-test--call "emacs_windows")
+            (should (member "_harness/emacs/windows" (car (cdr b))))
+            (should (= 1 (cl-count "_harness/emacs/windows" (car (cdr a)) :test #'equal))))
         (harness-acp-close (car a))
         (harness-acp-close (car b))))))
 
 (ert-deftest harness-emacs-endpoint-an-unauthenticated-client-lends-nothing ()
   "A client that has not authenticated may advertise an Emacs, but is
-not one the harness asks: it would be handed the model's code, and
-could answer for the user's Emacs with what it likes."
+not one the harness asks: it could answer for the user's Emacs, and be
+shown its buffers, with what it likes."
   (harness-emacs-endpoint-test--setup)
   (harness-test-with-temp-state
     (let* ((sent nil)
@@ -243,7 +242,11 @@ that Emacs."
             (should-not (plist-get answer :variable)))
           (should (eq :false (plist-get (harness-emacs-endpoint-handle "describe" '(:symbol "harness-endpoint-nonesuch-q"))
                                         :known)))
-          (should-error (harness-emacs-endpoint-handle "shell" nil)))
+          (should-error (harness-emacs-endpoint-handle "shell" nil))
+          ;; No request evaluates code: the vocabulary a lent Emacs
+          ;; answers has no eval, whatever is configured.
+          (should-not (assoc "eval" harness-emacs-endpoint--methods))
+          (should-error (harness-emacs-endpoint-handle "eval" '(:code "(+ 1 2)"))))
       (kill-buffer buffer))))
 
 (ert-deftest harness-emacs-endpoint-reads-are-bounded ()

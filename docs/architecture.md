@@ -82,11 +82,12 @@ default) the layers above are split across two Emacs processes:
   `initialize`), and the harness sends that one Emacs the small, fixed
   set of `_harness/emacs/*` requests of lisp/harness-emacs-endpoint.el
   through `emacs/request` (see the tools and acp sections).  The
-  `emacs_*` tools ask it for data; the `elisp` tool evaluates in a
-  child `emacs --batch' (lisp/harness-elisp.el), and in the lent Emacs
-  only when a call asks for it and that Emacs allows it
-  (`harness-elisp-allow-ui-eval`, off by default), since a blocking
-  call there freezes it beyond recovery.
+  `emacs_*` tools ask it for plain data and a few bounded actions
+  (show a buffer, insert text, save one); none evaluates code.  The
+  `elisp` tool evaluates in a child `emacs --batch'
+  (lisp/harness-elisp.el), never in the lent Emacs: model-written Lisp
+  does not run there at all, since a blocking call would freeze it
+  beyond recovery, and no setting or request changes that.
 - Chores of the UI, which any client may do, are asked for with
   `client/request` (below): saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
@@ -1774,7 +1775,11 @@ TRAMP prefixes come from the session host):
 | `bash` | Bash | command, timeout, cwd | exec |
 | `elisp` | Emacs Lisp | code, timeout | exec |
 | `emacs_buffers` | List buffers | filter, all | read |
+| `emacs_windows` | List windows | — | read |
 | `emacs_buffer` | Read buffer | name, offset, limit | read |
+| `emacs_open` | Open buffer | name (buffer or path), line | read |
+| `emacs_insert` | Insert text | name, text, position (point/start/end) | write |
+| `emacs_save_buffer` | Save buffer | name | write |
 | `emacs_describe` | Describe symbol | symbol | read |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
@@ -1894,32 +1899,38 @@ for plain data with `harness-tools-ask-emacs METHOD PARAMS` (→ promise;
 `emacs/request` under a deadline, `harness-tools--emacs-timeout'), and
 word the result here.  The lent Emacs answers from
 lisp/harness-emacs-endpoint.el, which knows no tool: `buffers` (every
-buffer's name, mode, modified flag, size and file), `buffer` (a range of
-lines, stopping at the characters the tool names, so a long buffer comes
-in ranges), `describe` (a symbol as function, variable and face, its
-value printed in part) and `messages`.  With no Emacs lent -- a headless
-harness, or only clients such as a phone -- the call fails at once,
-saying so and pointing at read_file and the elisp tool; one that does not
-answer in time fails the call, logs, and shows a desktop notice, rather
-than leaving the turn pending.  `write_file`/`edit_file` emit
-`tools/file-written PATH`; the UI reverts unmodified buffers visiting
-PATH.
+buffer's name, mode, modified flag, size and file), `windows` (the
+window tree, frame by frame), `buffer` (a range of lines, stopping at
+the characters the tool names, so a long buffer comes in ranges),
+`describe` (a symbol as function, variable and face, its value printed
+in part) and `messages`; and it does the few bounded actions the same
+tools need: `open` (show a live buffer, or visit an existing local
+regular file under the size the tool names -- never a directory, a
+remote path or a prompt), `insert` (text into a live editable buffer,
+left unsaved) and `save` (a buffer to its local file, every question
+the save could ask turned into an error).  With no Emacs lent -- a
+headless harness, or only clients such as a phone -- the call fails at
+once, saying so and pointing at read_file and the elisp tool; one that
+does not answer in time fails the call, logs, and shows a desktop
+notice, rather than leaving the turn pending.  `write_file`/`edit_file`
+emit `tools/file-written PATH`; the UI reverts unmodified buffers
+visiting PATH.
 
-The `elisp` tool runs in the harness too, and evaluates in an Emacs it
-picks per call (input `emacs`).  `background`, the default, is a child
-`emacs --batch' process: Emacs runs Lisp on one thread, so model-written
-code that blocks (a `call-process' waiting on a child, a loop that never
-yields) would freeze the user's typing and redisplay, and neither a timer
-nor a signal can end it.  The child gets the harness on its `load-path',
-the working directory as its `default-directory', a timeout, and the
-process tree killed when it overruns (lisp/harness-elisp.el); its result
-comes back as JSON.  `user` evaluates in the lent Emacs instead, to drive
-it (`_harness/emacs/eval`), and that Emacs refuses unless its own
-`harness-elisp-allow-ui-eval` is on (off by default): the Emacs that
-would freeze decides, whatever harness asks.  So by default no model code
-touches the UI, and with the option on only calls that ask for it do;
-their title ends "(in your Emacs)".  Both report the same payload
-(`harness-elisp-payload`: value, output, messages or error).
+The `elisp` tool runs in the harness too, and always evaluates in a
+child `emacs --batch' process: Emacs runs Lisp on one thread, so
+model-written code that blocks (a `call-process' waiting on a child, a
+loop that never yields) would freeze the user's typing and redisplay,
+and neither a timer nor a signal can end it.  The child gets the
+harness on its `load-path', the working directory as its
+`default-directory', a timeout, and the process tree killed when it
+overruns (lisp/harness-elisp.el); its result comes back as JSON, in the
+shape `harness-elisp-payload` describes (value, output, messages or
+error).  It never runs in the lent Emacs, and no request of
+lisp/harness-emacs-endpoint.el evaluates code: model-written Lisp does
+not run in the user's Emacs at all, whatever anyone configures.  A call
+that asks for the user's Emacs (the old `emacs` input) is refused with
+that explanation; the `emacs_*` tools are the whole of what a model may
+do to the live Emacs.
 
 ### acp
 
@@ -2006,14 +2017,19 @@ claims an Emacs is not asked.  It rejects at once when none is
 attached, with the Emacs's message when it refuses, and when it
 disconnects first.  `emacs/attached` lists the lent Emacsen, the one
 asked first at the head.  Neither is callable over ACP.  Requests, all
-answered with plain data (lisp/harness-emacs-endpoint.el):
+answered with plain data or one bounded action
+(lisp/harness-emacs-endpoint.el):
 `buffers {}` → `{buffers: [{name, mode, modified, size, file}]}`;
-`buffer {name, offset, limit, maxChars}` → `{exists, mode, file,
-modified, total, first, lines, truncated}`; `describe {symbol,
-maxValueChars}` → `{known, function: {kind, signature, doc}, variable:
-{kind, value, doc}, face: {doc}}`; `messages {count}` → `{text}`;
-`eval {code, timeout}` → `{value, output, messages, error}`, or an error
-when the Emacs's `harness-elisp-allow-ui-eval` is off.
+`windows {}` → `{windows: [{frame, selected, name, mode, width, height,
+file}]}`; `buffer {name, offset, limit, maxChars}` → `{exists, mode,
+file, modified, total, first, lines, truncated}`; `open {name, path,
+line, maxBytes}` → `{name, mode, size, modified, file, visited}`;
+`insert {name, text, position, maxChars}` → `{name, inserted, line}`;
+`save {name}` → `{name, path, size}`; `describe {symbol, maxValueChars}`
+→ `{known, function: {kind, signature, doc}, variable: {kind, value,
+doc}, face: {doc}}`; `messages {count}` → `{text}`.  There is no `eval`
+request: a lent Emacs never evaluates model-written code, so nothing
+that asks it can freeze it.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token

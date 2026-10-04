@@ -2,20 +2,22 @@
 
 ;;; Commentary:
 
-;; Read-only windows into the user's Emacs so a model can help drive
-;; it: the buffer list, a buffer's text, documentation and values of
-;; symbols, and the tail of *Messages*.  Changing Emacs goes through
-;; the elisp tool (tools-shell), an exec-class tool that asks for
-;; permission separately and evaluates in a background Emacs unless the
-;; user lets it into theirs.
+;; Narrow windows into the user's Emacs so a model can help drive it:
+;; the buffer and window lists, a buffer's text, showing a buffer or a
+;; file where the user can see it, inserting text into a buffer, saving
+;; one, documentation and values of symbols, and the tail of *Messages*.
+;; None of them evaluates code: model-written Lisp never runs in the
+;; user's Emacs, and the elisp tool (tools-shell) evaluates in a
+;; background Emacs instead.
 ;;
 ;; Like every tool these run here, in the harness.  The user's Emacs is
 ;; a resource they reach, as a TRAMP host is for the file tools: they
 ;; check their input, ask the Emacs a client lent to the harness for
-;; plain data (`harness-tools-ask-emacs'; lisp/harness-emacs-endpoint.el
-;; answers in that Emacs) and word the result here.  A client that lends
-;; no Emacs, such as a phone, is never asked; with none attached (a
-;; headless harness) these tools say so, and every other tool works.
+;; plain data or one bounded action (`harness-tools-ask-emacs';
+;; lisp/harness-emacs-endpoint.el answers in that Emacs) and word the
+;; result here.  A client that lends no Emacs, such as a phone, is
+;; never asked; with none attached (a headless harness) these tools say
+;; so, and every other tool works.
 
 ;;; Code:
 
@@ -42,10 +44,26 @@ line numbers, so a long buffer comes in ranges instead of crossing from
 the user's Emacs whole."
   (max 1000 (/ (* 2 harness-tools-max-output-chars) 3)))
 
-(defun harness-tools-emacs--ask (method params format-answer)
+(defconst harness-tools-emacs--open-max-bytes (* 8 1024 1024)
+  "Largest file emacs_open has the user's Emacs visit.
+Reading a file into that Emacs happens on its only thread, so a larger
+file is refused with a message to read it in ranges instead.")
+
+(defconst harness-tools-emacs--insert-max-chars (* 10 1024 1024)
+  "Longest text emacs_insert accepts.
+Insertion copies the text on the user's Emacs's only thread, so a
+larger text is refused rather than freeze it moving the text.")
+
+(defconst harness-tools-emacs--write-hint
+  "Write the change to a file with write_file or edit_file instead."
+  "What the model is told when a write to the user's Emacs is refused.")
+
+(defun harness-tools-emacs--ask (method params format-answer &optional hint)
   "Ask the user's Emacs for METHOD with PARAMS; return a promise of a tool result.
 FORMAT-ANSWER turns the answer into the result.  When the Emacs cannot
-be asked or does not answer, the result is an error that says why."
+be asked or does not answer, the result is an error that says why,
+followed by HINT: `harness-tools-emacs--no-emacs-hint' by default,
+`:none' for no hint at all."
   (harness-then
    (harness-tools-ask-emacs method params)
    (lambda (answer)
@@ -53,8 +71,12 @@ be asked or does not answer, the result is an error that says why."
          (funcall format-answer answer)
        (error (harness-tool-error (harness-error-message err)))))
    (lambda (err)
-     (harness-tool-error (concat (harness-tools-sentence (harness-tools-reason err))
-                                 " " harness-tools-emacs--no-emacs-hint)))))
+     (let ((text (harness-tools-sentence (harness-tools-reason err))))
+       (harness-tool-error
+        (pcase hint
+          ('nil (concat text " " harness-tools-emacs--no-emacs-hint))
+          (':none text)
+          (_ (concat text " " hint))))))))
 
 (defun harness-tools-emacs--int (value default)
   "Return VALUE as an integer, or DEFAULT."
@@ -120,6 +142,54 @@ Hidden buffers, whose names start with a space, are left out unless ALL."
   :subject (lambda (input) (when-let* ((filter (plist-get input :filter))) (format "/%s/" filter)))
   :handler #'harness-tools-emacs--buffers)
 
+;;;; emacs_windows
+
+(defun harness-tools-emacs--format-windows (windows)
+  "Return the emacs_windows result for WINDOWS, the rows the Emacs sent."
+  (let ((rows (mapcar (lambda (window)
+                        (let ((file (plist-get window :file)))
+                          (list (format "%s" (or (plist-get window :frame) 1))
+                                (if (harness-json-true-p (plist-get window :selected)) "*" "")
+                                (or (plist-get window :name) "")
+                                (or (plist-get window :mode) "")
+                                (format "%sx%s" (or (plist-get window :width) 0)
+                                        (or (plist-get window :height) 0))
+                                (if (stringp file) (abbreviate-file-name file) ""))))
+                      windows)))
+    (if (null rows)
+        (harness-tool-ok "No windows")
+      (let ((w1 (min 5 (apply #'max (mapcar (lambda (r) (length (nth 0 r))) rows))))
+            (w2 (min 40 (apply #'max (mapcar (lambda (r) (length (nth 2 r))) rows))))
+            (w3 (min 28 (apply #'max (mapcar (lambda (r) (length (nth 3 r))) rows))))
+            (w4 (min 11 (apply #'max (mapcar (lambda (r) (length (nth 4 r))) rows)))))
+        (harness-tool-ok
+         (concat (format (format "%%-%ds  SEL  %%-%ds  %%-%ds  %%-%ds  %%s\n" w1 w2 w3 w4)
+                         "FRAME" "BUFFER" "MODE" "SIZE" "FILE")
+                 (mapconcat (lambda (r)
+                              (format (format "%%-%ds  %%1s    %%-%ds  %%-%ds  %%-%ds  %%s" w1 w2 w3 w4)
+                                      (nth 0 r) (nth 1 r)
+                                      (harness-truncate-end (nth 2 r) w2)
+                                      (harness-truncate-end (nth 3 r) w3)
+                                      (nth 4 r) (nth 5 r)))
+                            rows "\n")
+                 (format "\n(%d window%s)"
+                         (length rows) (if (= 1 (length rows)) "" "s"))))))))
+
+(defun harness-tools-emacs--windows (_input _ctx)
+  "Handler for emacs_windows."
+  (harness-tools-emacs--ask
+   "windows" :empty
+   (lambda (answer) (harness-tools-emacs--format-windows (plist-get answer :windows)))))
+
+(harness-define-tool "emacs_windows"
+  :label "List windows"
+  :description "List the windows of the user's Emacs, frame by frame: which window is selected, the buffer it shows, its mode, its size in characters and the buffer's file. Read-only."
+  :schema '(:type "object" :properties :empty)
+  :kind 'read
+  :coalescable t
+  :subject #'ignore
+  :handler #'harness-tools-emacs--windows)
+
 ;;;; emacs_buffer
 
 (defun harness-tools-emacs--format-buffer (name answer)
@@ -179,6 +249,134 @@ ANSWER is what the user's Emacs sent: the lines, and where they are."
                  (format "%s%s" name
                          (cond ((and o l) (format ":%s-%s" o (+ o l -1))) (o (format ":%s-" o)) (t ""))))))
   :handler #'harness-tools-emacs--buffer)
+
+;;;; emacs_open
+
+(defun harness-tools-emacs--format-open (answer line)
+  "Return the emacs_open result for ANSWER, the Emacs's report.
+LINE is the line the call asked for, when it did."
+  (let* ((name (or (plist-get answer :name) ""))
+         (mode (or (plist-get answer :mode) ""))
+         (file (plist-get answer :file))
+         (where (if (harness-json-true-p (plist-get answer :visited)) "Visited" "Showed")))
+    (harness-tool-ok
+     (format "%s %s (%s, %s%s)%s in the selected window%s"
+             where name mode (harness-format-bytes (plist-get answer :size))
+             (if (harness-json-true-p (plist-get answer :modified)) ", modified" "")
+             (if (and (stringp file) (not (equal (file-name-nondirectory file) name)))
+                 (format ", file %s" (abbreviate-file-name file))
+               "")
+             (if (and line (> line 0)) (format " at line %d" line) "")))))
+
+(defun harness-tools-emacs--open (input ctx)
+  "Handler for emacs_open with INPUT under CTX.
+The file path the name resolves to is worked out here, in the session's
+working directory, and the tool declares it as its path so the
+permission jail judges it like any other read; the Emacs named by the
+lent client then shows a buffer of that name if one is live, or visits
+the file."
+  (let ((name (plist-get input :name))
+        (line (harness-tools-emacs--int (plist-get input :line) nil)))
+    (if (not (stringp name))
+        (harness-tool-error "Missing name")
+      (harness-tools-emacs--ask
+       "open"
+       (list :name name
+             :path (harness-tools-resolve-path name ctx)
+             :line (and line (> line 0) line)
+             :maxBytes harness-tools-emacs--open-max-bytes)
+       (lambda (answer) (harness-tools-emacs--format-open answer line))))))
+
+(harness-define-tool "emacs_open"
+  :label "Open buffer"
+  :description "Show a buffer or a file in the user's Emacs, where they can see it, optionally with point at a line. NAME is a live buffer (as emacs_buffers lists it) or a file path; a file is visited first when no buffer has it. Only existing, local, regular files under 8 MiB are opened; directories, remote (TRAMP) files and larger files are refused instead of risking a freeze. Does not change any file, and never prompts."
+  :schema '(:type "object"
+            :properties (:name (:type "string" :description "Buffer name (as emacs_buffers lists it) or file path")
+                         :line (:type "integer" :description "Line to put point at, 1-based. Optional"))
+            :required ("name"))
+  :kind 'read
+  :paths (lambda (input) (list (plist-get input :name)))
+  :coalescable t
+  :subject (lambda (input) (when-let* ((name (plist-get input :name))) name))
+  :handler #'harness-tools-emacs--open)
+
+;;;; emacs_insert
+
+(defun harness-tools-emacs--position (value)
+  "Return the insert position VALUE names: \"point\", \"start\" or \"end\".
+Return nil when VALUE names none of them."
+  (let ((name (and value (downcase (format "%s" value)))))
+    (cond ((or (null value) (string-empty-p name) (equal name "point")) "point")
+          ((equal name "start") "start")
+          ((equal name "end") "end"))))
+
+(defun harness-tools-emacs--insert (input _ctx)
+  "Handler for emacs_insert with INPUT."
+  (let* ((name (plist-get input :name))
+         (text (plist-get input :text))
+         (position (harness-tools-emacs--position (plist-get input :position)))
+         (raw-position (plist-get input :position)))
+    (cond
+     ((not (stringp name)) (harness-tool-error "Missing name"))
+     ((not (stringp text)) (harness-tool-error "Missing text"))
+     ((and raw-position (not position))
+      (harness-tool-error (format "position must be point, start or end, not %S" raw-position)))
+     ((> (length text) harness-tools-emacs--insert-max-chars)
+      (harness-tool-error
+       (format "Text is %d characters, over the %d the emacs_insert limit allows"
+               (length text) harness-tools-emacs--insert-max-chars)))
+     (t
+      (harness-tools-emacs--ask
+       "insert"
+       (list :name name :text text :position position
+             :maxChars harness-tools-emacs--insert-max-chars)
+       (lambda (answer)
+         (harness-tool-ok
+          (format "Inserted %s characters %s in %s (from line %s); not saved"
+                  (or (plist-get answer :inserted) (length text))
+                  (pcase position ("point" "at point") ("start" "at the start") (_ "at the end"))
+                  (or (plist-get answer :name) name)
+                  (or (plist-get answer :line) 1))))
+       harness-tools-emacs--write-hint)))))
+
+(harness-define-tool "emacs_insert"
+  :label "Insert text"
+  :description "Insert text into a live buffer in the user's Emacs, at point (default), at the start or at the end; the buffer is left modified, not saved (use emacs_save_buffer for that). Refuses read-only buffers and the harness's own UI buffers. This is text editing, not evaluation; it cannot change modes, run commands or reach outside the buffer."
+  :schema '(:type "object"
+            :properties (:name (:type "string" :description "Buffer name, exactly as emacs_buffers lists it")
+                         :text (:type "string" :description "The text to insert")
+                         :position (:type "string" :enum ("point" "start" "end")
+                                    :description "Where to insert: at point (default), the start or the end of the buffer"))
+            :required ("name" "text"))
+  :kind 'write
+  :subject (lambda (input) (plist-get input :name))
+  :handler #'harness-tools-emacs--insert)
+
+;;;; emacs_save_buffer
+
+(defun harness-tools-emacs--save-buffer (input _ctx)
+  "Handler for emacs_save_buffer with INPUT."
+  (let ((name (plist-get input :name)))
+    (if (not (stringp name))
+        (harness-tool-error "Missing name")
+      (harness-tools-emacs--ask
+       "save" (list :name name)
+       (lambda (answer)
+         (harness-tool-ok
+          (format "Saved %s to %s"
+                  (or (plist-get answer :name) name)
+                  (abbreviate-file-name (or (plist-get answer :path) "")))))
+       harness-tools-emacs--write-hint))))
+
+(harness-define-tool "emacs_save_buffer"
+  :label "Save buffer"
+  :description "Save a live buffer to the local file it visits, as the user would with `save-buffer'. Refuses buffers with no file, remote (TRAMP) files, and files that changed on disk since the buffer was read; it never waits on a lock file or a prompt."
+  :schema '(:type "object"
+            :properties (:name (:type "string" :description "Buffer name, exactly as emacs_buffers lists it"))
+            :required ("name"))
+  :kind 'write
+  :subject (lambda (input) (plist-get input :name))
+  :handler #'harness-tools-emacs--save-buffer)
 
 ;;;; emacs_describe
 
@@ -246,7 +444,7 @@ ANSWER is what the user's Emacs sent: the lines, and where they are."
   :handler #'harness-tools-emacs--messages)
 
 (harness-define-module 'tools-emacs
-  :doc "List buffers, Read buffer, Describe symbol and Emacs messages: read-only tools into the user's Emacs."
+  :doc "List buffers, List windows, Read buffer, Open buffer, Insert text, Save buffer, Describe symbol and Emacs messages: bounded tools into the user's Emacs, without evaluation."
   :requires '(tools))
 
 (provide 'harness-tools-emacs)

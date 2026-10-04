@@ -17,9 +17,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   or API key), GitHub Copilot through the `copilot` CLI, DeepSeek,
   OpenAI-compatible endpoints, and AWS Bedrock.
 - **Built-in tools.** Tools for files (read, write, edit, search), the
-  shell, Emacs (buffers, documentation, `*Messages*`, Emacs Lisp
-  evaluation), web search and fetch, sub-agents and skills, plus tools
-  that let an agent inspect and drive other sessions and tasks.
+  shell, the user's Emacs (buffers, windows, showing and editing a
+  buffer, saving it, documentation, `*Messages*`), Emacs Lisp
+  evaluation in a separate background Emacs, web search and fetch,
+  sub-agents and skills, plus tools that let an agent inspect and
+  drive other sessions and tasks.
 - **Permissions and sandboxing.** Four permission modes (Ask, Accept
   edits, Auto, YOLO), per-session directory access, and a kernel
   sandbox for tool processes (bubblewrap or `systemd-run`).

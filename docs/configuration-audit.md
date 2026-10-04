@@ -302,7 +302,7 @@ marked *done* were fixed, the rest are recommendations, not changes.
 |---|---|
 | `write_file` and `edit_file` | One need ("change a file") with two parameters (whole file, or a patch). Kept separate: the agent chooses per call, and both are documented side by side |
 | `glob`, `grep`, `list_dir`, `file_info`, `read_file` | The fs tools are verbs on files, not duplicates. Their limits are now constants, so they compose |
-| `emacs_*` tools and the `elisp` tool | Not one need: `elisp` evaluates in a background Emacs, and reaches the user's only when a call asks for it and the user allowed it (`harness-elisp-allow-ui-eval`); the narrow, read-only tools are how the agent reads the user's Emacs unaided. Keep both, with `elisp` under the stricter permission |
+| `emacs_*` tools and the `elisp` tool | Not one need: `elisp` evaluates in a background Emacs and cannot touch the user's Emacs at all; the narrow `emacs_*` tools are the only way to read or drive the live Emacs, and each is bounded work (no prompt, subprocess, network or file-system wait), so the agent's UI reach is exactly what they allow. Keep both |
 | `web_search` and the provider's own search | Already one feature with a parameter (`harness-websearch-builtin`), exactly the pattern this audit asks for |
 | `session_wait` and `task_wait` | One waiting mechanism with different predicates; both already accept the same timeout options, with one default (now an internal constant) |
 | `fork` and `btw` | Fork copies context, BTW deliberately does not. One "start a side conversation" UI with a parameter would hide the price difference; keep both, they are named for what they do |

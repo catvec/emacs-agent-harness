@@ -4,24 +4,24 @@
 
 ;;; Commentary:
 
-;; The `elisp' tool lets a model run Lisp, and by default model-written
-;; code never runs in the user's Emacs.  Emacs runs Lisp on one thread,
-;; so code that blocks -- a `call-process' waiting on a child, a loop
-;; that never yields -- freezes typing and redisplay, and nothing can
-;; be done about it from Lisp: `with-timeout' needs the event loop, and
-;; a signal only breaks loops that call `maybe-quit', not a blocked
-;; subprocess read.  So the tool, which runs in the harness like every
-;; tool, evaluates in a background `emacs --batch' process
-;; (`harness-elisp-batch-main'), which it kills, tree and all, when it
-;; overruns its timeout.  The child adds the harness to its
-;; `load-path', so `(require 'harness-...)` works as it did when the
-;; code ran in the harness's own Emacs.
+;; The `elisp' tool lets a model run Lisp, and model-written code never
+;; runs in the user's Emacs.  Emacs runs Lisp on one thread, so code
+;; that blocks -- a `call-process' waiting on a child, a loop that never
+;; yields -- freezes typing and redisplay, and nothing can be done about
+;; it from Lisp: `with-timeout' needs the event loop, and a signal only
+;; breaks loops that call `maybe-quit', not a blocked subprocess read.
+;; So the tool, which runs in the harness like every tool, evaluates in
+;; a background `emacs --batch' process (`harness-elisp-batch-main'),
+;; which it kills, tree and all, when it overruns its timeout.  The
+;; child adds the harness to its `load-path', so `(require
+;; 'harness-...)` works as it did when the code ran in the harness's own
+;; Emacs.
 ;;
-;; A call may ask for the user's Emacs instead, which then evaluates the
-;; code itself (lisp/harness-emacs-endpoint.el) -- only when the user
-;; turned on `harness-elisp-allow-ui-eval' there.
-;; `harness-elisp-eval-string' is the evaluator both share, and
-;; `harness-elisp-payload' the shape both report in.
+;; There is no other place it can run: the user's Emacs answers no
+;; request that evaluates code (lisp/harness-emacs-endpoint.el), whatever
+;; anyone configures.  `harness-elisp-eval-string' is the background
+;; child's evaluator, and `harness-elisp-payload' the shape it reports
+;; in.
 
 ;;; Code:
 
@@ -45,23 +45,6 @@ Internal, not an option (see docs/configuration-audit.md).")
 (defcustom harness-elisp-emacs (expand-file-name invocation-name invocation-directory)
   "Emacs program the `elisp' tool runs its evaluations in."
   :type 'file :group 'harness)
-
-(defcustom harness-elisp-allow-ui-eval nil
-  "Non-nil lets the `elisp' tool evaluate in this Emacs, the one you use.
-DANGEROUS, and off by default.  The tool evaluates in a fresh
-background Emacs process, where nothing it does can touch this one.
-Only a call that asks for the user's Emacs comes here, and only with
-this on is it evaluated here, so a model can drive this Emacs in ways
-the read-only `emacs_*' tools cannot.  This Emacs decides: while this
-is off it refuses those calls, whatever harness asks it.
-
-The hazard: Emacs runs Lisp on one thread, so model-written code that
-blocks -- a `call-process' waiting on a child, a loop that never
-yields -- stops typing and redisplay, and neither a timer nor a signal
-can end it.  The tool call fails after its timeout, but this Emacs
-stays frozen until the blocking code returns or its process is killed.
-Only turn this on while you want an agent to drive this Emacs."
-  :type 'boolean :group 'harness)
 
 ;;;; Evaluating a string
 
@@ -146,8 +129,7 @@ does not parse or a form does not evaluate."
   "Return the JSON-ready plist that reports an `elisp' evaluation.
 RESULT is (VALUE OUTPUT MESSAGES) from `harness-elisp-eval-string', or
 nil; ERROR is the failure's message, or nil.  The background Emacs
-writes it as JSON, and the user's Emacs answers with it, so the tool
-reads one shape from both."
+writes it as JSON, and the `elisp' tool reads it back."
   (if error
       (list :value "" :output "" :messages "" :error error)
     (pcase-let ((`(,value ,output ,messages) result))
