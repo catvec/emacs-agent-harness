@@ -336,7 +336,7 @@ the fresh attempts left when the parent's HEAD moves meanwhile."
 ENTRY, BRANCH and RETRIES are as for `harness-merge--run-git-merge';
 MESSAGE is the commit message."
   (harness-then
-   (harness-merge--git parent-cwd "commit-tree" tree "-p" head "-p" tip "-m" message)
+   (harness-merge--git parent-cwd "commit-tree" "--no-gpg-sign" tree "-p" head "-p" tip "-m" message)
    (lambda (commit)
      (let ((sha (string-trim (plist-get commit :stdout))))
        (cond

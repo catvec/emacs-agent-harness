@@ -82,7 +82,7 @@
   (let ((root (file-name-as-directory (expand-file-name "acme" base))))
     (make-directory root t)
     (harness-ui-usage-test--git root "init" "-q" "-b" "main")
-    (harness-ui-usage-test--git root "-c" "user.name=t" "-c" "user.email=t@example.invalid"
+    (harness-ui-usage-test--git root "-c" "user.name=t" "-c" "user.email=t@example.invalid" "-c" "commit.gpgsign=false"
                                 "commit" "-q" "--allow-empty" "-m" "initial")
     root))
 

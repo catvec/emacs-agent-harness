@@ -143,7 +143,7 @@ also once the worktree is gone; other groupings have no `:main'."
            (remote "/ssh:nobody@example.invalid:/srv/x/"))
       (make-directory root t)
       (harness-usage-test--git root "init" "-q" "-b" "main")
-      (harness-usage-test--git root "-c" "user.name=t" "-c" "user.email=t@example.invalid"
+      (harness-usage-test--git root "-c" "user.name=t" "-c" "user.email=t@example.invalid" "-c" "commit.gpgsign=false"
                                "commit" "-q" "--allow-empty" "-m" "initial")
       (harness-usage-test--git root "worktree" "add" "-q" "-b" "task/live" live)
       (harness-usage-test--git root "worktree" "add" "-q" "-b" "task/gone" gone)
