@@ -1182,7 +1182,10 @@ pending request and resolves when answered).
   stays private to each command.
 - A CWD inside a linked git worktree also gets the repository's common
   git directory read-write (its `hooks/` and `config` stay read-only, so
-  nothing planted there runs when the harness uses git unconfined) and
+  nothing planted there runs when the harness uses git unconfined; the
+  main checkout's `index` and `HEAD` stay read-only too, since git there
+  would see the main checkout's files, absent from the sandbox, as
+  deleted and could wreck its index) and
   the host's `user.name`/`user.email` as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`,
   so worktree sessions can commit.
 - Git in the sandbox sees no other worktree's files, so it takes every
@@ -1428,14 +1431,22 @@ pending request and resolves when answered).
 - `merge/enqueue CHILD-SID PARENT-SID` → position; `merge/queue PARENT-SID`;
   `merge/cancel CHILD-SID`.  When the parent reaches a step boundary
   (`agent/step` filter) or is idle, the head of the queue gets the lock:
-  the harness runs `git merge --no-ff` of the child's branch in the
-  parent's cwd; on conflict the child session receives a steering
-  message describing the conflicts (from
-  `harness-sender-system "merge queue"`) and its jail is widened to the
-  parent's cwd until it resolves; then the lock passes on.  A merged
-  child's worktree loses the harness's lock (`worktree/unlock`; see
-  worktree).
-- `merge/status CHILD-SID`; the `merge_done` tool releases a conflict lock.
+  each merge is a transaction that never leaves the parent's checkout
+  mid-merge.  `git merge-tree --write-tree` merges the child's branch
+  into the parent's HEAD off to the side; a clean result becomes a merge
+  commit (`git commit-tree`, message as `git merge --no-ff` writes it)
+  and the checkout moves onto it with `git merge --ff-only`, which git
+  refuses, changing nothing, when it would overwrite uncommitted or
+  untracked work there or a merge is already in progress (the merge
+  fails; a HEAD that moved meanwhile is merged again).  On conflict the
+  parent is untouched and the lock passes on at once: the child session
+  receives a steering message (from `harness-sender-system "merge
+  queue"`) naming the files and the parent's commit to `git merge` into
+  its own branch, in its own worktree.  A merged child's worktree loses
+  the harness's lock (`worktree/unlock`; see worktree).
+- `merge/status CHILD-SID`; the `merge_done` tool checks the child's
+  worktree contains the parent's commit, merged and committed, and
+  queues the branch again.
 - Events `merge/queued CHILD PARENT POSITION`, `merge/started`,
   `merge/conflict CHILD PARENT FILES`, `merge/finished CHILD PARENT STATUS`
   (merged|failed|aborted|cancelled).
