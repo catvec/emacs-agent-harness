@@ -232,7 +232,6 @@ the `[menu]` button in the header line.
 | `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
-| `C-c C-v` | Attach what the clipboard holds (`C-u C-c C-v` picks an earlier capture) |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
 | `C-c C-p` | Edit the pattern the newest permission request about paths is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
@@ -259,8 +258,12 @@ compose box attaches it instead of yanking text: it goes on the *media
 ring*, a kill ring of its own that only compose boxes read, so no other
 mode ever yanks a picture as raw bytes. `M-y` right after goes back
 through earlier captures, their thumbnails showing in the box, and
-`C-u C-c C-v` picks one by name. Files copied in a file manager attach
-the same way. `yank-media` finds them too. Set
+`C-u M-x harness-compose-attach-clipboard` picks one by name. Files
+copied in a file manager attach the same way, `yank-media` finds them
+too, and `M-x harness-compose-attach-clipboard` chooses among the
+clipboard's other MIME types. The box binds no `C-c C-v`: in a chat
+that key is the review banner's `[Verify]`, so a screenshot never has
+to fight the banner's key. Set
 `harness-compose-yank-media` to nil to leave `C-y` and `M-y` alone.
 
 Permission requests and questions from the agent appear inline above
@@ -485,7 +488,7 @@ your checkout itself can be submitted to the **main tree** instead (the
   in the box, `C-c C-c` sends it) and `[Report]`, which pops it out, so
   you can read the work and accept it without going back to the board.
   The two keys work only while the banner shows; otherwise `C-c C-v`
-  attaches the clipboard as usual.
+  is nothing there, the box pasting with `C-y`.
 - `[Report]` on a card that has one, or on the banner, pops the
   handed-in summary and evidence out beside the board: images large, as
   wide as the popout, videos as thumbnails, files as buttons, and each

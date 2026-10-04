@@ -264,6 +264,9 @@ KEYS default to C-g, which closes the menu."
       (should (string-match-p "C-c C-q +Queue for next turn" text))
       (should (string-match-p "C-c C-k +Cancel turn" text))
       (should (string-match-p "C-c C-a +Attach file" text))
+      ;; Pasting is C-y; C-c C-v is the review banner's [Verify].
+      (should (string-match-p "C-y +Paste; an image attaches" text))
+      (should-not (string-match-p "C-c C-v" text))
       (should-not (string-match-p "Task board" text)))))
 
 (ert-deftest harness-ui-menu-in-a-btw-shows-its-keys-over-the-chats ()
@@ -278,7 +281,7 @@ KEYS default to C-g, which closes the menu."
 (ert-deftest harness-ui-menu-in-review-shows-its-keys-over-the-chats ()
   "While a task's review banner shows, C-c C-v verifies and C-c C-x sends
 it back, in the buffer and so in the menu; the chat's C-c C-r still
-redraws.  With the banner gone, C-c C-v attaches the clipboard again."
+redraws.  With the banner gone, C-c C-v is nothing: the box pastes with C-y."
   (harness-ui-test-with-menu-buffer (lambda () (harness-chat-mode) (harness-ui-review-minor-mode 1))
     (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
     (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-x"))))
@@ -290,9 +293,9 @@ redraws.  With the banner gone, C-c C-v attaches the clipboard again."
       (should (string-match-p "C-c C-r +Redraw" text))
       (should-not (string-match-p "Attach clipboard" text)))
     (harness-ui-review-minor-mode -1)
-    (should (eq 'harness-compose-attach-clipboard (key-binding (kbd "C-c C-v"))))
+    (should-not (key-binding (kbd "C-c C-v")))
     (let ((text (harness-ui-test-menu)))
-      (should (string-match-p "C-c C-v +Attach clipboard" text))
+      (should-not (string-match-p "C-c C-v" text))
       (should-not (string-match-p "Review\\|Send back" text)))))
 
 (ert-deftest harness-ui-menu-shows-the-board-commands-on-the-task-board ()
@@ -302,6 +305,8 @@ redraws.  With the banner gone, C-c C-v attaches the clipboard again."
       (should (string-match-p "\\. s +Start now" text))
       (should (string-match-p "\\. RET +Open its session" text))
       (should (string-match-p "C-c C-c +Submit" text))
+      (should (string-match-p "C-y +Paste; an image attaches" text))
+      (should-not (string-match-p "C-c C-v" text))
       (should-not (string-match-p "^Chat$" text)))))
 
 (ert-deftest harness-ui-menu-runs-buffer-commands-in-the-buffer ()
@@ -375,7 +380,14 @@ leave free.  None is left out by the menu."
                 (if dotted
                     (should (= 2 (length events)))
                   (should (memq 'control (event-modifiers (aref events 0)))))
-                (should (cl-some (lambda (map) (eq command (lookup-key map own))) maps)))))))))
+                (should (cl-some (lambda (map)
+                                   (or (eq command (lookup-key map own))
+                                       ;; Or the key's global command, remapped:
+                                       ;; the compose box's C-y, `yank' remapped.
+                                       (let ((global (lookup-key global-map own)))
+                                         (and global (symbolp global)
+                                              (eq command (lookup-key map (vector 'remap global)))))))
+                                 maps)))))))))
   ;; What every harness buffer offers is checked above; here, that each mode is there.
   (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-sessions-mode harness-ui-tree-mode
                   harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode

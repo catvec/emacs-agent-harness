@@ -7,7 +7,8 @@
 ;; chip with their progress, web pages go in as text, data: links and
 ;; dropped text land in the box, images and videos show thumbnails, and
 ;; yanking takes images and copied files off the clipboard into the
-;; media ring.  The clipboard and the display are stubbed; downloads go
+;; media ring, and C-c C-v is no longer the box's, so a chat's [Verify]
+;; keeps it.  The clipboard and the display are stubbed; downloads go
 ;; to a web server in this Emacs.
 
 ;;; Code:
@@ -514,7 +515,7 @@ Point starts after the box, where a command loop's hooks move it from."
       (should (string-suffix-p ".html" (plist-get att :path)))
       (should (equal "<b>bold</b>" (harness-ui-compose-test--bytes (plist-get att :path)))))
     (should (= 2 (length (harness-media-ring-entries))))
-    ;; C-u C-c C-v attaches an earlier capture.
+    ;; C-u M-x harness-compose-attach-clipboard attaches an earlier capture.
     (setq harness-compose-attachments nil)
     (let ((png (cl-find "image/png" (harness-media-ring-entries) :key (lambda (e) (plist-get e :mime)) :test #'equal)))
       (cl-letf (((symbol-function 'completing-read)
@@ -526,6 +527,17 @@ Point starts after the box, where a command loop's hooks move it from."
     (setq harness-compose-attachments nil)
     (harness-compose--yank-media-image 'image/png harness-test-png)
     (should (equal "image/png" (plist-get (car harness-compose-attachments) :mime)))))
+
+(ert-deftest harness-ui-compose-c-c-c-v-is-not-the-boxes ()
+  "C-c C-v is not the box's key: pasting is C-y, and Verify keeps C-c C-v.
+The box leaves C-c C-v unbound, so in a chat the review banner's
+[Verify] owns it and nothing shadows it."
+  (harness-ui-compose-test-with
+    (should-not (lookup-key harness-compose-map (kbd "C-c C-v")))
+    (should-not (key-binding (kbd "C-c C-v")))
+    ;; Every key that yanks pastes into the box.
+    (should (eq 'harness-compose-yank (key-binding (kbd "C-y"))))
+    (should (eq 'harness-compose-yank-pop (key-binding (kbd "M-y"))))))
 
 (provide 'harness-ui-compose-test)
 ;;; harness-ui-compose-test.el ends here

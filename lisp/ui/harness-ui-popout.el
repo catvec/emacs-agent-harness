@@ -122,7 +122,7 @@ They sit under the keymaps the content brings, which win.")
   (define-key map (kbd "g") #'harness-ui-popout-redraw))
 
 (let ((map harness-ui-popout-mode-map))
-  ;; The box's keys (RET newline, C-c C-a, C-c C-v).
+  ;; The box's keys (RET newline, C-c C-a, C-y pasting images).
   (set-keymap-parent map harness-compose-map)
   (define-key map (kbd "C-c C-c") #'harness-ui-popout-submit)
   ;; C-g, as a remapping: completion popups (corfu, company) keep their

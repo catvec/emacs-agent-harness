@@ -1891,7 +1891,7 @@ anything that moves a task without one, so a board never drifts.")
   "Keymap of `harness-ui-tasks-mode'.")
 
 (let ((map harness-ui-tasks-mode-map))
-  ;; The compose box's keys (RET newline, C-c C-a, C-c C-v).
+  ;; The compose box's keys (RET newline, C-c C-a, C-y pasting images).
   (set-keymap-parent map harness-compose-map)
   (define-key map (kbd "C-c C-c") #'harness-ui-tasks-submit)
   (define-key map (kbd "C-c C-k") #'harness-ui-tasks-compose-reset)
@@ -1962,7 +1962,7 @@ anything that moves a task without one, so a board never drifts.")
         ("C-c C-t" "Submit or Refine" harness-ui-tasks-toggle-refine)
         ("C-c C-k" "Clear" harness-ui-tasks-compose-reset)
         ("C-c C-a" "Attach file" harness-compose-add-attachment)
-        ("C-c C-v" "Attach clipboard" harness-compose-attach-clipboard)]))
+        ("C-y" "Paste; an image attaches" harness-compose-yank)]))
 
 (defun harness-ui-tasks--buffer-name (dir)
   (format "*harness tasks: %s*" (file-name-nondirectory (directory-file-name dir))))

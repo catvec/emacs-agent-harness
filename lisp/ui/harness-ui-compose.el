@@ -16,8 +16,10 @@
 ;;     popup that shows as you type (corfu, company) shows for them even
 ;;     while the host redraws around the box;
 ;;   - attachments: C-c C-a finds a project file by part of its name
-;;     (C-u C-c C-a: any file), C-c C-v pastes the clipboard (images and
-;;     other MIME types), files dropped on the window attach;
+;;     (C-u C-c C-a: any file), C-y pastes what the clipboard holds (an
+;;     image or copied files go on the media ring; M-x
+;;     harness-compose-attach-clipboard for other MIME types), files
+;;     dropped on the window attach;
 ;;   - the text and attachments, kept across redraws of the host;
 ;;   - long lines that wrap under the text, never scrolling sideways;
 ;;   - optionally, the box at the bottom of the window: a buffer shorter
@@ -94,7 +96,10 @@ say.")
   (define-key map (kbd "S-<return>") #'harness-compose-newline)
   (define-key map (kbd "C-j") #'harness-compose-newline)
   (define-key map (kbd "C-c C-a") #'harness-compose-add-attachment)
-  (define-key map (kbd "C-c C-v") #'harness-compose-attach-clipboard)
+  ;; C-c C-v, the clipboard's key once, is the review banner's [Verify]
+  ;; in a chat; unbound here so a reload frees it there too.  Other
+  ;; MIME types are chosen from with M-x harness-compose-attach-clipboard.
+  (define-key map (kbd "C-c C-v") nil t)
   ;; Bound here, not remapped: a minor mode's remap (Doom's
   ;; `consult-yank-pop' for M-y, say) outranks a major mode's.  The
   ;; filter makes the key fall through to its usual command when yanking

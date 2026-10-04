@@ -32,6 +32,7 @@
 (defvar harness-ui--sessions)
 (defvar harness-compose-start)
 (defvar harness-compose-end)
+(defvar harness-compose-map)
 (defvar harness-chat--loading)
 (defvar harness-chat--transcript-end)
 (defvar harness-compose-redraw-function)
@@ -195,16 +196,21 @@ review with a report, an image among its evidence; BODY gets `board',
         (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
         (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-x"))))
         (should (eq 'harness-chat-redraw (key-binding (kbd "C-c C-r"))))
+        ;; C-c C-v is the banner's and no longer the box's too: pasting
+        ;; an image is C-y.
+        (should (eq 'harness-compose-yank (key-binding (kbd "C-y"))))
+        (should-not (lookup-key harness-compose-map (kbd "C-c C-v")))
         (call-interactively (key-binding (kbd "C-c C-v"))))
       (harness-test-wait (lambda () (not (eq 'review (plist-get (harness-call 'task/get id) :state))))
                          10 "the task to leave review")
       (harness-test-wait (lambda () (not (string-match-p "Ready for review"
                                                          (harness-ui-review-test--text chat))))
                          5 "the banner to go")
-      ;; With the banner gone, so are its keys: C-c C-v attaches the clipboard again.
+      ;; With the banner gone, so are its keys: C-c C-v is nothing there,
+      ;; the box pasting with C-y.
       (with-current-buffer chat
         (should-not harness-ui-review-minor-mode)
-        (should (eq 'harness-compose-attach-clipboard (key-binding (kbd "C-c C-v"))))
+        (should-not (key-binding (kbd "C-c C-v")))
         (should-not (key-binding (kbd "C-c C-x")))))))
 
 (ert-deftest harness-ui-review-banner-sends-back-with-the-box ()

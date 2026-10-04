@@ -2420,7 +2420,7 @@ line, in a window shorter than the buffer too, a board under a BTW say,
 by scrolling that never moves point out of the box), a prompt that is a
 field of its own (`C-a` stops after it, so
 `C-a C-k` clears the line), the placeholder, @file and /skill
-completion, attachments (`C-c C-a`, clipboard `C-c C-v`, drag and
+completion, attachments (`C-c C-a`, pasting `C-y`, drag and
 drop), skill expansion (`harness-compose-with-expanded-text`) and ACP
 attachment blocks.  `harness-compose-insert` takes `:face`, the box's
 background (`harness-compose-face` by default) and `:accent`, the face
@@ -2451,8 +2451,12 @@ Media on the clipboard is read without touching `kill-ring`: `C-y` in a
 compose box attaches the image, or the files a file manager copied, and
 pushes captures on the media ring (`harness-ui-media-ring`), a ring of
 its own under `harness-state-directory/clips/` deduplicated by the
-SHA-1 of the bytes, which `M-y` goes back through and `C-u C-c C-v`
-picks from; `yank-media` attaches them too (`harness-compose-yank-media`).
+SHA-1 of the bytes, which `M-y` goes back through and
+`C-u M-x harness-compose-attach-clipboard` picks from; `yank-media`
+attaches them too (`harness-compose-yank-media`).  The box binds no
+`C-c C-v`: in a chat that is the review banner's [Verify], so the two
+never fight, and other MIME types are chosen from with
+`M-x harness-compose-attach-clipboard`.
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
