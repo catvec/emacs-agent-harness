@@ -486,16 +486,122 @@ provider had something to free.  A failure is logged, never signalled."
         (error (harness-log 'warn "provider %s: closing %s failed: %s" pid session-id (harness-error-message err))
                nil)))))
 
-(harness-defmethod provider/fork (model-id state)
+(harness-defmethod provider/fork (model-id state &optional checkpoint)
   "Ask MODEL-ID's provider to fork provider STATE.
-Return a promise of the new state, or of nil when unsupported."
+Return a promise of the new state, or of nil when unsupported.  With
+CHECKPOINT, a `:checkpoint' the provider put on a node, the fork holds
+the conversation as it was at that node and nothing after it; a
+provider that cannot cut its conversation there, or does not know the
+checkpoint (another provider made it), gives nil, and the conversation
+then starts anew from the transcript."
   (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model model-id))
-               (provider (and pid (harness-provider-get pid))))
-    (if (and provider (harness-provider-fork-fn provider))
-        (condition-case err
-            (harness-as-promise (funcall (harness-provider-fork-fn provider) model-id state))
-          (error (harness-rejected err)))
-      (harness-resolved nil))))
+               (provider (and pid (harness-provider-get pid)))
+               (fn (and provider (harness-provider-fork-fn provider))))
+    (cond
+     ((null fn) (harness-resolved nil))
+     ;; A fork function of two arguments cannot cut the conversation.
+     ((and checkpoint (not (harness-provider--accepts-args-p fn 3))) (harness-resolved nil))
+     (t (condition-case err
+            (harness-as-promise (if checkpoint
+                                    (funcall fn model-id state checkpoint)
+                                  (funcall fn model-id state)))
+          (error (harness-rejected err)))))))
+
+(defun harness-provider--accepts-args-p (fn n)
+  "Non-nil when function FN can be called with N arguments."
+  (let ((arity (func-arity fn)))
+    (and (<= (car arity) n) (or (eq (cdr arity) 'many) (>= (cdr arity) n)))))
+
+;;;; Replaying a transcript into a new conversation
+
+(defconst harness-provider-history-block-limit 20000
+  "Characters of one tool input or result kept when a transcript is replayed.")
+
+(defconst harness-provider-history-limit 400000
+  "Characters of transcript kept when it is replayed into a new conversation.
+Past it, the oldest messages go, all but the first.")
+
+(defun harness-provider-split-history (messages)
+  "Split provider MESSAGES into (HISTORY . TRAILING).
+TRAILING is the run of user messages at the end, what a hosted loop
+sends as the new message; HISTORY is everything before it, which a
+conversation that continues it already holds."
+  (let ((rest (reverse messages)) trailing)
+    (while (and rest (equal (format "%s" (plist-get (car rest) :role)) "user"))
+      (push (pop rest) trailing))
+    (cons (nreverse rest) trailing)))
+
+(defun harness-provider--history-clip (text)
+  "Return TEXT cut to `harness-provider-history-block-limit' characters."
+  (let ((text (or text "")))
+    (if (<= (length text) harness-provider-history-block-limit) text
+      (concat (substring text 0 harness-provider-history-block-limit)
+              (format "\n[… %d more characters]" (- (length text) harness-provider-history-block-limit))))))
+
+(defun harness-provider--history-message (message names)
+  "Render provider MESSAGE as transcript text, or nil when it shows nothing.
+NAMES maps tool_use ids to tool names, for the results."
+  (let* ((role (format "%s" (plist-get message :role)))
+         (parts
+          (delq nil
+                (mapcar
+                 (lambda (b)
+                   (pcase (plist-get b :type)
+                     ("text" (let ((text (plist-get b :text)))
+                               (unless (harness-string-blank-p text) text)))
+                     ("tool_use"
+                      (format "<tool_call name=\"%s\">\n%s\n</tool_call>" (plist-get b :name)
+                              (harness-provider--history-clip
+                               (harness-json-encode-text (or (plist-get b :input) :empty)))))
+                     ("tool_result"
+                      (format "<tool_result name=\"%s\"%s>\n%s\n</tool_result>"
+                              (or (gethash (plist-get b :tool_use_id) names) "tool")
+                              (if (harness-json-true-p (plist-get b :is_error)) " error=\"true\"" "")
+                              (harness-provider--history-clip
+                               (let ((c (plist-get b :content)))
+                                 (if (stringp c) c
+                                   (mapconcat (lambda (x) (or (plist-get x :text) "")) c "\n"))))))
+                     ("image" "[image]")
+                     ("audio" "[audio]")
+                     ("file" (format "[attached file: %s]" (plist-get b :path)))
+                     ;; Thinking is the model's own and its signature is for
+                     ;; the conversation it was written in.
+                     (_ nil)))
+                 (plist-get message :content)))))
+    (when parts
+      (format "<%s>\n%s\n</%s>" role (string-join parts "\n\n") role))))
+
+(defun harness-provider-history-text (history)
+  "Return provider messages HISTORY as one text a new conversation opens with.
+Nil when HISTORY shows nothing.  A hosted-loop provider that has to
+start a new conversation for a transcript that already has messages
+sends this before the new message, so the model knows what was said:
+its own conversation was cut before any checkpoint, could not be
+resumed, or another provider ran the turns before.  Tool inputs and
+results longer than `harness-provider-history-block-limit' are cut,
+and past `harness-provider-history-limit' the oldest messages but the
+first go."
+  (let ((names (make-hash-table :test 'equal)))
+    (dolist (m history)
+      (dolist (b (plist-get m :content))
+        (when (equal (plist-get b :type) "tool_use")
+          (puthash (plist-get b :id) (plist-get b :name) names))))
+    (let* ((rendered (delq nil (mapcar (lambda (m) (harness-provider--history-message m names)) history)))
+           (size (apply #'+ (mapcar #'length rendered)))
+           (dropped 0))
+      (when rendered
+        (while (and (> size harness-provider-history-limit) (cddr rendered))
+          (cl-decf size (length (cadr rendered)))
+          (setcdr rendered (cddr rendered))
+          (cl-incf dropped))
+        (concat
+         "This conversation continues an earlier one, which is reproduced below so that you know what"
+         " was said; you wrote its assistant messages and made its tool calls.  Carry on from where it"
+         " ends: the message after it is the new one.\n\n<conversation_history>\n"
+         (car rendered)
+         (if (zerop dropped) "" (format "\n\n[… %d earlier messages omitted …]" dropped))
+         (mapconcat (lambda (r) (concat "\n\n" r)) (cdr rendered) "")
+         "\n</conversation_history>")))))
 
 (defun harness-provider--accepts-arg-p (fn)
   "Non-nil when function FN can be called with one argument."

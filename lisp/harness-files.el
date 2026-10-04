@@ -55,7 +55,9 @@ The result has no trailing slash and may not exist."
 
 (defun harness-files-main-checkout (root)
   "Return the main checkout of project ROOT, or ROOT itself.
-A linked git worktree belongs to the checkout that owns its repository.
+A linked git worktree belongs to the checkout that owns its repository,
+also once git pruned its registration: its gitdir, X/.git/worktrees/ID,
+is gone then, but its path still names the main checkout X.
 Reads ROOT's .git file and the commondir it points to: no process, no
 walk up the tree, and remote roots are returned untouched."
   (if (file-remote-p root)
@@ -65,10 +67,28 @@ walk up the tree, and remote roots are returned untouched."
             (let ((dotgit (expand-file-name ".git" root)))
               (when (file-regular-p dotgit)
                 (when-let* ((common (harness-files--linked-git-dir dotgit)))
-                  ;; A submodule's gitdir has no commondir and is not a .git.
-                  (and (equal (file-name-nondirectory common) ".git")
-                       (file-name-as-directory (file-name-directory common)))))))
+                  (cond
+                   ((equal (file-name-nondirectory common) ".git")
+                    (file-name-as-directory (file-name-directory common)))
+                   ;; A pruned worktree: its gitdir, commondir and all, is
+                   ;; gone.  A submodule's gitdir (X/.git/modules/NAME)
+                   ;; has no commondir either, and is no worktree.
+                   ((and (string-match "\\`\\(.+\\)/\\.git/worktrees/[^/]+\\'" common)
+                         (not (file-directory-p common)))
+                    (file-name-as-directory (match-string 1 common))))))))
           root))))
+
+(defun harness-files-owning-checkout (root)
+  "Return the main checkout that project ROOT belongs to.
+That is ROOT itself, unless ROOT is a linked git worktree, such as a
+task's, which belongs to its repository's main checkout (see
+`harness-files-main-checkout'), or is gone from disk, like an archived
+task's worktree, which belongs to the project around it (see
+`harness-files-main-root').  Remote roots are returned untouched, and
+not looked at."
+  (cond ((file-remote-p root) root)
+        ((file-directory-p root) (harness-files-main-checkout root))
+        (t (harness-files-main-root root))))
 
 (defun harness-files-git-common-dir (dir)
   "Return the git directory every worktree of DIR's repository shares, or nil.

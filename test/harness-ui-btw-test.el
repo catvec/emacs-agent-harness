@@ -69,6 +69,7 @@
 (declare-function harness-ui-display-session "harness-ui")
 (declare-function harness-ui-session "harness-ui")
 (declare-function harness-ui-refresh-sessions "harness-ui")
+(declare-function harness-ui-thinking-label "harness-ui")
 (declare-function harness-acp--drop-client "harness-acp")
 
 (defun harness-ui-btw-test--reset-windows ()
@@ -163,6 +164,20 @@ That is the header line any chat buffer of its session has."
   (with-current-buffer buffer
     (let ((harness-chat-header-functions nil))
       (harness-ui-btw-test--header buffer))))
+
+(defun harness-ui-btw-test--full-header (buffer)
+  "BUFFER's header line as plain text, with room for all of it.
+A header is fitted to its window, and a BTW's is the chat's own with
+the BTW segment in front: in a narrow window the chat drops what does
+not fit.  This asks the view for the whole line, so a test can say what
+a header holds without depending on the batch frame's width."
+  (with-current-buffer buffer (harness-chat--header most-positive-fixnum)))
+
+(defun harness-ui-btw-test--own-full-header (buffer)
+  "BUFFER's header as `harness-ui-btw-test--full-header', without a mode's own."
+  (with-current-buffer buffer
+    (let ((harness-chat-header-functions nil))
+      (harness-chat--header most-positive-fixnum))))
 
 (defun harness-ui-btw-test--normal-header-p (buffer)
   "Non-nil when BUFFER's header line is the chat's, with nothing of a BTW's."
@@ -262,7 +277,10 @@ names the conversation."
         (goto-char (point-min))
         (search-forward "Fix the flaky")
         (should (eq 'harness-ui-tasks-btw (key-binding (kbd "b"))))
-        (should (string-match-p "\\[BTW\\]" (harness-ui-btw-test--header board))))
+        ;; The board's header is fitted to its window, and this board
+        ;; window is narrow: ask the view for the whole line.
+        (should (string-match-p "\\[BTW\\]" (with-current-buffer board
+                                             (harness-ui-tasks--header most-positive-fixnum)))))
       (let* ((window (harness-ui-btw-test--open-btw board-window (with-selected-window board-window
                                                                  (key-binding (kbd "b")))))
              (buffer (window-buffer window))
@@ -447,29 +465,32 @@ both under the session, which keeps its transcript and provider state."
   "A BTW's header line is its session's own, the BTW segment in front.
 The permission mode shows there, its parent's to begin with, and the
 header, the key and the harness menu change it for the BTW alone, the
-menu in a window of its own.  Closed, the BTW has the session's header
-and nothing else."
+menu in a window of its own.  The thinking level is the BTW level, low,
+whatever the parent's.  Closed, the BTW has the session's header and
+nothing else."
   (harness-ui-btw-test-with
     (pcase-let ((`(,parent . ,parent-window) (harness-ui-btw-test--open-session)))
-      (harness-call 'session/update parent :permission-mode 'accept-edits)
+      (harness-call 'session/update parent :permission-mode 'accept-edits :thinking "high")
       (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
              (buffer (window-buffer window))
              (sid (buffer-local-value 'harness-ui-session-id buffer)))
         (should (harness-ui-btw-test--ready-p window))
         (harness-ui-btw-test--wait-mode sid 'accept-edits)
+        (should (equal "low" (plist-get (harness-call 'session/get sid) :thinking)))
         ;; The chat's own header line, after the BTW segment.
         (should (equal '(:eval (harness-chat--header)) (buffer-local-value 'header-line-format buffer)))
-        (let ((own (harness-ui-btw-test--own-header buffer)))
+        (let ((own (harness-ui-btw-test--own-full-header buffer)))
           (should (equal (concat " BTW side conversation  [close] [keep] " own)
-                         (harness-ui-btw-test--header buffer)))
-          (dolist (segment '("btw" "scripted (Demo)" "Accept Edits" "default" "[menu]"))
+                         (harness-ui-btw-test--full-header buffer)))
+          (dolist (segment (list "btw" "scripted (Demo)" "Accept Edits"
+                                 (substring-no-properties (harness-ui-thinking-label "low")) "[menu]"))
             (should (string-search segment own))))
         ;; mouse-1 on the permission mode, from the parent's window.
         (select-window parent-window)
         (harness-ui-btw-test-choosing "Auto"
           (harness-ui-btw-test--click-header window "Accept Edits"))
         (harness-ui-btw-test--wait-mode sid 'auto)
-        (should (string-search "  Auto  " (harness-ui-btw-test--header buffer)))
+        (should (string-search "  Auto  " (harness-ui-btw-test--full-header buffer)))
         ;; The key that sets it, as in any session.
         (with-selected-window window
           (let ((key (where-is-internal #'harness-set-permission-mode nil t)))

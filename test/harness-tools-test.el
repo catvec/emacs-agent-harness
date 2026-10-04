@@ -121,14 +121,40 @@ array), as OpenAI did for hand_in, whose evidence item requires no key."
     (dolist (m '(store project config provider provider-demo tools))
       (harness-test-load-module m))
     (clrhash harness-tools)
-    (dolist (m '(session agent tools-fs tools-shell tools-emacs tools-web tools-agent skills perms
-                 tasks tools-sessions merge notifications tools-notify tools-handin))
+    (dolist (m '(session agent skills perms tasks merge notifications))
       (harness-test-load-module m))
+    ;; Every tools-* module, so a new one cannot be left out by hand,
+    ;; as tools-dev was when open_harness left Claude Code with no tools.
+    (dolist (file (directory-files (expand-file-name "lisp/modules" harness-test-root)
+                                   nil "\\`harness-\\(tools-.*\\)\\.el\\'"))
+      (harness-test-load-module (intern (substring file 8 -3))))
     (let ((specs (harness-call 'tools/list)))
       (should (member "hand_in" (mapcar (lambda (s) (plist-get s :name)) specs)))
+      (should (member "open_harness" (mapcar (lambda (s) (plist-get s :name)) specs)))
       (dolist (spec specs)
         (let ((json (harness-json-encode (plist-get spec :schema))))
           (should-not (string-match-p "\"required\":null" json)))))))
+
+;; Claude Code 2.1.289 refuses a tools/list holding such a schema, and
+;; then offers the model none of the harness's tools.
+(ert-deftest harness-tools-registry-drops-empty-required ()
+  "An empty `:required' a tool declares, at any depth, never reaches a provider."
+  (harness-tools-test-with
+    (harness-define-tool "t_optional" :label "Optional" :handler #'ignore
+                         :schema '(:type "object"
+                                   :properties (:path (:type "string")
+                                                :item (:type "object"
+                                                       :properties (:x (:type "string"))
+                                                       :required ()))
+                                   :required ()))
+    (harness-define-tool "t_needs" :label "Needs" :handler #'ignore
+                         :schema '(:type "object" :properties (:path (:type "string"))
+                                   :required ("path")))
+    (let ((json (harness-json-encode (plist-get (harness-call 'tools/get "t_optional") :schema))))
+      (should-not (string-match-p "required" json))
+      (should (string-match-p "\"x\"" json)))
+    (should (equal '("path") (plist-get (plist-get (harness-call 'tools/get "t_needs") :schema)
+                                        :required)))))
 
 (provide 'harness-tools-test)
 ;;; harness-tools-test.el ends here

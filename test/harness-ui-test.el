@@ -176,6 +176,7 @@ top, whole, and leaves them as they were."
 (require 'harness-ui-dirs)
 (require 'harness-ui-btw)
 (require 'harness-ui-media)
+(require 'harness-ui-review)
 
 (defvar harness-ui-test-ran nil "Commands the menu ran, newest first: (COMMAND BUFFER POINT).")
 
@@ -274,6 +275,26 @@ KEYS default to C-g, which closes the menu."
       (should-not (string-match-p "C-c C-k +Cancel turn" text))
       (should (string-match-p "C-c C-c +Send" text)))))
 
+(ert-deftest harness-ui-menu-in-review-shows-its-keys-over-the-chats ()
+  "While a task's review banner shows, C-c C-v verifies and C-c C-x sends
+it back, in the buffer and so in the menu; the chat's C-c C-r still
+redraws.  With the banner gone, C-c C-v attaches the clipboard again."
+  (harness-ui-test-with-menu-buffer (lambda () (harness-chat-mode) (harness-ui-review-minor-mode 1))
+    (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
+    (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-x"))))
+    (should (eq 'harness-chat-redraw (key-binding (kbd "C-c C-r"))))
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "^Chat .* Review$" text))
+      (should (string-match-p "C-c C-v +Verify (accept)" text))
+      (should (string-match-p "C-c C-x +Send back with feedback" text))
+      (should (string-match-p "C-c C-r +Redraw" text))
+      (should-not (string-match-p "Attach clipboard" text)))
+    (harness-ui-review-minor-mode -1)
+    (should (eq 'harness-compose-attach-clipboard (key-binding (kbd "C-c C-v"))))
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "C-c C-v +Attach clipboard" text))
+      (should-not (string-match-p "Review\\|Send back" text)))))
+
 (ert-deftest harness-ui-menu-shows-the-board-commands-on-the-task-board ()
   (harness-ui-test-with-menu-buffer #'harness-ui-tasks-mode
     (let ((text (harness-ui-test-menu)))
@@ -333,7 +354,9 @@ leave free.  None is left out by the menu."
   (should-not (harness-ui--menu-key-taken-p "."))
   (pcase-dolist (`(,mode ,_title . ,columns) (harness-ui-test-menu-groups))
     (let ((maps (delq nil (list (let ((map (intern (format "%s-map" mode)))) (and (boundp map) (symbol-value map)))
-                                (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map))))
+                                ;; Keys on a view's content, outside its box.
+                                (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map)
+                                (and (eq mode 'harness-ui-popout-mode) harness-ui-popout-content-map))))
           (keys nil))
       (dolist (column columns)
         (dolist (item (append column nil))
@@ -356,7 +379,7 @@ leave free.  None is left out by the menu."
   ;; What every harness buffer offers is checked above; here, that each mode is there.
   (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-sessions-mode harness-ui-tree-mode
                   harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode
-                  harness-ui-btw-minor-mode harness-ui-media-recording-mode))
+                  harness-ui-btw-minor-mode harness-ui-media-recording-mode harness-ui-review-minor-mode))
     (should (get mode 'harness-menu-group))))
 
 (ert-deftest harness-ui-menu-with-buffer-commands-from-a-side-window ()
@@ -758,6 +781,32 @@ reconnection."
     (let ((harness-corporate-mode nil)) (should-not (inapt-p)))
     (let ((harness-corporate-mode t)) (should (inapt-p)))))
 
+(ert-deftest harness-ui-server-exit-of-a-replaced-process-is-ignored ()
+  "The end of a harness process the UI no longer runs changes nothing.
+A process stopped for a restart can be reported gone after its
+successor started: the UI keeps the successor and starts no third one.
+The end of the process it runs is news, and restarts it."
+  (let ((old (make-pipe-process :name "harness-ui-test-old" :noquery t))
+        (current (make-pipe-process :name "harness-ui-test-current" :noquery t))
+        (scheduled nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-at-time) (lambda (&rest args) (push args scheduled) nil))
+                  ((symbol-function 'message) #'ignore))
+          (let ((harness-ui--server current)
+                (harness-ui--server-address '("127.0.0.1:1" . "token"))
+                (harness-ui--server-stopping nil)
+                (harness-ui--server-restarts nil))
+            (harness-ui--on-server-exit 15 old)
+            (should (eq current harness-ui--server))
+            (should harness-ui--server-address)
+            (should-not scheduled)
+            (harness-ui--on-server-exit 9 current)
+            (should-not harness-ui--server)
+            (should-not harness-ui--server-address)
+            (should (= 1 (length scheduled)))))
+      (delete-process old)
+      (delete-process current))))
+
 (defmacro harness-ui-test-with-corporate-change (&rest body)
   "Run BODY with `harness-restart' and `harness-ui-connect' recorded, not run.
 RESTARTS counts the restarts, CONNECTED lists the addresses connected
@@ -898,5 +947,60 @@ shrinks every window and moves the button under the mouse."
   (should (equal "path mouse-1: open" (harness-ui-one-line " path\nmouse-1: open ")))
   (should (equal "" (harness-ui-one-line nil))))
 
+;;;; Mouse targets
+
+(ert-deftest harness-ui-mouse-keymap-runs-on-ret-too ()
+  "A target of `harness-ui-mouse-keymap' runs its command on RET, an event
+without a position, as it does on a click."
+  (let ((ran 0)
+        (buffer (generate-new-buffer " *harness mouse keymap*")))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (insert (propertize "target" 'keymap (harness-ui-mouse-keymap (lambda () (interactive) (cl-incf ran)))))
+          (goto-char (point-min))
+          (execute-kbd-macro (kbd "RET"))
+          (should (= 1 ran)))
+      (kill-buffer buffer))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here
+
+(ert-deftest harness-ui-fit-header-drops-the-least-important-first ()
+  "A header too wide for its window keeps what matters and loses the rest.
+Segments are given in display order; the lowest priority goes first,
+the rightmost among equals, and a segment with a shortened form shrinks
+to it once nothing is left to drop.  A segment whose priority is t
+always stays."
+  (let ((segments '(" One" (" Two" 5) (" Three" 5 " 3") (" Four" 100))))
+    (should (equal " One Two Three Four" (harness-ui-fit-header segments 200)))
+    ;; Room for the rightmost of two equal priorities only after it
+    ;; shortens: a shortened segment is worth keeping over dropping it.
+    (should (equal " One Two 3 Four" (harness-ui-fit-header segments 16)))
+    ;; Not even its shortened form fits: then it goes.
+    (should (equal " One Four" (harness-ui-fit-header segments 10)))
+    (should (equal " One" (harness-ui-fit-header segments 4)))
+    ;; What cannot be dropped stays, however little room there is.
+    (should (equal " One" (harness-ui-fit-header segments 0)))
+    ;; A flexible segment shrinks only when dropping cannot help: the
+    ;; name has priority t here, so it is never dropped, only shortened.
+    (should (equal " One Four Wide Name" (harness-ui-fit-header
+                                          '(" One" (" Four" 100) (" Wide Name" t " W…")) 40)))
+    ;; Room for the name whole once the droppable segment is gone.
+    (should (equal " One Wide Name" (harness-ui-fit-header
+                                     '(" One" (" Four" 100) (" Wide Name" t " W…")) 16)))
+    ;; Too narrow even then: the name shortens, which is all that is left.
+    (should (equal " One W…" (harness-ui-fit-header
+                              '(" One" (" Four" 100) (" Wide Name" t " W…")) 10)))
+    ;; nil segments are left out, not turned into "nil".
+    (should (equal " One" (harness-ui-fit-header (list " One" nil "" nil) 80)))))
+
+(ert-deftest harness-ui-fit-header-measures-in-the-header-face ()
+  "On a graphic frame a header is measured in pixels, icons included."
+  (skip-unless (display-graphic-p))
+  (should (> (harness-ui-header-string-width (harness-ui-icon 'harness-icon-blocked))
+             (frame-char-width)))
+  ;; The room of a named window: the default is the narrowest window
+  ;; showing the buffer, which this buffer need not be shown in.
+  (should (= (harness-ui-header-width (selected-window))
+             (- (window-pixel-width) (or (window-scroll-bar-width) 0)))))

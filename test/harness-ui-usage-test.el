@@ -70,6 +70,140 @@
       (setq pos (1+ pos)))
     found))
 
+(defun harness-ui-usage-test--git (dir &rest args)
+  "Run git ARGS in DIR; signal on failure."
+  (with-temp-buffer
+    (let ((default-directory (file-name-as-directory dir)))
+      (unless (zerop (apply #'call-process "git" nil t nil args))
+        (error "git %s failed: %s" args (buffer-string))))))
+
+(defun harness-ui-usage-test--repo (base)
+  "Make BASE/acme a git repository with one commit; return its root."
+  (let ((root (file-name-as-directory (expand-file-name "acme" base))))
+    (make-directory root t)
+    (harness-ui-usage-test--git root "init" "-q" "-b" "main")
+    (harness-ui-usage-test--git root "-c" "user.name=t" "-c" "user.email=t@example.invalid" "-c" "commit.gpgsign=false"
+                                "commit" "-q" "--allow-empty" "-m" "initial")
+    root))
+
+(defun harness-ui-usage-test-lines ()
+  "Return the lines of the dashboard's table, from its header to its end."
+  (let ((text (harness-ui-usage-test-text)))
+    (string-match "^ Project .*\n\\(\\(?:.+\n\\)*\\)" text)
+    (split-string (match-string 1 text) "\n" t)))
+
+(defun harness-ui-usage-test-goto (regexp)
+  "Move to the start of the first dashboard line matching REGEXP."
+  (goto-char (point-min))
+  (re-search-forward regexp)
+  (goto-char (line-beginning-position)))
+
+(defun harness-ui-usage-test-cost-end (line)
+  "Return the column where the Cost cell of table LINE ends."
+  (and (string-match "\\$[0-9.]+ " line) (match-end 0)))
+
+(ert-deftest harness-ui-usage-worktrees-fold-under-their-project ()
+  "By project, a project's worktrees, its tasks', fold into one line with
+their sum; TAB, RET, w and the heading's button show and hide them."
+  (harness-ui-usage-test-with
+    (let* ((base (file-name-as-directory (file-truename (harness-test-temp-dir))))
+           (root (harness-ui-usage-test--repo base))
+           (fast (file-name-as-directory (expand-file-name ".worktrees/task-fast" root)))
+           (slow (file-name-as-directory (expand-file-name ".worktrees/task-slow" root)))
+           (gone (file-name-as-directory (expand-file-name ".worktrees/task-archived" root)))
+           (other (file-name-as-directory (expand-file-name "other" base)))
+           (label (harness-truncate-middle (abbreviate-file-name root) 40))
+           (now (float-time)))
+      (make-directory other)
+      (harness-ui-usage-test--git root "worktree" "add" "-q" "-b" "task/fast" fast)
+      (harness-ui-usage-test--git root "worktree" "add" "-q" "-b" "task/slow" slow)
+      (harness-ui-usage-test-record now root "demo:scripted" 1.0)
+      (harness-ui-usage-test-record now fast "demo:scripted" 0.5)
+      (harness-ui-usage-test-record now slow "demo:scripted" 2.25)
+      ;; An archived task's worktree is gone from disk; its usage stays.
+      (harness-ui-usage-test-record now gone "demo:scripted" 0.25)
+      (harness-ui-usage-test-record now other "demo:scripted" 3.0)
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage--buffer-name
+        ;; Folded: the project's line has the sum and how many worktrees.
+        (let ((lines (harness-ui-usage-test-lines)))
+          (should (= 2 (length lines)))
+          (should (string-match-p (concat "\\` . " (regexp-quote label) "  3 worktrees +\\$4\\.00 .* 4\\'")
+                                  (car lines)))
+          (should (string-match-p (concat "\\`   " (regexp-quote (harness-truncate-middle (abbreviate-file-name other) 40))
+                                          " +\\$3\\.00 ")
+                                  (cadr lines)))
+          ;; The fold icon's gutter ends at one column for every line.
+          (should (= (harness-ui-usage-test-cost-end (car lines)) (harness-ui-usage-test-cost-end (cadr lines)))))
+        (should (string-match-p "By project  \\[show worktrees\\]" (harness-ui-usage-test-text)))
+        (should-not (string-match-p "main checkout\\|task-" (harness-ui-usage-test-text)))
+        (harness-ui-usage-test-goto (regexp-quote label))
+        (should (equal '(space :align-to 3) (get-text-property (+ (point) 2) 'display)))
+        (should (harness-ui-usage-test-line-help "show its 3 worktrees"))
+        ;; TAB unfolds it: its main checkout first, then its worktrees by cost.
+        (forward-char 10)
+        (harness-ui-usage-tab)
+        (let ((lines (harness-ui-usage-test-lines)))
+          (should (equal '("main checkout" "task-slow" "task-fast" "task-archived")
+                         (mapcar (lambda (l) (and (string-match "\\`     \\([^ ]+\\(?: [^ $]+\\)*\\) " l)
+                                                  (match-string 1 l)))
+                                 (seq-subseq lines 1 5))))
+          (should (string-match-p "\\$1\\.00 " (nth 1 lines)))
+          (should (string-match-p "\\$2\\.25 " (nth 2 lines)))
+          (should (= 6 (length lines)))
+          (should (cl-every (lambda (l) (= (harness-ui-usage-test-cost-end (car lines)) (harness-ui-usage-test-cost-end l)))
+                            lines)))
+        (should (string-match-p "\\[hide worktrees\\]" (harness-ui-usage-test-text)))
+        (should (equal root (get-text-property (point) 'harness-ui-usage-fold)))
+        (harness-ui-usage-test-goto "task-slow")
+        (should (harness-ui-usage-test-line-help (regexp-quote (abbreviate-file-name slow))))
+        ;; A refresh keeps it unfolded.
+        (harness-ui-usage-refresh)
+        (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
+        (should (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        ;; TAB on one of its worktrees folds it, and goes to its line.
+        (harness-ui-usage-test-goto "task-fast")
+        (harness-ui-usage-tab)
+        (should-not (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        (should (equal root (get-text-property (point) 'harness-ui-usage-fold)))
+        ;; RET on its line unfolds it, and again folds it.
+        (harness-ui-usage-open)
+        (should (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        (harness-ui-usage-open)
+        (should-not (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        ;; w, or the heading's button, shows every project's; again hides them.
+        (harness-ui-usage-toggle-worktrees)
+        (should (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        (harness-ui-usage-test-goto "\\[hide worktrees\\]")
+        (search-forward "[hide")
+        (push-button)
+        (should-not (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        ;; Elsewhere TAB moves to the next button.
+        (goto-char (point-min))
+        (harness-ui-usage-tab)
+        (should (button-at (point)))
+        ;; Other groupings have no worktrees to fold.
+        (harness-ui-usage-set-group 'model)
+        (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
+        (should-not (string-match-p "worktrees" (harness-ui-usage-test-text)))
+        (should-error (harness-ui-usage-toggle-worktrees) :type 'user-error)))))
+
+(ert-deftest harness-ui-usage-redraw-keeps-the-view ()
+  "A redraw, from a refresh or a fold, scrolls no window showing the dashboard."
+  (harness-ui-usage-test-with
+    (let ((now (float-time)))
+      (dotimes (i 12)
+        (harness-ui-usage-test-record now (format "/tmp/harness-usage-p%d/" i) "demo:scripted" (+ 1.0 i)))
+      (harness-ui-usage-test-open)
+      (let ((window (get-buffer-window harness-ui-usage--buffer-name t)))
+        (should window)
+        (with-current-buffer harness-ui-usage--buffer-name
+          (set-window-start window (harness-ui-usage--line-start 6))
+          (set-window-point window (harness-ui-usage--line-start 9))
+          (harness-ui-usage--render)
+          (should (= 6 (line-number-at-pos (window-start window))))
+          (should (= 9 (line-number-at-pos (window-point window)))))))))
+
 (ert-deftest harness-ui-usage-empty-state ()
   (harness-ui-usage-test-with
     (let ((text (harness-ui-usage-test-open)))
@@ -426,7 +560,7 @@ Two lines would grow the echo area and move the chart under the mouse."
       (harness-ui-usage-test-request "_harness/usage/set-budget"
                                      (list :budget (list :scope "project" :target project :amount 8 :hard t)))
       (harness-ui-usage-test-open)
-      (with-current-buffer harness-ui-usage-buffer-name
+      (with-current-buffer harness-ui-usage--buffer-name
         (let ((pos (point-min)) (found nil) (offenders nil))
           (while (< pos (point-max))
             (when-let* ((help (get-text-property pos 'help-echo)))
