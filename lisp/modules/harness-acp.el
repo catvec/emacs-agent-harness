@@ -90,7 +90,7 @@ is never used for any other failure.")
 (defconst harness-acp-extension-prefixes
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "naming/" "sandbox/status"
-    "harness/api" "harness/version" "harness/reload" "question/" "project/" "task/"
+    "harness/api" "harness/version" "harness/reload" "harness-dev/" "question/" "project/" "task/"
     "notification/" "acp/remote-")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
@@ -117,8 +117,11 @@ is never used for any other failure.")
   '((:optionId "allow-once" :name "Allow once" :kind "allow_once")
     (:optionId "allow-session" :name "Allow directory for this session" :kind "allow_always")
     (:optionId "allow-always" :name "Always allow directory" :kind "allow_always")
-    (:optionId "deny-once" :name "Deny" :kind "reject_once"))
-  "Options offered when a tool call reaches outside the allowed directories.")
+    (:optionId "deny-once" :name "Deny" :kind "reject_once")
+    (:optionId "deny-always" :name "Always deny directory" :kind "reject_always"))
+  "Options offered when a tool call reaches outside the allowed directories.
+A client that shows the request's `_harness.pattern' can answer for
+another pattern; the names speak of the directory, the default.")
 
 (defconst harness-acp--forwarded-events
   '(session/created session/deleted session/queue-changed session/pending-changed
@@ -179,7 +182,8 @@ promise: once it resolves the client is authenticated; a rejection
   (pending (make-hash-table :test 'equal)) ; id -> (lambda (result error))
   ;; Slots added later go last, so clients made before a reload keep working.
   writer                             ; (CLIENT JSON-TEXT) for other transports
-  remote)                            ; plist of a client on another device, else nil
+  remote                             ; plist of a client on another device, else nil
+  active)                            ; `float-time' of its last request or notification
 
 (cl-defstruct (harness-acp-error-value (:constructor harness-acp--make-error-value)
                                        (:copier nil))
@@ -195,6 +199,11 @@ A reload keeps connected clients, whose records lack the slots added
 since they were made."
   (and (> (length client) (cl-struct-slot-offset 'harness-acp-client slot))
        (cl-struct-slot-value 'harness-acp-client slot client)))
+
+(defun harness-acp--client-set (client slot value)
+  "Set SLOT of CLIENT to VALUE, unless CLIENT predates the slot."
+  (when (> (length client) (cl-struct-slot-offset 'harness-acp-client slot))
+    (setf (cl-struct-slot-value 'harness-acp-client slot client) value)))
 
 (defun harness-acp-client-remote-info (client)
   "Return the plist describing CLIENT's device when it is on another one, else nil.
@@ -418,8 +427,10 @@ request is logged and stays pending on the session."
 (harness-defmethod client/request (method params)
   "Send request METHOD with PARAMS to the connected clients (the UI).
 Return a promise of the first successful answer.  It rejects at once
-when no client is connected and when every client declines, so a tool
-waiting on the UI never hangs on a missing one.  Not callable over ACP."
+when no client is connected and when every client declines.  It is for
+chores any client may do, such as showing a desktop notification; a
+tool never asks a client to do its work (see `emacs/request').  Not
+callable over ACP."
   (harness-with-promise (resolve reject)
     (let ((clients (copy-sequence harness-acp--clients)))
       (if (null clients)
@@ -437,6 +448,76 @@ waiting on the UI never hangs on a missing one.  Not callable over ACP."
                                               (format "%s: %s" method
                                                       (or (and (listp error) (plist-get error :message))
                                                           error)))))))))))))))
+
+;;;; Server: an Emacs lent to the harness
+
+;; Every tool runs here, in the harness.  The tools about the user's
+;; Emacs (its buffers, its windows, its symbols) reach that Emacs as a
+;; resource, the way the file tools reach a TRAMP host; it is never
+;; where a tool runs, and no request evaluates code in it.  An Emacs
+;; lends itself by advertising `_harness.emacs' among the
+;; `clientCapabilities' of `initialize'
+;; (lisp/harness-emacs-endpoint.el), the way ACP clients offer an agent
+;; their files with `fs'.  A client that lends nothing, such as a phone,
+;; is never asked; a harness no Emacs is attached to (headless) runs
+;; every other tool as usual.
+
+(defun harness-acp--emacs-info (client)
+  "Return the plist CLIENT advertised for the Emacs it lends, or nil."
+  (let ((info (plist-get (plist-get (harness-acp-client-capabilities client) :_harness) :emacs)))
+    (and (harness-json-true-p info) (if (listp info) info (list :lent t)))))
+
+(defun harness-acp--emacs-clients ()
+  "Return the clients that lend an Emacs, the most recently active first.
+Only clients that may call methods count: one that lent an Emacs but
+never authenticated would otherwise be asked for the user's buffers, or
+answer for the user's Emacs with what it likes."
+  ;; A copy: `cl-remove-if-not' may return the list itself, and `sort'
+  ;; reorders the list it is given.
+  (sort (copy-sequence
+         (cl-remove-if-not (lambda (client)
+                             (and (harness-acp--emacs-info client)
+                                  (not (harness-acp--auth-needed-p client))))
+                           harness-acp--clients))
+        (lambda (a b) (> (or (harness-acp--client-get a 'active) 0)
+                         (or (harness-acp--client-get b 'active) 0)))))
+
+(harness-defmethod emacs/attached ()
+  "Return the Emacsen lent to the harness, the one `emacs/request' asks first.
+Each is the plist its client advertised (`:version', `:pid', `:host')
+plus `:transport' (local, tcp, ...), `:remote' (non-nil for a client on
+another device) and `:active', when it last asked the harness anything.
+Empty when the harness runs headless, or none of its clients is an Emacs."
+  (mapcar (lambda (client)
+            (append (harness-plist-remove (harness-acp--emacs-info client) :transport :remote :active)
+                    (list :transport (harness-acp-client-kind client)
+                          :remote (and (harness-acp-client-remote-info client) t)
+                          :active (harness-acp--client-get client 'active))))
+          (harness-acp--emacs-clients)))
+
+(harness-defmethod emacs/request (method params)
+  "Send `_harness/emacs/METHOD' with PARAMS to the Emacs lent to the harness.
+Return a promise of its answer.  Exactly one Emacs is asked, never every
+client: the most recently active of those that lend one, which is where
+the user is.  The promise rejects at once when none is attached, with
+the Emacs's message when it refuses, and when it disconnects first.
+The tools of tools-emacs use it; see lisp/harness-emacs-endpoint.el for
+the methods.  Not callable over ACP."
+  (harness-with-promise (resolve reject)
+    (let ((client (car (harness-acp--emacs-clients))))
+      (if (null client)
+          (funcall reject (list 'harness-error
+                                "no Emacs is attached to the harness: it runs headless, or none of its clients is an Emacs"))
+        (harness-acp--client-request
+         client (concat "_harness/emacs/" method) params
+         (lambda (result error)
+           (cond
+            ((null error) (funcall resolve result))
+            ((and (listp error) (eql (plist-get error :code) harness-acp-error-transport))
+             (funcall reject (list 'harness-error "the user's Emacs disconnected before it answered")))
+            (t (funcall reject (list 'harness-error
+                                     (format "%s" (or (and (listp error) (plist-get error :message))
+                                                      error))))))))))))
 
 (defun harness-acp--drop-client (client)
   "Forget CLIENT and fail whatever it still owed."
@@ -460,6 +541,10 @@ waiting on the UI never hangs on a missing one.  Not callable over ACP."
   (let ((method (plist-get msg :method))
         (has-id (plist-member msg :id))
         (id (plist-get msg :id)))
+    ;; What a client asks for shows where the user is; its answers to
+    ;; the harness's own requests do not (see `harness-acp--emacs-clients').
+    (when (stringp method)
+      (harness-acp--client-set client 'active (float-time)))
     (cond
      ((and (stringp method) has-id) (harness-acp--handle-request client id method (plist-get msg :params)))
      ((stringp method) (harness-acp--handle-notification client method (plist-get msg :params)))
@@ -596,6 +681,9 @@ ARGLIST is (CLIENT PARAMS)."
 (harness-acp--define-standard "initialize" (client params)
   (setf (harness-acp-client-initialized client) t
         (harness-acp-client-capabilities client) (plist-get params :clientCapabilities))
+  (when-let* ((emacs (harness-acp--emacs-info client)))
+    (harness-log 'info "acp: a %s client lends its Emacs (pid %s on %s)"
+                 (harness-acp-client-kind client) (plist-get emacs :pid) (plist-get emacs :host)))
   (list :protocolVersion harness-acp-protocol-version
         :agentCapabilities (list :loadSession t
                                  :promptCapabilities (list :image t :audio t :embeddedContext t))
@@ -684,7 +772,6 @@ shared secret when `harness-acp-token' is set."
                  ((or 'end-turn 'nil) "end_turn")
                  ('cancelled "cancelled")
                  ('max-tokens "max_tokens")
-                 ('max-steps "max_turn_requests")
                  (_ "refusal"))))
     (list :stopReason stop
           :_harness (list :reason (and reason (symbol-name reason))
@@ -850,12 +937,15 @@ Nil means the turn ended; see `agent/activity' for the shape."
         (error (harness-log 'warn "acp: %s failed: %S" method err)))
     (harness-log 'warn "acp: no %s method to deliver the answer to" method)))
 
-(defun harness-acp--option-answer (option)
-  "Turn a permission OPTION id like \"allow-session\" into an answer plist."
+(defun harness-acp--option-answer (option &optional pattern)
+  "Turn a permission OPTION id like \"allow-session\" into an answer plist.
+PATTERN, a string, is the pattern the client answered for, when it
+edited the request's."
   (let* ((parts (split-string (format "%s" (or option "deny-once")) "-"))
          (behavior (if (equal (car parts) "allow") 'allow 'deny))
          (scope (intern (or (cadr parts) "once"))))
-    (list :behavior behavior :scope (if (memq scope '(once session always)) scope 'once))))
+    (append (list :behavior behavior :scope (if (memq scope '(once session always)) scope 'once))
+            (and (stringp pattern) (not (string-blank-p pattern)) (list :pattern pattern)))))
 
 (defun harness-acp--offered-options (payload)
   "Return the ACP options for a permission request with PAYLOAD.
@@ -869,7 +959,10 @@ an agent's own directory request has no \"Allow once\"."
         all)))
 
 (defun harness-acp--on-permission-requested (sid pending)
-  "Ask the connected clients to decide PENDING permission request of SID."
+  "Ask the connected clients to decide PENDING permission request of SID.
+A request about paths carries the glob pattern it is answered for in
+`_harness.pattern'; a client may answer for another one with
+`_harness.pattern' in its result, next to the outcome."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -884,12 +977,14 @@ an agent's own directory request has no \"Allow once\"."
                            :tool (plist-get payload :tool)
                            :paths (plist-get payload :paths)
                            :dir (plist-get payload :dir)
+                           :pattern (plist-get payload :pattern)
                            :reason (plist-get payload :reason)))
      (lambda (result)
        (let* ((outcome (plist-get result :outcome))
               (selected (equal (format "%s" (plist-get outcome :outcome)) "selected"))
               (answer (if selected
-                          (harness-acp--option-answer (plist-get outcome :optionId))
+                          (harness-acp--option-answer (plist-get outcome :optionId)
+                                                      (plist-get (plist-get result :_harness) :pattern))
                         (list :behavior 'deny :scope 'once))))
          (harness-acp--call-safely 'permission/answer sid pid answer))))))
 
@@ -1149,7 +1244,12 @@ established, so a connection still connecting need not be replaced."
   "Deliver what arrives on CONN to FN, called as (METHOD PARAMS RESPOND).
 For a notification RESPOND is nil.  For a request from the agent
 RESPOND is a function taking the result plist; answer an error with
-`harness-acp-respond-error'.  Requests without a handler are refused."
+`harness-acp-respond-error'.  Requests without a handler are refused.
+RESPOND returns non-nil when the answer went out, and nil when it could
+not: CONN closed since the request came, as when the UI connects again,
+or the request was answered already.  An answer kept for later (a
+permission prompt waiting for the user) must then reach the harness
+another way, such as the bus method that answers it."
   (setf (harness-acp-connection-handler conn) fn))
 
 (defun harness-acp-on-close (conn fn)
@@ -1157,7 +1257,8 @@ RESPOND is a function taking the result plist; answer an error with
   (push fn (harness-acp-connection-on-close conn)))
 
 (defun harness-acp-respond-error (respond code message &optional data)
-  "Answer the request behind RESPOND with a JSON-RPC error CODE, MESSAGE and DATA."
+  "Answer the request behind RESPOND with a JSON-RPC error CODE, MESSAGE and DATA.
+Return what RESPOND does: non-nil when the answer went out."
   (funcall respond (harness-acp--make-error-value :code code :message message :data data)))
 
 (defun harness-acp--conn-send (conn msg)
@@ -1215,26 +1316,43 @@ Return a promise of the initialize result."
   "Send `authenticate' with TOKEN over CONN; return a promise."
   (harness-acp-request conn "authenticate" (list :methodId "token" :token token)))
 
-(defun harness-acp-close (conn)
-  "Close CONN.  Pending requests are rejected and on-close functions run."
+(defun harness-acp-close (conn &optional reason)
+  "Close CONN.  Pending requests are rejected and on-close functions run.
+REASON, a short string such as \"replaced\" (default \"closed\"), says
+why: the rejections carry it (see `harness-acp-closed-reason'), so a
+client that let go of CONN on purpose can tell them from failures."
   (when (harness-acp-connection-open conn)
-    (pcase (harness-acp-connection-kind conn)
-      ('local (let ((client (harness-acp-connection-client conn)))
-                (when client (harness-acp--drop-client client))))
-      ('tcp (let ((proc (harness-acp-connection-process conn)))
-              (when (and proc (process-live-p proc)) (delete-process proc)))))
-    (harness-acp--conn-shutdown conn "closed")))
+    (let ((kind (harness-acp-connection-kind conn))
+          (client (harness-acp-connection-client conn))
+          (proc (harness-acp-connection-process conn)))
+      ;; Shut down first: deleting the socket runs its sentinel, whose
+      ;; reason would otherwise be the one the rejections carry.
+      (harness-acp--conn-shutdown conn (or reason "closed"))
+      (pcase kind
+        ('local (when client (harness-acp--drop-client client)))
+        ('tcp (when (and proc (process-live-p proc)) (delete-process proc)))))))
+
+(defun harness-acp-closed-reason (err)
+  "Return why the connection closed when that is what rejected ERR, else nil.
+ERR is the rejection of a request that was pending as its connection
+closed: the REASON of `harness-acp-close', or what the socket reported
+when it closed by itself, such as \"connection broken by remote peer\"."
+  (and (eq (car-safe err) 'acp-error)
+       (eql (nth 1 err) harness-acp-error-transport)
+       (plist-get (nth 3 err) :closed)))
 
 (defun harness-acp--conn-shutdown (conn reason)
   "Mark CONN closed for REASON, reject its pending requests and run on-close."
   (when (harness-acp-connection-open conn)
     (setf (harness-acp-connection-open conn) nil)
-    (let ((pending (harness-acp-connection-pending conn)) promises)
+    (let ((pending (harness-acp-connection-pending conn))
+          (message (if (string-prefix-p "connection" reason) reason (format "connection %s" reason)))
+          promises)
       (maphash (lambda (_ p) (push p promises)) pending)
       (clrhash pending)
       (dolist (p promises)
         (harness-run-soon #'harness-reject p
-                          (list 'acp-error harness-acp-error-transport (format "connection %s" reason) nil))))
+                          (list 'acp-error harness-acp-error-transport message (list :closed reason)))))
     (dolist (fn (harness-acp-connection-on-close conn))
       (harness-run-soon (lambda ()
                           (condition-case err (funcall fn)
@@ -1291,19 +1409,23 @@ Return a promise of the initialize result."
   "Hand METHOD with PARAMS to CONN's handler; ID non-nil means a request."
   (let* ((handler (harness-acp-connection-handler conn))
          (done nil)
+         ;; Returns non-nil when the answer went out (see `harness-acp-set-handler').
          (respond (and id
                        (lambda (value)
                          (unless done
                            (setq done t)
                            (condition-case err
-                               (harness-acp--conn-send
-                                conn (if (harness-acp-error-value-p value)
-                                         (harness-acp--message id nil (list (harness-acp-error-value-code value)
-                                                                            (harness-acp-error-value-message value)
-                                                                            (harness-acp-error-value-data value)))
-                                       (harness-acp--message id value)))
+                               (progn
+                                 (harness-acp--conn-send
+                                  conn (if (harness-acp-error-value-p value)
+                                           (harness-acp--message id nil (list (harness-acp-error-value-code value)
+                                                                              (harness-acp-error-value-message value)
+                                                                              (harness-acp-error-value-data value)))
+                                         (harness-acp--message id value)))
+                                 t)
                              (error (harness-log 'warn "acp: could not send response: %s"
-                                                 (harness-error-message err)))))))))
+                                                 (harness-error-message err))
+                                    nil)))))))
     (cond
      ((null handler)
       (when respond

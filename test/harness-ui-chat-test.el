@@ -207,7 +207,8 @@
         (harness-chat-copy-last-response)
         (should (string-prefix-p "# Tour" (current-kill 0)))
         ;; The header shows the session and the compose box is empty again.
-        (let ((header (harness-chat--header)))
+        ;; The whole of it: in the 80 columns of batch the spend makes room.
+        (let ((header (harness-chat--header most-positive-fixnum)))
           (should (string-match-p "Tour" header))
           (should (string-match-p "demo" header))
           (should (string-match-p "\\$0.0042" header))
@@ -318,7 +319,9 @@ on a background and bar of its own; the user's own messages are as before."
                                            (format "%s" (plist-get (plist-get (harness-ui-session sid) :usage) :billing))))
                          5 "the session update")
       (with-current-buffer buf
-        (let ((header (harness-chat--header)))
+        ;; The whole header: the plan's window is what this is about, so
+        ;; ask for a wide line rather than what an 80-column batch window keeps.
+        (let ((header (harness-chat--header most-positive-fixnum)))
           (should (string-match-p "Pro . 5h 42%" header))
           (should-not (string-match-p "\\$0\\.5" header))
           (let ((pos (string-match "Pro" header)))
@@ -353,15 +356,16 @@ moves the button under the mouse."
                          5 "the session update")
       (with-current-buffer buf
         (let ((offenders nil))
-          (dolist (text (list (buffer-string) (harness-chat--header)))
+          (dolist (text (list (buffer-string) (harness-chat--header most-positive-fixnum)))
             (let ((pos 0))
               (while (< pos (length text))
                 (let ((help (get-text-property pos 'help-echo text)))
                   (when (and (stringp help) (string-match-p "\n" help))
                     (push help offenders)))
                 (setq pos (1+ pos)))))
-          ;; The header's spend tooltip really is among them.
-          (let* ((header (harness-chat--header))
+          ;; The header's spend tooltip really is among them: the whole
+          ;; header, since a narrow window may drop the spend segment.
+          (let* ((header (harness-chat--header most-positive-fixnum))
                  (pos (string-match "Pro" header)))
             (should (string-match-p "Covered by Claude Pro" (get-text-property pos 'help-echo header))))
           (should-not offenders))))))
@@ -373,22 +377,23 @@ buffer-local function changes only its buffer's header."
   (harness-ui-chat-test-with
     (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "Mine")))
            (other (harness-ui-chat-test-open (harness-ui-chat-test-session "Other")))
-           (own (with-current-buffer buf (harness-chat--header)))
-           (other-own (with-current-buffer other (harness-chat--header))))
+           ;; Whole headers: no segment of theirs makes room for the other.
+           (own (with-current-buffer buf (harness-chat--header most-positive-fixnum)))
+           (other-own (with-current-buffer other (harness-chat--header most-positive-fixnum))))
       (should (string-match-p "Mine" own))
       (with-current-buffer buf
         (add-hook 'harness-chat-header-functions (lambda () (propertize " first" 'face 'bold)) nil t)
         (add-hook 'harness-chat-header-functions #'ignore t t)
         (add-hook 'harness-chat-header-functions (lambda () " second") t t)
-        (let ((header (harness-chat--header)))
+        (let ((header (harness-chat--header most-positive-fixnum)))
           (should (equal (concat " first second" own) header))
           (should (eq 'bold (get-text-property 1 'face header)))
           ;; The session's segments keep their clicks.
           (should (get-text-property (string-search "Mine" header) 'local-map header))))
-      (should (equal other-own (with-current-buffer other (harness-chat--header))))
+      (should (equal other-own (with-current-buffer other (harness-chat--header most-positive-fixnum))))
       (with-current-buffer buf
         (kill-local-variable 'harness-chat-header-functions)
-        (should (equal own (harness-chat--header)))))))
+        (should (equal own (harness-chat--header most-positive-fixnum)))))))
 
 (defun harness-ui-chat-test-segment (header command)
   "Return (TEXT POS) of the segment of HEADER that runs COMMAND, or nil."
@@ -789,7 +794,7 @@ It is never added to the running turn."
         (should (harness-ui-chat-test-find buf "/tmp"))
         (should (harness-ui-chat-test-find buf "exec asks"))
         (let ((pos (harness-ui-chat-test-find buf "[Allow]")))
-          (should (harness-ui-chat-test-face-at (1- pos) 'harness-chat-panel-face))
+          (should (harness-ui-chat-test-face-at (1- pos) 'harness-ui-panel-face))
           (goto-char (1- pos))
           (harness-chat-push))
         (should (equal '((:outcome (:outcome "selected" :optionId "allow-once"))) answers))
@@ -838,7 +843,8 @@ It is never added to the running turn."
       ;; Without options every button of the kind is offered.
       (should (equal '("Allow" "Allow for session" "Always allow" "Deny" "Always deny")
                      (funcall labels '(:kind "permission"))))
-      (should (equal '("Allow once" "Allow directory for session" "Always allow directory" "Deny")
+      (should (equal '("Allow once" "Allow directory for session" "Always allow directory" "Deny"
+                       "Always deny directory")
                      (funcall labels '(:dir "/d/"))))
       ;; Option ids as symbols (in process), strings or a vector (from the
       ;; wire), or ACP option plists all narrow the buttons.
@@ -894,6 +900,93 @@ It is never added to the running turn."
         (harness-test-wait (lambda () recorded) 5 "answered through the method")
         (should (equal (list sid "pre" "allow-always") (car recorded)))))))
 
+(ert-deftest harness-ui-chat-permission-pattern-is-editable ()
+  "A prompt about paths shows the pattern it is answered for; e edits it, the answer carries it."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (answers nil)
+           (respond (lambda (r) (push r answers)))
+           (params (lambda (pid)
+                     (list :sessionId sid
+                           :toolCall (list :toolCallId pid :title "Access ~/notes/" :kind "read"
+                                           :rawInput '(:path "~/notes/todo.org"))
+                           :options harness-acp--dir-permission-options
+                           :_harness (list :pendingId pid :tool "read_file" :dir (expand-file-name "~/notes/")
+                                           :pattern (expand-file-name "~/notes/**")
+                                           :paths (list (expand-file-name "~/notes/todo.org"))
+                                           :reason "Read file wants ~/notes/todo.org, which is outside the allowed directories")))))
+      (should (harness-chat--on-permission (funcall params "d1") respond))
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "pattern: ~/notes/**  [Edit] e"))
+        ;; A directory prompt's buttons speak of the pattern, not of a directory.
+        (should (harness-ui-chat-test-find buf "[Allow once] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N"))
+        ;; e on the panel edits it, from the pattern shown; M-n offers others.
+        (goto-char (harness-ui-chat-test-find buf "Permission"))
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_prompt initial _history defaults)
+                     (should (equal "~/notes/**" initial))
+                     (should (equal '("~/notes/todo.org" "~/notes/*.org" "~/notes/**" "~/**") defaults))
+                     " ~/notes/*.org ")))
+          (call-interactively (lookup-key harness-chat-panel-map (kbd "e"))))
+        (should (harness-ui-chat-test-find buf "pattern: ~/notes/*.org (edited)"))
+        ;; Point stays on the panel, so its keys still answer it.
+        (should (equal "d1" (get-text-property (point) 'harness-ui-pending)))
+        (call-interactively (lookup-key harness-chat-panel-map (kbd "s")))
+        (should (equal '(:outcome (:outcome "selected" :optionId "allow-session") :_harness (:pattern "~/notes/*.org"))
+                       (car answers)))
+        (should (null harness-chat--pending))
+        ;; Unedited, the answer is the plain option; an empty edit goes back to the request's own.
+        (harness-chat--on-permission (funcall params "d2") respond)
+        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "~/elsewhere/**")))
+          (harness-chat-edit-permission-pattern))
+        (should (harness-ui-chat-test-find buf "pattern: ~/elsewhere/** (edited)"))
+        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+          (harness-chat-edit-permission-pattern))
+        (should (harness-ui-chat-test-find buf "pattern: ~/notes/**  [Edit]"))
+        (goto-char (harness-ui-chat-test-find buf "Permission"))
+        (call-interactively (lookup-key harness-chat-panel-map (kbd "N")))
+        (should (equal '(:outcome (:outcome "selected" :optionId "deny-always")) (car answers)))
+        ;; Without a request about paths there is nothing to edit.
+        (harness-chat--on-permission (list :sessionId sid :toolCall '(:toolCallId "c3" :title "Bash: ls" :kind "execute")
+                                           :options harness-acp--permission-options
+                                           :_harness '(:pendingId "p3" :tool "bash"))
+                                     respond)
+        (should-not (harness-ui-chat-test-find buf "pattern:"))
+        (should-error (harness-chat-edit-permission-pattern) :type 'user-error)))))
+
+(ert-deftest harness-ui-chat-tool-permission-pattern ()
+  "A tool call's prompt says which answers its pattern is remembered for."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (recorded nil))
+      (harness-register-method 'permission/answer
+                               (lambda (session-id pending-id answer)
+                                 (push (list session-id pending-id answer) recorded)
+                                 (harness-call 'session/pending-resolve session-id pending-id answer)
+                                 answer))
+      (harness-call 'session/pending-add sid
+                    (list :id "w1" :kind 'permission
+                          :payload (list :tool "write_file" :kind 'write :title "Write file: lisp/a.el"
+                                         :input '(:path "lisp/a.el")
+                                         :paths (list (expand-file-name "~/proj/lisp/a.el"))
+                                         :pattern (expand-file-name "~/proj/lisp/**")
+                                         :options '(allow-once allow-session allow-always deny-once deny-always))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-find buf "pattern: ~/proj/lisp/**  [Edit] e   s, a, N remember the answer for it"))
+          (should (harness-ui-chat-test-find buf "[Allow] y  [Allow for session] s"))
+          ;; C-c C-p edits it from the compose box.
+          (goto-char harness-compose-end)
+          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "~/proj/**")))
+            (call-interactively (lookup-key harness-chat-mode-map (kbd "C-c C-p"))))
+          (should (harness-ui-chat-test-find buf "pattern: ~/proj/** (edited)"))
+          (goto-char (1- (harness-ui-chat-test-find buf "[Always allow]")))
+          (harness-chat-push))
+        (harness-test-wait (lambda () recorded) 5 "answered through the method")
+        (should (equal (list sid "w1" '(:option "allow-always" :pattern "~/proj/**")) (car recorded)))))))
+
 (ert-deftest harness-ui-chat-question-panel ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
@@ -928,7 +1021,7 @@ It is never added to the running turn."
 
 (defun harness-ui-chat-test-nav (nav)
   "Return the position of the diagram tab or arrow NAV in the current buffer."
-  (text-property-any (point-min) (point-max) 'harness-chat-diagram-nav nav))
+  (text-property-any (point-min) (point-max) 'harness-ui-pending-diagram-nav nav))
 
 (ert-deftest harness-ui-chat-question-diagrams ()
   "Options with diagrams show one diagram at a time, in one area under the
@@ -954,7 +1047,7 @@ onto an option switch it, and answering works as without diagrams."
         ;; The first option's diagram, fixed width, its label bold in the list.
         (should (harness-ui-chat-test-find buf "Diagram"))
         (should (= 0 (funcall shown)))
-        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "[left|main]")) 'harness-chat-output-face))
+        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "[left|main]")) 'harness-ui-output-face))
         (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "Sidebar left")) 'bold))
         (should-not (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "Sidebar right")) 'bold))
         (should (harness-ui-chat-test-find buf "next diagram"))
@@ -973,12 +1066,12 @@ onto an option switch it, and answering works as without diagrams."
         (goto-char (harness-ui-chat-test-nav 1))
         (harness-chat-push)
         (should (= 1 (funcall shown)))
-        (should (eql 1 (get-text-property (point) 'harness-chat-diagram-nav)))
+        (should (eql 1 (get-text-property (point) 'harness-ui-pending-diagram-nav)))
         (goto-char (harness-ui-chat-test-nav 'next))
         (harness-chat-push)
         (harness-chat-push)
         (should (= 0 (funcall shown)))
-        (should (eq 'next (get-text-property (point) 'harness-chat-diagram-nav)))
+        (should (eq 'next (get-text-property (point) 'harness-ui-pending-diagram-nav)))
         ;; n and p on the panel.
         (goto-char (harness-ui-chat-test-find buf "Which layout?"))
         (call-interactively (lookup-key (get-text-property (point) 'keymap) "n"))
@@ -989,12 +1082,12 @@ onto an option switch it, and answering works as without diagrams."
         (goto-char (harness-ui-chat-test-find buf "Tabs"))
         (harness-chat--post-command)
         (should (= 2 (funcall shown)))
-        (should (eql 2 (get-text-property (point) 'harness-chat-option)))
+        (should (eql 2 (get-text-property (point) 'harness-ui-pending-option)))
         ;; Switched there, it stays switched: only a move counts.
         (call-interactively (lookup-key (get-text-property (point) 'keymap) "n"))
         (harness-chat--post-command)
         (should (= 0 (funcall shown)))
-        (should (eql 2 (get-text-property (point) 'harness-chat-option)))
+        (should (eql 2 (get-text-property (point) 'harness-ui-pending-option)))
         ;; A redraw of the whole tail keeps the diagram shown.
         (harness-chat--render-tail)
         (should (= 0 (funcall shown)))
@@ -1003,7 +1096,7 @@ onto an option switch it, and answering works as without diagrams."
         (call-interactively (lookup-key (get-text-property (point) 'keymap) "2"))
         (should (equal '((:answer "Sidebar right")) answers))
         (should (null harness-chat--pending))
-        (should (null harness-chat--diagram-shown))
+        (should-not (harness-ui-pending--diagrams (car (harness-ui-pending-items sid))))
         (should-not (harness-ui-chat-test-find buf "Diagram"))
         (should-error (harness-chat-next-diagram) :type 'user-error)
         ;; A question without diagrams has no area and no n, p.
@@ -1527,6 +1620,32 @@ calls around it regroup."
         (harness-compose-remove-attachment (plist-get (car harness-compose-attachments) :path))
         (should (null harness-compose-attachments))))))
 
+(ert-deftest harness-ui-chat-dropped-link-is-sent-as-an-image ()
+  ;; A link dropped on a chat downloads behind a chip in the tail; the
+  ;; message waits for it, then carries the image.
+  (skip-unless (executable-find "curl"))
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (server (harness-test-http-serve
+                    `(("/cat.png" 200 (("Content-Type" . "image/png")) ,harness-test-png :chunks 2 :delay 0.3)))))
+      (unwind-protect
+          (save-window-excursion
+            (set-window-buffer (selected-window) buf)
+            (dnd-handle-multiple-urls (selected-window) (list (harness-test-http-url server "/cat.png")) 'private)
+            (with-current-buffer buf
+              (should (text-property-not-all harness-chat--transcript-end (point-max) 'harness-compose-pending nil))
+              (harness-ui-chat-test-type buf "what is this?")
+              (should-error (harness-chat-send) :type 'user-error)
+              (should (equal "what is this?" (harness-compose-text)))
+              (harness-test-wait (lambda () (not (plist-get (car harness-compose-attachments) :pending))) 10 "the download")
+              (should (harness-ui-chat-test-find buf "cat.png (")))
+            (harness-ui-chat-test-prompt buf "")
+            (let ((user (cl-find 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
+              (should (cl-some (lambda (b) (equal "image" (plist-get b :type))) (plist-get user :blocks))))
+            (with-current-buffer buf (should-not harness-compose-attachments)))
+        (delete-process server)))))
+
 (ert-deftest harness-ui-chat-session-deleted ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
@@ -1636,11 +1755,37 @@ to a waiting question still goes through the question instead."
         (should (equal '(("q1" "red")) answers))
         (should (= 1 (length sent)))))))
 
+(ert-deftest harness-ui-chat-shows-the-path-after-a-checkout ()
+  "A chat whose session's head moves shows the path to the new head.
+After a checkout at an earlier message, the branch left behind goes
+from the buffer: it shows what the next message continues."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (first (plist-get (harness-call 'session/append sid '(:kind user :content "the first question")) :id))
+           (reply (plist-get (harness-call 'session/append sid '(:kind assistant :content "the first answer")) :id)))
+      (ignore first)
+      (harness-call 'session/append sid '(:kind user :content "a question left behind"))
+      (harness-call 'session/append sid '(:kind assistant :content "an answer left behind"))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (should (harness-ui-chat-test-find buf "an answer left behind"))
+        (harness-call 'session/set-head sid reply)
+        (harness-test-wait (lambda () (and (not (harness-ui-chat-test-find buf "left behind"))
+                                           (not (buffer-local-value 'harness-chat--loading buf))))
+                           5 "the chat to show the new path")
+        (should (harness-ui-chat-test-find buf "the first question"))
+        (should (harness-ui-chat-test-find buf "the first answer"))
+        (with-current-buffer buf (should (harness-compose-live-p)))))))
+
 (ert-deftest harness-ui-chat-inactive-session-reanimates-on-send ()
   ;; An inactive session opens as it is, with a notice and its compose box;
   ;; the first message sent from it resumes it and the notice goes away.
   (harness-ui-chat-test-with
     (let ((sid (harness-ui-chat-test-session)))
+      ;; The UI reopens the sessions of chat buffers that were open when it
+      ;; connected; an inactive session is opened here, so wait for that
+      ;; connect first or the hook would resume it, which this test is not
+      ;; about (in the UI, a session cannot be opened before it connects).
+      (harness-test-wait (lambda () (harness-ui-session sid)) 5 "UI connected")
       (harness-call 'session/deactivate sid)
       (harness-open-session sid)
       (let ((buf (harness-chat--buffer-for sid)))
@@ -1938,18 +2083,28 @@ todos, lists one key per line rather than as a Lisp form."
     (should (equal (harness-chat--input-listing '(:options ("red" "green"))) "options: (\"red\" \"green\")\n"))))
 
 (ert-deftest harness-ui-chat-reopens-shown-sessions-on-connect ()
-  "A harness that starts again has every session closed; chat buffers reopen theirs."
+  "A harness that starts again has every session closed; chat buffers
+reopen the ones they showed open, and leave closed one they showed closed."
   (harness-ui-chat-test-with
     (let ((shown (harness-ui-chat-test-session "shown"))
-          (hidden (harness-ui-chat-test-session "hidden")))
+          (hidden (harness-ui-chat-test-session "hidden"))
+          (closed (harness-ui-chat-test-session "closed")))
       (harness-ui-chat-test-open shown)
-      ;; How a restarted harness loads them.
+      ;; Opened as it is: inactive until a message resumes it.
+      (harness-call 'session/deactivate closed)
+      (let ((buf (harness-ui-chat-test-open closed)))
+        (harness-test-wait (lambda () (buffer-local-value 'harness-chat--inactive buf))
+                           5 "the closed session shown closed"))
+      ;; The harness goes away and starts again with every session closed,
+      ;; as it loads them; the UI hears of it only as it connects again.
+      (harness-acp-close harness-ui-connection)
       (harness-call 'session/deactivate shown)
       (harness-call 'session/deactivate hidden)
       (harness-ui-connect nil)
       (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get shown) :status)))
                          5 "the shown session to reopen")
-      (should (eq 'inactive (plist-get (harness-call 'session/get hidden) :status))))))
+      (should (eq 'inactive (plist-get (harness-call 'session/get hidden) :status)))
+      (should (eq 'inactive (plist-get (harness-call 'session/get closed) :status))))))
 
 (ert-deftest harness-ui-chat-connect-remote-and-back ()
   "Switching to a harness over TCP with a chat buffer open opens one
@@ -2007,6 +2162,29 @@ connection let go of is never reported as closed."
         (harness-call 'acp/stop)
         ;; Whatever failed, the next test's UI connects in-process.
         (setq harness-ui-connection-address nil)))))
+
+(ert-deftest harness-ui-chat-session-record-applies-while-loading ()
+  "The session record is no transcript: a change of it that arrives while
+the transcript reloads (every buffer does, after a reload or a
+reconnect) applies at once instead of being dropped.  A deletion that
+arrives meanwhile applies once the transcript is in."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Loading"))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let ((session (copy-sequence harness-chat--session)))
+          (setq harness-chat--loading t)
+          (harness-chat--on-update sid (list :sessionUpdate "_harness/session"
+                                             :session (plist-put session :queue '((:id "q1" :text "next")))))
+          (should (equal '((:id "q1" :text "next")) harness-chat--queue))
+          (should-not harness-chat--deferred)
+          (setq harness-chat--loading nil))
+        (harness-chat--load)
+        (should harness-chat--loading)
+        (harness-chat--on-update sid '(:sessionUpdate "_harness/session_deleted"))
+        (should-not harness-chat--dead)
+        (harness-test-wait (lambda () (not harness-chat--loading)) 5 "the transcript loaded")
+        (should harness-chat--dead)))))
 
 (ert-deftest harness-ui-chat-hl-line-skips-compose ()
   ;; hl-line would paint over the compose background, so it stops short of it.
@@ -2151,6 +2329,16 @@ spellings; the chat used to drop it.  A long list is capped."
         (should (harness-ui-chat-test-find buf "item 20"))
         (should (harness-ui-chat-test-find buf "… 5 more"))
         (should-not (harness-ui-chat-test-find buf "item 21"))))))
+(ert-deftest harness-ui-chat-box-grows-past-a-short-window ()
+  "A box grown past the window stays above its spare line, point in it.
+Measured as on a graphical frame, a transcript whose line at the
+window's bottom is tall, an image say, once seemed to fit: the window
+was forced back to the top, and redisplay moved point out of the box."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (window (selected-window)))
+      (set-window-buffer window buf)
+      (harness-test-compose-grows-past-the-window buf window 1))))
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

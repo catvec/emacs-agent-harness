@@ -195,6 +195,45 @@
         (cl-letf (((symbol-function 'file-regular-p) (lambda (&rest _) (error "Looked at"))))
           (should (equal remote (harness-files-main-checkout remote))))))))
 
+(ert-deftest harness-files-main-checkout-of-a-pruned-worktree ()
+  "A worktree whose registration git pruned still names its main checkout.
+Its gitdir, ROOT/.git/worktrees/ID, is gone; a submodule's is no worktree."
+  (harness-worktree-test-with-repo
+    (let ((path (file-name-as-directory (expand-file-name "wt-pruned" base))))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "pruned" path)
+      (delete-directory (expand-file-name ".git/worktrees/wt-pruned" root) t)
+      (should (file-regular-p (expand-file-name ".git" path)))
+      (should (equal (harness-worktree-test--dir root)
+                     (harness-worktree-test--dir (harness-files-main-checkout path))))
+      ;; The sandbox's common dir is left as it was: none for a gitdir gone.
+      (should-not (harness-files-git-common-dir path))
+      ;; A .git file naming a submodule's gitdir is its own checkout.
+      (let ((module (harness-test-temp-dir)))
+        (with-temp-file (expand-file-name ".git" module)
+          (insert (format "gitdir: %s\n" (expand-file-name ".git/modules/lib" root))))
+        (should (equal module (harness-files-main-checkout module)))))))
+
+(ert-deftest harness-files-owning-checkout-of-every-root ()
+  "The main checkout a session's root belongs to, gone from disk or not."
+  (harness-worktree-test-with-repo
+    (let ((live (file-name-as-directory (expand-file-name ".worktrees/task-live" root)))
+          (gone (file-name-as-directory (expand-file-name ".worktrees/task-gone" root)))
+          (plain (harness-test-temp-dir)))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "task/live" live)
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "task/gone" gone)
+      (harness-worktree-test--git root "worktree" "remove" gone)
+      (should-not (file-exists-p gone))
+      (dolist (dir (list root live gone))
+        (should (equal (harness-worktree-test--dir root)
+                       (harness-worktree-test--dir (harness-files-owning-checkout dir)))))
+      (should (equal plain (harness-files-owning-checkout plain)))
+      ;; Remote roots are not looked at.
+      (let ((remote "/ssh:nobody@example.invalid:/srv/x/"))
+        (should (file-remote-p remote)) ; loads TRAMP before file access is watched
+        (cl-letf (((symbol-function 'file-directory-p) (lambda (&rest _) (error "Looked at")))
+                  ((symbol-function 'harness-files-main-root) (lambda (&rest _) (error "Looked at"))))
+          (should (equal remote (harness-files-owning-checkout remote))))))))
+
 (ert-deftest harness-files-git-common-dir-is-the-main-repository ()
   "Every directory of a repository, linked worktrees included, shares the main .git."
   (harness-worktree-test-with-repo

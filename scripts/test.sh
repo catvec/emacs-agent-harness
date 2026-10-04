@@ -40,9 +40,15 @@ run_suite() {
   local f=$1 base start
   base=$(basename "$f" .el)
   start=$SECONDS
-  timeout "$TIMEOUT" emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L test -L . \
-    -l test/harness-test-helpers.el -l "$f" \
-    --eval "(ert-run-tests-batch-and-exit (quote $selector))" >"$WORK/$base.log" 2>&1
+  # SIGPIPE ignored, as the Emacs the UI runs in has it.  A batch Emacs
+  # leaves it fatal, so a write racing the death of a harness process
+  # (the restart tests kill one) would kill the whole suite (exit 141)
+  # where the UI gets an error.  Emacs gives the processes it starts
+  # SIGPIPE back, so the harness processes see it as they really do.
+  (trap '' PIPE
+   timeout "$TIMEOUT" emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L test -L . \
+     -l test/harness-test-helpers.el -l "$f" \
+     --eval "(ert-run-tests-batch-and-exit (quote $selector))" >"$WORK/$base.log" 2>&1)
   echo $? >"$WORK/$base.status"
   echo "$base $((SECONDS - start + 1))" >>"$WORK/timings"
 }

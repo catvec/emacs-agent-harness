@@ -29,6 +29,9 @@ re-detected before BODY and restored afterwards."
   (harness-sandbox-test--setup)
   (let* ((cwd (harness-test-temp-dir))
          (extra (harness-test-temp-dir))
+         ;; The sandbox's own home must differ from the process home, or the
+         ;; "real home is never bound" check below cannot tell them apart.
+         (harness-sandbox--home (expand-file-name "sandbox-home" cwd))
          (harness-sandbox-policy 'preferred)
          (harness-sandbox-backend 'auto)
          (command '("sh" "-c" "true")))
@@ -53,7 +56,7 @@ re-detected before BODY and restored afterwards."
         ;; Network stays on by default.
         (should-not (member "--unshare-net" cmd))
         ;; The real home is never bound.
-        (should-not (member (directory-file-name (getenv "HOME")) cmd))
+        (should-not (member (harness-test-real-home) cmd))
         ;; The command follows the separator untouched.
         (should (equal command (cdr (member "--" cmd)))))
       ;; Options: network off and extra writable/readable directories.
@@ -149,31 +152,39 @@ re-detected before BODY and restored afterwards."
   (harness-sandbox-detect)
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (let* ((cwd (harness-test-temp-dir))
-         (home (getenv "HOME"))
-         (harness-sandbox-policy 'required)
-         (cmd (harness-call 'sandbox/wrap cwd
-                            (list "sh" "-c" (format "echo HOME=$HOME; ls $HOME; ls %s 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
-         (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+         ;; A home of the test's own with a file in it, so the check does not
+         ;; depend on what, if anything, the process's own home holds.
+         (home (harness-test-temp-dir))
+         ;; A distinct sandbox home, so the real home is a different path even
+         ;; when the process is started with HOME under /tmp.
+         (harness-sandbox--home (expand-file-name "sandbox-home" cwd))
+         (harness-sandbox-policy 'required))
     (unwind-protect
         (progn
-          (when (and (not (eql 0 (plist-get r :exit)))
-                     (string-match-p "bwrap:" (plist-get r :stderr)))
-            (ert-skip (format "bwrap cannot start in this environment: %s"
-                              (string-trim (plist-get r :stderr)))))
-          (should (eql 0 (plist-get r :exit)))
-          (let* ((out (plist-get r :stdout))
-                 (lines (split-string out "\n" t)))
-            (should (member "ok" lines))
-            (should (member (concat "HOME=" harness-sandbox--home) lines))
-            ;; Nothing from the real home directory shows up: not the
-            ;; empty sandbox home, not a listing of the real path.
-            (let ((real-entries (directory-files home nil "\\`[^.]" t)))
-              (should real-entries)
-              (should-not (cl-intersection real-entries lines :test #'equal))
-              (should (cl-some (lambda (l) (string-match-p "cannot access\\|No such file" l)) lines)))
-            ;; The cwd itself is writable.
-            (should (file-exists-p (expand-file-name "outside-test" cwd)))))
-      (delete-directory cwd t))))
+          (with-temp-file (expand-file-name "secret-in-real-home" home)
+            (insert "must not show\n"))
+          (let* ((cmd (harness-call 'sandbox/wrap cwd
+                                    (list "sh" "-c" (format "echo HOME=$HOME; ls $HOME; ls %s 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
+                 (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+            (when (and (not (eql 0 (plist-get r :exit)))
+                       (string-match-p "bwrap:" (plist-get r :stderr)))
+              (ert-skip (format "bwrap cannot start in this environment: %s"
+                                (string-trim (plist-get r :stderr)))))
+            (should (eql 0 (plist-get r :exit)))
+            (let* ((out (plist-get r :stdout))
+                   (lines (split-string out "\n" t)))
+              (should (member "ok" lines))
+              (should (member (concat "HOME=" harness-sandbox--home) lines))
+              ;; Nothing from the real home directory shows up: not the
+              ;; sandbox home, not a listing of the real path.
+              (let ((real-entries (directory-files home nil "\\`[^.]" t)))
+                (should real-entries)
+                (should-not (cl-intersection real-entries lines :test #'equal))
+                (should (cl-some (lambda (l) (string-match-p "cannot access\\|No such file" l)) lines)))
+              ;; The cwd itself is writable.
+              (should (file-exists-p (expand-file-name "outside-test" cwd))))))
+      (delete-directory cwd t)
+      (delete-directory home t))))
 
 ;;;; Git worktrees
 
@@ -213,6 +224,8 @@ re-detected before BODY and restored afterwards."
         (should (harness-sandbox-test--subseq-p (list "--bind" common common) cmd))
         (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/hooks") (concat common "/hooks")) cmd))
         (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/config") (concat common "/config")) cmd))
+        (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/index") (concat common "/index")) cmd))
+        (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/HEAD") (concat common "/HEAD")) cmd))
         ;; Read-only binds come after the writable one, so they win.
         (should (< (cl-position (concat common "/hooks") cmd :test #'equal)
                    (cl-position "--unshare-pid" cmd :test #'equal)))
@@ -247,6 +260,29 @@ re-detected before BODY and restored afterwards."
     (should-not (file-exists-p hook))
     (should (equal "inside\n" (harness-sandbox-test--git wt "log" "-1" "--format=%s")))
     (should (equal "Sandbox Test\n" (harness-sandbox-test--git wt "log" "-1" "--format=%an")))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-main-index-read-only ()
+  "Under the real bwrap, git in a worktree cannot change the main checkout's index.
+The main checkout's files are not in the sandbox, so git there sees them
+all deleted; staging anything would wreck its index."
+  (harness-sandbox-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (let* ((repo (harness-sandbox-test--worktree))
+         (root (car repo))
+         (wt (cdr repo))
+         (harness-sandbox-policy 'required)
+         (cmd (harness-call 'sandbox/wrap wt
+                            (list "sh" "-c"
+                                  (format "git -C %s rm -q --cached README 2>/dev/null && echo staged || echo index-refused; echo change > f && git add f && git -c commit.gpgsign=false commit -q -m inside && echo committed"
+                                          (shell-quote-argument root)))))
+         (r (harness-await (harness-run-command cmd :cwd wt :timeout 20))))
+    (when (and (not (eql 0 (plist-get r :exit))) (string-match-p "bwrap:" (plist-get r :stderr)))
+      (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get r :stderr)))))
+    (should (string-match-p "index-refused" (plist-get r :stdout)))
+    (should (string-match-p "committed" (plist-get r :stdout)))
+    (should (string-empty-p (harness-sandbox-test--git root "status" "--porcelain")))))
 
 ;;;; Refusing git worktree commands
 

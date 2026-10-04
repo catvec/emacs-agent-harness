@@ -148,6 +148,26 @@
       (should (eq 'ok (plist-get s :level)))
       (should-not (harness-compaction-needed-p (harness-call 'session/get id))))))
 
+(ert-deftest harness-compaction-context-limit-shortens-the-window ()
+  "A session capped below its model's window compacts at the cap."
+  (harness-compaction-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                        :model "demo:scripted" :context-window-limit 4000)
+                          :id))
+           (harness-provider-demo-script-override harness-compaction-test-script))
+      (harness-call 'session/append id '(:kind user :content "please refactor the parser"))
+      (harness-call 'session/append id '(:kind assistant :content "Done: parser.el rewritten"))
+      ;; Half of the demo model's 8000, less the test's 1000-token reserve.
+      (let ((s (harness-call 'compaction/status id)))
+        (should (= 4000 (plist-get s :window)))
+        (should (= 3000 (plist-get s :usable))))
+      ;; 3500 tokens compacts under the 4000 cap, where a session with
+      ;; the whole 8000 window would not.
+      (harness-call 'session/usage-add id '(:context 3500))
+      (should (harness-compaction-needed-p (harness-call 'session/get id)))
+      (harness-await (harness-call 'agent/prompt id "carry on"))
+      (should (member 'compaction (harness-compaction-test-kinds id))))))
+
 (ert-deftest harness-compaction-auto-compacts-before-turn ()
   (harness-compaction-test-with
     (let* ((id (harness-compaction-test-session))
