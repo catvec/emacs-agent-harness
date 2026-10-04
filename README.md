@@ -706,10 +706,47 @@ session to it; `C-c h H` (`harness-set-thinking-all`) does the same for
 the thinking level. Both make the choice the default for new sessions
 too, unless a prefix argument (`C-u C-c h M`) says otherwise. Only idle,
 running and blocked sessions change — deactivated ones are history and
-are left alone — no running turn is cancelled, each session records the
-change as a hint, and provider state is kept so switching back can
-still resume it. Use them when a plan runs out of credit, a provider
-fails, or a cheaper model should take over work already in flight.
+are left alone — no running turn is cancelled (it takes the new model at
+its next step), and each session records the change as a hint. Use them
+when a plan runs out of credit, a provider fails, or a cheaper model
+should take over work already in flight.
+
+Claude Code and Copilot keep the conversation themselves and are sent
+only your newest message, so switching a session to one of them from
+another provider would start a conversation that knows nothing of the
+work so far. Such a switch asks first — once for all of them with
+`C-c h M` — and lists the risks: a cold prompt cache (with what the
+session's context costs to write), lower fidelity (the model explores
+again; tool calls and thinking reach it only as text), the old
+provider's own state left behind, and that a running turn finishes its
+current step first. The question shows as a banner over the session's
+message box — the models, the risks and the costs, then one button and
+key per way to hand over — and as a minibuffer question when the session
+has no chat buffer open. Then choose:
+
+- **`c` current model summarises**: it summarises the conversation,
+  whose cache is warm, and the new one starts from that summary;
+- **`n` new model summarises** (advanced): the new model writes the
+  summary itself, from only the first and last messages of the session,
+  so the whole conversation never runs through it. Use this when the
+  current provider cannot answer at all — its plan ran out, it is down —
+  or to keep the job cheap. The middle of the conversation is left out,
+  so the summary is a lossy one;
+- **`t` full transcript**: the whole transcript is written to
+  `.harness/handoff/` in the session's directory (git ignores it), and
+  the new model is told to read it before it answers; its prompt cache
+  holds it as it reads;
+- **`s` no handoff**, or **`q` cancel**.
+
+If the summariser fails, the transcript goes over instead. Whichever
+handoff you choose, the message that opens the new conversation says the
+context may be lossy and tells the model to re-investigate anything it
+is unsure of — read the files, check the state — before it acts.
+
+A switch to an API provider (which is sent the whole conversation), to
+another model of the same provider, or back to a provider before any
+other ran a step in the session (it resumes its own conversation) loses
+nothing and does not ask.
 
 The task board has the same thing scoped to its tasks: turn on bulk edit
 (`B`, or `[Bulk edit: N tasks]` in the board's header) and the model,
@@ -886,7 +923,7 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |

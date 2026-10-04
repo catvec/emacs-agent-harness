@@ -352,8 +352,9 @@ when it is forked to a model of a provider that cannot."
                                   (should (equal (plist-get child :provider-state) (plist-get stored :provider-state)))
                                   (plist-get stored :provider-state)))))
               (harness-call 'session/set-provider-state id state)
-              ;; A provider that forks: the fork has the state it derives.
-              (should (equal '(:forked-from "parent-cli") (funcall fork-state id)))
+              ;; A provider that forks: the fork has the state it derives,
+              ;; which names the provider it belongs to.
+              (should (equal '(:forked-from "parent-cli" :provider "test-forky") (funcall fork-state id)))
               ;; Forked to the model of a provider that cannot fork: none.
               (should-not (funcall fork-state id :model "test-plain:m"))
               ;; A provider that cannot fork, or whose fork fails: none.
@@ -366,6 +367,32 @@ when it is forked to a model of a provider that cannot."
         (dolist (p '(test-plain test-broken test-forky))
           (remhash p harness-providers))))))
 
+(ert-deftest harness-session-provider-state-belongs-to-its-provider ()
+  "Only models of the provider a state belongs to can continue it.
+A state names its provider.  One from before states did belongs to the
+provider that answered last: another provider answering since means
+the state's own never saw those turns, so it counts as no state."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "claude:a") :id)))
+      (should-not (harness-call 'session/provider-state id))
+      (harness-call 'session/set-provider-state id '(:cli-session-id "x" :provider "claude"))
+      (should (equal '(:cli-session-id "x" :provider "claude") (harness-call 'session/provider-state id)))
+      (should (harness-call 'session/provider-state id "claude:b"))
+      (should-not (harness-call 'session/provider-state id "deepseek:flash"))
+      ;; A state that does not say: nothing answered yet, so the session's provider's.
+      (harness-call 'session/set-provider-state id '(:cli-session-id "old"))
+      (should (equal '(:cli-session-id "old") (harness-call 'session/provider-state id)))
+      ;; Claude answered last: still Claude's, after a switch away too.
+      (harness-call 'session/append id '(:kind assistant :content "from claude" :meta (:model "claude:a")))
+      (harness-call 'session/update id :model "deepseek:flash" :silent t)
+      (should-not (harness-call 'session/provider-state id))
+      (should (harness-call 'session/provider-state id "claude:a"))
+      ;; Another provider answered since, which Claude's conversation never
+      ;; saw: Claude cannot continue it.
+      (harness-call 'session/append id '(:kind assistant :content "from deepseek" :meta (:model "deepseek:flash")))
+      (should-not (harness-call 'session/provider-state id "claude:a"))
+      ;; The record itself is left as it is.
+      (should (equal '(:cli-session-id "old") (plist-get (harness-call 'session/get id) :provider-state))))))
 (defmacro harness-session-test-with-cut-provider (&rest body)
   "Run BODY with the provider `test-cut', which can fork at a checkpoint.
 Its fork of a whole state is (:whole CLI-SESSION-ID), of a checkpoint
@@ -410,11 +437,11 @@ too, even at its head."
                                               :id)))))
         (pcase-let ((`(,u1 ,a1 ,u2 ,a2) ids))
           (let ((at-head (funcall fork)))
-            (should (equal '(:whole "S") (plist-get at-head :provider-state)))
+            (should (equal '(:whole "S" :provider "test-cut") (plist-get at-head :provider-state)))
             (should (equal a2 (plist-get at-head :fork-node)))
             (should (equal a2 (plist-get at-head :provider-node))))
           (let ((at-u2 (funcall fork u2)))
-            (should (equal '(:cut (:at "c1")) (plist-get at-u2 :provider-state)))
+            (should (equal '(:cut (:at "c1") :provider "test-cut") (plist-get at-u2 :provider-state)))
             (should (equal u2 (plist-get at-u2 :head)))
             (should (equal u2 (plist-get at-u2 :fork-node)))
             (should (equal u2 (plist-get at-u2 :provider-node)))
@@ -427,7 +454,7 @@ too, even at its head."
           (should (equal '(:cli-session-id "S") (plist-get (harness-call 'session/get id) :provider-state)))
           ;; Its head moved back to the first reply: a fork at the head is cut.
           (harness-call 'session/set-head id a1)
-          (should (equal '(:cut (:at "c1")) (plist-get (funcall fork) :provider-state))))))))
+          (should (equal '(:cut (:at "c1") :provider "test-cut") (plist-get (funcall fork) :provider-state))))))))
 
 (ert-deftest harness-session-provider-continuation-follows-the-head ()
   "Where the head is says how the provider conversation goes on.

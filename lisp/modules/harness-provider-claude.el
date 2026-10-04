@@ -17,6 +17,9 @@
 ;;   JSON-RPC calls (initialize, tools/list, tools/call) inline.  A
 ;;   tools/call becomes a `tool-call' provider event whose `:respond'
 ;;   writes the result back, which is how the hosted loop continues.
+;;   tools/list answers with the tools of the last request, kept after
+;;   its turn: the CLI may list them between turns, and keeps the list
+;;   it got for as long as the process lives.
 ;; - The harness's permission system decides every tool call, so the
 ;;   CLI only has to let the harness's tools through, never bypass its
 ;;   checks: `harness-provider-claude-permission-args' fixes its
@@ -43,7 +46,15 @@
 ;;   shows the model is busy.
 ;; - `--resume ID' recreates a session after a restart and `--resume ID
 ;;   --fork-session' implements `:fork': the new session starts from
-;;   the parent's cached prefix.
+;;   the parent's cached prefix.  Which CLI session a harness session is
+;;   in is what its provider state says: one whose state was dropped,
+;;   because it went on with another provider, starts a new CLI session
+;;   rather than carry on a stale one (see
+;;   `harness-provider-claude--ensure-process').  Only the user messages
+;;   after the model's last reply are sent, so a new CLI session knows
+;;   nothing of what came before unless the harness hands it over (see
+;;   the handoff module); a new session with older history does get it
+;;   as text, below.
 ;; - Every assistant message and tool-result echo carries the uuid of
 ;;   its entry in the CLI session's chain.  They go out as checkpoints
 ;;   (`checkpoint' events, and `:checkpoint' on tool calls), which the
@@ -256,7 +267,8 @@ The auto-mode judge, for one, runs on the `cheap' one.")
   cost-total         ; the CLI's running cost total so far; nil while unknown
   baseline-id        ; id of the usage request whose session total starts it
   seen-output        ; non-nil once the CLI produced a reply or a result
-  probe)             ; non-nil for a quota probe, which serves no session
+  probe              ; non-nil for a quota probe, which serves no session
+  tools)             ; the harness tools the last request served, kept between turns
 
 (defvar harness-provider-claude--sessions (make-hash-table :test 'equal)
   "Harness session id -> `harness-provider-claude-session'.")
@@ -576,7 +588,10 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
           ;; A fresh CLI session starts from zero; a resumed or forked
           ;; one from the spend it restores, which the usage report says.
           (harness-provider-claude-session-cost-total entry) (if resume nil 0.0)
-          (harness-provider-claude-session-seen-output entry) nil)
+          (harness-provider-claude-session-seen-output entry) nil
+          ;; The CLI session the process is in, until its banner says:
+          ;; the one it resumes, and none yet for a new one or a fork.
+          (harness-provider-claude-session-cli-session-id entry) (and (not fork) resume))
     (harness-provider-claude--send
      entry '(:type "control_request" :request_id "init-1"
              :request (:subtype "initialize" :sdkMcpServers ("harness"))))
@@ -654,13 +669,18 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
 ;;;; MCP server
 
 (defun harness-provider-claude--tool-list (entry)
-  "Return the MCP tool descriptors for ENTRY's current request."
+  "Return the MCP tool descriptors of the tools ENTRY serves.
+They are those of the last request, which ENTRY keeps once its turn is
+over: the CLI may list the tools while no turn is in flight -- its
+handshake can come after a turn that ended at once -- and it keeps the
+list it got for the life of the process, so an empty one would leave
+every later turn without tools."
   (mapcar (lambda (spec)
             (list :name (plist-get spec :name)
                   :description (or (plist-get spec :description) "")
                   :inputSchema (or (plist-get spec :schema)
                                    '(:type "object" :properties :empty))))
-          (plist-get (harness-provider-claude-session-request entry) :tools)))
+          (harness-provider-claude-session-tools entry)))
 
 (defun harness-provider-claude--take-tool-id (entry name)
   "Return the pending tool_use id for NAME on ENTRY, or a generated one."
@@ -1743,23 +1763,33 @@ Return `live' when the running process serves REQUEST, else how the
 one started for it opens its conversation: `fresh', `resume' or
 `fork'.  The running process serves REQUEST when it was started with
 the settings REQUEST needs (`harness-provider-claude--spawn-key') and
-holds the CLI session REQUEST's provider state names, or any when the
-state names none.  A state marked `:fork-pending' always gets a new
-process, which forks the CLI session it names, cut at its `:resume-at'
-when it has one; otherwise the state's CLI session is resumed, else
-the one the entry last held."
+is in the CLI session REQUEST asks for: the one its session's record
+names -- none, when that record's state was dropped, which starts a new
+CLI session -- or, for a request without a session record (the
+permission judge, tests), the one the entry last held.  A state marked
+`:fork-pending' always gets a new process, which forks the CLI session
+it names, cut at its `:resume-at' when it has one."
   (let* ((state (plist-get request :provider-state))
+         (session (plist-get request :session))
+         (recorded (plist-member session :provider-state))
          (key (harness-provider-claude--spawn-key request))
          (proc (harness-provider-claude-session-process entry))
          (live (process-live-p proc))
-         (want (plist-get state :cli-session-id))
          (have (harness-provider-claude-session-cli-session-id entry))
-         (fork (and want (harness-json-true-p (plist-get state :fork-pending)))))
+         ;; The CLI session the request asks for: the one its provider state
+         ;; names.  A request that brings its session's record stays there, and
+         ;; no other: one whose record's state was dropped, because the session
+         ;; went on with another provider, starts a new CLI session rather than
+         ;; carry on a stale one.  Without a session record (the permission
+         ;; judge, provider tests) the entry's own session serves.
+         (stated (plist-get state :cli-session-id))
+         (want (cond (stated stated) (recorded nil) (t have)))
+         (fork (and stated (harness-json-true-p (plist-get state :fork-pending)))))
     (if (and live (not fork)
              (equal key (harness-provider-claude-session-spawn-key entry))
-             (or (null want) (equal want have)))
+             (equal want have))
         'live
-      (let ((resume (or want have)))
+      (let ((resume want))
         (when live
           (harness-log 'info "provider-claude: %s for %s; restarting%s"
                        (if fork "forking" "settings or conversation changed")
@@ -1806,6 +1836,8 @@ new one gets them first, as text (`harness-provider-claude--with-history')."
     (when (harness-provider-claude-session-active entry)
       (harness-provider-claude--finish
        entry '(:type done :stop-reason error :error "superseded by a new request")))
+    ;; Kept after the turn, for a CLI that lists the tools between turns.
+    (setf (harness-provider-claude-session-tools entry) (plist-get request :tools))
     (setq mode (harness-provider-claude--ensure-process entry request))
     (setf (harness-provider-claude-session-request entry) request
           (harness-provider-claude-session-on-event entry) on-event

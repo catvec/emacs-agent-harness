@@ -232,7 +232,7 @@
         (should (equal "Forked title here" (harness-await (harness-call 'naming/name id))))
         (should (equal '(("forky:m" (:cli "abc"))) forks))
         (should (= 1 (length requests)))
-        (should (equal '(:forked-from "abc") (plist-get (car requests) :provider-state)))
+        (should (equal '(:forked-from "abc" :provider "forky") (plist-get (car requests) :provider-state)))
         (should (equal "Forked title here" (harness-naming-test-name id)))
         ;; The session's own state is untouched by the fork.
         (should (equal '(:cli "abc") (plist-get (harness-call 'session/get id) :provider-state)))))))

@@ -100,6 +100,12 @@ Each is (CALL-ID :tool NAME :title TITLE :since FLOAT :checking BOOL
 (defvar harness-agent--progress-timers (make-hash-table :test 'equal)
   "Session id -> the timer that announces held-back tool progress.")
 
+(defvar harness-agent--step-models (make-hash-table :test 'equal)
+  "Session id -> the model its running turn's current step was sent to.
+The session's model may change while a step runs (it applies from the
+next step), so what the step writes names this one.  Kept beside the
+turn records, as the activity tables are.")
+
 (defvar harness-agent--failures (make-hash-table :test 'equal)
   "Session id -> the failure of its running turn's last step, if it failed.
 The `done' event's keys (`:error' `:error-kind' `:resets' ...) plus the
@@ -444,14 +450,21 @@ Otherwise MESSAGES is returned as it is."
          (start (cl-position 'compaction path :key (lambda (n) (plist-get n :kind)) :from-end t))
          (path (if start (nthcdr start path) path))
          (own (cl-position-if (lambda (n) (equal (harness-agent--node-provider n) provider)) path :from-end t))
-         (missed (if own (nthcdr (1+ own) path) path))
+         ;; A handoff note is the conversation's deliberate opening for this
+         ;; provider, not something it missed: the handoff module wrote it,
+         ;; and a note in the trailing messages already brings the provider
+         ;; up to date, so the catch-up would only repeat it.
+         (trailing (cl-loop for n in (reverse path)
+                            while (memq (plist-get n :kind) '(user hint tool-result compaction))
+                            thereis (harness-node-handoff n)))
+         (missed (cl-remove-if #'harness-node-handoff (if own (nthcdr (1+ own) path) path)))
          (models (delete-dups
                   (delq nil (mapcar (lambda (n)
                                       (let ((p (harness-agent--node-provider n)))
                                         (and p (not (equal p provider))
                                              (plist-get (plist-get n :meta) :model))))
                                     missed)))))
-    (if (null models)
+    (if (or (null models) trailing)
         messages
       (let* (;; The newest message: the user nodes after the last other one.
              (tail (length (seq-take-while (lambda (n) (eq (plist-get n :kind) 'user)) (reverse missed))))
@@ -619,6 +632,24 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
 
 ;;;; Steps
 
+(defun harness-agent--provider-state (sid model)
+  "Return the provider state a step of session SID on MODEL continues, or nil.
+That is the state MODEL's provider can continue (`session/provider-state').
+A state another provider wrote is dropped from the session here: this
+step's turns go where that provider never sees them, so its conversation
+is stale from now on, and switching back to it must not look as if it
+could carry on.  Switching away and back with no step in between keeps
+the state."
+  (let* ((raw (plist-get (harness-call 'session/get sid) :provider-state))
+         (usable (if (harness-method-exists-p 'session/provider-state)
+                     (harness-call 'session/provider-state sid model)
+                   raw)))
+    (when (and raw (not usable))
+      (harness-log 'info "agent: %s moves on with %s; dropping the provider state of %s"
+                   sid model (or (harness-provider-state-owner raw) "an unknown provider"))
+      (harness-call 'session/set-provider-state sid nil))
+    usable))
+
 (defun harness-agent--step (turn)
   "Call the provider once for TURN."
   (let ((sid (harness-agent-turn-session-id turn)))
@@ -634,8 +665,12 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
             (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil
             (harness-agent-turn-pending turn) 0 (harness-agent-turn-waiting-done turn) nil
             (harness-agent-turn-stop-reason turn) nil (harness-agent-turn-error turn) nil)
-      (let* ((session (harness-call 'session/get sid))
-             (request (list :model (plist-get session :model)
+      (let* ((model (plist-get (harness-call 'session/get sid) :model))
+             (state (harness-agent--provider-state sid model))
+             ;; Read after the state above was settled, so the request's
+             ;; session record holds the state the request carries.
+             (session (harness-call 'session/get sid))
+             (request (list :model model
                             :session session
                             :system (harness-agent--system-prompt session)
                             :messages (harness-agent--request-messages session)
@@ -644,8 +679,9 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
                             :builtin-tools (and (harness-method-exists-p 'tools/builtin)
                                                 (harness-call 'tools/builtin sid))
                             :thinking (plist-get session :thinking)
-                            :provider-state (plist-get session :provider-state)
-                            :on-event (lambda (ev) (harness-agent--on-event turn ev)))))
+                            :provider-state state
+                            :on-event (lambda (ev) (harness-agent--on-event turn ev model)))))
+        (puthash sid model harness-agent--step-models)
         (harness-emit 'agent/step-started sid (harness-agent-turn-steps turn))
         (harness-agent--update-activity sid '(:phase waiting))
         (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
@@ -680,8 +716,10 @@ a node already after it keeps its place and is left untouched."
                                 :meta (plist-put (copy-sequence (plist-get n :meta))
                                                  :delivered-after (plist-get anchor :id)))))))
 
-(defun harness-agent--on-event (turn ev)
-  "Handle EV from TURN's provider; late events of a finished turn are dropped."
+(defun harness-agent--on-event (turn ev &optional model)
+  "Handle EV from TURN's provider; late events of a finished turn are dropped.
+MODEL is the model the step was sent to: the provider state it reports
+is that model's provider's, whatever the session's model is by now."
   (when (harness-agent--current-p turn)
     (let ((sid (harness-agent-turn-session-id turn)))
       (pcase (plist-get ev :type)
@@ -707,7 +745,11 @@ a node already after it keeps its place and is left untouched."
                              :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
                              :billing (plist-get ev :billing) :plan (plist-get ev :plan)
                              :context (plist-get ev :context))))
-        ('provider-state (harness-call 'session/set-provider-state sid (plist-get ev :state)))
+        ('provider-state
+         (harness-call 'session/set-provider-state sid
+                       (harness-tag-provider-state
+                        (plist-get ev :state)
+                        (or model (plist-get (harness-call 'session/get sid) :model)))))
         ('checkpoint (harness-agent--checkpoint turn ev))
         ('quota (harness-call 'session/runtime sid :quota (plist-get ev :windows))
                 (harness-emit 'agent/quota sid (plist-get ev :windows)))
@@ -770,7 +812,8 @@ Whitespace held back for a node that never got visible text is dropped."
          (buf (if thinking (harness-agent-turn-think-buf turn) (harness-agent-turn-text-buf turn))))
     (when node-id
       (harness-call 'session/update-node sid node-id :content (or buf "")
-                    :meta (list :model (plist-get (harness-call 'session/get sid) :model)
+                    :meta (list :model (or (gethash sid harness-agent--step-models)
+                                           (plist-get (harness-call 'session/get sid) :model))
                                 :usage (and (not thinking) (harness-agent-turn-last-usage turn)))))
     (if thinking
         (setf (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil)
@@ -1081,6 +1124,7 @@ the turn was cancelled, it ends with `error'."
       (when (harness-call 'session/exists-p sid)
         (harness-agent--close-builtins turn reason))
       (remhash sid harness-agent--turns)
+      (remhash sid harness-agent--step-models)
       (remhash sid harness-agent--failures)
       (remhash sid harness-agent--retries)
       (harness-agent--clear-activity sid)

@@ -1765,14 +1765,273 @@ available is offered."
             (choice (completing-read "Model: " table nil t)))
        (funcall callback (plist-get (cdr (assoc choice table)) :id) choice)))))
 
+;;;; Switching models, and handing conversations over
+
+(defconst harness-ui--handoff-choices
+  '((?c "current model summarises" compact
+        "warm cache; summary from the whole conversation")
+    (?n "new model summarises" compact-new
+        "only the first and last messages; small, but lossy")
+    (?t "full transcript" transcript
+        "whole conversation as a file the new model reads")
+    (?s "no handoff" none
+        "no context; the new model starts from your next message")
+    (?q "cancel" cancel "keep the current model"))
+  "What a model switch that loses the conversation offers.
+Each entry is (KEY NAME CHOICE DESCRIPTION); CHOICE is a mode of
+`handoff/switch', or `cancel'.  The names are short so the minibuffer
+prompt stays readable; the descriptions are one line each.")
+
+(defun harness-ui--handoff-choice-text ()
+  "Return the handoff choices as a short, aligned list, easy to scan."
+  (let* ((choices harness-ui--handoff-choices)
+         (width (apply #'max (mapcar (lambda (c) (string-width (nth 1 c))) choices)))
+         (fmt (format "  %%c  %%-%ds  %%s" width)))
+    (mapconcat (lambda (c)
+                 (format fmt (nth 0 c) (nth 1 c) (or (nth 3 c) "")))
+               choices "\n")))
+
+(defun harness-ui--check-session-label (check)
+  "Return the name to show for the session a `handoff/check' CHECK is about."
+  (let ((name (plist-get check :name))
+        (id (or (plist-get check :id) "?")))
+    (if (and (stringp name) (not (string-blank-p name)))
+        (format "“%s”" name)
+      (substring id 0 (min 8 (length id))))))
+
+(defun harness-ui--handoff-heading (text)
+  "Return TEXT as the heading of a section in the switch help."
+  (propertize text 'face 'bold))
+
+(defun harness-ui--handoff-wrap (text width)
+  "Return TEXT as lines no wider than WIDTH, broken at spaces."
+  (let ((words (split-string text " " t))
+        (lines nil) (line ""))
+    (dolist (w words)
+      (cond ((string-empty-p line) (setq line w))
+            ((<= (+ (length line) 1 (length w)) width) (setq line (concat line " " w)))
+            (t (push line lines) (setq line w))))
+    (when (not (string-empty-p line)) (push line lines))
+    (or (nreverse lines) '(""))))
+
+(defun harness-ui--handoff-table (header rows &optional wrap)
+  "Return a table of HEADER and ROWS for the switch help.
+HEADER and each row are lists of cell strings; the last cell may be
+empty.  Columns are padded to their widest cell, a rule of dashes
+separates HEADER from ROWS, and WRAP caps the last column, whose
+continuation lines line up under it.  A nil HEADER gives label and
+value columns with no rule."
+  (let* ((n (length (or header (car rows))))
+         (widths (cl-loop for i from 0 below n
+                          for w = (apply #'max 0
+                                         (mapcar (lambda (r) (string-width (or (nth i r) "")))
+                                                 (append (and header (list header)) rows)))
+                          collect (if (and wrap (= i (1- n))) (min w wrap) w)))
+         (head (lambda (row)
+                 (concat "  "
+                         (mapconcat (lambda (i)
+                                      (format (format "%%-%ds" (nth i widths)) (or (nth i row) "")))
+                                    (number-sequence 0 (- n 2)) "  ")
+                         (if (> n 1) "  " ""))))
+         (lines (lambda (row)
+                  (let* ((prefix (funcall head row))
+                         (last (or (nth (1- n) row) ""))
+                         (parts (if (and wrap (> (length last) wrap))
+                                    (harness-ui--handoff-wrap last wrap)
+                                  (list last)))
+                         (continuation (make-string (length prefix) ?\s)))
+                    (concat (string-trim-right (concat prefix (car parts)))
+                            (if (cdr parts) "\n" "")
+                            (mapconcat (lambda (l) (string-trim-right (concat continuation l)))
+                                       (cdr parts) "\n")))))
+         (rule (concat "  " (mapconcat (lambda (w) (make-string w ?-)) widths "  "))))
+    (concat (if header (concat (funcall lines header) "\n" rule "\n") "")
+            (mapconcat (lambda (r) (funcall lines r)) rows "\n"))))
+
+(defun harness-ui--handoff-risk-row (risk)
+  "Return RISK, a \"label: what it means\" sentence, as the cells of a table row."
+  (let ((colon (string-match ":" risk)))
+    (if colon
+        (list (substring risk 0 colon) (string-trim (substring risk (1+ colon))))
+      (list risk ""))))
+
+(defun harness-ui--handoff-text (checks label total)
+  "Return what to say before a switch to model LABEL loses conversations.
+CHECKS are the `handoff/check' answers of the sessions that would lose
+theirs, TOTAL how many sessions the switch changes in all.  The view is
+a few small tables -- the sessions that change, the risks, what to do --
+shown before the question, not prose."
+  (let* ((first (car checks))
+         (one (= 1 total))
+         (lossy (length checks))
+         (running (cl-some (lambda (c) (harness-json-true-p (plist-get c :running))) checks))
+         (info (if one
+                   (append
+                    (list (list "Session" (harness-ui--check-session-label first))
+                          (list "From" (harness-ui-model-label (plist-get first :from)))
+                          (list "Why" (plist-get first :reason)))
+                    (when (plist-get first :cache-cost)
+                      (list (list "Cache" (format "%s (list prices)" (plist-get first :cache-cost)))))
+                    (when running
+                      (list (list "Turn" "running; the switch takes effect at its next step"))))
+                 (list (list "Sessions" (if (= lossy total)
+                                            (format "all %d start a new conversation there" total)
+                                          (format "%d of %d start a new conversation there" lossy total)))
+                       (list "Why" (plist-get first :reason))))))
+    (concat
+     (harness-ui--handoff-heading (format "MODEL SWITCH → %s" label)) "\n\n"
+     (harness-ui--handoff-table nil info 72) "\n\n"
+     (if one
+         ""
+       (concat (harness-ui--handoff-table
+                (list "SESSION" "FROM" "TURN" "CACHE COST")
+                (mapcar (lambda (c)
+                          (list (harness-ui--check-session-label c)
+                                (harness-ui-model-label (plist-get c :from))
+                                (if (harness-json-true-p (plist-get c :running)) "running" "-")
+                                (or (plist-get c :cache-cost) "-")))
+                        checks)
+               60)
+               "\n\n"))
+     (harness-ui--handoff-heading "RISKS") "\n\n"
+     (harness-ui--handoff-table
+      (list "RISK" "WHAT IT MEANS")
+      (mapcar #'harness-ui--handoff-risk-row (plist-get first :risks))
+      72)
+     "\n\n"
+     (harness-ui--handoff-heading "HAND OVER") "\n"
+     "  lossy; the new model is told to re-investigate\n\n"
+     (harness-ui--handoff-choice-text)
+     (if one "" "\n\nThe choice applies to each session listed; the others just switch.")
+     "\n")))
+
+(defun harness-ui--read-handoff (checks label &optional total)
+  "Ask what to do about a switch to model LABEL that loses conversations.
+CHECKS are the `handoff/check' answers of the sessions that would lose
+theirs; TOTAL is how many sessions the switch changes in all (default
+their number).  The risks show before the question.  Return a mode of
+`handoff/switch' (`compact', `compact-new', `transcript', `none') or
+`cancel'."
+  (let* ((total (or total (length checks)))
+         (answer (read-multiple-choice
+                  (format "Switch to %s" label)
+                  (mapcar (lambda (c) (list (nth 0 c) (nth 1 c) (nth 3 c))) harness-ui--handoff-choices)
+                  (harness-ui--handoff-text checks label total)
+                  "*Harness model switch*")))
+    (nth 2 (assq (car answer) harness-ui--handoff-choices))))
+
+(defun harness-ui--handoff-outcome (label result)
+  "Say how a switch to model LABEL went, from `handoff/switch''s RESULT."
+  (let ((mode (format "%s" (or (plist-get result :mode) "none")))
+        (file (plist-get result :file)))
+    (cond
+     ((plist-get result :error)
+      (format "Model → %s, but the handoff failed: %s" label (plist-get result :error)))
+     ((harness-json-true-p (plist-get result :deferred))
+      (format "Model → %s from the running turn's next step, which takes the handoff" label))
+     ((equal mode "compact") (format "Model → %s, starting from a summary of the conversation" label))
+     ((equal mode "compact-new")
+      (format "Model → %s, starting from a summary that model wrote from the first and last messages" label))
+     ((and (equal mode "transcript") (stringp file))
+      (format "Model → %s, which reads the transcript in %s first%s" label (abbreviate-file-name file)
+              (if (plist-get result :fallback) " (no summary could be made)" "")))
+     (t (format "Model → %s" label)))))
+
+(defun harness-ui--ask-handoff (checks label total _session _host callback)
+  "Ask how to hand over a lossy switch in the minibuffer.
+See `harness-ui-switch-function'; CALLBACK gets the mode chosen."
+  (funcall callback (harness-ui--read-handoff checks label total)))
+
+(defvar harness-ui-switch-function #'harness-ui--ask-handoff
+  "Function asking how to hand a conversation over on a lossy model switch.
+Called with (CHECKS LABEL TOTAL SESSION HOST CALLBACK): CHECKS are the
+`handoff/check' answers of the sessions that would lose their
+conversation, LABEL the model being switched to, TOTAL how many sessions
+the switch changes in all, SESSION the session's id or nil for a switch
+of many, HOST the chat buffer the command ran in or nil, and CALLBACK a
+function taking the mode chosen (`compact', `compact-new', `transcript',
+`none' or `cancel'), run once the user decides.  The default asks in the
+minibuffer (`harness-ui--read-handoff'); the `ui-switch' module shows a
+banner in the session's chat instead.")
+
+(defun harness-ui--handoff-perform (session-id model label mode)
+  "Switch SESSION-ID to MODEL as MODE says, saying what happens with LABEL.
+MODE is a mode of `handoff/switch': the handoff runs at once, or at the
+running turn's next step, and its outcome is reported."
+  (when (memq mode '(compact compact-new transcript))
+    (message "Model → %s: %s…" label
+             (pcase mode
+               ('compact "summarising the conversation on the current model first")
+               ('compact-new "letting the new model summarise a limited context first")
+               (_ "handing the transcript over"))))
+  (harness-ui-call "_harness/handoff/switch"
+                   (list :sessionId session-id :model model :mode (symbol-name mode))
+                   (lambda (result) (message "%s" (harness-ui--handoff-outcome label result)))))
+
+(defun harness-ui-switch-model (session-id model label)
+  "Switch SESSION-ID to MODEL, shown as LABEL; ask first if that loses context.
+The harness checks the switch (`handoff/check').  A model of another
+provider that keeps its own conversation (Claude Code, Copilot) and
+cannot continue this session's starts a new one that knows nothing of
+it, so such a switch asks how to hand the conversation over -- a banner
+in the session's chat, or the minibuffer when it has none
+\(`harness-ui-switch-function'): summarise on the current model, have
+the new model summarise a limited context, hand the full transcript
+over, switch without handoff, or cancel.  Any other switch happens at
+once."
+  (let ((plain (lambda () (harness-ui--setting-set session-id :model model (format "Model → %s" label)))))
+    (harness-ui-call
+     "_harness/handoff/check" (list :sessionId session-id :model model)
+     (lambda (check)
+       (if (not (harness-json-true-p (plist-get check :lossy)))
+           (funcall plain)
+         (funcall harness-ui-switch-function
+                  (list check) label 1 session-id nil
+                  (lambda (mode)
+                    (if (eq mode 'cancel)
+                        (message "Model unchanged")
+                      (harness-ui--handoff-perform session-id model label mode))))))
+     ;; A harness that cannot check switches them as it always did.
+     (lambda (_err) (funcall plain) nil))))
+
 ;;;###autoload
 (defun harness-set-model (&optional session-id)
-  "Choose a model for SESSION-ID (default the current buffer's session)."
+  "Choose a model for SESSION-ID (default the current buffer's session).
+A switch that would lose the session's conversation asks first and
+offers to hand it over; see `harness-ui-switch-model'."
   (interactive)
   (let ((target (harness-ui--setting-target session-id)))
     (harness-ui-choose-model
      (lambda (id label)
-       (harness-ui--setting-set target :model id (format "Model → %s" label))))))
+       (if (stringp target)
+           (harness-ui-switch-model target id label)
+         (harness-ui--setting-set target :model id (format "Model → %s" label)))))))
+
+(defun harness-ui--switch-all (model label mode no-default)
+  "Switch every current session to MODEL, shown as LABEL.
+MODE is how the sessions that would lose their conversation hand it
+over (see `handoff/switch'); `none' just switches them all.  The model
+becomes the default for new sessions too, unless NO-DEFAULT."
+  (unless no-default
+    (harness-ui-call "_harness/config/set"
+                     (list :key "harness-model" :value model :scope "global")
+                     (lambda (_) nil)))
+  (let ((done (lambda (ids)
+                (message "Model → %s for %s session%s%s%s"
+                         label (length ids) (if (= 1 (length ids)) "" "s")
+                         (pcase mode
+                           ('compact ", summarising the conversations that need it first")
+                           ('compact-new ", letting the new model summarise a limited context where needed")
+                           ('transcript ", handing the transcripts over where needed")
+                           (_ ""))
+                         (if no-default "" ", and for new sessions")))))
+    (if (eq mode 'none)
+        (harness-ui-call "_harness/session/set-all"
+                         (list :settings (list :model model) :filter (list :active t))
+                         done)
+      (harness-ui-call "_harness/handoff/switch-all"
+                       (list :model model :filter (list :active t) :mode (symbol-name mode))
+                       done))))
 
 ;;;###autoload
 (defun harness-set-model-all (&optional no-default)
@@ -1782,21 +2041,31 @@ argument says otherwise.  Use this when a plan runs out, a provider
 fails, or a cheaper model should take over work already in flight.
 Idle, running and blocked sessions of every project change, each
 recording it as a hint; inactive ones are history and are left alone,
-and no running turn is cancelled.  A session's provider state is kept,
-so switching back can still resume it."
+and no running turn is cancelled: it takes the new model at its next
+step.  When the switch would lose sessions their conversation (see
+`harness-ui-switch-model'), it asks once for all of them, and the
+handoff chosen applies to each of them.  A session keeps its provider
+state until another provider runs a step in it, so switching back before
+then resumes its conversation."
   (interactive "P")
-  (harness-ui-choose-model
-   (lambda (id label)
-     (unless no-default
-       (harness-ui-call "_harness/config/set"
-                        (list :key "harness-model" :value id :scope "global")
-                        (lambda (_) nil)))
-     (harness-ui-call "_harness/session/set-all"
-                      (list :settings (list :model id) :filter (list :active t))
-                      (lambda (ids)
-                        (message "Model → %s for %s session%s%s"
-                                 label (length ids) (if (= 1 (length ids)) "" "s")
-                                 (if no-default "" ", and for new sessions")))))))
+  ;; The chat the command runs in, for the banner to show in.
+  (let ((host (and (derived-mode-p 'harness-chat-mode) (current-buffer))))
+    (harness-ui-choose-model
+     (lambda (id label)
+       (harness-ui-call
+        "_harness/handoff/check-all" (list :model id :filter (list :active t))
+        (lambda (checks)
+          (let ((lossy (cl-remove-if-not (lambda (c) (harness-json-true-p (plist-get c :lossy))) checks)))
+            (if (null lossy)
+                (harness-ui--switch-all id label 'none no-default)
+              (funcall harness-ui-switch-function
+                       lossy label (length checks) nil host
+                       (lambda (mode)
+                         (if (eq mode 'cancel)
+                             (message "Models unchanged")
+                           (harness-ui--switch-all id label mode no-default)))))))
+        ;; A harness that cannot check switches them as it always did.
+        (lambda (_err) (harness-ui--switch-all id label 'none no-default) nil))))))
 
 (defconst harness-ui--thinking-level-order
   '("none" "minimal" "low" "medium" "high" "xhigh" "max")

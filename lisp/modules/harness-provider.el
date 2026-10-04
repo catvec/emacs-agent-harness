@@ -591,9 +591,11 @@ then starts anew from the transcript."
      ;; A fork function of two arguments cannot cut the conversation.
      ((and checkpoint (not (harness-provider--accepts-args-p fn 3))) (harness-resolved nil))
      (t (condition-case err
-            (harness-as-promise (if checkpoint
-                                    (funcall fn model-id state checkpoint)
-                                  (funcall fn model-id state)))
+            (harness-then
+             (harness-as-promise (if checkpoint
+                                     (funcall fn model-id state checkpoint)
+                                   (funcall fn model-id state)))
+             (lambda (new) (harness-tag-provider-state new model-id)))
           (error (harness-rejected err)))))))
 
 (defun harness-provider--accepts-args-p (fn n)

@@ -89,7 +89,7 @@ is never used for any other failure.")
 
 (defconst harness-acp-extension-prefixes
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
-    "config/" "skills/" "permission/" "compaction/" "naming/" "sandbox/status"
+    "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "harness/api" "harness/version" "harness/reload" "harness-dev/" "question/" "project/" "task/"
     "notification/" "acp/remote-")
   "Bus method name prefixes callable as `_harness/NAME'.")

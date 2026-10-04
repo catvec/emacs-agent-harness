@@ -37,6 +37,10 @@
 (declare-function harness-provider-claude--environment-for "harness-provider-claude")
 (declare-function harness-provider-claude--autocompact-pct "harness-provider-claude")
 (declare-function harness-provider-claude--spawn-key "harness-provider-claude")
+(declare-function harness-provider-claude-session-active "harness-provider-claude")
+(declare-function harness-provider-claude-session-baseline-id "harness-provider-claude")
+(declare-function harness-define-tool "harness-tools")
+(defvar harness-provider-demo-script-override)
 (defvar harness-brave-api-key)
 (defvar harness-websearch-provider)
 (defvar harness-websearch-builtin)
@@ -689,7 +693,7 @@ CLI session and all three."
         (should (equal (car replies) (plist-get (harness-call 'session/get fork) :fork-node)))
         (should (equal (list :cli-session-id parent-cli
                              :resume-at (plist-get (plist-get first-reply :checkpoint) :uuid)
-                             :fork-pending t)
+                             :fork-pending t :provider "claude")
                        state))
         (let ((argv (harness-provider-claude-test--turn fork "recall")))
           (should (equal parent-cli (harness-provider-claude-test--flag argv "--resume")))
@@ -873,7 +877,7 @@ running and its conversation never hears the question."
 (ert-deftest harness-provider-claude-fork-at-checkpoint-command-line ()
   "`provider/fork' with a checkpoint cuts the fork there; another provider's gives nil."
   (harness-provider-claude-test--setup)
-  (should (equal '(:cli-session-id "s-1" :resume-at "u-2" :fork-pending t)
+  (should (equal '(:cli-session-id "s-1" :resume-at "u-2" :fork-pending t :provider "claude")
                  (harness-test-await (harness-call 'provider/fork "claude:claude-fable-5-1"
                                                    '(:cli-session-id "s-9")
                                                    '(:cli-session-id "s-1" :uuid "u-2")))))
@@ -899,6 +903,307 @@ running and its conversation never hears the question."
                                       :cli-session-id)))
     (should (harness-provider-claude-close "s7"))
     (should-not (harness-provider-claude-close "s7"))))
+
+;;;; The CLI session a request continues
+
+(defun harness-provider-claude-test--after (flag argv)
+  "Return the argument after FLAG in ARGV, or nil."
+  (let ((pos (cl-position flag argv :test #'equal)))
+    (and pos (nth (1+ pos) argv))))
+
+(ert-deftest harness-provider-claude-tools-listed-while-idle ()
+  "A CLI that lists the tools while no turn is in flight still gets them.
+The incident of 2026-10-03: the first step after a switch to Claude Code
+had only a tool result to send, so it ended at once with \"No user
+message to send\"; the CLI's MCP handshake came after that, while no
+turn was in flight, and got an empty tool list; the next turn reused the
+process, and the model had no tools for the rest of its life."
+  (harness-provider-claude-test--setup)
+  (let* ((sid "tl1")
+         (first (car (harness-provider-claude-test--run
+                      (harness-provider-claude-test--request
+                       sid "unused"
+                       :messages '((:role user :content ((:type "text" :text "please call echo")))
+                                   (:role assistant :content ((:type "tool_use" :id "t1" :name "echo"
+                                                                     :input (:text "ping"))))
+                                   (:role user :content ((:type "tool_result" :tool_use_id "t1"
+                                                                :content "echo: ping"))))))))
+         (entry (gethash sid harness-provider-claude--sessions))
+         (proc (harness-provider-claude-session-process entry)))
+    (should (equal "No user message to send"
+                   (plist-get (harness-provider-claude-test--find first 'done) :error)))
+    (should (process-live-p proc))
+    ;; The CLI asks for the tools once the harness's initialize reaches it,
+    ;; which is after the turn ended; its usage report comes after that.
+    (harness-test-wait (lambda () (null (harness-provider-claude-session-baseline-id entry)))
+                       10 "the CLI's handshake")
+    (should-not (harness-provider-claude-session-active entry))
+    (let ((second (car (harness-provider-claude-test--run
+                        (harness-provider-claude-test--request sid "list your tools")))))
+      (should (eq proc (harness-provider-claude-session-process entry)))
+      (should (eq 'end-turn (plist-get (harness-provider-claude-test--find second 'done) :stop-reason)))
+      (should (equal "tools: echo" (harness-provider-claude-test--text second))))
+    (harness-provider-claude-close sid)))
+
+(ert-deftest harness-provider-claude-follows-the-session-record ()
+  "The CLI session a request continues is the one its session's state names.
+A fork of it forks, even while a process runs in it: naming once
+resumed the session's own CLI session there, and wrote its question
+into the conversation.  A session whose state is gone (dropped when it
+went on with another provider) starts a new CLI session rather than
+carry on the stale one its process is still in."
+  (harness-provider-claude-test--setup)
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+         (cwd (harness-test-temp-dir))
+         (record (lambda (state) (list :id "rec" :cwd cwd :provider-state state)))
+         (first (car (harness-provider-claude-test--run
+                      (harness-provider-claude-test--request "rec" "hi" :session (funcall record nil)))))
+         (id (plist-get (plist-get (harness-provider-claude-test--find first 'provider-state) :state)
+                        :cli-session-id))
+         (state (list :cli-session-id id :provider "claude"))
+         (process (lambda () (harness-provider-claude-session-process (gethash "rec" harness-provider-claude--sessions))))
+         (proc (funcall process)))
+    (should (string-prefix-p "fake-" id))
+    ;; The next turn, with the state recorded, keeps the process.
+    (harness-provider-claude-test--run
+     (harness-provider-claude-test--request "rec" "again" :session (funcall record state) :provider-state state))
+    (should (eq proc (funcall process)))
+    ;; A fork of the state, asked while that process lives, forks.
+    (let ((events (car (harness-provider-claude-test--run
+                        (harness-provider-claude-test--request
+                         "rec" "a side question" :session (funcall record state) :max-tokens 40
+                         :provider-state (list :cli-session-id id :fork-pending t :provider "claude")))))
+          (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+      (should (equal id (harness-provider-claude-test--after "--resume" argv)))
+      (should (member "--fork-session" argv))
+      (should (string-prefix-p "forked-" (plist-get (plist-get (harness-provider-claude-test--find events 'provider-state)
+                                                              :state)
+                                                    :cli-session-id))))
+    ;; The session's next turn is back in its own CLI session, not the fork:
+    ;; the fork ran in a process of its own, so nothing restarted the session's.
+    (harness-provider-claude-test--run
+     (harness-provider-claude-test--request "rec" "and on" :session (funcall record state) :provider-state state))
+    (should (eq proc (funcall process)))
+    (should (equal id (harness-provider-claude-session-cli-session-id
+                       (gethash "rec" harness-provider-claude--sessions))))
+    ;; With its state gone, the session starts over, though the process lives.
+    (setq proc (funcall process))
+    (should (process-live-p proc))
+    (let ((events (car (harness-provider-claude-test--run
+                        (harness-provider-claude-test--request "rec" "fresh start" :session (funcall record nil)))))
+          (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+      (should-not (eq proc (funcall process)))
+      (should-not (member "--resume" argv))
+      (should-not (equal id (plist-get (plist-get (harness-provider-claude-test--find events 'provider-state) :state)
+                                       :cli-session-id))))
+    (harness-provider-claude-close "rec")))
+
+;;;; Switching to Claude Code: what the new CLI session is told
+
+(defun harness-provider-claude-test--inputs (file)
+  "Return the user messages the fixture logged in FILE, oldest first."
+  (when (file-exists-p file)
+    (mapcar #'harness-json-parse (split-string (harness-read-file file) "\n" t))))
+
+(defmacro harness-provider-claude-test-with-handoff (&rest body)
+  "Run BODY with sessions, the handoff module and an input log of the fake CLI.
+BODY sees CWD, a directory for the sessions, and INPUTS, a function
+returning the user messages every CLI got so far."
+  (declare (indent 0))
+  `(harness-provider-claude-test-with-sessions
+     (harness-test-load-module 'compaction)
+     (harness-test-load-module 'handoff)
+     (let* ((input-file (make-temp-file "harness-claude-input-"))
+            (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_INPUT=" input-file) process-environment))
+            (inputs (lambda () (harness-provider-claude-test--inputs input-file))))
+       (ignore inputs)
+       ,@body)))
+
+(defun harness-provider-claude-test--demo-session (cwd)
+  "Return a session in CWD on the demo provider with one answered exchange."
+  (let ((sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id)))
+    (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid "fix the parser"))
+                                     :stop-reason)))
+    sid))
+
+(ert-deftest harness-provider-claude-handoff-summary-opens-the-new-cli-session ()
+  "Compact first: the summary made on the old model is the new CLI session's first message."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (harness-provider-claude-test--demo-session cwd))
+           (check (harness-call 'handoff/check sid "claude:claude-fable-5-1")))
+      (should (plist-get check :lossy))
+      (let ((result (let ((harness-provider-demo-script-override
+                           '((:type text :delta "SUMMARY: the parser needs fixing")
+                             (:type done :stop-reason end-turn))))
+                      (harness-test-await (harness-call 'handoff/switch sid "claude:claude-fable-5-1" 'compact)))))
+        (should (eq 'compact (plist-get result :mode)))
+        (should (equal "claude:claude-fable-5-1" (plist-get (harness-call 'session/get sid) :model))))
+      (let ((argv (harness-provider-claude-test--turn sid "carry on"))
+            (got (funcall inputs)))
+        (should argv)
+        (should-not (member "--resume" argv))
+        (should (= 1 (length got)))
+        (should-not (plist-get (car got) :resumed))
+        (let ((text (plist-get (car got) :text)))
+          (should (string-match-p "\\`Summary of the conversation so far:" text))
+          (should (string-match-p "SUMMARY: the parser needs fixing" text))
+          (should (string-match-p "carry on\\'" text))))
+      ;; The summary is the handoff's, and the session is on Claude Code now.
+      (let ((compaction (cl-find 'compaction (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
+        (should (equal "claude:claude-fable-5-1" (plist-get (harness-node-handoff compaction) :to))))
+      (should (equal "claude" (plist-get (plist-get (harness-call 'session/get sid) :provider-state) :provider))))))
+
+(ert-deftest harness-provider-claude-handoff-summary-by-the-new-model ()
+  "Compact-new: the new CLI session writes the summary, from a bounded context.
+The old provider cannot answer in the incident this guards (its plan ran
+out), so the new model makes the summary itself: the first and last
+messages of the session reach it inside one message, since a hosted loop
+with no state of the session is sent no ordinary transcript."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (harness-provider-claude-test--demo-session cwd))
+           (claude "claude:claude-fable-5-1")
+           (result (harness-test-await (harness-call 'handoff/switch sid claude 'compact-new))))
+      (should (eq 'compact-new (plist-get result :mode)))
+      (should (equal claude (plist-get result :summarizer)))
+      (should (eq 'sample (plist-get result :context)))
+      (should (equal claude (plist-get (harness-call 'session/get sid) :model)))
+      ;; The summarisation request: a new CLI session, one message of text.
+      (let ((got (funcall inputs)))
+        (should (= 1 (length got)))
+        (should-not (plist-get (car got) :resumed))
+        (let ((text (plist-get (car got) :text)))
+          (should (string-match-p "\\`### user" text))
+          (should (string-match-p "fix the parser" text))
+          (should (string-match-p "Summarize the conversation above" text))))
+      ;; Its summary opens the conversation, marked as a lossy handoff.
+      (harness-provider-claude-test--turn sid "carry on")
+      (let* ((got (funcall inputs))
+             (text (plist-get (cadr got) :text)))
+        (should (= 2 (length got)))
+        (should (string-match-p "\\`Summary of the conversation so far:\n\nhello" text))
+        (should (string-match-p "re-investigate" text))
+        (should (string-match-p "carry on\\'" text)))
+      (let ((compaction (cl-find 'compaction (harness-call 'session/nodes sid)
+                                 :key (lambda (n) (plist-get n :kind)))))
+        (should (equal "compact-new" (plist-get (harness-node-handoff compaction) :mode)))
+        (should (equal "sample" (plist-get (harness-node-handoff compaction) :context)))
+        (should (equal claude (plist-get (harness-node-handoff compaction) :summarizer)))))))
+
+(ert-deftest harness-provider-claude-handoff-transcript-reaches-the-new-cli-session ()
+  "Full transcript: the new CLI session is told to read a file holding the conversation."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (harness-provider-claude-test--demo-session cwd))
+           (result (harness-test-await (harness-call 'handoff/switch sid "claude:claude-fable-5-1" 'transcript)))
+           (file (plist-get result :file)))
+      (should (eq 'transcript (plist-get result :mode)))
+      ;; In the session's directory, which its tools may read, and out of git's way.
+      (should (file-in-directory-p file cwd))
+      (should (equal "*\n" (harness-read-file (expand-file-name ".gitignore" (file-name-directory file)))))
+      (let ((text (harness-read-file file)))
+        (should (string-match-p "^\\[user\\] fix the parser$" text))
+        (should (string-match-p "^\\[assistant\\] You said: \\*fix the parser\\*" text)))
+      ;; The note is the newest node: it opens the new conversation.
+      (let ((note (car (last (harness-call 'session/nodes sid)))))
+        (should (eq 'user (plist-get note :kind)))
+        (should (equal file (plist-get (harness-node-handoff note) :file)))
+        (should (eq 'system (harness-sender-kind (harness-node-sender note)))))
+      (harness-provider-claude-test--turn sid "carry on")
+      (let ((got (funcall inputs)))
+        (should (= 1 (length got)))
+        (should-not (plist-get (car got) :resumed))
+        (should (string-match-p (concat "read " (regexp-quote file) ": it is the whole conversation")
+                                (plist-get (car got) :text)))
+        (should (string-match-p "carry on\\'" (plist-get (car got) :text)))))))
+
+(ert-deftest harness-provider-claude-handoff-mid-turn-waits-for-the-next-step ()
+  "A switch while a turn runs hands over at the turn's next step.
+The incident: a session switched to Claude Code while a turn ran sent
+the new CLI session only a tool result; now the next step carries the
+handoff note, after the tool's result, and the model gets the tools."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))
+           (switched nil))
+      (harness-define-tool "look" :label "Look" :description "Look at something."
+                           :schema '(:type "object" :properties (:what (:type "string")))
+                           :handler (lambda (_input _ctx) "looked"))
+      (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next '(:behavior allow))) 10)
+      (harness-on 'agent/tool-call
+                  (lambda (id _node)
+                    (unless switched
+                      (setq switched (harness-call 'handoff/switch id "claude:claude-fable-5-1" 'transcript)))))
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Looking first.")
+               (:type tool-call :id "c1" :name "look" :input (:what "the parser")))))
+        (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid "fix the parser"))
+                                         :stop-reason))))
+      (should (plist-get (harness-test-await switched) :deferred))
+      (let* ((nodes (harness-call 'session/nodes sid))
+             (kinds (mapcar (lambda (n) (plist-get n :kind)) nodes))
+             (note (cl-find-if #'harness-node-handoff nodes))
+             (file (plist-get (harness-node-handoff note) :file)))
+        ;; The note came after the call's result, and Claude Code answered it.
+        (should note)
+        (should (< (cl-position 'tool-result kinds) (cl-position note nodes)
+                   (cl-position 'assistant kinds :from-end t)))
+        (should (string-match-p "^\\[tool look\\]" (harness-read-file file)))
+        (let ((got (funcall inputs)))
+          (should (= 1 (length got)))
+          (should (string-match-p (regexp-quote file) (plist-get (car got) :text)))))
+      (should (equal "claude" (plist-get (plist-get (harness-call 'session/get sid) :provider-state) :provider)))
+      ;; The model of that CLI session has the harness's tools.
+      (harness-provider-claude-test--turn sid "list your tools")
+      (should (string-match-p "\\`tools: .*look" (plist-get (car (last (harness-call 'session/nodes sid))) :content))))))
+
+(ert-deftest harness-provider-claude-switching-away-and-back ()
+  "Back on Claude Code before another provider ran a step, the conversation resumes.
+After a step elsewhere, Claude Code's state is gone: switching back is
+lossy, and the CLI session starts over rather than resume a
+conversation that never saw that step."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (claude "claude:claude-fable-5-1")
+           (process (lambda () (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions)))))
+      (harness-provider-claude-test--turn sid "hi")
+      (let ((state (plist-get (harness-call 'session/get sid) :provider-state))
+            (cli (harness-provider-claude-test--cli-id sid))
+            (proc (funcall process)))
+        ;; The state says whose it is.
+        (should (equal "claude" (plist-get state :provider)))
+        ;; Away and straight back: nothing is lost, the conversation goes on.
+        (should-not (plist-get (harness-call 'handoff/check sid "demo:scripted") :lossy))
+        (harness-test-await (harness-call 'handoff/switch sid "demo:scripted"))
+        (should (equal state (plist-get (harness-call 'session/get sid) :provider-state)))
+        (let ((check (harness-call 'handoff/check sid claude)))
+          (should-not (plist-get check :lossy))
+          (should (string-match-p "still holds" (plist-get check :reason))))
+        (harness-test-await (harness-call 'handoff/switch sid claude))
+        (harness-provider-claude-test--turn sid "again")
+        (should (eq proc (funcall process)))
+        (should (equal cli (harness-provider-claude-test--cli-id sid)))
+        ;; Away for a step: Claude Code's state goes with it.
+        (harness-test-await (harness-call 'handoff/switch sid "demo:scripted"))
+        (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid "a demo step"))
+                                         :stop-reason)))
+        (should-not (plist-get (harness-call 'session/get sid) :provider-state))
+        (let ((check (harness-call 'handoff/check sid claude)))
+          (should (plist-get check :lossy))
+          (should (plist-get check :risks)))
+        ;; Back without a handoff: a new CLI session, not the stale one.
+        (harness-test-await (harness-call 'handoff/switch sid claude 'none))
+        (let ((argv (harness-provider-claude-test--turn sid "back on claude")))
+          (should argv)
+          (should-not (member "--resume" argv))
+          (should-not (eq proc (funcall process)))
+          (should-not (equal cli (harness-provider-claude-test--cli-id sid))))
+        (let ((last (car (last (funcall inputs)))))
+          (should-not (plist-get last :resumed))
+          ;; The new CLI session is caught up on the step it missed, as
+          ;; text, and then gets the new message.
+          (let ((text (plist-get last :text)))
+            (should (string-match-p "While you were unavailable" text))
+            (should (string-match-p "a demo step" text))
+            (should (string-match-p "back on claude\\'" text))))))))
 
 (ert-deftest harness-provider-claude-session-events-close-process ()
   (harness-provider-claude-test--setup)

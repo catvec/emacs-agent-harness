@@ -737,6 +737,38 @@ serves the old conversation can let it go."
       (harness-session--touch s))
     state))
 
+(defun harness-session--last-model (s)
+  "Return the model that answered last in the transcript of S, or nil.
+That is the `:meta' `:model' of the newest assistant or thinking node."
+  (cl-loop for n in (reverse (harness-session--path s))
+           for model = (and (memq (plist-get n :kind) '(assistant thinking))
+                            (plist-get (plist-get n :meta) :model))
+           when (and (stringp model) (not (string-empty-p model))) return model))
+
+(defun harness-session--state-owner (s state)
+  "Return the provider, a symbol, that provider STATE of session S belongs to.
+A state names its provider (see `harness-tag-provider-state').  One
+written before states did belongs to the provider that answered last in
+S's transcript: had another provider answered since, the state's own
+would not have seen those turns.  With no answer to go by, it is the
+provider of S's model.  Nil means no provider can vouch for STATE."
+  (or (harness-provider-state-owner state)
+      (harness-model-provider (or (harness-session--last-model s) (harness-session-model s)))))
+
+(harness-defmethod session/provider-state (id &optional model)
+  "Return the provider state of session ID that MODEL can continue, or nil.
+MODEL defaults to the session's model.  A state belongs to the provider
+it names (`:provider'), and only that provider's models continue it: a
+model of another provider gets nil, as if the session had no state.  A
+state written before states named their provider is attributed as
+`harness-session--state-owner' says."
+  (let* ((s (harness-session--get id))
+         (state (harness-session-provider-state s))
+         (provider (harness-model-provider (or model (harness-session-model s)))))
+    (and state provider
+         (eq provider (harness-session--state-owner s state))
+         state)))
+
 (harness-defmethod session/set-provider-node (id node-id)
   "Record NODE-ID as the node the provider conversation of session ID reached.
 The agent records the head when a turn ends; `session/provider-continuation'
@@ -816,10 +848,12 @@ parent's, and holds exactly that transcript, nothing after it (see
 parent's whole provider conversation; at an earlier node, a fork of it
 cut at the last provider checkpoint up to the node; and none when no
 checkpoint precedes the node, or the provider cannot fork the state,
-so that the provider starts a new conversation from the transcript.
-It is never the parent's own state, which would carry on the parent's
-provider conversation: for Claude Code, resume and write into the
-parent's CLI session.  A BTW is no fork; see `session/btw'."
+or the fork's model is of another provider, which cannot continue the
+parent's state (`session/provider-state'), so that the provider starts
+a new conversation from the transcript.  It is never the parent's own
+state, which would carry on the parent's provider conversation: for
+Claude Code, resume and write into the parent's CLI session.  A BTW is
+no fork; see `session/btw'."
   (let* ((parent (harness-session--get id))
          (node (or (plist-get plist :node) (harness-session-head parent)))
          (path (progn (harness-session--load-nodes parent)
@@ -859,7 +893,7 @@ parent's CLI session.  A BTW is no fork; see `session/btw'."
      (if (and (harness-method-exists-p 'provider/fork)
               (not (eq (plist-get continuation :mode) 'fresh)))
          (harness-catch (apply #'harness-call 'provider/fork (harness-session-model cs)
-                               (harness-session-provider-state parent)
+                               (harness-call 'session/provider-state id (harness-session-model cs))
                                (and (eq (plist-get continuation :mode) 'checkpoint)
                                     (list (plist-get continuation :checkpoint))))
                         (lambda (e)

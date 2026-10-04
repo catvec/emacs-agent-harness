@@ -632,18 +632,39 @@ The harness reads \"System · SOURCE\", another session's agent
             (if which (concat (propertize " · " 'face 'harness-dim-face) which) "")
             "\n")))
 
+(defun harness-chat--handoff-line (handoff)
+  "Return the line under a note that HANDOFF carried a conversation over.
+It names the models and, for a transcript, offers to open the file."
+  (let ((file (plist-get handoff :file)))
+    (concat (propertize (format "%s → %s"
+                                (harness-ui-model-label (plist-get handoff :from))
+                                (harness-ui-model-label (plist-get handoff :to)))
+                        'face 'harness-dim-face)
+            (if (and (stringp file) (not (string-empty-p file)))
+                (concat "  "
+                        (harness-chat--button "[open the transcript]"
+                                              (lambda () (find-file-other-window file))
+                                              :help (format "Open %s" file)))
+              "")
+            "\n")))
+
 (defun harness-chat--render-user (block)
   "Return the body of user BLOCK.
 A message the user did not write names who sent it instead of the user
-and sits on the system background (see `harness-node-sender')."
+and sits on the system background (see `harness-node-sender').  One
+that handed the conversation over to a model of another provider (see
+`harness-node-handoff') also names the two models and links the
+transcript it points the new model at."
   (let* ((node (harness-chat-block-node block))
          (from (harness-node-sender node))
+         (handoff (harness-node-handoff node))
          (face (if from 'harness-system-face 'harness-user-face))
          (text (harness-chat--plain (plist-get node :content)))
          (body (concat (if from
                            (harness-chat--from-line from)
                          (harness-chat--sender harness-chat-user-label 'harness-user-label-face))
                        (if (string-blank-p text) "" text)
+                       (if handoff (harness-chat--handoff-line handoff) "")
                        (harness-chat--blocks-string (plist-get node :blocks)))))
     (harness-chat--margin (harness-chat--face body face) face
                           (if from 'harness-system-bar-face 'harness-user-bar-face))))
@@ -805,14 +826,22 @@ and in the message that attached it."
      (propertize (concat "    " text "\n") 'face 'harness-hint-face 'wrap-prefix "    "))))
 
 (defun harness-chat--render-compaction (block)
-  "Return the body of compaction BLOCK."
+  "Return the body of compaction BLOCK.
+A summary made to hand the conversation over to a model of another
+provider says which (see `harness-node-handoff')."
   (let* ((id (harness-chat-block-id block))
-         (content (or (plist-get (harness-chat-block-node block) :content) ""))
+         (node (harness-chat-block-node block))
+         (content (or (plist-get node :content) ""))
+         (handoff (harness-node-handoff node))
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
                          " "
-                         (propertize (format "%s context compacted (%d words)"
+                         (propertize (format "%s context compacted%s (%d words)"
                                              (harness-ui-icon 'harness-chat-icon-compaction)
+                                             (if handoff
+                                                 (format " to hand over to %s"
+                                                         (harness-ui-model-label (plist-get handoff :to)))
+                                               "")
                                              (harness-chat--words content))
                                      'face 'harness-summary-face)
                          "\n"))

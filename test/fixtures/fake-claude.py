@@ -20,6 +20,9 @@ Behaviour is chosen by the prompt text:
   "hang"       -> starts a turn and waits for an interrupt (or forever
                   with "hang ignore", to exercise the kill path)
   "die"        -> exits mid-turn without a result
+  "list your tools"
+               -> answers "tools: " and the names of the tools the
+                  harness listed in the MCP handshake ("none" for none)
   "recall"     -> answers "I remember: " and the user prompts the
                   conversation holds, oldest first, joined by " | "
 Anything else streams the text "hello" and finishes.
@@ -83,7 +86,11 @@ The MCP handshake only runs when --mcp-config is given, so the
 provider's quota probe (initialize and get_usage, then end of input)
 works too.  If HARNESS_FAKE_CLAUDE_ARGV names a file, a JSON object
 with the argv, the cwd, the CLAUDECODE environment variable and the
-CLAUDE_CODE_* ones (under "env") is written there.
+CLAUDE_CODE_* ones (under "env") is written there.  If
+HARNESS_FAKE_CLAUDE_INPUT names a file, every user message the process
+gets is appended to it as a JSON line: the CLI session it went to, the
+session it resumed (null for a new one), whether it was forked, and the
+message's text.
 """
 
 import json
@@ -246,6 +253,8 @@ class Fake:
         self.tools = []
         resume = arg_value(argv, "--resume")
         resume_at = arg_value(argv, "--resume-session-at")
+        self.resumed = resume
+        self.forked = bool(resume and "--fork-session" in argv)
         self.chain = []
         if resume:
             chain = load_chain(resume)
@@ -560,6 +569,11 @@ class Fake:
             text = blocks
         else:
             text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        log = os.environ.get("HARNESS_FAKE_CLAUDE_INPUT")
+        if log:
+            with open(log, "a") as f:
+                f.write(json.dumps({"session": self.session_id, "resumed": self.resumed,
+                                    "forked": self.forked, "text": text}) + "\n")
         self.record("user", text)
         emit({"type": "system", "subtype": "init", "session_id": self.session_id,
               "model": self.model, "cwd": os.getcwd(),
@@ -646,7 +660,9 @@ class Fake:
         self.stream({"type": "content_block_delta", "index": 1,
                      "delta": {"type": "signature_delta", "signature": "sig"}})
         self.stream({"type": "content_block_stop", "index": 1})
-        if "paragraphs" in text:
+        if "list your tools" in text:
+            pieces = ["tools: " + (", ".join(t.get("name", "?") for t in self.tools) or "none")]
+        elif "paragraphs" in text:
             pieces = ["One.", "\n\n", "Two."]
         elif "slow-text" in text:
             pieces = ["Hel", None, "lo"]

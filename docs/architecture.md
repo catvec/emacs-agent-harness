@@ -13,8 +13,8 @@ module needs something more, add it here first.
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, fallback, naming,
-                compaction, worktree, merge, tasks, tasks-notify, skills, perms,
-                sandbox, notifications
+                compaction, handoff, worktree, merge, tasks, tasks-notify, skills,
+                perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
@@ -187,9 +187,14 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :pending ((:id "p1" :kind permission|question :payload PLIST :created FLOAT) …)
  :todos ((:id :text :status pending|in-progress|done) …)
  :plan nil|"markdown"
- :provider-state PLIST                 ; opaque, owned by the provider (e.g. CLI session id)
+ :provider-state PLIST                 ; owned by the provider it names: (:cli-session-id … :provider "claude")
  :provider-node nil|"node-id")         ; the node that provider conversation reached
 ```
+
+`:provider-state` is opaque to everyone but the provider that wrote it,
+which it names as `:provider` (see "provider", Provider state): only
+that provider's models continue it, and `session/provider-state` says
+whether a given model can.
 
 `:usage :context` is the input size of the last request (prompt tokens
 incl. cache); the UI colours it against `:context-window`.  `:cost`
@@ -228,6 +233,17 @@ then).  No `:from` means the user; read it with `harness-node-sender'
 and `harness-sender-kind' (harness-util, both sides of ACP), which
 tolerate a kind that travelled as a string.  The model still gets the
 message as a user message; UIs show the sender instead of "You".
+
+A node the harness wrote to hand the conversation over to a model of
+another provider (see "handoff") says so in its `:meta` `:handoff`,
+`(:mode "transcript"|"compact" :file PATH :from MODEL :to MODEL)`: the
+user message pointing the new model at a transcript file (sender
+`(:kind system :source "model handoff")`), or the compaction node of a
+summary made for it.  Read it with `harness-node-handoff`.  The chat
+shows the note as the harness's, with the two models and a button that
+opens the file.  An assistant or thinking node's `:meta` `:model` is
+the model of the step that wrote it, which a switch during that step
+does not change.
 
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
@@ -444,7 +460,17 @@ gone.
   returns the ids that changed, newest first.  A session already holding
   the value is skipped, and each one changed gets the same event and hint
   as `session/update`.  This is what `harness-set-model-all` uses to move
-  every session to another model or provider at once.
+  every session to another model or provider at once, when no session
+  would lose its conversation (else `handoff/switch-all`).
+- `session/provider-state ID &optional MODEL` → the provider state of
+  ID that MODEL (default the session's model) can continue, or nil.  A
+  state belongs to the provider it names (`:provider`); a model of
+  another provider gets nil, as if the session had none.  A state
+  written before states named their provider belongs to the provider
+  that answered last (the `:meta` `:model` of the newest assistant or
+  thinking node), else to the session's model's: another provider
+  having answered since means the state's own never saw those turns.
+  The record itself is not changed.
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
 - `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
   (closed: still listed and readable; the next message sent to it resumes it).
@@ -466,10 +492,12 @@ gone.
   supported: at the parent's head (when that is where its provider
   conversation is) the whole state, at an earlier node the state cut at
   the last checkpoint up to it, and none when no checkpoint precedes
-  the node.  Without a forked state the fork has none, never the
-  parent's own, which would carry on the parent's provider
-  conversation; the provider then starts a new one from the transcript.
-  The fork's `:provider-node` is the node.  → new session.
+  the node, or when the fork's model is of another provider, which
+  cannot continue the parent's state (`session/provider-state`).
+  Without a forked state the fork has none, never the parent's own,
+  which would carry on the parent's provider conversation; the provider
+  then starts a new one from the transcript.  The fork's
+  `:provider-node` is the node.  → new session.
 - `session/btw ID &optional NAME`: a BTW side conversation over ID, a
   new, empty `btw` session sharing nothing with ID or with any other
   BTW (no nodes, no fork node, no provider state, no directory grants).
@@ -583,7 +611,9 @@ a refresh (`provider/models t`).  `provider/models-updated` follows
 every listing that is cached.
 
 Capabilities: `:hosted-loop` (provider runs the tool loop and keeps the
-history; the agent only sends new user content), `:fork`, `:resume`,
+history; the agent only sends new user content, so switching to it
+from another provider starts a conversation without the history unless
+it is handed over: see "handoff"), `:fork`, `:resume`,
 `:vision`, `:audio-in`, `:thinking`, `:cache-status`, `:quota`,
 `:compaction hosted`, `:cost-reported` (usage events carry `:cost`),
 `:billing` (usage events say who paid: `:billing`, `:plan`,
@@ -596,7 +626,10 @@ REQUEST = `(:model "ID:NAME" :session SESSION :system "…" :messages (MSG…)
 :tools (TOOL-SPEC…) :thinking LEVEL :max-tokens N :provider-state PLIST
 :on-event FN)`.  MSG = `(:role user|assistant|tool :content (BLOCK…))`.
 TOOL-SPEC = `(:name :description :schema JSON-SCHEMA-PLIST)`.  For hosted
-loops only the trailing user message is sent.  A REQUEST may also carry
+loops only the trailing user message is sent: the user messages after
+the last assistant message, less tool results.  A turn's
+`:provider-state` is the session's state when the request's model can
+continue it (`session/provider-state`), else nil.  A REQUEST may also carry
 `:builtin-tools`, a list of harness tool names (from `tools/builtin`):
 the provider turns on its own tools in their place for this request,
 and `:tools` lacks them.  `:no-thinking t` asks for no extended
@@ -688,6 +721,20 @@ first completion consumes it and emits a `provider-state` event that the
 agent persists, replacing the pending one.  When it returns nil or
 fails, the fork starts without provider state: copied as is, the
 parent's would make the fork resume the parent's own CLI session.
+
+Provider state: a state belongs to the provider that wrote it and says
+so as `:provider` (a string).  The agent tags each `provider-state`
+event with the provider of the model the step went to -- not the
+session's model, which a switch during the step changes -- and
+`provider/fork` tags what it returns (`harness-tag-provider-state`,
+`harness-provider-state-owner`).  Each step sends only a state its
+model can continue (`session/provider-state`); a state of another
+provider is dropped from the session at that step, since that
+provider's turns are ones the state's conversation never saw.  So a
+session switched away and straight back resumes its conversation,
+while one that ran a step elsewhere starts a new one there, which
+`handoff/check` calls lossy.  Naming, compaction and forks work on a
+fork of a state their model can continue, never on another provider's.
 
 Checkpoints: a hosted loop says where its conversation stands as
 content lands in it, so that a fork or a checkout at a node can cut the
@@ -798,6 +845,16 @@ model), and the echoed `tool_result` a `tool-result`.  The process
 records which tools it was started with, so a request that turns
 WebSearch on or off restarts it with `--resume`.
 
+The CLI asks for the harness's tools (MCP `tools/list`) once, in a
+handshake that follows the harness's `initialize`, and keeps the list
+for the life of the process.  That handshake can come while no turn is
+in flight: a request whose trailing messages are only tool results
+spawns the process and ends at once ("No user message to send"), as
+the first step after a mid-turn switch to Claude Code did.  So the
+process record keeps the tool set of its last request after the turn
+(`tools` slot) and `tools/list` answers from it, never with an empty
+list for want of a running turn.
+
 Every `assistant` message and tool-result echo of the CLI carries the
 uuid of its entry in the CLI session's chain; messages of a sub-agent's
 chain (`parent_tool_use_id`) do not count.  The provider reports them
@@ -809,7 +866,9 @@ which spawns `--resume ID --fork-session --resume-session-at UUID`: the
 CLI keeps the chain up to and including that entry (print mode only,
 which the provider uses).  A running process is reused only when it was
 started with the request's settings and holds the CLI session the
-request's state names; a `:fork-pending` state always gets a new one.
+request's state names -- a session whose state was dropped, because it
+went on with another provider, starts a new CLI session rather than
+carry on a stale one; a `:fork-pending` state always gets a new one.
 `session/provider-state-changed` to a state naming another CLI session,
 or none, closes the session's idle process.
 
@@ -1331,6 +1390,12 @@ non-interactive session it stays a denial.
   turns (`agent/before-turn'), not inside one, so a native-provider
   turn that outgrows the window reaches the provider's own error;
   budgets refuse new turns.
+- Each step reads the session's model afresh: a model switch reaches a
+  running turn at its next step, never mid-step.  The step sends only
+  the provider state its model can continue and drops one of another
+  provider (see "provider", Provider state); what the step writes (the
+  `:meta` `:model` of its nodes, the provider state it reports) is the
+  step's model's.
 - Every node a model produces (assistant, thinking, tool-call) records
   that model in `:meta :model`.
 - Handoff to a hosted loop: a hosted provider only gets the trailing
@@ -1480,9 +1545,25 @@ and hinted.
 
 ### compaction
 
-- `compaction/compact SESSION-ID` → promise; summarises the transcript
-  with the session's model, appends a `compaction` node whose `:meta`
-  points at the compacted head, sets it as head, hints before/after.
+- `compaction/compact SESSION-ID &optional OPTS` → promise; summarises
+  the transcript with the session's model (OPTS `:model` another),
+  appends a `compaction` node whose `:meta` points at the compacted
+  head, records the summariser (`:model`), what it was given
+  (`:context`) and the size compacted, sets it as head, hints
+  before/after.  `session/messages` starts at the node, as a user
+  message ("Summary of the conversation so far: ..."), followed by the
+  unanswered user messages carried over after it.  OPTS `:context` is
+  `full` (the default) or `sample`, which keeps only the first and last
+  few messages (`harness-compaction--sample-head`/`-tail`) with a user
+  message saying how many were left out: a bound on what a summariser
+  sent the conversation as text costs.  A summariser whose provider
+  keeps the conversation and can fork it (a hosted loop) works on a
+  fork of the session's provider state, so it summarises the real
+  conversation and leaves the session's own alone; one whose provider
+  is sent the transcript anyway (an API provider) gets it as messages.
+  A summariser that keeps the conversation and has no state of this
+  session (the target of a switch) is sent only the newest user
+  messages, so the context goes inside one message as structured text.
 - Auto: `agent/before-turn` compacts when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
   reports `:compaction hosted`.  The window is the session's
@@ -1492,6 +1573,64 @@ and hinted.
   earlier (`harness-tasks-context-limit', 256k tokens by default).
   It judges the session as it is then, read again: the fallback,
   earlier in the chain, may have moved it to another model.
+
+### handoff
+
+Switching a session to a hosted loop (Claude Code, Copilot) of another
+provider starts a new conversation there, which is sent only the user
+messages after the model's last reply: without a handoff the new model
+knows nothing of the task.  An API provider is sent the whole transcript
+and a provider that still holds the session's conversation resumes it,
+so switching to either loses nothing.
+
+- `handoff/check SESSION-ID MODEL` → `(:id :name :from :from-label :to
+  :to-label :to-provider :lossy :history :running :reason :risks
+  :cache-cost)`.  Lossy when MODEL's provider differs from the
+  session's, runs a hosted loop, cannot continue the session's state
+  (`session/provider-state`), and the session has history it would
+  miss (anything a model or tool wrote since the last compaction) with
+  no handoff already waiting for it.  `:reason` says why or why not.
+  For a lossy switch `:risks` are `harness-handoff-risks`: a cold prompt
+  cache (cache writes where carrying on would read), reduced fidelity
+  (the model explores again; tool calls and thinking reach it as text),
+  provider state left behind (resume, the provider's own compaction,
+  its built-in tools), and that it takes effect at the next step, not
+  mid-step; `:cache-cost` prices the session's context at MODEL's
+  cache-write and cache-read list prices.
+- `handoff/check-all MODEL &optional FILTER` → the checks of the
+  sessions `session/set-all` would change.
+- `handoff/switch SESSION-ID MODEL &optional MODE` → promise of `(:id
+  :model :from :lossy :mode :summarizer :context :deferred :file :node
+  :fallback :error)`.
+  The model changes at once (`session/update`); a lossy switch then
+  hands over as MODE says, any other is a plain switch.  `compact`
+  summarises on the old model (`compaction/compact` with `:model`, the
+  warm cache) and `compact-new` has the *new* model summarise instead,
+  from a bounded context (`:context sample`: the first and last few
+  messages): use it when the old provider cannot answer -- its plan ran
+  out, it is down -- or to keep the job small.  The compaction node,
+  marked `:handoff` with the mode, summariser and context, opens the new
+  conversation, ending in a harness note that the handoff is lossy and
+  the model should re-investigate rather than trust it.  When no summary
+  can be made (the summariser fails or its plan ran out) the transcript
+  goes over instead (`:fallback` says why).  `transcript` writes
+  `session/transcript-text` to `CWD/.harness/handoff/ID-TIME.md` -- in
+  the session's directory, which its tools may read and the new
+  provider's prompt cache holds as it reads, unlike the state directory,
+  and kept out of git by a `.gitignore` of `*` there -- and appends a
+  user message from the harness (`:source "model handoff"`, `:meta
+  :handoff`) telling the new model to read it before it answers, with
+  the same lossy warning.  `none` only switches.
+- `handoff/switch-all MODEL &optional FILTER MODE` → the ids switched;
+  MODE applies to the lossy ones.
+- A handoff must land in the trailing user messages.  An idle
+  session's starts at once and a turn started meanwhile waits for it;
+  a running session's waits for the turn's next step: the
+  `agent/before-turn` and `agent/step` gates (priority 10, before
+  automatic compaction) run it and hold the step until it is done, and
+  a turn that ends first has it run right after.  A handoff waiting for
+  a provider the session has left again is dropped.  Event
+  `handoff/done SESSION-ID RESULT`.
 
 ### naming
 
@@ -2220,7 +2359,7 @@ the image data, since the pending question is saved with the session.
 
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
-`config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
+`config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`, `task/`,
 `notification/`, `sandbox/status`, `harness-dev/`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
@@ -2586,6 +2725,25 @@ session.  The menu's `i` entry says whether that is non-interactive
 ("Non-interactive: on"), and has no state where the command would
 ask for a session.
 
+A model switch asks the harness first (`handoff/check`, or
+`handoff/check-all` for `harness-set-model-all`, which asks once for the
+whole batch).  A lossy one asks how to hand over through
+`harness-ui-switch-function`: with the `ui-switch` module the question is
+a banner above the session's compose box -- the chat panel the review
+banner uses (`harness-chat-panel-functions`) -- with the two models, the
+reason, the risks, the cache cost and the running turn as labelled rows,
+and one button per choice (current model summarises, new model
+summarises a limited context, full transcript, no handoff, cancel).  Its
+keys answer while point is on the banner and a click answers from
+anywhere; the banner says the handoff is lossy and the new model is told
+to re-investigate.  Without a chat buffer to show it in (a switch asked
+for outside the UI, or over ACP) the minibuffer question of
+`harness-ui--read-handoff` asks instead.  The answer goes to
+`handoff/switch` (`handoff/switch-all`); cancelling changes nothing, not
+even the default for new sessions.  A switch that loses nothing goes
+through `session/set_model` (`session/set-all`) as before, and so does
+any switch when the harness cannot check.
+
 Desktop notifications: `harness-ui` answers `_harness/client/notify` by
 showing the notification on this Emacs's desktop
 (`harness-notifications-desktop-notify`), with `{backend}` once it
@@ -2819,7 +2977,12 @@ the feedback that sends it back (`harness-tasks--on-message'), so
 those two keys over the buffer's own, only for as long as it shows; it
 follows the task events of its session and draws again only when what
 it shows changes, finding the chat buffer by session id with `equal`,
-since an id from the harness process is a fresh string), and the
+since an id from the harness process is a fresh string), the switch
+banner of a session (`harness-ui-switch`: the chat panel that asks how
+to hand the conversation over when a lossy model switch needs it -- the
+models, the reason, the risks and costs as labelled rows, and a button
+and a key per way to hand over, falling back to the minibuffer question
+when no chat buffer shows; see "Switching model or provider"), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images as wide as the popout and up to
 `harness-ui-report-image-max-height` of the frame high, the popout

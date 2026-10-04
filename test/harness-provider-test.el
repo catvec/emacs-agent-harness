@@ -223,9 +223,9 @@ make no difference to the caller."
                              :fork (lambda (_m state &optional checkpoint) (list state checkpoint)))
     (harness-define-provider 'test-whole :complete #'ignore
                              :fork (lambda (_m state) (list :whole state)))
-    (should (equal '(s nil) (harness-test-await (harness-call 'provider/fork "test-cuts:m" 's))))
-    (should (equal '(s c) (harness-test-await (harness-call 'provider/fork "test-cuts:m" 's 'c))))
-    (should (equal '(:whole s) (harness-test-await (harness-call 'provider/fork "test-whole:m" 's))))
+    (should (equal '(s nil :provider "test-cuts") (harness-test-await (harness-call 'provider/fork "test-cuts:m" 's))))
+    (should (equal '(s c :provider "test-cuts") (harness-test-await (harness-call 'provider/fork "test-cuts:m" 's 'c))))
+    (should (equal '(:whole s :provider "test-whole") (harness-test-await (harness-call 'provider/fork "test-whole:m" 's))))
     (should-not (harness-test-await (harness-call 'provider/fork "test-whole:m" 's 'c)))))
 
 (ert-deftest harness-provider-history-renders-what-was-said ()
