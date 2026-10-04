@@ -1250,7 +1250,13 @@ pending request and resolves when answered).
   Steering is drained at every boundary (each tool result and each
   step), so it is delivered once; a model that stops with steering
   waiting gets one more step with it as the newest user message.
-  `max-turns` (`harness-agent-max-steps`, 200) ends runaway loops.
+  A turn has no step limit: long unattended work is the point, and the
+  loop ends when the model stops, the provider errors or hits its
+  output limit, the user cancels, or an `agent/step` filter (a merge
+  hold) pauses it at a boundary.  Automatic compaction runs between
+  turns (`agent/before-turn'), not inside one, so a native-provider
+  turn that outgrows the window reaches the provider's own error;
+  budgets refuse new turns.
 - Streaming updates of the live node are not persisted one by one; on
   exit (`kill-emacs-hook`) and shutdown the text streamed so far is.
 - Provider conversation and head: before a turn's gate,
