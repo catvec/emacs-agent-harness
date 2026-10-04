@@ -1529,33 +1529,60 @@ their number).  The risks show before the question.  Return a mode of
               (if (plist-get result :fallback) " (no summary could be made)" "")))
      (t (format "Model → %s" label)))))
 
+(defun harness-ui--ask-handoff (checks label total _session _host callback)
+  "Ask how to hand over a lossy switch in the minibuffer.
+See `harness-ui-switch-function'; CALLBACK gets the mode chosen."
+  (funcall callback (harness-ui--read-handoff checks label total)))
+
+(defvar harness-ui-switch-function #'harness-ui--ask-handoff
+  "Function asking how to hand a conversation over on a lossy model switch.
+Called with (CHECKS LABEL TOTAL SESSION HOST CALLBACK): CHECKS are the
+`handoff/check' answers of the sessions that would lose their
+conversation, LABEL the model being switched to, TOTAL how many sessions
+the switch changes in all, SESSION the session's id or nil for a switch
+of many, HOST the chat buffer the command ran in or nil, and CALLBACK a
+function taking the mode chosen (`compact', `compact-new', `transcript',
+`none' or `cancel'), run once the user decides.  The default asks in the
+minibuffer (`harness-ui--read-handoff'); the `ui-switch' module shows a
+banner in the session's chat instead.")
+
+(defun harness-ui--handoff-perform (session-id model label mode)
+  "Switch SESSION-ID to MODEL as MODE says, saying what happens with LABEL.
+MODE is a mode of `handoff/switch': the handoff runs at once, or at the
+running turn's next step, and its outcome is reported."
+  (when (memq mode '(compact compact-new transcript))
+    (message "Model → %s: %s…" label
+             (pcase mode
+               ('compact "summarising the conversation on the current model first")
+               ('compact-new "letting the new model summarise a limited context first")
+               (_ "handing the transcript over"))))
+  (harness-ui-call "_harness/handoff/switch"
+                   (list :sessionId session-id :model model :mode (symbol-name mode))
+                   (lambda (result) (message "%s" (harness-ui--handoff-outcome label result)))))
+
 (defun harness-ui-switch-model (session-id model label)
   "Switch SESSION-ID to MODEL, shown as LABEL; ask first if that loses context.
 The harness checks the switch (`handoff/check').  A model of another
 provider that keeps its own conversation (Claude Code, Copilot) and
 cannot continue this session's starts a new one that knows nothing of
-it, so such a switch states its risks and offers to summarise on the
-current model, to have the new model summarise a limited context, to
-hand the full transcript over, to switch without handoff, or to cancel.
-Any other switch happens at once."
+it, so such a switch asks how to hand the conversation over -- a banner
+in the session's chat, or the minibuffer when it has none
+\(`harness-ui-switch-function'): summarise on the current model, have
+the new model summarise a limited context, hand the full transcript
+over, switch without handoff, or cancel.  Any other switch happens at
+once."
   (let ((plain (lambda () (harness-ui--setting-set session-id :model model (format "Model → %s" label)))))
     (harness-ui-call
      "_harness/handoff/check" (list :sessionId session-id :model model)
      (lambda (check)
        (if (not (harness-json-true-p (plist-get check :lossy)))
            (funcall plain)
-         (let ((mode (harness-ui--read-handoff (list check) label)))
-           (if (eq mode 'cancel)
-               (message "Model unchanged")
-             (when (memq mode '(compact compact-new transcript))
-               (message "Model → %s: %s…" label
-                        (pcase mode
-                          ('compact "summarising the conversation on the current model first")
-                          ('compact-new "letting the new model summarise a limited context first")
-                          (_ "handing the transcript over"))))
-             (harness-ui-call "_harness/handoff/switch"
-                              (list :sessionId session-id :model model :mode (symbol-name mode))
-                              (lambda (result) (message "%s" (harness-ui--handoff-outcome label result))))))))
+         (funcall harness-ui-switch-function
+                  (list check) label 1 session-id nil
+                  (lambda (mode)
+                    (if (eq mode 'cancel)
+                        (message "Model unchanged")
+                      (harness-ui--handoff-perform session-id model label mode))))))
      ;; A harness that cannot check switches them as it always did.
      (lambda (_err) (funcall plain) nil))))
 
@@ -1608,23 +1635,29 @@ Idle, running and blocked sessions of every project change, each
 recording it as a hint; inactive ones are history and are left alone,
 and no running turn is cancelled: it takes the new model at its next
 step.  When the switch would lose sessions their conversation (see
-`harness-ui-switch-model'), it says so once for all of them, with the
-risks, and the handoff chosen applies to each of them.  A session
-keeps its provider state until another provider runs a step in it,
-so switching back before then resumes its conversation."
+`harness-ui-switch-model'), it asks once for all of them, and the
+handoff chosen applies to each of them.  A session keeps its provider
+state until another provider runs a step in it, so switching back before
+then resumes its conversation."
   (interactive "P")
-  (harness-ui-choose-model
-   (lambda (id label)
-     (harness-ui-call
-      "_harness/handoff/check-all" (list :model id :filter (list :active t))
-      (lambda (checks)
-        (let* ((lossy (cl-remove-if-not (lambda (c) (harness-json-true-p (plist-get c :lossy))) checks))
-               (mode (if lossy (harness-ui--read-handoff lossy label (length checks)) 'none)))
-          (if (eq mode 'cancel)
-              (message "Models unchanged")
-            (harness-ui--switch-all id label mode no-default))))
-      ;; A harness that cannot check switches them as it always did.
-      (lambda (_err) (harness-ui--switch-all id label 'none no-default) nil)))))
+  ;; The chat the command runs in, for the banner to show in.
+  (let ((host (and (derived-mode-p 'harness-chat-mode) (current-buffer))))
+    (harness-ui-choose-model
+     (lambda (id label)
+       (harness-ui-call
+        "_harness/handoff/check-all" (list :model id :filter (list :active t))
+        (lambda (checks)
+          (let ((lossy (cl-remove-if-not (lambda (c) (harness-json-true-p (plist-get c :lossy))) checks)))
+            (if (null lossy)
+                (harness-ui--switch-all id label 'none no-default)
+              (funcall harness-ui-switch-function
+                       lossy label (length checks) nil host
+                       (lambda (mode)
+                         (if (eq mode 'cancel)
+                             (message "Models unchanged")
+                           (harness-ui--switch-all id label mode no-default)))))))
+        ;; A harness that cannot check switches them as it always did.
+        (lambda (_err) (harness-ui--switch-all id label 'none no-default) nil))))))
 
 (defconst harness-ui--thinking-level-order
   '("none" "minimal" "low" "medium" "high" "xhigh" "max")

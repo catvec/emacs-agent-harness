@@ -2103,19 +2103,23 @@ session.  The menu's `i` entry says whether that is non-interactive
 ask for a session.
 
 A model switch asks the harness first (`handoff/check`, or
-`handoff/check-all` for `harness-set-model-all`, which asks once for
-the whole batch).  A lossy one shows, before the question
-(`read-multiple-choice`, help shown at once in `*Harness model
-switch*`), a small table view: the sessions that change (name, from,
-turn, cache cost), a table of the risks (label and what it means), and
-the choices -- current model summarises (warm cache), new model
-summarises a limited context (for when the current provider cannot
-answer), full transcript, no handoff, cancel.  The view says the
-handoff is lossy and the new model is told to re-investigate.  The
-answer goes to `handoff/switch` (`handoff/switch-all`); cancelling
-changes nothing, not even the default for new sessions.  A switch that
-loses nothing goes through `session/set_model` (`session/set-all`) as
-before, and so does any switch when the harness cannot check.
+`handoff/check-all` for `harness-set-model-all`, which asks once for the
+whole batch).  A lossy one asks how to hand over through
+`harness-ui-switch-function`: with the `ui-switch` module the question is
+a banner above the session's compose box -- the chat panel the review
+banner uses (`harness-chat-panel-functions`) -- with the two models, the
+reason, the risks, the cache cost and the running turn as labelled rows,
+and one button per choice (current model summarises, new model
+summarises a limited context, full transcript, no handoff, cancel).  Its
+keys answer while point is on the banner and a click answers from
+anywhere; the banner says the handoff is lossy and the new model is told
+to re-investigate.  Without a chat buffer to show it in (a switch asked
+for outside the UI, or over ACP) the minibuffer question of
+`harness-ui--read-handoff` asks instead.  The answer goes to
+`handoff/switch` (`handoff/switch-all`); cancelling changes nothing, not
+even the default for new sessions.  A switch that loses nothing goes
+through `session/set_model` (`session/set-all`) as before, and so does
+any switch when the harness cannot check.
 
 Desktop notifications: `harness-ui` answers `_harness/client/notify` by
 showing the notification on this Emacs's desktop
@@ -2250,7 +2254,12 @@ the review of a task in its session (`harness-ui-review`: a chat panel
 -- `harness-chat-panel-functions` -- that shows the board's Ready for
 review above the box, with [Verify] (`C-c C-v`), [Send back]
 (`C-c C-R`) and [Report]; while it shows, `harness-chat-send-function`
-gives the box's text to `task/reject` as the feedback), and the
+gives the box's text to `task/reject` as the feedback), the switch
+banner of a session (`harness-ui-switch`: the chat panel that asks how
+to hand the conversation over when a lossy model switch needs it -- the
+models, the reason, the risks and costs as labelled rows, and a button
+and a key per way to hand over, falling back to the minibuffer question
+when no chat buffer shows; see "Switching model or provider"), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images inline, videos and files through ui-media, code as a
 block, notes, and a referenced tool call drawn as the call it links to,

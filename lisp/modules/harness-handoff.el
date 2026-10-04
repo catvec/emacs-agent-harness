@@ -115,13 +115,13 @@ Those come after the model's last reply, so a hosted loop is sent them."
        t))
 
 (defconst harness-handoff-risks
-  '("Cold prompt cache: the new conversation starts uncached and pays cache writes where carrying on pays reads."
-    "Reduced fidelity: the model explores again; tool calls, results and thinking reach it only as text or a summary."
-    "Old provider state: a conversation it could resume, compaction it did itself and its built-in tools stay behind; switching back starts over there."
-    "Timing: takes effect at the next step, not mid-step; a running turn finishes its current step on the old model.")
+  '("Cold cache: the new conversation starts uncached, so it pays cache writes where carrying on pays reads."
+    "Fidelity: the model explores again; tool calls, results and thinking arrive as text or a summary."
+    "Old state: a conversation it could resume, its own compaction and built-in tools stay behind."
+    "Timing: takes effect at the next step, not mid-step.")
   "The risks of a lossy model switch, as `handoff/check' states them.
-Each is a short label, a colon and what it means, which the switch
-prompt lays out as a table.")
+Each is a short label, a colon and what it means, which the switch UI
+lays out as aligned rows.")
 
 (defun harness-handoff--price (tokens model key)
   "Return what TOKENS tokens cost at MODEL's KEY price (USD per million), or nil."

@@ -536,7 +536,10 @@ work so far. Such a switch asks first — once for all of them with
 session's context costs to write), lower fidelity (the model explores
 again; tool calls and thinking reach it only as text), the old
 provider's own state left behind, and that a running turn finishes its
-current step first. Then choose:
+current step first. The question shows as a banner over the session's
+message box — the models, the risks and the costs, then one button and
+key per way to hand over — and as a minibuffer question when the session
+has no chat buffer open. Then choose:
 
 - **`c` current model summarises**: it summarises the conversation,
   whose cache is warm, and the new one starts from that summary;
