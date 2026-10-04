@@ -45,7 +45,7 @@
 (defvar harness-acp--server-enabled)
 (defvar harness-compile-subdirectory)
 (defvar harness-process)
-(declare-function harness-reload "harness")
+(declare-function harness--reload "harness")
 (declare-function harness-start "harness")
 (declare-function harness-stop "harness")
 (declare-function harness-acp-server-address "harness-acp")
@@ -77,6 +77,54 @@ or filters added to the harness bus."
   "Non-nil while process PID exists."
   (condition-case nil (eq 0 (signal-process pid 0)) (error nil)))
 
+(defconst harness-server--max-wait 60
+  "Longest the harness process's event loop sleeps, in seconds.")
+
+(defun harness-server--wait-time ()
+  "Return how long the event loop may sleep: until the earliest timer is due.
+Emacs runs the due timers inside `accept-process-output' from a copy
+of `timer-list', then sleeps until the next timer of that copy is due.
+A timer that a timer function adds -- `harness-run-soon' in a request
+handler, the next step of a provider's script -- is not in the copy,
+and would wait for an unrelated timer or process output, seconds
+later.  An interactive Emacs runs timers again until none is due, but
+`emacs --batch' waits only in `accept-process-output', so
+`harness-server--event-loop' never sleeps past the earliest timer it
+knows of and, waking, sees the ones added meanwhile."
+  (let ((now (float-time))
+        (wait harness-server--max-wait))
+    (dolist (timer timer-list)
+      ;; A triggered timer is running or will not run again.
+      (unless (timer--triggered timer)
+        (setq wait (min wait (- (float-time (timer--time timer)) now)))))
+    ;; Zero would wait forever; a timer due now still needs one pass.
+    (max 0.001 wait)))
+
+(defun harness-server--event-loop ()
+  "Run timers and process output until Emacs exits; never return."
+  (while t
+    (condition-case err
+        (accept-process-output nil (harness-server--wait-time))
+      (error (harness-log 'error "server: event loop: %s" (error-message-string err))))))
+
+(defun harness-server--reload ()
+  "Reload the harness process in place, for its `harness/reload' method.
+Return (:files N).  Signal a `harness-error' naming the problems when a
+file does not compile, so that nothing was reloaded, or when some files
+failed to load while the others did."
+  (let ((result (harness--reload)))
+    (cond
+     ((plist-get result :refused)
+      (signal 'harness-error
+              (list (format "reload refused, nothing was reloaded: %s"
+                            (string-join (plist-get result :refused) "; ")))))
+     ((plist-get result :errors)
+      (signal 'harness-error
+              (list (format "reloaded, but these files failed to load: %s"
+                            (string-join (plist-get result :errors) "; ")))))
+     (t (harness-log 'info "server: reloaded %d files" (plist-get result :files))
+        (list :files (plist-get result :files))))))
+
 (defun harness-server--log-to-stderr (level msg)
   "Write LEVEL and MSG as one stderr line for the parent's log."
   (princ (format "%s %s\n" (upcase (symbol-name level)) (replace-regexp-in-string "\n" "\\\\n" msg))
@@ -104,7 +152,7 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
     (with-no-warnings
       (harness-defmethod harness/reload ()
         "Reload the harness process's modules in place, keeping its sessions."
-        (if (harness-reload) t (signal 'harness-error (list "reload refused; see the harness log")))))
+        (harness-server--reload)))
     (harness-start)
     (let ((address (harness-acp-server-address)))
       (unless address
@@ -117,10 +165,7 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
                          (unless (harness-server--parent-alive-p parent)
                            (harness-log 'info "server: parent %d is gone, exiting" parent)
                            (kill-emacs 0)))))
-    (while t
-      (condition-case err
-          (accept-process-output nil 60)
-        (error (harness-log 'error "server: event loop: %s" (error-message-string err)))))))
+    (harness-server--event-loop)))
 
 ;;;; Parent
 
@@ -196,7 +241,8 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
 (cl-defun harness-server-spawn (&key on-address on-exit)
   "Start the harness process; return it without waiting for anything.
 ON-ADDRESS is called with (ADDRESS TOKEN) once the child listens.
-ON-EXIT is called with the exit status when the child ends."
+ON-EXIT is called with the exit status and the process when the child
+ends: a caller that started another meanwhile can tell which one ended."
   (let* ((token (or (bound-and-true-p harness-acp-token) (harness-server--token)))
          (config (expand-file-name "server-config.el" harness-state-directory))
          (announced nil)
@@ -238,7 +284,7 @@ ON-EXIT is called with the exit status when the child ends."
                  :filter #'ignore
                  :sentinel (lambda (p _event)
                              (unless (process-live-p p)
-                               (when on-exit (funcall on-exit (process-exit-status p))))))))
+                               (when on-exit (funcall on-exit (process-exit-status p) p)))))))
       (process-send-eof proc)
       proc)))
 

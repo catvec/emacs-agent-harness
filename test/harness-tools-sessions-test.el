@@ -383,6 +383,25 @@ tell it from the user's messages."
       (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
       (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
 
+(ert-deftest harness-tools-sessions-task-submit-main-tree ()
+  "task_submit passes main_tree through; the result and task_list say so."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (submitted (harness-tools-sessions-test-run me "task_submit"
+                                                       '(:prompt "Clean the checkout" :main_tree t)))
+           (id (plist-get (plist-get submitted :meta) :task-id)))
+      (should-not (plist-get submitted :is-error))
+      (should (string-match-p "main tree" (plist-get submitted :content)))
+      (should (harness-json-true-p (plist-get (harness-call 'task/get id) :main-tree)))
+      (should (string-match-p (regexp-quote ", main tree (no worktree)")
+                              (harness-tools-sessions-test-ok me "task_list" nil)))
+      ;; Without the flag nothing says main tree.
+      (let ((plain (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Ordinary"))
+                                         :meta)
+                              :task-id)))
+        (should-not (harness-json-true-p (plist-get (harness-call 'task/get plain) :main-tree)))))))
+
 (ert-deftest harness-tools-sessions-task-review ()
   "task_wait settles when finished work waits for review; task_control sends it back, then verifies it."
   (harness-tools-sessions-test-with
@@ -407,6 +426,22 @@ tell it from the user's messages."
         (should (string-match-p "state done.*, verified" text)))
       (should (plist-get (harness-tools-sessions-test-run me "task_control" (list :task_id id :action "verify")) :is-error))
       (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
+
+(ert-deftest harness-tools-sessions-task-list-merging-column ()
+  "A task holding a place in the merge queue lists as merging.
+task_list filters on it and task_wait can wait for it."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Fix the lexer")) :meta)
+                          :task-id)))
+      (harness-tasks--set id :state 'merging :merge-status 'queued :merge-queued (float-time))
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" '(:column "merging"))))
+        (should (string-match-p (concat (regexp-quote id) " +merging +Fix the lexer") listing))
+        (should (string-match-p "merge queued" listing)))
+      (should (string-match-p "No tasks match" (harness-tools-sessions-test-ok me "task_list" '(:column "active"))))
+      (should (string-match-p "Done waiting"
+                              (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "merging")))))))
 
 (provide 'harness-tools-sessions-test)
 ;;; harness-tools-sessions-test.el ends here

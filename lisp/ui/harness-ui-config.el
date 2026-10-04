@@ -1397,27 +1397,34 @@ FACE defaults to `harness-label-face'."
              (if (> edits 0) (format " (%d %s not saved)" edits (if (= edits 1) "edit" "edits")) ""))
      (if (eq scope harness-ui-config--scope) 'harness-settings-selected-face 'harness-label-face))))
 
-(defun harness-ui-config--header ()
-  "Return the header line of the settings page."
-  (let ((edits (harness-ui-config--edit-count)))
-    (list (propertize " Settings " 'face 'harness-settings-heading-face)
-          (harness-ui-config--scope-segment 'global)
-          (harness-ui-config--scope-segment 'project)
-          "  "
-          (propertize (abbreviate-file-name (or (plist-get harness-ui-config--data :root)
-                                                harness-ui-config--root ""))
-                      'face 'harness-settings-doc-face)
-          "  "
-          (cond (harness-ui-config--loading (propertize "loading\u2026 " 'face 'harness-settings-doc-face))
-                (harness-ui-config--error (propertize (format "error: %s " harness-ui-config--error) 'face 'error))
-                (t ""))
-          (if (> edits 0)
-              (concat (propertize (format "%d edited " edits) 'face 'harness-settings-edited-face)
-                      (harness-ui-config--segment "save" #'harness-ui-config-save-all "Save every edit (C-x C-s)")
-                      (harness-ui-config--segment "revert" #'harness-ui-config-revert-all "Drop every edit"))
-            "")
-          (harness-ui-config--segment "g" #'harness-ui-config-refresh "Reload the settings (g)")
-          (harness-ui-config--segment "q" #'quit-window "Quit (q)"))))
+(defun harness-ui-config--header (&optional width)
+  "Return the header line of the settings page, fitted to WIDTH.
+WIDTH, as `harness-ui-fit-header' takes it, defaults to its window's.
+In a window too narrow for all of it, the project's directory shortens
+first, keeping its end, then g and q go; the scopes, the edits waiting
+with save and revert, and a load in progress or an error stay longest."
+  (let ((edits (harness-ui-config--edit-count))
+        (root (abbreviate-file-name (or (plist-get harness-ui-config--data :root)
+                                        harness-ui-config--root ""))))
+    (harness-ui-fit-header
+     (list (propertize " Settings " 'face 'harness-settings-heading-face)
+           (list (harness-ui-config--scope-segment 'global) 90)
+           (list (harness-ui-config--scope-segment 'project) 90)
+           (list (concat "  " (propertize root 'face 'harness-settings-doc-face))
+                 30 (concat "  " (propertize (harness-truncate-middle root 20) 'face 'harness-settings-doc-face)))
+           (cond (harness-ui-config--loading
+                  (list (concat "  " (propertize "loading…" 'face 'harness-settings-doc-face)) 95))
+                 (harness-ui-config--error
+                  (list (concat "  " (propertize (format "error: %s" harness-ui-config--error) 'face 'error)) 95)))
+           (and (> edits 0)
+                (list (concat "  " (propertize (format "%d edited " edits) 'face 'harness-settings-edited-face)
+                              (harness-ui-config--segment "save" #'harness-ui-config-save-all
+                                                          "Save every edit (C-x C-s)")
+                              (harness-ui-config--segment "revert" #'harness-ui-config-revert-all "Drop every edit"))
+                      92))
+           (list (concat "  " (harness-ui-config--segment "g" #'harness-ui-config-refresh "Reload the settings (g)")) 60)
+           (list (harness-ui-config--segment "q" #'quit-window "Quit (q)") 65))
+     width)))
 
 ;;;; Loading
 

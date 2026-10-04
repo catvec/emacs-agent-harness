@@ -61,7 +61,7 @@ Claude provider does; tool results do not count."
                  (when (equal (plist-get b :type) "text") (push (plist-get b :text) texts))))))
     (and texts (string-join (nreverse texts) "\n"))))
 
-(defun harness-agent-test-define-hosted (script)
+(defun harness-agent-test-define-hosted (script &optional fork)
   "Define `hosted', a provider running its own tool loop from SCRIPT.
 SCRIPT gets the text each request sends and returns its steps: event
 plists or functions, called for their side effects, such as a message
@@ -69,7 +69,8 @@ the user sends mid-step.  A tool call waits for the agent's answer,
 unless it is a call of the provider's own tool (`:builtin'); a
 `tool-permission' waits for the agent's decision.  A request with
 nothing to send fails like the Claude provider's.  The provider has
-its own web_search, as Claude Code does."
+its own web_search, as Claude Code does.  FORK, when given, is its
+`:fork' function."
   (setq harness-agent-test-prompts nil harness-agent-test-results nil
         harness-agent-test-decisions nil harness-agent-test-requests nil)
   (harness-define-provider 'hosted
@@ -112,6 +113,7 @@ its own web_search, as Claude Code does."
         (list :cancel (lambda ()
                         (setq cancelled t)
                         (funcall on-event '(:type done :stop-reason cancelled))))))
+    :fork fork
     :capabilities '(:hosted-loop t :builtin-tools ("web_search"))))
 
 (defun harness-agent-test-hosted-session ()
@@ -190,6 +192,36 @@ its own web_search, as Claude Code does."
       (should (null (plist-get (harness-call 'session/get id) :queue)))
       (should (equal '(user assistant user assistant) (harness-agent-test-kinds id)))
       (should-not (harness-agent-test-steering-nodes id)))))
+
+(ert-deftest harness-agent-message-filters-see-each-delivered-message ()
+  "`agent/message' filters see a message as it is delivered; what they return goes out.
+A message is delivered when it starts a turn or steers one, a queued
+one when its queue goes out, never while it waits there.  Task mode
+sends a task waiting for review back this way."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (seen nil)
+          (ended 0))
+      (harness-on 'agent/turn-ended (lambda (&rest _) (cl-incf ended)))
+      (harness-add-filter 'agent/message
+                          (lambda (blocks sid info)
+                            (push (list (equal sid id) (plist-get (car blocks) :text)
+                                        (and (plist-get info :steering) t)
+                                        (harness-sender-kind (plist-get info :from)))
+                                  seen)
+                            (cons (list :type "text" :text "[seen]") blocks)))
+      (harness-call 'agent/prompt id "first")
+      (harness-call 'agent/prompt id "steer it" (list :from (harness-sender-system "test")))
+      (harness-call 'agent/prompt id "queued one" '(:queue t))
+      (should (equal '((t "steer it" t system) (t "first" nil nil)) seen))
+      (should (equal '("queued one") (mapcar (lambda (it) (plist-get it :text))
+                                             (plist-get (harness-call 'session/get id) :queue))))
+      (harness-test-wait (lambda () (= ended 2)) 5 "the queued turn")
+      (should (equal '((t "queued one" nil nil) (t "steer it" t system) (t "first" nil nil)) seen))
+      ;; What the filter returned is what each message became.
+      (should (equal '("[seen] first" "[seen] queued one" "[seen] steer it")
+                     (sort (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-user-nodes id))
+                           #'string<))))))
 
 (ert-deftest harness-agent-queue-during-turn-is-not-steering ()
   "A message queued while a turn runs waits for it to end, then is a turn of its own.
@@ -345,7 +377,7 @@ The model gets it as a user message all the same."
 
 (ert-deftest harness-agent-steering-during-last-step-is-sent-once ()
   "Steering that arrives after the last tool call gets one more step, then the turn ends.
-It used to stay pending, so every later stop stepped again until max-steps."
+It used to stay pending, so every later stop stepped the provider again."
   (harness-agent-test-with
     (let ((id (harness-agent-test-session))
           (harness-provider-demo--delay 0.05)
@@ -358,6 +390,27 @@ It used to stay pending, so every later stop stepped again until max-steps."
       (should (= 2 steps))
       (should (equal '(user assistant user assistant) (harness-agent-test-kinds id)))
       (should (string-match-p "also this" (plist-get (car (last (harness-call 'session/nodes id))) :content))))))
+
+(ert-deftest harness-agent-turn-has-no-step-limit ()
+  "A turn is not capped: it runs until the model stops, however many steps that takes.
+The harness is for long unattended runs, so a step cap must not cut one
+short (this would have ended at 200 steps before)."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (rounds 210)
+          (harness-provider-demo--delay 0.0005)
+          (steps 0))
+      (setq harness-provider-demo-script-override
+            (append (cl-loop for i from 1 to rounds
+                             collect (list :type 'tool-call :id (format "c%d" i)
+                                           :name "list_dir" :input (list :path ".")))
+                    '((:type done :stop-reason end-turn))))
+      (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))
+      (let ((result (harness-test-await (harness-call 'agent/prompt id "keep going") 60)))
+        (should (eq 'end-turn (plist-get result :stop-reason)))
+        ;; One step per tool round, then the step the model ends on.
+        (should (= (1+ rounds) steps))
+        (should (= rounds (cl-count 'tool-call (harness-agent-test-kinds id))))))))
 
 (ert-deftest harness-agent-steering-after-last-tool-call-hosted ()
   "A hosted loop gets steering sent after its last tool call once, as its next message.
@@ -602,7 +655,13 @@ user message after that answer: \"No user message to send\"."
         (harness-await (harness-call 'agent/prompt id "hi")))
       (should (string-match-p "EXTRA SECTION" seen-system))
       (should (string-match-p "Working directory" seen-system))
-      (should (equal '("list_dir") seen-tools)))))
+      (should (equal '("list_dir") seen-tools))
+      ;; The Environment names the session's own temporary directory, which exists.
+      (let ((tmp (harness-call 'session/tmp-dir id)))
+        (should (string-match-p (concat "^- Temporary directory: " (regexp-quote tmp) " (") seen-system))
+        (delete-directory tmp t)
+        (harness-await (harness-call 'agent/prompt id "again"))
+        (should (file-directory-p tmp))))))
 
 (ert-deftest harness-agent-prompt-resumes-inactive-session ()
   (harness-agent-test-with
@@ -751,6 +810,75 @@ The harness has a web_search tool that must never run; a filter on
         (should (string-match-p "Cancelled before" (plist-get result :output))))
       ;; A result reported after the turn is not recorded twice.
       (should (= 2 (cl-count 'tool-result (harness-agent-test-kinds id)))))))
+
+;;;; Provider checkpoints and the head
+
+(ert-deftest harness-agent-records-provider-checkpoints ()
+  "A hosted provider's checkpoints land on the nodes holding what they mark.
+One without a call id marks the text the turn wrote last, unless a tool
+call came after it; a tool call brings its own; one with a call id marks
+that call's result.  The turn's end records where the conversation got."
+  (harness-agent-test-with
+    (harness-agent-test-define-hosted
+     (lambda (_prompt)
+       (list '(:type text :delta "Let me look")
+             '(:type checkpoint :checkpoint (:at "c-text"))
+             '(:type tool-call :id "t1" :name "list_dir" :input (:path "/") :checkpoint (:at "c-call"))
+             '(:type checkpoint :checkpoint (:at "c-result") :call-id "t1")
+             '(:type checkpoint :checkpoint (:at "c-nowhere"))
+             '(:type text :delta "Done")
+             '(:type checkpoint :checkpoint (:at "c-done"))
+             '(:type done :stop-reason end-turn))))
+    (let ((id (harness-agent-test-hosted-session)))
+      (harness-await (harness-call 'agent/prompt id "go"))
+      (let ((nodes (harness-call 'session/nodes id)))
+        (should (equal '(user assistant tool-call tool-result assistant) (mapcar (lambda (n) (plist-get n :kind)) nodes)))
+        (should (equal '(nil (:at "c-text") (:at "c-call") (:at "c-result") (:at "c-done"))
+                       (mapcar (lambda (n) (plist-get n :checkpoint)) nodes)))
+        (should (equal (plist-get (car (last nodes)) :id)
+                       (plist-get (harness-call 'session/get id) :provider-node)))))))
+
+(ert-deftest harness-agent-rewinds-the-provider-conversation-to-the-head ()
+  "A turn after a checkout gets the provider conversation cut at the head.
+The head moved back to the first reply: the next request brings the
+provider's fork of its conversation at that reply's checkpoint, which
+the session keeps.  At the first message, before any checkpoint, the
+request brings no state at all: the provider starts anew."
+  (harness-agent-test-with
+    (harness-agent-test-define-hosted
+     (lambda (prompt)
+       (list (list :type 'provider-state :state (list :conv prompt))
+             '(:type text :delta "ok")
+             (list :type 'checkpoint :checkpoint (list :at prompt))
+             '(:type done :stop-reason end-turn)))
+     (lambda (_model _state &optional checkpoint) (harness-resolved (and checkpoint (list :cut checkpoint)))))
+    (let* ((id (harness-agent-test-hosted-session))
+           (states nil)
+           (watch (harness-on 'session/provider-state-changed (lambda (_sid state) (push state states))))
+           (state-sent (lambda () (plist-get (car (last harness-agent-test-requests)) :provider-state))))
+      (harness-await (harness-call 'agent/prompt id "one"))
+      (let ((u1 (plist-get (car (harness-call 'session/nodes id)) :id))
+            (a1 (plist-get (cadr (harness-call 'session/nodes id)) :id)))
+        (harness-await (harness-call 'agent/prompt id "two"))
+        (should (equal '(:conv "one") (funcall state-sent)))
+        ;; Back to the first reply.
+        (harness-call 'session/set-head id a1)
+        (setq states nil)
+        (harness-await (harness-call 'agent/prompt id "three"))
+        (should (equal '(:cut (:at "one")) (funcall state-sent)))
+        (should (equal "three" (car (last harness-agent-test-prompts))))
+        (should (equal (list '(:conv "three") '(:cut (:at "one"))) states))
+        ;; The next turn goes on in the conversation the last one left.
+        (harness-await (harness-call 'agent/prompt id "four"))
+        (should (equal '(:conv "three") (funcall state-sent)))
+        ;; Back to the first message: nothing to cut at.
+        (harness-call 'session/set-head id u1)
+        (harness-await (harness-call 'agent/prompt id "five"))
+        (should-not (funcall state-sent))
+        (should (equal "one\nfive" (car (last harness-agent-test-prompts))))
+        (should (equal (plist-get (harness-call 'session/get id) :head)
+                       (plist-get (harness-call 'session/get id) :provider-node))))
+      (harness-off watch))))
 
 (provide 'harness-agent-test)
 ;;; harness-agent-test.el ends here

@@ -3,9 +3,9 @@
 ;;; Commentary:
 
 ;; A `tabulated-list-mode' buffer of the directories a session may
-;; touch (see `permission/dirs'): its cwd and worktree, the configured
-;; `harness-allowed-directories', the directories granted at runtime and
-;; the tool output directory.  `a' grants another directory to the
+;; touch (see `permission/dirs'): its cwd and worktree, its own
+;; temporary directory, the configured `harness-allowed-directories',
+;; the directories granted at runtime and the tool output directory.  `a' grants another directory to the
 ;; session (with a prefix argument: to every session), `k' revokes the
 ;; grant at point, `g' refreshes.  The list follows grants made from
 ;; permission prompts elsewhere.
@@ -32,6 +32,7 @@
   (pcase (format "%s" source)
     ("cwd" "working directory")
     ("worktree" "worktree")
+    ("tmp" "temporary directory")
     ("config" "configured")
     ("session" "granted to session")
     ("outputs" "tool outputs")
@@ -46,9 +47,24 @@
                   (propertize (harness-ui-dirs--describe (plist-get e :source)) 'face 'harness-dim-face)
                   (if revocable (propertize "k to revoke" 'face 'harness-hint-face) "")))))
 
+(defconst harness-ui-dirs--min-width 50
+  "Narrowest the Directory column gets.")
+
+(defun harness-ui-dirs--fit-columns ()
+  "Make the Directory column as wide as its longest entry.
+A session's own temporary directory alone is longer than most paths, so
+a fixed width would push its source out of line with the others."
+  (let ((width (apply #'max harness-ui-dirs--min-width
+                      (mapcar (lambda (e) (string-width (aref (cadr e) 0))) tabulated-list-entries))))
+    (unless (eql width (cadr (aref tabulated-list-format 0)))
+      (setq tabulated-list-format (copy-sequence tabulated-list-format))
+      (aset tabulated-list-format 0 (list "Directory" width t))
+      (tabulated-list-init-header))))
+
 (defun harness-ui-dirs--render ()
   "Redraw the current buffer from `harness-ui-dirs--entries'."
   (setq tabulated-list-entries (mapcar #'harness-ui-dirs--entry harness-ui-dirs--entries))
+  (harness-ui-dirs--fit-columns)
   (tabulated-list-print t))
 
 (defun harness-ui-dirs--refresh (&optional buffer)
@@ -78,7 +94,7 @@ BUFFER defaults to the current buffer."
   "Major mode listing the directories a harness session may touch.
 \\{harness-ui-dirs-mode-map}"
   (setq tabulated-list-format
-        (vector (list "Directory" 50 t)
+        (vector (list "Directory" harness-ui-dirs--min-width t)
                 (list "Source" 20 t)
                 (list "" 12 nil)))
   (setq tabulated-list-padding 1)

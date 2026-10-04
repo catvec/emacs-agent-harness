@@ -416,24 +416,9 @@ PREFIX is the relative path shown for entries; LIMIT caps the total."
 ;;;; glob
 
 (defun harness-tools-fs--glob-regexp (pattern)
-  "Translate glob PATTERN (with ** support) into an anchored regexp."
-  (let ((i 0) (n (length pattern)) (out "\\`"))
-    (while (< i n)
-      (let ((c (aref pattern i)))
-        (cond
-         ((and (eq c ?*) (< (1+ i) n) (eq (aref pattern (1+ i)) ?*))
-          (if (and (< (+ i 2) n) (eq (aref pattern (+ i 2)) ?/))
-              (progn (setq out (concat out "\\(?:.*/\\)?")) (cl-incf i 3))
-            (setq out (concat out ".*")) (cl-incf i 2)))
-         ((eq c ?*) (setq out (concat out "[^/]*")) (cl-incf i))
-         ((eq c ??) (setq out (concat out "[^/]")) (cl-incf i))
-         ((eq c ?\[)
-          (let ((end (string-search "]" pattern (1+ i))))
-            (if end
-                (progn (setq out (concat out (substring pattern i (1+ end)))) (setq i (1+ end)))
-              (setq out (concat out "\\[")) (cl-incf i))))
-         (t (setq out (concat out (regexp-quote (string c)))) (cl-incf i)))))
-    (concat out "\\'")))
+  "Translate glob PATTERN (with ** support) into an anchored regexp.
+See `harness-glob-regexp', which the permission patterns share."
+  (harness-glob-regexp pattern))
 
 (defun harness-tools-fs--not-git-p (dir)
   "Non-nil unless DIR is a .git directory.

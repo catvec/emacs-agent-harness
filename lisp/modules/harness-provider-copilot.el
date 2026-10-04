@@ -53,7 +53,12 @@
 ;;   by the next process when its own goes away first.
 ;;
 ;; The Copilot session id is the provider state, so a harness session
-;; resumes the same Copilot conversation after Emacs restarts.
+;; resumes the same Copilot conversation after Emacs restarts.  A
+;; Copilot session created for a transcript that already has messages
+;; (a checkout or a fork at an earlier node, which cannot be cut in
+;; Copilot's conversation, a conversation another provider held, one
+;; Copilot could not resume) gets that transcript as text with its
+;; first message.
 ;;
 ;; Billing.  Copilot plans include a monthly allowance; since June 2026
 ;; it is counted in AI credits ($0.01 each) at each model's token
@@ -237,6 +242,11 @@ the web on GitHub's side.  A request's `:builtin-tools' (see
 Each is a plist (:id TOOL-CALL-ID :name HARNESS-NAME :input INPUT :asked
 BOOL), `:asked' once Copilot asked whether it may run.  Kept beside the
 records, whose layout a reload must keep.")
+
+(defvar harness-provider-copilot--new-sessions (make-hash-table :test 'equal)
+  "Copilot session ids created and not sent to yet.
+The first message to one carries the transcript it continues (see
+`harness-provider-copilot--first-prompt').")
 
 (defun harness-provider-copilot--drop-stale-value (value depth)
   "Stop what VALUE, found in a slot of a stale record, holds.
@@ -1610,14 +1620,15 @@ Only what follows the last assistant message is new to the CLI."
   "Non-nil when REQUEST is a side request, which leaves the conversation alone.
 A turn of a harness session brings the provider state the session has
 recorded and lets the model answer at length.  A one-off question
-caps its answer with `:max-tokens' (naming the session, a summary for
-compaction, the permission judge), may bring other state (naming
-brings a fork of the recorded one), or comes with a session record of
-its own making that has no state at all (the judge's).  Such requests
-run in throwaway Copilot sessions, beside the conversation's turn and
-beside each other."
+says so with `:ephemeral' (the permission judge), caps its answer with
+`:max-tokens' (naming the session, a summary for compaction, the
+judge), may bring other state (naming brings a fork of the recorded
+one), or comes with a session record of its own making that has no
+state at all (the judge's).  Such requests run in throwaway Copilot
+sessions, beside the conversation's turn and beside each other."
   (let ((session (plist-get request :session)))
-    (and (or (not (plist-member session :provider-state))
+    (and (or (harness-json-true-p (plist-get request :ephemeral))
+             (not (plist-member session :provider-state))
              (plist-get request :max-tokens)
              (not (equal (plist-get request :provider-state) (plist-get session :provider-state))))
          t)))
@@ -1659,6 +1670,7 @@ idle, or at once with NOW; open nowhere, it is just deleted.  Until it
 is, SID waits in the `doomed' slot; when the process goes away first,
 the next one deletes it once its handshake is done."
   (when sid
+    (remhash sid harness-provider-copilot--new-sessions)
     (cond
      ((not (harness-provider-copilot--ready-p entry))
       (harness-provider-copilot--doom entry sid))
@@ -1749,11 +1761,27 @@ make it after a timeout, or have made it before it went away."
   (let ((id (harness-uuid)))
     (harness-then (harness-provider-copilot--call entry "session.create" (append (list :sessionId id) config))
                   (lambda (result)
-                    (harness-provider-copilot--mark-open
-                     entry (or (plist-get result :sessionId) id) key))
+                    (let ((sid (or (plist-get result :sessionId) id)))
+                      (puthash sid t harness-provider-copilot--new-sessions)
+                      (harness-provider-copilot--mark-open entry sid key)))
                   (lambda (err)
                     (harness-provider-copilot--drop-session entry id)
                     (harness-rejected err)))))
+
+(defun harness-provider-copilot--first-prompt (request prompt sid)
+  "Return PROMPT, (TEXT . ATTACHMENTS), as REQUEST sends it to Copilot session SID.
+A session just created knows nothing of the conversation REQUEST
+continues, when there is one: a turn of a session whose conversation
+was cut before anything Copilot could fork (a checkout, a fork at an
+earlier node), or that another provider held, or that Copilot could
+not resume.  Its first message then carries the transcript before the
+new message (`harness-provider-history-text')."
+  (if (not (gethash sid harness-provider-copilot--new-sessions))
+      prompt
+    (remhash sid harness-provider-copilot--new-sessions)
+    (let ((history (harness-provider-history-text
+                    (car (harness-provider-split-history (plist-get request :messages))))))
+      (if history (cons (concat history "\n\n" (car prompt)) (cdr prompt)) prompt))))
 
 (defun harness-provider-copilot--restart-p (err)
   "Non-nil when ERR says that the process was stopped on purpose."
@@ -1778,7 +1806,7 @@ NOTE, a function, is called with a hint saying so; other errors fail."
      (if (not (harness-provider-copilot--not-found-p err))
          (harness-rejected err)
        (harness-log 'warn "provider-copilot: cannot resume %s: %s" sid (harness-error-message err))
-       (funcall note (format "Copilot could not resume its conversation (%s); this turn starts a new one without the earlier context"
+       (funcall note (format "Copilot could not resume its conversation (%s); this turn starts a new one, which gets the transcript"
                              (harness-error-message err)))
        (harness-provider-copilot--create entry config key)))))
 
@@ -1801,7 +1829,7 @@ NOTE, a function, is called with a hint saying so; other errors fail."
      (if (not (harness-provider-copilot--not-found-p err))
          (harness-rejected err)
        (harness-log 'warn "provider-copilot: cannot fork %s: %s" source (harness-error-message err))
-       (funcall note (format "Copilot could not fork its conversation (%s); this turn starts a new one"
+       (funcall note (format "Copilot could not fork its conversation (%s); this turn starts a new one, which gets the transcript"
                              (harness-error-message err)))
        (harness-provider-copilot--create entry config key)))))
 
@@ -1960,7 +1988,9 @@ stopped on the way starts again once in a new one (RETRIED)."
                                                                 entry turn request live)))))
                (idle (harness-then opened (funcall step (lambda (sid) (harness-provider-copilot--when-idle entry sid)))))
                (sent (harness-then idle (funcall step (lambda (sid) (harness-provider-copilot--send-turn
-                                                                     entry turn sid prompt))))))
+                                                                     entry turn sid
+                                                                     (harness-provider-copilot--first-prompt
+                                                                      request prompt sid)))))))
           (harness-catch sent fail))
       (error (funcall fail err)))))
 
@@ -2060,13 +2090,17 @@ requests never take over from each other."
       (harness-provider-copilot--run entry turn request prompt))
     (list :cancel (lambda () (harness-provider-copilot--cancel entry turn)))))
 
-(defun harness-provider-copilot--fork-state (_model-id state)
+(defun harness-provider-copilot--fork-state (_model-id state &optional checkpoint)
   "Return a promise of provider state for a fork of STATE.
 The fork's first turn copies the Copilot session with sessions.fork, so
-the child starts from the parent's conversation."
+the child starts from the parent's conversation.  A fork at a
+CHECKPOINT, an earlier point of the conversation, gives nil: Copilot
+reports none, so the fork starts a new Copilot session, which gets the
+transcript up to that point (`harness-provider-copilot--first-prompt')."
   (let ((id (plist-get state :copilot-session-id)))
-    (harness-resolved (and id (list :copilot-session-id id :model (plist-get state :model)
-                                    :fork-pending t)))))
+    (harness-resolved (and id (not checkpoint)
+                           (list :copilot-session-id id :model (plist-get state :model)
+                                 :fork-pending t)))))
 
 ;;;; Lifecycle
 

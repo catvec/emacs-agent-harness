@@ -35,6 +35,9 @@
            (id (plist-get s :id)))
       (should (file-remote-p (plist-get s :cwd)))
       (should (plist-get s :host))
+      ;; No temporary directory of its own: nothing is made on the host.
+      (should-not (harness-call 'session/tmp-dir id))
+      (should-not (memq 'tmp (mapcar (lambda (e) (plist-get e :source)) (harness-call 'permission/dirs id))))
       (cl-flet ((run (name input)
                   (harness-await (harness-call 'tools/execute id (list :id name :name name :input input)) 60)))
         (should-not (plist-get (run "write_file" '(:path "hello.txt" :content "line one\nline two\n")) :is-error))

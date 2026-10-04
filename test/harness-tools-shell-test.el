@@ -29,6 +29,21 @@
 
 ;;;; bash
 
+(ert-deftest harness-tools-shell-bash-skips-the-login-profile ()
+  "A command runs without the user's login profile.
+A profile's side effects go wrong there: one that started an ssh-agent
+when it saw none ran in the sandbox's PID namespace, saw none, and
+overwrote the user's saved agent details with a dead one."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (with-temp-file (expand-file-name ".bash_profile" root)
+      (insert "echo profile-ran\n"))
+    (with-temp-file (expand-file-name ".profile" root)
+      (insert "echo profile-ran\n"))
+    (let* ((process-environment (cons (concat "HOME=" root) process-environment))
+           (r (harness-tools-shell-test--call "bash" :command "echo hi")))
+      (should (equal "hi\nexit 0" (plist-get r :content))))))
+
 (ert-deftest harness-tools-shell-bash-output-and-exit-codes ()
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir
@@ -114,6 +129,9 @@
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (harness-tools-shell-test-in-dir
     (let* ((harness-sandbox-policy 'required)
+           ;; A distinct sandbox home, so listing the process home stays
+           ;; hidden even when the process is started with HOME under /tmp.
+           (harness-sandbox--home (expand-file-name "sandbox-home" (harness-test-temp-dir)))
            (r (harness-tools-shell-test--call "bash" :command (format "echo HOME=$HOME; ls %s >/dev/null 2>&1 && echo visible || echo hidden" (getenv "HOME")))))
       (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
         (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
@@ -122,11 +140,67 @@
       (should (string-search "hidden" (plist-get r :content)))
       (should (plist-get (plist-get r :meta) :sandboxed)))))
 
+(ert-deftest harness-tools-shell-bash-lets-the-sandbox-write-the-tmp-dir ()
+  "bash asks the sandbox to let the command write the session's own
+temporary directory, and asks for nothing more without a session."
+  (harness-tools-shell-test--setup)
+  (let ((saved (mapcar (lambda (m) (cons m (gethash m harness--methods))) '(session/tmp-dir sandbox/wrap)))
+        (seen nil))
+    (harness-register-method 'session/tmp-dir (lambda (sid) (and (equal sid "s1") "/tmp/harness-0/s1/")))
+    (harness-register-method 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command))
+    (unwind-protect
+        (harness-tools-shell-test-in-dir
+          (should (equal "exit 0" (plist-get (harness-await (harness-call 'tools/execute "s1"
+                                                                          (list :id "c1" :name "bash" :input '(:command "true")))
+                                                            20)
+                                             :content)))
+          (should (equal '("/tmp/harness-0/s1/") (plist-get (cdar seen) :writable)))
+          (harness-tools-shell-test--call "bash" :command "true")
+          (should-not (plist-get (cdar seen) :writable)))
+      (dolist (m saved)
+        (if (cdr m) (puthash (car m) (cdr m) harness--methods) (remhash (car m) harness--methods))))))
+
+(ert-deftest harness-tools-shell-bwrap-keeps-files-in-the-session-tmp-dir ()
+  "Under the real bwrap a command writes the session's own temporary
+directory at its real path, where the next command and the harness
+find the file, while the rest of /tmp stays private to the command."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (dolist (m '(store project config provider session sandbox)) (harness-test-load-module m))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let* ((harness-sandbox-policy 'required)
+           (sid (plist-get (harness-call 'session/create :cwd root) :id))
+           (tmp (harness-call 'session/tmp-dir sid))
+           (stray (format "/tmp/harness-stray-%s" (harness-short-id)))
+           (run (lambda (command)
+                  (harness-await (harness-call 'tools/execute sid (list :id (harness-short-id) :name "bash"
+                                                                        :input (list :command command)))
+                                 20)))
+           (r (funcall run (format "echo made > %s; touch %s"
+                                   (shell-quote-argument (concat tmp "note.txt")) stray))))
+      (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
+        (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+      (should-not (plist-get r :is-error))
+      (should (plist-get (plist-get r :meta) :sandboxed))
+      (should (equal "made\n" (with-temp-buffer (insert-file-contents (concat tmp "note.txt")) (buffer-string))))
+      (should-not (file-exists-p stray))
+      (should (string-search "made" (plist-get (funcall run (format "cat %s" (shell-quote-argument (concat tmp "note.txt"))))
+                                               :content)))
+      (harness-call 'session/delete sid))))
+
+(defvar harness-sandbox-policy)
+
 (ert-deftest harness-tools-shell-bash-timeout-kills-the-process-tree ()
   "A timed-out command takes its children with it."
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir
     (let* ((pidfile (expand-file-name "child.pid" root))
+           ;; Unconfined, whether or not an earlier test loaded the
+           ;; sandbox: in bwrap's PID namespace $! is a number of that
+           ;; namespace, which says nothing about a process out here.
+           (harness-sandbox-policy 'off)
            (r (harness-tools-shell-test--call
                "bash"
                :command (format "sleep 300 & echo $! > %s; wait" (shell-quote-argument pidfile))
@@ -223,16 +297,28 @@ a child never yields, so nothing in the evaluating Emacs can end it."
             (sleep-for 0.1)))
         (should-not (eql 0 (signal-process pid 0)))))))
 
-(ert-deftest harness-tools-shell-elisp-in-ui-is-opt-in ()
-  "The UI refuses to evaluate elisp unless the user allowed it."
+(ert-deftest harness-tools-shell-elisp-never-runs-in-the-users-emacs ()
+  "The elisp tool always evaluates in the background Emacs.
+There is no option to put it in the user's Emacs, its schema has no
+place to ask for one, and a call that asks anyway is refused."
   (harness-tools-shell-test--setup)
   (harness-test-with-temp-state
-    (should-not harness-elisp-allow-ui-eval)
-    (let ((r (harness-client-tools-run "elisp" (list :code "(+ 1 2)"))))
+    ;; The option that used to allow it is gone, not just off.
+    (should-not (boundp 'harness-elisp-allow-ui-eval))
+    (let ((r (harness-tools-shell-test--call "elisp" :code "(emacs-pid)" :emacs "user")))
       (should (plist-get r :is-error))
-      (should (string-search "harness-elisp-allow-ui-eval" (plist-get r :content))))
-    (let ((harness-elisp-allow-ui-eval t))
-      (should (equal "=> 3" (plist-get (harness-client-tools-run "elisp" (list :code "(+ 1 2)")) :content))))))
+      (should (string-search "never evaluates in the user's Emacs" (plist-get r :content)))
+      (should (string-search "emacs_* tools" (plist-get r :content))))
+    (should-not (plist-get (plist-get (plist-get (harness-tool-spec (harness-tool-get "elisp")) :schema)
+                                      :properties)
+                           :emacs))
+    ;; A call without a target evaluates in the background, not here.
+    (let* ((r (harness-tools-shell-test--call "elisp" :code "(emacs-pid)"))
+           (content (plist-get r :content)))
+      (should (string-prefix-p "=> " content))
+      (should-not (equal (format "=> %d" (emacs-pid)) content))
+      (should (equal "background" (plist-get (plist-get r :meta) :emacs))))
+    (should (equal "Emacs Lisp: (+ 1 2)" (harness-tool-title "elisp" '(:code "(+ 1 2)"))))))
 
 (provide 'harness-tools-shell-test)
 ;;; harness-tools-shell-test.el ends here

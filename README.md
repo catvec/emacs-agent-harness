@@ -17,9 +17,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   or API key), GitHub Copilot through the `copilot` CLI, DeepSeek,
   OpenAI-compatible endpoints, and AWS Bedrock.
 - **Built-in tools.** Tools for files (read, write, edit, search), the
-  shell, Emacs (buffers, documentation, `*Messages*`, Emacs Lisp
-  evaluation), web search and fetch, sub-agents and skills, plus tools
-  that let an agent inspect and drive other sessions and tasks.
+  shell, the user's Emacs (buffers, windows, showing and editing a
+  buffer, saving it, documentation, `*Messages*`), Emacs Lisp
+  evaluation in a separate background Emacs, web search and fetch,
+  sub-agents and skills, plus tools that let an agent inspect and
+  drive other sessions and tasks.
 - **Permissions and sandboxing.** Four permission modes (Ask, Accept
   edits, Auto, YOLO), per-session directory access, and a kernel
   sandbox for tool processes (bubblewrap or `systemd-run`).
@@ -46,14 +48,20 @@ OpenAI-compatible APIs and AWS Bedrock.
 |---|---|
 | ![A chat waiting for permission to run pip install, with the allow and deny buttons](docs/media/chat-permission.png) | ![A chat waiting for the answer to a question, with three options](docs/media/chat-question.png) |
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
-| ![The task board with tasks needing input, in review, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
+| ![The task board with tasks needing input, in review, merging, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
+| ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
+| A task's report: verify it or send it back from there | An image of the report, clicked: shown larger |
 | ![The usage dashboard: a month of cost per day, cost by model, the plan's quota and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
 | Usage: cost per day and model, plan quota, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
 | The session list | The worktrees of a project and their sessions |
+| ![The session list with a permission request popped out, its allow and deny buttons under it](docs/media/popout-permission.png) | ![The task board with a question popped out, its options and a box to type another answer under it](docs/media/popout-question.png) |
+| A request popped out of the session list, answered there | A question popped out of the task board, answered there |
 | ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
 | A BTW side conversation under its session | The menu, with the chat's own commands |
+| ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) | |
+| Messaging a task's session: the box says so, in its colours | |
 
 ## Requirements
 
@@ -177,6 +185,7 @@ named by `harness-server-init-file`.
 | `C-c h o` | `harness-open-latest-session` | Open the newest session of the current project |
 | `C-c h O` | `harness-open-session` | Open a session chosen by name |
 | `C-c h l` | `harness-sessions` | Show the session list |
+| `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
@@ -221,8 +230,10 @@ the `[menu]` button in the header line.
 | `@` | Complete a project file to attach; part of a name finds a file in any subdirectory |
 | `/` | Complete a skill |
 | `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
-| `C-y` | Paste: an image in the clipboard (a screenshot) is attached; text yanks as ever. `M-x yank-media` attaches the image even when the clipboard holds text too, and files copied in a file manager |
+| `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
+| `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
+| `C-c C-p` | Edit the pattern the newest permission request about paths is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
 | `TAB` | Complete in the compose box; elsewhere, fold or unfold the block at point |
@@ -231,6 +242,29 @@ the `[menu]` button in the header line.
 | `C-c C-w` | Copy the last reply |
 | `C-c C-e` | Jump to the bottom |
 | `C-c C-r` | Redraw the buffer |
+
+Drag a file from your file browser onto a chat or the task board and it
+attaches. Drag a *link* — an image from a web page, a video, any address
+— and it downloads in the background with curl, behind a chip that shows
+a spinner, a progress bar and the size; the file attaches with its own
+name when it arrives, and sending waits for it. A link to a web page is
+not downloaded: its address goes into the message as text, which is
+usually what you wanted. Images and videos show a thumbnail in the
+attachment chip (`harness-compose-thumbnail-lines`; videos need
+`ffmpeg`), so you can see what you are about to send.
+
+Copied an image (in a browser, or with a screenshot tool)? `C-y` in a
+compose box attaches it instead of yanking text: it goes on the *media
+ring*, a kill ring of its own that only compose boxes read, so no other
+mode ever yanks a picture as raw bytes. `M-y` right after goes back
+through earlier captures, their thumbnails showing in the box, and
+`C-u M-x harness-compose-attach-clipboard` picks one by name. Files
+copied in a file manager attach the same way, `yank-media` finds them
+too, and `M-x harness-compose-attach-clipboard` chooses among the
+clipboard's other MIME types. The box binds no `C-c C-v`: in a chat
+that key is the review banner's `[Verify]`, so a screenshot never has
+to fight the banner's key. Set
+`harness-compose-yank-media` to nil to leave `C-y` and `M-y` alone.
 
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
@@ -242,6 +276,31 @@ in view: the header line names the progress and the item in hand, and a
 panel above the compose box lists every item with its state. `C-c C-t`,
 a click on the header segment, or `TAB` on the panel folds the items
 away and brings them back; the list disappears when the agent clears it.
+
+A session may use its working directory, its worktree, the directories
+in `harness-allowed-directories` and the ones you grant it. It also has
+a temporary directory of its own, `/tmp/harness-UID/ID/` (under
+`temporary-file-directory`), which needs no grant. The agent keeps
+scratch files, logs and screenshots there. Its shell commands can write
+there even in the sandbox, where the rest of `/tmp` is private to each
+command. The directory is made with the session, made again if it went
+missing, and deleted with the session. `C-c h d` lists all of these
+directories. Remote sessions have no temporary directory.
+
+A permission request about paths is answered for a glob pattern, not
+for a single file. By default the pattern covers everything in the
+directory: the directory that holds the file, or the directory itself,
+such as `~/notes/**`. The panel shows the pattern on its own line.
+Press `e` on the panel, `C-c C-p`, or click `[Edit]` to change it in
+the minibuffer, either more specific (`~/notes/*.org`, a subdirectory,
+one file) or less (`~/**`). `*` matches within a name and `**` across
+directories, and `M-n` offers patterns around the request's own.
+Access outside the session's directories grants or denies the
+pattern: once, for the session, or always (as an entry of
+`harness-allowed-directories`, or a rule in `harness-perms-rules` for
+*Always deny*). For a tool call such as a file edit or a command, *Allow
+for session*, *Always allow* and *Always deny* hold for that tool on the
+pattern only, not for every call of the tool.
 
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
@@ -262,6 +321,13 @@ and show one at a time. Switch between them with the tabs above the
 area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
 buffer, or by moving point onto an option.
 
+The same request can be read and answered without opening the session:
+`SPC` in the session list, or on the task board, pops out
+what the session at point waits on, in a small window with the same
+panel -- the permission prompt or the question in full, its options,
+diagrams and keys, and a box for a typed answer. It closes itself once
+the request is settled, and the session's own view stays where it was.
+
 The header line shows the session's status, name, todo progress while
 it has one, model, permission mode, whether it is `non-interactive` or
 `interactive`, thinking level, context and cost. Click the model, the
@@ -273,8 +339,15 @@ permission, the auto-mode judge decides instead, whatever the
 permission mode. The judge runs on the session's own provider: its
 cheap tier (Claude Haiku, DeepSeek Flash, or the cheapest model that
 provider lists), so a session on one provider is never judged through
-another. Set `harness-perms-auto-model` to force one model. After any
-denial the agent is told to find another
+another. Set `harness-perms-auto-model` to force one model. The judge
+sees only the one call: no conversation, and no project instructions
+such as CLAUDE.md. It refuses only what risks serious harm that is
+hard to undo, such as wiping data outside the project, force pushes,
+system changes, leaking secrets, or widening its own permissions. It
+never rules on the task or your workflow, and when in doubt it allows.
+A call it would deny is put to you in an interactive session, with the
+judge's reason, so you can allow it; in a non-interactive session the
+denial stands and the agent is told to find another
 way. Access to directories outside the session's own still needs you,
 so it is denied while you are away. New sessions, task sessions
 included, start interactive unless `harness-non-interactive` is set.
@@ -288,25 +361,46 @@ box stays available, and the first message you send resumes it.
 ### Forks and side conversations
 
 `C-c h f` forks the current session. The fork starts from the
-conversation so far and continues independently.
+conversation so far and continues independently. A session can be
+forked while it works: the tool calls still running finish in the
+original session only, so the fork records that they have no result
+there.
+
+`C-c h t` shows the conversation tree: every message of the session, its
+forks and its BTWs as a git-like graph. On a message, `f` forks the
+session there and `c` checks the message out, moving the session's head
+back to it. Either way the next message continues from that message: the
+model knows the conversation up to it and nothing that came after, which
+stays in the tree on its own branch. With Claude Code the CLI's own
+conversation is cut at that message, so the fork keeps its cached
+prefix. Where nothing can be cut there (Copilot, or a session older than
+this), the new conversation gets the transcript up to the message.
 
 `C-c h b` opens a BTW ("by the way") side conversation in a window
 below the session. A BTW is a new, empty session that shares nothing
 with the session or with other BTWs, which makes it a good place for
 quick questions. It has the full chat interface, including the header
-line with the model, permission mode and thinking level, which start
-from the session's, and whether it is non-interactive. Two extra
-controls appear at the front of its header line:
+line with the model and permission mode, which start from the
+session's, the thinking level and whether it is non-interactive. Two
+extra controls appear at the front of its header line:
 
 - `[close]` (`C-c C-k`) closes the BTW. A BTW in which nothing was
   asked is deleted.
 - `[keep]` (`C-c C-o`) keeps it as a normal session.
 
+So that quick questions get quick answers, a BTW starts at the `low`
+thinking level, whatever the session's level is. Set
+`harness-btw-thinking` to choose another level, or to nil to start
+from the session's level. A BTW whose model does not offer that level
+starts at the session's.
+
 ### Task board
 
 `C-c h a` opens the task board of the current project. Each task runs in
-its own session and, in a git project, in its own worktree and branch,
-so several tasks can work in parallel.
+its own session and, in a git project, normally in its own worktree and
+branch, so several tasks can work in parallel; a task that has to touch
+your checkout itself can be submitted to the **main tree** instead (the
+`own worktree` / `main tree` switch below).
 
 - Write a task in the compose box at the bottom of the board and press
   `C-c C-c` to submit it. `C-c C-t` switches the box between **Submit**,
@@ -316,43 +410,103 @@ so several tasks can work in parallel.
   first: a task it already has is refused rather than written up (drop
   it, or write it up anyway), and the write-up names the tasks working
   on the same code, to coordinate with instead of redoing their work.
+- Each card is one line, with a subtitle that recaps the task: what it is
+  doing or has done so far, written by a short model call and refreshed
+  at the first of so many turns, seconds or tool calls since the last
+  one, like a warranty's months or miles (see
+  `harness-tasks-recap-turns`, `harness-tasks-recap-seconds` and
+  `harness-tasks-recap-tool-calls`). The recap shows by default where it
+  matters most, in *Requires your input* beside what the task waits for
+  and in *Merging* beside where its branch stands; elsewhere `TAB` on a
+  card, or a click on its chevron, shows it.
 - `C-c h m`, `C-c h T`, `C-c h p` and `C-c h i` set the model, thinking
   level, permission mode and non-interactive mode of the next task, or
   of the task at point. New tasks run in auto mode and are interactive
   unless your configuration says otherwise, so a request that needs
   you, such as access to another directory, waits for you in *Requires
   your input* instead of being denied.
-- The `own worktree` switch beside those settings, in a git project,
-  changes the next task to the **main tree**: no worktree and no branch,
-  nothing merges, and its changes take effect in your checkout directly.
-  Submit a task that way when it has to touch the checkout itself, such
-  as cleaning up uncommitted changes. A refined task keeps the choice
-  for when you start it.
+- The `own worktree` / `main tree` switch beside those settings, in a
+  git project, picks where the next task works: **own worktree**, on its
+  own branch, merged back when it is done, or **main tree**, the
+  project's checkout itself, with no branch and nothing to merge. Use
+  the main tree for work that has to touch the checkout directly, such
+  as cleaning up uncommitted changes; those tasks show `main tree` on
+  their card, and a refined task keeps the choice for when you start it.
+  An agent can ask for the same thing with `task_submit`'s `main_tree`.
+- Task sessions run on at most 256k tokens of context
+  (`harness-tasks-context-limit`): they compact sooner than interactive
+  sessions, so a long task works from a smaller transcript between
+  turns. Set it to another number of tokens to tune that, or to nil to
+  give task sessions the whole window like any other session. A
+  provider that compacts on its own side keeps its own threshold,
+  except Claude Code, which the harness tells to compact at the same
+  point.
+- A turn is not capped: the harness does not limit how many model calls
+  a turn may make, so a task runs as long as the work needs. It ends
+  when the agent hands in, the provider stops it (an error, or the
+  model hitting its output limit), a merge hold pauses it at a step
+  boundary, or you cancel it from its session. Automatic compaction
+  (above) runs between turns, so a turn that outgrows the model's
+  window reaches the provider's own error; budgets still refuse *new*
+  turns once they are spent.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
-  its session with feedback.
+  its session with feedback. Any message you send to a task waiting
+  for review sends it back the same way, with your message as the
+  feedback, wherever you write it: in the task's session (no need to
+  press `[Send back]` first), with `m` on the board, from another
+  device, or from another session. The task goes back to work at once
+  and comes back for review when it is done.
+- When the project is the harness itself, a card in *Ready for review*
+  whose worktree is a checkout of the harness also offers
+  `[Open harness]`: it opens an Emacs running that worktree's harness
+  in an instance of its own, its frame raised, so the work can be tried
+  before it is verified. The agent has the same as the `open_harness`
+  tool, which starts such an instance for its own worktree and says how
+  to drive it (`scripts/dev.sh` with its socket).
 - To skip review, press `V` or click `[Review: on]` in the board's
   header line. Finished tasks then merge and complete without waiting
   for you, and if tasks are already waiting for review, the board offers
   to verify them. The switch sets `harness-tasks-require-verification`,
   so it applies to every project and is saved for later sessions. Press
   `V` again to turn review back on.
+- A verified task waits in *Merging* while its branch goes through the
+  merge queue: queued for the queue's turn, merging, or, when the merge
+  conflicts, its session resolving them. The card says where it stands;
+  the task moves to *Completed* once the branch is in.
 - A task's session finishes by *handing its work in* (`hand_in`): the
   agent gives a final summary and the evidence for it -- an image or a
   video of what it built whenever there is anything to see, a file, a
   code block, a note, or a link to an earlier tool call, the tests or a
   command it ran. The turn ends there and the task waits for your
-  review. In the session itself a banner above the compose box offers
-  `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-R`; type the feedback
-  in the box, `C-c C-c` sends it) and `[Report]`, so you can accept the
-  work without going back to the board.
-- `[Report]` on a card that has one pops the handed-in summary and
-  evidence out beside the board: images inline, videos as thumbnails,
-  files as buttons, and each referenced tool call as the call it links
-  to, with `[Open in the session]`. The board's item-at-point key
-  (`SPC`) opens it too, along with whatever else the task has to show.
+  review. In the session itself a banner above the compose box shows
+  that report in full, already expanded -- the summary, then every piece
+  of evidence, a referenced call with its whole output -- and offers
+  `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-x`; type the feedback
+  in the box, `C-c C-c` sends it) and `[Report]`, which pops it out, so
+  you can read the work and accept it without going back to the board.
+  The two keys work only while the banner shows; otherwise `C-c C-v`
+  is nothing there, the box pasting with `C-y`.
+- `[Report]` on a card that has one, or on the banner, pops the
+  handed-in summary and evidence out beside the board: images large, as
+  wide as the popout, videos as thumbnails, files as buttons, and each
+  referenced tool call as the call it links to, with
+  `[Open in the session]`. Click an image, or press `RET` on it, to see
+  it larger still in a popout of its own; `q` goes back to the report.
+  While the task waits for review, the report ends with the same banner
+  as its session: `[Verify]` (`C-c C-v`) and `[Send back]` (`C-c C-x`),
+  and a box under it for the feedback (`C-c C-c` sends it), so you can
+  read the work and accept it in one place. Once the review is decided
+  -- the task verified, or sent back with feedback -- the report closes,
+  wherever that was done: from the board, from the session's banner or
+  from the report's own banner. The board's item-at-point key (`SPC`)
+  opens the report too, along with whatever else the task has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
+- `SPC` on a task that needs input pops out what it waits on -- the
+  permission prompt or the question, with its options and diagrams --
+  and answers it there. The card offers the same as [Answer…] or
+  [Request…] next to [Allow] and [Deny].
 - `RET` opens the session of the task at point. From that session,
   `C-c h a` leads back to the board.
 - A task's session shows in the session list (`C-c h l`) under the
@@ -424,6 +578,7 @@ project's, and a project's over the global value.
 
 - `harness-model`
 - `harness-thinking`
+- `harness-btw-thinking`
 - `harness-permission-mode`
 - `harness-allowed-directories`
 - `harness-budget`
@@ -509,9 +664,11 @@ earlier assistant turns to come back as `reasoning_content` once a
 request carries tools, so the provider replays the recorded thinking of
 each assistant message, empty when it has none.  This follows an
 official DeepSeek host, so an OpenAI-compatible endpoint you added
-yourself at `api.deepseek.com` gets it too; OpenAI and OpenRouter are
-unaffected and still drop thinking.  Thinking effort uses DeepSeek's own
-three-step ladder — low, high, max — which its /models route reports, so
+yourself at `api.deepseek.com` gets it too, and its cached input is
+billed at the cache-hit rate rather than the cache-miss rate; OpenAI
+and OpenRouter are unaffected and still drop thinking.  Thinking effort
+uses DeepSeek's own three-step ladder — low, high, max — which its
+/models route reports, so
 the thinking menu offers exactly those levels and never a `medium` or
 `xhigh` that DeepSeek would just collapse onto `high`.
 
@@ -547,6 +704,12 @@ archived tasks are history and are left alone.
 The usage dashboard (`C-c h u`) lists every quota window with its reset
 time, the plan's extra usage, and the value at API prices that the plan
 covered.
+
+Grouped by project, every task's git worktree is folded under the
+project it belongs to: one line per project, with the total and how many
+worktrees it holds. `TAB`, `RET` or a click on a project shows its main
+checkout's usage and each worktree's, and hides them again; `w` (or
+`[show worktrees]`) does it for every project at once.
 
 Budgets count billed cost only. A budget created partway through a
 month can start from what was already spent outside the harness: press
@@ -632,7 +795,9 @@ the token yourself.
 
 - From another Emacs, `M-x harness-connect-remote` (`C-c h c`) with a
   `host:port` address connects the UI to that harness. An empty address
-  connects it back to the local harness.
+  connects it back to the local harness. Switching leaves running
+  sessions alone. Turns go on, and a permission prompt or question
+  already on screen can still be answered after you come back.
 - `scripts/harness-acp-stdio` bridges ACP to standard input and output,
   for editors that start ACP agents as subprocesses.
 
@@ -725,7 +890,9 @@ set. See [docs/dev-loop.md](docs/dev-loop.md) for the full workflow.
 
 `M-x harness-reload` (`C-c h R`) checks and byte-compiles every source
 file, then reloads the harness in place, keeping running sessions. If
-any file fails to compile, nothing is reloaded.
+any file fails to compile, nothing is reloaded. The UI reloads first,
+then the harness process. The echo area says whether the process
+reloaded every file, some failed to load, or it refused the reload.
 `harness-auto-reload-mode` reloads the harness whenever one of its
 source files changes.
 

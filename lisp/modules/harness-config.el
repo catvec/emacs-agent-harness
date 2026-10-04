@@ -65,8 +65,25 @@
   :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
   :group 'harness)
 
+(defcustom harness-btw-thinking "low"
+  "Thinking level BTW side conversations start at, or nil for the usual one.
+A BTW is for quick questions on the side, so by default it thinks
+little.  It starts at this level only when its model offers it.
+Otherwise, and always with nil, it starts at the level of the session
+it is opened over; a BTW about a task board starts at
+`harness-thinking'.  The level can be changed in the BTW like in any
+session."
+  :type '(choice (const :tag "Same as the session" nil) (const :tag "Low" "low")
+                 (const :tag "Medium" "medium") (const :tag "High" "high")
+                 (const :tag "Extra high" "xhigh") (const :tag "Max" "max"))
+  :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
+  :group 'harness)
+
 (defcustom harness-allowed-directories nil
-  "Extra directories sessions may touch besides their working directory."
+  "Extra directories sessions may touch besides their working directory.
+An entry may also be a glob pattern, such as ~/notes/*.org, to allow
+only the paths it matches: `*' matches within a name, `**' across
+directories."
   :type '(repeat directory)
   :safe (lambda (v) (and (listp v) (cl-every #'stringp v)))
   :group 'harness)
@@ -103,16 +120,16 @@ non-interactive anyway."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defconst harness-config-keys
-  '(harness-model harness-permission-mode harness-thinking harness-allowed-directories
-    harness-budget harness-sandbox-policy harness-non-interactive)
+  '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
+    harness-allowed-directories harness-budget harness-sandbox-policy harness-non-interactive)
   "Settings that take part in layering.")
 
 (defconst harness-config-sections
   '((sessions
      :title "New sessions"
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
-     :keys (harness-model harness-thinking harness-permission-mode harness-non-interactive
-            harness-budget))
+     :keys (harness-model harness-thinking harness-btw-thinking harness-permission-mode
+            harness-non-interactive harness-budget))
     (safety
      :title "Files and safety"
      :doc "What sessions may reach, and what may run without asking you."
@@ -122,7 +139,8 @@ non-interactive anyway."
      :title "Task board"
      :doc "The sessions tasks start with, and when their work counts as done."
      :keys (harness-tasks-model harness-tasks-thinking harness-tasks-permission-mode
-            harness-tasks-non-interactive harness-tasks-require-verification
+            harness-tasks-non-interactive harness-tasks-context-limit
+            harness-tasks-require-verification
             harness-tasks-max-running harness-tasks-worktrees))
     (notifications
      :title "Notifications"
@@ -257,7 +275,7 @@ init file only."
 (defun harness-config--module-of (key)
   "Return the name of the module KEY belongs to, or \"core\".
 That is the module whose file defines KEY, else (for an option of a
-shared file such as harness-client-tools.el) the module whose name
+shared file such as harness-elisp.el) the module whose name
 starts KEY's name."
   (let* ((file (symbol-file key 'defvar))
          (base (and file (file-name-base file)))
