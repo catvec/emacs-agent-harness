@@ -415,6 +415,11 @@ an interactive one with nobody able to answer is denied too."
                          :hint harness-perms-judge-deny-hint)))
       (should (eq 'deny (plist-get (harness-perms--judge-decision verdict harness-perms-test--session)
                                    :behavior)))
+      ;; Interactive with nobody able to answer: the denial stands, with
+      ;; the judge's reason, rather than turning into a dead end.
+      (should (equal verdict (harness-perms--judge-decision
+                              verdict (plist-put (copy-sequence harness-perms-test--session)
+                                                 :non-interactive nil))))
       (harness-perms-test--install-pending)
       (let* ((d (harness-perms--judge-decision
                  verdict (plist-put (copy-sequence harness-perms-test--session) :non-interactive nil)))
@@ -552,6 +557,15 @@ function giving the judge prompts they encoded, newest first."
                                             (funcall cb '(:type done :stop-reason end-turn)))))
                   (list :cancel #'ignore)))
     (lambda () sent)))
+
+(ert-deftest harness-perms-judge-prompt-keeps-harness-tools-ordinary ()
+  "The judge is told the harness's own tools are ordinary work.
+It used to refuse sub-agents, messages to other sessions and session
+control as changes to the agent's permissions, which stopped the
+harness's own workflows (spawning help, answering a parent session)."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (dolist (phrase '("sub-agents" "other sessions of the harness" "task board"))
+    (should (string-search phrase harness-perms--judge-system))))
 
 (ert-deftest harness-perms-judge-sees-a-cut-input-as-cut ()
   "A long input is cut, and the judge is told the harness cut it.
