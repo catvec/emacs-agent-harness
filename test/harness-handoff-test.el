@@ -117,7 +117,8 @@
         (should (= 4 (length (plist-get check :risks))))
         (should (cl-every #'stringp (plist-get check :risks)))
         ;; The cold cache priced at the new model's list prices.
-        (should (string-match-p "tokens of context cost about .* to write to the cache" (plist-get check :cache-cost))))
+        (should (string-match-p "\\`[0-9.k]+ tokens: \\$[0-9.]+ to write, \\$[0-9.]+ to read\\'"
+                                (plist-get check :cache-cost))))
       ;; Same provider, an API provider, the same model: no warning.
       (dolist (model '("demo:other" "api:m" "demo:scripted"))
         (let ((check (harness-call 'handoff/check sid model)))

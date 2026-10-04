@@ -115,11 +115,13 @@ Those come after the model's last reply, so a hosted loop is sent them."
        t))
 
 (defconst harness-handoff-risks
-  '("Cold prompt cache: the new conversation starts uncached, so what it is sent costs cache writes where carrying on would cost cache reads."
-    "Reduced fidelity: the model explores again; tool calls, their results and thinking reach it only as text or a summary."
-    "Provider state stays behind: a conversation the old provider could resume, compaction it did itself, its built-in tools; switching back later starts over there too."
-    "It takes effect at the next step, not mid-step: a running turn finishes its current step on the old model.")
-  "The risks of a lossy model switch, as `handoff/check' states them.")
+  '("Cold prompt cache: the new conversation starts uncached and pays cache writes where carrying on pays reads."
+    "Reduced fidelity: the model explores again; tool calls, results and thinking reach it only as text or a summary."
+    "Old provider state: a conversation it could resume, compaction it did itself and its built-in tools stay behind; switching back starts over there."
+    "Timing: takes effect at the next step, not mid-step; a running turn finishes its current step on the old model.")
+  "The risks of a lossy model switch, as `handoff/check' states them.
+Each is a short label, a colon and what it means, which the switch
+prompt lays out as a table.")
 
 (defun harness-handoff--price (tokens model key)
   "Return what TOKENS tokens cost at MODEL's KEY price (USD per million), or nil."
@@ -135,7 +137,7 @@ cache rather than read back from it."
          (write (harness-handoff--price context model :cache-write))
          (read (harness-handoff--price context model :cache-read)))
     (when (and write read)
-      (format "%s tokens of context cost about %s to write to the cache, against %s to read"
+      (format "%s tokens: %s to write, %s to read"
               (harness-format-tokens context) (harness-format-cost write) (harness-format-cost read)))))
 
 (defun harness-handoff--check (session model)
@@ -169,8 +171,7 @@ See `handoff/check' for the shape."
           :lossy lossy :history history :running running
           :reason (or reason
                       (format (concat "%s keeps its own conversation and is sent only the user messages after"
-                                      " the model's last reply, so it starts a new conversation that has none of"
-                                      " this session's history.")
+                                      " the model's last reply, so none of this session's history reaches it.")
                               (harness-handoff--provider-label model)))
           :risks (and lossy harness-handoff-risks)
           :cache-cost (and lossy (harness-handoff--cache-cost session model)))))

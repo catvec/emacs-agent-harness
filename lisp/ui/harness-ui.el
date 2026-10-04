@@ -1391,38 +1391,108 @@ prompt stays readable; the descriptions are one line each.")
         (format "“%s”" name)
       (substring id 0 (min 8 (length id))))))
 
+(defun harness-ui--handoff-heading (text)
+  "Return TEXT as the heading of a section in the switch help."
+  (propertize text 'face 'bold))
+
+(defun harness-ui--handoff-wrap (text width)
+  "Return TEXT as lines no wider than WIDTH, broken at spaces."
+  (let ((words (split-string text " " t))
+        (lines nil) (line ""))
+    (dolist (w words)
+      (cond ((string-empty-p line) (setq line w))
+            ((<= (+ (length line) 1 (length w)) width) (setq line (concat line " " w)))
+            (t (push line lines) (setq line w))))
+    (when (not (string-empty-p line)) (push line lines))
+    (or (nreverse lines) '(""))))
+
+(defun harness-ui--handoff-table (header rows &optional wrap)
+  "Return a table of HEADER and ROWS for the switch help.
+HEADER and each row are lists of cell strings; the last cell may be
+empty.  Columns are padded to their widest cell, a rule of dashes
+separates HEADER from ROWS, and WRAP caps the last column, whose
+continuation lines line up under it.  A nil HEADER gives label and
+value columns with no rule."
+  (let* ((n (length (or header (car rows))))
+         (widths (cl-loop for i from 0 below n
+                          for w = (apply #'max 0
+                                         (mapcar (lambda (r) (string-width (or (nth i r) "")))
+                                                 (append (and header (list header)) rows)))
+                          collect (if (and wrap (= i (1- n))) (min w wrap) w)))
+         (head (lambda (row)
+                 (concat "  "
+                         (mapconcat (lambda (i)
+                                      (format (format "%%-%ds" (nth i widths)) (or (nth i row) "")))
+                                    (number-sequence 0 (- n 2)) "  ")
+                         (if (> n 1) "  " ""))))
+         (lines (lambda (row)
+                  (let* ((prefix (funcall head row))
+                         (last (or (nth (1- n) row) ""))
+                         (parts (if (and wrap (> (length last) wrap))
+                                    (harness-ui--handoff-wrap last wrap)
+                                  (list last)))
+                         (continuation (make-string (length prefix) ?\s)))
+                    (concat (string-trim-right (concat prefix (car parts)))
+                            (if (cdr parts) "\n" "")
+                            (mapconcat (lambda (l) (string-trim-right (concat continuation l)))
+                                       (cdr parts) "\n")))))
+         (rule (concat "  " (mapconcat (lambda (w) (make-string w ?-)) widths "  "))))
+    (concat (if header (concat (funcall lines header) "\n" rule "\n") "")
+            (mapconcat (lambda (r) (funcall lines r)) rows "\n"))))
+
+(defun harness-ui--handoff-risk-row (risk)
+  "Return RISK, a \"label: what it means\" sentence, as the cells of a table row."
+  (let ((colon (string-match ":" risk)))
+    (if colon
+        (list (substring risk 0 colon) (string-trim (substring risk (1+ colon))))
+      (list risk ""))))
+
 (defun harness-ui--handoff-text (checks label total)
   "Return what to say before a switch to model LABEL loses conversations.
 CHECKS are the `handoff/check' answers of the sessions that would lose
-theirs, TOTAL how many sessions the switch changes in all."
+theirs, TOTAL how many sessions the switch changes in all.  The view is
+a few small tables -- the sessions that change, the risks, what to do --
+shown before the question, not prose."
   (let* ((first (car checks))
          (one (= 1 total))
-         (running (cl-some (lambda (c) (harness-json-true-p (plist-get c :running))) checks)))
+         (lossy (length checks))
+         (running (cl-some (lambda (c) (harness-json-true-p (plist-get c :running))) checks))
+         (info (if one
+                   (append
+                    (list (list "Session" (harness-ui--check-session-label first))
+                          (list "From" (harness-ui-model-label (plist-get first :from)))
+                          (list "Why" (plist-get first :reason)))
+                    (when (plist-get first :cache-cost)
+                      (list (list "Cache" (format "%s (list prices)" (plist-get first :cache-cost)))))
+                    (when running
+                      (list (list "Turn" "running; the switch takes effect at its next step"))))
+                 (list (list "Sessions" (if (= lossy total)
+                                            (format "all %d start a new conversation there" total)
+                                          (format "%d of %d start a new conversation there" lossy total)))
+                       (list "Why" (plist-get first :reason))))))
     (concat
+     (harness-ui--handoff-heading (format "MODEL SWITCH → %s" label)) "\n\n"
+     (harness-ui--handoff-table nil info 72) "\n\n"
      (if one
-         (format "Switching %s from %s to %s starts a new conversation.\n\n%s\n"
-                 (harness-ui--check-session-label first) (harness-ui-model-label (plist-get first :from)) label
-                 (plist-get first :reason))
-       (format "Switching %d sessions to %s: %s start%s a new conversation there.\n\n%s\n\n%s\n"
-               total label
-               (if (= 1 (length checks)) "one of them" (format "%d of them" (length checks)))
-               (if (= 1 (length checks)) "s" "")
-               (plist-get first :reason)
-               (mapconcat (lambda (c)
-                            (format "  - %s, from %s%s%s"
-                                    (harness-ui--check-session-label c) (harness-ui-model-label (plist-get c :from))
-                                    (if (harness-json-true-p (plist-get c :running)) ", running a turn" "")
-                                    (if (plist-get c :cache-cost) (format ": %s" (plist-get c :cache-cost)) "")))
-                          checks "\n")))
-     "\nRisks:\n"
-     (mapconcat (lambda (r) (concat "  - " r)) (plist-get first :risks) "\n")
-     (if (and one (plist-get first :cache-cost))
-         (format "\n  At %s's list prices, this session's %s." label (plist-get first :cache-cost))
-       "")
-     (if running
-         (if one "\n  A turn is running now." "\n  Sessions running a turn take the new model at its next step.")
-       "")
-     "\nHow to hand over (lossy: the new model is told to re-investigate):\n\n"
+         ""
+       (concat (harness-ui--handoff-table
+                (list "SESSION" "FROM" "TURN" "CACHE COST")
+                (mapcar (lambda (c)
+                          (list (harness-ui--check-session-label c)
+                                (harness-ui-model-label (plist-get c :from))
+                                (if (harness-json-true-p (plist-get c :running)) "running" "-")
+                                (or (plist-get c :cache-cost) "-")))
+                        checks)
+               60)
+               "\n\n"))
+     (harness-ui--handoff-heading "RISKS") "\n\n"
+     (harness-ui--handoff-table
+      (list "RISK" "WHAT IT MEANS")
+      (mapcar #'harness-ui--handoff-risk-row (plist-get first :risks))
+      72)
+     "\n\n"
+     (harness-ui--handoff-heading "HAND OVER") "\n"
+     "  lossy; the new model is told to re-investigate\n\n"
      (harness-ui--handoff-choice-text)
      (if one "" "\n\nThe choice applies to each session listed; the others just switch.")
      "\n")))

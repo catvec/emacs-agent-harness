@@ -899,9 +899,11 @@ NAME is the session's name; RUNNING says a turn runs."
         :from "deepseek:deepseek-flash" :from-label "DeepSeek V4.1 Flash"
         :to "claude:claude-opus-5-5" :to-label "Claude Opus 5.5" :to-provider "Claude Code"
         :reason "Claude Code keeps its own conversation and is sent only the user messages after the model's last reply."
-        :risks '("Cold prompt cache: written, not read." "Reduced fidelity: explored again."
-                 "Provider state stays behind." "It takes effect at the next step, not mid-step.")
-        :cache-cost "120k tokens of context cost about $0.60 to write to the cache, against $0.02 to read"))
+        :risks '("Cold prompt cache: written, not read."
+                 "Reduced fidelity: explored again."
+                 "Old provider state: a conversation it could resume, compaction it did itself and its built-in tools stay behind."
+                 "Timing: takes effect at the next step, not mid-step.")
+        :cache-cost "120k tokens: $0.60 to write, $0.02 to read"))
 
 (defmacro harness-ui-test-with-switch (answers key &rest body)
   "Run BODY switching models with the harness answering from ANSWERS.
@@ -934,25 +936,31 @@ made, newest first, and ASKED, the arguments of each question asked."
     (harness-set-model "s1")
     (should (= 1 (length asked)))
     (pcase-let ((`(,_prompt ,choices ,help ,show) (car asked)))
-      ;; Shown at once: what happens, why, the risks, the choices.
+      ;; Shown at once: the switch, the risks, the choices -- as tables.
       (should show)
       (should (equal '(?c ?n ?t ?s ?q) (mapcar #'car choices)))
-      (should (string-match-p (concat "Switching “Fix the parser” from "
-                                      (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash"))
-                                      " to .* starts a new conversation")
+      (should (string-match-p (concat "^MODEL SWITCH → "
+                                      (regexp-quote (harness-ui-model-label "claude:claude-opus-5-5")) "$")
                               help))
-      (should (string-match-p "sent only the user messages after the model's last reply" help))
-      (dolist (risk '("Cold prompt cache" "Reduced fidelity" "Provider state stays behind" "next step"))
-        (should (string-match-p (regexp-quote risk) help)))
-      (should (string-match-p "this session's 120k tokens of context cost about \\$0\\.60 to write" help))
-      (should (string-match-p "A turn is running now" help))
+      (should (string-match-p "^  Session  “Fix the parser”$" help))
+      (should (string-match-p (concat "^  From     " (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash")) "$")
+                              help))
+      (should (string-match-p "sent only the user[ \n]+messages after the model's last reply" help))
+      (should (string-match-p "^  Cache    120k tokens: \\$0\\.60 to write, \\$0\\.02 to read (list prices)$" help))
+      (should (string-match-p "^  Turn     running; the switch takes effect at its next step$" help))
+      ;; The risks table: a heading, a header row, the four labelled risks.
+      (should (string-match-p "^RISKS$" help))
+      (should (string-match-p "^  RISK\\( +\\)WHAT IT MEANS$" help))
+      (dolist (risk '("Cold prompt cache" "Reduced fidelity" "Old provider state" "Timing"))
+        (should (string-match-p (format "^  %s +." (regexp-quote risk)) help)))
       ;; Short, one line each, easy to scan: key, name, what it does.
       (should (string-match-p "^  c  current model summarises[ ]+warm cache; summary from the whole conversation$" help))
       (should (string-match-p "^  n  new model summarises[ ]+only the first and last messages; small, but lossy$" help))
       (should (string-match-p "^  t  full transcript[ ]+whole conversation as a file the new model reads$" help))
       (should (string-match-p "^  s  no handoff[ ]+no context; the new model starts from your next message$" help))
       (should (string-match-p "^  q  cancel[ ]+keep the current model$" help))
-      (should (string-match-p "How to hand over (lossy: the new model is told to re-investigate)" help)))
+      (should (string-match-p "^HAND OVER$" help))
+      (should (string-match-p "^  lossy; the new model is told to re-investigate$" help)))
     (let ((check (cdr (assoc "_harness/handoff/check" calls)))
           (switch (cdr (assoc "_harness/handoff/switch" calls))))
       (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5") check))
@@ -999,11 +1007,16 @@ made, newest first, and ASKED, the arguments of each question asked."
     (harness-set-model-all)
     (should (= 1 (length asked)))
     (let ((help (nth 2 (car asked))))
-      (should (string-match-p "Switching 3 sessions to .*: 2 of them start a new conversation there" help))
+      (should (string-match-p "^  Sessions  2 of 3 start a new conversation there$" help))
+      (should (string-match-p (concat "^MODEL SWITCH → "
+                                      (regexp-quote (harness-ui-model-label "claude:claude-opus-5-5")) "$")
+                              help))
+      (should (string-match-p "^  SESSION +\\(FROM +TURN +CACHE COST\\)$" help))
       (let ((from (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash"))))
-        (should (string-match-p (concat "- “Fix the parser”, from " from ", running a turn: 120k tokens of context cost about \\$0\\.60")
+        (should (string-match-p (concat "^  “Fix the parser” +" from " +running +120k tokens: \\$0\\.60 to write, \\$0\\.02 to read$")
                                 help))
-        (should (string-match-p (concat "- s2, from " from) help)))
+        (should (string-match-p (concat "^  s2 +" from " +- +120k tokens: \\$0\\.60 to write, \\$0\\.02 to read$")
+                                help)))
       (should (string-match-p "The choice applies to each session listed; the others just switch" help)))
     (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t))
                    (cdr (assoc "_harness/handoff/check-all" calls))))

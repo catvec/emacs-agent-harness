@@ -2106,16 +2106,16 @@ A model switch asks the harness first (`handoff/check`, or
 `handoff/check-all` for `harness-set-model-all`, which asks once for
 the whole batch).  A lossy one shows, before the question
 (`read-multiple-choice`, help shown at once in `*Harness model
-switch*`), what happens and why, the risks with the cache cost, and the
-choices: current model summarises (warm cache), new model summarises a
-limited context (for when the current provider cannot answer), full
-transcript, no handoff, cancel -- each a short, aligned line.  The help
-says every handoff warns the new model that the context may be lossy
-and to re-investigate.  The answer goes to `handoff/switch'
-(`handoff/switch-all`); cancelling changes nothing, not even the
-default for new sessions.  A switch that loses nothing goes through
-`session/set_model` (`session/set-all`) as before, and so does any
-switch when the harness cannot check.
+switch*`), a small table view: the sessions that change (name, from,
+turn, cache cost), a table of the risks (label and what it means), and
+the choices -- current model summarises (warm cache), new model
+summarises a limited context (for when the current provider cannot
+answer), full transcript, no handoff, cancel.  The view says the
+handoff is lossy and the new model is told to re-investigate.  The
+answer goes to `handoff/switch` (`handoff/switch-all`); cancelling
+changes nothing, not even the default for new sessions.  A switch that
+loses nothing goes through `session/set_model` (`session/set-all`) as
+before, and so does any switch when the harness cannot check.
 
 Desktop notifications: `harness-ui` answers `_harness/client/notify` by
 showing the notification on this Emacs's desktop
