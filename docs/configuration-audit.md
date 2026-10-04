@@ -270,11 +270,11 @@ setting.  A harness whose modules are all disabled, and therefore names
 no sections, lists its layered settings in one *Session defaults*
 section.
 
-## Advanced options kept (25)
+## Advanced options kept (24)
 
 These stayed options because they are real choices, just not common
-ones: `harness-log-level`, `harness-agent-max-steps`,
-`harness-naming-auto`, `harness-notifications-desktop-backend`,
+ones: `harness-log-level`, `harness-naming-auto`,
+`harness-notifications-desktop-backend`,
 `harness-provider-claude-program`, `harness-provider-claude-extra-args`,
 `harness-provider-claude-permission-args`,
 `harness-provider-copilot-program`,

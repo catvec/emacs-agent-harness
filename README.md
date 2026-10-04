@@ -438,6 +438,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   provider that compacts on its own side keeps its own threshold,
   except Claude Code, which the harness tells to compact at the same
   point.
+- A turn is not capped: the harness does not limit how many model calls
+  a turn may make, so a task runs as long as the work needs. It ends
+  when the agent hands in, the provider stops it (an error, or the
+  model hitting its output limit), a merge hold pauses it at a step
+  boundary, or you cancel it from its session. Automatic compaction
+  (above) runs between turns, so a turn that outgrows the model's
+  window reaches the provider's own error; budgets still refuse *new*
+  turns once they are spent.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback. Any message you send to a task waiting
