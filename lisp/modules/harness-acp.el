@@ -771,7 +771,6 @@ shared secret when `harness-acp-token' is set."
                  ((or 'end-turn 'nil) "end_turn")
                  ('cancelled "cancelled")
                  ('max-tokens "max_tokens")
-                 ('max-steps "max_turn_requests")
                  (_ "refusal"))))
     (list :stopReason stop
           :_harness (list :reason (and reason (symbol-name reason))

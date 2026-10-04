@@ -230,7 +230,9 @@ the `[menu]` button in the header line.
 | `@` | Complete a project file to attach; part of a name finds a file in any subdirectory |
 | `/` | Complete a skill |
 | `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
-| `C-c C-v` | Attach the image in the clipboard |
+| `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
+| `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
+| `C-c C-v` | Attach what the clipboard holds (`C-u C-c C-v` picks an earlier capture) |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
 | `C-c C-p` | Edit the pattern the newest permission request about paths is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
@@ -241,6 +243,25 @@ the `[menu]` button in the header line.
 | `C-c C-w` | Copy the last reply |
 | `C-c C-e` | Jump to the bottom |
 | `C-c C-r` | Redraw the buffer |
+
+Drag a file from your file browser onto a chat or the task board and it
+attaches. Drag a *link* — an image from a web page, a video, any address
+— and it downloads in the background with curl, behind a chip that shows
+a spinner, a progress bar and the size; the file attaches with its own
+name when it arrives, and sending waits for it. A link to a web page is
+not downloaded: its address goes into the message as text, which is
+usually what you wanted. Images and videos show a thumbnail in the
+attachment chip (`harness-compose-thumbnail-lines`; videos need
+`ffmpeg`), so you can see what you are about to send.
+
+Copied an image (in a browser, or with a screenshot tool)? `C-y` in a
+compose box attaches it instead of yanking text: it goes on the *media
+ring*, a kill ring of its own that only compose boxes read, so no other
+mode ever yanks a picture as raw bytes. `M-y` right after goes back
+through earlier captures, their thumbnails showing in the box, and
+`C-u C-c C-v` picks one by name. Files copied in a file manager attach
+the same way. `yank-media` finds them too. Set
+`harness-compose-yank-media` to nil to leave `C-y` and `M-y` alone.
 
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
@@ -323,7 +344,9 @@ such as CLAUDE.md. It refuses only what risks serious harm that is
 hard to undo, such as wiping data outside the project, force pushes,
 system changes, leaking secrets, or widening its own permissions. It
 never rules on the task or your workflow, and when in doubt it allows.
-After any denial the agent is told to find another
+A call it would deny is put to you in an interactive session, with the
+judge's reason, so you can allow it; in a non-interactive session the
+denial stands and the agent is told to find another
 way. Access to directories outside the session's own still needs you,
 so it is denied while you are away. New sessions, task sessions
 included, start interactive unless `harness-non-interactive` is set.
@@ -417,6 +440,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   provider that compacts on its own side keeps its own threshold,
   except Claude Code, which the harness tells to compact at the same
   point.
+- A turn is not capped: the harness does not limit how many model calls
+  a turn may make, so a task runs as long as the work needs. It ends
+  when the agent hands in, the provider stops it (an error, or the
+  model hitting its output limit), a merge hold pauses it at a step
+  boundary, or you cancel it from its session. Automatic compaction
+  (above) runs between turns, so a turn that outgrows the model's
+  window reaches the provider's own error; budgets still refuse *new*
+  turns once they are spent.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback. Any message you send to a task waiting
@@ -464,14 +495,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   While the task waits for review, the report ends with the same banner
   as its session: `[Verify]` (`C-c C-v`) and `[Send back]` (`C-c C-x`),
   and a box under it for the feedback (`C-c C-c` sends it), so you can
-  read the work and accept it in one place. The board's item-at-point
-  key (`SPC`) opens the report too, along with whatever else the task
-  has to show.
-- `m` on a task writes a message to its session without leaving the
-  board; when its session asks a question, `m` answers that instead.
-  The compose box then turns amber, bar and all, and names the session
-  it sends to, so it cannot be taken for the box that writes a new
-  task; `C-g` returns to that one.
+  read the work and accept it in one place. Once the review is decided
+  -- the task verified, or sent back with feedback -- the report closes,
+  wherever that was done: from the board, from the session's banner or
+  from the report's own banner. The board's item-at-point key (`SPC`)
+  opens the report too, along with whatever else the task has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `SPC` on a task that needs input pops out what it waits on -- the

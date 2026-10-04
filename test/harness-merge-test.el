@@ -148,59 +148,109 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
       (should (null (harness-call 'merge/queue parent))))))
 
 (ert-deftest harness-merge-conflict-resolved-with-merge-done ()
+  "A conflict never touches the parent: the child merges the parent in its worktree."
   (harness-merge-test-with
     ;; Both sides change the same line.
     (harness-merge-test--write wt "README" "child version\n")
     (harness-merge-test--commit wt "child edit" "README")
     (harness-merge-test--write root "README" "parent version\n")
     (harness-merge-test--commit root "parent edit" "README")
-    (let ((conflicts nil) (finished nil) (allowed nil))
+    (let ((conflicts nil) (finished nil)
+          (parent-head (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
       (harness-on 'merge/conflict (lambda (c p files) (push (list c p files) conflicts)))
       (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
-      ;; A stand-in for the perms module: record the widened jail.
-      (harness-register-method 'permission/allow-dir (lambda (sid dir) (push (cons sid dir) allowed) (list dir)))
       (harness-call 'merge/enqueue child parent)
       (harness-test-wait (lambda () conflicts) 10 "conflict")
       (should (equal (list child parent '("README")) (car conflicts)))
       (should (eq 'conflict (harness-call 'merge/status child)))
-      (should (equal (list (cons child root)) allowed))
       (should (null finished))
-      ;; The child was steered with the file names and instructions.
+      ;; The parent's checkout is exactly as it was, and not locked.
+      (should (equal parent-head (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+      (should (string-empty-p (harness-merge-test--git root "status" "--porcelain")))
+      (should-not (file-exists-p (expand-file-name ".git/MERGE_HEAD" root)))
+      (should (null (gethash parent harness-merge--locks)))
+      ;; The child was steered to merge the parent's commit in its worktree.
       (harness-test-wait (lambda () (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes child)))
                          10 "child steering node")
       (let ((user (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes child))))
         (should (string-match-p "- README" (plist-get user :content)))
-        (should (string-match-p (regexp-quote root) (plist-get user :content)))
+        (should (string-match-p (regexp-quote (concat "git merge " (substring parent-head 0 12))) (plist-get user :content)))
         (should (string-match-p "merge_done" (plist-get user :content)))
         (should (equal (harness-sender-system "merge queue") (harness-node-sender user))))
       (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get child) :status))) 10 "child idle")
-      ;; The parent is held: a new turn waits for the lock.
-      (let ((held (harness-call 'agent/prompt parent "hello while merging")))
-        (should-not (harness-promise-settled-p held))
-        (accept-process-output nil 0.1)
-        (should-not (harness-promise-settled-p held))
-        ;; merge_done fails while the conflict remains.
-        (let ((r (harness-merge-test--merge-done child)))
-          (should (plist-get r :is-error))
-          (should (string-match-p "README" (plist-get r :content))))
-        ;; Resolve but do not commit: still refused.
-        (harness-merge-test--write root "README" "resolved version\n")
-        (harness-merge-test--git root "add" "README")
-        (let ((r (harness-merge-test--merge-done child)))
-          (should (plist-get r :is-error))
-          (should (string-match-p "not committed" (plist-get r :content))))
-        (harness-merge-test--git root "commit" "-q" "--no-edit")
-        (let ((r (harness-merge-test--merge-done child)))
-          (should-not (plist-get r :is-error))
-          (should (string-match-p "completed" (plist-get r :content))))
-        (should (equal (list child parent 'merged) (car finished)))
-        (should (null (harness-call 'merge/queue parent)))
-        (should (null (gethash parent harness-merge--locks)))
-        ;; The held turn now runs.
-        (should (eq 'end-turn (plist-get (harness-test-await held) :stop-reason)))
-        (should (equal "resolved version\n"
-                       (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
-        (should (= 2 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))))))
+      ;; The parent is not held while the child resolves.
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt parent "hello")) :stop-reason)))
+      ;; merge_done fails before the parent's commit is merged in.
+      (let ((r (harness-merge-test--merge-done child)))
+        (should (plist-get r :is-error))
+        (should (string-match-p "does not contain" (plist-get r :content))))
+      ;; In the middle of the merge: conflicts remain.
+      (ignore-errors (harness-merge-test--git wt "merge" "-q" parent-head))
+      (let ((r (harness-merge-test--merge-done child)))
+        (should (plist-get r :is-error))
+        (should (string-match-p "README" (plist-get r :content))))
+      ;; Resolved but not committed: still refused.
+      (harness-merge-test--write wt "README" "resolved version\n")
+      (harness-merge-test--git wt "add" "README")
+      (let ((r (harness-merge-test--merge-done child)))
+        (should (plist-get r :is-error))
+        (should (string-match-p "not committed" (plist-get r :content))))
+      (harness-merge-test--git wt "commit" "-q" "--no-edit")
+      (let ((r (harness-merge-test--merge-done child)))
+        (should-not (plist-get r :is-error))
+        (should (string-match-p "queued" (plist-get r :content))))
+      (harness-test-wait (lambda () finished) 10 "merged")
+      (should (equal (list child parent 'merged) (car finished)))
+      (should (null (harness-call 'merge/queue parent)))
+      (should (null (gethash parent harness-merge--locks)))
+      (should (equal "resolved version\n"
+                     (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
+      (should (= 2 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t)))))))
+
+(ert-deftest harness-merge-keeps-local-work-in-the-parent ()
+  "Uncommitted work in the parent's checkout in the merge's way is never touched."
+  (harness-merge-test-with
+    (harness-merge-test--write wt "README" "child version\n")
+    (harness-merge-test--write wt "feature.txt" "new feature\n")
+    (harness-merge-test--commit wt "child edit" "README" "feature.txt")
+    ;; Someone's uncommitted edit, and an untracked file, in the parent.
+    (harness-merge-test--write root "README" "work in progress\n")
+    (harness-merge-test--write root "notes.txt" "scratch\n")
+    (let ((finished nil)
+          (head (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "merge finished")
+      (should (equal (list child parent 'failed) (car finished)))
+      (should (equal head (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+      (should-not (file-exists-p (expand-file-name ".git/MERGE_HEAD" root)))
+      (should-not (file-exists-p (expand-file-name "feature.txt" root)))
+      (should (equal "work in progress\n"
+                     (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
+      (should (file-exists-p (expand-file-name "notes.txt" root)))
+      (should (cl-some (lambda (h) (string-match-p "left untouched" h)) (harness-merge-test--hints parent)))
+      (should (null (gethash parent harness-merge--locks))))))
+
+(ert-deftest harness-merge-leaves-a-merge-in-progress-alone ()
+  "A merge someone left in progress in the parent is neither finished nor aborted."
+  (harness-merge-test-with
+    (harness-merge-test--write wt "feature.txt" "new feature\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    (let ((other (harness-merge-test--worktree base root "other")))
+      (harness-merge-test--write other "README" "other version\n")
+      (harness-merge-test--commit other "other edit" "README")
+      (harness-merge-test--write root "README" "parent version\n")
+      (harness-merge-test--commit root "parent edit" "README")
+      (ignore-errors (harness-merge-test--git root "merge" "-q" "other")))
+    (should (file-exists-p (expand-file-name ".git/MERGE_HEAD" root)))
+    (let ((finished nil))
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "merge finished")
+      (should (equal (list child parent 'failed) (car finished)))
+      (should (file-exists-p (expand-file-name ".git/MERGE_HEAD" root)))
+      (should (equal '("README") (split-string (harness-merge-test--git root "diff" "--name-only" "--diff-filter=U") "\n" t)))
+      (should-not (file-exists-p (expand-file-name "feature.txt" root))))))
 
 (ert-deftest harness-merge-pauses-a-running-parent-at-a-step ()
   (harness-merge-test-with
@@ -282,7 +332,8 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
       (harness-call 'merge/enqueue child parent)
       (harness-test-wait (lambda () finished) 10 "aborted")
       (should (equal (list child parent 'aborted) (car finished)))
-      (should (string-empty-p (harness-merge-test--git root "diff" "--name-only" "--diff-filter=U")))
+      (should (null (harness-call 'merge/status child)))
+      (should (string-empty-p (harness-merge-test--git root "status" "--porcelain")))
       (should (equal "parent version\n"
                      (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
       (should (null (gethash parent harness-merge--locks))))))

@@ -1003,7 +1003,9 @@ args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
 :paths (…))`.  Chain (priority): 5 dir-request, 7 sandbox-guard, 10 jail,
 20 mode, 25 write-up (the tasks module: a backlog write-up only reads),
 30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a
-pending request and resolves when answered).
+pending request and resolves when answered).  A judge denial reaches 90
+as an `ask` in an interactive session, so the user answers it; in a
+non-interactive session it stays a denial.
 
 - The sandbox guard asks `sandbox/check-command` about every `exec` call
   whose input has a `:command` (the bash tool), passing the directory it
@@ -1139,6 +1141,23 @@ pending request and resolves when answered).
   directory and the allowed roots.  The request is `:ephemeral`, so the
   provider brings no earlier verdicts and no project instructions
   (CLAUDE.md).  A judge's denial carries `harness-perms-judge-deny-hint`.
+  A long input is cut (`harness-perms--judge-input-chars') and the block
+  above it says so; the judge is told to weigh what the call would do,
+  never whether a value looks complete, since a cut input once read as
+  the agent's own truncated edit ("the replacement string is
+  truncated ... that would corrupt the file").
+- A judge denial is a verdict on one call, not on the work, so an
+  interactive session puts it to the user instead of enforcing it
+  (`harness-perms--judge-decision`): stage 30 hands on an `ask` that
+  keeps the judge's reason and `:judge-deny', stage 90 opens the
+  permission prompt (`harness-perms--judge-prompt-reason` words it as
+  "The permission judge would deny this call: …"), and the user answers
+  it like any other permission request: allow once, for the session, or
+  always.  Switching the session to yolo used to be the only way past a
+  denial the user disagreed with.  A non-interactive session has nobody
+  to ask: the denial stands and the agent is steered to another
+  approach.  A judge that gives no verdict at all leaves the call `ask`
+  as before, which the user is asked about in an interactive session.
 - Jail denials are final and carry a constructive hint listing the
   allowed roots and how to widen them.  A path elsewhere in the
   system's temporary directory (and the agent's own request for one)
@@ -1188,7 +1207,10 @@ pending request and resolves when answered).
   stays private to each command.
 - A CWD inside a linked git worktree also gets the repository's common
   git directory read-write (its `hooks/` and `config` stay read-only, so
-  nothing planted there runs when the harness uses git unconfined) and
+  nothing planted there runs when the harness uses git unconfined; the
+  main checkout's `index` and `HEAD` stay read-only too, since git there
+  would see the main checkout's files, absent from the sandbox, as
+  deleted and could wreck its index) and
   the host's `user.name`/`user.email` as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`,
   so worktree sessions can commit.
 - Git in the sandbox sees no other worktree's files, so it takes every
@@ -1257,7 +1279,13 @@ pending request and resolves when answered).
   Steering is drained at every boundary (each tool result and each
   step), so it is delivered once; a model that stops with steering
   waiting gets one more step with it as the newest user message.
-  `max-turns` (`harness-agent-max-steps`, 200) ends runaway loops.
+  A turn has no step limit: long unattended work is the point, and the
+  loop ends when the model stops, the provider errors or hits its
+  output limit, the user cancels, or an `agent/step` filter (a merge
+  hold) pauses it at a boundary.  Automatic compaction runs between
+  turns (`agent/before-turn'), not inside one, so a native-provider
+  turn that outgrows the window reaches the provider's own error;
+  budgets refuse new turns.
 - Streaming updates of the live node are not persisted one by one; on
   exit (`kill-emacs-hook`) and shutdown the text streamed so far is.
 - Provider conversation and head: before a turn's gate,
@@ -1434,14 +1462,22 @@ pending request and resolves when answered).
 - `merge/enqueue CHILD-SID PARENT-SID` → position; `merge/queue PARENT-SID`;
   `merge/cancel CHILD-SID`.  When the parent reaches a step boundary
   (`agent/step` filter) or is idle, the head of the queue gets the lock:
-  the harness runs `git merge --no-ff` of the child's branch in the
-  parent's cwd; on conflict the child session receives a steering
-  message describing the conflicts (from
-  `harness-sender-system "merge queue"`) and its jail is widened to the
-  parent's cwd until it resolves; then the lock passes on.  A merged
-  child's worktree loses the harness's lock (`worktree/unlock`; see
-  worktree).
-- `merge/status CHILD-SID`; the `merge_done` tool releases a conflict lock.
+  each merge is a transaction that never leaves the parent's checkout
+  mid-merge.  `git merge-tree --write-tree` merges the child's branch
+  into the parent's HEAD off to the side; a clean result becomes a merge
+  commit (`git commit-tree`, message as `git merge --no-ff` writes it)
+  and the checkout moves onto it with `git merge --ff-only`, which git
+  refuses, changing nothing, when it would overwrite uncommitted or
+  untracked work there or a merge is already in progress (the merge
+  fails; a HEAD that moved meanwhile is merged again).  On conflict the
+  parent is untouched and the lock passes on at once: the child session
+  receives a steering message (from `harness-sender-system "merge
+  queue"`) naming the files and the parent's commit to `git merge` into
+  its own branch, in its own worktree.  A merged child's worktree loses
+  the harness's lock (`worktree/unlock`; see worktree).
+- `merge/status CHILD-SID`; the `merge_done` tool checks the child's
+  worktree contains the parent's commit, merged and committed, and
+  queues the branch again.
 - Events `merge/queued CHILD PARENT POSITION`, `merge/started`,
   `merge/conflict CHILD PARENT FILES`, `merge/finished CHILD PARENT STATUS`
   (merged|failed|aborted|cancelled).
@@ -2129,8 +2165,10 @@ listener.
 `harness-ui` owns the connection (`harness-ui-connection`, local by
 default; `harness-connect-remote` swaps it, and an empty address swaps
 it back to this Emacs's own harness; `harness-ui-connected-hook`
-runs after every connect, where the chat reopens the closed sessions its
-buffers show, as a harness that just started has them all closed), the face set
+runs after every connect, where the chat reopens the sessions its
+buffers showed open, as a harness that just started has them all
+closed -- not one a buffer showed inactive, nor one a buffer still
+loading has not heard of yet), the face set
 (`harness-user-face`, `harness-agent-face`, `harness-tool-face`,
 `harness-thinking-face`, `harness-hint-face`, warning ramps), the
 session cache updated from `_harness/session` updates, the tool cache
@@ -2281,6 +2319,30 @@ host whose box does something else than compose -- the task board's,
 which sends to a session -- marks it; `harness-compose-bar` draws that
 same bar on the host's own lines around the box.  Without either
 argument the box is the plain one.
+An attachment chip leads with a thumbnail (`harness-compose-thumbnail-lines`)
+when it is an image, or a video whose thumbnail the media module makes
+with ffmpeg in the background (a chip asks for it through
+`harness-ui-media-video-thumbnail' and is drawn again when it lands).  A
+link dropped from a browser or a page (`dnd-protocol-alist` for
+http/https/ftp, plus the X types through `x-dnd-types-alist`: a raw
+image, a browser's file promise, `text/html`, text, and X direct save)
+downloads with `harness-http-download` behind a chip whose spinner,
+progress bar and size an overlay redraws, so the buffer's text is not
+touched while it ticks; the file attaches under the name the server or
+the link gave, or the link goes in as text when it turns out to be a
+web page.  Sending waits for a download in flight.  The X handlers take
+what the drop says the dragged media is (a browser's `text/html` or
+`application/x-moz-file-promise-url` names the image inside a link),
+and dropped text goes into the box rather than into the read-only
+transcript around it.  A link off a selection arrives propertized
+(`foreign-selection`), which is why the code that hands one to curl
+strips text properties first.
+Media on the clipboard is read without touching `kill-ring`: `C-y` in a
+compose box attaches the image, or the files a file manager copied, and
+pushes captures on the media ring (`harness-ui-media-ring`), a ring of
+its own under `harness-state-directory/clips/` deduplicated by the
+SHA-1 of the bytes, which `M-y` goes back through and `C-u C-c C-v`
+picks from; `yank-media` attaches them too (`harness-compose-yank-media`).
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
@@ -2506,7 +2568,9 @@ quit; `harness-ui-popout-at-point-functions' lets a view pop out the item
 at point with one key), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video posters that play the video, and the attachments a tool
-result or a message carries), popouts (`harness-ui-popout`: one item of
+result or a message carries; a compose chip's thumbnail comes through
+`harness-ui-media-video-thumbnail`, which makes one in the background and
+tells the chip when it is there), popouts (`harness-ui-popout`: one item of
 a session or a task in a small selected bottom side window, fitted to
 its content up to `harness-ui-popout-max-height` or the popout's own
 `:max-height`, one buffer per KEY the owner picks; `q`/`g` on the
@@ -2544,4 +2608,7 @@ report; videos and files through ui-media, code as a block, notes, and
 a referenced tool call drawn as the call it links to, with [Open in
 the session]; opened from the board's [Report] button and from the
 banner, in a popout of its own, to which other modules add panels and a
-box).
+box, which follows `task/changed` and closes once the review is decided
+-- the task turns verified, or is sent back with a new round of
+`:feedback` -- wherever that was done; the report of a task decided
+before it opened stays).

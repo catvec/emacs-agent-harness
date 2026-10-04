@@ -36,10 +36,6 @@
 
 (declare-function harness-tool-title "harness-tools")
 
-(defcustom harness-agent-max-steps 200
-  "Maximum model calls in one turn before the harness stops it."
-  :type 'integer :group 'harness)
-
 (defconst harness-agent--base-system-prompt
   "You are an expert software engineering agent working inside the user's GNU Emacs through the Emacs agent harness.
 
@@ -478,9 +474,6 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
   (let ((sid (harness-agent-turn-session-id turn)))
     (cond
      ((harness-agent-turn-cancelled turn) (harness-agent--end turn 'cancelled))
-     ((>= (harness-agent-turn-steps turn) harness-agent-max-steps)
-      (harness-call 'session/hint sid (format "Stopped after %d steps" harness-agent-max-steps))
-      (harness-agent--end turn 'max-steps))
      ((not (harness-call 'session/exists-p sid)) (harness-agent--end turn 'error "session deleted"))
      (t
       (cl-incf (harness-agent-turn-steps turn))

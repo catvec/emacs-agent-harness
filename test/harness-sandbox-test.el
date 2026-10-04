@@ -224,6 +224,8 @@ re-detected before BODY and restored afterwards."
         (should (harness-sandbox-test--subseq-p (list "--bind" common common) cmd))
         (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/hooks") (concat common "/hooks")) cmd))
         (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/config") (concat common "/config")) cmd))
+        (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/index") (concat common "/index")) cmd))
+        (should (harness-sandbox-test--subseq-p (list "--ro-bind" (concat common "/HEAD") (concat common "/HEAD")) cmd))
         ;; Read-only binds come after the writable one, so they win.
         (should (< (cl-position (concat common "/hooks") cmd :test #'equal)
                    (cl-position "--unshare-pid" cmd :test #'equal)))
@@ -258,6 +260,29 @@ re-detected before BODY and restored afterwards."
     (should-not (file-exists-p hook))
     (should (equal "inside\n" (harness-sandbox-test--git wt "log" "-1" "--format=%s")))
     (should (equal "Sandbox Test\n" (harness-sandbox-test--git wt "log" "-1" "--format=%an")))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-main-index-read-only ()
+  "Under the real bwrap, git in a worktree cannot change the main checkout's index.
+The main checkout's files are not in the sandbox, so git there sees them
+all deleted; staging anything would wreck its index."
+  (harness-sandbox-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (let* ((repo (harness-sandbox-test--worktree))
+         (root (car repo))
+         (wt (cdr repo))
+         (harness-sandbox-policy 'required)
+         (cmd (harness-call 'sandbox/wrap wt
+                            (list "sh" "-c"
+                                  (format "git -C %s rm -q --cached README 2>/dev/null && echo staged || echo index-refused; echo change > f && git add f && git -c commit.gpgsign=false commit -q -m inside && echo committed"
+                                          (shell-quote-argument root)))))
+         (r (harness-await (harness-run-command cmd :cwd wt :timeout 20))))
+    (when (and (not (eql 0 (plist-get r :exit))) (string-match-p "bwrap:" (plist-get r :stderr)))
+      (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get r :stderr)))))
+    (should (string-match-p "index-refused" (plist-get r :stdout)))
+    (should (string-match-p "committed" (plist-get r :stdout)))
+    (should (string-empty-p (harness-sandbox-test--git root "status" "--porcelain")))))
 
 ;;;; Refusing git worktree commands
 

@@ -377,7 +377,7 @@ The model gets it as a user message all the same."
 
 (ert-deftest harness-agent-steering-during-last-step-is-sent-once ()
   "Steering that arrives after the last tool call gets one more step, then the turn ends.
-It used to stay pending, so every later stop stepped again until max-steps."
+It used to stay pending, so every later stop stepped the provider again."
   (harness-agent-test-with
     (let ((id (harness-agent-test-session))
           (harness-provider-demo--delay 0.05)
@@ -390,6 +390,27 @@ It used to stay pending, so every later stop stepped again until max-steps."
       (should (= 2 steps))
       (should (equal '(user assistant user assistant) (harness-agent-test-kinds id)))
       (should (string-match-p "also this" (plist-get (car (last (harness-call 'session/nodes id))) :content))))))
+
+(ert-deftest harness-agent-turn-has-no-step-limit ()
+  "A turn is not capped: it runs until the model stops, however many steps that takes.
+The harness is for long unattended runs, so a step cap must not cut one
+short (this would have ended at 200 steps before)."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (rounds 210)
+          (harness-provider-demo--delay 0.0005)
+          (steps 0))
+      (setq harness-provider-demo-script-override
+            (append (cl-loop for i from 1 to rounds
+                             collect (list :type 'tool-call :id (format "c%d" i)
+                                           :name "list_dir" :input (list :path ".")))
+                    '((:type done :stop-reason end-turn))))
+      (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))
+      (let ((result (harness-test-await (harness-call 'agent/prompt id "keep going") 60)))
+        (should (eq 'end-turn (plist-get result :stop-reason)))
+        ;; One step per tool round, then the step the model ends on.
+        (should (= (1+ rounds) steps))
+        (should (= rounds (cl-count 'tool-call (harness-agent-test-kinds id))))))))
 
 (ert-deftest harness-agent-steering-after-last-tool-call-hosted ()
   "A hosted loop gets steering sent after its last tool call once, as its next message.

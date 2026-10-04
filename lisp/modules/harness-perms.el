@@ -14,7 +14,8 @@
 ;;                       otherwise the user is asked for the directory
 ;;   20 mode             ask / accept-edits / auto / yolo, plus standing rules
 ;;   30 auto             a cheap model judges what is still undecided, in
-;;                       auto mode and in every non-interactive session
+;;                       auto mode and in every non-interactive session;
+;;                       a denial is put to the user when one is present
 ;;   40 non-interactive  the judge gave no verdict and the user is away:
 ;;                       nobody can approve the call, so it is denied
 ;;   90 ask-user         a pending request the UI answers
@@ -44,6 +45,14 @@
 ;; done.  Its request is `:ephemeral', so the provider brings no earlier
 ;; verdicts and no project instructions (CLAUDE.md) along: it never
 ;; rules on the task, its review or the project's workflow.
+;;
+;; Its verdict is a verdict on one call, never on the work: an `auto'
+;; session whose user is present turns a judge denial into a permission
+;; prompt (`harness-perms--judge-decision') that says what the judge
+;; objected to, so the user can allow a call the judge was wrong about
+;; instead of the work stopping (or the user having to leave auto mode).
+;; A non-interactive session has nobody to ask: it takes the verdict and
+;; steers the agent to another approach.
 ;;
 ;; An agent asks for another directory with the request_directory_access
 ;; tool.  The first stage owns that tool's decision and always makes it
@@ -163,6 +172,11 @@ again with `harness-perms--judge-retry-max-tokens'.")
   "Output budget of the auto-mode judge's second call.
 The first ran out of tokens, which a reasoning model does before its
 verdict is written, so the second gives it room to think and answer.")
+
+(defconst harness-perms--judge-input-chars 12000
+  "Characters of a call's input the auto-mode judge is shown.
+A longer input is cut, and the judge is told so above it: the judge
+weighs what the call would do, never whether an input looks complete.")
 
 ;;;; Runtime state (survives reloads)
 
@@ -909,6 +923,12 @@ Deny only what clearly risks serious harm:
   .dir-locals.el files), changing the permission mode or the non-interactive
   setting, or turning the sandbox off.  Only the user grants directories; the
   agent asks for one with the request_directory_access tool.
+
+The harness's own tools are ordinary work: spawning and answering sub-agents,
+reading, messaging and controlling other sessions of the harness, reading and
+writing the task board, and reading or writing the harness's own files inside
+the allowed roots.
+
 When in doubt, allow: a needless denial stops work the user wants done.  Reply
 with exactly one line of JSON and nothing else:
 {\"decision\":\"allow\"|\"deny\",\"reason\":\"one short sentence\"}"
@@ -933,6 +953,20 @@ the judge's to enforce."
           ((string-match "[.!?]\\([ \t\n]+\\)[[:upper:]]" text) (substring text 0 (match-beginning 1)))
           (t text))))
 
+(defun harness-perms--judge-input (input)
+  "Return the input block of the judge's message for a call's INPUT.
+A long input is cut so the judge call stays small, and the block says
+so above the JSON: the judge used to be shown a trailing ellipsis
+instead, and read it as the agent's own incomplete value (\"the
+replacement string is truncated ... that would corrupt the file\")."
+  (let* ((json (harness-json-encode-text (or input :empty)))
+         (limit harness-perms--judge-input-chars))
+    (if (<= (length json) limit)
+        (format "Input (JSON):\n%s" json)
+      (format (concat "Input (JSON, longer than %d characters: the harness shows"
+                      " its first %d and cut the rest; the call is not missing anything):\n%s")
+              (length json) limit (substring json 0 limit)))))
+
 (defun harness-perms--judge-text (request)
   "Return the user message describing REQUEST for the judge.
 That is the call alone: the tool, what it does, its input, and where
@@ -942,10 +976,10 @@ input would make that fail."
   (let* ((tool (plist-get request :tool))
          (spec (and (harness-method-exists-p 'tools/get) (harness-call 'tools/get tool)))
          (session (plist-get request :session)))
-    (format "Tool: %s\nKind: %s\nWhat it does: %s\n\nInput (JSON):\n%s\n\nWorking directory: %s\nAllowed roots (where the agent's own work lives):\n%s\n\nIs this one call safe?  Answer with one line of JSON: {\"decision\":\"allow\"|\"deny\",\"reason\":\"...\"}"
+    (format "Tool: %s\nKind: %s\nWhat it does: %s\n\n%s\n\nWorking directory: %s\nAllowed roots (where the agent's own work lives):\n%s\n\nIs this one call safe?  Answer with one line of JSON: {\"decision\":\"allow\"|\"deny\",\"reason\":\"...\"}"
             tool (plist-get request :kind)
             (harness-perms--what-it-does (plist-get spec :description))
-            (harness-truncate-end (harness-json-encode-text (or (plist-get request :input) :empty)) 4000)
+            (harness-perms--judge-input (plist-get request :input))
             (or (plist-get session :cwd) default-directory)
             (mapconcat (lambda (r) (concat "- " r)) (harness-perms-roots session) "\n"))))
 
@@ -964,6 +998,29 @@ Return nil when TEXT holds no usable verdict."
         ("allow" (list :behavior 'allow :reason (or reason "allowed by the auto-mode judge")))
         ("deny" (list :behavior 'deny :reason (or reason "denied by the auto-mode judge")
                       :hint harness-perms-judge-deny-hint))))))
+
+(defun harness-perms--judge-decision (verdict session)
+  "Return the decision a judge VERDICT makes for SESSION.
+An allow stands.  A deny stands while the user is away.  Interactive,
+where the user can answer and the judge is a model that can be wrong,
+it is put to the user instead: `:behavior ask' with the judge's reason
+and `:judge-deny' kept, so the prompt says where the doubt comes from
+and the user decides whether the call may run."
+  (if (and (eq (plist-get verdict :behavior) 'deny)
+           (not (harness-perms--non-interactive-p session))
+           (harness-method-exists-p 'session/pending-add))
+      (list :behavior 'ask :judge-deny t
+            :reason (plist-get verdict :reason)
+            :hint (plist-get verdict :hint))
+    verdict))
+
+(defun harness-perms--judge-prompt-reason (decision)
+  "Return the prompt line for a judge denial DECISION, or nil.
+It says the judge was against the call and why, so the user knows what
+they are being asked about."
+  (when (plist-get decision :judge-deny)
+    (format "The permission judge would deny this call: %s"
+            (or (plist-get decision :reason) "no reason given"))))
 
 (defun harness-perms--no-verdict-message (tool event text)
   "Return the warning for a judge of TOOL whose `done' EVENT brought no verdict.
@@ -1022,7 +1079,7 @@ value and NEXT continues the chain."
                          (funcall next (if (eq d decision)
                                            (plist-put (copy-sequence decision) :no-verdict
                                                       (or failure "it gave no answer"))
-                                         d))))))
+                                         (harness-perms--judge-decision d session)))))))
         (cl-labels
             ;; Ask once, as call N.  Each call keeps its own reply and
             ;; only speaks while it is the live one, so an event from a
@@ -1199,6 +1256,7 @@ denied because nobody can answer."
                                                    :call-id (plist-get request :call-id))
                                              (and pattern (list :pattern pattern))
                                              (list :title (harness-perms-describe-request request)
+                                                   :reason (harness-perms--judge-prompt-reason decision)
                                                    :options harness-perms-options))))
              (pid (harness-call 'session/pending-add sid pending)))
         (puthash pid (list :session-id sid :request request :next next :pattern pattern) harness-perms--waiting)

@@ -29,6 +29,21 @@
 
 ;;;; bash
 
+(ert-deftest harness-tools-shell-bash-skips-the-login-profile ()
+  "A command runs without the user's login profile.
+A profile's side effects go wrong there: one that started an ssh-agent
+when it saw none ran in the sandbox's PID namespace, saw none, and
+overwrote the user's saved agent details with a dead one."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (with-temp-file (expand-file-name ".bash_profile" root)
+      (insert "echo profile-ran\n"))
+    (with-temp-file (expand-file-name ".profile" root)
+      (insert "echo profile-ran\n"))
+    (let* ((process-environment (cons (concat "HOME=" root) process-environment))
+           (r (harness-tools-shell-test--call "bash" :command "echo hi")))
+      (should (equal "hi\nexit 0" (plist-get r :content))))))
+
 (ert-deftest harness-tools-shell-bash-output-and-exit-codes ()
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir

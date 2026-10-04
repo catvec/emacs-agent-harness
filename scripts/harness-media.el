@@ -1871,10 +1871,73 @@ Every project starts folded, whatever an earlier shot unfolded."
   (harness-media--capture "remote")
   (harness-call 'acp/remote-stop))
 
+(defun harness-media--attachments-make-media ()
+  "Make the picture and the video the attachments shot sends.
+They go in the demo project; return (PNG MP4), or nil without ffmpeg."
+  (let ((png (harness-media--path "docs/screenshot.png"))
+        (mp4 (harness-media--path "docs/walkthrough.mp4"))
+        (ffmpeg (executable-find "ffmpeg")))
+    (when ffmpeg
+      (make-directory (file-name-directory png) t)
+      (unless (file-exists-p png)
+        (call-process ffmpeg nil nil nil "-loglevel" "error" "-y" "-f" "lavfi"
+                      "-i" "testsrc2=size=960x540" "-frames:v" "1" png))
+      (unless (file-exists-p mp4)
+        (call-process ffmpeg nil nil nil "-loglevel" "error" "-y" "-f" "lavfi"
+                      "-i" "testsrc=duration=3:size=960x540:rate=25"
+                      "-c:v" "libx264" "-pix_fmt" "yuv420p" mp4))
+      (list png mp4))))
+
+(defun harness-media--attachments-downloading ()
+  "Put a link that is still downloading in the current compose box.
+Nothing is fetched: the chip reads the bytes of a partly written file
+against the size the server said, which is what a real one shows."
+  (let* ((dir (harness-ensure-directory (expand-file-name "downloads/" harness-state-directory)))
+         (partial (expand-file-name "walkthrough.mp4.part" dir))
+         (total 12400000)
+         (received (round (* 0.41 total)))
+         (coding-system-for-write 'binary))
+    (with-temp-file partial
+      (set-buffer-multibyte nil)
+      (insert-char ?x received))
+    (setq harness-compose-attachments
+          (append harness-compose-attachments
+                  (list (list :pending t :id "shot" :name "walkthrough.mp4"
+                              :url "https://acme.example/docs/walkthrough.mp4"
+                              :download (harness-http--make-download
+                                         :url "https://acme.example/docs/walkthrough.mp4"
+                                         :file partial :total total
+                                         :name "walkthrough.mp4" :mime "video/mp4")))))))
+
+(defun harness-media--attachments-wait-for-thumbnails (files)
+  "Wait until the video in FILES has its thumbnail, or give up."
+  (let ((deadline (+ (float-time) 30)))
+    (while (and (< (float-time) deadline)
+                (not (file-exists-p (harness-ui-media-thumbnail-path (cadr files)))))
+      (harness-media--settle 0.5))
+    (harness-media--settle 0.5)))
+
+(defun harness-media-shot-attachments ()
+  "The compose box of a chat: a picture and a video attached, both with
+their thumbnails in the chips, and a link still downloading with its
+progress."
+  (let* ((buffer (harness-media--open-chat (plist-get harness-media--world :hero) 'full))
+         (files (harness-media--attachments-make-media)))
+    (harness-media--settle 1)
+    (with-current-buffer buffer
+      (dolist (file files) (harness-compose-add-attachment file))
+      (harness-media--attachments-downloading)
+      (harness-compose-redraw))
+    (when files (harness-media--attachments-wait-for-thumbnails files))
+    (harness-media--fit (harness-media--text-lines (selected-window)) 30)
+    (harness-media--to-bottom buffer)
+    (harness-media--capture "attachments")))
+
 (defconst harness-media-shots
   '(("chat" . harness-media-shot-chat)
     ("chat-permission" . harness-media-shot-chat-permission)
     ("chat-question" . harness-media-shot-chat-question)
+    ("attachments" . harness-media-shot-attachments)
     ("tasks" . harness-media-shot-tasks)
     ("tasks-long" . harness-media-shot-tasks-long)
     ("tasks-message" . harness-media-shot-tasks-message)

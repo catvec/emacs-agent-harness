@@ -347,6 +347,10 @@ class Fake:
         self.rpc_id += 1
         listed = self.mcp({"jsonrpc": "2.0", "id": self.rpc_id, "method": "tools/list"})
         self.tools = listed.get("result", {}).get("tools", [])
+        # Claude Code 2.1.289 refuses a whole listing with "required": null
+        # in a schema, and offers the model none of the server's tools.
+        if any(t.get("inputSchema", {}).get("required", []) is None for t in self.tools):
+            self.tools = []
 
     def answer(self, request_id, response):
         emit({"type": "control_response",
@@ -531,7 +535,8 @@ class Fake:
             text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         self.record("user", text)
         emit({"type": "system", "subtype": "init", "session_id": self.session_id,
-              "model": self.model, "cwd": os.getcwd(), "tools": [],
+              "model": self.model, "cwd": os.getcwd(),
+              "tools": ["mcp__harness__" + t["name"] for t in self.tools],
               "mcp_servers": [{"name": "harness", "status": "connected"}],
               "apiKeySource": "ANTHROPIC_API_KEY" if AUTH == "api" else "none",
               "permissionMode": self.permission_mode})
