@@ -69,6 +69,12 @@
 ;; Roots and rules alike are directories or patterns (see
 ;; `harness-perms--within-p').
 ;;
+;; Switching a session that is waiting on a prompt into yolo mode answers
+;; the prompt: the call was open only because the old mode asked, and
+;; yolo would have allowed it.  A standing rule still decides, and a
+;; directory prompt keeps waiting, because yolo does not grant
+;; directories.
+;;
 ;; The module works without the session and agent modules: methods it
 ;; needs from them are looked up with `harness-method-exists-p'.
 
@@ -1330,6 +1336,44 @@ a call with paths the rule holds for the answer's pattern (see
     (funcall (plist-get waiting :next) decision)
     decision))
 
+;;;; Switching to yolo with a prompt waiting
+
+(defun harness-perms--accept-yolo (session-id)
+  "Answer SESSION-ID's waiting prompts that yolo would have allowed.
+A pending tool prompt was asked because the mode in effect left the
+call undecided; once the session is in yolo the call would be allowed
+without asking, so the prompt is answered allow-once and the call runs.
+Only what the mode stage now allows is answered, so a standing deny
+rule still decides, and a directory prompt keeps waiting: not even yolo
+grants a directory without the user's answer."
+  (let ((session (harness-perms--session session-id)) pids)
+    (when (eq (harness-perms--mode-of session) 'yolo)
+      (maphash
+       (lambda (pid waiting)
+         (when (equal (plist-get waiting :session-id) session-id)
+           (let* ((request (plist-get waiting :request))
+                  ;; The request holds the session as it was when the
+                  ;; prompt was made; the mode stage must see the new one.
+                  (fresh (plist-put (copy-sequence request) :session session)))
+             (when (and (not (plist-get waiting :dir))
+                        (eq 'allow (plist-get (harness-perms--mode-decision nil fresh) :behavior)))
+               (push pid pids)))))
+       harness-perms--waiting)
+      (dolist (pid (nreverse pids))
+        (condition-case err
+            (harness-call 'permission/answer
+                          session-id pid (list :behavior 'allow :scope 'once
+                                               :reason "the session switched to yolo mode"))
+          (error (harness-log 'warn "perms: could not accept %s for yolo mode: %s"
+                              pid (harness-error-message err))))))))
+
+(defun harness-perms--on-session-updated (session-id changes)
+  "Accept SESSION-ID's waiting prompts when it switches to yolo.
+The prompts are answered from the command loop, after the switch
+returns.  See `harness-perms--accept-yolo'."
+  (when (eq (harness-perms--sym (plist-get changes :permission-mode)) 'yolo)
+    (harness-run-soon #'harness-perms--accept-yolo session-id)))
+
 ;;;; Methods for UIs and the agent
 
 (defun harness-perms--expand-dir (session dir)
@@ -1460,14 +1504,16 @@ Safe to call again."
   (harness-add-filter 'permission/decide #'harness-perms--auto 30)
   (harness-add-filter 'permission/decide #'harness-perms--non-interactive 40)
   (harness-add-filter 'permission/decide #'harness-perms--ask 90)
-  (harness-on 'permission/decided #'harness-perms--on-decided))
+  (harness-on 'permission/decided #'harness-perms--on-decided)
+  (harness-on 'session/updated #'harness-perms--on-session-updated))
 
 (defun harness-perms--shutdown ()
   "Remove the `permission/decide' chain and the steering after denials."
   (dolist (fn '(harness-perms--dir-request harness-perms--sandbox-guard harness-perms--jail harness-perms--mode
                 harness-perms--auto harness-perms--non-interactive harness-perms--ask))
     (harness-remove-filter 'permission/decide fn))
-  (harness-off (cons 'permission/decided #'harness-perms--on-decided)))
+  (harness-off (cons 'permission/decided #'harness-perms--on-decided))
+  (harness-off (cons 'session/updated #'harness-perms--on-session-updated)))
 
 ;; A reload does not run `:init' again for a ready module, and the tools
 ;; above are registered at load time, so the chain is installed here too:

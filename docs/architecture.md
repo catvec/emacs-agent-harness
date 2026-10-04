@@ -1121,6 +1121,12 @@ non-interactive session it stays a denial.
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
   `web_fetch` reaches any URL and stays with the mode (the judge in auto).
+- Switching a session that waits on a `permission` prompt into `yolo`
+  answers the prompt (a `session/updated` handler): answering it
+  allow-once lets the call run, since yolo would have allowed it without
+  asking.  Only what the mode stage now allows is answered, so a
+  standing deny rule still decides; a directory prompt keeps waiting,
+  because not even yolo grants a directory without the user.
 - The judge is a safety check, not the agent's manager.  Its prompt
   (`harness-perms--judge-system`) has it decide one thing: whether the
   call risks serious harm that is hard to undo.  That means destroying

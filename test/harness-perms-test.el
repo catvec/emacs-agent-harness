@@ -1253,6 +1253,115 @@ for a request without a session record."
       (harness-test-await (car started)))
     (should (null (gethash "s1" harness-perms--allowed-dirs)))))
 
+;;;; Switching to yolo with a prompt waiting
+
+(defun harness-perms-test--real-session (mode)
+  "Load the real modules and create a session in MODE; return its id.
+To be used inside `harness-test-with-temp-state'; the caller clears
+`harness-sessions' afterwards."
+  (harness-test-reset-bus)
+  (dolist (m '(store project config provider session tools perms))
+    (harness-test-load-module m))
+  (clrhash harness-sessions)
+  (clrhash harness-perms--waiting)
+  (clrhash harness-perms--allowed-dirs)
+  (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode mode) :id))
+
+(ert-deftest harness-perms-yolo-switch-accepts-a-waiting-prompt ()
+  "Switching a waiting session to yolo answers what yolo would have allowed."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (harness-perms-test--request "bash" 'exec))))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "pending")
+    (should-not (harness-promise-settled-p p))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'yolo))
+    (harness-emit 'session/updated "s1" '(:permission-mode yolo))
+    (let ((d (harness-test-await p)))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (string-match-p "switched to yolo" (plist-get d :reason))))
+    (should (null harness-perms-test--pending))
+    (should (null (hash-table-keys harness-perms--waiting)))
+    ;; Allow once: the answer leaves nothing behind.
+    (should (null (gethash "s1" harness-perms--session-rules)))
+    (should (equal "p1" (caar harness-perms-test--resolved)))))
+
+(ert-deftest harness-perms-yolo-switch-keeps-what-yolo-would-not-allow ()
+  "A standing deny rule and a directory prompt outlive the switch to yolo."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((outside (harness-test-temp-dir))
+         (dir (harness-perms-test--start "read_file" 'read (expand-file-name "x.txt" outside)))
+         (tool (harness-perms-test--start "elisp" 'exec
+                                          (expand-file-name "f" (plist-get harness-perms-test--session :cwd)))))
+    (harness-perms-add-rule "s1" '(:tool "elisp" :behavior deny) 'session)
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'yolo))
+    (harness-emit 'session/updated "s1" '(:permission-mode yolo))
+    (accept-process-output nil 0.1)
+    ;; The jail asks for a directory in every mode, and the rule beats yolo.
+    (should-not (harness-promise-settled-p (car dir)))
+    (should-not (harness-promise-settled-p (car tool)))
+    (should (= 2 (length harness-perms-test--pending)))
+    ;; With the rule gone the tool prompt is accepted; the directory one
+    ;; still waits for the user's answer.
+    (remhash "s1" harness-perms--session-rules)
+    (harness-emit 'session/updated "s1" '(:permission-mode yolo))
+    (should (eq 'allow (plist-get (harness-test-await (car tool)) :behavior)))
+    (should-not (harness-promise-settled-p (car dir)))
+    (harness-call 'permission/answer "s1" (plist-get (cdr dir) :id) "allow-session")
+    (should (eq 'allow (plist-get (harness-test-await (car dir)) :behavior)))))
+
+(ert-deftest harness-perms-yolo-switch-runs-a-waiting-call ()
+  "Switching a blocked session to yolo runs the call it was waiting on."
+  (harness-test-with-temp-state
+    (unwind-protect
+        (let* ((sid (harness-perms-test--real-session 'ask))
+               (ran 0))
+          (harness-define-tool "t_exec" :label "Run" :kind 'exec
+                               :handler (lambda (_in _ctx) (cl-incf ran) "done"))
+          (let ((p (harness-call 'tools/execute sid (list :id "c1" :name "t_exec" :input nil))))
+            (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "prompt")
+            (should (zerop ran))
+            (harness-call 'session/update sid :permission-mode 'yolo)
+            (let ((r (harness-test-await p)))
+              (should-not (plist-get r :is-error))
+              (should (equal "done" (plist-get r :content))))
+            (should (= 1 ran))
+            (should (null (harness-call 'session/pending sid)))
+            (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+            ;; Allow once: no rule was recorded.
+            (should (null (gethash sid harness-perms--session-rules)))))
+      (clrhash harness-sessions))))
+
+(ert-deftest harness-perms-yolo-switch-keeps-a-directory-prompt ()
+  "Yolo is no permission to widen the jail: the directory prompt waits."
+  (harness-test-with-temp-state
+    (unwind-protect
+        (let* ((sid (harness-perms-test--real-session 'ask))
+               (outside (harness-test-temp-dir))
+               (ran 0))
+          (harness-define-tool "t_read" :label "Read" :kind 'read
+                               :paths (lambda (in) (list (plist-get in :path)))
+                               :handler (lambda (_in _ctx) (cl-incf ran) "read"))
+          (let ((p (harness-call 'tools/execute sid
+                                 (list :id "c1" :name "t_read"
+                                       :input (list :path (expand-file-name "x.txt" outside))))))
+            (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "directory prompt")
+            (should (plist-get (plist-get (car (harness-call 'session/pending sid)) :payload) :dir))
+            (harness-call 'session/update sid :permission-mode 'yolo)
+            (accept-process-output nil 0.2)
+            (should (zerop ran))
+            (should-not (harness-promise-settled-p p))
+            (should (harness-call 'session/pending sid))
+            (should-not (plist-get (harness-call 'session/get sid) :allowed-dirs))
+            ;; The user's answer still grants the directory, and only then
+            ;; the call runs.
+            (harness-call 'permission/answer
+                          sid (plist-get (car (harness-call 'session/pending sid)) :id) "allow-session")
+            (should-not (plist-get (harness-test-await p) :is-error))
+            (should (= 1 ran))))
+      (clrhash harness-sessions))))
+
 (defun harness-perms-test--end-to-end ()
   "Body of `harness-perms-dir-request-end-to-end', with real sessions loaded."
   (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode 'auto) :id))
