@@ -49,7 +49,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
-| `usage` | The usage dashboard over 30 days, by model | `harness-media-shot-usage` |
+| `usage` | The usage dashboard over 30 days, by model, with the fallback list beneath the plan | `harness-media-shot-usage` |
 | `worktrees` | The worktrees of the demo project | `harness-media-shot-worktrees` |
 | `settings` | The settings page for the demo project, which overrides two settings | `harness-media-shot-settings` |
 | `btw` | A BTW under the first picture's chat | `harness-media-shot-btw` |

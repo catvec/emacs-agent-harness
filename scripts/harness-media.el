@@ -1516,7 +1516,8 @@ Return the chat's buffer."
   (harness-media--capture "tree"))
 
 (defun harness-media-shot-usage ()
-  "The usage dashboard over 30 days, by model."
+  "The usage dashboard over 30 days, by model, with the fallback list."
+  (setq harness-fallback-models '("claude" "openrouter:openai/gpt-5"))
   (harness-media--view #'harness-usage
                        (lambda ()
                          (harness-ui-usage-set-period 'month)

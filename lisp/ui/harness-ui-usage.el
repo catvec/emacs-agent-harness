@@ -578,17 +578,30 @@ prices; rows sort by, and Share divides, their value at API prices."
 
 ;;;; Fallback list
 
+(defun harness-ui-usage--fallback-tier-text (entry)
+  "Return what provider fallback ENTRY stands for, one per tier.
+Such as \"cheap→Haiku 4.5 · balanced→Sonnet 5 · frontier→Opus 5.5\", the
+provider's word left off a model label it repeats."
+  (let* ((provider (or (plist-get entry :provider-label) (plist-get entry :provider) ""))
+         (word (car (split-string provider)))
+         (tiers (delq nil (mapcar
+                           (lambda (tier)
+                             (when-let* ((m (plist-get tier :model)))
+                               (let ((label (or (plist-get tier :label) m)))
+                                 (when (and word (not (string-empty-p word))
+                                            (string-prefix-p (concat word " ") label))
+                                   (setq label (substring label (1+ (length word)))))
+                                 (format "%s→%s" (plist-get tier :tier) label))))
+                           (plist-get entry :tiers)))))
+    (string-join tiers " · ")))
+
 (defun harness-ui-usage--fallback-entry-label (entry)
   "Return how fallback ENTRY reads: its model, or its provider and tiers."
   (let ((label (or (plist-get entry :label) (plist-get entry :entry))))
     (if (plist-get entry :model)
         (format "%s (%s)" label (or (plist-get entry :provider-label) (plist-get entry :provider)))
-      (let ((tiers (delq nil (mapcar (lambda (tier)
-                                       (let ((m (plist-get tier :model)))
-                                         (and m (format "%s %s" (plist-get tier :tier)
-                                                        (or (plist-get tier :label) m)))))
-                                     (plist-get entry :tiers)))))
-        (concat label (if tiers (concat "  " (string-join tiers " · ")) ""))))))
+      (let ((tiers (harness-ui-usage--fallback-tier-text entry)))
+        (concat label (if (string-empty-p tiers) "" (concat "  " tiers)))))))
 
 (defun harness-ui-usage--fallback-mark-text (mark)
   "Describe MARK, what ran out and until when, as the fallback would."
@@ -638,7 +651,7 @@ absent."
         (let* ((start (point))
                (state (harness-ui-usage--fallback-state entry)))
           (insert (format "  %2d. " (cl-incf number)))
-          (insert (format "%-36s " (harness-truncate-end (harness-ui-usage--fallback-entry-label entry) 36)))
+          (insert (format "%-74s " (harness-truncate-end (harness-ui-usage--fallback-entry-label entry) 74)))
           (insert (propertize (car state)
                               'face (if (plist-get entry :mark) 'warning 'harness-dim-face)
                               'help-echo (or (cdr state) nil)))
