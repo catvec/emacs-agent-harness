@@ -342,7 +342,9 @@ such as CLAUDE.md. It refuses only what risks serious harm that is
 hard to undo, such as wiping data outside the project, force pushes,
 system changes, leaking secrets, or widening its own permissions. It
 never rules on the task or your workflow, and when in doubt it allows.
-After any denial the agent is told to find another
+A call it would deny is put to you in an interactive session, with the
+judge's reason, so you can allow it; in a non-interactive session the
+denial stands and the agent is told to find another
 way. Access to directories outside the session's own still needs you,
 so it is denied while you are away. New sessions, task sessions
 included, start interactive unless `harness-non-interactive` is set.
