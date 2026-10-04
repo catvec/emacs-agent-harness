@@ -296,7 +296,9 @@ says what the actions did, and a third asks about what waits for an OK."
         (list :show #'harness-ui-tasks-search--show-p
               :banner #'harness-ui-tasks-search--banner
               :clear #'harness-ui-tasks-search-clear))
-  (harness-ui-tasks--render)
+  ;; Forced: the banner says what the search is doing, which the board's
+  ;; key -- the tasks -- does not change.
+  (harness-ui-tasks--render t)
   (force-mode-line-update))
 
 (defun harness-ui-tasks-search--update (board seq &rest changes)
@@ -476,7 +478,7 @@ An answer still on its way is dropped too."
     (cl-incf harness-ui-tasks-search--seq)
     (setq harness-ui-tasks-search--state nil
           harness-ui-tasks-filter nil)
-    (harness-ui-tasks--render)
+    (harness-ui-tasks--render t)
     (force-mode-line-update)))
 
 ;;;; The header line
