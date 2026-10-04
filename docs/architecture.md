@@ -1656,7 +1656,17 @@ verdict.
   of a report popout has the task already) and
   `task/hand-in ID REPORT` (record `:summary` and `:evidence` as the
   work ID handed in; the write-up tool's `:end-turn` ends its turn, which
-  the review step then picks up).
+  the review step then picks up).  A round of work whose turn ends
+  without a hand-in -- the model replied instead, or had no tools to
+  call -- gets a `:report` marked `:missing t` instead
+  (`harness-tasks--missing-report`): no evidence, and as `:summary` the
+  session's last message of the round.  A round starts at `:started`,
+  at each round of `:feedback`, and at `:reopened` (new work on a task
+  in review or done); a report handed in before the round started
+  speaks for earlier work, so a round that ends without a hand-in of
+  its own replaces it.  The board's button for such a report reads
+  [No report], its popout says "Not handed in", and the session's
+  review banner says so in a line.
 - Events `task/changed TASK`, `task/deleted ID`, `task/review TASK` (its
   work waits for the user's review), `task/done TASK HOW` (it became
   done; HOW is `merged` when the merge queue merged its branch,

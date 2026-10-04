@@ -108,10 +108,11 @@ calls a model or the network.
   verified and waiting in the merge queue, one in review (sent back
   once), one asking a question, two working
   (their turns held half way), two written up for the backlog.  They
-  run in real worktrees, commit and merge.  The pagination task, in
-  review, hands its work in (`hand_in`): a latency chart it writes,
-  `docs/orders-latency.svg`, and its real test run, which the report
-  pictures show.
+  run in real worktrees, commit and merge.  Every round of work ends
+  with `hand_in`, as a task session is told to (a round without it
+  would put `[No report]` on its card).  The pagination task hands in
+  a latency chart it writes, `docs/orders-latency.svg`, and its real
+  test run, which the report pictures show.
 - `harness-media--build-sessions` runs the conversations: the first
   picture's session, a fork of it and a BTW over it, the permission and
   question chats, and two older sessions, closed since.
