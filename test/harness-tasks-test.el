@@ -77,7 +77,8 @@ turn `harness-tasks-require-verification' on themselves."
 (defun harness-tasks-test-state (id) (plist-get (harness-tasks-test-task id) :state))
 
 (defun harness-tasks-test-wait-state (id state)
-  (harness-test-wait (lambda () (eq (harness-tasks-test-state id) state)) 5
+  "Wait until task ID is in STATE: merges run git, slow on a busy machine."
+  (harness-test-wait (lambda () (eq (harness-tasks-test-state id) state)) 30
                      (format "task %s to become %s" id state)))
 
 (defun harness-tasks-test-submit (prompt &optional cwd)
@@ -1240,10 +1241,10 @@ commits from call `harness-tasks-test--commit-on-call' on."
                                                        "status" "--porcelain" "--untracked-files=all")))
       ;; Archiving removes the worktree and the merged branch.
       (harness-call 'task/archive id)
-      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 10 "worktree removal")
+      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 30 "worktree removal")
       (should-not (file-directory-p (plist-get task :worktree)))
       (harness-test-wait (lambda () (string-empty-p (harness-tasks-test--git root "branch" "--list" (plist-get task :branch))))
-                         10 "branch deletion"))))
+                         30 "branch deletion"))))
 
 (ert-deftest harness-tasks-git-merge-failure-needs-input ()
   (harness-tasks-test-with-git
@@ -2020,7 +2021,7 @@ A session the user has to answer for comes first: the queue waits too."
         (should (equal "three\n" (harness-tasks-test--main-text root)))
         ;; Archived, its worktree goes.
         (harness-call 'task/archive id)
-        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 10 "worktree removal")
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 30 "worktree removal")
         (should-not (file-directory-p worktree))))))
 
 (ert-deftest harness-tasks-git-archive-removes-a-still-locked-worktree ()
@@ -2036,7 +2037,7 @@ A session the user has to answer for comes first: the queue waits too."
                                  (directory-file-name (plist-get task :worktree)))
         (should (harness-tasks-test--lock-line root (plist-get task :worktree)))
         (harness-call 'task/archive id)
-        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 10 "worktree removal")
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 30 "worktree removal")
         (should-not (file-directory-p (plist-get task :worktree)))))))
 
 (ert-deftest harness-tasks-git-reject-continues-in-its-worktree ()

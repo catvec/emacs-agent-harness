@@ -560,7 +560,7 @@ Two lines would grow the echo area and move the chart under the mouse."
       (harness-ui-usage-test-request "_harness/usage/set-budget"
                                      (list :budget (list :scope "project" :target project :amount 8 :hard t)))
       (harness-ui-usage-test-open)
-      (with-current-buffer harness-ui-usage-buffer-name
+      (with-current-buffer harness-ui-usage--buffer-name
         (let ((pos (point-min)) (found nil) (offenders nil))
           (while (< pos (point-max))
             (when-let* ((help (get-text-property pos 'help-echo)))

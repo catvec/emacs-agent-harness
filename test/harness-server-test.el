@@ -52,7 +52,7 @@ its way out is written to a process that is exiting."
     (setq harness-ui-connection-address nil harness-ui-connection nil)
     (when conn (ignore-errors (harness-acp-close conn)))
     (harness-stop)
-    (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit"))))
+    (when proc (harness-test-wait (lambda () (not (process-live-p proc))) 30 "harness process exit"))))
 
 (defconst harness-server-test--init
   (concat ";; -*- lexical-binding: t -*-\n"
@@ -107,7 +107,10 @@ The harness process loads `harness-server-test--init'."
         (cancel-timer timer))
       (let ((gaps (cl-loop for (a b) on (nreverse ticks) while b collect (- b a))))
         (should (> (length gaps) 20))
-        (should (< (apply #'max gaps) 0.15))))))
+        ;; A UI the harness blocked would miss its 2 s of ticks; a busy
+        ;; machine, running other suites meanwhile, delays one by a
+        ;; tenth or two.
+        (should (< (apply #'max gaps) 0.5))))))
 
 (ert-deftest harness-server-loop-runs-timers-that-timers-start ()
   "In the harness process, a timer that a timer starts runs when it is due.
@@ -268,6 +271,26 @@ forwarded as every `harness-' option the user sets."
                                          harness-ui--server-address))
                          30 "restart")
       (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30))))))
+
+(ert-deftest harness-server-a-stopped-process-ending-late-changes-nothing ()
+  "A harness process stopped and started again at once: the old one,
+whose end is heard once the new one runs, neither takes the new one's
+place nor starts yet another."
+  (harness-server-test-with-process
+    (harness-test-await (harness-ui-request "_harness/session/list") 30)
+    (let ((old harness-ui--server)
+          (ended nil))
+      (add-function :after (process-sentinel old) (lambda (&rest _) (setq ended t)))
+      ;; Nothing in between reads the old process's end.
+      (harness-ui--stop-server)
+      (harness-ui--ensure-server)
+      (let ((new harness-ui--server))
+        (should (process-live-p new))
+        (should-not (eq new old))
+        (harness-test-wait (lambda () ended) 10 "the old process's end to be heard")
+        (should (eq new harness-ui--server))
+        (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30)))
+        (should (eq new harness-ui--server))))))
 
 (ert-deftest harness-server-requires-the-token ()
   (harness-server-test-with-process

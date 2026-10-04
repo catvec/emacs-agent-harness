@@ -462,14 +462,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   While the task waits for review, the report ends with the same banner
   as its session: `[Verify]` (`C-c C-v`) and `[Send back]` (`C-c C-x`),
   and a box under it for the feedback (`C-c C-c` sends it), so you can
-  read the work and accept it in one place. The board's item-at-point
-  key (`SPC`) opens the report too, along with whatever else the task
-  has to show.
-- `m` on a task writes a message to its session without leaving the
-  board; when its session asks a question, `m` answers that instead.
-  The compose box then turns amber, bar and all, and names the session
-  it sends to, so it cannot be taken for the box that writes a new
-  task; `C-g` returns to that one.
+  read the work and accept it in one place. Once the review is decided
+  -- the task verified, or sent back with feedback -- the report closes,
+  wherever that was done: from the board, from the session's banner or
+  from the report's own banner. The board's item-at-point key (`SPC`)
+  opens the report too, along with whatever else the task has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `SPC` on a task that needs input pops out what it waits on -- the

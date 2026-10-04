@@ -19,7 +19,11 @@
 ;;
 ;; The report is drawn from the task record the harness holds: the board
 ;; and the chat both pass the record they already have, and a popout
-;; follows `task/changed' so what it shows is current.  A referenced tool
+;; follows `task/changed' so what it shows is current.  Once the task
+;; is verified or sent back its popout closes, wherever that was done --
+;; the board, the session's banner, the Review switch, an agent: the
+;; review the report was opened for is over.  The report of a task
+;; decided before it opened, a done one, stays open.  A referenced tool
 ;; call is the link it is, drawn as the chat draws calls: its title and
 ;; status, the input it ran with, its output (capped in the popout, with
 ;; a button for the rest; whole in the session), and [Open in the
@@ -121,6 +125,18 @@ its images fit this one instead.")
   "Return the task record the report popout in this buffer shows, or nil.
 Nil in any other buffer."
   harness-ui-report--task)
+
+(defun harness-ui-report--verified-p (task)
+  "Non-nil when the user verified TASK's work."
+  (harness-json-true-p (plist-get task :verified)))
+
+(defun harness-ui-report--decided-p (shown task)
+  "Non-nil when the review of SHOWN is decided in TASK.
+SHOWN is the task record a popout drew last, TASK the one it has now:
+the work was verified since, or sent back, which adds a round of
+feedback to `:feedback'."
+  (or (and (harness-ui-report--verified-p task) (not (harness-ui-report--verified-p shown)))
+      (> (length (plist-get task :feedback)) (length (plist-get shown :feedback)))))
 
 (defun harness-ui-report--title (task)
   "Return the title of TASK, as the board shows it."
@@ -436,14 +452,20 @@ handed no report in, so another function may pop out what else it has."
         t))))
 
 (defun harness-ui-report--on-task-changed (event args)
-  "Follow `task/changed': an open report popout of that task draws again."
+  "Follow EVENT: on `task/changed' for the task in ARGS, redraw its open report.
+Once the review is decided -- the task verified or sent back -- its
+popout closes instead, dropping any draft in its box, whoever decided
+it.  Only that change closes it, so the report of a task decided before
+it opened, a done one say, stays open through later changes."
   (when (equal event "task/changed")
     (when-let* ((task (car args))
                 (id (plist-get task :id))
                 (key (list 'report id)))
       (when (harness-ui-popout-buffer key)
-        (puthash key task harness-ui-report--reports)
-        (harness-ui-popout-refresh key)))))
+        (if (harness-ui-report--decided-p (gethash key harness-ui-report--reports) task)
+            (harness-ui-popout-close key t)
+          (puthash key task harness-ui-report--reports)
+          (harness-ui-popout-refresh key))))))
 
 ;;;; Module
 

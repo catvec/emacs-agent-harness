@@ -40,6 +40,7 @@
 (defvar harness-ui-popout--parent)
 (defvar harness-ui-popout--max-height)
 (defvar harness-ui-report-max-height)
+(defvar harness-ui-report--reports)
 (declare-function harness-ui-popout--header "harness-ui-popout")
 (declare-function harness-ui-popout-pixel-width "harness-ui-popout")
 (declare-function harness-ui-report--placeholder "harness-ui-report")
@@ -130,6 +131,7 @@ review with a report, an image among its evidence; BODY gets `board',
                             10 "the task to wait for review")
                            (plist-get (car harness-ui-tasks--tasks) :id))))
               (sid (plist-get (harness-call 'task/get id) :session)))
+         (ignore sid)
          (unwind-protect
              (progn ,@body)
            (dolist (b (buffer-list))
@@ -154,6 +156,21 @@ review with a report, an image among its evidence; BODY gets `board',
   "Wait until BUFFER's text matches REGEXP."
   (harness-test-wait (lambda () (string-match-p regexp (harness-ui-review-test--text buffer)))
                      5 (format "the buffer to show %s" regexp)))
+
+(defun harness-ui-review-test--push (buffer label)
+  "Push the button LABEL in BUFFER, as a click on it does."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (let (pos)
+        (while (and (not pos) (search-forward label nil t))
+          (when (button-at (match-beginning 0)) (setq pos (match-beginning 0))))
+        (unless pos (error "No %s button in %s" label (buffer-name)))
+        (push-button pos)))))
+
+(defun harness-ui-review-test--feedback (id)
+  "The feedback task ID was sent back with, as texts."
+  (mapcar (lambda (round) (plist-get round :text)) (plist-get (harness-call 'task/get id) :feedback)))
 
 (ert-deftest harness-ui-review-banner-shows-and-verifies ()
   "A task in review says so in its session, and its [Verify] accepts the work."
@@ -448,7 +465,7 @@ The board's record is the one the wire gives, as the UI sees it."
 
 (ert-deftest harness-ui-review-report-popout-verifies ()
   "A report of a task in review ends with its session's banner and a box:
-C-c C-v, anywhere in the popout, accepts the work, and the banner goes."
+C-c C-v, anywhere in the popout, accepts the work, and the popout closes."
   (harness-ui-review-test-with
     (let ((popout (harness-ui-review-test--report board id)))
       (with-current-buffer popout
@@ -476,18 +493,15 @@ C-c C-v, anywhere in the popout, accepts the work, and the banner goes."
         (call-interactively (key-binding (kbd "C-c C-v"))))
       (harness-test-wait (lambda () (not (eq 'review (plist-get (harness-call 'task/get id) :state))))
                          10 "the task to leave review")
-      ;; The report stays; its banner, its box and their keys go.
-      (harness-test-wait (lambda () (not (string-match-p "Ready for review" (harness-ui-review-test--text popout))))
-                         5 "the banner to go")
-      (with-current-buffer popout
-        (should (string-match-p "Evidence (4)" (buffer-string)))
-        (should-not (harness-compose-live-p))
-        (should-not harness-ui-review-minor-mode)
-        (should-error (harness-ui-review-verify) :type 'user-error)))))
+      ;; The popout closes with the decision: its buffer and its window go.
+      (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close")
+      (should-not (harness-ui-popout-buffer (list 'report id)))
+      (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
 
 (ert-deftest harness-ui-review-report-popout-sends-back ()
   "[Send back] in a report goes to its box, whose C-c C-c sends the task
-back with what it holds; once handed in again, the banner is back."
+back with what it holds, closing the popout; once handed in again, the
+report opens anew."
   (harness-ui-review-test-with
     (let ((popout (harness-ui-review-test--report board id)))
       (with-current-buffer popout
@@ -502,14 +516,22 @@ back with what it holds; once handed in again, the banner is back."
       (should (equal '("the chart is cut off")
                      (mapcar (lambda (round) (plist-get round :text))
                              (plist-get (harness-call 'task/get id) :feedback))))
+      ;; The popout closes with the send back: its buffer and its window go.
+      (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close")
+      (should-not (harness-ui-popout-buffer (list 'report id)))
       ;; Back at work, then, this fixture's script handing in again, back
-      ;; for review: the popout follows it.
-      (harness-test-wait (lambda () (eq 'review (plist-get (harness-call 'task/get id) :state)))
+      ;; for review: the report opens anew, with its banner.
+      (harness-test-wait (lambda ()
+                           (let ((task (harness-call 'task/get id)))
+                             (and (eq 'review (plist-get task :state))
+                                  (plist-get task :report))))
                          10 "the task to come back for review")
-      (harness-ui-review-test--wait-text popout "Ready for review")
-      ;; An empty box sends nothing back.
-      (with-current-buffer popout
-        (should-error (harness-ui-review--send "  " nil) :type 'user-error)))))
+      (harness-ui-report-popout (harness-call 'task/get id))
+      (let ((again (harness-ui-popout-buffer (list 'report id))))
+        (harness-ui-review-test--wait-text again "Ready for review")
+        ;; An empty box sends nothing back.
+        (with-current-buffer again
+          (should-error (harness-ui-review--send "  " nil) :type 'user-error))))))
 
 (ert-deftest harness-ui-review-report-image-shows-larger ()
   "An image of a report is as wide as the popout and much of the frame
@@ -547,6 +569,110 @@ high; RET on it shows it larger in a popout of its own, and q goes back."
             (execute-kbd-macro (kbd "q")))
           (should-not (buffer-live-p viewer))
           (should (eq popout (window-buffer window))))))))
+
+(ert-deftest harness-ui-review-verify-closes-the-report ()
+  "[Verify] in the session's banner closes the report its [Report] popped out.
+The popout goes as the task turns verified: its buffer and its window."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid))
+          (key (list 'report id)))
+      (harness-ui-review-test--wait-text chat "Ready for review")
+      (let ((windows (length (window-list nil 'nomini))))
+        (harness-ui-review-test--push chat "[Report]")
+        (let ((popout (harness-ui-popout-buffer key)))
+          (should popout)
+          (should (get-buffer-window popout))
+          (harness-ui-review-test--push chat "[Verify]")
+          (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
+        (should-not (harness-ui-popout-buffer key))
+        (should (= windows (length (window-list nil 'nomini)))))
+      (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
+
+(ert-deftest harness-ui-review-board-verify-closes-the-report ()
+  "[Verify] on the board's card closes the report its [Report] popped out."
+  (harness-ui-review-test-with
+    (let ((key (list 'report id)))
+      (with-current-buffer board (harness-ui-tasks--render))
+      (harness-ui-review-test--push board "[Report]")
+      (let ((popout (harness-ui-popout-buffer key)))
+        (should popout)
+        (harness-ui-review-test--push board "[Verify]")
+        (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
+      (should-not (harness-ui-popout-buffer key))
+      (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
+
+(ert-deftest harness-ui-review-send-back-closes-the-report ()
+  "Sending the work back from the session's banner closes the report too.
+[Send back] leaves it open while the feedback is written; sending that
+closes it."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid))
+          (key (list 'report id)))
+      (harness-ui-review-test--wait-text chat "Ready for review")
+      (harness-ui-review-test--push chat "[Report]")
+      (let ((popout (harness-ui-popout-buffer key)))
+        (should popout)
+        (harness-ui-review-test--push chat "[Send back]")
+        (should (buffer-live-p popout))
+        (with-current-buffer chat
+          (goto-char harness-compose-end)
+          (insert "it still flakes on CI")
+          (call-interactively #'harness-chat-send))
+        (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
+      (should-not (harness-ui-popout-buffer key))
+      (should (equal '("it still flakes on CI") (harness-ui-review-test--feedback id))))))
+
+(ert-deftest harness-ui-review-board-send-back-closes-the-report ()
+  "Sending the work back from the board's card closes the report its [Report] popped out."
+  (harness-ui-review-test-with
+    (let ((key (list 'report id)))
+      (with-current-buffer board (harness-ui-tasks--render))
+      (harness-ui-review-test--push board "[Report]")
+      (let ((popout (harness-ui-popout-buffer key)))
+        (should popout)
+        (harness-ui-review-test--push board "[Send back]")
+        (should (buffer-live-p popout))
+        (with-current-buffer board
+          (goto-char harness-compose-end)
+          (insert "it still flakes on CI")
+          (harness-ui-tasks-submit))
+        (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
+      (should-not (harness-ui-popout-buffer key))
+      (should (equal '("it still flakes on CI") (harness-ui-review-test--feedback id))))))
+
+(ert-deftest harness-ui-review-report-after-send-back-stays-open ()
+  "A report opened once the task was sent back stays open as it works again.
+It follows the task back to review, and closes once that review is decided."
+  (harness-ui-review-test-with
+    (let ((key (list 'report id)))
+      (harness-call 'task/reject id "it still flakes on CI")
+      (harness-ui-report-popout (harness-call 'task/get id))
+      (should (harness-ui-popout-buffer key))
+      ;; The session works on the feedback and, this fixture's script
+      ;; handing in again, the task waits for review anew.
+      (harness-test-wait (lambda () (or (not (harness-ui-popout-buffer key))
+                                        (equal "review" (plist-get (gethash key harness-ui-report--reports) :state))))
+                         10 "the popout to follow the task back to review")
+      (should (harness-ui-popout-buffer key))
+      (harness-call 'task/verify id)
+      (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the report to close"))))
+
+(ert-deftest harness-ui-review-done-report-stays-open ()
+  "The report of a task verified before it popped out stays open as the task changes."
+  (harness-ui-review-test-with
+    (let ((key (list 'report id)))
+      (harness-call 'task/verify id)
+      (with-current-buffer board
+        (harness-test-wait (lambda () (equal "done" (plist-get (harness-ui-tasks--find id) :state)))
+                           10 "the board to see the task done")
+        (harness-ui-report-popout (harness-ui-tasks--find id)))
+      (should (harness-ui-popout-buffer key))
+      (harness-call 'task/archive id)
+      (harness-test-wait (lambda () (or (not (harness-ui-popout-buffer key))
+                                        (harness-json-true-p
+                                         (plist-get (gethash key harness-ui-report--reports) :archived))))
+                         5 "the popout to follow the task")
+      (should (harness-ui-popout-buffer key)))))
 
 (provide 'harness-ui-review-test)
 ;;; harness-ui-review-test.el ends here
