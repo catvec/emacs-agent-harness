@@ -1359,33 +1359,29 @@ available is offered."
 
 ;;;; Switching models, and handing conversations over
 
-(defun harness-ui--handoff-choices (checks total)
-  "Return what a model switch that loses conversations offers.
-CHECKS are the `handoff/check' answers of the sessions that would lose
-theirs, TOTAL how many sessions the switch changes in all; a batch
-speaks of the models generically, one session names them.  Each entry
-is (KEY NAME CHOICE DESCRIPTION); CHOICE is a mode of `handoff/switch',
-or `cancel'."
-  (let* ((first (car checks))
-         (one (= 1 total))
-         (from (if one (or (plist-get first :from-label)
-                           (harness-ui-model-label (plist-get first :from)))
-                 "the current model"))
-         (to (if one (or (plist-get first :to-label) (plist-get first :to))
-               "the new model")))
-    (list
-     (list ?c (format "compact with %s" from) 'compact
-           (format "summarise on %s now, whose cache is warm, then switch; the new model starts from the summary" from))
-     (list ?n (format "compact with %s, limited" to) 'compact-new
-           (format (concat "for when %s cannot answer (its plan ran out, it is down): let %s write the summary"
-                           " from only the first and last messages, so the whole conversation never runs"
-                           " through it (lossy: the middle is left out)")
-                   from to))
-     (list ?t "full transcript" 'transcript
-           (format "write the whole conversation to a markdown file in the session's directory; %s reads it first" to))
-     (list ?s "switch without handoff" 'none
-           "the new model starts from the next message alone")
-     (list ?q "cancel" 'cancel "keep the current model"))))
+(defconst harness-ui--handoff-choices
+  '((?c "current model summarises" compact
+        "warm cache; summary from the whole conversation")
+    (?n "new model summarises" compact-new
+        "only the first and last messages; small, but lossy")
+    (?t "full transcript" transcript
+        "whole conversation as a file the new model reads")
+    (?s "no handoff" none
+        "no context; the new model starts from your next message")
+    (?q "cancel" cancel "keep the current model"))
+  "What a model switch that loses the conversation offers.
+Each entry is (KEY NAME CHOICE DESCRIPTION); CHOICE is a mode of
+`handoff/switch', or `cancel'.  The names are short so the minibuffer
+prompt stays readable; the descriptions are one line each.")
+
+(defun harness-ui--handoff-choice-text ()
+  "Return the handoff choices as a short, aligned list, easy to scan."
+  (let* ((choices harness-ui--handoff-choices)
+         (width (apply #'max (mapcar (lambda (c) (string-width (nth 1 c))) choices)))
+         (fmt (format "  %%c  %%-%ds  %%s" width)))
+    (mapconcat (lambda (c)
+                 (format fmt (nth 0 c) (nth 1 c) (or (nth 3 c) "")))
+               choices "\n")))
 
 (defun harness-ui--check-session-label (check)
   "Return the name to show for the session a `handoff/check' CHECK is about."
@@ -1426,10 +1422,8 @@ theirs, TOTAL how many sessions the switch changes in all."
      (if running
          (if one "\n  A turn is running now." "\n  Sessions running a turn take the new model at its next step.")
        "")
-     "\nHand the conversation over (the new model is told it may be lossy, and to re-investigate):\n\n"
-     (let ((choices (harness-ui--handoff-choices checks total)))
-       (mapconcat (lambda (c) (format "  %c  %s: %s" (nth 0 c) (nth 1 c) (nth 3 c)))
-                  choices "\n"))
+     "\nHow to hand over (lossy: the new model is told to re-investigate):\n\n"
+     (harness-ui--handoff-choice-text)
      (if one "" "\n\nThe choice applies to each session listed; the others just switch.")
      "\n")))
 
@@ -1441,13 +1435,12 @@ their number).  The risks show before the question.  Return a mode of
 `handoff/switch' (`compact', `compact-new', `transcript', `none') or
 `cancel'."
   (let* ((total (or total (length checks)))
-         (choices (harness-ui--handoff-choices checks total))
          (answer (read-multiple-choice
                   (format "Switch to %s" label)
-                  (mapcar (lambda (c) (list (nth 0 c) (nth 1 c) (nth 3 c))) choices)
+                  (mapcar (lambda (c) (list (nth 0 c) (nth 1 c) (nth 3 c))) harness-ui--handoff-choices)
                   (harness-ui--handoff-text checks label total)
                   "*Harness model switch*")))
-    (nth 2 (assq (car answer) choices))))
+    (nth 2 (assq (car answer) harness-ui--handoff-choices))))
 
 (defun harness-ui--handoff-outcome (label result)
   "Say how a switch to model LABEL went, from `handoff/switch''s RESULT."
