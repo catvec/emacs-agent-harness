@@ -637,7 +637,8 @@ class Fake:
                 json.dump({"env": {k: v for k, v in os.environ.items() if k.startswith("CLAUDE_CODE_")},
                            "argv": self.argv,
                            "cwd": os.getcwd(),
-                           "claudecode": os.environ.get("CLAUDECODE")}, f)
+                           "claudecode": os.environ.get("CLAUDECODE"),
+                           "max_thinking_tokens": os.environ.get("MAX_THINKING_TOKENS")}, f)
         while True:
             msg = self.next_message()
             if msg is None:

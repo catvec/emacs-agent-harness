@@ -47,11 +47,17 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-permission` | A chat waiting for permission to run `pip install` | `harness-media-shot-chat-permission` |
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
+| `tasks-long` | That board after weeks of merges, its completed list held back to keep the box in the window | `harness-media-shot-tasks-long` |
+| `tasks-message` | The task board writing a message to a task's session: the box in its message colours | `harness-media-shot-tasks-message` |
+| `report` | The board with a task's report popped out, at its end: the chart it handed in, the test run it quotes, the review banner and the feedback box | `harness-media-shot-report` |
+| `report-image` | That chart, clicked: shown larger in a popout of its own | `harness-media-shot-report-image` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
 | `popout-permission` | The session list with a session's permission request popped out under it | `harness-media-shot-popout-permission` |
 | `popout-question` | The task board with a task's question popped out under it | `harness-media-shot-popout-question` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
 | `usage` | The usage dashboard over 30 days, by model | `harness-media-shot-usage` |
+| `usage-projects` | The usage dashboard by project, the tasks' worktrees folded under the demo project | `harness-media-shot-usage-projects` |
+| `usage-worktrees` | The same, the demo project's worktrees unfolded | `harness-media-shot-usage-worktrees` |
 | `worktrees` | The worktrees of the demo project | `harness-media-shot-worktrees` |
 | `settings` | The settings page for the demo project, which overrides two settings | `harness-media-shot-settings` |
 | `btw` | A BTW under the first picture's chat | `harness-media-shot-btw` |
@@ -97,10 +103,14 @@ calls a model or the network.
   three projects, and `harness-media--seed-budgets` adds three budgets,
   sized from that usage so their meters land at different levels.
 - `harness-media--build-tasks` submits tasks and drives them, as a user
-  would, into every column of the board: two verified and merged, two
-  in review (one sent back once), one asking a question, two working
+  would, into every column of the board: two verified and merged, one
+  verified and waiting in the merge queue, one in review (sent back
+  once), one asking a question, two working
   (their turns held half way), two written up for the backlog.  They
-  run in real worktrees, commit and merge.
+  run in real worktrees, commit and merge.  The pagination task, in
+  review, hands its work in (`hand_in`): a latency chart it writes,
+  `docs/orders-latency.svg`, and its real test run, which the report
+  pictures show.
 - `harness-media--build-sessions` runs the conversations: the first
   picture's session, a fork of it and a BTW over it, the permission and
   question chats, and two older sessions, closed since.
@@ -130,6 +140,7 @@ names a function that returns the turn as a list of events, built with:
 | `(harness-media--tool NAME :key VALUE ...)` | A tool call; the agent runs the real tool |
 | `(harness-media--todos (TEXT . STATUS) ...)` | A `todo_write` call |
 | `(harness-media--git-commit MESSAGE)` | A `bash` call committing everything |
+| `(harness-media--tool "hand_in" :summary TEXT :evidence ITEMS)` | Hand the work in: the turn ends and the task waits for review with a report |
 | `(list :type 'hold)` | Stop here and never finish: the turn stays running |
 | `(list :type 'usage ...)` | The request's usage, when the default will not do |
 
@@ -138,7 +149,9 @@ run the tool it asks again, and the script goes on where it stopped.
 Each request reports a plausible usage (context from what was sent,
 billing by provider) unless the script gives one.
 `harness-media--task-script` builds a task's turn: todos, the changes,
-a commit and a summary, or, with HOLD, half of it and a hold.
+a commit and a summary, or, with HOLD, half of it and a hold; with
+EVIDENCE it hands the summary in with that evidence rather than saying
+it.
 
 Requests that are not a conversation get answers of their own: the
 auto-mode judge always allows, session titles come from

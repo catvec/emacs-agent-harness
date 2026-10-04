@@ -282,16 +282,28 @@ a child never yields, so nothing in the evaluating Emacs can end it."
             (sleep-for 0.1)))
         (should-not (eql 0 (signal-process pid 0)))))))
 
-(ert-deftest harness-tools-shell-elisp-in-ui-is-opt-in ()
-  "The UI refuses to evaluate elisp unless the user allowed it."
+(ert-deftest harness-tools-shell-elisp-never-runs-in-the-users-emacs ()
+  "The elisp tool always evaluates in the background Emacs.
+There is no option to put it in the user's Emacs, its schema has no
+place to ask for one, and a call that asks anyway is refused."
   (harness-tools-shell-test--setup)
   (harness-test-with-temp-state
-    (should-not harness-elisp-allow-ui-eval)
-    (let ((r (harness-client-tools-run "elisp" (list :code "(+ 1 2)"))))
+    ;; The option that used to allow it is gone, not just off.
+    (should-not (boundp 'harness-elisp-allow-ui-eval))
+    (let ((r (harness-tools-shell-test--call "elisp" :code "(emacs-pid)" :emacs "user")))
       (should (plist-get r :is-error))
-      (should (string-search "harness-elisp-allow-ui-eval" (plist-get r :content))))
-    (let ((harness-elisp-allow-ui-eval t))
-      (should (equal "=> 3" (plist-get (harness-client-tools-run "elisp" (list :code "(+ 1 2)")) :content))))))
+      (should (string-search "never evaluates in the user's Emacs" (plist-get r :content)))
+      (should (string-search "emacs_* tools" (plist-get r :content))))
+    (should-not (plist-get (plist-get (plist-get (harness-tool-spec (harness-tool-get "elisp")) :schema)
+                                      :properties)
+                           :emacs))
+    ;; A call without a target evaluates in the background, not here.
+    (let* ((r (harness-tools-shell-test--call "elisp" :code "(emacs-pid)"))
+           (content (plist-get r :content)))
+      (should (string-prefix-p "=> " content))
+      (should-not (equal (format "=> %d" (emacs-pid)) content))
+      (should (equal "background" (plist-get (plist-get r :meta) :emacs))))
+    (should (equal "Emacs Lisp: (+ 1 2)" (harness-tool-title "elisp" '(:code "(+ 1 2)"))))))
 
 (provide 'harness-tools-shell-test)
 ;;; harness-tools-shell-test.el ends here

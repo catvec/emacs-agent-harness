@@ -249,3 +249,13 @@
 
 (provide 'harness-ui-tree-test)
 ;;; harness-ui-tree-test.el ends here
+
+(ert-deftest harness-ui-tree-excerpt-holds-tabs-out-of-the-row ()
+  "A tab in a node's text cannot push a row past the columns it fits.
+The excerpt is one plain line: a tab would jump to the next tab stop
+and shove the rest of the row, time and all, out of the tree."
+  (harness-ui-tree-test-with
+    (dolist (text '("a\tb" "one\n\ntwo\tthree" "tab\t\there"))
+      (let ((excerpt (harness-ui-tree--excerpt (list :kind "message" :content text))))
+        (should-not (string-match-p "[\t\n\r]" excerpt))))
+    (should (equal "a b" (harness-ui-tree--excerpt (list :kind "message" :content "a\tb"))))))

@@ -18,7 +18,7 @@ module needs something more, add it here first.
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
-                tools-sessions, tools-notify, tools-handin
+                tools-sessions, tools-notify, tools-handin, tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -44,7 +44,8 @@ default) the layers above are split across two Emacs processes:
  user's Emacs                         harness process (emacs --batch -Q)
  harness.el, core, lisp/ui,     ACP   harness.el, core, lisp/modules
  harness-acp (client only),  <------> (acp serves 127.0.0.1:ephemeral,
- harness-files, client-tools  TCP     token per spawn)
+ harness-files,               TCP     token per spawn; every tool runs here)
+ harness-emacs-endpoint
 ```
 
 - `harness-start` in the user's Emacs loads only the UI and the ACP client,
@@ -60,19 +61,39 @@ default) the layers above are split across two Emacs processes:
   `*harness-log*`.  Its stdin is closed, so a stray prompt fails rather
   than hangs; it exits when its parent dies.  The parent restarts it
   with backoff when it crashes and stops it with SIGTERM (which runs
-  `kill-emacs-hook`, flushing sessions, tasks and streamed text).
+  `kill-emacs-hook`, flushing sessions, tasks and streamed text); the
+  end of a process it already replaced, reported late, changes nothing.
   `M-x harness-restart` restarts it with fresh configuration;
-  `harness-reload` reloads both sides.
-- Work about the user's Emacs runs there, asked for by the harness with
-  `client/request` (below): the `emacs_*` tools
-  (lisp/harness-client-tools.el), saving user options to `custom-file`
+  `harness-reload` reloads both sides: the UI first, then it asks the
+  process (`harness/reload`), which answers whether every file loaded,
+  some failed to, or none were loaded because one does not compile.
+- The child's event loop (`harness-server--event-loop`) never sleeps past
+  the earliest timer.  Batch Emacs runs due timers from a copy of
+  `timer-list` inside `accept-process-output` and then sleeps until the
+  next timer of that copy, so a timer a timer starts -- every
+  `harness-run-soon` of a request handler, the next step of a turn --
+  would otherwise wait for an unrelated timer or process output, seconds
+  later.
+- Every tool runs in the harness process; no client runs one, so an
+  ACP client that is not an Emacs (a phone) loses nothing, and the
+  harness works headless.  The user's Emacs is a resource some tools
+  reach, as a TRAMP host is for the file tools: the UI lends it to the
+  harness when it connects (`clientCapabilities._harness.emacs` in
+  `initialize`), and the harness sends that one Emacs the small, fixed
+  set of `_harness/emacs/*` requests of lisp/harness-emacs-endpoint.el
+  through `emacs/request` (see the tools and acp sections).  The
+  `emacs_*` tools ask it for plain data and a few bounded actions
+  (show a buffer, insert text, save one); none evaluates code.  The
+  `elisp` tool evaluates in a child `emacs --batch'
+  (lisp/harness-elisp.el), never in the lent Emacs: model-written Lisp
+  does not run there at all, since a blocking call would freeze it
+  beyond recovery, and no setting or request changes that.
+- Chores of the UI, which any client may do, are asked for with
+  `client/request` (below): saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
   writes a file (event `tools/file-written`), and desktop notifications
   (lisp/harness-notifications-desktop.el, see notifications), so they
   show where the user is and a click on one opens what it is about.
-  The `elisp` tool is not one of them: model-written code runs in a
-  child `emacs --batch' (lisp/harness-elisp.el), never in the UI, where
-  a blocking call could freeze it beyond recovery.
 - Project roots and file lists (lisp/harness-files.el) are computed on
   both sides with the same code; the UI lists files itself so `@`
   completion uses the user's projectile cache.
@@ -82,7 +103,8 @@ non-interactive authentication (ssh agent), and auth-source secrets
 must decrypt without a minibuffer (gpg-agent pinentry, not loopback).
 
 `harness-process` nil keeps everything in one Emacs (tests, debugging);
-the same `client/request` path then runs over the local connection.
+the same `client/request` and `emacs/request` paths then run over the
+local connection.
 
 ## The bus
 
@@ -119,8 +141,16 @@ module `NAME` and provides feature `harness-NAME`.
 Reload safety: keep state in `defvar`s (never re-initialised), register
 subscribers with named functions, and make `:init` idempotent.
 `harness-reload` compiles every file first and refuses to load anything
-if one fails.  After a reload the `harness/reloaded` event fires and the
-UI redraws every session buffer.
+if one fails.  It loads harness.el, the core files, the libraries of
+lisp/ (`harness--library-files`: files, the Emacs endpoint, desktop
+notifications, server) and the modules, so a module never runs against
+a library as it was before an update; a file added to lisp/ that both
+sides load belongs in one of those lists.  Records made before a reload
+keep their layout: a slot added to a struct goes last and is read in a
+way that tolerates records without it (see `harness-acp--client-get`),
+or the module drops its stale records (see
+`harness-provider-claude--drop-stale-entries`).  After a reload the
+`harness/reloaded` event fires and the UI redraws every session buffer.
 
 ## Data shapes
 
@@ -202,6 +232,13 @@ message as a user message; UIs show the sender instead of "You".
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
 `:parent-id` / `:fork-node`, so the tree view can merge families by id.
+A tool call the fork copies without a result gets one of the fork's
+own, after the copied nodes (`:meta (:forked t)`).  That happens when
+the parent is mid-turn, as with `spawn_agent` forking it, or when its
+head was moved back between a call and its result.  The result goes
+to the parent, never to the fork, and providers that pair calls with
+results (DeepSeek and other strict OpenAI-compatible servers, Bedrock)
+reject a request with an unanswered call.
 
 A hosted-loop provider (Claude Code, Copilot) holds the conversation
 itself and only gets new user content each turn, so its conversation
@@ -362,7 +399,9 @@ come.  Every session loads `inactive` (closed until something resumes
 it).  One saved `running` or `blocked` was interrupted mid-turn by a
 harness that stopped, so loading settles it: each tool call without a
 result gets one (`:is-error t`, `:meta (:interrupted t)`) and a hint
-says what it was doing or which question it waited on.  Pending
+says what it was doing or which question it waited on.  Only calls
+from the last compaction on count, as for forks: earlier ones reach no
+provider, so a result for one would answer nothing.  Pending
 requests are not restored: the turn that would read their answers is
 gone.
 
@@ -411,15 +450,26 @@ gone.
   (closed: still listed and readable; the next message sent to it resumes it).
 - `session/fork ID &rest PLIST` — copies the ancestor chain up to
   `:node` (default the head; ID's head never moves); `:kind
-  fork|subagent`, `:name`, `:cwd` (defaults to parent's).  Asks the
-  provider to fork its state via `provider/fork` when supported: at the
-  parent's head (when that is where its provider conversation is) the
-  whole state, at an earlier node the state cut at the last checkpoint
-  up to it, and none when no checkpoint precedes the node.  Without a
-  forked state the fork has none, never the parent's own, which would
-  carry on the parent's provider conversation; the provider then starts
-  a new one from the transcript.  The fork's `:provider-node` is the
-  node.  → new session.
+  fork|subagent`, `:name`, `:cwd` (defaults to parent's).  Each copied
+  tool call without a result gets one in the fork.  It is an error
+  result, `harness-session-forked-output`, saying the session was
+  forked before the call returned and its result went to ID.
+  `:call-id` names ID's call that forks it to start a sub-agent
+  (spawn_agent passes its own).  That call's result is no error:
+  `harness-session-spawned-output` tells the fork it is the sub-agent
+  the call started, that its task is the next message, and that its
+  final message is what the call returns.  Settling keeps the whole
+  transcript, the current turn included; trimming back to the last
+  finished turn or step would drop the context a fork is for: the
+  request being worked on, the reasoning and the results already in.
+  Asks the provider to fork its state via `provider/fork` when
+  supported: at the parent's head (when that is where its provider
+  conversation is) the whole state, at an earlier node the state cut at
+  the last checkpoint up to it, and none when no checkpoint precedes
+  the node.  Without a forked state the fork has none, never the
+  parent's own, which would carry on the parent's provider
+  conversation; the provider then starts a new one from the transcript.
+  The fork's `:provider-node` is the node.  → new session.
 - `session/btw ID &optional NAME`: a BTW side conversation over ID, a
   new, empty `btw` session sharing nothing with ID or with any other
   BTW (no nodes, no fork node, no provider state, no directory grants).
@@ -463,7 +513,15 @@ gone.
 - `session/messages ID` → provider messages (content blocks) built
   from the path, tool calls paired with results.  A steering message
   marked `:delivered-after NODE-ID` stands after that node (and the
-  tool results right after it), where the model got it.
+  tool results right after it), where the model got it.  Every tool_use
+  is answered in the message right after it, whatever the path holds.
+  A call whose result is not there gets a stand-in error result
+  (`harness-session-missing-result-output`), in a user message of its
+  own when none follows.  A tool_result that answers no call of the
+  message before it becomes text.  That covers a call cancelled
+  mid-turn, a result that came after its turn ended, and a head moved
+  back between a call and its result.  The transcript itself is not
+  changed, and a message that needs no change comes out as it is.
 - `session/transcript-text ID` → searchable plain text.
 - Event `session/changed ID SESSION` fires after any of the above (for UIs
   that just want to redraw).
@@ -530,7 +588,10 @@ TOOL-SPEC = `(:name :description :schema JSON-SCHEMA-PLIST)`.  For hosted
 loops only the trailing user message is sent.  A REQUEST may also carry
 `:builtin-tools`, a list of harness tool names (from `tools/builtin`):
 the provider turns on its own tools in their place for this request,
-and `:tools` lacks them.
+and `:tools` lacks them.  `:no-thinking t` asks for no extended
+thinking (the auto-mode judge sends it); Claude Code, which takes no
+`:max-tokens`, then runs the CLI with `MAX_THINKING_TOKENS=0`, and
+other providers may ignore it.
 
 A REQUEST with `:ephemeral t` is a one-off question, such as the
 auto-mode judge's.  The provider answers it from the request alone, as
@@ -700,30 +761,7 @@ model), and the echoed `tool_result` a `tool-result`.  The process
 records which tools it was started with, so a request that turns
 WebSearch on or off restarts it with `--resume`.
 
-A request whose provider state is not the one its session has recorded
-(naming sends a fork of it) runs in a CLI process of its own, closed
-when it is done.  It never restarts the session's process with its own
-settings or writes into the session's CLI session.
-
-One-off requests (`:ephemeral`) do not use the session's CLI process.
-Each starts a process of its own, under a key of its own
-(SESSION-ID~N), never with `--resume`.  The process stops once the
-request is done: its input is closed, and it is killed if it still
-runs a few seconds later.  It runs with
-`harness-provider-claude--ephemeral-environment`
-(`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`,
-`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
-`CLAUDE_CODE_SKIP_PROMPT_HISTORY=1`; a CLI that does not know one
-ignores it), so it loads no CLAUDE.md or auto memory and saves no
-transcript.  A local session's request runs in a private empty
-directory, `claude-one-off/` in the state directory, rather than the
-project's, so no project settings or hooks apply either.  A remote
-session's runs in its own directory on its host.  This keeps the
-permission judge's verdicts on the call alone.  When the judge kept one
-CLI conversation per session, started in the project, each verdict saw
-the earlier ones (a hand-in, say) and the project's CLAUDE.md, and it
-judged by them.
-
+Every `assistant` message and tool-result echo of the CLI carries the
 uuid of its entry in the CLI session's chain; messages of a sub-agent's
 chain (`parent_tool_use_id`) do not count.  The provider reports them
 as checkpoints `(:cli-session-id ID :uuid UUID)`: a message with a
@@ -747,6 +785,28 @@ which gets the transcript and the turn's message, and a hint says so; a
 session never gets stuck on a conversation the CLI cannot resume.  A
 new CLI session opened for a transcript that has messages before the
 new one gets them the same way.
+
+A request whose provider state is not the one its session has recorded
+(naming sends a fork of it) runs in a CLI process of its own, closed
+when it is done.  It never restarts the session's process with its own
+settings or writes into the session's CLI session.
+
+A one-off request (`:ephemeral t', the permission judge's) gets a CLI
+process of its own whatever its state, under a key of its own
+(SESSION-ID~N), never resumed and stopped once it is done (its input is
+closed, and it is killed if it still runs a few seconds later).  It
+runs with `harness-provider-claude--ephemeral-environment'
+(`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1',
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1',
+`CLAUDE_CODE_SKIP_PROMPT_HISTORY=1'; a CLI that does not know one
+ignores it), so it loads no CLAUDE.md and no auto memory and saves no
+transcript, and a local session's runs in a private empty directory,
+`claude-one-off/' in the state directory, rather than the project's, so
+no project settings or hooks apply either.  This keeps the permission
+judge's verdicts on the call alone.  When the judge kept one CLI
+conversation per session, started in the project, each verdict saw the
+earlier ones (whether the work had been handed in, say) and the
+project's CLAUDE.md, and judged by them.
 
 The Bedrock provider (`provider-bedrock`) is a native loop over the
 Converse API: one ConverseStream request per call, its binary event
@@ -955,17 +1015,39 @@ non-interactive session it stays a denial.
   (see sandbox).  A guard that fails lets the chain go on.
 
 - `permission/answer SESSION-ID PENDING-ID ANSWER` — ANSWER
-  `(:behavior allow|deny :scope once|session|always :reason)`, or an
-  option id string such as "allow-session" (what ACP clients send back).
+  `(:behavior allow|deny :scope once|session|always :reason :pattern)`,
+  or an option id string such as "allow-session" (what ACP clients send
+  back), also as `(:option ID :pattern P)`.
+- Patterns: a prompt about paths is answered for a glob pattern, not
+  for one file.  Its payload's `:pattern` is everything in the
+  directory of the call's paths (`DIR/**`, `harness-perms--paths-dir`:
+  the directory holding a file, a directory itself, the deepest common
+  one of several), with symbolic links resolved.  ANSWER's `:pattern`,
+  absolute or relative to the session's cwd, replaces it: more specific
+  (`DIR/sub/**`, `DIR/*.el`, one file) or less (a parent).  Roots and
+  rule paths alike are directories, holding themselves and all below,
+  or globs, which have a `*` or a `?` (`*` within a name, `**` across
+  directories, `**/` also none, `?` one character;
+  `harness-glob-regexp` in harness-util, shared with the glob tool),
+  matched case-sensitively against resolved paths by
+  `harness-perms--within-p`.  Brackets are no classes there: they match
+  themselves, so a directory such as `Photos [2024]` stays a directory.
+  `DIR/**` also holds DIR itself, and a glob ending in `/` holds
+  everything below the directories it matches.  A grant of `DIR/**` is
+  kept as the directory DIR/, so default grants read as before; a grant
+  narrowed to one file keeps its name.
 - The jail asks instead of denying when a path lies outside the roots
   and someone can answer: a pending `permission` request whose payload
-  carries `:dir` and the options allow-once / allow-session (grant the
-  directory to the session) / allow-always (add it to
-  `harness-allowed-directories`) / deny-once.  After a grant the rest
-  of the chain still decides the call itself.  Non-interactive sessions
-  are denied with a hint as before.  The prompt names the directory
-  with symbolic links resolved, since that is what the jail compares
-  and what a grant opens.
+  carries `:dir`, `:pattern` and the options allow-once (this call may
+  reach the pattern) / allow-session (grant the pattern to the session)
+  / allow-always (add it to `harness-allowed-directories`) / deny-once
+  / deny-always (a standing rule `(:path PATTERN :behavior deny)`, for
+  every tool).  After a grant the rest of the chain still decides the
+  call itself; a pattern that leaves the call's path out makes the jail
+  ask again.  A rule that denies the call anyway denies it at once,
+  without asking.  Non-interactive sessions are denied with a hint as
+  before.  The prompt names the directory with symbolic links resolved,
+  since that is what the jail compares and what a grant opens.
 - Agents ask for a directory themselves with the `request_directory_access`
   tool (`path`, `reason`).  The dir-request stage owns that tool's
   decision and always makes it final, so the mode, standing rules,
@@ -973,11 +1055,16 @@ non-interactive session it stays a denial.
   In every mode, auto and yolo included, a directory is granted only
   by a person answering the prompt.  A directory that is already
   reachable is allowed at once and nothing is granted.  Non-interactive
-  sessions are denied with a hint.  Otherwise the session blocks on a
-  `permission` prompt (`:dir`, the agent's reason, options
-  allow-session / allow-always / deny-once; a generic allow-once
-  answer grants to the session).  The handler then tells the agent
-  what it can reach.  Being a permission and not a question, the
+  sessions are denied with a hint, and so is a directory a path rule
+  for no tool in particular denies (`harness-perms--dir-rule`, what
+  deny-always records); no rule grants one.  Otherwise the session
+  blocks on a `permission` prompt (`:dir`, `:pattern`, the agent's
+  reason, options allow-session / allow-always / deny-once /
+  deny-always; a generic allow-once answer grants to the session).  The
+  decision hands the handler the grant as `:granted` in its `:input`,
+  and the handler tells the agent what it can reach, saying so when the
+  user granted another pattern than it asked for.  Being a permission
+  and not a question, the
   prompt cannot be answered by another agent through `session_control`.
   The auto judge is also told to deny calls that widen the agent's own
   permissions some other way (for example `harness-allowed-directories`
@@ -997,13 +1084,21 @@ non-interactive session it stays a denial.
   `permission/pending SESSION-ID`.
 - Session directory grants are stored on the session record
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
-- Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :behavior allow|deny)`;
-  session rules live in memory, always-rules in `harness-perms-rules`.
-  The mode stage checks them first, before the auto-allow list and the mode.
+- Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :path PATTERN-or-nil
+  :behavior allow|deny)`; session rules live in memory, always-rules in
+  `harness-perms-rules`.  A rule with a `:path` (absolute, or relative to
+  the session's cwd) applies to calls with paths only: an allow rule when
+  the pattern holds every path of the call, a deny rule when it holds
+  any.  The mode stage checks them first, before the auto-allow list and
+  the mode.  A tool prompt for a call with paths offers its `:pattern`,
+  and its allow-session / allow-always / deny-always answers record
+  `(:tool NAME :path PATTERN :behavior B)` rather than a rule for the
+  tool everywhere; a call without paths records `(:tool NAME :behavior B)`
+  as before.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
-  `:dir` and `:reason` for a directory prompt; UIs offer only the
-  listed `:options`),
+  `:pattern` for a call with paths and `:dir` and `:reason` for a
+  directory prompt; UIs offer only the listed `:options`),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
@@ -1070,7 +1165,10 @@ non-interactive session it stays a denial.
   verdict, which a reasoning model does after spending the small first
   budget thinking, stage 30 asks again with more room
   (`harness-perms--judge-retry-max-tokens') before it gives the call
-  up; a verdict written before the cap is taken as it stands.  A call
+  up; a verdict written before the cap is taken as it stands.  The
+  judge asks for no extended thinking (`:no-thinking`), so the verdict
+  is not left unwritten or half written behind the model's thinking.
+  A call
   it gives no verdict on
   (it failed, timed out or answered without one; stage 30 passes the
   `ask` on with `:no-verdict` saying why) nobody can approve, so stage
@@ -1141,6 +1239,12 @@ non-interactive session it stays a denial.
 - `agent/send-queue SESSION-ID` — sends every queued item as one turn;
   the message is the user's when any item is, else from the first
   item's sender.
+- Sync filter `agent/message` (value the message's blocks; args SID
+  and `(:from FROM :steering BOOL)`) on every message as it is
+  delivered: when it starts a turn or steers one, a queued message when
+  its queue goes out, never while it waits there.  What it returns is
+  the message (nil leaves it as it was); the tasks module sends a task
+  waiting for review back this way.
 - Sync filter `agent/system-prompt` (value string, args session); sync
   filter `agent/tools`; sync filter `agent/builtin-tools` (see
   `tools/builtin`); async filter `agent/before-turn` (value
@@ -1201,7 +1305,13 @@ non-interactive session it stays a denial.
   group-by `project|model|day|hour|session|billing` (billing keys "api",
   "subscription", "extra-usage", "" when unrecorded); sorted by list
   cost.  `:cost` is what was billed, `:list-cost` the same usage at API
-  prices (rows from before list costs count their cost).
+  prices (rows from before list costs count their cost).  By project a
+  row also has `:main`, the main checkout its project belongs to
+  (`harness-files-owning-checkout`, resolved here so the UI never reads
+  the disk for it): a linked git worktree's, such as a task's, is its
+  repository's main checkout, also once the worktree is removed or git
+  pruned its registration; any other project's is its own root, and the
+  row without a project has "".
 - `usage/budgets`, `usage/set-budget BUDGET`, `usage/remove-budget ID`,
   `usage/budget-status ID &rest (:now)` (ID may be "session:SID" for a
   session's implicit budget) → `(:budget :spent :amount :remaining
@@ -1354,15 +1464,18 @@ non-interactive session it stays a denial.
 Task mode: one session per task.  TASK =
 `(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…)
 :state pending|refining|active|merging|review|done
-:column pending|needs-input|active|review|done
+:column pending|needs-input|active|review|merging|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
-:conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
+:merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`.
 `:column` is derived on every read: `needs-input` when the session is
-blocked on a request or the task stopped part way, `review` while its
-finished work waits for the user's verdict.
+blocked on a request or the task stopped part way, `merging` while its
+branch holds a place in the merge queue (`:merge-status` is queued,
+merging or conflict; `:merge-queued` is when it joined, which orders the
+board's section), `review` while its finished work waits for the user's
+verdict.
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
   :thinking :non-interactive :refine :main-tree)` → task; it starts when
@@ -1460,6 +1573,8 @@ finished work waits for the user's verdict.
   `merge/enqueue SID TARGET`, TARGET being the project's root session
   named `harness-tasks--merge-session-name`
   (created on demand); `merge/finished … merged` makes the task `done`.
+  While its branch holds a place in the queue the task is in the
+  `merging` column (`:merge-queued` says when it joined).
   Failures the agent can fix (uncommitted work) are steered by the merge
   queue; others, or more than `harness-tasks--merge-attempts`, set
   `:outcome merge-failed`.  Outside git, and in the main tree
@@ -1470,14 +1585,24 @@ finished work waits for the user's verdict.
   TASK`; in git, when it works on a branch, that branch waits unmerged,
   so nothing reaches the base branch unreviewed.  `task/verify ID` accepts the work (`:verified t
   :verified-at F`): its branch goes through the merge queue as above
-  and the task is `done` once merged (outside git, or when the branch
-  merged already, at once).  `task/reject ID FEEDBACK &optional
-  ATTACHMENTS` sends it back: the feedback goes to the same session, in
-  its own worktree and with its provider conversation, as a prompt
-  opened by `harness-tasks--reject-message`; the task is `active` again and
-  returns to `review` when that turn ends.  Each round is appended to
-  `:feedback`.  Any other new turn of work (a follow-up, a message from
-  the chat) clears the verification, so it is reviewed again; the merge
+  and the task is `done` once merged, waiting in `merging` between the
+  two (outside git, or when the branch merged already, at once).
+  `task/reject ID FEEDBACK &optional
+  ATTACHMENTS` sends it back: the feedback (words, attachments or both)
+  goes to the same session, in its own worktree and with its provider
+  conversation, as a prompt opened by `harness-tasks--reject-message`;
+  the task is `active` again and returns to `review` when that turn
+  ends.  Each round is appended to `:feedback`.  Any other message that
+  reaches the session while its task waits for review sends it back the
+  same way, with the message as the feedback: typed in its chat,
+  `task/prompt` (`task_control` message), another ACP client, another
+  session's agent (`session_send`), its queue going out once the turn
+  ended.  The tasks module's `agent/message` filter
+  (`harness-tasks--on-message`) makes the task active at once, keeps
+  the round and opens the message with the reject text; only the
+  harness's own messages (`:from` system) do not count.  Any other new
+  turn of work (a follow-up, a message from the chat) clears the
+  verification, so it is reviewed again; the merge
   queue's own steering (commit first) does not.  Only clean ends go to
   review: a turn that stops needs input as before, and `task/complete`
   (Mark done) counts as accepting the work.  A merge that finishes for
@@ -1501,7 +1626,7 @@ finished work waits for the user's verdict.
   (default `harness-tasks-bulk-columns': running, pending and blocked),
   `:ids', `:except' and `:cwd', and review, done and archived tasks are
   never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
-  steering; reopens), `task/refine ID &optional TEXT`,
+  steering; reopens; in review it sends the task back, as above), `task/refine ID &optional TEXT`,
   `task/merge ID` (retry; not in review), `task/verify ID`,
   `task/reject ID FEEDBACK &optional ATTACHMENTS` (both in review only),
   `task/complete ID` (counts as verified), `task/archive ID &optional
@@ -1510,7 +1635,8 @@ finished work waits for the user's verdict.
   task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree),
   `task/for-session SESSION-ID` (the task of a session, or nil, which
-  `hand_in` and the session's review banner use) and
+  `hand_in` and the session's review banner use; the banner at the end
+  of a report popout has the task already) and
   `task/hand-in ID REPORT` (record `:summary` and `:evidence` as the
   work ID handed in; the write-up tool's `:end-turn` ends its turn, which
   the review step then picks up).
@@ -1668,7 +1794,11 @@ TRAMP prefixes come from the session host):
 | `bash` | Bash | command, timeout, cwd | exec |
 | `elisp` | Emacs Lisp | code, timeout | exec |
 | `emacs_buffers` | List buffers | filter, all | read |
+| `emacs_windows` | List windows | — | read |
 | `emacs_buffer` | Read buffer | name, offset, limit | read |
+| `emacs_open` | Open buffer | name (buffer or path), line | read |
+| `emacs_insert` | Insert text | name, text, position (point/start/end) | write |
+| `emacs_save_buffer` | Save buffer | name | write |
 | `emacs_describe` | Describe symbol | symbol | read |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
@@ -1686,11 +1816,12 @@ TRAMP prefixes come from the session host):
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | List tasks | column (pending/needs-input/active/review/done), include_archived, all_projects, limit (the most recent) | read |
+| `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
-| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/changed; settled counts review), mode, timeout_seconds | read |
+| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
+| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus | exec (tools-dev; offered in a checkout of the harness only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read |
 | `merge_done` | Finish merge | none | meta (merge module) |
@@ -1705,6 +1836,25 @@ no task.  Evidence is required: an image or a video (a path inside the
 session's roots), a file, code, a note, or `tool_call' naming an
 earlier call of the session, which is copied into the report as a
 snapshot so the view can show it as the link it is.
+
+`open_harness` (`tools-dev`) opens a second Emacs running the harness
+from a checkout of this project -- a task's worktree, say -- so harness
+changes can be tried live instead of only read.  It runs that
+checkout's own live development loop (`scripts/dev.sh start`) with
+`HARNESS_DEV_SOCKET=harness-dev-HASH`, a socket derived from the
+checkout's true name, so the same worktree reuses its instance and two
+worktrees never share one; the instance's state and compiled files stay
+in that checkout's `scripts/.dev/state-SOCKET`.  The result lists the
+`scripts/dev.sh` commands that drive it (shot, keys, eval, errors,
+reload, stop) prefixed with that socket.  `path` defaults to the
+session's worktree, else its cwd; a directory that is not a checkout
+(`harness.el` and `scripts/dev.sh` side by side) is refused.  The sync
+filter `agent/tools` drops the tool outside such checkouts: it is for
+this project only.  The bus method `harness-dev/open PATH &optional
+FOCUS` does the same for the UI (focus raises the frame); the task
+board's [Open harness] button on a review card calls it, and the tool
+is in `harness-perms--auto-allow-tools', so the agent needs no approval
+to use it.
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
@@ -1761,24 +1911,45 @@ how providers are set up.  A session sends at most
 past that it is told when it can send again.  `notification_providers`
 lists `notification/providers`: set up or not, used by default or not.
 
-The `emacs_*` tools are about the user's Emacs, so their handlers
-(`harness-tools-in-client NAME`) forward the call to the UI as
-`_harness/client/tool {name, input}`; `harness-client-tools-run` answers
-it there, under a deadline (`harness-tools--client-timeout'): a UI that
-cannot answer fails the call, logs, and shows a desktop notice, rather
-than leaving the turn pending.  `write_file`/`edit_file` emit
-`tools/file-written PATH`; the UI reverts unmodified buffers visiting
-PATH.
+Every tool runs in the harness; none runs in a client.  The `emacs_*`
+tools are about the user's Emacs, which they reach as a resource: their
+handlers check the input, ask the Emacs a client lent to the harness
+for plain data with `harness-tools-ask-emacs METHOD PARAMS` (→ promise;
+`emacs/request` under a deadline, `harness-tools--emacs-timeout'), and
+word the result here.  The lent Emacs answers from
+lisp/harness-emacs-endpoint.el, which knows no tool: `buffers` (every
+buffer's name, mode, modified flag, size and file), `windows` (the
+window tree, frame by frame), `buffer` (a range of lines, stopping at
+the characters the tool names, so a long buffer comes in ranges),
+`describe` (a symbol as function, variable and face, its value printed
+in part) and `messages`; and it does the few bounded actions the same
+tools need: `open` (show a live buffer, or visit an existing local
+regular file under the size the tool names -- never a directory, a
+remote path or a prompt), `insert` (text into a live editable buffer,
+left unsaved) and `save` (a buffer to its local file, every question
+the save could ask turned into an error).  With no Emacs lent -- a
+headless harness, or only clients such as a phone -- the call fails at
+once, saying so and pointing at read_file and the elisp tool; one that
+does not answer in time fails the call, logs, and shows a desktop
+notice, rather than leaving the turn pending.  `write_file`/`edit_file`
+emit `tools/file-written PATH`; the UI reverts unmodified buffers
+visiting PATH.
 
-The `elisp` tool evaluates in a child `emacs --batch' process, never in
-the UI: Emacs runs Lisp on one thread, so model-written code that blocks
-(a `call-process' waiting on a child, a loop that never yields) freezes
-typing and redisplay, and neither a timer nor a signal can end it.  The
-child gets the harness on its `load-path', the working directory as its
+The `elisp` tool runs in the harness too, and always evaluates in a
+child `emacs --batch' process: Emacs runs Lisp on one thread, so
+model-written code that blocks (a `call-process' waiting on a child, a
+loop that never yields) would freeze the user's typing and redisplay,
+and neither a timer nor a signal can end it.  The child gets the
+harness on its `load-path', the working directory as its
 `default-directory', a timeout, and the process tree killed when it
-overruns (lisp/harness-elisp.el); its result comes back as JSON.
-`harness-elisp-allow-ui-eval', off by default, restores in-UI
-evaluation for a user who asks for it and accepts that hazard.
+overruns (lisp/harness-elisp.el); its result comes back as JSON, in the
+shape `harness-elisp-payload` describes (value, output, messages or
+error).  It never runs in the lent Emacs, and no request of
+lisp/harness-emacs-endpoint.el evaluates code: model-written Lisp does
+not run in the user's Emacs at all, whatever anyone configures.  A call
+that asks for the user's Emacs (the old `emacs` input) is refused with
+that explanation; the `emacs_*` tools are the whole of what a model may
+do to the live Emacs.
 
 ### acp
 
@@ -1793,7 +1964,8 @@ Client API used by every UI:
 (harness-acp-request CONN METHOD PARAMS)    ; → promise of result plist
 (harness-acp-notify CONN METHOD PARAMS)
 (harness-acp-set-handler CONN FN)           ; FN (METHOD PARAMS RESPOND); RESPOND nil for notifications
-(harness-acp-close CONN)
+(harness-acp-close CONN &optional REASON)   ; rejects what waits with REASON ("closed")
+(harness-acp-closed-reason ERR)             ; that REASON, when a close is what rejected ERR
 (harness-acp-connection-p CONN) (harness-acp-connected-p CONN)
 (harness-acp-open-p CONN)                   ; connected, or TCP still connecting
 ```
@@ -1802,6 +1974,15 @@ What is sent while a TCP connection connects waits and goes out once
 the socket is up, so a client keeps a connection while `harness-acp-open-p`
 holds rather than connecting again, which would drop it along with
 every request it carries.
+
+RESPOND returns non-nil when the answer went out and nil when it could
+not: its connection closed since the request came, or it was answered
+already.  A request answered later than it came, such as a permission
+prompt waiting for the user, belongs to the connection it came on; the
+harness keeps it pending on the session when that connection goes, and
+never sends it again on another.  An answer that cannot go out where
+the request came goes through the bus method that answers it
+(`permission/answer`, `question/answer`).
 
 Wire: JSON-RPC 2.0, one message per line.  Standard ACP methods:
 `initialize`, `authenticate`, `session/new {cwd}` → `{sessionId}`,
@@ -1817,7 +1998,10 @@ change), `_harness/node` (a finalised or updated node), `_harness/hint`,
 `_harness/activity` (`activity`: what the running turn does, as
 `agent/activity` returns it; null once the turn ends).
 Requests agent → client: `session/request_permission {sessionId, toolCall,
-options:[{optionId,name,kind}]}` → `{outcome:{outcome:"selected",optionId}}`
+options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, dir,
+pattern, reason}}` → `{outcome:{outcome:"selected",optionId}}`, plus
+`_harness:{pattern}` when the client answers a request about paths for
+another glob pattern than its `_harness.pattern` (see perms),
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
 Its `options` are the answers' labels; `diagrams`, present when the
 options have them, holds one per option, `{type: "ascii", text}` or
@@ -1827,19 +2011,44 @@ the image data, since the pending question is saved with the session.
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
-`notification/`, `sandbox/status`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
+`notification/`, `sandbox/status`, `harness-dev/`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
 
-Harness → UI requests for work in the user's Emacs go through the bus
+Harness → UI requests for chores any client may do go through the bus
 method `client/request METHOD PARAMS` → promise of the first client's
 answer; it rejects at once when no client is connected or all decline
-(never callable over ACP).  Methods: `_harness/client/tool {name, input}`
-→ tool result, `_harness/client/customize-save {symbol, value}` (value
-printed; only `harness-` options), `_harness/client/notify {id, title,
-body, urgency, source, kind, session, task, project, url}` -> `{backend}`
-once a desktop notification shows (see notifications), or an error.
+(never callable over ACP).  Methods: `_harness/client/customize-save
+{symbol, value}` (value printed; only `harness-` options),
+`_harness/client/notify {id, title, body, urgency, source, kind,
+session, task, project, url}` -> `{backend}` once a desktop
+notification shows (see notifications), or an error.  No tool uses it.
+
+A client lends its Emacs to the harness by adding `_harness: {emacs:
+{version, pid, host}}` to the `clientCapabilities` of `initialize`
+(`harness-emacs-endpoint-client-capabilities`; the UI does, again after
+a reload).  The bus method `emacs/request METHOD PARAMS` → promise sends
+`_harness/emacs/METHOD` to exactly one such client, never to the rest:
+the most recently active (the last to send a request or notification)
+among those that may call methods, so an unauthenticated client that
+claims an Emacs is not asked.  It rejects at once when none is
+attached, with the Emacs's message when it refuses, and when it
+disconnects first.  `emacs/attached` lists the lent Emacsen, the one
+asked first at the head.  Neither is callable over ACP.  Requests, all
+answered with plain data or one bounded action
+(lisp/harness-emacs-endpoint.el):
+`buffers {}` → `{buffers: [{name, mode, modified, size, file}]}`;
+`windows {}` → `{windows: [{frame, selected, name, mode, width, height,
+file}]}`; `buffer {name, offset, limit, maxChars}` → `{exists, mode,
+file, modified, total, first, lines, truncated}`; `open {name, path,
+line, maxBytes}` → `{name, mode, size, modified, file, visited}`;
+`insert {name, text, position, maxChars}` → `{name, inserted, line}`;
+`save {name}` → `{name, path, size}`; `describe {symbol, maxValueChars}`
+→ `{known, function: {kind, signature, doc}, variable: {kind, value,
+doc}, face: {doc}}`; `messages {count}` → `{text}`.  There is no `eval`
+request: a lent Emacs never evaluates model-written code, so nothing
+that asks it can freeze it.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token
@@ -1933,8 +2142,10 @@ listener.
 `harness-ui` owns the connection (`harness-ui-connection`, local by
 default; `harness-connect-remote` swaps it, and an empty address swaps
 it back to this Emacs's own harness; `harness-ui-connected-hook`
-runs after every connect, where the chat reopens the closed sessions its
-buffers show, as a harness that just started has them all closed), the face set
+runs after every connect, where the chat reopens the sessions its
+buffers showed open, as a harness that just started has them all
+closed -- not one a buffer showed inactive, nor one a buffer still
+loading has not heard of yet), the face set
 (`harness-user-face`, `harness-agent-face`, `harness-tool-face`,
 `harness-thinking-face`, `harness-hint-face`, warning ramps), the
 session cache updated from `_harness/session` updates, the tool cache
@@ -1971,6 +2182,28 @@ board, SPC, through `harness-ui-popout-at-point-functions`).  Opening a
 popout brings the session's cached pending list into the store first
 (`harness-ui-pending-sync-session`), which is how a request a view
 already shows becomes answerable there when no chat has synced it.
+A permission prompt about paths shows the glob pattern its answers
+hold for on a line of its own (`pattern: ~/notes/**  [Edit] e`), with
+`[Edit]`/`e` (`harness-ui-pending-edit-pattern`, also `C-c C-p` in
+the chat) to change it in the minibuffer, more or less specific;
+`M-n` offers patterns around the request's own, and the answer carries
+the edited pattern (see perms).  For a call with paths the line also
+says which answers remember the pattern ("s, a, N remember the answer
+for it").
+
+Connecting again never strands a session.  The connection the UI swaps
+out closes with the reason `replaced`, and the requests still waiting
+on it are rejected with that reason (`harness-ui-connection-replaced-p`):
+`harness-ui-call` and the chat do not report them, since the harness
+goes on with them (a prompt's turn runs, and the redrawn transcript
+shows it).  A permission prompt or question shown from before answers
+through the bus methods (`permission/answer`, `question/answer`): the
+pending module records the connection with each request, and a RESPOND
+whose connection is gone would never be heard.  While a chat buffer
+fetches its transcript again (after every reload and reconnect) it
+holds back node updates, which the fetched nodes carry, but applies
+the session record and the activity as they come: a status, queue or
+prompt that changed meanwhile is not lost.
 
 Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
 list + attachments row + compose region at the bottom.  Rendering is
@@ -2056,7 +2289,13 @@ field of its own (`C-a` stops after it, so
 `C-a C-k` clears the line), the placeholder, @file and /skill
 completion, attachments (`C-c C-a`, clipboard `C-c C-v`, drag and
 drop), skill expansion (`harness-compose-with-expanded-text`) and ACP
-attachment blocks.
+attachment blocks.  `harness-compose-insert` takes `:face`, the box's
+background (`harness-compose-face` by default) and `:accent`, the face
+of the prompt and of the bar down the box's left edge, through which a
+host whose box does something else than compose -- the task board's,
+which sends to a session -- marks it; `harness-compose-bar` draws that
+same bar on the host's own lines around the box.  Without either
+argument the box is the plain one.
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
@@ -2137,20 +2376,37 @@ code expires, and when hidden, which drops the code
 one SVG path, black on white; `harness-qr-insert`, half blocks without
 images).  In corporate mode the page shows a notice only.
 
-Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in five
-sections -- requires your input, ready for review, in progress, pending,
-completed -- with each card's current todo, progress, elapsed time,
-cost and merge state, one-click answers to a blocked task's question or
+Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in six
+sections -- requires your input, ready for review, merging, in progress,
+pending, completed -- with each card's current todo, progress, elapsed
+time, cost and merge state, one-click answers to a blocked task's
+question or
 permission, and a compose box that submits a task, edits a pending one,
 messages a task's session, answers its question or takes the feedback
 that sends a task back from review (`C-g` leaves an edit, message,
 answer or feedback for a new task again: a question stays waiting,
-never cancelled).  A task in review shows [Verify] and [Send back]: `v`
+never cancelled).  The same box does all of these, so what `C-c C-c`
+will do is made plain: a box that sends to an existing session -- a
+message, an answer, feedback on a write-up, or feedback that sends a
+task back from review -- wears the message colours
+(`harness-compose-message-face`, with the prompt and a bar in
+`harness-compose-message-accent-face`, carried onto the label line and
+the [cancel] beside it), shows the message icon and names where it
+sends ("Message to session “X”", "Refine “X” with feedback",
+"Answer the session's question “…”", "Send back “X” with feedback");
+composing a task, new or edited, keeps the plain box.  A task in
+review shows [Verify] and [Send back]: `v`
 accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
-in the minibuffer).  A card of a task that handed a report in also
-shows [Report], popping the report out; it is one of the items
-`harness-ui-popout-at-point-functions' offers.  The header counts the
+in the minibuffer); `m`, a message, opens the same box, since any
+message to a task in review sends it back.  A verified task waits in
+merging -- queued for the queue's turn, merging, or its session
+resolving the conflicts -- saying so on its card until the branch is in
+and it moves to completed.  A card of a task that handed a report in
+also shows [Report], popping the report out; it is one of the items
+`harness-ui-popout-at-point-functions' offers.  While the task waits
+for review, the report ends with the banner of its session, [Verify]
+and [Send back], and a box for the feedback.  The header counts the
 tasks to review, and `task/review` says in the echo area that one is
 ready (`harness-ui-tasks--notify-review`).  The header's Review switch
 ([Review: on], `V`) turns review off and on again for every project
@@ -2184,7 +2440,11 @@ whose write-up refused it as a duplicate shows it in Requires your
 input, naming the task it duplicates and saying why: `k` drops it, `r`
 writes it up anyway, `m` takes what makes it another task than the one
 it duplicates.  `I` or
-[Add session] makes an ongoing session a task.  `b` or [BTW] (or the
+[Add session] makes an ongoing session a task.  A card in Ready for
+review whose worktree is itself a checkout of the harness gets an
+[Open harness] button: it starts the worktree's own live development
+loop in an Emacs of its own, frame raised, through `harness-dev/open`,
+so the work can be tried before it is verified.  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  `SPC` over a card, or [Answer…] / [Request…]
 on it, pops out what the task at point needs -- the permission prompt or
@@ -2196,7 +2456,8 @@ Boards reload after any
 task, merge, turn, status, worktree or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
 finished first and completed the latest completed (verified, else
-finished) first; pending is the queue, in the order its tasks start,
+finished) first; merging is the queue's own order, from when each
+branch joined it; pending is the queue, in the order its tasks start,
 with the backlog among it (oldest first; only queued tasks have a place
 in line).
 
@@ -2218,13 +2479,18 @@ waits on (a session that waits on nothing leaves SPC scrolling), its
 status cell's tooltip says so (`harness-ui-sessions-requests`);
 scoped to the current project, its
 git worktrees and so its tasks' sessions included, each session's root
-resolved to its main checkout once with `harness-files-main-checkout`;
+resolved to its main checkout once with `harness-files-owning-checkout`;
 a task's session is of kind task and goes by its task's title, as on the
 board, until the model names it after its first turn — the list loads
 the tasks with `_harness/task/list` and follows `task/changed' and
 `task/deleted'),
 conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
-svg charts via svg.el), worktrees (`harness-ui-worktree`), notifier
+svg charts via svg.el; by project, the rows of a project's git
+worktrees, its tasks' and sub-agents', fold by their `:main` into one
+line with their sum and count, folded until TAB, RET or a click unfolds
+it, `w` or `[show worktrees]` every project, the main checkout's own
+usage first, then each worktree's; a redraw keeps every window's start
+and point lines), worktrees (`harness-ui-worktree`), notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle
 counts, clickable), BTW side window (`harness-ui-btw`: a new, empty
 session listed under the session it is opened over but sharing nothing
@@ -2257,19 +2523,43 @@ at point with one key), media
 meters, video posters that play the video, and the attachments a tool
 result or a message carries), popouts (`harness-ui-popout`: one item of
 a session or a task in a small selected bottom side window, fitted to
-its content, one buffer per KEY the owner picks; `q`/`g` on the content
-under the owner's own keys, `C-c C-c` sends its optional shared compose
-box, `C-g` closes it, and `harness-ui-popout-at-point` runs the first
-`harness-ui-popout-at-point-functions` that knows the item at point),
-the review of a task in its session (`harness-ui-review`: a chat panel
--- `harness-chat-panel-functions` -- that shows the board's Ready for
-review above the box, with [Verify] (`C-c C-v`), [Send back]
-(`C-c C-x`) and [Report]; while it shows, `harness-chat-send-function`
-gives the box's text to `task/reject` as the feedback, and
-`harness-ui-review-minor-mode` puts those two keys over the chat's own,
-only for as long as it shows), and the
+its content up to `harness-ui-popout-max-height` or the popout's own
+`:max-height`, one buffer per KEY the owner picks; `q`/`g` on the
+content under the owner's own keys, `C-c C-c` sends its optional shared
+compose box, `C-g` closes it, and `harness-ui-popout-at-point` runs the
+first `harness-ui-popout-at-point-functions` that knows the item at
+point; a popout opened from another (`:parent`) takes that one's
+window, says [back], and gives the window back when it closes, and
+`harness-ui-popout-pixel-width`/`-pixel-height` size what it draws for
+the window it shows, or will show, in; `harness-ui-popout-image` is
+one image as large as the frame allows, `harness-ui-popout-image-max-height`
+of it, scaled down to fit or up by `harness-ui-popout-image-max-scale`
+at most, with Emacs's image keys and [Open externally]), the review of
+a task (`harness-ui-review`: one banner, the board's Ready for
+review -- its heading, the handed-in report in full and always
+expanded, then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`) and
+[Report] -- shown above the compose box of the task's session, a chat
+panel (`harness-chat-panel-functions`), and at the end of its report
+popout (`harness-ui-report-panel-functions`); the session's box sends
+as always and the harness takes any message to the task's session for
+the feedback that sends it back (`harness-tasks--on-message'), so
+[Send back] only points at the box, while
+`harness-ui-report-compose-functions` gives the report box's text to
+`task/reject` as the feedback; `harness-ui-review-minor-mode` puts
+those two keys over the buffer's own, only for as long as it shows; it
+follows the task events of its session and draws again only when what
+it shows changes, finding the chat buffer by session id with `equal`,
+since an id from the harness process is a fresh string), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
-evidence -- images inline, videos and files through ui-media, code as a
-block, notes, and a referenced tool call drawn as the call it links to,
-with [Open in the session]; opened from the board's [Report] button and
-from the banner, in a popout of its own).
+evidence -- images as wide as the popout and up to
+`harness-ui-report-image-max-height` of the frame high, the popout
+growing to `harness-ui-report-max-height` for them, a click or RET
+showing one larger in an image popout whose [back] returns to the
+report; videos and files through ui-media, code as a block, notes, and
+a referenced tool call drawn as the call it links to, with [Open in
+the session]; opened from the board's [Report] button and from the
+banner, in a popout of its own, to which other modules add panels and a
+box, which follows `task/changed` and closes once the review is decided
+-- the task turns verified, or is sent back with a new round of
+`:feedback` -- wherever that was done; the report of a task decided
+before it opened stays).

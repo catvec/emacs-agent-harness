@@ -21,7 +21,12 @@
 ;;   - the text and attachments, kept across redraws of the host;
 ;;   - long lines that wrap under the text, never scrolling sideways;
 ;;   - optionally, the box at the bottom of the window: a buffer shorter
-;;     than its window is padded at the top so it ends on the last line.
+;;     than its window is padded at the top so it ends on the last line;
+;;   - optionally, colours of its own: a host passes `:face' for the
+;;     background and `:accent' for the prompt and a bar down the left
+;;     edge, to mark a box that does something else than compose -- the
+;;     task board's, which sends a message to a session.  It carries the
+;;     bar onto its own lines around the box with `harness-compose-bar'.
 ;;
 ;; Hosts read the box with `harness-compose-text' and
 ;; `harness-compose-take', expand /skill references with
@@ -54,6 +59,13 @@
 (defvar-local harness-compose--files-at nil "Start of the @ token whose completion last refreshed the files.")
 (defvar-local harness-compose--last-token nil "The @file or /skill token at point after the last command.")
 (defvar-local harness-compose--popup-timer nil "Timer asking the completion UI to show the token's completions.")
+(defvar-local harness-compose--face 'harness-compose-face
+  "Face the box's background is drawn in, set by `harness-compose-insert'.")
+(defvar-local harness-compose--accent nil
+  "Face of the box's prompt and bar, or nil for an ordinary box.
+A host sets it through `harness-compose-insert' to mark a box that does
+something else than compose: sending a message to an existing session,
+say.")
 
 (defvar-local harness-compose-project-function (lambda () default-directory)
   "Function returning the project root files are completed and attached from.")
@@ -148,19 +160,42 @@ window the ones that must stay on one line."
                 "  ")))
     (insert "\n")))
 
-(defun harness-compose-insert (&optional text help)
+(defun harness-compose-bar (&optional accent face)
+  "Return the bar of a compose box in ACCENT on background FACE, and a space.
+ACCENT and FACE default to the ones the box was last drawn with
+\(`harness-compose--accent', `harness-compose--face'), so a host can carry
+the bar onto the lines it draws around the box, such as the label saying
+what the box does.  Two columns wide, the bar and a space; empty when
+the box has no accent, since an ordinary box has no bar."
+  (let ((accent (or accent harness-compose--accent))
+        (face (or face harness-compose--face)))
+    (if (null accent)
+        ""
+      (propertize "▌ " 'face (delq nil (list accent face))))))
+
+(cl-defun harness-compose-insert (&optional text help &key face accent)
   "Insert the prompt and the box at point, holding TEXT or the kept text.
-HELP is the prompt's tooltip.  Point ends after the box's final newline."
+HELP is the prompt's tooltip.  FACE is the background to draw the box
+in, `harness-compose-face' by default.  ACCENT, when given, is the face
+of the box's prompt and the bar down its left edge, which marks a box
+that does something else than compose -- sending a message to a session,
+say.  Point ends after the box's final newline."
   (dolist (ov (list harness-compose-overlay harness-compose--placeholder harness-compose--indent))
     (when ov (delete-overlay ov)))
   (when text (setq harness-compose--text text))
-  (let ((label-start (point)))
+  (let* ((background (or face 'harness-compose-face))
+         (accent (and accent (list accent background)))
+         (prompt (if accent (concat (harness-compose-bar (car accent) background) "❯ ") "❯ "))
+         (label-start (point)))
+    (setq harness-compose--face background
+          harness-compose--accent (car accent))
     ;; The prompt is a field of its own, like the minibuffer's: C-a, and
     ;; whatever finds the line's start with `line-beginning-position',
     ;; stops after it, so C-a C-k clears the line rather than running
     ;; into the read-only prompt.  Rear-nonsticky, so text typed after
     ;; the prompt takes neither its field nor its read-only.
-    (insert (propertize "❯ " 'face '(harness-dim-face harness-compose-face) 'help-echo help
+    (insert (propertize prompt 'face (or accent (list 'harness-dim-face background))
+                        'help-echo help
                         'read-only t 'rear-nonsticky t 'field 'harness-compose-prompt))
     (setq harness-compose-start (copy-marker (point)))
     (insert harness-compose--text)
@@ -169,14 +204,17 @@ HELP is the prompt's tooltip.  Point ends after the box's final newline."
       (setq harness-compose-end (copy-marker end t)))
     ;; FRONT-ADVANCE: text the host inserts just before the box stays outside.
     (setq harness-compose-overlay (make-overlay label-start (point) nil t t))
-    (overlay-put harness-compose-overlay 'face 'harness-compose-face)
+    (overlay-put harness-compose-overlay 'face background)
     ;; Wrapped lines, and lines after a newline, start under the text
     ;; rather than under the prompt.  The overlay starts after the prompt,
     ;; so the prompt's line gets no prefix, and ends after the final
     ;; newline, so an empty last line already has one.  A prefix is drawn
     ;; in the default face unless it brings its own.
-    (let ((indent (propertize (make-string (string-width (buffer-substring label-start harness-compose-start)) ?\s)
-                              'face 'harness-compose-face)))
+    (let* ((width (string-width (buffer-substring label-start harness-compose-start)))
+           (indent (if (car accent)
+                       (concat (harness-compose-bar (car accent) background)
+                               (propertize (make-string (- width 2) ?\s) 'face background))
+                     (propertize (make-string width ?\s) 'face background))))
       (setq harness-compose--indent (make-overlay harness-compose-start (point)))
       (overlay-put harness-compose--indent 'line-prefix indent)
       (overlay-put harness-compose--indent 'wrap-prefix indent))
@@ -191,7 +229,8 @@ HELP is the prompt's tooltip.  Point ends after the box's final newline."
                  (and (= harness-compose-start harness-compose-end)
                       ;; Overlay strings miss the compose overlay's face.
                       (propertize (funcall harness-compose-placeholder-function)
-                                  'face '(harness-dim-face harness-compose-face) 'cursor t)))))
+                                  'face (list 'harness-dim-face harness-compose--face)
+                                  'cursor t)))))
 
 (defun harness-compose-hl-line-range ()
   "Return the `hl-line-mode' range, empty inside the box.
@@ -208,16 +247,6 @@ would hide the region too.  Never nil: `global-hl-line-mode' needs a range."
              (harness-compose-live-p)
              (not (harness-compose-in-p)))
     (goto-char harness-compose-end)))
-
-(defun harness-compose--height (window from limit)
-  "Return how many pixels high WINDOW's text is from FROM to the box's end.
-Text taller than LIMIT pixels measures more than LIMIT.  It is measured
-up to a window's height past LIMIT, which is cheap however long the
-buffer: `window-text-pixel-size' leaves out the line that crosses its
-Y-LIMIT, so measured up to LIMIT itself, text a line too tall would
-measure less than LIMIT, as if it fit."
-  (cdr (window-text-pixel-size window from harness-compose-end nil
-                               (+ limit (window-body-height window t)))))
 
 (defun harness-compose-pad-window (window)
   "Keep the box at the bottom of WINDOW.
@@ -251,7 +280,8 @@ from `pre-redisplay-functions'."
         ;; box, where a host following the end (chat) puts the bottom of
         ;; the window; padding inside the buffer puts the box on the last line.
         (let* ((line (frame-char-height (window-frame window)))
-               (used (harness-compose--height window (point-min) body))
+               ;; More than BODY for a buffer taller than the window: no padding.
+               (used (harness-ui-text-height window (point-min) harness-compose-end body))
                (lines (/ (- body used (if harness-compose--pad-at 0 line)) line)))
           (when (and (= (window-start window) (point-min)) (> lines 0))
             ;; An explicit face: bare newlines would take the height of the
@@ -302,7 +332,11 @@ commands, rather than scroll."
         (let* ((body (window-body-height window t))
                (line (frame-char-height (window-frame window)))
                (room (- body (if harness-compose--pad-at 0 line)))
-               (height (lambda (from) (harness-compose--height window from room)))
+               ;; Exact up to ROOM and more than ROOM beyond, so a buffer
+               ;; taller than the window never reads as one that fits:
+               ;; showing it from its start would push point, and the
+               ;; box with it, out of the window on every redraw.
+               (height (lambda (from) (harness-ui-text-height window from harness-compose-end room)))
                (start (window-start window))
                (pt (window-point window))
                (anchor (if harness-compose--pad-at harness-compose-end (point-max))))

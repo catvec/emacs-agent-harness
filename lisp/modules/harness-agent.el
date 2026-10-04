@@ -11,7 +11,10 @@
 ;; a turn runs are delivered once, at the next step boundary: with the
 ;; next tool result, or as the next user message when the model stops
 ;; first.  Queued messages wait for the turn to end and then go out
-;; together as a turn of their own.
+;; together as a turn of their own.  A message is delivered when it
+;; starts a turn or steers one, a queued one when its queue goes out;
+;; then, and only then, the `agent/message' filters see it and may
+;; change it (task mode sends a task waiting for review back this way).
 ;;
 ;; A provider may run a tool of its own in place of a harness tool (see
 ;; `tools/builtin'): Claude Code's web search for web_search, say.  It
@@ -341,6 +344,17 @@ A turn still running in it (it was closed mid-turn) keeps it running."
     (when (gethash session-id harness-agent--turns)
       (harness-call 'session/set-status session-id 'running))))
 
+(defun harness-agent--message (session-id blocks from steering)
+  "Return BLOCKS, a message delivered to SESSION-ID, as the filters leave it.
+The sync filter `agent/message' gets BLOCKS and its arguments
+SESSION-ID and (:from FROM :steering STEERING): FROM is who sent the
+message (nil for the user, see `agent/prompt'), STEERING is non-nil
+when the message steers the running turn rather than starting one.
+Each filter returns the blocks to deliver.  A filter that returns
+none leaves the message as it was, so a message is never emptied."
+  (or (harness-run-filter 'agent/message blocks session-id (list :from from :steering steering))
+      blocks))
+
 (harness-defmethod agent/prompt (session-id blocks &optional opts)
   "Send BLOCKS (content blocks, or a string) to SESSION-ID.
 Idle session: start a turn and return a promise of (:stop-reason …).
@@ -355,7 +369,10 @@ harness (`harness-sender-system') or another session's agent
 model gets the message as a user message all the same.
 An inactive session is resumed first: sending to it brings it back.
 Blank text blocks are dropped; a message left empty signals an error,
-so no turn, steering message or queued item is ever empty."
+so no turn, steering message or queued item is ever empty.
+A message that starts a turn or steers one goes through the
+`agent/message' filters first (see `harness-agent--message'); a queued
+one does when its queue is sent."
   (let* ((blocks (cl-remove-if #'harness-agent--blank-p
                                (if (stringp blocks) (list (list :type "text" :text blocks)) blocks)))
          (queue (harness-json-true-p (plist-get opts :queue)))
@@ -365,7 +382,8 @@ so no turn, steering message or queued item is ever empty."
     (unless (or blocks attachments)
       (signal 'harness-error (list "Nothing to send: the message is empty")))
     (unless queue
-      (harness-agent--reanimate session-id))
+      (harness-agent--reanimate session-id)
+      (setq blocks (harness-agent--message session-id blocks from (and turn t))))
     (cond
      (queue
       (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments from)

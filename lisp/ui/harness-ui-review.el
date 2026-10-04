@@ -1,28 +1,40 @@
-;;; harness-ui-review.el --- The review banner of a task's session  -*- lexical-binding: t; -*-
+;;; harness-ui-review.el --- Reviewing a task: the banner of its session and of its report  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; A session that is a task waiting for review shows a banner above its
-;; compose box: that the work is done and waits for the user, with the
-;; buttons that act on it -- [Verify], which accepts the work and merges
-;; its branch, [Send back], and [Report], which shows the final message
-;; and evidence the session handed in (`hand_in').  It is the board's
-;; Ready for review, in the session itself: the same face and the same
-;; wording, so accepting work is one action wherever the user is.
+;; A task waiting for review shows a banner wherever its work is looked
+;; at: that the work is done and waits for the user, and the buttons that
+;; act on it -- [Verify], which accepts the work and merges its branch,
+;; and [Send back].  It is the board's Ready for review: the same mark
+;; and the same wording, so accepting work is one action wherever the
+;; user is.  One banner, one set of commands and keys, in two places:
 ;;
-;; While the banner shows, the compose box writes the feedback that sends
-;; the task back: C-c C-c takes what the box holds to the task's session,
-;; which works on it again and comes back for review (`harness-chat-send-function').
-;; The banner disappears when the task leaves review, whoever moved it.
+;;   the session  above its compose box, a chat panel
+;;                (`harness-chat-panel-functions'), with [Report] too;
+;;                in the session's own window, in a BTW over it, and in
+;;                a task's session opened from the board -- the width is
+;;                the window's;
+;;   the report   at the end of its report popout, after the evidence
+;;                (`harness-ui-report-panel-functions'), so the work is
+;;                accepted or sent back where it is read.
 ;;
-;; Its keys, C-c C-v to verify and C-c C-x to send back, are those of
+;; Inside the session the report is not behind a button either: it is
+;; shown in full and always expanded, between the heading and the
+;; buttons (`harness-ui-review--report', `harness-ui-report-string').
+;;
+;; Under the banner the compose box writes the feedback that sends the
+;; task back: C-c C-c takes what the box holds to the task's session,
+;; which works on it again and comes back for review.  The session's box
+;; needs nothing of its own: the harness takes any message to the
+;; session of a task in review for the feedback that sends it back,
+;; whoever wrote it (`harness-tasks--on-message').  The report's box
+;; sends it back itself (`harness-ui-review--send' through
+;; `harness-ui-report-compose-functions').  Its keys,
+;; C-c C-v to verify and C-c C-x to send back, are those of
 ;; `harness-ui-review-minor-mode', on only while the banner shows: the
-;; rest of the time the chat's own keys stand, C-c C-v attaching the
-;; clipboard.
-;;
-;; The banner is a panel of the chat buffer (`harness-chat-panel-functions'),
-;; so it shows in the session's own window, in a BTW over it, and in a
-;; task's session opened from the board -- the width is the window's.
+;; rest of the time the buffer's own keys stand, C-c C-v attaching the
+;; clipboard.  The banner disappears when the task leaves review, whoever
+;; moved it, and its keys with it.
 
 ;;; Code:
 
@@ -41,15 +53,20 @@
 (defvar harness-ui-session-id)
 (defvar harness-compose-redraw-function)
 (declare-function harness-ui-report-popout "harness-ui-report" (task))
+(declare-function harness-ui-report-string "harness-ui-report" (task &optional window))
+(declare-function harness-ui-report-task "harness-ui-report" ())
 
 (defgroup harness-ui-review nil
-  "Reviewing a task's work in its own session." :group 'harness-ui)
+  "Reviewing a task's work in its own session and its report." :group 'harness-ui)
 
 (defface harness-chat-review-face
   '((((background light)) :background "#e6f4e6" :extend t)
     (((background dark)) :background "#1f3a22" :extend t))
   "Background of the review banner: the board's Ready for review, in the session."
   :group 'harness-ui-review)
+
+(defconst harness-ui-review--feedback-hint "What should change? C-c C-c sends it back"
+  "The empty box's hint while it takes the feedback that sends a task back.")
 
 (defvar harness-ui-review--tasks (make-hash-table :test 'equal)
   "Session id -> the task record of that session, as last heard.")
@@ -60,7 +77,7 @@
 (defun harness-ui-review--chat-buffer (sid)
   "Return the live chat buffer showing session SID, or nil."
   (cl-find-if (lambda (buffer)
-                (eq (buffer-local-value 'harness-ui-session-id buffer) sid))
+                (equal (buffer-local-value 'harness-ui-session-id buffer) sid))
               (buffer-list)))
 
 (defun harness-ui-review--redraw (sid)
@@ -97,10 +114,159 @@ such, so the lookup happens once per session."
        (equal (plist-get task :state) "review")
        (not (harness-json-true-p (plist-get task :archived)))))
 
+;;;; The task under review
+
+(defun harness-ui-review--current-task ()
+  "Return the task this buffer shows, which has to wait for review.
+In a report popout that is the task of the report; in a chat buffer,
+the task of its session."
+  (let* ((report (and (fboundp 'harness-ui-report-task) (harness-ui-report-task)))
+         (task (or report (gethash harness-ui-session-id harness-ui-review--tasks))))
+    (unless (harness-ui-review--reviewing-p task)
+      (user-error (if report "This task is not waiting for your review"
+                    "This session is not waiting for your review")))
+    task))
+
+(defun harness-ui-review-verify ()
+  "Accept the work of the task this buffer shows: verify it.
+Its branch then merges and the task is done.  In a task's session or in
+its report popout, while it waits for review."
+  (interactive)
+  (let ((task (harness-ui-review--current-task)))
+    (harness-ui-call "_harness/task/verify" (list :id (plist-get task :id)) #'ignore
+                     (lambda (e) (message "Could not verify: %s" (harness-error-message e))))
+    (message "Verified")))
+
+(defun harness-ui-review-reject ()
+  "Send the work of the task this buffer shows back: say what should change.
+Point goes to the compose box, whose C-c C-c sends what you write there
+back to the task.  In a task's session or in its report popout, while
+it waits for review.  Any message sent to the session while its task
+waits for review sends the task back with it as the feedback; this
+takes you to the box."
+  (interactive)
+  (harness-ui-review--current-task)
+  ;; A report's box asks for the feedback already; a session's says so now.
+  (when (derived-mode-p 'harness-chat-mode)
+    (setq-local harness-chat-placeholder harness-ui-review--feedback-hint)
+    (with-no-warnings
+      (when (fboundp 'harness-compose-update-placeholder)
+        (harness-compose-update-placeholder))))
+  (when-let* ((window (get-buffer-window (current-buffer))))
+    (select-window window)
+    (goto-char (or harness-compose-end (point-max))))
+  (message "Write what should change in the box; C-c C-c sends it back"))
+
+(defun harness-ui-review--send (text attachments)
+  "Send the task this buffer shows back, TEXT and ATTACHMENTS its feedback.
+The report popout's box under the banner sends this way
+\(`harness-ui-report-compose-functions'); a session's box is the
+session's own, the harness taking any message to the task's session for
+the feedback that sends it back (`harness-tasks--on-message')."
+  (let ((task (harness-ui-review--current-task)))
+    (if (and (harness-string-blank-p text) (null attachments))
+        (user-error "Sending the work back needs feedback: type what should change")
+      (harness-ui-call "_harness/task/reject"
+                       (list :id (plist-get task :id) :feedback text :attachments attachments)
+                       (lambda (_) (message "Sent back: the session works on your feedback"))
+                       (lambda (e) (message "Could not send it back: %s" (harness-error-message e)))))))
+
+;;;; The banner
+
+(defun harness-ui-review--button (label command help)
+  "Return a button string LABEL running COMMAND with HELP."
+  (propertize (buttonize label (lambda (_) (funcall command)) nil help)
+              "mouse-face" 'highlight))
+
+(defconst harness-ui-review--indentation "   "
+  "What the banner's lines start with, under its heading.")
+
+(defun harness-ui-review--indent (string)
+  "Return STRING indented as the banner's text, on the review background.
+Every line of it, wrapped ones too, starts with the banner's
+indentation; the line and wrap prefixes STRING has already follow,
+on the same background, so no stretch of a line goes without it."
+  (let* ((s (copy-sequence string))
+         (on-review (lambda (prefix)
+                      (let ((p (copy-sequence prefix)))
+                        (add-face-text-property 0 (length p) 'harness-chat-review-face t p)
+                        p)))
+         (margin (funcall on-review harness-ui-review--indentation))
+         (pos 0)
+         (len (length s)))
+    (while (< pos len)
+      (let ((next (or (next-property-change pos s) len))
+            (line (get-text-property pos 'line-prefix s))
+            (wrap (get-text-property pos 'wrap-prefix s)))
+        (put-text-property pos next 'line-prefix
+                           (concat margin (if (stringp line) (funcall on-review line) "")) s)
+        (put-text-property pos next 'wrap-prefix
+                           (concat margin (if (stringp wrap) (funcall on-review wrap) "")) s)
+        (setq pos next)))
+    s))
+
+(defun harness-ui-review--report (task)
+  "Return the report TASK handed in, drawn in full for the banner, or nil.
+Inside the session the report is always expanded -- the summary and
+every piece of evidence, each referenced call with its whole output --
+and indented as the banner's text.  It is the drawing of the [Report]
+popout (`harness-ui-report-string'), sized for this buffer's window.
+A report that cannot be drawn says so rather than take the compose box
+down with it."
+  (when (and (plist-get task :report) (fboundp 'harness-ui-report-string))
+    (harness-ui-review--indent
+     (condition-case err
+         (or (harness-ui-report-string task (car (get-buffer-window-list nil nil t))) "")
+       (error (propertize (format "The report could not be drawn: %s\n" (error-message-string err))
+                          'face 'harness-dim-face))))))
+
+(defun harness-ui-review--banner (task &optional report in-report)
+  "Return the banner string for TASK, waiting for review.
+It reads as the board's Ready for review card: the mark, the heading,
+what verifying does, and the buttons, with the keys beside them.
+REPORT, what TASK handed in drawn in full (`harness-ui-review--report'),
+goes between what verifying does and the buttons: the work is read
+before it is verified or sent back.  IN-REPORT is non-nil when the banner
+is drawn at the end of TASK's report popout
+(`harness-ui-report-panel-functions'): it speaks of the task then, and
+leaves [Report] out, the report being the window it is drawn in."
+  (let* ((in-report (or in-report (and (fboundp 'harness-ui-report-task)
+                                       (harness-ui-report-task))))
+         (title (harness-ui-tasks--title task))
+         (merges (and (plist-get task :worktree) (not (harness-json-true-p (plist-get task :merged)))))
+         (verify-help (if merges "Accept the work; its branch merges and the task is done"
+                        "Accept the work; the task is done")))
+    (concat
+     " " (propertize (concat (harness-ui-icon 'harness-icon-task-review) " Ready for review")
+                    'face 'harness-task-review-face)
+     (propertize (if in-report "   this task is waiting for you" "   this session is a task waiting for you")
+                 'face 'harness-dim-face)
+     "\n"
+     "   " (propertize title 'face 'bold)
+     (propertize (if merges " is done; verify it to merge its branch, or send it back with what to change."
+                   " is done; verify it, or send it back with what to change.")
+                 'face 'harness-dim-face 'wrap-prefix "   ")
+     "\n"
+     (if (harness-string-blank-p report) "" (concat "\n" report "\n"))
+     "   "
+     (harness-ui-review--button "[Verify]" #'harness-ui-review-verify verify-help)
+     (harness-ui-review--key #'harness-ui-review-verify)
+     "   "
+     (harness-ui-review--button "[Send back]" #'harness-ui-review-reject
+                                "Type the feedback in the box below, then C-c C-c")
+     (harness-ui-review--key #'harness-ui-review-reject)
+     (when (and (not in-report) (plist-get task :report) (fboundp 'harness-ui-report-popout))
+       (concat "   " (harness-ui-review--button "[Report]" (lambda () (harness-ui-report-popout task))
+                                                "Pop the final message and evidence out in a window of their own")))
+     "\n"
+     "   " (propertize "C-c C-c in the box sends what you write back to this task."
+                    'face 'harness-hint-face)
+     "\n ")))
+
 ;;;; Keys
 
 (defvar harness-ui-review-minor-mode-map (make-sparse-keymap)
-  "Keys of the review banner, on in a chat buffer while it shows.")
+  "Keys of a buffer showing a task that waits for your review.")
 
 ;; Filled at top level, not in the `defvar', so a reload updates the map.
 (let ((map harness-ui-review-minor-mode-map))
@@ -110,12 +276,14 @@ such, so the lookup happens once per session."
   (define-key map (kbd "C-c C-x") #'harness-ui-review-reject))
 
 (define-minor-mode harness-ui-review-minor-mode
-  "Minor mode of a chat buffer while it shows a task's review banner.
-It adds the banner's keys, over the chat's own:
+  "Keys to review the task this buffer shows, on while its banner shows.
+In a task's session and in its report popout, while the task waits for
+your review: \\<harness-ui-review-minor-mode-map>\\[harness-ui-review-verify] verifies it and \\[harness-ui-review-reject] sends it back, with what the
+compose box holds as the feedback.  Elsewhere, and once the task has
+left review, the keys are the buffer's own (C-c C-v attaches the
+clipboard to the box).
 
-\\{harness-ui-review-minor-mode-map}
-The banner turns it on and off (`harness-ui-review--panel'), so out of
-review the chat's keys are back: \\<harness-compose-map>\\[harness-compose-attach-clipboard] attaches the clipboard."
+\\{harness-ui-review-minor-mode-map}"
   :lighter nil :keymap harness-ui-review-minor-mode-map :group 'harness-ui-review)
 
 ;; Its keys in the harness menu.  They beat the chat's own `C-c C-v'
@@ -143,120 +311,85 @@ that runs it."
       (concat "  " (propertize (key-description key) 'face 'harness-chat-key-face))
     ""))
 
-;;;; The banner
+(defun harness-ui-review--shown (task)
+  "Return what the banner shows of TASK: nil unless TASK waits for review.
+Two records whose banners read the same give `equal' values, so a
+change the banner does not show -- a task at work moving on, say --
+does not draw the session's tail again under a reader of the report."
+  (when (harness-ui-review--reviewing-p task)
+    (list (plist-get task :id) (plist-get task :prompt) (plist-get task :worktree)
+          (plist-get task :merged) (plist-get task :report))))
 
-(defun harness-ui-review--button (label command help)
-  "Return a button string LABEL running COMMAND with HELP."
-  (propertize (buttonize label (lambda (_) (funcall command)) nil help)
-              "mouse-face" 'highlight))
+(defun harness-ui-review--keys (on)
+  "Turn this buffer's review keys on when ON, else off."
+  (if on
+      (unless harness-ui-review-minor-mode (harness-ui-review-minor-mode 1))
+    (when harness-ui-review-minor-mode (harness-ui-review-minor-mode -1))))
 
-(defun harness-ui-review-verify ()
-  "Accept this task's work: verify it, which merges its branch."
-  (interactive)
-  (let* ((sid harness-ui-session-id)
-         (task (gethash sid harness-ui-review--tasks)))
-    (unless (harness-ui-review--reviewing-p task)
-      (user-error "This session is not waiting for your review"))
-    (harness-ui-call "_harness/task/verify" (list :id (plist-get task :id)) #'ignore
-                     (lambda (e) (message "Could not verify: %s" (harness-error-message e))))
-    (message "Verified")))
+;;;; Where the banner shows
 
-(defun harness-ui-review-reject ()
-  "Send this task's work back: type what to change in the box, C-c C-c sends it."
-  (interactive)
-  (let* ((sid harness-ui-session-id)
-         (task (gethash sid harness-ui-review--tasks)))
-    (unless (harness-ui-review--reviewing-p task)
-      (user-error "This session is not waiting for your review"))
-    (setq-local harness-chat-placeholder "What should change? C-c C-c sends it back")
-    (with-no-warnings (when (fboundp 'harness-compose-update-placeholder)
-                        (harness-compose-update-placeholder)))
-    (when-let* ((window (get-buffer-window (current-buffer))))
-      (set-window-point window (or harness-compose-end (point-max))))
-    (message "Write what should change in the box; C-c C-c sends it back")))
-
-(defun harness-ui-review--send (text attachments)
-  "Send TEXT and ATTACHMENTS back to the task in review.
-Runs from `harness-chat-send-function' while the banner shows."
-  (let* ((sid harness-ui-session-id)
-         (task (gethash sid harness-ui-review--tasks)))
-    (unless (harness-ui-review--reviewing-p task)
-      (user-error "This session is not waiting for your review"))
-    (if (and (harness-string-blank-p text) (null attachments))
-        (user-error "Sending the work back needs feedback: type what should change")
-      (harness-ui-call "_harness/task/reject"
-                       (list :id (plist-get task :id) :feedback text :attachments attachments)
-                       (lambda (_) (message "Sent back: the session works on your feedback"))
-                       (lambda (e) (message "Could not send it back: %s" (harness-error-message e)))))))
-
-(defun harness-ui-review--banner (task)
-  "Return the banner string for TASK, waiting for review.
-It reads as the board's Ready for review card: the mark, the heading,
-what verifying does, and the buttons, with the keys beside them."
-  (let* ((title (harness-ui-tasks--title task))
-         (merges (and (plist-get task :worktree) (not (harness-json-true-p (plist-get task :merged)))))
-         (verify-help (if merges "Accept the work; its branch merges and the task is done"
-                        "Accept the work; the task is done")))
-    (concat
-     " " (propertize (concat (harness-ui-icon 'harness-icon-task-review) " Ready for review")
-                    'face 'harness-task-review-face)
-     (propertize "   this session is a task waiting for you" 'face 'harness-dim-face)
-     "\n"
-     "   " (propertize title 'face 'bold)
-     (propertize (if merges " is done; verify it to merge its branch, or send it back with what to change."
-                   " is done; verify it, or send it back with what to change.")
-                 'face 'harness-dim-face 'wrap-prefix "   ")
-     "\n   "
-     (harness-ui-review--button "[Verify]" #'harness-ui-review-verify verify-help)
-     (harness-ui-review--key #'harness-ui-review-verify)
-     "   "
-     (harness-ui-review--button "[Send back]" #'harness-ui-review-reject
-                                "Type the feedback in the box below, then C-c C-c")
-     (harness-ui-review--key #'harness-ui-review-reject)
-     (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
-       (concat "   " (harness-ui-review--button "[Report]" (lambda () (harness-ui-report-popout task))
-                                                "The final message and evidence it handed in")))
-     "\n"
-     "   " (propertize "C-c C-c in the box sends what you write back to this task."
-                    'face 'harness-hint-face)
-     "\n ")))
+(defun harness-ui-review--face (banner)
+  "Return BANNER on the review background, under its own faces.
+The board's Ready for review has it: a panel's own background stays out."
+  (if (fboundp 'harness-chat--face)
+      (harness-chat--face banner 'harness-chat-review-face)
+    (let ((s (copy-sequence banner)))
+      (add-face-text-property 0 (length s) 'harness-chat-review-face t s)
+      s)))
 
 (defun harness-ui-review--panel ()
   "Return the review banner when this session's task waits for review.
 On `harness-chat-panel-functions': nil for a session that is no task's,
 one that is not in review, or before the task is known.  While it
-shows, the compose box takes feedback (`harness-chat-send-function')
-and the banner's keys are on (`harness-ui-review-minor-mode')."
+shows, the banner's keys are on (`harness-ui-review-minor-mode'); the
+box is the session's own, since the harness takes any message to the
+task's session for the feedback that sends it back
+\(`harness-tasks--on-message')."
   (let* ((sid harness-ui-session-id)
          (task (harness-ui-review--task sid))
          (review (harness-ui-review--reviewing-p task)))
+    (harness-ui-review--keys review)
+    ;; A buffer drawn by an earlier version may still have its box routed
+    ;; to `harness-ui-review--send'; the harness takes the message now.
+    (when (eq harness-chat-send-function #'harness-ui-review--send)
+      (kill-local-variable 'harness-chat-send-function))
     (if review
-        (progn
-          (setq-local harness-chat-send-function #'harness-ui-review--send)
-          (unless harness-ui-review-minor-mode (harness-ui-review-minor-mode 1))
-          ;; The review background, as the board's Ready for review has it:
-          ;; the chat panel's own background stays out of it.
-          (let ((banner (harness-ui-review--banner task)))
-            (if (fboundp 'harness-chat--face)
-                (harness-chat--face banner 'harness-chat-review-face)
-              banner)))
-      ;; Not in review: the box and the keys are the session's own again.
-      (when (eq harness-chat-send-function #'harness-ui-review--send)
-        (setq-local harness-chat-send-function nil))
-      (when harness-ui-review-minor-mode (harness-ui-review-minor-mode -1))
+        (harness-ui-review--face (harness-ui-review--banner task (harness-ui-review--report task)))
+      ;; Not in review: the box asks for a message again, not feedback.
+      (when (equal harness-chat-placeholder harness-ui-review--feedback-hint)
+        (kill-local-variable 'harness-chat-placeholder))
       nil)))
 
-;;;; Events
+(defun harness-ui-review--report-panel (task)
+  "Return the review banner for the end of TASK's report, when it waits for review.
+On `harness-ui-report-panel-functions': the banner of TASK's session,
+less its [Report] button.  While it shows, the review keys are on, and
+the box under it sends TASK back (`harness-ui-review--report-compose')."
+  (let ((review (harness-ui-review--reviewing-p task)))
+    (harness-ui-review--keys review)
+    (and review (harness-ui-review--face (harness-ui-review--banner task nil t)))))
+
+(defun harness-ui-review--report-compose (task)
+  "Give TASK's report popout a box that sends it back, while it waits for review.
+On `harness-ui-report-compose-functions'."
+  (and (harness-ui-review--reviewing-p task)
+       (cons #'harness-ui-review--send harness-ui-review--feedback-hint)))
+
+;;;; Events and setup
 
 (defun harness-ui-review--on-event (event args)
   "Follow tasks: the banner of an open session follows its task, and a
-session that becomes a task's, or stops being one, is looked up again."
+session that becomes a task's, or stops being one, is looked up again.
+Only a change the banner shows draws the session's tail again: the
+report it holds is long, and its reader keeps their place."
   (pcase event
     ((or "task/changed" "task/review" "task/done")
      (let ((task (car args)))
        (when-let* ((sid (plist-get task :session)))
-         (puthash sid task harness-ui-review--tasks)
-         (harness-ui-review--redraw sid))))
+         (let ((before (harness-ui-review--shown (gethash sid harness-ui-review--tasks))))
+           (puthash sid task harness-ui-review--tasks)
+           (unless (equal before (harness-ui-review--shown task))
+             (harness-ui-review--redraw sid))))))
     ("task/deleted"
      (let ((id (car args)))
        (maphash (lambda (sid task)
@@ -270,13 +403,16 @@ session that becomes a task's, or stops being one, is looked up again."
   (add-hook 'harness-chat-panel-functions #'harness-ui-review--panel t))
 
 (defun harness-ui-review--init ()
-  "Add the banner to every chat buffer and follow task events."
+  "Add the banner to every chat buffer and to report popouts; follow tasks."
   (with-eval-after-load 'harness-ui-chat
     (add-hook 'harness-chat-mode-hook #'harness-ui-review--setup))
+  (with-eval-after-load 'harness-ui-report
+    (add-hook 'harness-ui-report-panel-functions #'harness-ui-review--report-panel)
+    (add-hook 'harness-ui-report-compose-functions #'harness-ui-review--report-compose))
   (add-hook 'harness-ui-event-functions #'harness-ui-review--on-event))
 
 (harness-define-module 'ui-review
-  :doc "The review banner of a task's session: verify it or send it back."
+  :doc "Reviewing a task where it is looked at: its report in full in its session; verify it or send it back."
   :requires '(ui ui-tasks ui-report)
   :init #'harness-ui-review--init)
 

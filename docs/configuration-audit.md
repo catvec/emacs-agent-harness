@@ -101,10 +101,10 @@ simply pushed the implementation detail across that line.
 
 | Old option | Constant |
 |---|---|
-| `harness-tools-emacs-value-chars` | `harness-client-tools--value-chars` |
-| `harness-tools-emacs-messages-default` | `harness-client-tools--messages-default` |
-| `harness-elisp-timeout` | `harness-client-tools--elisp-timeout` |
-| `harness-elisp-max-value-chars` | `harness-client-tools--elisp-max-value-chars` |
+| `harness-tools-emacs-value-chars` | `harness-tools-emacs--value-chars` |
+| `harness-tools-emacs-messages-default` | `harness-tools-emacs--messages-default` |
+| `harness-elisp-timeout` | `harness-elisp--timeout` |
+| `harness-elisp-max-value-chars` | `harness-elisp--max-value-chars` |
 | `harness-log-max-lines` | `harness--log-max-lines` |
 | `harness-files-timeout` | `harness-files--timeout` |
 | `harness-http-curl-program` | `harness-http--curl-program` |
@@ -302,7 +302,7 @@ marked *done* were fixed, the rest are recommendations, not changes.
 |---|---|
 | `write_file` and `edit_file` | One need ("change a file") with two parameters (whole file, or a patch). Kept separate: the agent chooses per call, and both are documented side by side |
 | `glob`, `grep`, `list_dir`, `file_info`, `read_file` | The fs tools are verbs on files, not duplicates. Their limits are now constants, so they compose |
-| `emacs_*` tools and the `elisp` tool | `elisp` can do everything the `emacs_*` tools do, but the narrow tools are what the agent is allowed to use unaided; keep both, with `elisp` under the stricter permission |
+| `emacs_*` tools and the `elisp` tool | Not one need: `elisp` evaluates in a background Emacs and cannot touch the user's Emacs at all; the narrow `emacs_*` tools are the only way to read or drive the live Emacs, and each is bounded work (no prompt, subprocess, network or file-system wait), so the agent's UI reach is exactly what they allow. Keep both |
 | `web_search` and the provider's own search | Already one feature with a parameter (`harness-websearch-builtin`), exactly the pattern this audit asks for |
 | `session_wait` and `task_wait` | One waiting mechanism with different predicates; both already accept the same timeout options, with one default (now an internal constant) |
 | `fork` and `btw` | Fork copies context, BTW deliberately does not. One "start a side conversation" UI with a parameter would hide the price difference; keep both, they are named for what they do |

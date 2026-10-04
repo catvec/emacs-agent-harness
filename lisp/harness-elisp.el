@@ -4,20 +4,24 @@
 
 ;;; Commentary:
 
-;; The `elisp' tool lets a model run Lisp, and model-written code must
-;; never run in the user's Emacs.  Emacs runs Lisp on one thread, so
-;; code that blocks -- a `call-process' waiting on a child, a loop that
-;; never yields -- freezes typing and redisplay, and nothing can be
-;; done about it from Lisp: `with-timeout' needs the event loop, and a
-;; signal only breaks loops that call `maybe-quit', not a blocked
-;; subprocess read.  So the tool evaluates in a child `emacs --batch'
-;; process (`harness-elisp-batch-main'), which the tool kills, tree and
-;; all, when it overruns its timeout.  The child adds the harness to
-;; its `load-path', so `(require 'harness-...)` works as it did when
-;; the code ran in the harness's own Emacs.
+;; The `elisp' tool lets a model run Lisp, and model-written code never
+;; runs in the user's Emacs.  Emacs runs Lisp on one thread, so code
+;; that blocks -- a `call-process' waiting on a child, a loop that never
+;; yields -- freezes typing and redisplay, and nothing can be done about
+;; it from Lisp: `with-timeout' needs the event loop, and a signal only
+;; breaks loops that call `maybe-quit', not a blocked subprocess read.
+;; So the tool, which runs in the harness like every tool, evaluates in
+;; a background `emacs --batch' process (`harness-elisp-batch-main'),
+;; which it kills, tree and all, when it overruns its timeout.  The
+;; child adds the harness to its `load-path', so `(require
+;; 'harness-...)` works as it did when the code ran in the harness's own
+;; Emacs.
 ;;
-;; `harness-elisp-eval-string' is the evaluator both that child and the
-;; opt-in in-UI path (`harness-elisp-allow-ui-eval') share.
+;; There is no other place it can run: the user's Emacs answers no
+;; request that evaluates code (lisp/harness-emacs-endpoint.el), whatever
+;; anyone configures.  `harness-elisp-eval-string' is the background
+;; child's evaluator, and `harness-elisp-payload' the shape it reports
+;; in.
 
 ;;; Code:
 
@@ -41,18 +45,6 @@ Internal, not an option (see docs/configuration-audit.md).")
 (defcustom harness-elisp-emacs (expand-file-name invocation-name invocation-directory)
   "Emacs program the `elisp' tool runs its evaluations in."
   :type 'file :group 'harness)
-
-(defcustom harness-elisp-allow-ui-eval nil
-  "Non-nil lets the `elisp' tool evaluate inside the UI's Emacs.
-The default runs it in a separate batch Emacs process, where it cannot
-freeze Emacs.  Turning this on restores the older behaviour, and with
-it the ability to wedge Emacs beyond recovery: Emacs runs Lisp on one
-thread, so a blocking subprocess call or a loop that never yields
-stops typing and redisplay, and neither a timer nor a signal can end
-it.  Only turn this on to drive the live Emacs in ways the narrow
-`emacs_*' tools cannot, and expect that a bad expression can freeze
-the UI until the blocking process is killed."
-  :type 'boolean :group 'harness)
 
 ;;;; Evaluating a string
 
@@ -133,10 +125,11 @@ does not parse or a form does not evaluate."
 
 ;;;; The child process
 
-(defun harness-elisp--batch-payload (result error)
-  "Return the JSON-ready plist for an `elisp' evaluation.
-RESULT is (VALUE OUTPUT MESSAGES) or nil; ERROR is the failure's
-message or nil."
+(defun harness-elisp-payload (result error)
+  "Return the JSON-ready plist that reports an `elisp' evaluation.
+RESULT is (VALUE OUTPUT MESSAGES) from `harness-elisp-eval-string', or
+nil; ERROR is the failure's message, or nil.  The background Emacs
+writes it as JSON, and the `elisp' tool reads it back."
   (if error
       (list :value "" :output "" :messages "" :error error)
     (pcase-let ((`(,value ,output ,messages) result))
@@ -180,13 +173,13 @@ $HARNESS_ELISP_TIMEOUT seconds."
                        (progn
                          (when (or (not code-file) (not (file-readable-p code-file)))
                            (error "Cannot read the code file %s" code-file))
-                         (harness-elisp--batch-payload
+                         (harness-elisp-payload
                           (let ((code (with-temp-buffer
                                         (insert-file-contents code-file)
                                         (buffer-string))))
                             (harness-elisp-eval-string code))
                           nil))
-                     (error (harness-elisp--batch-payload nil (error-message-string err))))))
+                     (error (harness-elisp-payload nil (error-message-string err))))))
       ;; Anything the code printed to the terminal is noise to the parent,
       ;; which reads the result file.
       (harness-elisp--batch-write result-file payload)

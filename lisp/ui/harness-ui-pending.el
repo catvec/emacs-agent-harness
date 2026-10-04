@@ -53,9 +53,12 @@
   "Session id -> the request records it waits on, oldest first.
 A record is a plist: `:id' `:kind' (\"permission\" or \"question\"),
 `:respond' (the ACP callback, when a client owns the request, else nil),
-`:created', and what its panel draws: `:title' `:tool' `:tool-kind'
-`:input' `:paths' `:dir' `:reason' `:options' for a permission,
-`:question' `:options' `:diagrams' for a question.")
+`:connection' (the UI connection it came on, so an answer still goes out
+on it), `:created', and what its panel draws: `:title' `:tool' `:tool-kind'
+`:input' `:paths' `:pattern' `:dir' `:reason' `:options' for a
+permission (`:pattern' is the glob the answer holds for, and
+`:edited-pattern' the one the user typed), `:question' `:options'
+`:diagrams' for a question.")
 
 (defvar harness-ui-pending--diagrams (make-hash-table :test 'equal)
   "Session id -> (PID . INDEX) of the diagram its panel shows.
@@ -141,11 +144,14 @@ opening it."
 (defun harness-ui-pending-add (session-id record)
   "Add or replace RECORD among the requests SESSION-ID waits on.
 An answer already given here wins over news of the request still
-arriving: the record keeps its `:respond' and does not come back."
+arriving: the record keeps its `:respond' and does not come back.  A
+pattern the user edited is kept too, for the same reason."
   (let* ((pid (plist-get record :id))
          (old (harness-ui-pending-record session-id pid))
-         (record (if (and old (plist-get old :respond) (not (plist-get record :respond)))
-                     old record))
+         (record (cond ((and old (plist-get old :respond) (not (plist-get record :respond))) old)
+                       ((plist-get old :edited-pattern)
+                        (plist-put (copy-sequence record) :edited-pattern (plist-get old :edited-pattern)))
+                       (t record)))
          (rest (cl-remove pid (harness-ui-pending-items session-id)
                           :key (lambda (r) (plist-get r :id)) :test #'equal)))
     (harness-ui-pending--put session-id (append rest (list record)))))
@@ -184,7 +190,8 @@ ITEM is (:id :kind :payload) in the wire shape."
             :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
             :tool (plist-get payload :tool) :tool-kind (harness-ui-pending--str (plist-get payload :kind))
             :input (plist-get payload :input) :paths (plist-get payload :paths)
-            :dir (plist-get payload :dir) :reason (plist-get payload :reason)
+            :dir (plist-get payload :dir) :pattern (plist-get payload :pattern)
+            :reason (plist-get payload :reason)
             :options (plist-get payload :options)))))
 
 (defun harness-ui-pending-sync-session (session-id)
@@ -218,36 +225,150 @@ non-nil when the store changed."
 
 ;;;; Answering
 
-(defun harness-ui-pending--message-for (option dir)
-  "Return the echo-area message for permission OPTION (DIR: a directory)."
+(defun harness-ui-pending--message-for (option dir shown)
+  "Return the echo-area message for permission OPTION.
+DIR is the prompt's directory when it has one, SHOWN the pattern the
+answer holds for (nil for a call without paths)."
   (pcase option
     ("allow-once" "Allowed")
-    ("allow-session" (if dir "Directory allowed for this session" "Allowed for this session"))
-    ("allow-always" (if dir "Directory always allowed" "Always allowed"))
-    ("deny-always" "Always denied")
+    ("allow-session" (cond (shown (format "Allowed %s for this session" shown))
+                           (dir "Directory allowed for this session")
+                           (t "Allowed for this session")))
+    ("allow-always" (cond (shown (format "Always allowed %s" shown))
+                          (dir "Directory always allowed")
+                          (t "Always allowed")))
+    ("deny-always" (if shown (format "Always denied %s" shown) "Always denied"))
     (_ "Denied")))
 
 (defun harness-ui-pending-answer-permission (session-id pid option)
   "Answer permission request PID of SESSION-ID with OPTION.
-OPTION is an option id such as \"allow-once\".  An ACP request is
-answered through the function that holds it; one only known from the
-session's pending list goes over `_harness/permission/answer'."
+OPTION is an option id such as \"allow-once\".  A pattern the user
+edited goes with the answer (see `harness-ui-pending-edit-pattern').
+An ACP request is answered through the function that holds it; one only
+known from the session's pending list goes over
+`_harness/permission/answer'."
   (when-let* ((r (harness-ui-pending-record session-id pid)))
-    (if-let* ((respond (plist-get r :respond)))
-        (funcall respond (list :outcome (list :outcome "selected" :optionId option)))
-      (harness-ui-call "_harness/permission/answer"
-                       (list :session-id session-id :pending-id pid :answer option) #'ignore))
-    (harness-ui-pending-remove session-id pid)
-    (message "%s" (harness-ui-pending--message-for option (plist-get r :dir)))))
+    (let ((edited (plist-get r :edited-pattern))
+          (shown (harness-ui-pending--permission-pattern r)))
+      (unless (harness-ui-pending--respond
+               r (append (list :outcome (list :outcome "selected" :optionId option))
+                         (and edited (list :_harness (list :pattern edited)))))
+        (harness-ui-call "_harness/permission/answer"
+                         (list :session-id session-id :pending-id pid
+                               :answer (if edited (list :option option :pattern edited) option))
+                         #'ignore))
+      (harness-ui-pending-remove session-id pid)
+      (message "%s" (harness-ui-pending--message-for option (plist-get r :dir) shown)))))
 
 (defun harness-ui-pending-answer-question (session-id pid answer)
   "Answer question PID of SESSION-ID with ANSWER."
   (when-let* ((r (harness-ui-pending-record session-id pid)))
-    (if-let* ((respond (plist-get r :respond)))
-        (funcall respond (list :answer answer))
+    (unless (harness-ui-pending--respond r (list :answer answer))
       (harness-ui-call "_harness/question/answer"
                        (list :session-id session-id :pid pid :answer answer) #'ignore))
     (harness-ui-pending-remove session-id pid)))
+
+(defun harness-ui-pending--respond (r value)
+  "Answer request record R through its RESPOND with VALUE.
+Non-nil when it went out.  RESPOND answers the request on the
+connection it came on, and only while that is the UI's live connection.
+After the UI connected again (`harness-connect-remote', even back to the
+same harness) the harness keeps the request pending, but would never
+hear an answer sent on the old connection, and the session would stay
+blocked: the caller then answers through the bus method instead
+\(`permission/answer', `question/answer'), which is what this returns
+nil for.  A record of the session's own pending list has no RESPOND at
+all."
+  (let ((respond (plist-get r :respond))
+        (connection (plist-get r :connection)))
+    (and respond
+         (eq connection harness-ui-connection)
+         (harness-acp-open-p connection)
+         ;; Nil when it could not go out after all (see `harness-acp-set-handler').
+         (funcall respond value))))
+
+;;;; Patterns a prompt about paths is answered for
+;;
+;; A permission request about paths (the jail's, an agent's own request
+;; for a directory, a tool call that touches files) is answered for a
+;; glob pattern rather than for one file: its `:pattern', by default
+;; everything in the directory of its paths.  The user edits it, more
+;; or less specific, with `harness-ui-pending-edit-pattern' (`e' on the
+;; panel, C-c C-p in the chat); the answer then carries the edited
+;; pattern, and for a call the panel says which answers hold for it.
+
+(defun harness-ui-pending--permission-pattern (r)
+  "Return the glob pattern permission record R is answered for, as shown, or nil.
+That is the one the user edited, else the request's own, abbreviated."
+  (or (plist-get r :edited-pattern)
+      (and (stringp (plist-get r :pattern)) (abbreviate-file-name (plist-get r :pattern)))))
+
+(defun harness-ui-pending--pattern-suggestions (r)
+  "Return patterns more or less specific than permission record R's own.
+The paths of the call itself, every file with one's extension in the
+directory, the directory, and its parent: what
+\\<minibuffer-local-map>\\[next-history-element] offers while editing."
+  (let* ((pattern (plist-get r :pattern))
+         (dir (and (string-suffix-p "/**" pattern) (substring pattern 0 -2)))
+         (parent (and dir (file-name-directory (directory-file-name dir))))
+         (paths (mapcar (lambda (p) (format "%s" p)) (append (plist-get r :paths) nil))))
+    (delete-dups
+     (mapcar #'abbreviate-file-name
+             (delq nil (append paths
+                               (mapcar (lambda (p)
+                                         (and dir (file-name-extension p) (equal (file-name-directory p) dir)
+                                              (concat dir "*." (file-name-extension p))))
+                                       paths)
+                               (list pattern
+                                     (and parent (not (equal parent dir)) (concat parent "**")))))))))
+
+(defun harness-ui-pending-set-pattern (session-id pid pattern)
+  "Make PATTERN, or the request's own when nil, the one PID is answered for.
+The hosts drawing the request are redrawn; point goes to the request's
+pattern line when this buffer shows it."
+  (harness-ui-pending--put
+   session-id
+   (mapcar (lambda (r)
+             (if (equal (plist-get r :id) pid)
+                 (plist-put (copy-sequence r) :edited-pattern pattern)
+               r))
+           (harness-ui-pending-items session-id)))
+  ;; Point on the panel's pattern line again, after the redraw; the text
+  ;; property is compared with `equal', so the loop walks the changes.
+  (let ((pos (point-min)))
+    (while (and pos (not (and (equal (get-text-property pos 'harness-ui-pending-pattern) pid)
+                              (equal (get-text-property pos 'harness-ui-pending) pid))))
+      (setq pos (next-single-property-change pos 'harness-ui-pending-pattern)))
+    (when pos (goto-char pos))))
+
+(defun harness-ui-pending-edit-pattern (&optional pid)
+  "Edit the glob pattern the permission request PID is answered for.
+PID defaults to the request at point, or else the newest one.  A
+request about paths is answered for everything in the directory they
+lie in; edit the pattern to be more specific (a subdirectory,
+src/*.el, one file) or less (a parent directory).  `*' matches within a
+name, `**' across directories; a relative pattern is relative to the
+session's working directory.
+\\<minibuffer-local-map>\\[next-history-element] offers patterns around
+the request's own; an empty answer goes back to it."
+  (interactive)
+  (let* ((session-id (harness-ui-pending--session))
+         (pid (or pid (harness-ui-pending-at-point)))
+         (r (and pid (harness-ui-pending-record session-id pid))))
+    (unless (and r (equal (plist-get r :kind) "permission"))
+      (setq r (cl-find-if (lambda (x) (equal (plist-get x :kind) "permission"))
+                          (reverse (harness-ui-pending-items session-id)))
+            pid (plist-get r :id)))
+    (unless (plist-get r :pattern)
+      (user-error "No permission request about paths is waiting"))
+    (let* ((own (abbreviate-file-name (plist-get r :pattern)))
+           (typed (string-trim (read-string "Pattern (* within a name, ** across directories): "
+                                            (harness-ui-pending--permission-pattern r) nil
+                                            (harness-ui-pending--pattern-suggestions r)))))
+      (harness-ui-pending-set-pattern session-id pid
+                                      (unless (or (string-empty-p typed) (equal typed own)) typed))
+      (message "Answers now hold for %s"
+               (harness-ui-pending--permission-pattern (harness-ui-pending-record session-id pid))))))
 
 ;;;; Keys on the panels, and the commands behind them
 
@@ -267,15 +388,16 @@ session's pending list goes over `_harness/permission/answer'."
           (harness-ui-pending-answer-permission session-id pid option)
         (user-error "No permission request waiting")))))
 
-(defvar harness-ui-pending-permission-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "y") (harness-ui-pending--permission-command "allow-once"))
-    (define-key map (kbd "s") (harness-ui-pending--permission-command "allow-session"))
-    (define-key map (kbd "a") (harness-ui-pending--permission-command "allow-always"))
-    (define-key map (kbd "n") (harness-ui-pending--permission-command "deny-once"))
-    (define-key map (kbd "N") (harness-ui-pending--permission-command "deny-always"))
-    map)
+(defvar harness-ui-pending-permission-map (make-sparse-keymap)
   "Keys active while point is on a permission panel.")
+
+;; Filled at top level, not in the `defvar', so a reload updates the map.
+(define-key harness-ui-pending-permission-map (kbd "y") (harness-ui-pending--permission-command "allow-once"))
+(define-key harness-ui-pending-permission-map (kbd "s") (harness-ui-pending--permission-command "allow-session"))
+(define-key harness-ui-pending-permission-map (kbd "a") (harness-ui-pending--permission-command "allow-always"))
+(define-key harness-ui-pending-permission-map (kbd "n") (harness-ui-pending--permission-command "deny-once"))
+(define-key harness-ui-pending-permission-map (kbd "N") (harness-ui-pending--permission-command "deny-always"))
+(define-key harness-ui-pending-permission-map (kbd "e") #'harness-ui-pending-edit-pattern)
 
 (defun harness-ui-pending--question-command (n)
   "Return a command answering the question at point with its Nth option."
@@ -369,17 +491,47 @@ strings) or from an ACP request (plists with `:optionId')."
 
 (defun harness-ui-pending-permission-buttons (r)
   "Return the (LABEL KEY OPTION) buttons for permission record R.
-A directory prompt is worded for directories; only the options R
-offers are shown, so an agent's own directory request has no
-\"Allow once\"."
-  (let ((all (if (plist-get r :dir)
-                 '(("Allow once" "y" "allow-once") ("Allow directory for session" "s" "allow-session")
-                   ("Always allow directory" "a" "allow-always") ("Deny" "n" "deny-once"))
+A directory prompt answered for a pattern says so on its pattern line,
+one without speaks of the directory; only the options R offers are
+shown, so an agent's own directory request has no \"Allow once\"."
+  (let ((all (cond
+              ((and (plist-get r :dir) (not (plist-get r :pattern)))
+               '(("Allow once" "y" "allow-once") ("Allow directory for session" "s" "allow-session")
+                 ("Always allow directory" "a" "allow-always") ("Deny" "n" "deny-once")
+                 ("Always deny directory" "N" "deny-always")))
+              ((plist-get r :dir)
+               '(("Allow once" "y" "allow-once") ("Allow for session" "s" "allow-session")
+                 ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always")))
+              (t
                '(("Allow" "y" "allow-once") ("Allow for session" "s" "allow-session")
-                 ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always"))))
+                 ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always")))))
         (offered (harness-ui-pending--offered-options r)))
     (or (and offered (cl-remove-if-not (lambda (o) (member (nth 2 o) offered)) all))
         all)))
+
+(defun harness-ui-pending--insert-pattern-line (r buttons)
+  "Insert the line of the pattern permission record R is answered for.
+BUTTONS are the panel's; for a tool call, the line says which of them
+the pattern is for: those that remember the answer."
+  (let ((pid (plist-get r :id))
+        (remembering (and (not (plist-get r :dir))
+                          (cl-remove-if-not (lambda (b) (member (nth 2 b) '("allow-session" "allow-always" "deny-always")))
+                                            buttons)))
+        (start (point)))
+    (insert (propertize "   pattern: " 'face 'harness-dim-face)
+            (propertize (harness-ui-pending--permission-pattern r) 'face 'harness-tool-subject-face)
+            (if (plist-get r :edited-pattern) (propertize " (edited)" 'face 'harness-dim-face) "")
+            "  "
+            (harness-ui-action-button "[Edit]" (lambda () (harness-ui-pending-edit-pattern pid))
+                                      :help "Edit the pattern, to make it more or less specific (e)")
+            " " (harness-ui-kbd "e")
+            (if remembering
+                (propertize (format "   %s remember the answer for it"
+                                    (mapconcat (lambda (b) (nth 1 b)) remembering ", "))
+                            'face 'harness-dim-face)
+              "")
+            "\n")
+    (put-text-property start (point) 'harness-ui-pending-pattern pid)))
 
 (defun harness-ui-pending--decorate (start end pid map)
   "Make START..END the panel of request PID, with keymap MAP."
@@ -391,7 +543,8 @@ offers are shown, so an agent's own directory request has no
   "Insert the panel for permission record R."
   (let ((pid (plist-get r :id))
         (session-id (harness-ui-pending--session))
-        (start (point)))
+        (start (point))
+        (buttons (harness-ui-pending-permission-buttons r)))
     (insert (propertize (concat " " (harness-ui-icon 'harness-icon-blocked) " Permission  ") 'face 'harness-label-face)
             (harness-ui-tool-title-string (plist-get r :tool) (plist-get r :title))
             "\n")
@@ -403,8 +556,10 @@ offers are shown, so an agent's own directory request has no
       (insert (propertize (concat "   " (harness-ui-tool-input-summary input) "\n") 'face 'harness-dim-face)))
     (when-let* ((reason (plist-get r :reason)))
       (insert (propertize (format "   %s\n" reason) 'face 'harness-hint-face)))
+    (when (plist-get r :pattern)
+      (harness-ui-pending--insert-pattern-line r buttons))
     (insert "   ")
-    (dolist (o (harness-ui-pending-permission-buttons r))
+    (dolist (o buttons)
       (let ((option (nth 2 o)))
         (insert (harness-ui-action-button (format "[%s]" (nth 0 o))
                                           (lambda () (harness-ui-pending-answer-permission session-id pid option))
@@ -628,11 +783,13 @@ clients, or the session's own pending list, answer it."
              (pid (or (plist-get extra :pendingId) (plist-get tc :toolCallId) (harness-short-id 6))))
         (harness-ui-pending-add
          session-id
-         (list :id pid :kind "permission" :respond respond :created (float-time)
+         (list :id pid :kind "permission" :respond respond :connection harness-ui-connection
+               :created (float-time)
                :title (or (plist-get tc :title) (plist-get extra :tool) "tool call")
                :tool (plist-get extra :tool) :tool-kind (format "%s" (plist-get tc :kind))
                :input (plist-get tc :rawInput) :paths (plist-get extra :paths)
-               :dir (plist-get extra :dir) :reason (plist-get extra :reason)
+               :dir (plist-get extra :dir) :pattern (plist-get extra :pattern)
+               :reason (plist-get extra :reason)
                :options (plist-get params :options))))
       t)))
 
@@ -643,7 +800,7 @@ clients, or the session's own pending list, answer it."
       (harness-ui-pending-add
        session-id
        (list :id (or (plist-get params :requestId) (harness-short-id 6)) :kind "question" :respond respond
-             :created (float-time)
+             :connection harness-ui-connection :created (float-time)
              :question (plist-get params :question) :options (plist-get params :options)
              :diagrams (plist-get params :diagrams)))
       t)))

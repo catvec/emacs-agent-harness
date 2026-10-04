@@ -201,6 +201,16 @@ project's rule about landing work first."
     (should (eq 'allow (harness-perms-test--behavior "hand_in" 'meta)))
     (should (null (funcall probe 'requests)))))
 
+(ert-deftest harness-perms-open-harness-needs-no-approval ()
+  ;; open_harness only starts an Emacs running a checkout of the harness,
+  ;; in a state directory of its own, so verifying harness work live needs
+  ;; no prompt, in every mode.
+  (harness-perms-test--setup :permission-mode 'ask)
+  (should (member "open_harness" harness-perms--auto-allow-tools))
+  (should (eq 'allow (harness-perms-test--behavior "open_harness" 'exec)))
+  (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'auto))
+  (should (eq 'allow (harness-perms-test--behavior "open_harness" 'exec))))
+
 (ert-deftest harness-perms-rules-beat-auto-allow ()
   ;; web_search used to ask, so a user may have answered deny-always: the
   ;; rule must still hold now that the tool needs no approval.
@@ -533,6 +543,47 @@ call, so a non-interactive session is not refused one nobody judged."
     (should (eq 'allow (plist-get d :behavior)))
     (should (equal "fine" (plist-get d :reason)))
     (should (= 1 (length (funcall requests))))))
+
+(ert-deftest harness-perms-auto-mode-a-verdict-ending-at-max-tokens-decides ()
+  "A parseable verdict decides even when the completion stopped at max-tokens.
+The judge used to require `end-turn' and so discarded verdicts like
+these, from the log, then denied ordinary unattended work.  The judge
+asks for no extended thinking, which spent its output before the verdict."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_edit" :label "Edit" :kind 'write :description "Edits a file." :handler #'ignore)
+  (pcase-dolist (`(,reply ,behavior ,reason)
+                 '(("{\"decision\":\"allow\",\"reason\":\"Ordinary source edit within the project worktree.\"}"
+                    allow "Ordinary source edit within the project worktree.")
+                   ("{\"decision\":\"deny\",\"reason\":\"Outside the project.\"}"
+                    deny "Outside the project.")))
+    (let* ((requests (harness-perms-test--scripted-judge
+                      `(((:type text :delta ,reply) (:type done :stop-reason max-tokens)))))
+           (harness-perms-auto-model "judge:x")
+           (d (harness-perms-test--decide (harness-perms-test--request "t_edit" 'write))))
+      (should (eq behavior (plist-get d :behavior)))
+      (should (equal reason (plist-get d :reason)))
+      (should-not (plist-get d :no-verdict))
+      ;; Decided at once, without the retry; and with thinking off.
+      (should (= 1 (length (funcall requests))))
+      (should (eq t (plist-get (car (funcall requests)) :no-thinking))))))
+
+(ert-deftest harness-perms-auto-mode-a-cut-verdict-at-max-tokens-is-no-verdict ()
+  "A reply cut off before its verdict is complete gives no verdict, whatever it began.
+Nothing is read into half a JSON object, so a non-interactive session
+denies the call as nobody's verdict, after the one retry."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let* ((cut '((:type text :delta "{\"decision\":\"allow\",\"reason\":\"")
+                (:type done :stop-reason max-tokens)))
+         (requests (harness-perms-test--scripted-judge (list cut cut)))
+         (harness-perms-auto-model "judge:x")
+         (d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (equal harness-perms-no-verdict-hint (plist-get d :hint)))
+    (should (string-match-p "no verdict (it stopped: max-tokens)" (plist-get d :reason)))
+    (should (= 2 (length (funcall requests)))))
+  (should-not (harness-perms--parse-verdict "{\"decision\":\"allow\",\"reason\":\""))
+  (should-not (harness-perms--parse-verdict "{\"decision\":\"maybe\",\"reason\":\"unsure\"}"))
+  (should-not (harness-perms--parse-verdict "")))
 
 (defconst harness-perms-test--non-ascii "\N{U+2717} caf\N{U+E9} 3 \N{U+D7} 4 \N{U+2026}"
   "Text with a ballot X, an accented letter, a multiplication sign and an ellipsis.")
@@ -1324,6 +1375,287 @@ to its own temporary directory, so it carries on rather than stops."
           (should (equal (concat "wrote " tmp "x") (funcall run "t_write" (list :path (concat tmp "x"))))))
       (clrhash harness-sessions))))
 
+;;;; Patterns a prompt about paths is answered for
+
+(ert-deftest harness-perms-patterns-match-like-globs ()
+  "A root or a rule's path is a directory, holding all below it, or a glob."
+  (harness-perms-test--setup)
+  (let* ((d (harness-perms-test--real (harness-test-temp-dir)))
+         (case-fold-search t)           ; file names stay case-sensitive anyway
+         (in (lambda (root path) (harness-perms--within-p root (expand-file-name path d)))))
+    ;; A directory, with or without its slash, holds itself and what lies below.
+    (should (funcall in d "a/b.txt"))
+    (should (funcall in (directory-file-name d) "."))
+    ;; DIR/** is the same, the directory itself included.
+    (should (funcall in (concat d "**") "a/b.txt"))
+    (should (funcall in (concat d "**") "."))
+    (should-not (harness-perms--within-p (concat d "**") (concat (directory-file-name d) "-evil/x")))
+    ;; * stays within a name, ** crosses directories, ? is one character.
+    (should (funcall in (concat d "*.org") "todo.org"))
+    (should-not (funcall in (concat d "*.org") "sub/todo.org"))
+    (should-not (funcall in (concat d "*.org") "todo.ORG"))
+    (should (funcall in (concat d "**/*.org") "sub/deep/todo.org"))
+    (should (funcall in (concat d "**/*.org") "todo.org"))
+    (should (funcall in (concat d "todo.?rg") "todo.org"))
+    ;; A path without wildcards holds that file alone when it names one.
+    (should (funcall in (concat d "notes/todo.org") "notes/todo.org"))
+    (should-not (funcall in (concat d "notes/todo.org") "notes/todo.orgx"))
+    ;; Brackets match themselves: a directory may well be called so.
+    (let ((photos (file-name-as-directory (expand-file-name "Photos [2024]" d))))
+      (make-directory photos)
+      (should-not (harness-perms--glob-p photos))
+      (should (harness-perms--within-p photos (expand-file-name "a/b.jpg" photos)))
+      (should (harness-perms--within-p (concat photos "*.jpg") (expand-file-name "b.jpg" photos)))
+      (should-not (harness-perms--within-p (concat d "Photos [0-9]*/**") (expand-file-name "b.jpg" photos)))
+      (should (equal photos (harness-perms--grant-form (concat photos "**"))))
+      ;; As a working directory, it holds its files.
+      (let ((harness-perms-test--session (plist-put (copy-sequence harness-perms-test--session) :cwd photos)))
+        (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "b.jpg" photos))))))
+    ;; A glob ending in / holds everything below what it matches, as a
+    ;; directory does: so does a directory whose name has a wildcard.
+    (should (funcall in (concat d "*/") "sub/deep/x"))
+    (let ((odd (file-name-as-directory (expand-file-name "what?" d))))
+      (should (harness-perms--within-p odd (expand-file-name "x/y" odd)))
+      ;; Granted by its name alone, it is still a directory.
+      (make-directory odd)
+      (harness-call 'permission/allow-dir "s1" (directory-file-name odd))
+      (should (member odd (harness-call 'permission/allowed-dirs "s1"))))
+    ;; The directory a pattern starts with is resolved, as paths are.
+    (let ((link (expand-file-name "docs" (harness-perms-test--real (harness-test-temp-dir)))))
+      (make-symbolic-link (directory-file-name d) link)
+      (should (harness-perms--within-p (concat link "/*.md") (expand-file-name "a.md" d)))
+      (should (harness-perms--within-p (concat link "/*.md") (concat link "/a.md")))
+      (should-not (harness-perms--within-p (concat link "/*.md") (concat link "/a.txt"))))
+    ;; A remote pattern matches on its own host only.
+    (should (harness-perms--within-p "/ssh:u@box:/srv/*.log" "/ssh:u@box:/srv/a.log"))
+    (should-not (harness-perms--within-p "/ssh:u@box:/srv/*.log" "/ssh:u@box:/srv/a/b.log"))
+    (should-not (harness-perms--within-p "/ssh:u@box:/srv/*.log" "/ssh:u@other:/srv/a.log"))
+    (should-not (harness-perms--within-p "/ssh:u@box:/srv/*.log" "/srv/a.log"))))
+
+(ert-deftest harness-perms-path-prompts-offer-the-directory ()
+  "A prompt about a file is answered for everything in its directory unless edited."
+  (let* ((s (harness-perms-test--setup :permission-mode 'ask))
+         (cwd (harness-perms-test--real (plist-get s :cwd)))
+         (outside (harness-perms-test--real (harness-test-temp-dir)))
+         (sub (file-name-as-directory (expand-file-name "sub" outside)))
+         (pattern-of (lambda (started) (plist-get (plist-get (cdr started) :payload) :pattern))))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd cwd))
+    (make-directory sub)
+    (harness-perms-test--install-pending)
+    (dolist (case (list (list "read_file" 'read (expand-file-name "x.txt" outside) (concat outside "**"))
+                        ;; A directory stands for itself.
+                        (list "list_dir" 'read (directory-file-name sub) (concat sub "**"))
+                        ;; The tool prompt for a write inside the jail.
+                        (list "write_file" 'write (expand-file-name "lisp/a.el" cwd) (concat cwd "lisp/**"))
+                        (list "bash" 'exec cwd (concat cwd "**"))))
+      (pcase-let ((`(,tool ,kind ,path ,pattern) case))
+        (let ((started (harness-perms-test--start tool kind path)))
+          (should (equal pattern (funcall pattern-of started)))
+          (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+          (should (eq 'deny (plist-get (harness-test-await (car started)) :behavior))))))
+    ;; Several paths: the directory that holds them all.
+    (should (equal (concat outside "")
+                   (harness-perms--paths-dir (list (expand-file-name "a/x" outside) (expand-file-name "b/y/z" outside)))))
+    ;; A call with no path has no pattern, and its answers hold for the tool.
+    (let ((p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                       (harness-perms-test--request "elisp" 'exec))))
+      (harness-test-wait (lambda () harness-perms-test--pending) 2 "pending")
+      (should-not (plist-member (plist-get (car harness-perms-test--pending) :payload) :pattern))
+      (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "allow-session")
+      (harness-test-await p)
+      (should (equal '((:tool "elisp" :behavior allow)) (gethash "s1" harness-perms--session-rules))))))
+
+(ert-deftest harness-perms-jail-grants-the-pattern-the-user-edits ()
+  "Allow answers to the jail grant the pattern: narrower, wider, or just this call."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((outside (harness-perms-test--real (harness-test-temp-dir)))
+         (parent (file-name-directory (directory-file-name outside)))
+         (txt (expand-file-name "notes.txt" outside)))
+    ;; Narrower: only the org files there, for the session.
+    (let ((s (harness-perms-test--start "read_file" 'read (expand-file-name "todo.org" outside))))
+      (should (eq 'continue (harness-call 'permission/answer "s1" (plist-get (cdr s) :id)
+                                          (list :option "allow-session" :pattern (concat outside "*.org")))))
+      (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+    (should (member (concat outside "*.org") (harness-call 'permission/allowed-dirs "s1")))
+    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "other.org" outside))))
+    (should (null harness-perms-test--pending))
+    ;; A pattern that leaves the call's own path out: the call asks again.
+    (let ((s (harness-perms-test--start "read_file" 'read txt)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) (list :option "allow-once" :pattern (concat outside "*.md")))
+      (harness-test-wait (lambda () harness-perms-test--pending) 2 "the prompt again")
+      (should-not (harness-promise-settled-p (car s)))
+      (should (equal (concat outside "**") (plist-get (plist-get (car harness-perms-test--pending) :payload) :pattern)))
+      (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "deny-once")
+      (should (eq 'deny (plist-get (harness-test-await (car s)) :behavior))))
+    ;; Once, for a pattern that holds it: this call only.
+    (let ((s (harness-perms-test--start "read_file" 'read txt)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) (list :option "allow-once" :pattern (concat outside "*.txt")))
+      (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+    (should-not (member (concat outside "*.txt") (harness-call 'permission/allowed-dirs "s1")))
+    ;; Wider: the parent directory; DIR/** is granted as the directory.
+    (let ((s (harness-perms-test--start "read_file" 'read txt)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) (list :option "allow-session" :pattern (concat parent "**")))
+      (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+    (should (member parent (harness-call 'permission/allowed-dirs "s1")))
+    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read txt)))
+    (should (null harness-perms-test--pending))))
+
+(ert-deftest harness-perms-jail-always-deny-records-a-rule ()
+  "Always deny on a directory prompt denies its pattern to every tool, without asking."
+  (let ((saved nil))
+    (harness-perms-test--setup :permission-mode 'ask)
+    (harness-perms-test--install-pending)
+    (cl-letf (((symbol-function 'harness-save-user-option)
+               (lambda (sym value) (set sym value) (push (cons sym value) saved))))
+      (let* ((outside (harness-perms-test--real (harness-test-temp-dir)))
+             (s (harness-perms-test--start "read_file" 'read (expand-file-name "x.txt" outside))))
+        (should (equal harness-perms-dir-options (plist-get (plist-get (cdr s) :payload) :options)))
+        (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "deny-always")
+        (let ((d (harness-test-await (car s))))
+          (should (eq 'deny (plist-get d :behavior)))
+          (should (string-match-p (regexp-quote (abbreviate-file-name (concat outside "**"))) (plist-get d :reason))))
+        (should (equal (list (list :path (concat outside "**") :behavior 'deny)) harness-perms-rules))
+        (should (eq 'harness-perms-rules (caar saved)))
+        ;; The next call there is denied at once, whatever the tool.
+        (let ((d (harness-perms-test--decide (harness-perms-test--request "write_file" 'write (expand-file-name "y" outside)))))
+          (should (eq 'deny (plist-get d :behavior)))
+          (should (plist-get d :final))
+          (should (string-match-p "standing rule for .*\\*\\*" (plist-get d :reason))))
+        (should (null harness-perms-test--pending))
+        ;; So is the agent's own request for the directory.
+        (let ((d (harness-perms-test--decide (harness-perms-test--dir-request outside "please"))))
+          (should (eq 'deny (plist-get d :behavior)))
+          (should (plist-get d :final))
+          (should (string-match-p "Do not ask for it again" (plist-get d :hint))))
+        (should (null harness-perms-test--pending))
+        ;; Elsewhere still asks.
+        (let ((other (harness-perms-test--start "read_file" 'read (expand-file-name "z" (harness-test-temp-dir)))))
+          (harness-call 'permission/answer "s1" (plist-get (cdr other) :id) "deny-once")
+          (harness-test-await (car other)))))))
+
+(ert-deftest harness-perms-dir-request-grants-the-pattern-the-user-edits ()
+  "The agent gets what the user granted, which may be narrower than it asked."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((outside (harness-perms-test--real (harness-test-temp-dir)))
+         (api (file-name-as-directory (expand-file-name "api" outside)))
+         (result (lambda (started)
+                   (harness-perms--dir-request-result (plist-get (harness-test-await (car started)) :input)
+                                                      (list :session-id "s1")))))
+    (make-directory api)
+    ;; A directory below the one asked for.
+    (let ((started (harness-perms-test--start-request outside "read the API")))
+      (should (equal (concat outside "**") (plist-get (plist-get (cdr started) :payload) :pattern)))
+      (should (equal harness-perms-dir-request-options (plist-get (plist-get (cdr started) :payload) :options)))
+      (let ((d (harness-call 'permission/answer "s1" (plist-get (cdr started) :id)
+                             (list :option "allow-session" :pattern (concat api "**")))))
+        (should (eq 'allow (plist-get d :behavior)))
+        (should (equal (list :path outside :granted api) (plist-get d :input))))
+      (should (member api (harness-call 'permission/allowed-dirs "s1")))
+      (should-not (member outside (harness-call 'permission/allowed-dirs "s1")))
+      (let ((r (funcall result started)))
+        (should-not (plist-get r :is-error))
+        (should (string-match-p (format "granted %s instead of %s: it is now allowed for this session"
+                                        (regexp-quote (abbreviate-file-name api))
+                                        (regexp-quote (abbreviate-file-name outside)))
+                                (plist-get r :content)))))
+    ;; A glob, written relative to the working directory.
+    (let* ((rel (concat (file-name-as-directory (file-relative-name outside (plist-get harness-perms-test--session :cwd)))
+                        "*.md"))
+           (started (harness-perms-test--start-request outside "the docs")))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) (list :option "allow-session" :pattern rel))
+      (let ((r (funcall result started)))
+        (should (string-match-p (regexp-quote (concat (abbreviate-file-name outside) "*.md")) (plist-get r :content)))
+        (should (string-match-p "the paths it matches" (plist-get r :content))))
+      (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "a.md" outside))))
+      (should (null harness-perms-test--pending)))
+    ;; The agent cannot claim a grant: a reachable directory reports nothing granted.
+    (let ((d (harness-perms-test--decide (list :session harness-perms-test--session :tool harness-perms-dir-tool
+                                               :kind 'meta :input (list :path api :granted "/etc/")))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (equal (list :path api) (plist-get d :input))))))
+
+(ert-deftest harness-perms-tool-prompt-remembers-for-a-pattern ()
+  "Answers for the session or always hold for the prompt's pattern, not every call of the tool."
+  (let* ((saved nil)
+         (s (harness-perms-test--setup :permission-mode 'ask))
+         (cwd (harness-perms-test--real (plist-get s :cwd)))
+         (lisp (file-name-as-directory (expand-file-name "lisp" cwd))))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd cwd))
+    (harness-perms-test--install-pending)
+    (cl-letf (((symbol-function 'harness-save-user-option)
+               (lambda (sym value) (set sym value) (push (cons sym value) saved))))
+      (let ((started (harness-perms-test--start "write_file" 'write (expand-file-name "a.el" lisp))))
+        (should-not (plist-get (plist-get (cdr started) :payload) :dir))
+        (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-session")
+        (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior))))
+      (should (equal (list (list :tool "write_file" :path (concat lisp "**") :behavior 'allow))
+                     (gethash "s1" harness-perms--session-rules)))
+      ;; Other files there need no answer; elsewhere, the same tool still asks.
+      (should (eq 'allow (harness-perms-test--behavior "write_file" 'write (expand-file-name "b/c.el" lisp))))
+      (should (null harness-perms-test--pending))
+      (let ((other (harness-perms-test--start "write_file" 'write (expand-file-name "README" cwd))))
+        ;; An edited pattern, relative to the working directory, denied for good.
+        (harness-call 'permission/answer "s1" (plist-get (cdr other) :id) (list :option "deny-always" :pattern "docs/*.md"))
+        (should (eq 'deny (plist-get (harness-test-await (car other)) :behavior))))
+      (should (equal (list (list :tool "write_file" :path (concat cwd "docs/*.md") :behavior 'deny)) harness-perms-rules))
+      (should (eq 'harness-perms-rules (caar saved)))
+      (let ((d (harness-perms-test--decide (harness-perms-test--request "write_file" 'write (expand-file-name "docs/x.md" cwd)))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (string-match-p "standing rule for write_file in .*docs/\\*\\.md" (plist-get d :reason))))
+      ;; Not matched: the README again asks.
+      (let ((again (harness-perms-test--start "write_file" 'write (expand-file-name "README" cwd))))
+        (harness-call 'permission/answer "s1" (plist-get (cdr again) :id) "deny-once")
+        (harness-test-await (car again))))))
+
+(ert-deftest harness-perms-path-rules-allow-all-deny-any ()
+  "An allow rule with a path needs every path of the call, a deny rule any."
+  (let* ((s (harness-perms-test--setup :permission-mode 'ask))
+         (cwd (harness-perms-test--real (plist-get s :cwd)))
+         (req (lambda (&rest rel) (list :session harness-perms-test--session :tool "write_file" :kind 'write
+                                        :paths (mapcar (lambda (r) (expand-file-name r cwd)) rel)))))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd cwd))
+    (let ((allow '(:tool "write_file" :path "src/**" :behavior allow))
+          (deny '(:path "src/secret/*" :behavior deny)))
+      (should (harness-perms--rule-matches-p allow (funcall req "src/a.el" "src/b/c.el")))
+      (should-not (harness-perms--rule-matches-p allow (funcall req "src/a.el" "README")))
+      (should-not (harness-perms--rule-matches-p allow (funcall req)))
+      (should (harness-perms--rule-matches-p deny (funcall req "README" "src/secret/key")))
+      (should-not (harness-perms--rule-matches-p deny (funcall req "src/secret/sub/key")))
+      ;; The first rule that applies wins, as always.
+      (let ((harness-perms-rules (list deny allow)))
+        (should (eq 'deny (harness-perms-test--behavior "write_file" 'write (expand-file-name "src/secret/k" cwd))))
+        (should (eq 'allow (harness-perms-test--behavior "write_file" 'write (expand-file-name "src/a.el" cwd)))))
+      ;; A blank path is no limit.
+      (should (harness-perms--rule-matches-p '(:tool "write_file" :path " " :behavior allow) (funcall req "README"))))))
+
+(ert-deftest harness-perms-pattern-grants-list-and-revoke ()
+  "A glob grant shows among the directories and can be revoked; one file stays a file."
+  (harness-perms-test--setup :permission-mode 'yolo)
+  (let* ((outside (harness-perms-test--real (harness-test-temp-dir)))
+         (glob (concat outside "*.org"))
+         (file (expand-file-name "a.org" outside)))
+    (harness-call 'permission/allow-dir "s1" glob)
+    (should (member glob (harness-call 'permission/allowed-dirs "s1")))
+    (let ((e (cl-find glob (harness-call 'permission/dirs "s1") :key (lambda (e) (plist-get e :dir)) :test #'equal)))
+      (should (eq 'session (plist-get e :source)))
+      (should (plist-get e :revocable)))
+    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read file)))
+    (should (eq 'deny (harness-perms-test--behavior "read_file" 'read (expand-file-name "a.txt" outside))))
+    (harness-call 'permission/revoke-dir "s1" glob)
+    (should-not (member glob (harness-call 'permission/allowed-dirs "s1")))
+    (should (eq 'deny (harness-perms-test--behavior "read_file" 'read file)))
+    ;; A grant narrowed to one file keeps its name.
+    (with-temp-file file (insert "* todo"))
+    (harness-call 'permission/allow-dir "s1" file)
+    (should (member file (harness-call 'permission/allowed-dirs "s1")))
+    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read file)))
+    (should (eq 'deny (harness-perms-test--behavior "read_file" 'read (expand-file-name "b.org" outside))))
+    (should (equal (concat outside "") (harness-perms--grant-form (concat outside "**"))))
+    (should (equal glob (harness-perms--grant-form glob)))
+    (should (equal (concat outside "*/**") (harness-perms--grant-form (concat outside "*/**"))))))
+
 (ert-deftest harness-perms-describe-and-reload ()
   (harness-perms-test--setup)
   (harness-define-tool "t_titled" :label "Run" :kind 'exec :subject (lambda (in) (plist-get in :cmd)) :handler #'ignore)
@@ -1409,10 +1741,11 @@ to its own temporary directory, so it carries on rather than stops."
   "The settings page offers each part of a standing rule by name."
   (require 'harness-test-helpers)
   (let ((type (cadr (get 'harness-perms-rules 'custom-type))))
-    (should (equal '(:tool :kind :behavior) (harness-test-option-keys type)))
+    (should (equal '(:tool :kind :path :behavior) (harness-test-option-keys type)))
     (harness-test-check-record-type type)
     (should (harness-test-fits-p type '(:tool "web_search" :behavior deny)))
     (should (harness-test-fits-p type '(:kind read :behavior allow)))
+    (should (harness-test-fits-p type '(:tool "write_file" :path "/home/u/proj/lisp/**" :behavior allow)))
     (should (harness-test-fits-p type '(:behavior "deny")))
     (should (harness-test-fits-p (get 'harness-perms-rules 'custom-type)
                                  '((:tool "bash" :kind exec :behavior deny) (:behavior allow))))))

@@ -103,6 +103,48 @@ Signal an error mentioning MESSAGE on timeout.  Return PRED's value."
   "Create and return a fresh temporary directory."
   (file-name-as-directory (make-temp-file "harness-tmp-" t)))
 
+(defun harness-test-real-home ()
+  "Return the user's home directory as the password database has it.
+Not $HOME: a suite run from a harness session's shell runs in that
+session's sandbox, where $HOME is the sandbox's own empty home."
+  (directory-file-name (expand-file-name (concat "~" (user-real-login-name)))))
+
+(defun harness-test-harness-checkout ()
+  "Make a directory that looks like a checkout of the harness.
+harness.el and an executable scripts/dev.sh are there; the script
+appends its cwd, arguments and HARNESS_DEV_SOCKET to invocation.log in
+the checkout and exits 0.  Return the directory."
+  (let* ((dir (file-name-as-directory (make-temp-file "harness-checkout-" t)))
+         (scripts (expand-file-name "scripts/" dir))
+         (script (expand-file-name "dev.sh" scripts)))
+    (make-directory scripts t)
+    (with-temp-file (expand-file-name "harness.el" dir) (insert ";; fake harness\n"))
+    (with-temp-file script
+      (insert "#!/bin/sh\n"
+              "printf '\\n' >> \"$PWD/invocation.log\"\n"
+              "printf 'cwd=%s\\n' \"$PWD\" >> \"$PWD/invocation.log\"\n"
+              "printf 'args=%s\\n' \"$*\" >> \"$PWD/invocation.log\"\n"
+              "printf 'socket=%s\\n' \"$HARNESS_DEV_SOCKET\" >> \"$PWD/invocation.log\"\n"
+              "exit 0\n"))
+    (set-file-modes script #o755)
+    dir))
+
+(defun harness-test-dev-invocations (dir)
+  "Return the fake dev loop's invocations recorded in DIR, oldest first.
+Each invocation is an alist of the script's fields (cwd, args, socket)."
+  (let ((log (expand-file-name "invocation.log" dir)))
+    (when (file-exists-p log)
+      (with-temp-buffer
+        (insert-file-contents log)
+        (let (out)
+          (dolist (block (split-string (buffer-string) "\n\n" t))
+            (push (mapcar (lambda (line)
+                            (let ((eq (string-match "=" line)))
+                              (cons (substring line 0 eq) (substring line (1+ eq)))))
+                          (split-string block "\n" t))
+                  out))
+          (nreverse out))))))
+
 ;;;; Customize types
 
 (defun harness-test-fits-p (type value)
@@ -136,30 +178,34 @@ They are the keywords that start an indented line, as in
 (defvar harness-acp--server-enabled)
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")
-(declare-function harness-client-tools-run "harness-client-tools")
-(declare-function harness-client-tools-revert-visiting "harness-client-tools")
-(declare-function harness-client-tools-customize-save "harness-client-tools")
+(declare-function harness-acp-initialize "harness-acp")
+(declare-function harness-emacs-endpoint-answer "harness-emacs-endpoint")
+(declare-function harness-emacs-endpoint-client-capabilities "harness-emacs-endpoint")
+(declare-function harness-emacs-endpoint-revert-visiting "harness-emacs-endpoint")
+(declare-function harness-emacs-endpoint-customize-save "harness-emacs-endpoint")
 
 (defun harness-test-connect-ui-client ()
   "Load the acp module and connect an in-process client acting as the UI.
-It answers `_harness/client/tool' and `_harness/client/customize-save',
-and reverts buffers on
-`tools/file-written', like lisp/ui does.  Return the connection."
+Like lisp/ui, it lends this Emacs to the harness, so the tools about the
+user's Emacs ask it (`_harness/emacs/...', answered by
+`harness-emacs-endpoint-answer'); it answers
+`_harness/client/customize-save', and reverts buffers on
+`tools/file-written'.  Return the connection, initialized."
   (let ((harness-acp--server-enabled nil))
     (harness-test-load-module 'acp))
-  (require 'harness-client-tools)
+  (require 'harness-emacs-endpoint)
   (let ((conn (harness-acp-connect nil)))
     (harness-acp-set-handler
      conn
      (lambda (method params respond)
-       (pcase method
-         ("_harness/client/tool"
-          (funcall respond (harness-client-tools-run (plist-get params :name) (plist-get params :input))))
-         ("_harness/client/customize-save"
-          (funcall respond (harness-client-tools-customize-save (plist-get params :symbol) (plist-get params :value))))
-         ("_harness/event"
-          (when (equal (plist-get params :event) "tools/file-written")
-            (harness-client-tools-revert-visiting (car (plist-get params :args))))))))
+       (unless (harness-emacs-endpoint-answer method params respond)
+         (pcase method
+           ("_harness/client/customize-save"
+            (funcall respond (harness-emacs-endpoint-customize-save (plist-get params :symbol) (plist-get params :value))))
+           ("_harness/event"
+            (when (equal (plist-get params :event) "tools/file-written")
+              (harness-emacs-endpoint-revert-visiting (car (plist-get params :args)))))))))
+    (harness-test-await (harness-acp-initialize conn (harness-emacs-endpoint-client-capabilities)))
     conn))
 
 ;;;; The compose box, in each buffer that hosts it
