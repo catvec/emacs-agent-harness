@@ -345,5 +345,22 @@ rendering keeps the properties its buffer gave it."
       (harness-ui-media-stop wav)
       (should-not (harness-ui-media--playing-p wav)))))
 
+(ert-deftest harness-ui-media-thumbnail-callback-and-no-retry ()
+  "A chip asking for a thumbnail is told when the attempt is over.
+One that could not be made is not tried again."
+  (harness-ui-media-test-with
+    (let* ((video (harness-ui-media-test--fake-video (expand-file-name "cb.mp4" dir)))
+           (runs 0) (called 0))
+      (cl-letf (((symbol-function 'executable-find) (lambda (p) (equal p "ffmpeg")))
+                ((symbol-function 'harness-run-command)
+                 (lambda (&rest _) (cl-incf runs) (harness-resolved '(:exit 1)))))
+        (should-not (harness-ui-media-video-thumbnail video (lambda () (cl-incf called))))
+        (should (>= runs 1))
+        (should (= 1 called))
+        ;; Tried once, however many commands that took, and never again.
+        (let ((tried runs))
+          (should-not (harness-ui-media-video-thumbnail video))
+          (should (= tried runs)))))))
+
 (provide 'harness-ui-media-test)
 ;;; harness-ui-media-test.el ends here

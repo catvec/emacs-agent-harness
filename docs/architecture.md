@@ -2288,6 +2288,30 @@ host whose box does something else than compose -- the task board's,
 which sends to a session -- marks it; `harness-compose-bar` draws that
 same bar on the host's own lines around the box.  Without either
 argument the box is the plain one.
+An attachment chip leads with a thumbnail (`harness-compose-thumbnail-lines`)
+when it is an image, or a video whose thumbnail the media module makes
+with ffmpeg in the background (a chip asks for it through
+`harness-ui-media-video-thumbnail' and is drawn again when it lands).  A
+link dropped from a browser or a page (`dnd-protocol-alist` for
+http/https/ftp, plus the X types through `x-dnd-types-alist`: a raw
+image, a browser's file promise, `text/html`, text, and X direct save)
+downloads with `harness-http-download` behind a chip whose spinner,
+progress bar and size an overlay redraws, so the buffer's text is not
+touched while it ticks; the file attaches under the name the server or
+the link gave, or the link goes in as text when it turns out to be a
+web page.  Sending waits for a download in flight.  The X handlers take
+what the drop says the dragged media is (a browser's `text/html` or
+`application/x-moz-file-promise-url` names the image inside a link),
+and dropped text goes into the box rather than into the read-only
+transcript around it.  A link off a selection arrives propertized
+(`foreign-selection`), which is why the code that hands one to curl
+strips text properties first.
+Media on the clipboard is read without touching `kill-ring`: `C-y` in a
+compose box attaches the image, or the files a file manager copied, and
+pushes captures on the media ring (`harness-ui-media-ring`), a ring of
+its own under `harness-state-directory/clips/` deduplicated by the
+SHA-1 of the bytes, which `M-y` goes back through and `C-u C-c C-v`
+picks from; `yank-media` attaches them too (`harness-compose-yank-media`).
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
@@ -2513,7 +2537,9 @@ quit; `harness-ui-popout-at-point-functions' lets a view pop out the item
 at point with one key), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video posters that play the video, and the attachments a tool
-result or a message carries), popouts (`harness-ui-popout`: one item of
+result or a message carries; a compose chip's thumbnail comes through
+`harness-ui-media-video-thumbnail`, which makes one in the background and
+tells the chip when it is there), popouts (`harness-ui-popout`: one item of
 a session or a task in a small selected bottom side window, fitted to
 its content up to `harness-ui-popout-max-height` or the popout's own
 `:max-height`, one buffer per KEY the owner picks; `q`/`g` on the

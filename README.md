@@ -230,7 +230,9 @@ the `[menu]` button in the header line.
 | `@` | Complete a project file to attach; part of a name finds a file in any subdirectory |
 | `/` | Complete a skill |
 | `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
-| `C-c C-v` | Attach the image in the clipboard |
+| `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
+| `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
+| `C-c C-v` | Attach what the clipboard holds (`C-u C-c C-v` picks an earlier capture) |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
 | `C-c C-p` | Edit the pattern the newest permission request about paths is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
@@ -241,6 +243,25 @@ the `[menu]` button in the header line.
 | `C-c C-w` | Copy the last reply |
 | `C-c C-e` | Jump to the bottom |
 | `C-c C-r` | Redraw the buffer |
+
+Drag a file from your file browser onto a chat or the task board and it
+attaches. Drag a *link* — an image from a web page, a video, any address
+— and it downloads in the background with curl, behind a chip that shows
+a spinner, a progress bar and the size; the file attaches with its own
+name when it arrives, and sending waits for it. A link to a web page is
+not downloaded: its address goes into the message as text, which is
+usually what you wanted. Images and videos show a thumbnail in the
+attachment chip (`harness-compose-thumbnail-lines`; videos need
+`ffmpeg`), so you can see what you are about to send.
+
+Copied an image (in a browser, or with a screenshot tool)? `C-y` in a
+compose box attaches it instead of yanking text: it goes on the *media
+ring*, a kill ring of its own that only compose boxes read, so no other
+mode ever yanks a picture as raw bytes. `M-y` right after goes back
+through earlier captures, their thumbnails showing in the box, and
+`C-u C-c C-v` picks one by name. Files copied in a file manager attach
+the same way. `yank-media` finds them too. Set
+`harness-compose-yank-media` to nil to leave `C-y` and `M-y` alone.
 
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,

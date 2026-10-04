@@ -348,6 +348,34 @@ told from, like a worktree git lost track of, still leads back."
         (should (equal file (plist-get (car (plist-get task :attachments)) :path)))
         (should (cl-some (lambda (b) (equal (plist-get b :path) file)) (plist-get user :blocks)))))))
 
+(ert-deftest harness-ui-tasks-dropped-link-goes-with-the-task ()
+  "A link dropped on the board downloads behind a chip, then goes with the task."
+  (skip-unless (executable-find "curl"))
+  (harness-ui-tasks-test-with
+    (let ((server (harness-test-http-serve
+                   `(("/shot.png" 200 (("Content-Type" . "image/png")) ,harness-test-png :chunks 2 :delay 0.3)))))
+      (unwind-protect
+          (let ((window (get-buffer-window board)))
+            (with-current-buffer board
+              (should (eq 'harness-compose-yank (key-binding (kbd "C-y")))))
+            (dnd-handle-multiple-urls window (list (harness-test-http-url server "/shot.png")) 'private)
+            (with-current-buffer board
+              ;; The chip of the download is on the attachments line.
+              (let ((pos (text-property-not-all (point-min) (point-max) 'harness-compose-pending nil)))
+                (should pos)
+                (should (eq 'attachments (get-text-property pos 'harness-task-tail))))
+              (harness-test-wait (lambda () (not (plist-get (car harness-compose-attachments) :pending))) 10 "the download")
+              (should (equal "image/png" (plist-get (car harness-compose-attachments) :mime)))
+              (goto-char harness-compose-end)
+              (insert "Look at the screenshot")
+              (harness-ui-tasks-submit)
+              (should-not harness-compose-attachments))
+            (harness-test-wait (lambda () (car (harness-call 'task/list default-directory))) 5 "the task")
+            (should (string-suffix-p "downloads/shot.png"
+                                     (plist-get (car (plist-get (car (harness-call 'task/list default-directory)) :attachments))
+                                                :path))))
+        (delete-process server)))))
+
 (defvar harness-ui-tasks--new)
 (declare-function harness-toggle-non-interactive "harness-ui")
 (declare-function harness-set-permission-mode "harness-ui")

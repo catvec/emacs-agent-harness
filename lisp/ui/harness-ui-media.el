@@ -411,33 +411,51 @@ installed."
   (let ((size (harness-file-size file)))
     (and size (> size 0))))
 
-(defun harness-ui-media--make-thumbnail (path)
+(defun harness-ui-media--make-thumbnail (path &optional callback)
   "Make the thumbnail of the video PATH in the background, then redraw it.
-Return non-nil while it is being made.  A video none could be made of
-is remembered, and not tried again."
+Return non-nil while it is being made.  CALLBACK, when given, is called
+with no arguments once that is over, whether one was made or not.  A
+video none could be made of is remembered, and not tried again."
   (let ((out (harness-ui-media-thumbnail-path path)))
     (unless (or (harness-ui-media--thumbnail-ready-p out)
                 (gethash path harness-ui-media--thumbnailing)
                 (gethash path harness-ui-media--thumbnail-failed))
       (when-let* ((commands (harness-ui-media--thumbnail-commands path out)))
-        (puthash path t harness-ui-media--thumbnailing)
+        (puthash path (list (or callback #'ignore)) harness-ui-media--thumbnailing)
         (harness-ui-media--try-thumbnail path out commands)))
     (gethash path harness-ui-media--thumbnailing)))
 
 (defun harness-ui-media--try-thumbnail (path out commands)
   "Run the first of COMMANDS to make the thumbnail OUT of video PATH.
-When it made none, the next one runs; after the last, PATH has failed."
+When it made none, the next one runs; after the last, PATH has failed.
+Whoever asked for it (a CALLBACK of `harness-ui-media--make-thumbnail')
+is told once the attempt is over."
   (let ((after (lambda (_)
                  (if (and (cdr commands) (not (harness-ui-media--thumbnail-ready-p out)))
                      (harness-ui-media--try-thumbnail path out (cdr commands))
                    (unless (harness-ui-media--thumbnail-ready-p out)
                      (puthash path t harness-ui-media--thumbnail-failed))
-                   (remhash path harness-ui-media--thumbnailing)
-                   (harness-ui-media--rerender path)))))
+                   (let ((callbacks (gethash path harness-ui-media--thumbnailing)))
+                     (remhash path harness-ui-media--thumbnailing)
+                     (harness-ui-media--rerender path)
+                     (dolist (f callbacks)
+                       (condition-case err (funcall f)
+                         (error (harness-log 'warn "media: thumbnail callback failed: %S" err)))))))))
     ;; Run here, not on the host of a remote `default-directory'.
     (harness-then (harness-run-command (car commands) :name "harness-thumbnail" :timeout 60
                                        :cwd temporary-file-directory)
                   after after)))
+
+(defun harness-ui-media-video-thumbnail (path &optional callback)
+  "Return the thumbnail image file of the video PATH, or nil while there is none.
+Without one it is made in the background (ffmpegthumbnailer or ffmpeg),
+and CALLBACK is called with no arguments once that is over, whether one
+was made or not."
+  (let ((thumb (harness-ui-media-thumbnail-path path)))
+    (if (harness-ui-media--thumbnail-ready-p thumb)
+        thumb
+      (harness-ui-media--make-thumbnail path callback)
+      nil)))
 
 (defun harness-ui-media-open (path)
   "Open PATH with the desktop's default application or mpv."

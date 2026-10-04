@@ -46,6 +46,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat` | `acme/ratelimit.py` beside a finished turn: reads, edits, a test run, a summary | `harness-media-shot-chat` |
 | `chat-permission` | A chat waiting for permission to run `pip install` | `harness-media-shot-chat-permission` |
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
+| `attachments` | A compose box holding a picture and a video, their thumbnails in the chips, and a link still downloading with its progress | `harness-media-shot-attachments` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
 | `tasks-long` | That board after weeks of merges, its completed list held back to keep the box in the window | `harness-media-shot-tasks-long` |
 | `tasks-message` | The task board writing a message to a task's session: the box in its message colours | `harness-media-shot-tasks-message` |
