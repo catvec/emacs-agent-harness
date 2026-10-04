@@ -280,7 +280,10 @@ Past `harness-notifications-desktop-max-waiting' the oldest stops."
         (when-let* ((ep (get-buffer-process stderr)))
           (set-process-query-on-exit-flag ep nil)
           (set-process-sentinel ep #'ignore))
-        (process-send-eof proc)))))
+        ;; A notify-send that failed at once is gone already: its
+        ;; sentinel says why, so sending it EOF would only signal.
+        (when (process-live-p proc)
+          (process-send-eof proc))))))
 
 ;;;; D-Bus
 

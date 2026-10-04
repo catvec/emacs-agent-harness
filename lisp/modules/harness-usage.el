@@ -7,7 +7,11 @@
 ;; table of usage.db (or to usage/records.jsonl when Emacs lacks
 ;; SQLite), and answers questions about spending: summaries grouped by
 ;; project, model, day, hour, session or billing; totals; and
-;; continuous time series for charts.
+;; continuous time series for charts.  A row is recorded under its
+;; session's project, which for a task or a sub-agent working in a git
+;; worktree is that worktree, so summaries by project also say which
+;; main checkout each project belongs to, for the dashboard to fold the
+;; worktrees under it.
 ;;
 ;; A row's cost is what was billed.  Its list cost is what the call
 ;; costs at API prices, and its billing says who paid: `api' (per
@@ -42,6 +46,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-http)
+(require 'harness-files)
 
 (declare-function sqlite-execute "sqlite.c")
 (declare-function sqlite-select "sqlite.c")
@@ -454,6 +459,20 @@ cost when a subscription paid.  Budgets are checked after."
 
 ;;;; Queries
 
+(defun harness-usage--with-main (rows)
+  "Return ROWS, aggregates by project, each with `:main' added.
+`:main' is the main checkout the project belongs to: for a linked git
+worktree, such as a task's or a sub-agent's, its repository's main
+checkout, even once the worktree is gone; else the project itself.  The
+row without a project keeps \"\".  Each distinct root is resolved once,
+here in the harness, so the UI never reads the disk for it."
+  (mapcar (lambda (row)
+            (let ((key (plist-get row :key)))
+              (append row (list :main (if (or (null key) (string-empty-p key))
+                                          ""
+                                        (harness-files-owning-checkout key))))))
+          rows))
+
 (harness-defmethod usage/summary (&rest opts)
   "Return usage aggregated by OPTS `:group-by'.
 The grouping is project, model, day, session, hour or billing.
@@ -462,10 +481,14 @@ Other OPTS filter rows: `:since' `:until' (floats, until exclusive)
 \(:key STRING :input N :output N :cache-read N :cache-write N :cost F
 :list-cost F :calls N), cost being what was billed and list cost the
 same usage at API prices; billing keys are \"api\", \"subscription\",
-\"extra-usage\", or \"\" when no billing was recorded.  Rows are sorted
+\"extra-usage\", or \"\" when no billing was recorded.  A row by project
+also has `:main', the main checkout the project belongs to: the
+repository's for a linked git worktree such as a task's, else the
+project's own root (see `harness-usage--with-main').  Rows are sorted
 by list cost descending, or by key ascending for day and hour."
   (let* ((group-by (harness-usage--sym (or (plist-get opts :group-by) 'project)))
-         (aggs (harness-usage--aggregate (apply #'harness-usage--rows opts) group-by)))
+         (aggs (harness-usage--aggregate (apply #'harness-usage--rows opts) group-by))
+         (aggs (if (eq group-by 'project) (harness-usage--with-main aggs) aggs)))
     (if (memq group-by '(day hour))
         (sort aggs (lambda (a b) (string< (plist-get a :key) (plist-get b :key))))
       (sort aggs (lambda (a b)

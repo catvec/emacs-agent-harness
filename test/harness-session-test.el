@@ -535,6 +535,134 @@ its transcript; one made at its parent's head goes on."
 (defun harness-session-test-kinds (id)
   (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes id)))
 
+(defun harness-session-test-unpaired (messages)
+  "Return the tool calls in MESSAGES that the message after them leaves unanswered.
+Also return, as (:stray ID), each result answering no call of the
+message before it.  Providers that pair calls with results, DeepSeek
+among them, reject a request when this is not nil."
+  (let ((problems nil) (asked nil))
+    (dolist (m messages)
+      (let ((blocks (plist-get m :content)))
+        (if (eq (plist-get m :role) 'user)
+            (let ((answered (delq nil (mapcar (lambda (b) (and (equal (plist-get b :type) "tool_result")
+                                                               (plist-get b :tool_use_id)))
+                                              blocks))))
+              (dolist (id asked) (unless (member id answered) (push id problems)))
+              (dolist (id answered) (unless (member id asked) (push (list :stray id) problems)))
+              (setq asked nil))
+          (dolist (id asked) (push id problems))
+          (setq asked (delq nil (mapcar (lambda (b) (and (equal (plist-get b :type) "tool_use") (plist-get b :id)))
+                                        blocks))))))
+    (dolist (id asked) (push id problems))
+    (nreverse problems)))
+
+(defun harness-session-test-node-ids (id)
+  (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id)))
+
+(defun harness-session-test-result (id call-id)
+  "Return the tool result node answering CALL-ID in session ID, or nil."
+  (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result) (equal (plist-get n :call-id) call-id)))
+              (harness-call 'session/nodes id)))
+
+(ert-deftest harness-session-fork-mid-turn-answers-the-running-calls ()
+  "A session forked in the middle of a turn copies the calls still
+running: the spawn_agent call forking it, and any other call of its
+step.  Their results only ever reach the parent, so the fork answers
+each of them itself -- the forking call with the news that the fork is
+the sub-agent it started -- and its first request pairs every call with
+a result.  Unanswered, DeepSeek refused that request with HTTP 400.
+The parent is left as it was, and the answers persist."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append id '(:kind user :content "look into it"))
+      (harness-call 'session/append id '(:kind thinking :content "I will read and delegate."))
+      (harness-call 'session/append id '(:kind assistant :content "Reading first."))
+      (harness-call 'session/append id '(:kind tool-call :tool "read_file" :call-id "c1" :input (:path "a")))
+      (harness-call 'session/append id '(:kind tool-call :tool "spawn_agent" :call-id "c2"
+                                                :input (:prompt "dig deeper" :fork t)))
+      (harness-call 'session/append id '(:kind tool-call :tool "bash" :call-id "c3" :input (:command "make")))
+      (harness-call 'session/append id '(:kind tool-result :call-id "c1" :output "A"))
+      (let* ((parent-ids (harness-session-test-node-ids id))
+             (head (plist-get (harness-call 'session/get id) :head))
+             (child (harness-await (harness-call 'session/fork id :kind 'subagent :call-id "c2")))
+             (cid (plist-get child :id))
+             (nodes (harness-call 'session/nodes cid))
+             (spawned (harness-session-test-result cid "c2"))
+             (running (harness-session-test-result cid "c3")))
+        ;; The parent's transcript, then an answer for each running call, in order.
+        (should (equal parent-ids (seq-take (mapcar (lambda (n) (plist-get n :id)) nodes) (length parent-ids))))
+        (should (equal '(tool-result tool-result) (mapcar (lambda (n) (plist-get n :kind))
+                                                          (nthcdr (length parent-ids) nodes))))
+        (should (equal '("c2" "c3") (mapcar (lambda (n) (plist-get n :call-id)) (nthcdr (length parent-ids) nodes))))
+        (should (equal head (plist-get child :fork-node)))
+        (should (equal (plist-get running :id) (plist-get child :head)))
+        ;; The forking call says who the fork is; the other one says where its result went.
+        (should (equal harness-session-spawned-output (plist-get spawned :output)))
+        (should-not (plist-get spawned :is-error))
+        (should (equal harness-session-forked-output (plist-get running :output)))
+        (should (plist-get running :is-error))
+        (should (plist-get (plist-get spawned :meta) :forked))
+        (should (plist-get (plist-get running :meta) :forked))
+        ;; They are the fork's own nodes, not the parent's.
+        (should (equal cid (plist-get spawned :session)))
+        (should (equal parent-ids (harness-session-test-node-ids id)))
+        (should-not (harness-session-test-result id "c2"))
+        ;; The fork's first request: every call answered, the task last.
+        (harness-call 'session/append cid '(:kind user :content "dig deeper"))
+        (let ((msgs (harness-call 'session/messages cid)))
+          (should-not (harness-session-test-unpaired msgs))
+          (should (equal '(user assistant user) (mapcar (lambda (m) (plist-get m :role)) msgs)))
+          (should (equal '("tool_result" "tool_result" "tool_result" "text")
+                         (mapcar (lambda (b) (plist-get b :type)) (plist-get (nth 2 msgs) :content)))))
+        ;; The answers outlive a restart, and a fork that was idle is not settled again.
+        (let ((before (harness-session-test-node-ids cid)))
+          (harness-session-flush)
+          (clrhash harness-sessions)
+          (harness-session--load-all)
+          (should (equal before (harness-session-test-node-ids cid)))
+          (should (equal harness-session-spawned-output (plist-get (harness-session-test-result cid "c2") :output))))))))
+
+(ert-deftest harness-session-fork-answers-calls-only-when-needed ()
+  "A fork of a session whose calls all have results adds nothing; one
+forked at a head moved back between a call and its result answers that
+call, whose result stays the parent's; and calls before the last
+compaction, which reach no provider, are left alone."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append id '(:kind user :content "go"))
+      (let ((call (harness-call 'session/append id '(:kind tool-call :tool "read_file" :call-id "c1"))))
+        (harness-call 'session/append id '(:kind tool-result :call-id "c1" :output "A"))
+        (harness-call 'session/append id '(:kind assistant :content "Done."))
+        ;; Every call answered: the fork is the parent's transcript, no more.
+        (let ((child (harness-await (harness-call 'session/fork id))))
+          (should (equal (harness-session-test-node-ids id) (harness-session-test-node-ids (plist-get child :id)))))
+        ;; Forked from the call itself, as the tree's fork at a node does.
+        (let ((head (plist-get (harness-call 'session/get id) :head)))
+          (harness-call 'session/set-head id (plist-get call :id))
+          (let* ((child (harness-await (harness-call 'session/fork id)))
+                 (cid (plist-get child :id)))
+            (harness-call 'session/set-head id head)
+            (should (equal '(user tool-call tool-result) (harness-session-test-kinds cid)))
+            (should (equal harness-session-forked-output (plist-get (harness-session-test-result cid "c1") :output)))
+            (should (equal "A" (plist-get (harness-session-test-result id "c1") :output)))
+            (harness-call 'session/append cid '(:kind user :content "again"))
+            (should-not (harness-session-test-unpaired (harness-call 'session/messages cid))))))
+      ;; A call left unanswered before a compaction is summarised, not sent.
+      (harness-call 'session/append id '(:kind tool-call :tool "bash" :call-id "c8"))
+      (harness-call 'session/append id '(:kind compaction :content "Earlier: a bash call."))
+      (harness-call 'session/append id '(:kind user :content "next"))
+      (harness-call 'session/append id '(:kind tool-call :tool "bash" :call-id "c9"))
+      (let ((cid (plist-get (harness-await (harness-call 'session/fork id)) :id)))
+        (should-not (harness-session-test-result cid "c8"))
+        (should (harness-session-test-result cid "c9"))
+        (should-not (harness-session-test-unpaired (harness-call 'session/messages cid))))
+      ;; So does a harness that stopped mid-turn.
+      (harness-call 'session/set-status id 'running)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should-not (harness-session-test-result id "c8"))
+      (should (equal harness-session-interrupted-output (plist-get (harness-session-test-result id "c9") :output))))))
+
 (ert-deftest harness-session-interrupted-turn-settled-on-load ()
   "A session saved mid-turn comes back closed, its tool calls answered."
   (harness-session-test-with
@@ -716,6 +844,59 @@ and so does a queued one; the searchable transcript says who sent it."
           (should (equal '("thinking") (funcall types (nth 3 msgs))))
           (should (equal "steer two" (plist-get (car (plist-get (nth 4 msgs) :content)) :text))))))))
 
+(ert-deftest harness-session-messages-answer-every-call ()
+  "Every tool call is answered in the message right after it, whatever
+the path holds.  A call without its result there -- its turn was
+cancelled, or the head moved back between them -- gets a stand-in
+error result, and a result answering no call of the message before it,
+one that came after its turn ended say, becomes text: providers that
+pair calls with results reject a request with either.  The transcript
+itself is left alone."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (add (lambda (node) (harness-call 'session/append id node)))
+           (types (lambda (msg) (mapcar (lambda (b) (plist-get b :type)) (plist-get msg :content)))))
+      (funcall add '(:kind user :content "go"))
+      (funcall add '(:kind tool-call :tool "t" :call-id "c1"))
+      (funcall add '(:kind tool-call :tool "t" :call-id "c2"))
+      ;; Sent mid-step and never delivered: the turn was cancelled.
+      (funcall add '(:kind user :content "stop that" :meta (:steering t)))
+      (funcall add '(:kind tool-result :call-id "c2" :output "B"))
+      (let* ((msgs (harness-call 'session/messages id))
+             (answers (plist-get (nth 2 msgs) :content)))
+        (should-not (harness-session-test-unpaired msgs))
+        (should (equal '("tool_result" "tool_result" "text") (funcall types (nth 2 msgs))))
+        (should (equal '("c2" "c1") (mapcar (lambda (b) (plist-get b :tool_use_id)) (seq-take answers 2))))
+        (should (equal harness-session-missing-result-output (plist-get (cadr answers) :content)))
+        (should (plist-get (cadr answers) :is_error))
+        (should (equal "stop that" (plist-get (nth 2 answers) :text))))
+      ;; The cancelled call's result arrives once the next turn is under way.
+      (funcall add '(:kind assistant :content "Stopped."))
+      (funcall add '(:kind user :content "next"))
+      (funcall add '(:kind tool-result :call-id "c1" :output "A, late" :is-error t))
+      (let* ((msgs (harness-call 'session/messages id))
+             (last (car (last msgs))))
+        (should-not (harness-session-test-unpaired msgs))
+        (should (equal '("text" "text") (funcall types last)))
+        (should (equal "[Result of tool call c1, an error]\nA, late" (plist-get (cadr (plist-get last :content)) :text))))
+      ;; A call at the very end gets a message of its own; a second
+      ;; result for a call it already has is text.
+      (funcall add '(:kind tool-call :tool "t" :call-id "c3"))
+      (let ((msgs (harness-call 'session/messages id)))
+        (should-not (harness-session-test-unpaired msgs))
+        (should (equal '(user assistant user assistant user assistant user)
+                       (mapcar (lambda (m) (plist-get m :role)) msgs)))
+        (should (equal "c3" (plist-get (car (plist-get (car (last msgs)) :content)) :tool_use_id))))
+      (funcall add '(:kind tool-result :call-id "c3" :output "C"))
+      (funcall add '(:kind tool-result :call-id "c3" :output "C again"))
+      (let ((last (car (last (harness-call 'session/messages id)))))
+        (should (equal '("tool_result" "text") (funcall types last)))
+        (should (equal "C" (plist-get (car (plist-get last :content)) :content))))
+      ;; Nothing was added to the transcript.
+      (should (equal '(user tool-call tool-call user tool-result assistant user tool-result tool-call
+                            tool-result tool-result)
+                     (harness-session-test-kinds id))))))
+
 ;;;; Context windows
 
 (defvar harness-providers)
@@ -793,6 +974,44 @@ announced, so the UI does not keep showing the old one."
             (should (= 50000 (harness-session-test-window id)))
             ;; Unset, the model's applies again.
             (harness-call 'session/update id :context-window nil :silent t)
+            (should (= 1000000 (harness-session-test-window id)))))
+      (harness-session-test-drop-provider))))
+
+(ert-deftest harness-session-window-limit-caps-the-model-window ()
+  "A session can cap its context window at a number of tokens.
+The cap follows a model change (it never raises the model's window), an
+outright window wins over it, and nil gives the model's window back."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("big" . 1000000) ("small" . 200000)))
+          (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                             :model "test-win:big" :context-window-limit 256000)
+                               :id)))
+            (should (= 256000 (harness-session-test-window id)))
+            (should (= 256000 (plist-get (harness-call 'session/get id) :context-window-limit)))
+            ;; A model with less than the limit brings its own window.
+            (harness-call 'session/update id :model "test-win:small" :silent t)
+            (should (= 200000 (harness-session-test-window id)))
+            ;; An outright window wins over the limit; unset, the limit
+            ;; applies again.
+            (harness-call 'session/update id :context-window 8000 :silent t)
+            (should (= 8000 (harness-session-test-window id)))
+            (harness-call 'session/update id :context-window nil :silent t)
+            (should (= 200000 (harness-session-test-window id)))
+            ;; It is kept across restarts, and a fork inherits it.
+            (harness-session-flush)
+            (clrhash harness-sessions)
+            (harness-session--load-all)
+            (should (= 200000 (harness-session-test-window id)))
+            (let ((fork (harness-await (harness-call 'session/fork id :kind 'fork))))
+              (should (= 256000 (plist-get fork :context-window-limit)))
+              (should (= 200000 (plist-get fork :context-window))))
+            ;; nil is the model's window, as for any session.
+            (harness-call 'session/update id :context-window-limit nil :silent t)
+            (should-not (plist-get (harness-call 'session/get id) :context-window-limit))
+            (should (= 200000 (harness-session-test-window id)))
+            (harness-call 'session/update id :model "test-win:big" :silent t)
             (should (= 1000000 (harness-session-test-window id)))))
       (harness-session-test-drop-provider))))
 

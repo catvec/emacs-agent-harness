@@ -182,12 +182,12 @@ state directory, as they would the user's."
     (should (string-match-p "this project uses YOLO" (harness-ui-config-test-block "harness-permission-mode")))
     (should (string-match-p "Model: " (harness-ui-config-test-block "harness-model")))
     ;; The header line has a mouse target for both scopes.
-    (let ((header (harness-ui-config--header)))
+    (let ((header (harness-ui-config--header most-positive-fixnum)))
       (dolist (label '("Global" "Project"))
-        (let ((seg (cl-find-if (lambda (s) (string-match-p label s)) header)))
-          (should seg)
-          (should (keymapp (get-text-property 1 'local-map seg)))
-          (should (get-text-property 1 'help-echo seg)))))
+        (let ((pos (string-match label header)))
+          (should pos)
+          (should (keymapp (get-text-property pos 'local-map header)))
+          (should (get-text-property pos 'help-echo header)))))
     ;; s switches to the Project scope.
     (goto-char (point-min))
     (execute-kbd-macro "s")
@@ -305,7 +305,7 @@ state directory, as they would the user's."
     (harness-ui-config-set-scope 'project)
     (should-not (harness-ui-config--edited-p "harness-model"))
     (should (= 1 (harness-ui-config--edit-count 'global)))
-    (should (string-match-p "Global." (mapconcat #'identity (harness-ui-config--header) "")))
+    (should (string-match-p "Global." (harness-ui-config--header most-positive-fixnum)))
     (harness-ui-config-set-scope 'global)
     (should (equal "demo:edited" (widget-value (harness-ui-config--widget "harness-model"))))
     ;; C-c C-k drops the edit.

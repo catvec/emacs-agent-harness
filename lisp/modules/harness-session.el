@@ -18,6 +18,14 @@
 ;; settles that turn: tool calls left without a result get one saying
 ;; they were interrupted, and a hint says what the session was doing.
 ;;
+;; A fork copies its parent's transcript and settles it the same way:
+;; forked mid-turn (a `spawn_agent' call forking its session, say), it
+;; copies calls whose results only ever reach the parent, so each gets
+;; a result in the fork.  `session/messages' makes sure of the same
+;; for every request, whatever the path holds: a provider that pairs
+;; tool calls with results, as DeepSeek does, rejects a request with
+;; an unanswered call.
+;;
 ;; A hosted-loop provider (Claude Code, Copilot) keeps the conversation
 ;; itself, so the transcript and that conversation must agree.  Nodes
 ;; carry the provider's `:checkpoint' where it reported one (for Claude
@@ -45,6 +53,14 @@
 ;; use it, the sandbox lets its commands write there, and the system
 ;; prompt names it.  /tmp is shared, so only a directory that is the
 ;; user's own is ever handed out.
+;;
+;; A session may instead cap its context window at a number of tokens
+;; (`:context-window-limit' to `session/create' or `session/update'):
+;; the window in effect is then the smaller of the model's and the
+;; limit, computed afresh so a model change moves it too.  Task
+;; sessions use this to compact earlier than interactive ones (see
+;; `harness-tasks-context-limit').  A `:context-window' set outright
+;; for the session wins over the limit, being the more explicit choice.
 
 ;;; Code:
 
@@ -63,6 +79,7 @@
   allowed-dirs (status 'idle) parent-id fork-node created updated
   (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :list-cost 0.0 :context 0 :turns 0))
   context-window                        ; one set for the session, else nil: the model's
+  context-window-limit                  ; most tokens of context, else nil: the model's
   budget head queue pending todos plan provider-state
   ;; runtime only
   (nodes (make-hash-table :test 'equal))
@@ -94,15 +111,15 @@ defaults."
 (defconst harness-session--public-keys
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
-    :context-window :context-window-override :budget :head :queue :pending :todos :plan
-    :provider-state :provider-node))
+    :context-window :context-window-override :context-window-limit :budget :head :queue :pending
+    :todos :plan :provider-state :provider-node))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
 
 (defconst harness-session--settings
   '(:name :model :permission-mode :thinking :non-interactive :allowed-dirs :budget :context-window
-    :cwd :host :worktree)
+    :context-window-limit :cwd :host :worktree)
   "Keys `session/update' accepts.")
 
 ;;;; Conversions
@@ -114,8 +131,9 @@ defaults."
 
 (defun harness-session-plist (s)
   "Return the public plist of session struct S.
-`:context-window' is the window in effect (see `harness-session--window'),
-`:context-window-override' the one set for S, or nil."
+`:context-window' is the window in effect (see `harness-session--window');
+`:context-window-override' and `:context-window-limit' are what was set
+for S, and are nil when unset."
   (list :id (harness-session-id s) :name (harness-session-name s)
         :kind (harness-session-kind s) :project (harness-session-project s)
         :cwd (harness-session-cwd s) :host (harness-session-host s)
@@ -129,6 +147,7 @@ defaults."
         :updated (harness-session-updated s) :usage (harness-session-usage s)
         :context-window (harness-session--window s)
         :context-window-override (harness-session-context-window s)
+        :context-window-limit (harness-session-context-window-limit s)
         :budget (harness-session-budget s) :head (harness-session-head s)
         :queue (harness-session-queue s) :pending (harness-session-pending s)
         :todos (harness-session-todos s) :plan (harness-session-plan s)
@@ -167,6 +186,8 @@ defaults."
           ;; Not `:context-window': that is the model's window as it was
           ;; when the record was written, and now comes from the catalogue.
           (harness-session-context-window s) (plist-get pl :context-window-override)
+          (harness-session-context-window-limit s)
+          (harness-session--context-window-limit-value (plist-get pl :context-window-limit))
           (harness-session-budget s) (plist-get pl :budget)
           (harness-session-head s) (plist-get pl :head)
           (harness-session-queue s) (plist-get pl :queue)
@@ -235,6 +256,35 @@ defaults."
                 (if update (plist-put (copy-sequence node) :_op "update") node)))
 
 ;;;; Path helpers
+
+(defun harness-session--from-compaction (path)
+  "Return PATH from its last compaction node on, or all of it without one.
+That is the part of a transcript `session/messages' sends: the summary
+in the compaction node stands for everything before it."
+  (let ((start (cl-position-if (lambda (n) (eq (plist-get n :kind) 'compaction)) path :from-end t)))
+    (if start (nthcdr start path) path)))
+
+(defun harness-session--unanswered (path)
+  "Return the tool-call nodes on PATH that no tool result on PATH answers.
+Only the calls from the last compaction on count: the ones before it
+reach no provider, and a result added for one would answer nothing."
+  (let ((path (harness-session--from-compaction path))
+        (answered (make-hash-table :test 'equal)))
+    (dolist (n path)
+      (when (eq (plist-get n :kind) 'tool-result)
+        (puthash (plist-get n :call-id) t answered)))
+    (cl-remove-if-not (lambda (n) (and (eq (plist-get n :kind) 'tool-call)
+                                       (not (gethash (plist-get n :call-id) answered))))
+                      path)))
+
+(defun harness-session--answer (id calls result)
+  "Append a tool result to session ID for each tool-call node in CALLS.
+RESULT, called with a call node, returns the rest of its result node:
+`:output', `:is-error', `:meta'."
+  (dolist (call calls)
+    (harness-call 'session/append id
+                  (append (list :kind 'tool-result :call-id (plist-get call :call-id))
+                          (funcall result call)))))
 
 (defun harness-session--path (s &optional head)
   "Return the nodes of S from the root to HEAD, oldest first.
@@ -332,10 +382,20 @@ taken anywhere but at the head of its parent starts off it."
                     nil)))
       128000))
 
+(defun harness-session--context-window-limit-value (v)
+  "Return V when it is a usable limit on a context window, else nil.
+A limit is a positive number of tokens, kept whole."
+  (and (numberp v) (> v 0) (round v)))
+
 (defun harness-session--window (s)
-  "Return the context window of S: the one set for it, else its model's."
+  "Return the context window of S: the one set for it, else its model's.
+Its `context-window-limit' caps the model's window; a window set for S
+outright (`:context-window') wins over the limit."
   (or (harness-session-context-window s)
-      (harness-session--model-window (harness-session-model s))))
+      (let ((window (harness-session--model-window (harness-session-model s)))
+            (limit (harness-session--context-window-limit-value
+                    (harness-session-context-window-limit s))))
+        (if limit (min window limit) window))))
 
 (defun harness-session--model-levels (model)
   "Return the thinking levels the provider catalogue gives MODEL, or nil."
@@ -486,6 +546,8 @@ configured at `:cwd'."
           (harness-session-created s) (float-time)
           (harness-session-updated s) (float-time)
           (harness-session-context-window s) (plist-get plist :context-window)
+          (harness-session-context-window-limit s)
+          (harness-session--context-window-limit-value (plist-get plist :context-window-limit))
           (harness-session-budget s) (or (plist-get plist :budget) (harness-session--config 'harness-budget cwd))
           (harness-session-provider-state s) (plist-get plist :provider-state)
           (harness-session-loaded s) t)
@@ -586,6 +648,9 @@ next start settles its turn."
     (:model (format "model → %s" value))
     (:permission-mode (format "permission mode → %s" value))
     (:thinking (format "thinking → %s" (or value "default")))
+    (:context-window-limit (if value (format "context window limit → %s"
+                                             (harness-format-tokens value))
+                             "context window limit removed"))
     (:non-interactive (format "non-interactive %s" (if (harness-json-true-p value) "on" "off")))
     (:budget (if value (format "budget → %s%s" (harness-format-cost (plist-get value :amount))
                                (if (plist-get value :hard) " (hard)" ""))
@@ -599,7 +664,9 @@ With `:persist' non-nil, model, permission mode and thinking are also
 written to the configuration layer.  With `:silent' no hint is added.
 `:context-window' sets the session's own context window, nil its
 model's again; a new `:model' brings its own window too, unless PLIST
-also sets one."
+also sets one.  `:context-window-limit N' caps its model's window at N
+tokens, nil the model's again; a `:context-window' set for the session
+wins over it."
   (let* ((s (harness-session--get id))
          (persist (plist-get plist :persist))
          (silent (plist-get plist :silent))
@@ -618,6 +685,8 @@ also sets one."
                   (:allowed-dirs (setf (harness-session-allowed-dirs s) (and (listp v) v)))
                   (:budget (setf (harness-session-budget s) v))
                   (:context-window (setf (harness-session-context-window s) v))
+                  (:context-window-limit (setf (harness-session-context-window-limit s)
+                                               (harness-session--context-window-limit-value v)))
                   (:cwd (setf (harness-session-cwd s) (file-name-as-directory (expand-file-name v))))
                   (:host (setf (harness-session-host s) v))
                   (:worktree (setf (harness-session-worktree s) v)))
@@ -698,6 +767,31 @@ With only ID return the whole runtime plist."
 
 ;;;; Methods: forks, BTWs and trees
 
+(defconst harness-session-forked-output
+  "No result in this fork: the session was forked before this call returned, and the result went to the session it was forked from."
+  "Result a fork records for a tool call that had none when it was forked.")
+
+(defconst harness-session-spawned-output
+  "You are the sub-agent this call started: the session was forked here, and the next message is your task. Do the task yourself; your final message is this call's result for the session that forked you."
+  "Result a fork records for the call that forked it to start a sub-agent.")
+
+(defun harness-session--settle-fork (cs spawn-call)
+  "Answer the tool calls that the transcript of fork CS copied unanswered.
+A session forked in the middle of a turn copies the calls still
+running, the forking spawn_agent call among them, and one forked where
+its head was moved back copies calls without the results that came
+later.  Their results go to the parent, never to the fork, so each gets
+one in the fork: providers that pair calls with results reject a
+transcript with an unanswered call.  The call whose id is SPAWN-CALL is
+the one that forked the session to start a sub-agent, which the fork
+is; its result says so rather than that it is missing."
+  (harness-session--answer
+   (harness-session-id cs) (harness-session--unanswered (harness-session--path cs))
+   (lambda (call)
+     (if (and spawn-call (equal (plist-get call :call-id) spawn-call))
+         (list :output harness-session-spawned-output :meta (list :forked t))
+       (list :output harness-session-forked-output :is-error t :meta (list :forked t))))))
+
 (harness-defmethod session/fork (id &rest plist)
   "Fork session ID; return a promise of the new session plist.
 PLIST may set `:kind' (fork, subagent), `:name', `:cwd', `:model' and
@@ -705,6 +799,16 @@ any other `session/create' key, and `:node', the node to fork at: by
 default the head.  Forking at another node leaves ID's head where it
 is.  The path from the root to that node is copied (same node ids), so
 the fork starts with the parent's transcript up to there.
+
+A tool call it copies without a result -- ID is in the middle of a
+turn, or its head was moved back between a call and its result -- gets
+one in the fork, saying the result went to ID
+\(`harness-session-forked-output'), so the fork's first request pairs
+every call with a result, as providers such as DeepSeek require.
+PLIST's `:call-id' names ID's tool call that forks it to start a
+sub-agent (spawn_agent's), whose result says instead that the fork is
+that sub-agent and its task comes next
+\(`harness-session-spawned-output').
 
 Its provider state is the one `provider/fork' derives from the
 parent's, and holds exactly that transcript, nothing after it (see
@@ -723,6 +827,7 @@ parent's CLI session.  A BTW is no fork; see `session/btw'."
                         (signal 'harness-error (list (format "No node %s in %s" node id))))
                       (harness-session--path parent node)))
          (continuation (harness-session--continuation parent node))
+         (spawn-call (plist-get plist :call-id))
          (child-plist (harness-plist-merge
                        (list :cwd (harness-session-cwd parent)
                              :host (harness-session-host parent)
@@ -735,10 +840,11 @@ parent's CLI session.  A BTW is no fork; see `session/btw'."
                                                   t :false)
                              :allowed-dirs (harness-session-allowed-dirs parent)
                              :budget (harness-session-budget parent)
+                             :context-window-limit (harness-session-context-window-limit parent)
                              :kind 'fork
                              :parent-id id
                              :fork-node node)
-                       (harness-plist-remove plist :node)))
+                       (harness-plist-remove plist :node :call-id)))
          (child (apply #'harness-call 'session/create child-plist))
          (cs (harness-session--get (plist-get child :id))))
     (dolist (n path)
@@ -747,6 +853,7 @@ parent's CLI session.  A BTW is no fork; see `session/btw'."
     (setf (harness-session-head cs) node
           ;; Its provider state, whatever it is, is the conversation up to NODE.
           (harness-session-provider-node cs) node)
+    (harness-session--settle-fork cs spawn-call)
     (harness-session--save (harness-session-id cs))
     (harness-then
      (if (and (harness-method-exists-p 'provider/fork)
@@ -1088,17 +1195,70 @@ A message delivered after a node missing from PATH stays where it is."
           (puthash anchor (append (gethash anchor after) (list n)) after))))
     (cons moved after)))
 
+(defconst harness-session-missing-result-output
+  "No result was recorded for this call."
+  "Result `session/messages' gives a tool call whose result is not on the path.")
+
+(defun harness-session--stray-text (block)
+  "Return tool_result BLOCK, which answers no call before it, as text."
+  (list :type "text"
+        :text (format "[Result of tool call %s%s]\n%s" (plist-get block :tool_use_id)
+                      (if (plist-get block :is_error) ", an error" "")
+                      (plist-get block :content))))
+
+(defun harness-session--pair-tools (messages)
+  "Return MESSAGES with every tool call answered by the message after it.
+A tool_use block whose result is not in the next message gets an error
+result there (`harness-session-missing-result-output'), in a user
+message of its own when no user message follows; a tool_result block
+that answers no tool_use of the message before it becomes text.
+Providers that pair calls with results, such as DeepSeek and Bedrock,
+reject a request with either.  A path has an unanswered call when its
+head was moved back between a call and its result, say, or a stray
+result when a call finished after its turn ended.  A message that needs
+no change is returned as it is; one that does lists its results first."
+  (let ((out nil) (asked nil))
+    (cl-flet ((missing (call-id)
+                (list :type "tool_result" :tool_use_id call-id
+                      :content harness-session-missing-result-output :is_error t)))
+      (dolist (m messages)
+        (if (not (eq (plist-get m :role) 'user))
+            (progn
+              (when asked (push (list :role 'user :content (mapcar #'missing asked)) out))
+              (push m out)
+              (setq asked (delq nil (mapcar (lambda (b) (and (equal (plist-get b :type) "tool_use")
+                                                             (plist-get b :id)))
+                                            (plist-get m :content)))))
+          (let ((results nil) (others nil) (answered nil) (stray nil))
+            (dolist (b (plist-get m :content))
+              (let ((call-id (plist-get b :tool_use_id)))
+                (cond ((not (equal (plist-get b :type) "tool_result")) (push b others))
+                      ((and (member call-id asked) (not (member call-id answered)))
+                       (push call-id answered)
+                       (push b results))
+                      (t (setq stray t)
+                         (push (harness-session--stray-text b) others)))))
+            (let ((unanswered (cl-remove-if (lambda (call-id) (member call-id answered)) asked)))
+              (push (if (or stray unanswered)
+                        (list :role 'user :content (append (nreverse results) (mapcar #'missing unanswered)
+                                                           (nreverse others)))
+                      m)
+                    out))
+            (setq asked nil))))
+      (when asked (push (list :role 'user :content (mapcar #'missing asked)) out)))
+    (nreverse out)))
+
 (harness-defmethod session/messages (id)
   "Return provider messages (:role :content BLOCKS) for the transcript of ID.
 Adjacent assistant-side nodes merge into one assistant message; tool
 results become user messages with tool_result blocks; the transcript
 starts at the last compaction node when one exists.  A steering message
 stands where the model got it, after its `:delivered-after' node and
-the tool results right after that, not where it was sent mid-step."
+the tool results right after that, not where it was sent mid-step.
+Every tool call is answered in the message after it, by a stand-in
+result when the path has none (see `harness-session--pair-tools')."
   (let* ((s (harness-session--get id))
-         (path (harness-session--path s))
-         (start (cl-position-if (lambda (n) (eq (plist-get n :kind) 'compaction)) path :from-end t))
-         (path (if start (nthcdr start path) path))
+         (path (harness-session--from-compaction (harness-session--path s)))
          (delivered (harness-session--delivered path))
          (ready nil)
          (messages nil) (cur nil) (cur-role nil))
@@ -1142,7 +1302,7 @@ the tool results right after that, not where it was sent mid-step."
         (setq ready (append ready (gethash (plist-get n :id) (cdr delivered)))))
       (mapc #'user ready)
       (flush))
-    (nreverse messages)))
+    (harness-session--pair-tools (nreverse messages))))
 
 (harness-defmethod session/transcript-text (id)
   "Return the transcript of session ID as searchable plain text.
@@ -1185,19 +1345,11 @@ providers that pair calls with results reject a transcript with an
 unanswered call -- and a hint says what the session was doing.  The
 requests themselves are gone: the turn that would read their answers
 ended with the process."
-  (let ((id (harness-session-id s))
-        (path (harness-session--path s))
-        (answered (make-hash-table :test 'equal)))
-    (dolist (n path)
-      (when (eq (plist-get n :kind) 'tool-result)
-        (puthash (plist-get n :call-id) t answered)))
-    (dolist (n path)
-      (when (and (eq (plist-get n :kind) 'tool-call)
-                 (not (gethash (plist-get n :call-id) answered)))
-        (harness-call 'session/append id
-                      (list :kind 'tool-result :call-id (plist-get n :call-id)
-                            :output harness-session-interrupted-output :is-error t
-                            :meta (list :interrupted t)))))
+  (let ((id (harness-session-id s)))
+    (harness-session--answer id (harness-session--unanswered (harness-session--path s))
+                             (lambda (_call)
+                               (list :output harness-session-interrupted-output :is-error t
+                                     :meta (list :interrupted t))))
     (harness-call 'session/hint id (harness-session--interrupted-text pending))
     ;; Saved inactive now, so the next start does not settle it again.
     (harness-session--save id)))

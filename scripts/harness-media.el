@@ -32,6 +32,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'text-property-search)
 
 ;;;; Settings of the run
 
@@ -67,10 +68,12 @@
 (defvar harness-ui-positions)
 (defvar harness-ui-default-position)
 (defvar harness-ui--position-buffers)
+(defvar harness-ui-tasks--target)
 (defvar harness-chat--blocks)
 (defvar harness-chat--loading)
 (defvar harness-chat--order)
 (defvar harness-sessions)
+(defvar harness-ui-tasks--tasks)
 
 (declare-function harness-start "harness")
 (declare-function harness-call "harness-core")
@@ -92,12 +95,18 @@
 (declare-function harness-compose-repad "harness-ui-compose")
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-requests "harness-ui-tasks")
+(declare-function harness-ui-tasks-reply "harness-ui-tasks")
+(declare-function harness-ui-tasks--find "harness-ui-tasks")
+(declare-function harness-ui-report-popout "harness-ui-report")
+(declare-function harness-ui-popout-buffer "harness-ui-popout")
 (declare-function harness-sessions "harness-ui-sessions")
 (declare-function harness-ui-sessions-requests "harness-ui-sessions")
 (declare-function harness-tree "harness-ui-tree")
 (declare-function harness-usage "harness-ui-usage")
 (declare-function harness-ui-usage-set-period "harness-ui-usage")
 (declare-function harness-ui-usage-set-group "harness-ui-usage")
+(declare-function harness-ui-usage-toggle-worktrees "harness-ui-usage")
+(defvar harness-ui-usage--unfolded)
 (declare-function harness-worktrees "harness-ui-worktree")
 (declare-function harness-settings "harness-ui-config")
 (declare-function harness-tasks--set "harness-tasks")
@@ -559,6 +568,51 @@ def authenticate(environ):
     return key
 ")
 
+(defconst harness-media--latency-chart "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"960\" height=\"540\" viewBox=\"0 0 960 540\" font-family=\"sans-serif\">
+  <rect width=\"960\" height=\"540\" rx=\"10\" fill=\"#181a28\"/>
+  <text x=\"90\" y=\"44\" font-size=\"24\" font-weight=\"bold\" fill=\"#e6e8f4\">GET /orders: p95 latency by orders stored</text>
+  <g stroke=\"#2e3148\" stroke-width=\"1\">
+    <line x1=\"90\" y1=\"470\" x2=\"920\" y2=\"470\"/>
+    <line x1=\"90\" y1=\"336.7\" x2=\"920\" y2=\"336.7\"/>
+    <line x1=\"90\" y1=\"203.3\" x2=\"920\" y2=\"203.3\"/>
+    <line x1=\"90\" y1=\"70\" x2=\"920\" y2=\"70\"/>
+  </g>
+  <g font-size=\"15\" fill=\"#9a9cb0\" text-anchor=\"end\">
+    <text x=\"80\" y=\"475\">10 ms</text>
+    <text x=\"80\" y=\"341.7\">100 ms</text>
+    <text x=\"80\" y=\"208.3\">1 s</text>
+    <text x=\"80\" y=\"75\">10 s</text>
+  </g>
+  <g font-size=\"15\" fill=\"#9a9cb0\" text-anchor=\"middle\">
+    <text x=\"173\" y=\"500\">1,000</text>
+    <text x=\"339\" y=\"500\">5,000</text>
+    <text x=\"505\" y=\"500\">10,000</text>
+    <text x=\"671\" y=\"500\">50,000</text>
+    <text x=\"837\" y=\"500\">100,000</text>
+    <text x=\"505\" y=\"528\">orders in the database</text>
+  </g>
+  <polyline fill=\"none\" stroke=\"#f78166\" stroke-width=\"3\" points=\"173,379.2 339,288.4 505,248.3 671,153.9 837,112.5\"/>
+  <g fill=\"#f78166\">
+    <circle cx=\"173\" cy=\"379.2\" r=\"5\"/><circle cx=\"339\" cy=\"288.4\" r=\"5\"/><circle cx=\"505\" cy=\"248.3\" r=\"5\"/>
+    <circle cx=\"671\" cy=\"153.9\" r=\"5\"/><circle cx=\"837\" cy=\"112.5\" r=\"5\"/>
+    <text x=\"837\" y=\"98\" font-size=\"15\" text-anchor=\"middle\">4.8 s</text>
+  </g>
+  <polyline fill=\"none\" stroke=\"#56d364\" stroke-width=\"3\" points=\"173,464.5 339,459.4 505,459.4 671,454.8 837,450.5\"/>
+  <g fill=\"#56d364\">
+    <circle cx=\"173\" cy=\"464.5\" r=\"5\"/><circle cx=\"339\" cy=\"459.4\" r=\"5\"/><circle cx=\"505\" cy=\"459.4\" r=\"5\"/>
+    <circle cx=\"671\" cy=\"454.8\" r=\"5\"/><circle cx=\"837\" cy=\"450.5\" r=\"5\"/>
+    <text x=\"837\" y=\"436\" font-size=\"15\" text-anchor=\"middle\">14 ms</text>
+  </g>
+  <g font-size=\"16\" fill=\"#c6c8d8\">
+    <rect x=\"110\" y=\"92\" width=\"18\" height=\"4\" fill=\"#f78166\"/>
+    <text x=\"138\" y=\"99\">every order at once (before)</text>
+    <rect x=\"110\" y=\"118\" width=\"18\" height=\"4\" fill=\"#56d364\"/>
+    <text x=\"138\" y=\"125\">limit=50, the default (after)</text>
+  </g>
+</svg>
+"
+  "docs/orders-latency.svg, the chart the pagination task hands in.")
+
 (defconst harness-media--orders-paginated "\"\"\"Order handlers.\"\"\"
 
 import json
@@ -812,10 +866,12 @@ The orders endpoints only touch a list in memory, and authentication is a set lo
    (harness-media--tool "read_file" :path "tests/test_app.py")
    (harness-media--say "`ORDERS` is module state, so `test_creates_an_order` saw the orders of whichever test ran before it. `setUp` now clears it, and the test passes in any order.")))
 
-(defun harness-media--task-script (todos changes message summary &optional hold)
+(defun harness-media--task-script (todos changes message summary &optional hold evidence)
   "A task's turn: TODOS, CHANGES (tool calls), a commit as MESSAGE, SUMMARY.
 TODOS are the item texts.  With HOLD the turn stops working half way
-and never ends, so the task stays in progress, and nothing is committed."
+and never ends, so the task stays in progress, and nothing is committed.
+With EVIDENCE, hand_in's evidence items, the turn hands its work in
+with SUMMARY rather than saying it."
   (let* ((n (length todos))
          (at (lambda (done)
                (apply #'harness-media--todos
@@ -826,8 +882,13 @@ and never ends, so the task stays in progress, and nothing is committed."
                 (list (funcall at 1)) (cl-subseq changes 1)
                 (list (list :type 'hold)))
       (append (list (funcall at 0)) changes
-              (list (funcall at (1- n)) (harness-media--git-commit message) (funcall at n)
-                    (harness-media--say summary))))))
+              (list (funcall at (1- n)) (harness-media--git-commit message) (funcall at n))
+              (if evidence
+                  ;; A word first, as models do: a session is named after
+                  ;; a first turn that said something.
+                  (list (harness-media--say "Done, and the tests pass: handing it in for review.")
+                        (harness-media--tool "hand_in" :summary summary :evidence evidence))
+                (list (harness-media--say summary)))))))
 
 (defun harness-media--task-constant-time (_request)
   "Task: constant-time key checks."
@@ -850,15 +911,22 @@ and never ends, so the task stays in progress, and nothing is committed."
    "pyproject.toml requires Python 3.12 and lists 3.12 and 3.13."))
 
 (defun harness-media--task-pagination (_request)
-  "Task: paginate GET /orders."
-  (harness-media--task-script
-   '("Read the orders handler" "Add limit and offset" "Update the tests")
-   (list (harness-media--tool "read_file" :path "acme/orders.py")
-         (harness-media--tool "write_file" :path "acme/orders.py" :content harness-media--orders-paginated)
-         (harness-media--tool "edit_file" :path "tests/test_app.py"
-                              :old_string "{\"orders\": []}" :new_string "{\"orders\": [], \"total\": 0}"))
-   "Paginate GET /orders"
-   "GET /orders takes `limit` (50 by default, 200 at most) and `offset`, and returns the total."))
+  "Task: paginate GET /orders, handed in with a chart and the test run."
+  (let ((tests (harness-media--tool "bash" :command "python3 -m unittest")))
+    (harness-media--task-script
+     '("Read the orders handler" "Add limit and offset" "Update the tests" "Chart the latency")
+     (list (harness-media--tool "read_file" :path "acme/orders.py")
+           (harness-media--tool "write_file" :path "acme/orders.py" :content harness-media--orders-paginated)
+           (harness-media--tool "edit_file" :path "tests/test_app.py"
+                                :old_string "{\"orders\": []}" :new_string "{\"orders\": [], \"total\": 0}")
+           tests
+           (harness-media--tool "write_file" :path "docs/orders-latency.svg" :content harness-media--latency-chart))
+     "Paginate GET /orders"
+     "GET /orders takes `limit` (50 by default, 200 at most) and `offset`, and returns the total, so a client pages through the orders instead of loading them all."
+     nil
+     (list (list :image "docs/orders-latency.svg"
+                 :caption "p95 latency of GET /orders: flat at 11-14 ms with pagination, where it grew to 4.8 s with every order at once")
+           (list :tool_call (plist-get tests :id) :caption "The tests pass, the total included.")))))
 
 (defun harness-media--task-slow (_request)
   "Task: log slow requests."
@@ -950,6 +1018,7 @@ and never ends, so the task stays in progress, and nothing is committed."
     ("slower than" . harness-media--task-slow)
     ("typed config" . harness-media--task-settings)
     ("OpenAPI" . harness-media--task-openapi)
+    ("Hold this turn" . harness-media--hold-script)
     ("/health" . harness-media--task-health))
   "Scripts as (REGEXP . FUNCTION), matched against the newest user message.")
 
@@ -1041,6 +1110,10 @@ tool and asks again, and the script goes on from there."
     (list :cancel (lambda ()
                     (setq cancelled t)
                     (when timer (cancel-timer timer))
+                    ;; A turn a tool ended (hand_in cancels it) takes no
+                    ;; more of its script: the next request -- naming the
+                    ;; session, say -- must not get the rest.
+                    (remhash sid harness-media--rest)
                     (funcall on-event '(:type done :stop-reason cancelled))))))
 
 (defun harness-media--claude-models ()
@@ -1137,8 +1210,20 @@ Give up after TIMEOUT seconds (default 90)."
   "Submit PROMPT as a task of the demo project with OPTS; return its id."
   (plist-get (harness-call 'task/submit harness-media-project prompt opts) :id))
 
+(defun harness-media--hold-script (_request)
+  "A turn that never ends: the merge queue's parent, kept busy for the board picture."
+  (list (list :type 'hold)))
+
+(defun harness-media--hold-merge-session ()
+  "Keep the task project's merge session busy, so a merged branch waits in the queue.
+The picture of the board then has a task in its merging section."
+  (let ((merger (cl-find "Task merges" (harness-call 'session/list)
+                         :key (lambda (s) (plist-get s :name)) :test #'equal)))
+    (when merger
+      (harness-media--prompt (plist-get merger :id) "Hold this turn while the picture is taken." '(running)))))
+
 (defun harness-media--build-tasks ()
-  "Fill the task board: done, in review, in progress, stuck and in the backlog."
+  "Fill the task board: done, merging, in review, in progress, stuck and in the backlog."
   (let* ((constant (harness-media--submit "use hmac.compare_digest when checking API keys, so a key check takes the same time whatever the key"))
          (python (harness-media--submit "we deploy on 3.12 now: bump requires-python and list the versions we support in pyproject.toml")))
     (dolist (id (list constant python))
@@ -1155,6 +1240,11 @@ Give up after TIMEOUT seconds (default 90)."
           (retry (harness-media--submit "webhooks: retry failed deliveries with exponential backoff, give up after an hour" :refine t)))
       (dolist (id (list pagination slow))
         (harness-media--wait-task id (lambda (task) (equal (harness-media--column task) "review")) "to wait for review"))
+      ;; With the merge session busy, the verified branch waits in the queue.
+      (harness-media--hold-merge-session)
+      (harness-call 'task/verify pagination)
+      (harness-media--wait-task pagination (lambda (task) (equal (harness-media--column task) "merging"))
+                                "to wait in the merge queue")
       (harness-call 'task/reject slow "Say which unit the threshold is in.")
       (harness-media--wait-task slow (lambda (task) (equal (harness-media--column task) "active")) "to go back to work")
       (harness-media--wait-task slow (lambda (task) (equal (harness-media--column task) "review")) "to come back for review")
@@ -1309,6 +1399,9 @@ recaps: the lines the model would have written by now."
                        (and refined (list :refined (harness-media--ago refined)))))
         (when-let* ((sid (plist-get task :session)))
           (harness-media--set-times sid created (or finished verified refined 1)))))
+    ;; The branch waiting in the merge queue joined it when its work finished,
+    ;; so its card reads "queued 21m ago" rather than "just now".
+    (harness-tasks--set (plist-get tasks :pagination) :merge-queued (harness-media--ago 21))
     (pcase-dolist (`(,key ,created ,updated)
                    '((:guide 2900 2870) (:flaky 5800 5790) (:hero 7 0.2) (:fork 3 2) (:btw 1 0.5)
                      (:permission 9 8) (:question 15 14)))
@@ -1526,6 +1619,122 @@ Return the chat's buffer."
       (set-window-start window (point-min))))
   (harness-media--capture "tasks"))
 
+(defconst harness-media--done-titles
+  '("add a DELETE /orders/{id} endpoint"
+    "return 409 when an order already shipped"
+    "keep the order tests off the network"
+    "log the request id with every order line"
+    "make the invoice total an int in cents"
+    "retry a failed webhook once before giving up"
+    "rate-limit the login endpoint"
+    "validate the coupon code before applying it"
+    "document the pagination parameters"
+    "drop the unused legacy_price column"
+    "send a receipt email after checkout"
+    "cache the product catalogue for five minutes")
+  "Titles of the pretend completed tasks of the long board picture.")
+
+(defun harness-media--add-done-tasks (n)
+  "Put N completed tasks of the demo project on the board.
+The picture is about a long board -- one grown by weeks of merged work
+-- and running N tasks through the scripted providers would take
+minutes: the board draws the same cards from its own task list."
+  (setq harness-ui-tasks--tasks
+        (append harness-ui-tasks--tasks
+                (cl-loop for i below n
+                         for title = (nth (mod i (length harness-media--done-titles))
+                                          harness-media--done-titles)
+                         for age = (* 7200 (1+ i))
+                         for created = (- (float-time) age)
+                         collect (list :id (format "t-media%03d" i)
+                                       :project harness-media-project
+                                       :cwd harness-media-project
+                                       :prompt title
+                                       :state "done" :column "done" :merged t
+                                       :created created
+                                       :started (+ created 600)
+                                       :finished (+ created 1200)
+                                       :verified-at (+ created 1300))))))
+
+(defun harness-media-shot-tasks-long ()
+  "A board grown long by merged work, still fitting its window.
+53 completed tasks and every other column filled: the board holds the
+least urgent cards back, a capped section saying \"... N more  [Show
+all]\", so the compose box stays at the bottom of the window with the
+task being written in it.  The frame is a fixed height, the same as the
+before picture's: a board that does not fit would push the box below
+the last line."
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  (set-frame-size nil harness-media-columns 40)
+  (let ((window (selected-window)))
+    (with-current-buffer (window-buffer window)
+      (harness-media--add-done-tasks 53)
+      (harness-compose-set "Add DELETE /orders/{id}, which cancels an order that has not shipped yet")
+      (set-window-point window (point-max))
+      ;; The frame is the picture's size now: lay the board out for it
+      ;; once more, as a tick does when a window changes size.
+      (harness-ui-tasks--render))
+    (harness-media--settle 1)
+    (set-window-start window (point-min))
+    (harness-media--settle 1))
+  (harness-media--capture "tasks-long"))
+
+(defun harness-media-shot-tasks-message ()
+  "The task board writing a message to the session of a task at work.
+The compose box wears the message colours and names the session it
+sends to, so it cannot be taken for the one that writes a new task."
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :settings))
+         (window (selected-window)))
+    (with-current-buffer (window-buffer window)
+      ;; The board draws its cards as they arrive and the shared helper
+      ;; errors on a card that is not there yet.
+      (harness-media--wait (lambda () (ignore-errors (harness-media--goto-task-card id) t))
+                           15 "the task's card")
+      (harness-ui-tasks-reply)
+      (unless (eq 'reply (car harness-ui-tasks--target))
+        (error "The board did not open a message box (target %S)" harness-ui-tasks--target))
+      (harness-compose-set "Keep the old settings module as a thin wrapper for one release, so the deploy can roll back.")
+      (set-window-point window (point-max))
+      (harness-media--settle 1)
+      (set-window-start window (point-min))))
+  (harness-media--capture "tasks-message"))
+
+(defun harness-media--report-layout ()
+  "Show the board the whole frame high, the pagination task's report over it.
+Return the report's popout buffer."
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  ;; The whole height: the report grows to most of it, for its chart.
+  (set-frame-size nil harness-media-columns harness-media-lines)
+  (harness-media--settle 0.5)
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :pagination))
+         (task (with-current-buffer (window-buffer (selected-window)) (harness-ui-tasks--find id))))
+    (harness-ui-report-popout task)
+    (harness-media--settle 1)
+    (harness-ui-popout-buffer (list 'report id))))
+
+(defun harness-media-shot-report ()
+  "A task's report popped out of the board, at its end: its chart, large,
+the test run it quotes, then the banner and the box that verify the task
+or send it back."
+  (let ((popout (harness-media--report-layout)))
+    (with-selected-window (get-buffer-window popout)
+      (goto-char (point-max))
+      (recenter -1))
+    (harness-media--capture "report")))
+
+(defun harness-media-shot-report-image ()
+  "That chart shown larger, in a popout of its own: RET on it in the report."
+  (let ((popout (harness-media--report-layout)))
+    (with-selected-window (get-buffer-window popout)
+      (goto-char (point-min))
+      (let ((match (text-property-search-forward 'display nil (lambda (_ value) (eq 'image (car-safe value))))))
+        (unless match (error "The report shows no image"))
+        (goto-char (prop-match-beginning match))
+        (call-interactively (key-binding (kbd "RET")))))
+    (harness-media--settle 1)
+    (harness-media--capture "report-image")))
+
 (defun harness-media-shot-sessions ()
   "The session list."
   (harness-media--view #'harness-sessions)
@@ -1587,6 +1796,28 @@ popout both show; the popout is a side window and keeps its height."
                          (harness-media--settle 1.5)))
   (harness-media--capture "usage"))
 
+(defun harness-media--usage-by-project (unfold)
+  "Show the usage dashboard over 30 days by project, worktrees shown when UNFOLD.
+Every project starts folded, whatever an earlier shot unfolded."
+  (harness-media--view #'harness-usage
+                       (lambda ()
+                         (setq harness-ui-usage--unfolded nil)
+                         (harness-ui-usage-set-period '30d)
+                         (harness-ui-usage-set-group 'project)
+                         (harness-media--settle 1.5)
+                         (when unfold (harness-ui-usage-toggle-worktrees))
+                         (goto-char (point-min)))))
+
+(defun harness-media-shot-usage-projects ()
+  "The usage dashboard by project, the tasks' worktrees folded under theirs."
+  (harness-media--usage-by-project nil)
+  (harness-media--capture "usage-projects"))
+
+(defun harness-media-shot-usage-worktrees ()
+  "The usage dashboard by project, the demo project's worktrees unfolded."
+  (harness-media--usage-by-project t)
+  (harness-media--capture "usage-worktrees"))
+
 (defun harness-media-shot-worktrees ()
   "The worktrees of the demo project."
   (harness-media--view (lambda () (harness-worktrees harness-media-project)))
@@ -1645,11 +1876,17 @@ popout both show; the popout is a side window and keeps its height."
     ("chat-permission" . harness-media-shot-chat-permission)
     ("chat-question" . harness-media-shot-chat-question)
     ("tasks" . harness-media-shot-tasks)
+    ("tasks-long" . harness-media-shot-tasks-long)
+    ("tasks-message" . harness-media-shot-tasks-message)
+    ("report" . harness-media-shot-report)
+    ("report-image" . harness-media-shot-report-image)
     ("sessions" . harness-media-shot-sessions)
     ("popout-permission" . harness-media-shot-popout-permission)
     ("popout-question" . harness-media-shot-popout-question)
     ("tree" . harness-media-shot-tree)
     ("usage" . harness-media-shot-usage)
+    ("usage-projects" . harness-media-shot-usage-projects)
+    ("usage-worktrees" . harness-media-shot-usage-worktrees)
     ("worktrees" . harness-media-shot-worktrees)
     ("settings" . harness-media-shot-settings)
     ("btw" . harness-media-shot-btw)

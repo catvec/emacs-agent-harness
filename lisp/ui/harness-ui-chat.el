@@ -1246,8 +1246,11 @@ state the group had."
   (when-let* ((buf (harness-chat--buffer-for sid)))
     (with-current-buffer buf
       (if (and harness-chat--loading
-               ;; Activity is not transcript: it is current however it loads.
-               (not (equal (plist-get update :sessionUpdate) "_harness/activity")))
+               ;; Activity and the session record are not transcript: they
+               ;; are current however it loads.  Held back, a change of
+               ;; status, queue or pending requests that came while every
+               ;; buffer reloads (a reload, a reconnect) would be lost.
+               (not (member (plist-get update :sessionUpdate) '("_harness/activity" "_harness/session"))))
           (push update harness-chat--deferred)
         (harness-chat--apply-update update)))))
 
@@ -1440,6 +1443,14 @@ continues, not the branch left behind."
   "Deny the newest pending permission request once."
   (interactive)
   (harness-ui-pending-deny-newest))
+
+(defun harness-chat-edit-permission-pattern (&optional pid)
+  "Edit the glob pattern the permission request PID is answered for.
+PID defaults to the request at point, or else the newest one.  The
+pattern, and editing it, belong to the pending module, so a popout
+edits the same request the same way."
+  (interactive)
+  (harness-ui-pending-edit-pattern pid))
 
 (defun harness-chat-next-diagram (&optional n)
   "Show the diagram of the next option of the question waiting with diagrams."
@@ -1970,14 +1981,7 @@ end afterwards."
                (when offset
                  (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
                (harness-chat--restore-anchors anchors)
-               (dolist (u (nreverse harness-chat--deferred))
-                 (pcase (plist-get u :sessionUpdate)
-                   ;; The list is state, not transcript: the newest wins.
-                   ("plan" (harness-chat--apply-update u))
-                   ("_harness/node"
-                    (when (harness-chat--node-current-p (plist-get u :node))
-                      (harness-chat--apply-update u)))))
-               (setq harness-chat--deferred nil)
+               (harness-chat--replay-deferred t)
                (when keep-bottom (harness-chat-scroll-to-bottom))
                (harness-chat--schedule-history))))))
      (lambda (err)
@@ -1985,9 +1989,30 @@ end afterwards."
          (with-current-buffer buf
            (when (= gen harness-chat--generation)
              (setq harness-chat--loading nil)
-             (harness-chat--render-nodes nil)
-             (harness-chat--append-local-block "error" (format "could not load the session: %s" (harness-error-message err)))
-             (harness-chat--render-top))))))))
+             ;; Not a failure when the UI connected elsewhere meanwhile:
+             ;; it redraws every buffer once it has.
+             (unless (harness-ui-connection-replaced-p err)
+               (harness-chat--render-nodes nil)
+               (harness-chat--append-local-block "error" (format "could not load the session: %s" (harness-error-message err)))
+               (harness-chat--render-top))
+             (harness-chat--replay-deferred nil))))))))
+
+(defun harness-chat--replay-deferred (loaded)
+  "Apply the updates held back while the transcript loaded, then forget them.
+With LOADED non-nil the transcript was just rendered: node updates that
+continue it are applied, the older ones are in it already, as is the
+text streamed meanwhile.  The todo list and the session being deleted
+are state, not transcript, so they apply either way; the session record
+and activity were never held back (see `harness-chat--on-update')."
+  (dolist (u (nreverse harness-chat--deferred))
+    (pcase (plist-get u :sessionUpdate)
+      ;; The list is state, not transcript: the newest wins.
+      ("plan" (harness-chat--apply-update u))
+      ("_harness/node"
+       (when (and loaded (harness-chat--node-current-p (plist-get u :node)))
+         (harness-chat--apply-update u)))
+      ("_harness/session_deleted" (harness-chat--apply-update u))))
+  (setq harness-chat--deferred nil))
 
 (defun harness-chat--node-current-p (node)
   "Non-nil when NODE is rendered already or continues the rendered transcript.
@@ -2020,17 +2045,21 @@ fetched: older nodes outside the fetched window are skipped."
                  (harness-chat--load (harness-chat--at-bottom-p)))))
            harness-chat--buffers))
 
+(defun harness-chat--showed-open-p (buffer)
+  "Non-nil when chat BUFFER last showed its session open, not inactive.
+A buffer that has not shown its session yet does not count."
+  (let ((seen (buffer-local-value 'harness-chat--session buffer)))
+    (and seen (not (equal (format "%s" (plist-get seen :status)) "inactive")))))
+
 (defun harness-chat--reopen-all ()
-  "Open again the closed sessions that chat buffers show.
+  "Open again the closed sessions that chat buffers showed open.
 Run after connecting: a harness that just started (`harness-restart', a
-crash) has every session closed, but one on screen here is open, as
-`harness-open-session' made it."
+crash) has every session closed, but one a buffer here showed open was
+open, so it opens again.  One a buffer showed inactive, or has not shown
+yet -- it opened as the UI connected -- stays as it is: an inactive
+session opens as it is, and the first message sent from it resumes it."
   (maphash (lambda (id buf)
-             (when (and (buffer-live-p buf)
-                        ;; A buffer still loading was opened by this very
-                        ;; connection: it opens the session as it is, and
-                        ;; sending from it resumes it.
-                        (not (buffer-local-value 'harness-chat--loading buf)))
+             (when (and (buffer-live-p buf) (harness-chat--showed-open-p buf))
                (harness-ui-call "_harness/session/get" (list :id id)
                                 (lambda (session)
                                   (when (equal (format "%s" (plist-get session :status)) "inactive")
@@ -2047,7 +2076,9 @@ the box held, after it is emptied.  It sends them wherever they belong
 instead of prompting the session, for a module showing something of its
 own in the buffer (see `harness-chat-panel-functions').  An answer to a
 waiting question still goes to the question, and C-c C-q queues and
-C-c C-k cancels as usual.")
+C-c C-k cancels as usual.  A task in review is no such thing: the
+harness takes any message to its session for the feedback that sends it
+back (`harness-tasks--on-message').")
 
 (defvar harness-chat-send-functions nil
   "Functions run with the TEXT and ATTACHMENTS of each message sent.
@@ -2084,8 +2115,11 @@ module names a side conversation after its first message this way.")
     (setq harness-chat--editing nil)))
 
 (defun harness-chat--report-error (buf what err)
-  "Append an error block to BUF saying WHAT failed with ERR."
-  (when (buffer-live-p buf)
+  "Append an error block to BUF saying WHAT failed with ERR.
+Nothing failed when the UI let go of the connection on purpose while
+waiting (`harness-ui-connection-replaced-p'): a message sent before it
+connected again still runs its turn, as the redrawn transcript shows."
+  (when (and (buffer-live-p buf) (not (harness-ui-connection-replaced-p err)))
     (with-current-buffer buf
       (harness-chat--append-local-block "error" (format "%s failed: %s" what (harness-error-message err))))))
 
@@ -2406,45 +2440,57 @@ conversation and gives it its [close] and [keep] buttons this way.")
                         nil))
     (apply #'concat (nreverse segments))))
 
-(defun harness-chat--header ()
-  "Return the header line."
+(defun harness-chat--header (&optional width)
+  "Return the header line, fitted to WIDTH, its window's by default.
+In a window too narrow for all of it, the spend goes first, then the
+thinking level, the context, the non-interactive mode, the model and
+the todos; the name shortens after those.  What
+`harness-chat-header-functions' put in front, the status, the
+permission mode, [menu] and the notice of new messages stay.  WIDTH is
+as `harness-ui-fit-header' takes it."
   (let* ((s (harness-chat--session))
          (status (or (plist-get s :status) "idle"))
          (running (equal status "running"))
+         (todos (harness-chat--todos-segment))
          (name (or (plist-get s :name) "unnamed")))
-    (concat
-     (harness-chat--header-prefix)
-     " "
-     (if running
-         (propertize (harness-chat--spinner-frame)
-                     'face 'harness-status-running-face
-                     'help-echo (harness-chat--activity-text harness-chat--activity))
-       (propertize (harness-ui-status-icon status) 'help-echo status))
-     " "
-     (harness-chat--segment name #'harness-rename-session "Session name (mouse-1: rename)" 'bold)
-     "  "
-     (harness-chat--todos-segment)
-     (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
-                            "Model (mouse-1: change)" 'harness-dim-face)
-     "  "
-     (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
-                            #'harness-set-permission-mode
-                            "Permission mode (mouse-1: change)")
-     "  "
-     (harness-chat--non-interactive-segment s)
-     "  "
-     (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
-                            #'harness-set-thinking "Thinking level (mouse-1: change)" 'harness-dim-face)
-     "  "
-     (harness-ui-format-context s)
-     "  "
-     (harness-chat--spend-segment s)
-     "  "
-     (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face)
-     (if harness-chat--unseen
-         (concat "  " (harness-chat--segment "↓ new messages" #'harness-chat-scroll-to-bottom
-                                             "New content below (mouse-1: jump to it)" 'harness-status-blocked-face))
-       ""))))
+    (harness-ui-fit-header
+     (list
+      (harness-chat--header-prefix)
+      (concat " "
+              (if running
+                  (propertize (harness-chat--spinner-frame)
+                              'face 'harness-status-running-face
+                              'help-echo (harness-chat--activity-text harness-chat--activity))
+                (propertize (harness-ui-status-icon status) 'help-echo status)))
+      (list (concat " " (harness-chat--segment name #'harness-rename-session
+                                               "Session name (mouse-1: rename)" 'bold))
+            70 (concat " " (harness-chat--segment (harness-truncate-end name 8) #'harness-rename-session
+                                                 "Session name (mouse-1: rename)" 'bold)))
+      ;; The segment ends in two spaces of its own; the list takes them
+      ;; as the separator, as the plain header line did.
+      (and todos (list (concat "  " (string-trim-right todos " +")) 55))
+      (list (concat "  " (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
+                                                "Model (mouse-1: change)" 'harness-dim-face))
+            50)
+      (list (concat "  " (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
+                                                #'harness-set-permission-mode
+                                                "Permission mode (mouse-1: change)"))
+            90)
+      (list (concat "  " (harness-chat--non-interactive-segment s)) 40)
+      (list (concat "  " (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
+                                                #'harness-set-thinking "Thinking level (mouse-1: change)"
+                                                'harness-dim-face))
+            20)
+      (list (concat "  " (harness-ui-format-context s)) 30)
+      (list (concat "  " (harness-chat--spend-segment s)) 10)
+      (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
+            95)
+      (and harness-chat--unseen
+           (list (concat "  " (harness-chat--segment "↓ new messages" #'harness-chat-scroll-to-bottom
+                                                     "New content below (mouse-1: jump to it)"
+                                                     'harness-status-blocked-face))
+                 88)))
+     width)))
 
 (defun harness-chat--mode-line ()
   "Return the mode line text."
@@ -2572,6 +2618,7 @@ message sent from it resumes it."
   (define-key map (kbd "C-c C-s") #'harness-chat-search)
   (define-key map (kbd "C-c C-y") #'harness-chat-allow-newest)
   (define-key map (kbd "C-c C-n") #'harness-chat-deny-newest)
+  (define-key map (kbd "C-c C-p") #'harness-chat-edit-permission-pattern)
   (define-key map (kbd "C-c C-f") #'harness-chat-next-diagram)
   (define-key map (kbd "C-c C-b") #'harness-chat-previous-diagram)
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
@@ -2613,6 +2660,7 @@ on \\[harness-menu] here, or the [menu] button in the header line.
        ["Agent"
         ("C-c C-y" "Allow request" harness-chat-allow-newest)
         ("C-c C-n" "Deny request" harness-chat-deny-newest)
+        ("C-c C-p" "Edit request's pattern" harness-chat-edit-permission-pattern)
         ("C-c C-f" "Next diagram" harness-chat-next-diagram)
         ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
         ("C-c C-t" "Show or hide the todo list" harness-chat-toggle-todos)

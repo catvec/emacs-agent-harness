@@ -10,6 +10,7 @@
 
 (require 'harness-test-helpers)
 (require 'harness-acp)
+(require 'text-property-search)
 
 (defvar harness-provider-demo-script-override)
 (defvar harness-provider-demo--delay)
@@ -32,22 +33,53 @@
 (defvar harness-compose-start)
 (defvar harness-compose-end)
 (defvar harness-chat--loading)
+(defvar harness-chat--transcript-end)
+(defvar harness-compose-redraw-function)
 (defvar harness-ui-popout-key)
 (defvar harness-ui-review-minor-mode)
+(defvar harness-ui-popout--parent)
+(defvar harness-ui-popout--max-height)
+(defvar harness-ui-report-max-height)
+(declare-function harness-ui-popout--header "harness-ui-popout")
+(declare-function harness-ui-popout-pixel-width "harness-ui-popout")
+(declare-function harness-ui-report--placeholder "harness-ui-report")
+(declare-function harness-ui-report--image-max-height "harness-ui-report")
+(declare-function harness-ui-report--image-width "harness-ui-report")
+(declare-function harness-ui-review--send "harness-ui-review")
+(declare-function harness-compose-live-p "harness-ui-compose")
+(declare-function harness-compose-in-p "harness-ui-compose")
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks--render "harness-ui-tasks")
+(declare-function harness-ui-tasks--find "harness-ui-tasks")
 (declare-function harness-ui-popout-buffer "harness-ui-popout")
 (declare-function harness-ui-popout-close "harness-ui-popout")
 (declare-function harness-ui-report-popout "harness-ui-report")
+(declare-function harness-ui-report-string "harness-ui-report")
+(declare-function harness-ui-report--insert "harness-ui-report")
 (declare-function harness-ui-review-verify "harness-ui-review")
 (declare-function harness-ui-review-reject "harness-ui-review")
+(declare-function harness-ui-review--on-event "harness-ui-review")
 (declare-function harness-chat-buffer "harness-ui-chat")
 (declare-function harness-compose-text "harness-ui-compose")
+(defvar harness-chat-placeholder)
+(defvar harness-chat-send-function)
+(defvar harness-ui-review--feedback-hint)
+(defvar harness-tasks--reject-message)
+(defvar harness-ui-session-id)
+(declare-function harness-acp--normalise "harness-acp")
+(declare-function harness-chat-send "harness-ui-chat")
+(declare-function harness-ui-review--chat-buffer "harness-ui-review")
+(declare-function harness-ui-review--on-event "harness-ui-review")
+
+(defconst harness-ui-review-test--image
+  "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"180\"><rect width=\"320\" height=\"180\" fill=\"#1f3a22\"/></svg>\n"
+  "The image the fixture's task hands in, as shot.svg in its directory.")
 
 (defmacro harness-ui-review-test-with (&rest body)
   "Like the board tests, with review on and a task that hands a report in.
 The provider's script makes the task call hand_in, so the task reaches
-review with a report; BODY gets `board', `id' and `sid'."
+review with a report, an image among its evidence; BODY gets `board',
+`id' and `sid'."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -69,6 +101,7 @@ review with a report; BODY gets `board', `id' and `sid'."
                      :input (:summary "# Done\n\nThe flaky test is fixed."
                              :evidence ("a note" (:code "(fix-flaky)" :language "elisp"
                                              :caption "the fix")
+                                        (:image "shot.svg" :caption "the board, fixed")
                                         (:tool_call "h1"))))
               (:type text :delta " this must not matter")))
            (harness-naming-auto nil)
@@ -79,6 +112,7 @@ review with a report; BODY gets `board', `id' and `sid'."
            (harness-ui-default-position 'full)
            (harness-acp-token nil)
            (default-directory dir))
+       (with-temp-file (expand-file-name "shot.svg" dir) (insert harness-ui-review-test--image))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
        (dolist (m '(ui ui-compose ui-markdown ui-popout ui-tasks ui-chat ui-report ui-review))
@@ -157,27 +191,71 @@ review with a report; BODY gets `board', `id' and `sid'."
         (should-not (key-binding (kbd "C-c C-x")))))))
 
 (ert-deftest harness-ui-review-banner-sends-back-with-the-box ()
-  "The banner's box writes the feedback: C-c C-c sends the task back to work."
+  "The banner's box writes the feedback: C-c C-c sends the task back to work.
+The box sends as it always does: the harness takes a message to a task
+in review for the feedback that sends it back, [Send back] pressed or
+not.  The banner goes as soon as the task is back at work."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
       (with-current-buffer chat
+        ;; [Send back] says what the box is for; the box itself is the chat's.
+        (harness-ui-review-reject)
+        (should (equal harness-ui-review--feedback-hint harness-chat-placeholder))
+        (should-not harness-chat-send-function)
+        ;; An empty box sends nothing.
+        (should-error (harness-chat-send) :type 'user-error)
+        ;; A slower turn, so the test sees the session at work on the feedback.
+        (setq harness-provider-demo--delay 0.3)
         (goto-char harness-compose-end)
         (insert "it still flakes on CI")
         (call-interactively #'harness-chat-send))
-      ;; The feedback reaches the task; the session works on it and, this
-      ;; fixture's script handing in again, the task waits for review anew.
+      ;; The feedback reaches the task, which is at work again: the banner
+      ;; goes, and the box asks for a message again.
       (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :feedback))
                          10 "the feedback to reach the task")
+      (harness-test-wait (lambda () (not (string-match-p "Ready for review" (harness-ui-review-test--text chat))))
+                         5 "the banner to go while the session works")
+      (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+      (with-current-buffer chat (should-not harness-chat-placeholder))
       (should (equal '("it still flakes on CI")
                      (mapcar (lambda (round) (plist-get round :text))
                              (plist-get (harness-call 'task/get id) :feedback))))
+      ;; The agent got it as the user sending the work back.
+      (harness-test-wait (lambda () (harness-ui-review-test--last-user sid "it still flakes on CI"))
+                         5 "the feedback in the transcript")
+      (should (string-prefix-p harness-tasks--reject-message
+                               (harness-ui-review-test--last-user sid "it still flakes on CI")))
+      ;; This fixture's script hands in again: the task waits for review anew.
       (harness-test-wait (lambda () (eq 'review (plist-get (harness-call 'task/get id) :state)))
                          10 "the task to come back for review")
+      (harness-ui-review-test--wait-text chat "Ready for review"))))
+
+(defun harness-ui-review-test--last-user (sid text)
+  "The content of SID's last user message when it ends in TEXT, else nil."
+  (let ((content (plist-get (car (last (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                                         (harness-call 'session/nodes sid))))
+                            :content)))
+    (and (stringp content) (string-suffix-p text content) content)))
+
+(ert-deftest harness-ui-review-banner-follows-events-from-another-process ()
+  "The banner follows a `task/changed' whose session id is a string of its own.
+From a harness in its own process every event is parsed afresh, so the
+id it carries is never the very string the chat buffer holds: the buffer
+is found all the same, and the banner goes once the task leaves review."
+  (harness-ui-review-test-with
+    (let* ((chat (harness-ui-review-test--open-session sid))
+           (fresh (copy-sequence sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
-      ;; An empty box cannot send it back.
-      (with-current-buffer chat
-        (should-error (harness-ui-review--send "  " nil) :type 'user-error)))))
+      (should-not (eq fresh (buffer-local-value 'harness-ui-session-id chat)))
+      (should (eq chat (harness-ui-review--chat-buffer fresh)))
+      ;; The task goes back to work elsewhere; the news arrives as over TCP.
+      (let ((task (copy-sequence (harness-acp--normalise (harness-call 'task/get id)))))
+        (setq task (plist-put task :session fresh))
+        (setq task (plist-put task :state "active"))
+        (setq task (plist-put task :column "active"))
+        (harness-ui-review--on-event "task/changed" (list task)))
+      (should-not (string-match-p "Ready for review" (harness-ui-review-test--text chat))))))
 
 (ert-deftest harness-ui-review-report-popout ()
   "[Report], and the board's item at point, show the report: the summary and the evidence."
@@ -193,7 +271,8 @@ review with a report; BODY gets `board', `id' and `sid'."
                            5 "the report to draw")
         (let ((text (harness-ui-review-test--text popout)))
           (should (string-match-p "the flaky test is fixed" text))
-          (should (string-match-p "Evidence (3)" text))
+          (should (string-match-p "Evidence (4)" text))
+          (should (string-match-p "the board, fixed" text))
           (should (string-match-p "a note" text))
           (should (string-match-p "(fix-flaky)" text))
           (should (string-match-p "the fix" text))
@@ -212,6 +291,262 @@ review with a report; BODY gets `board', `id' and `sid'."
           (search-forward "Fix the flaky test")
           (call-interactively #'harness-ui-popout-at-point))
         (should (harness-ui-popout-buffer key))))))
+
+(defvar harness-ui-review--tasks)
+
+(defun harness-ui-review-test--tail (buffer)
+  "The text of BUFFER under its transcript: its panels and the box."
+  (with-current-buffer buffer
+    (buffer-substring-no-properties harness-chat--transcript-end (point-max))))
+
+(defun harness-ui-review-test--wait-report (buffer)
+  "Wait until the banner of BUFFER shows the report."
+  (harness-test-wait (lambda () (string-search "Handed in" (harness-ui-review-test--tail buffer)))
+                     5 "the report to show in the banner"))
+
+(ert-deftest harness-ui-review-banner-shows-the-report-in-full ()
+  "Inside the task's session the report is not behind a button: the banner
+shows it in full, expanded, between its heading and its buttons."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid)))
+      (harness-ui-review-test--wait-report chat)
+      (let* ((tail (harness-ui-review-test--tail chat))
+             (at (lambda (text) (or (string-search text tail) (error "%S is not in the banner" text)))))
+        ;; In reading order: the heading, the report, then the buttons.
+        (should (< (funcall at "Ready for review") (funcall at "Handed in")
+                   (funcall at "The flaky test is fixed.") (funcall at "Evidence (4)")
+                   (funcall at "a note") (funcall at "(fix-flaky)") (funcall at "the fix")
+                   (funcall at "[tool call]") (funcall at "[Open in the session]")
+                   (funcall at "[Verify]")))
+        ;; Each piece of evidence starts a line of its own.
+        (should (string-match-p "^a note$" tail))
+        (should (string-match-p "^(fix-flaky)$" tail))
+        ;; Expanded: nothing waits behind a [show all].
+        (should-not (string-search "[show all" tail)))
+      (with-current-buffer chat
+        (let* ((pos (save-excursion (goto-char harness-chat--transcript-end)
+                                    (search-forward "Handed in")
+                                    (match-beginning 0)))
+               (prefix (get-text-property pos 'line-prefix)))
+          ;; Indented under the heading, on the banner's background.
+          (should (string-prefix-p "   " prefix))
+          (should (memq 'harness-chat-review-face (ensure-list (get-text-property 0 'face prefix))))
+          (should (memq 'harness-chat-review-face (ensure-list (get-text-property pos 'face)))))))))
+
+(ert-deftest harness-ui-review-report-opens-the-call-in-the-transcript ()
+  "[Open in the session] of a referenced call takes point to the call in
+the transcript, from the banner's report and from the popout alike:
+never to the copy of the report under the transcript."
+  (harness-ui-review-test-with
+    (let* ((chat (harness-ui-review-test--open-session sid))
+           (evidence (append (plist-get (plist-get (harness-call 'task/get id) :report) :evidence) nil))
+           (node (plist-get (car (last evidence)) :id)))
+      (should (stringp node))
+      (harness-ui-review-test--wait-report chat)
+      (with-current-buffer chat
+        (goto-char harness-chat--transcript-end)
+        (search-forward "[Open in the session]")
+        (push-button (match-beginning 0))
+        (should (< (point) harness-chat--transcript-end))
+        (should (equal node (get-text-property (point) 'harness-chat-node)))
+        (goto-char (point-max)))
+      (with-current-buffer (harness-ui-report-popout (harness-call 'task/get id))
+        (goto-char (point-min))
+        (search-forward "[Open in the session]")
+        (push-button (match-beginning 0)))
+      (with-current-buffer chat
+        (should (< (point) harness-chat--transcript-end))
+        (should (equal node (get-text-property (point) 'harness-chat-node)))))))
+
+(ert-deftest harness-ui-review-banner-follows-task-events ()
+  "The banner follows the task events of its session, which carry a copy
+of the session's id, and only a change it shows draws the tail again:
+a reader of a long report keeps their place."
+  (harness-ui-review-test-with
+    (let* ((chat (harness-ui-review-test--open-session sid))
+           (task (progn (harness-ui-review-test--wait-report chat)
+                        (gethash sid harness-ui-review--tasks)))
+           (draws 0)
+           (event (lambda (&rest changes)
+                    ;; As the wire has it: a fresh record and a fresh id.
+                    (let ((record (plist-put (copy-sequence task) :session (copy-sequence sid))))
+                      (while changes
+                        (setq record (plist-put record (pop changes) (pop changes))))
+                      (harness-ui-review--on-event "task/changed" (list record))))))
+      (should (equal "review" (plist-get task :state)))
+      (with-current-buffer chat
+        (let ((draw harness-compose-redraw-function))
+          (setq-local harness-compose-redraw-function (lambda () (cl-incf draws) (funcall draw)))))
+      ;; Out of review: the banner and its report go at once.
+      (funcall event :state "active")
+      (should (= draws 1))
+      (should-not (string-search "Ready for review" (harness-ui-review-test--tail chat)))
+      (should-not (string-search "Handed in" (harness-ui-review-test--tail chat)))
+      ;; A change the banner does not show draws nothing.
+      (funcall event :state "active" :merge-status "queued")
+      (should (= draws 1))
+      ;; Back in review, they are back.
+      (funcall event)
+      (should (= draws 2))
+      (should (string-search "Handed in" (harness-ui-review-test--tail chat)))
+      (funcall event :finished 1.0)
+      (should (= draws 2))
+      ;; A new report replaces the old one.
+      (funcall event :report (list :summary "Second try." :at 2.0
+                                   :evidence (list (list :kind "note" :text "again"))))
+      (should (= draws 3))
+      (should (string-search "Second try." (harness-ui-review-test--tail chat)))
+      (should-not (string-search "The flaky test is fixed." (harness-ui-review-test--tail chat))))))
+
+(ert-deftest harness-ui-review-report-string-is-the-report-in-full ()
+  "The session's drawing of a report is the popout's, expanded: a call's
+whole output where the popout caps it.  A button sits after its
+indentation with nothing after it, and each piece of evidence starts a
+line of its own."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (let ((harness-acp--server-enabled nil))
+      (dolist (m '(acp ui ui-compose ui-markdown ui-popout ui-tasks ui-report))
+        (harness-test-load-module m)))
+    (let* ((output (concat (make-string 2000 ?x) "\nend of the output\n"))
+           (task (list :id "t-report" :session "s-report" :prompt "Fix it" :state "review"
+                       :report (list :summary "# Done\n\nIt works." :at 1.0
+                                     :evidence (list (list :kind "note" :text "a note")
+                                                     (list :kind "code" :code "(fix)" :language "elisp"
+                                                           :caption "the fix")
+                                                     (list :kind "tool-call" :id "n-1" :call-id "c-report"
+                                                           :tool "bash" :title "bash: make test"
+                                                           :input "{\"command\":\"make test\"}"
+                                                           :output output)))))
+           (full (harness-ui-report-string task))
+           (capped (with-temp-buffer (harness-ui-report--insert task) (buffer-string))))
+      (should (string-search "end of the output" full))
+      (should-not (string-search "[show all" full))
+      (should (string-match-p "^  \\[show all ([0-9]+ more chars)\\]$" capped))
+      (should-not (string-search "end of the output" capped))
+      (dolist (text (list full capped))
+        (should (string-match-p "^It works\\.$" text))
+        (should (string-match-p "^a note$" text))
+        (should (string-match-p "^(fix)$" text))
+        (should (string-match-p "^  the fix$" text))
+        (should (string-match-p "^  \\[Open in the session\\]$" text))
+        ;; A blank line between pieces of evidence, a caption with its own.
+        (should (string-match-p "^a note\n\n" text))
+        (should (string-match-p "^(fix)\n  the fix\n\n  \\[tool call\\]" text)))
+      ;; None after the last: what follows the report keeps its own spacing.
+      (should (string-suffix-p "  [Open in the session]\n" full))
+      ;; No report, nothing to draw.
+      (should-not (harness-ui-report-string (list :id "t-none"))))))
+
+(defun harness-ui-review-test--report (board id)
+  "Pop out the report of task ID as BOARD's [Report] does; return its buffer.
+The board's record is the one the wire gives, as the UI sees it."
+  (harness-ui-report-popout (with-current-buffer board (harness-ui-tasks--find id)))
+  (let ((popout (harness-ui-popout-buffer (list 'report id))))
+    (harness-ui-review-test--wait-text popout "Handed in")
+    popout))
+
+(ert-deftest harness-ui-review-report-popout-verifies ()
+  "A report of a task in review ends with its session's banner and a box:
+C-c C-v, anywhere in the popout, accepts the work, and the banner goes."
+  (harness-ui-review-test-with
+    (let ((popout (harness-ui-review-test--report board id)))
+      (with-current-buffer popout
+        (let ((text (buffer-string)))
+          (should (string-match-p "Ready for review" text))
+          (should (string-match-p "this task is waiting for you" text))
+          (should (string-match-p "\\[Verify\\]" text))
+          (should (string-match-p "\\[Send back\\]" text))
+          (should (string-match-p "C-c C-c in the box sends what you write back to this task" text))
+          ;; The report shows already: its banner has no [Report].
+          (should-not (string-match-p "\\[Report\\]" text))
+          ;; After the evidence, on the review background, as in the session.
+          (let ((at (string-match "Ready for review" text)))
+            (should (< (string-match "Evidence (4)" text) at))
+            (should (memq 'harness-chat-review-face (ensure-list (get-text-property (1+ at) 'face))))))
+        ;; Under it, the box takes the feedback.
+        (should (harness-compose-live-p))
+        (should (equal "What should change? C-c C-c sends it back" (harness-ui-report--placeholder)))
+        ;; The keys work on the content and in the box.
+        (goto-char (point-min))
+        (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
+        (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-x"))))
+        (goto-char harness-compose-end)
+        (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
+        (call-interactively (key-binding (kbd "C-c C-v"))))
+      (harness-test-wait (lambda () (not (eq 'review (plist-get (harness-call 'task/get id) :state))))
+                         10 "the task to leave review")
+      ;; The report stays; its banner, its box and their keys go.
+      (harness-test-wait (lambda () (not (string-match-p "Ready for review" (harness-ui-review-test--text popout))))
+                         5 "the banner to go")
+      (with-current-buffer popout
+        (should (string-match-p "Evidence (4)" (buffer-string)))
+        (should-not (harness-compose-live-p))
+        (should-not harness-ui-review-minor-mode)
+        (should-error (harness-ui-review-verify) :type 'user-error)))))
+
+(ert-deftest harness-ui-review-report-popout-sends-back ()
+  "[Send back] in a report goes to its box, whose C-c C-c sends the task
+back with what it holds; once handed in again, the banner is back."
+  (harness-ui-review-test-with
+    (let ((popout (harness-ui-review-test--report board id)))
+      (with-current-buffer popout
+        (goto-char (point-min))
+        (search-forward "[Send back]")
+        (push-button (1- (point)))
+        (should (harness-compose-in-p))
+        (insert "the chart is cut off")
+        (call-interactively (key-binding (kbd "C-c C-c"))))
+      (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :feedback))
+                         10 "the feedback to reach the task")
+      (should (equal '("the chart is cut off")
+                     (mapcar (lambda (round) (plist-get round :text))
+                             (plist-get (harness-call 'task/get id) :feedback))))
+      ;; Back at work, then, this fixture's script handing in again, back
+      ;; for review: the popout follows it.
+      (harness-test-wait (lambda () (eq 'review (plist-get (harness-call 'task/get id) :state)))
+                         10 "the task to come back for review")
+      (harness-ui-review-test--wait-text popout "Ready for review")
+      ;; An empty box sends nothing back.
+      (with-current-buffer popout
+        (should-error (harness-ui-review--send "  " nil) :type 'user-error)))))
+
+(ert-deftest harness-ui-review-report-image-shows-larger ()
+  "An image of a report is as wide as the popout and much of the frame
+high; RET on it shows it larger in a popout of its own, and q goes back."
+  (harness-ui-review-test-with
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+      (let* ((popout (harness-ui-review-test--report board id))
+             (window (get-buffer-window popout))
+             (file (expand-file-name "shot.svg" dir)))
+        ;; The report grows taller than other popouts, for its images.
+        (should (= harness-ui-report-max-height (buffer-local-value 'harness-ui-popout--max-height popout)))
+        (with-current-buffer popout
+          (goto-char (point-min))
+          (let ((match (text-property-search-forward 'display nil
+                                                     (lambda (_ value) (eq 'image (car-safe value))))))
+            (should match)
+            (goto-char (prop-match-beginning match))
+            (let ((image (cdr (get-text-property (point) 'display))))
+              (should (equal file (plist-get image :file)))
+              ;; Not a fraction of the width as before: the popout's, less a column.
+              (should (= (- (harness-ui-popout-pixel-width) (frame-char-width)) (plist-get image :max-width)))
+              (should (= (harness-ui-report--image-width) (plist-get image :max-width)))
+              (should (= (harness-ui-report--image-max-height) (plist-get image :max-height))))
+            (should (string-match-p "view it larger" (get-text-property (point) 'help-echo)))
+            (execute-kbd-macro (kbd "RET"))))
+        (let ((viewer (harness-ui-popout-buffer (list 'image file))))
+          (should viewer)
+          ;; In the report's window, which it gives back.
+          (should (eq viewer (window-buffer window)))
+          (with-current-buffer viewer
+            (should (equal (list 'report id) harness-ui-popout--parent))
+            (should (string-search "shot.svg" (harness-ui-popout--header)))
+            (should (string-search "[back]" (harness-ui-popout--header)))
+            (goto-char (point-min))
+            (execute-kbd-macro (kbd "q")))
+          (should-not (buffer-live-p viewer))
+          (should (eq popout (window-buffer window))))))))
 
 (provide 'harness-ui-review-test)
 ;;; harness-ui-review-test.el ends here

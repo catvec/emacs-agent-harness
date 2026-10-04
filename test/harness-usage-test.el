@@ -124,6 +124,46 @@ Return (PROJECT-A PROJECT-B)."
         (should-not (plist-member all :key)))
       (should (= 0 (plist-get (harness-call 'usage/totals :project "/nowhere/") :calls))))))
 
+(defun harness-usage-test--git (dir &rest args)
+  "Run git ARGS in DIR; signal on failure."
+  (with-temp-buffer
+    (let ((default-directory (file-name-as-directory dir)))
+      (unless (zerop (apply #'call-process "git" nil t nil args))
+        (error "git %s failed: %s" args (buffer-string))))))
+
+(ert-deftest harness-usage-summary-by-project-names-the-main-checkout ()
+  "A worktree's rows, a task's, say which main checkout they belong to,
+also once the worktree is gone; other groupings have no `:main'."
+  (harness-usage-test-with
+    (let* ((base (harness-test-temp-dir))
+           (root (file-name-as-directory (expand-file-name "repo" base)))
+           (live (file-name-as-directory (expand-file-name ".worktrees/task-live" root)))
+           (gone (file-name-as-directory (expand-file-name ".worktrees/task-gone" root)))
+           (plain (harness-test-temp-dir))
+           (remote "/ssh:nobody@example.invalid:/srv/x/"))
+      (make-directory root t)
+      (harness-usage-test--git root "init" "-q" "-b" "main")
+      (harness-usage-test--git root "-c" "user.name=t" "-c" "user.email=t@example.invalid"
+                               "commit" "-q" "--allow-empty" "-m" "initial")
+      (harness-usage-test--git root "worktree" "add" "-q" "-b" "task/live" live)
+      (harness-usage-test--git root "worktree" "add" "-q" "-b" "task/gone" gone)
+      (harness-usage-test--git root "worktree" "remove" gone)
+      (cl-loop for (project cost) in (list (list root 4.0) (list live 2.0) (list gone 1.0) (list plain 8.0)
+                                           (list remote 0.5) (list nil 0.25))
+               do (harness-call 'usage/record (list :ts (float-time) :session "s" :project project
+                                                    :model "demo:scripted" :cost cost)))
+      (let ((by-project (harness-call 'usage/summary :group-by 'project))
+            ;; git writes the paths it resolved: compare those.
+            (true (lambda (p) (if (or (string-empty-p p) (file-remote-p p)) p
+                                (file-name-as-directory (file-truename p))))))
+        (should (equal (list plain root live gone remote "")
+                       (mapcar (lambda (r) (plist-get r :key)) by-project)))
+        (should (equal (mapcar true (list plain root root root remote ""))
+                       (mapcar (lambda (r) (funcall true (plist-get r :main))) by-project))))
+      (dolist (group '(model session day billing))
+        (should-not (cl-some (lambda (r) (plist-member r :main))
+                             (harness-call 'usage/summary :group-by group)))))))
+
 (ert-deftest harness-usage-series-fills-gaps ()
   (harness-usage-test-with
     (harness-usage-test-seed)

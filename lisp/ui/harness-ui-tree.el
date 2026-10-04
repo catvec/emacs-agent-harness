@@ -310,20 +310,27 @@ A user message the user did not write shows who sent it instead."
     ("empty" (propertize (harness-ui-icon 'harness-icon-fork) 'face 'harness-dim-face))
     (_ (propertize (harness-ui-icon 'harness-icon-hint) 'face 'harness-hint-face))))
 
+(defun harness-ui-tree--flat (text)
+  "Return TEXT as one plain line, tabs and other breaks turned into spaces.
+A tab jumps to the next tab stop, which would push the rest of the row
+past the columns the excerpt was fitted to."
+  (replace-regexp-in-string "[\t\n\r\f\v]" " " (or text "")))
+
 (defun harness-ui-tree--excerpt (node)
   "Return a one-line excerpt of NODE.
 A tool result's excerpt starts with how the call went, as the chat
 says it: a green circle, a yellow one when it was refused, a red
 triangle when it failed.  That icon has a face of its own."
-  (pcase (harness-ui-tree--kind node)
-    ("tool-call" (if (plist-get node :title)
-                     (harness-ui-tool-title (plist-get node :tool) (plist-get node :title))
-                   (format "%s: %s" (harness-ui-tool-label (plist-get node :tool))
-                           (harness-first-line (format "%S" (plist-get node :input))))))
-    ("tool-result" (concat (harness-ui-level-icon (harness-ui-tool-level (harness-ui-tool-outcome node)))
-                           " "
-                           (harness-first-line (or (plist-get node :output) ""))))
-    (_ (harness-first-line (or (plist-get node :content) "")))))
+  (harness-ui-tree--flat
+   (pcase (harness-ui-tree--kind node)
+     ("tool-call" (if (plist-get node :title)
+                      (harness-ui-tool-title (plist-get node :tool) (plist-get node :title))
+                    (format "%s: %s" (harness-ui-tool-label (plist-get node :tool))
+                            (harness-first-line (format "%S" (plist-get node :input))))))
+     ("tool-result" (concat (harness-ui-level-icon (harness-ui-tool-level (harness-ui-tool-outcome node)))
+                            " "
+                            (harness-first-line (or (plist-get node :output) ""))))
+     (_ (harness-first-line (or (plist-get node :content) ""))))))
 
 (defun harness-ui-tree--excerpt-face (node)
   "Return the face for NODE's excerpt."
@@ -417,29 +424,40 @@ The rails of the NLANES lanes continue as the line prefix."
 
 ;;;; Rendering
 
-(defun harness-ui-tree--header ()
-  "Return the header line."
-  (let ((btn (lambda (label cmd help)
-               (concat (propertize label 'face 'harness-label-face 'mouse-face 'mode-line-highlight
-                                   'help-echo help 'local-map (harness-ui-mouse-keymap cmd))
-                       " "))))
-    (list (propertize " Tree " 'face 'harness-label-face)
-          (propertize (harness-ui-tree--session-name harness-ui-tree--session-id) 'face 'bold)
-          (propertize (format "  %d sessions · %d nodes " (length harness-ui-tree--family) (length harness-ui-tree--rows))
-                      'face 'harness-dim-face)
-          (cond (harness-ui-tree--loading (propertize "loading… " 'face 'harness-dim-face))
-                (harness-ui-tree--error (propertize (format "error: %s " harness-ui-tree--error) 'face 'error))
-                (t ""))
-          (funcall btn "[RET open]" #'harness-ui-tree-open "Open the session at this node")
-          (funcall btn "[c checkout]" #'harness-ui-tree-checkout
-                   "Move the session head to this node (time travel): the next message continues from here")
-          (funcall btn "[f fork]" #'harness-ui-tree-fork
-                   "Fork the session at this node: a new session that knows the conversation up to here")
-          (funcall btn "[b btw]" #'harness-ui-tree-btw "Start a BTW side conversation over this node's session")
-          (funcall btn "[TAB expand]" #'harness-ui-tree-toggle "Show the full node")
-          (funcall btn "[n/p lane]" #'harness-ui-tree-next-in-lane "Move within this session's rows")
-          (funcall btn "[g]" #'harness-ui-tree-refresh "Refresh")
-          (funcall btn "[q]" #'quit-window "Quit"))))
+(defun harness-ui-tree--header (&optional width)
+  "Return the header line, fitted to WIDTH, its window's by default.
+In a window too narrow for all of it, the counts go first, then the
+keys least used ([n/p lane], [TAB expand], [b btw], [c checkout],
+[f fork]); the session's name shortens after those.  [RET open], [g],
+[q] and a load in progress or an error stay longest.  WIDTH is as
+`harness-ui-fit-header' takes it."
+  (let ((btn (lambda (label cmd help priority)
+               (list (concat " " (propertize label 'face 'harness-label-face 'mouse-face 'mode-line-highlight
+                                             'help-echo help 'local-map (harness-ui-mouse-keymap cmd)))
+                     priority)))
+        (name (harness-ui-tree--session-name harness-ui-tree--session-id)))
+    (harness-ui-fit-header
+     (list (propertize " Tree" 'face 'harness-label-face)
+           (list (concat " " (propertize name 'face 'bold))
+                 60 (concat " " (propertize (harness-truncate-end name 8) 'face 'bold)))
+           (list (propertize (format "  %d sessions · %d nodes" (length harness-ui-tree--family)
+                                     (length harness-ui-tree--rows))
+                             'face 'harness-dim-face)
+                 15)
+           (cond (harness-ui-tree--loading (list (propertize "  loading…" 'face 'harness-dim-face) 90))
+                 (harness-ui-tree--error
+                  (list (concat "  " (propertize (format "error: %s" harness-ui-tree--error) 'face 'error)) 90)))
+           (funcall btn "[RET open]" #'harness-ui-tree-open "Open the session at this node" 70)
+           (funcall btn "[c checkout]" #'harness-ui-tree-checkout
+                    "Move the session head to this node (time travel): the next message continues from here" 45)
+           (funcall btn "[f fork]" #'harness-ui-tree-fork
+                    "Fork the session at this node: a new session that knows the conversation up to here" 50)
+           (funcall btn "[b btw]" #'harness-ui-tree-btw "Start a BTW side conversation over this node's session" 40)
+           (funcall btn "[TAB expand]" #'harness-ui-tree-toggle "Show the full node" 30)
+           (funcall btn "[n/p lane]" #'harness-ui-tree-next-in-lane "Move within this session's rows" 20)
+           (funcall btn "[g]" #'harness-ui-tree-refresh "Refresh" 75)
+           (funcall btn "[q]" #'quit-window "Quit" 80))
+     width)))
 
 (defun harness-ui-tree--node-position (id)
   "Return the buffer position of the row of node ID, or nil."

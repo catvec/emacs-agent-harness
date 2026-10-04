@@ -80,7 +80,10 @@ session."
   :group 'harness)
 
 (defcustom harness-allowed-directories nil
-  "Extra directories sessions may touch besides their working directory."
+  "Extra directories sessions may touch besides their working directory.
+An entry may also be a glob pattern, such as ~/notes/*.org, to allow
+only the paths it matches: `*' matches within a name, `**' across
+directories."
   :type '(repeat directory)
   :safe (lambda (v) (and (listp v) (cl-every #'stringp v)))
   :group 'harness)
@@ -136,7 +139,8 @@ non-interactive anyway."
      :title "Task board"
      :doc "The sessions tasks start with, and when their work counts as done."
      :keys (harness-tasks-model harness-tasks-thinking harness-tasks-permission-mode
-            harness-tasks-non-interactive harness-tasks-require-verification
+            harness-tasks-non-interactive harness-tasks-context-limit
+            harness-tasks-require-verification
             harness-tasks-max-running harness-tasks-worktrees))
     (notifications
      :title "Notifications"
@@ -271,7 +275,7 @@ init file only."
 (defun harness-config--module-of (key)
   "Return the name of the module KEY belongs to, or \"core\".
 That is the module whose file defines KEY, else (for an option of a
-shared file such as harness-client-tools.el) the module whose name
+shared file such as harness-elisp.el) the module whose name
 starts KEY's name."
   (let* ((file (symbol-file key 'defvar))
          (base (and file (file-name-base file)))

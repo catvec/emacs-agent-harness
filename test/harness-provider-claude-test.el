@@ -34,6 +34,9 @@
 (declare-function harness-provider-claude--drop-stale-entries "harness-provider-claude")
 (declare-function harness-provider-claude--make-session "harness-provider-claude")
 (declare-function harness-provider-claude--cli-tools "harness-provider-claude")
+(declare-function harness-provider-claude--environment-for "harness-provider-claude")
+(declare-function harness-provider-claude--autocompact-pct "harness-provider-claude")
+(declare-function harness-provider-claude--spawn-key "harness-provider-claude")
 (defvar harness-brave-api-key)
 (defvar harness-websearch-provider)
 (defvar harness-websearch-builtin)
@@ -188,6 +191,34 @@ and the sessions created meanwhile kept that window."
     (should (equal "bypassPermissions" (nth (1+ (cl-position "--permission-mode" cmd :test #'equal)) cmd)))
     (should-not (member "--allowedTools" cmd))
     (should (equal "claude-sonnet-5" (nth (1+ (cl-position "--model" cmd :test #'equal)) cmd)))))
+
+(ert-deftest harness-provider-claude-autocompact-follows-a-capped-window ()
+  "A session below its model's window tells the CLI to compact there.
+That is the harness's shorter budget for a task's session."
+  (harness-provider-claude-test--setup)
+  (let* ((request (harness-provider-claude-test--request "s-ctx" "hello"))
+         (with-window (lambda (window)
+                        (plist-put (copy-sequence request) :session
+                                   (plist-put (copy-sequence (plist-get request :session))
+                                              :context-window window)))))
+    ;; No cap: nothing is overridden, and the CLI's default stands.
+    (should-not (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=25"
+                        (harness-provider-claude--environment-for request)))
+    (should-not (car (last (harness-provider-claude--spawn-key request))))
+    ;; 256k of the model's 1M is 26%.
+    (let ((capped (funcall with-window 256000)))
+      (should (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=26"
+                      (harness-provider-claude--environment-for capped)))
+      ;; The percentage is part of the settings a process was spawned
+      ;; with, so changing the cap restarts the CLI with the new one.
+      (should (equal 26 (car (last (harness-provider-claude--spawn-key capped))))))
+    ;; A tiny cap is clamped to the CLI's scale, and a window at or above
+    ;; the model's is no cap at all.
+    (should (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=1"
+                    (harness-provider-claude--environment-for (funcall with-window 1000))))
+    (should-not (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=100"
+                        (harness-provider-claude--environment-for
+                         (funcall with-window 1000000))))))
 
 (ert-deftest harness-provider-claude-turn-with-hosted-tool-call ()
   (harness-provider-claude-test--setup)
@@ -354,6 +385,150 @@ and the sessions created meanwhile kept that window."
       (should-not (plist-get new-state :fork-pending))
       (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason))))
     (harness-provider-claude-close "child")))
+
+;;;; One-off requests
+
+(defun harness-provider-claude-test--one-off (sid cwd text &rest extra)
+  "Run a one-off request of SID's in CWD with TEXT and EXTRA keys.
+Return (EVENTS . DUMP), DUMP being what its CLI process saw."
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+         (events (car (harness-provider-claude-test--run
+                       (apply #'harness-provider-claude-test--request sid text
+                              :session (list :id sid :cwd cwd) :ephemeral t :tools nil :max-tokens 200
+                              extra)))))
+    (cons events (harness-provider-claude-test--read-argv argv-file))))
+
+(defun harness-provider-claude-test--one-off-processes (prefix)
+  "Return the live CLI processes of the one-off requests of session PREFIX."
+  (cl-remove-if-not (lambda (p) (and (process-live-p p)
+                                     (string-prefix-p (format "harness-claude-%s~" prefix) (process-name p))))
+                    (process-list)))
+
+(defun harness-provider-claude-test--cli-session (events)
+  "Return the CLI session id the provider-state event of EVENTS names."
+  (plist-get (plist-get (harness-provider-claude-test--find events 'provider-state) :state) :cli-session-id))
+
+(ert-deftest harness-provider-claude-one-off-request-runs-alone ()
+  "A one-off request runs in a fresh CLI process that loads no context.
+The permission judge's requests are one-off ones.  They used to go into
+one CLI conversation per session, started in the project, so every
+verdict saw the earlier ones (a task handed in) and the project's
+CLAUDE.md, and judged by them.  Each now runs in a process of its own:
+never resumed, with CLAUDE.md, auto memory and transcripts off, in a
+private directory rather than the project, and stopped once done.  The
+session's own process is left alone."
+  (harness-provider-claude-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (argv-file (harness-provider-claude-test--argv-file))
+         (turn (let ((process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file)
+                                                process-environment)))
+                 (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "s9" "hi" :session (list :id "s9" :cwd cwd))))))
+         (own (harness-provider-claude-session-process (gethash "s9" harness-provider-claude--sessions)))
+         (own-env (plist-get (harness-provider-claude-test--read-argv argv-file) :env))
+         (first (harness-provider-claude-test--one-off "s9-perms" cwd "is this call safe"))
+         (dump (cdr first))
+         (env (plist-get dump :env))
+         (ran-in (file-name-as-directory (file-truename (plist-get dump :cwd)))))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find turn 'done) :stop-reason)))
+    ;; A session's turn loads what the CLI loads.
+    (should-not (plist-get own-env :CLAUDE_CODE_DISABLE_CLAUDE_MDS))
+    ;; The one-off is answered...
+    (should (equal "hello" (harness-provider-claude-test--text (car first))))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find (car first) 'done) :stop-reason)))
+    ;; ...from the request alone: no conversation before it, no CLAUDE.md,
+    ;; memory or transcript, not in the project.
+    (should-not (member "--resume" (plist-get dump :argv)))
+    (should (equal "1" (plist-get env :CLAUDE_CODE_DISABLE_CLAUDE_MDS)))
+    (should (equal "1" (plist-get env :CLAUDE_CODE_DISABLE_AUTO_MEMORY)))
+    (should (equal "1" (plist-get env :CLAUDE_CODE_SKIP_PROMPT_HISTORY)))
+    (should-not (equal (file-truename cwd) ran-in))
+    (should (equal (file-truename (expand-file-name "claude-one-off/" harness-state-directory)) ran-in))
+    (should (= #o700 (file-modes ran-in)))
+    ;; Nothing is kept once it is done: no record, and its process exits.
+    (harness-test-wait (lambda () (= 1 (hash-table-count harness-provider-claude--sessions)))
+                       5 "the one-off's record to go")
+    (should (gethash "s9" harness-provider-claude--sessions))
+    (harness-test-wait (lambda () (null (harness-provider-claude-test--one-off-processes "s9-perms")))
+                       5 "the one-off's process to exit")
+    ;; The next one-off starts afresh, not in the first one's conversation.
+    (let ((second (harness-provider-claude-test--one-off "s9-perms" cwd "and this one")))
+      (should-not (member "--resume" (plist-get (cdr second) :argv)))
+      (should (stringp (harness-provider-claude-test--cli-session (car second))))
+      (should-not (equal (harness-provider-claude-test--cli-session (car first))
+                         (harness-provider-claude-test--cli-session (car second)))))
+    ;; The session's own process served neither, and still serves it.
+    (should (eq own (harness-provider-claude-session-process (gethash "s9" harness-provider-claude--sessions))))
+    (should (process-live-p own))
+    (harness-provider-claude-close "s9")))
+
+(ert-deftest harness-provider-claude-one-off-request-ends-every-way ()
+  "A one-off request's process goes however the request ends.
+Cancelled (the judge timing out), dead mid-turn, or never started: no
+record and no process is left behind."
+  (harness-provider-claude-test--setup)
+  (let ((cwd (harness-test-temp-dir)))
+    ;; Cancelled.
+    (let* (events
+           (handle (harness-call 'provider/complete
+                                 (harness-provider-claude-test--request
+                                  "s10" "hang here" :session (list :id "s10-perms" :cwd cwd) :ephemeral t
+                                  :on-event (lambda (ev) (push ev events))))))
+      (harness-test-wait (lambda () (harness-provider-claude-test--find events 'text)) 10 "first delta")
+      (should (harness-provider-claude-test--one-off-processes "s10-perms"))
+      (funcall (plist-get handle :cancel))
+      (harness-test-wait (lambda () (harness-provider-claude-test--find events 'done)) 10 "done")
+      (should (eq 'cancelled (plist-get (harness-provider-claude-test--find events 'done) :stop-reason))))
+    ;; Dead mid-turn.
+    (let ((done (harness-provider-claude-test--find (car (harness-provider-claude-test--one-off "s10-perms" cwd "die now"))
+                                                    'done)))
+      (should (eq 'error (plist-get done :stop-reason))))
+    (harness-test-wait (lambda () (and (zerop (hash-table-count harness-provider-claude--sessions))
+                                       (null (harness-provider-claude-test--one-off-processes "s10-perms"))))
+                       10 "the one-offs' records and processes to go")
+    ;; Never started: the CLI is missing.
+    (let* ((harness-provider-claude-program (expand-file-name "no-such-claude" cwd))
+           (done (harness-provider-claude-test--find
+                  (car (harness-provider-claude-test--run
+                        (harness-provider-claude-test--request
+                         "s10" "hi" :session (list :id "s10-perms" :cwd cwd) :ephemeral t)))
+                  'done)))
+      (should (eq 'error (plist-get done :stop-reason)))
+      (should (zerop (hash-table-count harness-provider-claude--sessions)))
+      ;; Not even the pipe its stderr was to come through.
+      (should-not (harness-provider-claude-test--one-off-processes "s10-perms")))
+    ;; Its session deleted while it runs.
+    (let (events)
+      (harness-call 'provider/complete
+                    (harness-provider-claude-test--request
+                     "s10" "hang here" :session (list :id "s10-perms" :cwd cwd) :ephemeral t
+                     :on-event (lambda (ev) (push ev events))))
+      (harness-test-wait (lambda () (harness-provider-claude-test--find events 'text)) 10 "first delta")
+      (harness-emit 'session/deleted "s10")
+      (should (eq 'cancelled (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+      (should (zerop (hash-table-count harness-provider-claude--sessions)))
+      (harness-test-wait (lambda () (null (harness-provider-claude-test--one-off-processes "s10-perms")))
+                         5 "the one-off's process to go"))))
+
+(ert-deftest harness-provider-claude-drops-the-judges-old-conversations ()
+  "Loading the provider stops the CLI processes the judge kept per session.
+Each session's judge used to keep one conversation, SESSION-ID-perms,
+until the harness stopped, even after the session was deleted.  A busy
+one finishes its request; other sessions keep theirs."
+  (harness-provider-claude-test--setup)
+  (let ((cwd (harness-test-temp-dir)))
+    (dolist (sid '("s12" "s12-perms"))
+      (harness-provider-claude-test--run
+       (harness-provider-claude-test--request sid "hi" :session (list :id sid :cwd cwd))))
+    (let ((judge (harness-provider-claude-session-process (gethash "s12-perms" harness-provider-claude--sessions)))
+          (own (harness-provider-claude-session-process (gethash "s12" harness-provider-claude--sessions))))
+      (harness-test-load-module 'provider-claude)
+      (should-not (gethash "s12-perms" harness-provider-claude--sessions))
+      (should-not (process-live-p judge))
+      (should (eq own (harness-provider-claude-session-process (gethash "s12" harness-provider-claude--sessions))))
+      (should (process-live-p own)))
+    (harness-provider-claude-close "s12")))
 
 ;;;; Sessions on the CLI: what BTWs and forks share
 
@@ -841,6 +1016,44 @@ answers them.  Return the events, oldest first."
     (should-not (harness-provider-claude--cli-tools '(:builtin-tools ("bash"))))
     (should (equal '("web_search")
                    (plist-get (harness-call 'provider/capabilities "claude:claude-fable-5-1") :builtin-tools)))))
+
+(ert-deftest harness-provider-claude-no-thinking-turns-thinking-off ()
+  "A request with `:no-thinking' runs the CLI with extended thinking off.
+The CLI takes no output budget, so the auto-mode judge's Haiku spent
+its output thinking and stopped at max_tokens before its verdict was
+written.  Thinking is turned off both in the environment and by flag
+settings, which beat a user settings file's `env'; no effort is sent."
+  (harness-provider-claude-test--setup)
+  (cl-flet ((after (flag cmd) (nth (1+ (cl-position flag cmd :test #'equal)) cmd)))
+    (let ((cmd (harness-provider-claude--command "claude-haiku-4-5-20251001" 'off "sys" nil nil)))
+      (should-not (member "--effort" cmd))
+      (should (equal "0" (harness-plist-get-in (harness-json-parse (after "--settings" cmd))
+                                               '(:env :MAX_THINKING_TOKENS)))))
+    (should-not (member "--settings" (harness-provider-claude--command "m" "high" nil nil nil))))
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (append (list (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file))
+                                      process-environment))
+         (events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "judge" "hello" :tools nil
+                                                              :thinking "high" :no-thinking t))))
+         (dump (harness-provider-claude-test--read-argv argv-file))
+         (argv (plist-get dump :argv)))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+    (should (equal "0" (plist-get dump :max_thinking_tokens)))
+    (should (member "--settings" argv))
+    (should-not (member "--effort" argv)))
+  ;; Without it the process is started as before, thinking left alone.
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (append (list (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file))
+                                      (cl-remove-if (lambda (e) (string-prefix-p "MAX_THINKING_TOKENS=" e))
+                                                    process-environment))))
+    (harness-provider-claude-test--run
+     (harness-provider-claude-test--request "plain" "hello" :tools nil :thinking "high"))
+    (let* ((dump (harness-provider-claude-test--read-argv argv-file))
+           (argv (plist-get dump :argv)))
+      (should-not (plist-get dump :max_thinking_tokens))
+      (should-not (member "--settings" argv))
+      (should (equal "high" (nth (1+ (cl-position "--effort" argv :test #'equal)) argv))))))
 
 (ert-deftest harness-provider-claude-web-search-stands-in-for-web-search ()
   "Asked to, the CLI searches itself; the harness decides each search and hears its result.

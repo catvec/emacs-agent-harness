@@ -12,6 +12,13 @@
 ;; the task's title, so when the model names it,
 ;; `harness-tasks--naming-instructions' asks for a ticket title.
 ;;
+;; A task's session also runs on a shorter context than an interactive
+;; one by default: `harness-tasks-context-limit' (256k tokens) caps the
+;; session's context window, so the harness compacts a task sooner and
+;; hands it a smaller transcript to carry on from.  Set it to nil to
+;; give task sessions the whole window, like any other session, or to
+;; another number of tokens to choose how often they compact.
+;;
 ;; In a git project a task owns the whole life of its change: it starts
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
 ;; its session is told to commit there, and when the agent finishes the
@@ -36,7 +43,12 @@
 ;; same session, in its own worktree (or the main tree, see below), as a
 ;; new prompt, and the task comes back to review when that turn ends.
 ;; Every round of feedback is kept with the task (`:feedback'), and so
-;; is the verification (`:verified', `:verified-at').
+;; is the verification (`:verified', `:verified-at').  Any other message
+;; that reaches the session while its task waits for review sends it back
+;; the same way, with the message as the feedback, wherever it was
+;; written: the session's own chat, `task/prompt', another client,
+;; another session's agent, the queue (`harness-tasks--on-message').
+;; Only the harness's own messages do not count.
 ;;
 ;; Backlog refinement (once called grooming): a task submitted with
 ;; `:refine' is jotted down for later, not started.  An agent writes it
@@ -75,7 +87,10 @@
 ;;   active    its session is working on it, or stopped part way
 ;;             (`:outcome' says why: error, cancelled, merge-failed…)
 ;;   merging   the agent finished (and, with review, the user verified
-;;             the work); its branch is queued or merging
+;;             the work); its branch is queued or merging, or its
+;;             session resolves the merge's conflicts (`:merge-status'
+;;             queued, merging or conflict; `:merge-queued' says when
+;;             the branch joined the queue)
 ;;   review    the agent finished; the work waits for the user to
 ;;             verify it or send it back with feedback
 ;;   done      merged (or finished, outside git), and verified with
@@ -89,7 +104,10 @@
 ;;                 permission or a question, or it (or its refinement)
 ;;                 stopped part way
 ;;   review        finished, waiting for the user to verify it
-;;   active        in progress, merging included
+;;   merging       its branch holds a place in the merge queue: queued,
+;;                 merging, or its session resolving the conflicts
+;;                 (unless that session waits on the user: needs-input)
+;;   active        in progress
 ;;   done          completed
 ;;
 ;; Records are written shortly after every change and on exit; the
@@ -177,6 +195,22 @@ own setting, from the board or `task/submit', wins over both."
 (defcustom harness-tasks-thinking nil
   "Thinking level of task sessions, or nil for the configured default."
   :type `(choice (const :tag "Configured default" nil) ,@harness-tasks--thinking-levels)
+  :group 'harness)
+
+(defcustom harness-tasks-context-limit 256000
+  "Most tokens of context a task session uses, or nil for its whole window.
+A task session compacts when its context comes within the usual reserve
+of this limit, so unattended tasks compact earlier than interactive
+sessions: the handoff summary keeps them working from a smaller
+transcript, and the turn after a compaction starts cheap.  The limit
+never raises a session above its model's own window.  With nil task
+sessions use the whole window, like any other session, and compact at
+the usual point.  A provider that compacts on its own side is asked to
+compact at the same point where it can be (Claude Code, see the claude
+provider)."
+  :type '(choice (const :tag "The whole window" nil)
+                 (integer :tag "Tokens of context"))
+  :safe (lambda (v) (or (null v) (and (integerp v) (> v 0))))
   :group 'harness)
 
 (defconst harness-tasks--naming-instructions
@@ -293,7 +327,9 @@ work coordinates with (see `harness-tasks--refine-prompt').")
 (defconst harness-tasks--reject-message
   "The user reviewed your work on this task and sent it back. Address their feedback below, then finish as before (commit your changes, if you work in a git worktree). Your work goes back to the user for review when your turn ends."
   "Opening of the message that sends a task back to its session after review.
-The user's feedback follows it (`task/reject').")
+The user's feedback follows it (`task/reject'), as it opens any message
+that reaches the session while its task waits for review
+\(`harness-tasks--on-message').")
 
 (defconst harness-tasks--btw-prompt
   "## Task board
@@ -752,9 +788,13 @@ repository stores."
 ;;;; Columns
 
 (defun harness-tasks--column (task)
-  "Return the kanban column of TASK: pending, needs-input, review, active or done.
+  "Return the kanban column of TASK, a symbol.
+That is pending, needs-input, review, merging, active or done.
 A task being refined shows in pending, where it ends up, unless the
-refinement needs the user."
+refinement needs the user.  A task whose branch holds a place in the
+merge queue shows in merging however it holds it: queued, merging, or
+its session resolving the conflicts; unless that session waits on the
+user, whose answer the queue then waits for too."
   (pcase (plist-get task :state)
     ('pending 'pending)
     ('done 'done)
@@ -767,6 +807,7 @@ refinement needs the user."
     (_ (let ((session (harness-tasks--session task)))
          (cond ((gethash (plist-get task :id) harness-tasks--starting) 'active)
                ((plist-get session :pending) 'needs-input)
+               ((plist-get task :merge-status) 'merging)
                ((eq (plist-get session :status) 'running) 'active)
                ((plist-get task :outcome) 'needs-input)
                (t 'active))))))
@@ -816,7 +857,8 @@ refinement needs the user."
                :id)))
 
 (defun harness-tasks--enqueue-merge (id)
-  "Queue task ID's branch for the merge queue, or put the task before the user."
+  "Queue task ID's branch for the merge queue, or put the task before the user.
+`:merge-queued' records when the branch joined the queue."
   (let* ((task (harness-tasks--get id))
          (attempts (1+ (or (plist-get task :merge-attempts) 0))))
     (cond
@@ -829,7 +871,7 @@ refinement needs the user."
       (condition-case err
           (let ((target (harness-tasks--merge-target (plist-get task :project))))
             (harness-tasks--set id :state 'merging :merge-status 'queued :merge-attempts attempts
-                                :merge-target target :outcome nil :error nil)
+                                :merge-target target :merge-queued (float-time) :outcome nil :error nil)
             (harness-call 'merge/enqueue (plist-get task :session) target
                           :message (format "task %s" (harness-first-line (plist-get task :prompt) 60))))
         (error (harness-tasks--set id :state 'active :outcome 'merge-failed :merge-status nil
@@ -1062,7 +1104,9 @@ project's main checkout, where it was submitted from (`task/submit')."
 (defun harness-tasks--work-settings (task)
   "Return the settings TASK's work runs with, as `session/create' keys.
 The task's own, else the `harness-tasks-' defaults; unset ones are left
-out, so the session gets what its directory configures."
+out, so the session gets what its directory configures.  The context
+limit is `harness-tasks-context-limit', which caps a task's window and
+so has it compact sooner."
   (let ((mode (or (plist-get task :permission-mode) harness-tasks-permission-mode))
         (model (or (plist-get task :model) harness-tasks-model))
         (thinking (or (plist-get task :thinking) harness-tasks-thinking))
@@ -1075,7 +1119,9 @@ out, so the session gets what its directory configures."
             ;; The task's own false is set, not unset: off whatever the
             ;; directory configures.
             (cond (non-interactive (list :non-interactive t))
-                  ((plist-member task :non-interactive) (list :non-interactive :false))))))
+                  ((plist-member task :non-interactive) (list :non-interactive :false)))
+            (and harness-tasks-context-limit
+                 (list :context-window-limit harness-tasks-context-limit)))))
 
 (defconst harness-tasks-bulk-columns '(active pending needs-input)
   "Task columns a bulk update reaches by default.
@@ -1149,6 +1195,84 @@ It opens with `harness-tasks--reject-message', unless that is blank."
       feedback
     (concat harness-tasks--reject-message "\n\n" feedback)))
 
+(defun harness-tasks--text-block-p (block)
+  "Non-nil when BLOCK is a text block that says something."
+  (and (equal (plist-get block :type) "text")
+       (not (harness-string-blank-p (plist-get block :text)))))
+
+(defun harness-tasks--reject-blocks (blocks)
+  "Return the message BLOCKS as the one that sends a task back to its session.
+Its text, trimmed, opens with `harness-tasks--reject-message', as
+`harness-tasks--reject-text' has it; a message of attachments alone
+gets a text block of its own for it.  Blank text blocks are dropped."
+  (let ((blocks (cl-remove-if (lambda (b) (and (equal (plist-get b :type) "text")
+                                               (not (harness-tasks--text-block-p b))))
+                              blocks)))
+    (cond
+     ((harness-string-blank-p harness-tasks--reject-message) blocks)
+     ((harness-tasks--text-block-p (car blocks))
+      (cons (plist-put (copy-sequence (car blocks)) :text
+                       (harness-tasks--reject-text (string-trim (plist-get (car blocks) :text))))
+            (cdr blocks)))
+     (t (cons (list :type "text" :text harness-tasks--reject-message) blocks)))))
+
+(defun harness-tasks--feedback-text (blocks)
+  "Return what the message BLOCKS says, as its round of feedback keeps it.
+That is its text, trimmed; a message of attachments alone is named by
+them, such as \"[image]\" or \"[file notes.txt]\"."
+  (let ((texts (cl-loop for b in blocks
+                        when (harness-tasks--text-block-p b)
+                        collect (string-trim (plist-get b :text)))))
+    (if texts
+        (string-join texts "\n\n")
+      (mapconcat (lambda (b)
+                   (let ((type (or (plist-get b :type) "attachment")))
+                     (if (equal type "file")
+                         (format "[file %s]" (or (plist-get b :name)
+                                                 (file-name-nondirectory (or (plist-get b :path) ""))))
+                       (format "[%s]" type))))
+                 (cl-remove "text" blocks :key (lambda (b) (plist-get b :type)) :test #'equal)
+                 " "))))
+
+(defun harness-tasks--send-back (id feedback)
+  "Put task ID, which waits for review, back to work on FEEDBACK.
+The task is active again and its verification gone; FEEDBACK, what the
+message that sends it back says, is kept as a new round of its
+`:feedback'.  Delivering the message is the caller's: `task/reject'
+prompts the session, `harness-tasks--on-message' lets the message
+through.  Return the task's view."
+  (let ((task (harness-tasks--get id)))
+    (harness-tasks--set id :state 'active :outcome nil :error nil :finished nil :archived nil
+                        :verified nil :verified-at nil :merge-attempts 0
+                        :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+                        :feedback (append (plist-get task :feedback)
+                                          (list (list :text feedback :at (float-time)))))))
+
+(defun harness-tasks--on-message (blocks session-id info)
+  "Send SESSION-ID's task back from review with the message BLOCKS.
+An `agent/message' filter, INFO being (:from FROM :steering BOOL): a
+message that reaches the session while its task waits for review is
+feedback on the work, wherever it was written -- the session's chat,
+`task/prompt', a phone or another client, another session's agent
+\(`session_send'), the queue that goes out when a turn ends.  It sends
+the task back as `task/reject' does: the task is active at once, the
+round of feedback is kept, and the message the agent gets opens with
+`harness-tasks--reject-message'.  The harness's own messages (FROM a
+system sender) are left alone, and so is a task whose worktree was
+removed: a turn they start makes the task active all the same
+\(`harness-tasks--on-turn-started').  Return the blocks to deliver."
+  (let ((task (harness-tasks--by-session session-id)))
+    (if (and task
+             (eq (plist-get task :state) 'review)
+             (not (plist-get task :worktree-removed))
+             (not (eq (harness-sender-kind (plist-get info :from)) 'system)))
+        (progn
+          (harness-log 'info "task %s: a message to its session sends it back from review"
+                       (plist-get task :id))
+          (harness-tasks--send-back (plist-get task :id) (harness-tasks--feedback-text blocks))
+          (harness-tasks--reject-blocks blocks))
+      blocks)))
+
 (defun harness-tasks--continue-session (id cwd worktree)
   "Start task ID's work in the session that wrote it up, moved to CWD.
 WORKTREE, when non-nil, is the task's worktree.  The session takes the
@@ -1178,7 +1302,10 @@ transcript, which keeps the refinement, as text
                       :thinking (or (plist-get settings :thinking) (harness-tasks--config 'harness-thinking cwd))
                       :non-interactive (or (plist-get settings :non-interactive)
                                            (and (not (plist-member task :non-interactive))
-                                                (harness-tasks--config 'harness-non-interactive cwd) t)))
+                                                (harness-tasks--config 'harness-non-interactive cwd) t))
+                      ;; The task default applies from the start of the
+                      ;; work on; nil, turned off, clears an earlier one.
+                      :context-window-limit (plist-get settings :context-window-limit))
                 (when-let* ((model (or (plist-get settings :model) (harness-tasks--config 'harness-model cwd))))
                   (list :model model))))
         (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
@@ -1243,12 +1370,15 @@ At `harness-tasks--refine-tool-calls' calls it is steered to write up now."
   "Return the `session/create' settings of the session refining TASK.
 Ask mode allows reads, and non-interactive the session never waits for
 the user; whatever would ask `harness-tasks--write-up-gate' denies with
-a hint, which keeps a write-up a write-up."
+a hint, which keeps a write-up a write-up.  The task context limit
+rides along, so a write-up that reads a lot compacts sooner too."
   (let ((model (or harness-tasks-refine-model (plist-get task :model) harness-tasks-model))
         (thinking (or harness-tasks-refine-thinking (plist-get task :thinking) harness-tasks-thinking)))
     (append (list :permission-mode 'ask :non-interactive t)
             (and model (list :model model))
-            (and thinking (list :thinking thinking)))))
+            (and thinking (list :thinking thinking))
+            (and harness-tasks-context-limit
+                 (list :context-window-limit harness-tasks-context-limit)))))
 
 (defconst harness-tasks--write-up-hint
   "Write the task up from what you can read; put what you could not check in the write-up as an open question."
@@ -1655,7 +1785,8 @@ are not tasks yet, newest first."
   "Make the ongoing session SESSION-ID a task and return the task.
 Its first message becomes the task's prompt; a session in a git worktree
 keeps it and is merged through the merge queue like any task.  A running
-or blocked session is in progress; an idle one waits for the user."
+or blocked session is in progress; an idle one waits for the user.  The
+task context limit applies from now on when there is one."
   (harness-tasks--load)
   (let ((session (harness-call 'session/get session-id)))
     (unless (harness-tasks--adoptable-p session)
@@ -1673,6 +1804,11 @@ or blocked session is in progress; an idle one waits for the user."
                        :outcome (unless (memq (plist-get session :status) '(running blocked)) 'adopted)
                        :created (plist-get session :created) :started (plist-get session :created))))
       (harness-tasks--put task)
+      ;; The task's shorter context applies from its next turn on; a
+      ;; session adopted after long work may compact on it right away,
+      ;; and nil (turned off) clears a limit the session carried.
+      (harness-call 'session/update session-id
+                    :context-window-limit harness-tasks-context-limit :silent t)
       (when (and worktree (harness-method-exists-p 'worktree/branch))
         (let ((id (plist-get task :id)))
           (harness-then (harness-call-async 'worktree/branch worktree)
@@ -1787,7 +1923,9 @@ waits in the backlog like a refined one."
 
 (harness-defmethod task/prompt (id text &optional attachments)
   "Send TEXT and ATTACHMENTS to the session of task ID: a follow-up, or steering.
-Before a backlog task starts, TEXT is feedback on its write-up."
+Before a backlog task starts, TEXT is feedback on its write-up; while
+the task waits for review, it sends the task back with TEXT as the
+feedback, as `task/reject' does (`harness-tasks--on-message')."
   (let ((task (harness-tasks--get id)))
     (unless (harness-tasks--session task) (error "Task %s has no session yet" id))
     (when (plist-get task :worktree-removed)
@@ -1850,28 +1988,27 @@ already, it is done now."
 FEEDBACK and ATTACHMENTS go to the task's own session, in its own
 worktree, as a new prompt opened by `harness-tasks--reject-message'.  The
 round of feedback is kept in the task's `:feedback'.  The task is
-active again and comes back to review when that turn ends.  Return the
-task."
+active again and comes back to review when that turn ends.  Feedback
+may be ATTACHMENTS alone, a screenshot say, but not nothing.  Any
+message sent to the session meanwhile does the same
+\(`harness-tasks--on-message').  Return the task."
   (let ((task (harness-tasks--get id)))
     (unless (eq (plist-get task :state) 'review)
       (error "Task %s is not waiting for review" id))
-    (when (harness-string-blank-p feedback) (error "Sending a task back needs feedback"))
+    (when (and (harness-string-blank-p feedback) (null attachments))
+      (error "Sending a task back needs feedback"))
     (unless (harness-tasks--session task) (error "Task %s has no session to send the feedback to" id))
     (when (plist-get task :worktree-removed)
       (error "Task %s was archived and its worktree removed; submit a new task" id))
     (let ((sid (plist-get task :session))
-          (feedback (string-trim feedback)))
+          (blocks (harness-tasks--blocks (list :prompt (string-trim (or feedback ""))
+                                               :attachments attachments))))
       (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
         (harness-call 'session/resume sid))
-      (harness-tasks--set id :state 'active :outcome nil :error nil :finished nil :archived nil
-                          :verified nil :verified-at nil :merge-attempts 0
-                          :recap nil :recap-at nil :recap-turns nil :recap-tools nil
-                          :feedback (append (plist-get task :feedback)
-                                            (list (list :text feedback :at (float-time)))))
-      (harness-catch (harness-call-async 'agent/prompt sid
-                                         (harness-tasks--blocks
-                                          (list :prompt (harness-tasks--reject-text feedback)
-                                                :attachments attachments)))
+      ;; Active before the prompt goes out, so the message is not taken
+      ;; for one more sending the task back (`harness-tasks--on-message').
+      (harness-tasks--send-back id (harness-tasks--feedback-text blocks))
+      (harness-catch (harness-call-async 'agent/prompt sid (harness-tasks--reject-blocks blocks))
                      (lambda (e) (harness-tasks--fail id e)))
       (harness-call 'task/get id))))
 
@@ -1972,6 +2109,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
+  (harness-add-filter 'agent/message #'harness-tasks--on-message)
   (harness-tasks--pick-up))
 
 (defun harness-tasks--shutdown ()
@@ -1984,15 +2122,18 @@ up again, merges in flight are queued again and waiting tasks start."
 (harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task, from backlog write-up or worktree through your review to merged, with a concurrency limit."
+  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)
 
 ;; A reload does not initialise a running module again, and a write-up
-;; must not go without the stage that keeps it read-only: install it now.
+;; must not go without the stage that keeps it read-only, nor a message
+;; to a task in review without the filter that sends it back: install
+;; them now.
 (when (harness-module-ready-p 'tasks)
-  (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25))
+  (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
+  (harness-add-filter 'agent/message #'harness-tasks--on-message))
 
 (provide 'harness-tasks)
 ;;; harness-tasks.el ends here
