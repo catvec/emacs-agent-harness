@@ -948,6 +948,27 @@ running and its conversation never hears the question."
     (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
     (harness-provider-claude-close "deny1")))
 
+(ert-deftest harness-provider-claude-refused-tool-list-becomes-a-hint ()
+  "A tool list the CLI refuses leaves the model without tools; a hint says so.
+Claude Code refuses a listing whose schema says \"required\": null yet
+still reports the server connected, so the model writes its tool calls
+as text the CLI cannot parse."
+  (harness-provider-claude-test--setup)
+  (let* ((events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "ok1" "hello"))))
+         (hint (harness-provider-claude-test--find events 'hint)))
+    (should-not hint)
+    (harness-provider-claude-close "ok1"))
+  (let* ((bad '(:name "bad" :description "Optional only"
+                :schema (:type "object" :properties (:path (:type "string")) :required nil)))
+         (events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request
+                        "refused1" "hello"
+                        :tools (list harness-provider-claude-test--echo-tool bad)))))
+         (hint (harness-provider-claude-test--find events 'hint)))
+    (should (string-match-p "refused the harness's tool list" (plist-get hint :text)))
+    (harness-provider-claude-close "refused1")))
+
 (ert-deftest harness-provider-claude-permission-prompts-come-to-the-harness ()
   "With a permission prompt tool the CLI asks; the harness allows only its own tools."
   (harness-provider-claude-test--setup)

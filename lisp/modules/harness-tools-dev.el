@@ -185,8 +185,7 @@ its frame exists."
             :properties (:path (:type "string"
                                 :description "The harness checkout or task worktree to open, absolute or relative to the working directory. Default: the session's worktree, else its working directory.")
                          :focus (:type "boolean"
-                                 :description "Raise and focus the instance's frame. Default false, so an unattended start does not steal the user's focus."))
-            :required ())
+                                 :description "Raise and focus the instance's frame. Default false, so an unattended start does not steal the user's focus.")))
   :kind 'exec
   :timeout 300
   :paths (lambda (input) (list (or (plist-get input :path) ".")))

@@ -113,6 +113,20 @@ unresponsive UI (`harness-tools--ui-unresponsive')."
 (defvar harness-tools (make-hash-table :test 'equal)
   "Tool name -> `harness-tool'.")
 
+(defun harness-tools--clean-schema (schema)
+  "Return SCHEMA without its empty `:required' lists, at any depth.
+An empty list encodes as JSON null, not [], and a provider refuses a
+schema with \"required\": null: OpenAI fails the whole request, and
+Claude Code drops every tool of the harness from the turn."
+  (if (and (consp schema) (keywordp (car schema)))
+      (let (clean)
+        (while schema
+          (let ((key (pop schema)) (value (pop schema)))
+            (unless (and (eq key :required) (null value))
+              (setq clean (nconc clean (list key (harness-tools--clean-schema value)))))))
+        clean)
+    schema))
+
 (cl-defun harness-define-tool (name &key label description schema handler (kind 'meta)
                                     paths coalescable subject timeout)
   "Register tool NAME.  See docs/architecture.md for the keyword arguments.
@@ -126,7 +140,8 @@ the call's title (see `harness-tool-title')."
     (error "Tool %s needs a :label, the name people read (such as \"Read file\")" name))
   (puthash name (make-harness-tool :name name :label (string-trim label)
                                    :description (or description "")
-                                   :schema (or schema '(:type "object" :properties :empty))
+                                   :schema (or (harness-tools--clean-schema schema)
+                                               '(:type "object" :properties :empty))
                                    :handler handler :kind kind :paths-fn paths
                                    :coalescable coalescable :subject-fn subject
                                    :timeout timeout

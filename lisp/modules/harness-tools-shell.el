@@ -4,7 +4,7 @@
 
 ;; Two ways for a model to run things:
 ;;
-;; - `bash' runs a command through `bash -lc' as an asynchronous
+;; - `bash' runs a command through `bash -c' as an asynchronous
 ;;   process (`harness-run-command'), in the session's working
 ;;   directory or a subdirectory of it.  When the sandbox module is
 ;;   loaded and the directory is local, the command line is wrapped
@@ -111,7 +111,11 @@ WRITABLE lists other directories the command may write to."
       (harness-tool-error (format "Working directory does not exist: %s" cwd)))
      (t
       (let ((cmd (condition-case err
-                     (harness-tools-shell--wrap cwd (list harness-tools-shell--program "-lc" command)
+                     ;; Not a login shell: the harness already has the user's
+                     ;; environment, and a login profile's side effects (starting
+                     ;; an ssh-agent, importing keys) go wrong in a sandbox, whose
+                     ;; PID namespace hides the user's processes from it.
+                     (harness-tools-shell--wrap cwd (list harness-tools-shell--program "-c" command)
                                                 (delq nil (list (harness-tools-shell--tmp-dir ctx))))
                    (error (list :error (harness-error-message err))))))
         (if (and (consp cmd) (eq (car cmd) :error))

@@ -1479,7 +1479,19 @@ its usage report has arrived."
         (harness-provider-claude--emit
          entry (list :type 'hint
                      :text (format "Claude Code reports the harness tool server as %s; tools are unavailable this turn"
-                                   (plist-get server :status))))))))
+                                   (plist-get server :status))))))
+    ;; A tools/list answer the CLI refuses, a schema it finds invalid say,
+    ;; leaves the server connected but the model with none of its tools.
+    (when (and (plist-get (harness-provider-claude-session-request entry) :tools)
+               (not (cl-some (lambda (tool)
+                               (and (stringp tool)
+                                    (string-prefix-p harness-provider-claude-tool-prefix tool)))
+                             (plist-get msg :tools))))
+      (harness-log 'error "provider-claude: Claude Code offers none of the harness tools to %s"
+                   (harness-provider-claude-session-id entry))
+      (harness-provider-claude--emit
+       entry (list :type 'hint
+                   :text "Claude Code refused the harness's tool list; tools are unavailable this turn")))))
 
 (defun harness-provider-claude--handle-result (entry msg)
   "Handle the turn-ending result MSG on ENTRY."
