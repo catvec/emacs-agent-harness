@@ -17,6 +17,7 @@
 (defvar harness-tasks-require-verification)
 (defvar harness-tasks-permission-mode)
 (defvar harness-tasks-non-interactive)
+(defvar harness-tasks-context-limit)
 (defvar harness-tasks-model)
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
@@ -76,7 +77,8 @@ turn `harness-tasks-require-verification' on themselves."
 (defun harness-tasks-test-state (id) (plist-get (harness-tasks-test-task id) :state))
 
 (defun harness-tasks-test-wait-state (id state)
-  (harness-test-wait (lambda () (eq (harness-tasks-test-state id) state)) 5
+  "Wait until task ID is in STATE: merges run git, slow on a busy machine."
+  (harness-test-wait (lambda () (eq (harness-tasks-test-state id) state)) 30
                      (format "task %s to become %s" id state)))
 
 (defun harness-tasks-test-submit (prompt &optional cwd)
@@ -100,6 +102,27 @@ turn `harness-tasks-require-verification' on themselves."
                      (plist-get (cl-find 'user (harness-call 'session/nodes sid)
                                          :key (lambda (n) (plist-get n :kind)))
                                 :content))))))
+
+(ert-deftest harness-tasks-session-runs-on-a-capped-context ()
+  "A task's session is capped by `harness-tasks-context-limit'.
+The demo model's window is 8000: a 4000-token limit halves the window
+the session works on, the default 256000 leaves it whole, and nil
+leaves it whole too."
+  (harness-tasks-test-with
+    (let* ((id (harness-tasks-test-submit "fix the parser"))
+           (session (harness-tasks-test-session id)))
+      (should (= 256000 (plist-get session :context-window-limit)))
+      (should (= 8000 (plist-get session :context-window))))
+    (let ((harness-tasks-context-limit 4000))
+      (let* ((id (harness-tasks-test-submit "keep it small"))
+             (session (harness-tasks-test-session id)))
+        (should (= 4000 (plist-get session :context-window-limit)))
+        (should (= 4000 (plist-get session :context-window)))))
+    (let ((harness-tasks-context-limit nil))
+      (let* ((id (harness-tasks-test-submit "and another one"))
+             (session (harness-tasks-test-session id)))
+        (should-not (plist-get session :context-window-limit))
+        (should (= 8000 (plist-get session :context-window)))))))
 
 (ert-deftest harness-tasks-limit-queues-pending ()
   (harness-tasks-test-with
@@ -175,6 +198,73 @@ turn `harness-tasks-require-verification' on themselves."
         (should (eq 'active (harness-tasks-test-state id)))
         (should (eq 'error (plist-get (harness-tasks-test-task id) :outcome)))
         (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))))))
+
+(defvar harness-tasks--retry-prompt)
+(declare-function harness-tasks--set "harness-tasks")
+
+(ert-deftest harness-tasks-retry-carries-on-a-stopped-task ()
+  "task/retry has the session of a task whose turn failed carry on, told
+so by the harness, and the task works again."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+      (let* ((id (harness-tasks-test-submit "will fail once"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :outcome)) 5 "an outcome")
+        (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+        (let ((harness-provider-demo-script-override harness-tasks-test-script))
+          ;; It is at work again at once, before its turn starts.
+          (should (eq 'active (plist-get (harness-call 'task/retry id) :column)))
+          (should-error (harness-call 'task/retry id))
+          (harness-tasks-test-wait-state id 'done))
+        (should (equal sid (plist-get (harness-tasks-test-task id) :session)))
+        (let ((retry (car (last (harness-tasks-test-user-nodes sid)))))
+          (should (string-match-p "stopped before the task was finished: it failed with an error\\. Check where"
+                                  (plist-get retry :content)))
+          (should (equal (harness-sender-system "tasks") (harness-node-sender retry))))
+        ;; Done: nothing to retry.
+        (should-error (harness-call 'task/retry id))))))
+
+(ert-deftest harness-tasks-retry-follows-where-the-task-stopped ()
+  "A pending task starts, a write-up that stopped is written again, a
+failed merge is merged again, and a task at work or in review is not
+retried."
+  (harness-tasks-test-with
+    ;; Pending: it starts, whatever the limit says.
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "waits for a slot")))
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (harness-call 'task/retry id)
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-tasks-test-wait-state id 'done)))
+    ;; A write-up that failed is written again.
+    (let ((id (let ((harness-provider-demo-script-override
+                     '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+                (prog1 (harness-tasks-test-refine "a flaky idea")))))
+      (harness-test-wait (lambda () (eq 'error (plist-get (harness-tasks-test-task id) :outcome))) 5 "the error")
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Make the flaky idea solid") (:type done :stop-reason end-turn))))
+        (harness-call 'task/retry id)
+        (harness-tasks-test-wait-state id 'pending)
+        (should (equal "Make the flaky idea solid" (plist-get (harness-tasks-test-task id) :prompt)))))
+    ;; A failed merge goes back to the merge queue: here, with no
+    ;; worktree, `task/merge' says why it cannot.
+    (let ((id (harness-tasks-test-submit "merged badly")))
+      (harness-tasks-test-wait-state id 'done)
+      (harness-tasks--set id :state 'active :outcome 'merge-failed :error "merge conflict")
+      (should (string-match-p "no worktree to merge"
+                              (cadr (should-error (harness-call 'task/retry id))))))
+    ;; At work.
+    (let* ((harness-provider-demo--delay 5)
+           (id (harness-tasks-test-submit "busy")))
+      (harness-test-wait (lambda () (eq 'active (plist-get (harness-tasks-test-task id) :column))) 5 "at work")
+      (should (string-match-p "working already" (cadr (should-error (harness-call 'task/retry id)))))
+      (harness-call 'task/cancel id))
+    ;; In review.
+    (let* ((harness-tasks-require-verification t)
+           (id (harness-tasks-test-submit "for review")))
+      (harness-tasks-test-wait-state id 'review)
+      (should (string-match-p "review" (cadr (should-error (harness-call 'task/retry id))))))))
 
 (ert-deftest harness-tasks-blocked-session-needs-input ()
   (harness-tasks-test-with
@@ -433,6 +523,9 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
              (id (plist-get task :id)))
         (should (equal "Tidy the imports" (plist-get task :prompt)))
         (should (equal sid (plist-get task :session)))
+        ;; The task's shorter context applies from now on.
+        (should (= 256000 (plist-get (harness-call 'session/get sid) :context-window-limit)))
+        (should (= 8000 (plist-get (harness-call 'session/get sid) :context-window)))
         ;; An idle session is waiting for the user.
         (should (eq 'needs-input (plist-get task :column)))
         (should-not (member sid (mapcar (lambda (s) (plist-get s :id)) (harness-call 'task/adoptable default-directory))))
@@ -628,6 +721,9 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
           (should (equal default-directory (plist-get session :cwd)))
           (should-not (plist-get session :worktree))
           (should (string-match-p "## Task refinement" (harness-run-filter 'agent/system-prompt "" session))))
+        ;; A write-up runs on the task's shorter context too.
+        (should (= 256000 (plist-get (harness-call 'session/get sid) :context-window-limit)))
+        (should (= 8000 (plist-get (harness-call 'session/get sid) :context-window)))
         (harness-tasks-test-wait-state id 'pending)
         (setq task (harness-tasks-test-task id))
         (should (equal harness-tasks-test-write-up (plist-get task :prompt)))
@@ -1181,12 +1277,6 @@ commits from call `harness-tasks-test--commit-on-call' on."
     (mapcar (lambda (record) (plist-get record :id))
             (if (keywordp (car-safe data)) (plist-get data :tasks) data))))
 
-(declare-function harness-tasks--parse-file "harness-tasks")
-
-(defun harness-tasks-test--file-fields (path)
-  "Return the known frontmatter fields of the task file PATH, an alist."
-  (plist-get (harness-tasks--parse-file (harness-read-file path)) :fields))
-
 (ert-deftest harness-tasks-git-lifecycle ()
   (harness-tasks-test-with-git
     (let ((id (harness-tasks-test-submit "Change the shared file"))
@@ -1208,34 +1298,20 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (should (cl-find harness-tasks--merge-session-name (harness-call 'session/list)
                        :key (lambda (s) (plist-get s :name)) :test #'equal))
       ;; Its record is in the main repository's git directory, out of every
-      ;; working tree: the checkout the merge went into only has its task file.
+      ;; working tree: neither the checkout the merge went into nor the
+      ;; task's worktree shows it.
       (harness-tasks-flush)
       (should (equal (list id) (harness-tasks-test--stored-ids (harness-tasks-test--store root))))
       (should-not (harness-tasks-test--stored-ids (expand-file-name "tasks.json" harness-state-directory)))
-      (let ((file (plist-get (harness-tasks-test-task id) :file)))
-        (should (string-match-p "\\`docs/tasks/t-[a-z0-9]+-[a-z0-9-]+\\.md\\'" file))
-        (should (equal (list (concat "?? " file))
-                       (split-string (harness-tasks-test--git root "status" "--porcelain" "--untracked-files=all")
-                                     "\n" t)))
-        (should-not (string-match-p "tasks\\.json" (harness-tasks-test--git root "status" "--porcelain" "--ignored"
-                                                                            "--untracked-files=all")))
-        (should-not (file-exists-p (expand-file-name "docs" (plist-get task :worktree))))
-        (let ((fields (harness-tasks-test--file-fields (expand-file-name file root))))
-          (should (equal "done" (cdr (assoc "state" fields))))
-          (should (equal "merged" (cdr (assoc "merge" fields))))
-          (should (equal (plist-get task :branch) (cdr (assoc "branch" fields)))))
-        ;; Archiving removes the worktree and the merged branch, and the
-        ;; file goes into the archive subfolder.
-        (harness-call 'task/archive id)
-        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 10 "worktree removal")
-        (should-not (file-directory-p (plist-get task :worktree)))
-        (harness-test-wait (lambda () (string-empty-p (harness-tasks-test--git root "branch" "--list" (plist-get task :branch))))
-                           10 "branch deletion")
-        (harness-tasks-flush)
-        (should-not (file-exists-p (expand-file-name file root)))
-        (should (equal (list (concat "?? docs/tasks/archive/" (file-name-nondirectory file)))
-                       (split-string (harness-tasks-test--git root "status" "--porcelain" "--untracked-files=all")
-                                     "\n" t)))))))
+      (should (string-empty-p (harness-tasks-test--git root "status" "--porcelain" "--untracked-files=all")))
+      (should (string-empty-p (harness-tasks-test--git (plist-get task :worktree)
+                                                       "status" "--porcelain" "--untracked-files=all")))
+      ;; Archiving removes the worktree and the merged branch.
+      (harness-call 'task/archive id)
+      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 30 "worktree removal")
+      (should-not (file-directory-p (plist-get task :worktree)))
+      (harness-test-wait (lambda () (string-empty-p (harness-tasks-test--git root "branch" "--list" (plist-get task :branch))))
+                         30 "branch deletion"))))
 
 (ert-deftest harness-tasks-git-merge-failure-needs-input ()
   (harness-tasks-test-with-git
@@ -1313,6 +1389,78 @@ commits from call `harness-tasks-test--commit-on-call' on."
         (should (plist-get task :merged)))
       (should (equal "two\n" (harness-tasks-test--main-text root))))))
 
+(ert-deftest harness-tasks-git-main-tree-task-works-in-the-checkout ()
+  "A task submitted with :main-tree runs at the root, with no branch and nothing to merge."
+  (harness-tasks-test-with-git
+    (let* ((id (plist-get (harness-call 'task/submit root "Change the shared file" (list :main-tree t)) :id))
+           (task nil))
+      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :session)) 5 "a session")
+      (setq task (harness-tasks-test-task id))
+      (should (harness-json-true-p (plist-get task :main-tree)))
+      (should-not (plist-get task :worktree))
+      (should-not (plist-get task :branch))
+      (let ((session (harness-call 'session/get (plist-get task :session))))
+        (should (equal root (plist-get session :cwd)))
+        (should-not (plist-get session :worktree))
+        (should (string-match-p "main working tree"
+                                (harness-run-filter 'agent/system-prompt "" session))))
+      (harness-tasks-test-wait-state id 'done)
+      (setq task (harness-tasks-test-task id))
+      (should-not (plist-get task :merged))
+      (should-not (plist-get task :worktree-removed))
+      ;; The agent's commit landed on main itself: no merge, no merge session.
+      (should (equal "change shared" (string-trim (harness-tasks-test--git root "log" "-1" "--format=%s"))))
+      (should (equal "two\n" (harness-tasks-test--main-text root)))
+      (should-not (cl-find harness-tasks--merge-session-name (harness-call 'session/list)
+                           :key (lambda (s) (plist-get s :name)) :test #'equal)))))
+
+(ert-deftest harness-tasks-git-refined-main-tree-task-stays-at-the-root ()
+  "A backlog task that needs the main tree keeps its session at the root and merges nothing."
+  (harness-tasks-test-with-git
+    (let* ((harness-provider-demo-script-override
+            '((:type text :delta "Change shared.txt to two\n\nWrite two into shared.txt.")
+              (:type done :stop-reason end-turn)))
+           (id (plist-get (harness-call 'task/submit root "shared.txt should say two"
+                                        (list :refine t :main-tree t))
+                          :id))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-tasks-test-wait-state id 'pending)
+      (should (harness-json-true-p (plist-get (harness-tasks-test-task id) :main-tree)))
+      (setq harness-provider-demo-script-override
+            '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
+              (:type text :delta "Changed it.")
+              (:type done :stop-reason end-turn)))
+      (harness-call 'task/start id)
+      (harness-tasks-test-wait-state id 'done)
+      (let ((task (harness-tasks-test-task id))
+            (session (harness-call 'session/get sid)))
+        (should (equal sid (plist-get task :session)))
+        (should-not (plist-get task :worktree))
+        (should-not (plist-get task :branch))
+        (should-not (plist-get task :merged))
+        (should (equal root (plist-get session :cwd)))
+        (should-not (plist-get session :worktree)))
+      (should (equal "two\n" (harness-tasks-test--main-text root)))
+      (should (equal "change shared" (string-trim (harness-tasks-test--git root "log" "-1" "--format=%s")))))))
+
+(ert-deftest harness-tasks-main-tree-survives-a-restart ()
+  "The main-tree declaration is kept in the project's store across a restart."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-store-in-repository t)
+           (harness-tasks-max-running 0)
+           (root (harness-tasks-test--make-repo))
+           (id (plist-get (harness-call 'task/submit root "clean the checkout" (list :main-tree t)) :id)))
+      (harness-tasks-flush)
+      (harness-tasks-test--restart)
+      (let ((task (harness-tasks-test-task id)))
+        (should (harness-json-true-p (plist-get task :main-tree)))
+        (should (eq 'pending (plist-get task :state))))
+      ;; The stored record names it too, so a harness that reads the store
+      ;; without the files gets it.
+      (let* ((store (harness-tasks-test--read (harness-tasks-test--store root)))
+             (record (car (plist-get store :tasks))))
+        (should (harness-json-true-p (plist-get record :main-tree)))))))
+
 ;;;; Where tasks are kept
 
 (declare-function harness-tasks--repository-store "harness-tasks")
@@ -1346,15 +1494,9 @@ commits from call `harness-tasks-test--commit-on-call' on."
                        (plist-get (harness-tasks-test--read store) :state-directory)))
         (should (equal (list c) (harness-tasks-test--stored-ids (harness-tasks-test--global))))
         (should (equal (list store) (harness-tasks-test--read registry)))
-        ;; No working tree sees it, so neither does the merge queue: the main
-        ;; checkout has just the task files, and the worktree nothing.
-        (should (equal (sort (mapcar (lambda (id) (concat "?? " (plist-get (harness-tasks-test-task id) :file)))
-                                     (list a b))
-                             #'string<)
-                       (sort (split-string (harness-tasks-test--git root "status" "--porcelain" "--untracked-files=all")
-                                           "\n" t)
-                             #'string<)))
-        (should (string-empty-p (harness-tasks-test--git wt "status" "--porcelain")))
+        ;; No working tree sees it, so neither does the merge queue.
+        (should (string-empty-p (harness-tasks-test--git root "status" "--porcelain" "--untracked-files=all")))
+        (should (string-empty-p (harness-tasks-test--git wt "status" "--porcelain" "--untracked-files=all")))
         ;; A restart reads it back through the registry.
         (harness-tasks-test--restart)
         (should (equal (list a b) (harness-tasks-test--ids (harness-call 'task/list root))))
@@ -1497,550 +1639,6 @@ commits from call `harness-tasks-test--commit-on-call' on."
         (harness-tasks-flush)
         (should (equal "changed" (plist-get (car (harness-tasks-test--read global)) :prompt)))))))
 
-;;;; Task files: the board as markdown files in docs/tasks
-
-(defvar harness-tasks-directory)
-(defvar harness-tasks--directory-poll)
-(defvar harness-tasks-directory-archive)
-(defvar harness-tasks--file-stamps)
-(declare-function harness-tasks--render "harness-tasks")
-(declare-function harness-tasks--yaml-parse "harness-tasks")
-(declare-function harness-tasks--yaml-scalar "harness-tasks")
-(declare-function harness-tasks--add-from-file "harness-tasks")
-(declare-function harness-tasks--parse-time "harness-tasks")
-(declare-function harness-tasks--poll "harness-tasks")
-
-(defmacro harness-tasks-test-with-files (&rest body)
-  "Run BODY with task files kept, in a fresh repository bound to `root'.
-Nothing starts by itself (no free slots), and no timer reads the
-folders: BODY reads them by listing the board."
-  (declare (indent 0))
-  `(harness-tasks-test-with
-     (let* ((harness-tasks-store-in-repository t)
-            (harness-tasks-directory "docs/tasks")
-            (harness-tasks--directory-poll nil)
-            (harness-tasks-max-running 0)
-            (root (harness-tasks-test--make-repo))
-            (default-directory root))
-       ,@body)))
-
-(defun harness-tasks-test--file (id)
-  "Return the path of task ID's file, or nil when it has none."
-  (let ((task (harness-tasks-test-task id)))
-    (and (plist-get task :file) (expand-file-name (plist-get task :file) (plist-get task :project)))))
-
-(defun harness-tasks-test--write (root name text)
-  "Write the task file NAME into ROOT's docs/tasks with TEXT; return its path."
-  (let ((path (expand-file-name (concat "docs/tasks/" name) root)))
-    (make-directory (file-name-directory path) t)
-    (with-temp-file path (insert text))
-    path))
-
-(defun harness-tasks-test--edit (path from to)
-  "Replace the regexp FROM with TO in the file PATH, as a person would."
-  (let ((text (harness-read-file path)))
-    (should (string-match-p from text))
-    (with-temp-file path (insert (replace-regexp-in-string from to text t t)))
-    ;; Within one clock tick a stamp may not change; reading again is harmless.
-    (clrhash harness-tasks--file-stamps)))
-
-(defun harness-tasks-test--field (path key)
-  "Return frontmatter KEY of the task file PATH."
-  (cdr (assoc key (harness-tasks-test--file-fields path))))
-
-(ert-deftest harness-tasks-file-yaml-subset ()
-  "Frontmatter reads the YAML task files use, keeps entries as written and writes values back."
-  (let ((entries (harness-tasks--yaml-parse
-                  (string-join
-                   '("# a comment"
-                     "id: t-abc"
-                     "title: \"Fix: the \\\"parser\\\"\\n\""
-                     "plain: Fix #12 bug  # a comment"
-                     "single: 'it''s'"
-                     "count: 42"
-                     "ratio: 1.5"
-                     "flag: yes"
-                     "off: false"
-                     "nothing: ~"
-                     "empty:"
-                     "flow: [a, \"b, c\", 'd', 3]"
-                     "block:"
-                     "  - one"
-                     "  - \"two\""
-                     "dashes:"
-                     "- x"
-                     "- y"
-                     "literal: |"
-                     "  line one"
-                     "    indented"
-                     ""
-                     "  after a blank"
-                     "folded: >-"
-                     "  folded"
-                     "  text"
-                     "nested:"
-                     "  key: value"
-                     "multi: first"
-                     "  second"
-                     "stray line")
-                   "\n"))))
-    (cl-flet ((val (key) (nth 1 (assoc key entries))))
-      (should (equal "t-abc" (val "id")))
-      (should (equal "Fix: the \"parser\"\n" (val "title")))
-      (should (equal "Fix" (val "plain")))
-      (should (equal "it's" (val "single")))
-      (should (equal 42 (val "count")))
-      (should (equal 1.5 (val "ratio")))
-      (should (eq t (val "flag")))
-      (should (eq :false (val "off")))
-      (should-not (val "nothing"))
-      (should-not (val "empty"))
-      (should (equal ["a" "b, c" "d" 3] (val "flow")))
-      (should (equal ["one" "two"] (val "block")))
-      (should (equal ["x" "y"] (val "dashes")))
-      (should (equal "line one\n  indented\n\nafter a blank\n" (val "literal")))
-      (should (equal "folded text" (val "folded")))
-      (should-not (val "nested"))
-      (should (equal "first second" (val "multi")))
-      ;; Each entry keeps its lines, so keys the harness does not know go back as they were.
-      (should (equal "dashes:\n- x\n- y" (nth 2 (assoc "dashes" entries))))
-      (should (equal "nested:\n  key: value" (nth 2 (assoc "nested" entries))))
-      (should (equal '(nil nil "stray line") (car (last entries))))))
-  ;; Writing: plain when that reads back the same, else quoted.
-  (dolist (value '("plain words" "Fix: the parser" "yes" "007" "1.5" "- item" "#tag" "a #b" "trailing:"
-                   "it's \"quoted\"" "two\nlines" "tab\there" "" " padded " "12:30" "[x]" "ünïcödé ✓"))
-    (should (equal value (nth 1 (car (harness-tasks--yaml-parse (concat "k: " (harness-tasks--yaml-scalar value))))))))
-  (should (equal "plain words" (harness-tasks--yaml-scalar "plain words")))
-  (should (equal "\"yes\"" (harness-tasks--yaml-scalar "yes")))
-  (should (equal "true" (harness-tasks--yaml-scalar t)))
-  (should (equal "done" (harness-tasks--yaml-scalar 'done)))
-  (should (equal "[a, \"b, c\"]" (harness-tasks--yaml-scalar ["a" "b, c"])))
-  (should (equal ["a" "b, c" "[x]"]
-                 (nth 1 (car (harness-tasks--yaml-parse (concat "k: " (harness-tasks--yaml-scalar ["a" "b, c" "[x]"]))))))))
-
-(ert-deftest harness-tasks-file-round-trip ()
-  "A task written as a file reads back the same, and the file it makes is the file it came from."
-  (harness-tasks-test-with
-    (let* ((sid (plist-get (harness-call 'session/create :cwd default-directory :model "demo:scripted") :id))
-           (task (list :id "t-round001" :project default-directory :cwd default-directory
-                       :prompt "Fix nested quotes in the parser\n\n- Handle `parse-args'.\n- Done when: the tests pass. #1"
-                       :note "the parser chokes on \"nested\" quotes\n\nand more"
-                       :state 'pending :backlog t :session sid :outcome 'error :error "it broke:\nbadly"
-                       :duplicate-of "t-orig0001"
-                       :branch "task/fix-nested-round001" :base "main" :merged t
-                       :model "claude:claude-opus-5-5" :thinking "high"
-                       :created 1790861242.0 :started 1790861250.0 :refined 1790861300.0
-                       :finished 1790861400.0 :updated 1790861401.0
-                       :verified t :verified-at 1790861450.0
-                       :feedback (list (list :text "Also export the totals.\n\n- keep the header" :at 1790861420.0)
-                                       (list :text "Sort it too" :at 1790861440.0))
-                       :extra '("labels: [ui, \"a, b\"]" "assignee:\n  - noah")))
-           (text (harness-tasks--render task))
-           (parsed (harness-tasks--parse-file text))
-           (fields (plist-get parsed :fields)))
-      (should (string-prefix-p "---\nid: t-round001\ntitle: Fix nested quotes in the parser\nstate: pending\n" text))
-      (should (string-match-p "\nlabels: \\[ui, \"a, b\"\\]\nassignee:\n  - noah\n---\n\n# Fix nested quotes in the parser\n\n- Handle" text))
-      (should (string-match-p (concat "\n<!-- harness:request -->\n## Request\n\n> the parser chokes on \"nested\" quotes\n>\n> and more\n"
-                                      ;; Each time it was sent back from review, oldest first.
-                                      "\n<!-- harness:review -->\n## Review\n\n"
-                                      "### Sent back 2026-10-01T13:30:20Z\n\n> Also export the totals\\.\n>\n> - keep the header\n\n"
-                                      "### Sent back 2026-10-01T13:30:40Z\n\n> Sort it too\n\\'")
-                              text))
-      (should (equal (plist-get task :prompt) (plist-get parsed :prompt)))
-      (should (plist-get parsed :heading))
-      (should (equal (plist-get task :note) (plist-get parsed :note)))
-      (should (equal (plist-get task :extra) (plist-get parsed :extra)))
-      (should (equal '("id" "title" "state" "column" "backlog" "outcome" "error" "duplicate-of" "session" "branch"
-                       "base" "merge" "model" "thinking" "created" "started" "refined" "finished" "verified" "updated")
-                     (mapcar #'car fields)))
-      (should (equal "t-orig0001" (cdr (assoc "duplicate-of" fields))))
-      (should (equal "2026-10-01T13:30:50Z" (cdr (assoc "verified" fields))))
-      (should (equal "pending" (cdr (assoc "column" fields))))
-      (should (eq t (cdr (assoc "backlog" fields))))
-      (should (equal "it broke:\nbadly" (cdr (assoc "error" fields))))
-      (should (equal "merged" (cdr (assoc "merge" fields))))
-      (should (equal "2026-10-01T13:27:22Z" (cdr (assoc "created" fields))))
-      (dolist (key '(:created :started :refined :finished :updated))
-        (should (equal (plist-get task key)
-                       (harness-tasks--parse-time (cdr (assoc (substring (symbol-name key) 1) fields))))))
-      ;; Read back as a task, its store lost, it is the same task: the same file.
-      (let ((back (harness-tasks--add-from-file default-directory "docs/tasks/t-round001.md" parsed nil)))
-        (should (equal "t-round001" (plist-get back :id)))
-        (dolist (key '(:prompt :note :state :backlog :session :outcome :error :duplicate-of :branch :base :merged
-                       :model :thinking :created :started :refined :finished :updated :extra
-                       :verified :verified-at :feedback))
-          (should (equal (list key (plist-get task key)) (list key (plist-get back key)))))
-        (should (equal text (harness-tasks--render back)))))))
-
-(ert-deftest harness-tasks-file-written-by-hand ()
-  "A task file written by hand shows on the board as a backlog task, left as written until the task changes."
-  (harness-tasks-test-with-files
-    (let* ((text (concat "---\ntitle: Add CSV export\nlabels: [reports, export]\nmodel: demo:scripted\n---\n\n"
-                         "Reports should be exportable as CSV.\n\n## Done when\n\n- a button exports the table\n"))
-           (path (harness-tasks-test--write root "csv-export.md" text))
-           (tasks (harness-call 'task/list root))
-           (task (car tasks))
-           (id (plist-get task :id)))
-      (should (= 1 (length tasks)))
-      (should (string-prefix-p "t-" id))
-      (should (equal "Add CSV export\n\nReports should be exportable as CSV.\n\n## Done when\n\n- a button exports the table"
-                     (plist-get task :prompt)))
-      (should (eq 'pending (plist-get task :state)))
-      (should (plist-get task :backlog))
-      (should (eq 'pending (plist-get task :column)))
-      (should (equal "demo:scripted" (plist-get task :model)))
-      (should (equal "docs/tasks/csv-export.md" (plist-get task :file)))
-      (should (equal '("labels: [reports, export]") (plist-get task :extra)))
-      ;; Saved, it is not written over; free slots do not start it.
-      (harness-tasks-flush)
-      (should (equal text (harness-read-file path)))
-      (let ((harness-tasks-max-running nil)) (harness-tasks--schedule))
-      (should (eq 'pending (harness-tasks-test-state id)))
-      ;; It changes, and its file gets the harness's frontmatter, labels and name kept.
-      (harness-call 'task/complete id)
-      (harness-tasks-flush)
-      (should (equal path (harness-tasks-test--file id)))
-      (let* ((new (harness-read-file path))
-             (parsed (harness-tasks--parse-file new)))
-        (should (equal id (cdr (assoc "id" (plist-get parsed :fields)))))
-        (should (equal "done" (cdr (assoc "state" (plist-get parsed :fields)))))
-        (should (equal "Add CSV export" (cdr (assoc "title" (plist-get parsed :fields)))))
-        (should (equal '("labels: [reports, export]") (plist-get parsed :extra)))
-        (should (string-match-p "\n---\n\n# Add CSV export\n\nReports should be exportable as CSV\\.\n" new))
-        (should (equal (plist-get task :prompt) (plist-get parsed :prompt))))
-      ;; A file that says more than is so is written over with what is.
-      (let* ((claims (harness-tasks-test--write root "claims.md"
-                                                "---\ntitle: Claims too much\nstate: active\nsession: no-such-session\n---\n\nDo it.\n"))
-             (claimed (cl-find "docs/tasks/claims.md" (harness-call 'task/list root)
-                               :key (lambda (task) (plist-get task :file)) :test #'equal)))
-        (should (eq 'pending (plist-get claimed :state)))
-        (should-not (plist-get claimed :session))
-        (harness-tasks-flush)
-        (should (equal "pending" (harness-tasks-test--field claims "state")))
-        (should-not (harness-tasks-test--field claims "session")))
-      ;; The timer reads the folder too, without a board listing it.
-      (harness-tasks-test--write root "polled.md" "# Picked up by the timer\n")
-      (let ((harness-tasks--directory-poll 2)) (harness-tasks--poll))
-      (should (cl-find "Picked up by the timer" (hash-table-values harness-tasks--table)
-                       :key (lambda (task) (plist-get task :prompt)) :test #'equal)))))
-
-(ert-deftest harness-tasks-file-without-frontmatter ()
-  "Files without frontmatter are tasks too; empty, unfinished and README files are not."
-  (harness-tasks-test-with-files
-    (let ((heading (harness-tasks-test--write root "heading.md" "# Title from the heading\n\nThe body.\n"))
-          (broken (harness-tasks-test--write root "broken.md" "---\ntitle: never closed\n\nbody\n")))
-      (harness-tasks-test--write root "plain.md" "Just one line of text\nand another\n")
-      (harness-tasks-test--write root "setext.md" "Setext title\n============\n\nBody.\n")
-      (harness-tasks-test--write root "empty.md" "  \n")
-      (harness-tasks-test--write root "README.md" "# Tasks\n\nThis folder holds the tasks.\n")
-      (harness-tasks-test--write root "notes.txt" "not markdown\n")
-      (let ((tasks (harness-call 'task/list root)))
-        (should (equal '("Just one line of text\nand another" "Setext title\n\nBody." "Title from the heading\n\nThe body.")
-                       (sort (mapcar (lambda (task) (plist-get task :prompt)) tasks) #'string<)))
-        (should (cl-every (lambda (task) (and (eq 'pending (plist-get task :state)) (plist-get task :backlog))) tasks)))
-      ;; Left as written...
-      (harness-tasks-flush)
-      (should (equal "# Title from the heading\n\nThe body.\n" (harness-read-file heading)))
-      ;; ...until the task changes: then the body stays, under frontmatter.
-      (let ((id (plist-get (cl-find "docs/tasks/heading.md" (harness-call 'task/list root)
-                                    :key (lambda (task) (plist-get task :file)) :test #'equal)
-                           :id)))
-        (harness-call 'task/complete id)
-        (harness-tasks-flush)
-        (should (string-prefix-p (concat "---\nid: " id "\ntitle: Title from the heading\nstate: done\n")
-                                 (harness-read-file heading)))
-        (should (string-suffix-p "\n---\n\n# Title from the heading\n\nThe body.\n" (harness-read-file heading))))
-      ;; Frontmatter that never closes is a file being written: it waits until it is whole.
-      (should-not (cl-find "docs/tasks/broken.md" (harness-call 'task/list root)
-                           :key (lambda (task) (plist-get task :file)) :test #'equal))
-      (with-temp-file broken (insert "---\ntitle: Closed now\n---\n\nThe body.\n"))
-      (clrhash harness-tasks--file-stamps)
-      (should (equal "Closed now\n\nThe body."
-                     (plist-get (cl-find "docs/tasks/broken.md" (harness-call 'task/list root)
-                                         :key (lambda (task) (plist-get task :file)) :test #'equal)
-                                :prompt))))))
-
-(ert-deftest harness-tasks-file-follows-the-task ()
-  "A task's file is written as the task changes, takes edits, and goes when the task goes."
-  (harness-tasks-test-with-files
-    (let* ((id (harness-tasks-test-submit "Write the release notes\n\nCover the new task files." root))
-           (path nil))
-      ;; Written shortly after, with the store.
-      (should-not (harness-tasks-test--file id))
-      (harness-tasks-flush)
-      (setq path (harness-tasks-test--file id))
-      (should (string-suffix-p (concat "/docs/tasks/" id "-write-the-release-notes.md") path))
-      (let ((text (harness-read-file path)))
-        (should (string-prefix-p (concat "---\nid: " id "\ntitle: Write the release notes\nstate: pending\ncolumn: pending\n")
-                                 text))
-        (should (string-suffix-p "\n---\n\n# Write the release notes\n\nCover the new task files.\n" text)))
-      ;; State and column changes reach the frontmatter.
-      (harness-call 'task/complete id)
-      (harness-tasks-flush)
-      (should (equal "done" (harness-tasks-test--field path "state")))
-      (should (equal "done" (harness-tasks-test--field path "column")))
-      (should (harness-tasks-test--field path "finished"))
-      ;; An edit of the body is the task's prompt now, and the file is not written over.
-      (harness-tasks-test--edit path "Cover the new task files\\." "Cover the task files and the timer.")
-      (let ((edited (harness-read-file path)))
-        (harness-call 'task/list root)
-        (should (equal "Write the release notes\n\nCover the task files and the timer."
-                       (plist-get (harness-tasks-test-task id) :prompt)))
-        (harness-tasks-flush)
-        (should (equal edited (harness-read-file path))))
-      ;; What the harness says is put back.
-      (harness-tasks-test--edit path "^column: done$" "column: active")
-      (harness-call 'task/list root)
-      (harness-tasks-flush)
-      (should (equal "done" (harness-tasks-test--field path "column")))
-      ;; A file the harness has yet to write again is no edit: done is no
-      ;; news, though the task went back to pending since.
-      (harness-tasks--set id :state 'pending)
-      (harness-tasks-test--edit path "the timer\\." "the timer, too.")
-      (harness-call 'task/list root)
-      (should (eq 'pending (harness-tasks-test-state id)))
-      (should (string-suffix-p "the timer, too." (plist-get (harness-tasks-test-task id) :prompt)))
-      (harness-tasks-flush)
-      (should (equal "pending" (harness-tasks-test--field path "state")))
-      ;; Setting it done by hand completes it.
-      (harness-tasks-test--edit path "^state: pending$" "state: done")
-      (harness-call 'task/list root)
-      (should (eq 'done (harness-tasks-test-state id)))
-      (harness-tasks-flush)
-      ;; Deleting the file archives the task; the file coming back brings it back.
-      (let ((saved (harness-read-file path)))
-        (delete-file path)
-        (harness-call 'task/list root)
-        (should (plist-get (harness-tasks-test-task id) :archived))
-        (harness-tasks-flush)
-        (should-not (file-exists-p path))
-        (with-temp-file path (insert saved))
-        (harness-call 'task/list root)
-        (should-not (plist-get (harness-tasks-test-task id) :archived))
-        (should (equal path (harness-tasks-test--file id))))
-      ;; Archiving moves it into the archive subfolder, and restoring back.
-      (let ((archived (expand-file-name (concat "archive/" (file-name-nondirectory path)) (file-name-directory path))))
-        (harness-call 'task/archive id)
-        (harness-tasks-flush)
-        (should-not (file-exists-p path))
-        (should (file-exists-p archived))
-        (should (equal archived (harness-tasks-test--file id)))
-        (harness-call 'task/list root)
-        (should (plist-get (harness-tasks-test-task id) :archived))
-        (harness-call 'task/archive id t)
-        (harness-tasks-flush)
-        (should (equal path (harness-tasks-test--file id)))
-        (should (file-exists-p path))
-        (should-not (file-exists-p archived))
-        ;; Moved there by hand, it is archived too; moved back, it is back.
-        (rename-file path archived)
-        (harness-call 'task/list root)
-        (should (plist-get (harness-tasks-test-task id) :archived))
-        (should (equal archived (harness-tasks-test--file id)))
-        (rename-file archived path)
-        (harness-call 'task/list root)
-        (should-not (plist-get (harness-tasks-test-task id) :archived))
-        (should (equal path (harness-tasks-test--file id)))
-        ;; Without an archive subfolder, archiving deletes the file.
-        (let ((harness-tasks-directory-archive nil))
-          (harness-call 'task/archive id)
-          (harness-tasks-flush)
-          (should-not (file-exists-p path))
-          (should-not (file-exists-p archived))
-          (should-not (harness-tasks-test--file id))
-          (harness-call 'task/archive id t)
-          (harness-tasks-flush)
-          (should (file-exists-p path))))
-      ;; Deleting the task deletes its file.
-      (harness-call 'task/delete id)
-      (should-not (file-exists-p path))
-      ;; Cancelling a pending one too.
-      (let ((other (harness-tasks-test-submit "Not needed after all" root)))
-        (harness-tasks-flush)
-        (let ((file (harness-tasks-test--file other)))
-          (should (file-exists-p file))
-          (harness-call 'task/cancel other)
-          (should-not (file-exists-p file)))))))
-
-(ert-deftest harness-tasks-file-of-a-refined-task ()
-  "A refined task's file has the write-up, the request it came from, and its session's name and plan."
-  (harness-tasks-test-with-files
-    (let* ((harness-provider-demo-script-override
-            `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn)))
-           (id (harness-tasks-test-refine "the parser chokes on nested quotes" root))
-           (sid (plist-get (harness-tasks-test-task id) :session)))
-      (harness-tasks-flush)
-      (let ((path (harness-tasks-test--file id)))
-        (should (equal "refining" (harness-tasks-test--field path "state")))
-        (harness-tasks-test-wait-state id 'pending)
-        (harness-tasks-flush)
-        (let* ((text (harness-read-file path))
-               (parsed (harness-tasks--parse-file text))
-               (fields (plist-get parsed :fields)))
-          (should (equal harness-tasks-test-write-up (plist-get parsed :prompt)))
-          (should (equal "the parser chokes on nested quotes" (plist-get parsed :note)))
-          (should (string-match-p "\n---\n\n# Fix nested quotes in the parser\n\n- Handle nested quotes" text))
-          (should (string-match-p "\n<!-- harness:request -->\n## Request\n\n> the parser chokes on nested quotes\n\\'" text))
-          (should (equal "pending" (cdr (assoc "state" fields))))
-          (should (eq t (cdr (assoc "backlog" fields))))
-          (should (equal sid (cdr (assoc "session" fields))))
-          (should (cdr (assoc "refined" fields))))
-        ;; The session's name is the title and its plan a section.
-        (harness-call 'session/update sid :name "Nested quotes" :silent t)
-        (harness-call 'session/set-plan sid "1. Read the parser.\n2. Fix it.")
-        (harness-tasks-flush)
-        (should (equal "Nested quotes" (harness-tasks-test--field path "title")))
-        (should (string-suffix-p "\n<!-- harness:plan -->\n## Plan\n\n1. Read the parser.\n2. Fix it.\n"
-                                 (harness-read-file path)))
-        (should (equal "1. Read the parser.\n2. Fix it." (plist-get (harness-tasks--parse-file (harness-read-file path)) :plan)))
-        ;; Retitled in the file, the session is renamed; the request edited, the note changes.
-        (harness-tasks-test--edit path "^title: Nested quotes$" "title: Quotes, nested")
-        (harness-tasks-test--edit path "^> the parser chokes on nested quotes$" "> the parser chokes on quotes in quotes")
-        (harness-call 'task/list root)
-        (should (equal "Quotes, nested" (plist-get (harness-call 'session/get sid) :name)))
-        (should (equal "the parser chokes on quotes in quotes" (plist-get (harness-tasks-test-task id) :note)))
-        (should (equal harness-tasks-test-write-up (plist-get (harness-tasks-test-task id) :prompt)))))))
-
-(ert-deftest harness-tasks-files-bring-the-board-back ()
-  "With its store lost, a project's board comes back from its task files, sessions and all."
-  (harness-tasks-test-with-files
-    (let* ((harness-provider-demo-script-override '((:type text :delta "Written up") (:type done :stop-reason end-turn)))
-           (backlog (harness-tasks-test-refine "for later" root))
-           (done (harness-tasks-test-submit "finished already" root))
-           (sid (plist-get (harness-tasks-test-task backlog) :session)))
-      (harness-tasks-test-wait-state backlog 'pending)
-      (harness-call 'task/complete done)
-      (harness-tasks-flush)
-      (let* ((files (list (harness-tasks-test--file backlog) (harness-tasks-test--file done)))
-             ;; Written a while ago, so writing them again would show.
-             (texts (mapcar (lambda (file)
-                              (harness-tasks-test--edit file "^updated: .*$" "updated: 2026-01-01T00:00:00Z")
-                              (harness-read-file file))
-                            files)))
-        ;; A restart reads the store as ever.
-        (harness-tasks-test--restart)
-        (should (equal (sort (list backlog done) #'string<)
-                       (sort (harness-tasks-test--ids (harness-call 'task/list root)) #'string<)))
-        ;; Without the store, the files bring the board back once it is opened.
-        (harness-tasks-flush)
-        (delete-file (harness-tasks-test--store root))
-        (delete-file (expand-file-name "task-stores.json" harness-state-directory))
-        (harness-tasks-test--restart)
-        (should-not (gethash backlog harness-tasks--table))
-        (should (equal (sort (list backlog done) #'string<)
-                       (sort (harness-tasks-test--ids (harness-call 'task/list root)) #'string<)))
-        (let ((task (harness-tasks-test-task backlog)))
-          (should (eq 'pending (plist-get task :state)))
-          (should (plist-get task :backlog))
-          (should (equal "Written up" (plist-get task :prompt)))
-          (should (equal "for later" (plist-get task :note)))
-          (should (equal sid (plist-get task :session))))
-        (should (eq 'done (harness-tasks-test-state done)))
-        ;; The files were right, so nothing is written over; the store is back.
-        (harness-tasks-flush)
-        (should (equal texts (mapcar #'harness-read-file files)))
-        (should (equal (sort (list backlog done) #'string<)
-                       (sort (harness-tasks-test--stored-ids (harness-tasks-test--store root)) #'string<)))
-        ;; The backlog task starts in the session that wrote it up.
-        (harness-call 'task/start backlog)
-        (harness-tasks-test-wait-state backlog 'done)
-        (should (equal sid (plist-get (harness-tasks-test-task backlog) :session)))))))
-
-(ert-deftest harness-tasks-files-only-where-the-harness-keeps-the-tasks ()
-  "Task files go only into repositories whose tasks this harness keeps, in the folder each picks."
-  (harness-tasks-test-with-files
-    ;; Turned off: none.
-    (let ((harness-tasks-directory nil))
-      (harness-tasks-test-submit "no file for me" root)
-      (harness-tasks-flush)
-      (should-not (file-exists-p (expand-file-name "docs" root))))
-    ;; Outside git: none.
-    (let ((plain (harness-test-temp-dir)))
-      (harness-tasks-test-submit "outside git" plain)
-      (harness-tasks-flush)
-      (should-not (file-exists-p (expand-file-name "docs" plain))))
-    ;; In another harness's repository: none, and its files are not read.
-    (let ((theirs (harness-tasks-test--make-repo))
-          (other (harness-test-temp-dir)))
-      (harness-write-file-atomically (harness-tasks-test--store theirs)
-                                     (harness-json-encode (list :state-directory other :tasks [])))
-      (harness-tasks-test--write theirs "theirs.md" "# Theirs\n")
-      (harness-tasks-test-submit "mine, in their repository" theirs)
-      (harness-tasks-flush)
-      (should (equal '("theirs.md") (directory-files (expand-file-name "docs/tasks" theirs) nil "\\.md\\'")))
-      (should (equal '("mine, in their repository")
-                     (mapcar (lambda (task) (plist-get task :prompt)) (harness-call 'task/list theirs)))))
-    ;; With tests' defaults (the store in the state directory): none.
-    (let ((harness-tasks-store-in-repository nil)
-          (repo (harness-tasks-test--make-repo)))
-      (harness-tasks-test-submit "kept in the state directory" repo)
-      (harness-tasks-flush)
-      (should-not (file-exists-p (expand-file-name "docs" repo))))
-    ;; A project's .dir-locals.el picks its folder; files move when it picks another.
-    (let ((repo (harness-tasks-test--make-repo)))
-      (with-temp-file (expand-file-name ".dir-locals.el" repo)
-        (insert "((nil . ((harness-tasks-directory . \"planning/tasks\"))))\n"))
-      (let ((id (harness-tasks-test-submit "kept where the project keeps tasks" repo)))
-        (harness-tasks-flush)
-        (should (string-prefix-p "planning/tasks/" (plist-get (harness-tasks-test-task id) :file)))
-        (let ((old (harness-tasks-test--file id)))
-          (should (file-exists-p old))
-          (should-not (file-exists-p (expand-file-name "docs" repo)))
-          (with-temp-file (expand-file-name ".dir-locals.el" repo)
-            (insert "((nil . ((harness-tasks-directory . \"docs/tasks\"))))\n"))
-          ;; Next time the folder is looked at (here by listing the board).
-          (harness-call 'task/list repo)
-          (harness-tasks-flush)
-          (should (string-prefix-p "docs/tasks/" (plist-get (harness-tasks-test-task id) :file)))
-          (should (file-exists-p (harness-tasks-test--file id)))
-          (should-not (file-exists-p old))
-          ;; Its file gone from the folder it left is no deletion.
-          (harness-call 'task/list repo)
-          (should-not (plist-get (harness-tasks-test-task id) :archived)))))))
-
-(ert-deftest harness-tasks-files-start-nothing-by-themselves ()
-  "A task file names no session it may take, and starts, resumes or merges nothing."
-  (harness-tasks-test-with-files
-    (let* ((plain (plist-get (harness-call 'session/create :cwd root :model "demo:scripted") :id))
-           (elsewhere (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted") :id))
-           (owned (let ((harness-provider-demo-script-override
-                         '((:type text :delta "Written up") (:type done :stop-reason end-turn))))
-                    (harness-tasks-test-refine "already a task" root)))
-           (owner-session (plist-get (harness-tasks-test-task owned) :session)))
-      (harness-tasks-test-wait-state owned 'pending)
-      (harness-tasks-test--write root "resumes.md" (format "---\nstate: active\nsession: %s\n---\n\nCarry on.\n" plain))
-      (harness-tasks-test--write root "merges.md" (format "---\nstate: merging\nsession: %s\n---\n\nMerge me.\n" plain))
-      (harness-tasks-test--write root "steals.md" (format "---\nstate: active\nsession: %s\n---\n\nSteal it.\n" owner-session))
-      (harness-tasks-test--write root "far.md" (format "---\nstate: active\nsession: %s\n---\n\nFar away.\n" elsewhere))
-      (harness-tasks-test--write root "queued.md" "---\nstate: pending\nbacklog: false\n---\n\nQueue me.\n")
-      (let* ((harness-tasks-max-running nil)
-             (tasks (harness-call 'task/list root))
-             (by-file (lambda (name) (cl-find (concat "docs/tasks/" name) tasks
-                                              :key (lambda (task) (plist-get task :file)) :test #'equal))))
-        (harness-tasks--recover)
-        (harness-tasks--resume-merges)
-        (harness-tasks--schedule)
-        ;; A session of the project nobody has is the file's again (files are
-        ;; read by name): the task waits for the user, and merges nothing.
-        (let ((task (funcall by-file "merges.md")))
-          (should (equal plain (plist-get task :session)))
-          (should (eq 'active (plist-get task :state)))
-          (should (eq 'interrupted (plist-get task :outcome)))
-          (should-not (plist-get task :merge-status))
-          (should (eq 'needs-input (plist-get (harness-tasks-test-task (plist-get task :id)) :column))))
-        ;; Taken already, it is no other file's; nor are another task's, or another project's.
-        (dolist (name '("resumes.md" "steals.md" "far.md" "queued.md"))
-          (let ((task (funcall by-file name)))
-            (should-not (plist-get task :session))
-            (should (eq 'pending (harness-tasks-test-state (plist-get task :id))))
-            (should (plist-get task :backlog))))
-        (should (equal (list owned) (mapcar (lambda (task) (plist-get task :id))
-                                            (cl-remove-if-not (lambda (task) (equal owner-session (plist-get task :session)))
-                                                              (harness-call 'task/list root)))))
-        ;; Nothing was sent to any session.
-        (should-not (harness-tasks-test-user-texts plain))
-        (should (= 1 (length (harness-tasks-test-user-texts owner-session))))))))
-
 ;;;; BTW: side conversations about the board
 
 (defvar harness-tasks--btw-prompt)
@@ -2103,6 +1701,19 @@ Each is a new session, never an earlier one."
           (should (eq 'end-turn (plist-get (harness-test-await (harness-call-async 'agent/prompt sid "how are the tasks?"))
                                            :stop-reason)))
           (should (cl-some (lambda (s) (string-match-p (regexp-quote harness-tasks--btw-prompt) s)) systems)))))))
+
+(defvar harness-btw-thinking)
+
+(ert-deftest harness-tasks-btw-thinks-at-the-btw-level ()
+  "A conversation about the board starts at the BTW level, like every BTW.
+With nil it starts at the level the project configures instead."
+  (harness-tasks-test-with
+    ;; Not a task: the project's usual model, whose levels the demo
+    ;; catalogue lists (low and high).
+    (let ((harness-model "demo:scripted") (harness-thinking "high") (harness-btw-thinking "low"))
+      (should (equal "low" (plist-get (harness-call 'task/btw default-directory) :thinking)))
+      (let ((harness-btw-thinking nil))
+        (should (equal "high" (plist-get (harness-call 'task/btw default-directory) :thinking)))))))
 
 (ert-deftest harness-tasks-btw-starts-at-the-project-root ()
   "From anywhere in a repository, or one of its task worktrees, the BTW sits at the main checkout."
@@ -2210,6 +1821,101 @@ Each is a new session, never an earlier one."
         (should (= 2 (length (plist-get (harness-tasks-test-task id) :feedback))))
         (should (= 3 (length (harness-tasks-test-user-texts sid))))))))
 
+(ert-deftest harness-tasks-review-any-message-sends-it-back ()
+  "A message to the session of a task in review sends it back, as `task/reject' does.
+Whoever wrote it -- the user in the session's chat, without [Send back]
+(`agent/prompt'), an agent's task_control message (`task/prompt'),
+another session's agent -- the task is active at once, the round of
+feedback is kept and the agent gets the message opened by the reject
+text.  The harness's own messages do not count."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session))
+             (rounds (lambda () (mapcar (lambda (round) (plist-get round :text))
+                                        (plist-get (harness-tasks-test-task id) :feedback))))
+             (last-user (lambda () (car (last (harness-tasks-test-user-nodes sid))))))
+        (harness-tasks-test-wait-state id 'review)
+        ;; Typed in the session's own chat.
+        (harness-call 'agent/prompt sid "  Nested quotes still break.  ")
+        ;; Sent back at once: the board and the banner need not wait for the turn.
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'active (plist-get task :state)))
+          (should (eq 'active (plist-get task :column))))
+        (should (equal '("Nested quotes still break.") (funcall rounds)))
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal (harness-tasks--reject-text "Nested quotes still break.")
+                       (plist-get (funcall last-user) :content)))
+        (should-not (harness-node-sender (funcall last-user)))
+        ;; A message through `task/prompt', as task_control sends it.
+        (harness-call 'task/prompt id "And the docs.")
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal '("Nested quotes still break." "And the docs.") (funcall rounds)))
+        (should (equal (harness-tasks--reject-text "And the docs.") (plist-get (funcall last-user) :content)))
+        ;; Another session's agent, which stays the sender.
+        (let ((from (harness-sender-session (list :id "s-other" :name "orchestrator"))))
+          (harness-call 'agent/prompt sid "Ship it." (list :from from))
+          (should (eq 'active (harness-tasks-test-state id)))
+          (harness-tasks-test-wait-state id 'review)
+          (should (equal "Ship it." (car (last (funcall rounds)))))
+          (should (equal (harness-tasks--reject-text "Ship it.") (plist-get (funcall last-user) :content)))
+          (should (equal from (harness-node-sender (funcall last-user)))))
+        ;; The harness's own message is not feedback: no round, as it was sent.
+        (harness-call 'agent/prompt sid "Carry on." (harness-tasks--from-harness))
+        (harness-tasks-test-wait-state id 'review)
+        (should (= 3 (length (funcall rounds))))
+        (should (equal "Carry on." (plist-get (funcall last-user) :content)))
+        ;; Sent back three times, then accepted as any review.
+        (harness-call 'task/verify id)
+        (should (eq 'done (harness-tasks-test-state id)))
+        ;; Done, a message is a follow-up again, not feedback.
+        (harness-call 'agent/prompt sid "One more thing.")
+        (harness-tasks-test-wait-state id 'review)
+        (should (= 3 (length (funcall rounds))))
+        (should (equal "One more thing." (plist-get (funcall last-user) :content)))))))
+
+(ert-deftest harness-tasks-review-queued-message-sends-it-back ()
+  "A message queued while the task works goes out when it finishes, and sends it back."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo--delay 0.05)
+          (reviews 0))
+      (harness-on 'task/review (lambda (_) (cl-incf reviews)))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (should (harness-call 'agent/running sid))
+        (harness-call 'agent/prompt sid "Also the README." '(:queue t))
+        ;; It waits for review once, goes back to work on the queued
+        ;; message, then waits for review again.
+        (harness-test-wait (lambda () (and (= reviews 2) (eq 'review (harness-tasks-test-state id))))
+                           10 "the task back in review after the queued message")
+        (should (equal '("Also the README.")
+                       (mapcar (lambda (round) (plist-get round :text))
+                               (plist-get (harness-tasks-test-task id) :feedback))))
+        (should (equal (harness-tasks--reject-text "Also the README.")
+                       (car (last (harness-tasks-test-user-texts sid)))))))))
+
+(ert-deftest harness-tasks-review-reject-with-attachments-only ()
+  "Feedback may be attachments alone, a screenshot say, but not nothing."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (shot (expand-file-name "after.png" default-directory)))
+      (with-temp-file shot (insert "not really a png"))
+      (let* ((id (harness-tasks-test-submit "fix the layout"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-tasks-test-wait-state id 'review)
+        (should-error (harness-call 'task/reject id "" nil))
+        (should-error (harness-call 'task/reject id "  " nil))
+        (harness-call 'task/reject id "" (list (list :path shot :mime "image/png" :name "after.png" :size 16)))
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal '("[image]") (mapcar (lambda (round) (plist-get round :text))
+                                            (plist-get (harness-tasks-test-task id) :feedback))))
+        (let ((message (car (last (harness-tasks-test-user-nodes sid)))))
+          (should (string-prefix-p harness-tasks--reject-message (plist-get message :content)))
+          (should (equal '("text" "image") (mapcar (lambda (b) (plist-get b :type)) (plist-get message :blocks)))))))))
+
 (ert-deftest harness-tasks-review-failed-work-is-not-reviewed ()
   "Only work that finished cleanly goes to review; work that stopped needs the user as before."
   (harness-tasks-test-with
@@ -2299,6 +2005,49 @@ Each is a new session, never an earlier one."
         (harness-tasks-test-wait-state id 'done)
         (should (equal (list (list id 'merged t)) done))))))
 
+(ert-deftest harness-tasks-git-merge-queue-column ()
+  "A task whose branch is in the merge queue shows in a column of its own.
+The task record keeps when the branch joined the queue; done only once
+the merge finished."
+  (harness-tasks-test-with-git
+    (let ((harness-tasks-require-verification t)
+          (columns nil))
+      (harness-on 'task/changed (lambda (task) (push (plist-get task :column) columns)))
+      (let ((id (harness-tasks-test-submit "Change the shared file")))
+        (harness-tasks-test-wait-state id 'review)
+        (should-not (plist-get (harness-tasks-test-task id) :merge-queued))
+        (harness-call 'task/verify id)
+        (harness-tasks-test-wait-state id 'done)
+        ;; It waited in merging while the queue held its branch, and the
+        ;; time it joined the queue is kept.
+        (should (memq 'merging columns))
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'done (plist-get task :column)))
+          (should-not (plist-get task :merge-status))
+          (should (numberp (plist-get task :merge-queued))))
+        (should (equal "two\n" (harness-tasks-test--main-text root)))))))
+
+(ert-deftest harness-tasks-column-merging-for-every-place-in-the-queue ()
+  "Queued, merging and conflict all read as the merging column.
+A session the user has to answer for comes first: the queue waits too."
+  (harness-tasks-test-with
+    (let* ((sid (plist-get (harness-call 'session/create :cwd default-directory) :id))
+           (id "t-in-the-queue")
+           (task (list :id id :project default-directory :cwd default-directory
+                       :prompt "conflicted" :session sid :state 'merging
+                       :merge-status 'queued :created (float-time))))
+      (harness-tasks--put task)
+      (dolist (status '(queued merging conflict))
+        (harness-tasks--set id :merge-status status)
+        (should (eq 'merging (plist-get (harness-call 'task/get id) :column))))
+      (let ((pid (harness-call 'session/pending-add sid '(:kind question :payload (:question "Which?")))))
+        (should (eq 'needs-input (plist-get (harness-call 'task/get id) :column)))
+        (harness-call 'session/pending-resolve sid pid "theirs")
+        (should (eq 'merging (plist-get (harness-call 'task/get id) :column))))
+      ;; Once the merge is done it is not in the queue any more.
+      (harness-tasks--set id :state 'done :merge-status nil)
+      (should (eq 'done (plist-get (harness-call 'task/get id) :column))))))
+
 (defun harness-tasks-test--lock-line (root path)
   "Return the `locked' line `git worktree list --porcelain' gives PATH of ROOT, or nil."
   (let ((dir (file-name-as-directory (file-truename path))))
@@ -2339,7 +2088,7 @@ Each is a new session, never an earlier one."
         (should (equal "three\n" (harness-tasks-test--main-text root)))
         ;; Archived, its worktree goes.
         (harness-call 'task/archive id)
-        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 10 "worktree removal")
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 30 "worktree removal")
         (should-not (file-directory-p worktree))))))
 
 (ert-deftest harness-tasks-git-archive-removes-a-still-locked-worktree ()
@@ -2355,7 +2104,7 @@ Each is a new session, never an earlier one."
                                  (directory-file-name (plist-get task :worktree)))
         (should (harness-tasks-test--lock-line root (plist-get task :worktree)))
         (harness-call 'task/archive id)
-        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 10 "worktree removal")
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree-removed)) 30 "worktree removal")
         (should-not (file-directory-p (plist-get task :worktree)))))))
 
 (ert-deftest harness-tasks-git-reject-continues-in-its-worktree ()
@@ -2387,54 +2136,6 @@ Each is a new session, never an earlier one."
         (harness-tasks-test-wait-state id 'done)
         (should (equal "three\n" (harness-tasks-test--main-text root)))
         (should (= 2 harness-tasks-test--calls))))))
-
-(ert-deftest harness-tasks-review-in-the-task-file ()
-  "A task's file shows its review and every round of feedback; the file alone brings them back."
-  (harness-tasks-test-with-files
-    (let ((harness-tasks-require-verification t)
-          (harness-tasks-max-running nil))
-      (let* ((id (harness-tasks-test-submit "Fix the parser" root))
-             (sid (plist-get (harness-tasks-test-task id) :session))
-             (feedback "Nested quotes still break.\n\nSee the second test."))
-        (harness-tasks-test-wait-state id 'review)
-        (harness-call 'task/reject id feedback)
-        (harness-tasks-test-wait-state id 'review)
-        (harness-tasks-flush)
-        (let* ((path (harness-tasks-test--file id))
-               (text (harness-read-file path)))
-          (should (equal "review" (harness-tasks-test--field path "state")))
-          (should (equal "review" (harness-tasks-test--field path "column")))
-          (should-not (harness-tasks-test--field path "verified"))
-          (should (string-match-p (concat "\n<!-- harness:review -->\n## Review\n\n### Sent back [0-9]+-[0-9]+-[0-9]+T[0-9:]+Z\n\n"
-                                          "> Nested quotes still break\\.\n>\n> See the second test\\.\n\\'")
-                                  text))
-          ;; Written a while ago, so writing it again would show.
-          (harness-tasks-test--edit path "^updated: .*$" "updated: 2026-01-01T00:00:00Z")
-          (setq text (harness-read-file path))
-          ;; With its store lost, the file brings the task back in review, feedback and all.
-          (delete-file (harness-tasks-test--store root))
-          (delete-file (expand-file-name "task-stores.json" harness-state-directory))
-          (harness-tasks-test--restart)
-          (should-not (gethash id harness-tasks--table))
-          (harness-call 'task/list root)
-          (let ((task (harness-tasks-test-task id)))
-            (should (eq 'review (plist-get task :state)))
-            (should (eq 'review (plist-get task :column)))
-            (should (equal sid (plist-get task :session)))
-            (should (equal (list feedback) (mapcar (lambda (round) (plist-get round :text))
-                                                   (plist-get task :feedback))))
-            (should (numberp (plist-get (car (plist-get task :feedback)) :at))))
-          ;; Nothing to write: the file was right.
-          (harness-tasks-flush)
-          (should (equal text (harness-read-file path)))
-          ;; Set done in the file, the task is verified.
-          (harness-tasks-test--edit path "^state: review$" "state: done")
-          (harness-call 'task/list root)
-          (should (eq 'done (harness-tasks-test-state id)))
-          (should (plist-get (harness-tasks-test-task id) :verified))
-          (harness-tasks-flush)
-          (should (harness-tasks-test--field path "verified"))
-          (should (string-match-p "\n<!-- harness:review -->\n" (harness-read-file path))))))))
 
 ;;;; Handing the finished work in
 ;;
@@ -2551,36 +2252,19 @@ The refusal says what to fix, and the task keeps working."
       (should (member "hand_in" (funcall names sid)))
       (should (member "hand_in" (funcall names nil))))))
 
-(ert-deftest harness-tasks-hand-in-in-the-task-file ()
-  "A task's file holds the report, and the file alone brings it back."
-  (harness-tasks-test-with-files
-    (harness-test-load-module 'tools-handin)
-    (let ((harness-tasks-require-verification t)
-          (harness-tasks-max-running nil)
-          (harness-provider-demo-script-override
-           '((:type tool-call :id "h1" :name "hand_in"
-                  :input (:summary "# Done" :evidence ("a note" (:code "(parse x)" :language "elisp")))))))
-      (let* ((id (harness-tasks-test-submit "Fix the parser" root)))
-        (harness-tasks-test-wait-state id 'review)
-        (harness-tasks-flush)
-        (let* ((path (harness-tasks-test--file id))
-               (text (harness-read-file path)))
-          (should (string-search "<!-- harness:report -->" text))
-          (should (string-search "## Report" text))
-          (should (string-search "```json" text))
-          ;; With its store lost, the file brings the report back.
-          (delete-file (harness-tasks-test--store root))
-          (delete-file (expand-file-name "task-stores.json" harness-state-directory))
-          (harness-tasks-test--restart)
-          (harness-call 'task/list root)
-          (let ((report (plist-get (harness-tasks-test-task id) :report)))
-            (should (equal "# Done" (plist-get report :summary)))
-            (should (equal '((:kind "note" :text "a note")
-                             (:kind "code" :language "elisp" :code "(parse x)"))
-                           (plist-get report :evidence))))
-          ;; Nothing to write: the file was right.
-          (harness-tasks-flush)
-          (should (equal text (harness-read-file path))))))))
+(ert-deftest harness-tasks-recap-survives-a-restart ()
+  "A recap, and the counters it was made at, are kept in the store."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "recap me later")))
+        (harness-call 'task/set-recap id :recap "Wrote the parser and its tests"
+                      :recap-at 1700000000.0 :recap-turns 2 :recap-tools 3)
+        (harness-tasks-test--restart)
+        (let ((task (harness-tasks-test-task id)))
+          (should (equal "Wrote the parser and its tests" (plist-get task :recap)))
+          (should (= 1700000000.0 (plist-get task :recap-at)))
+          (should (= 2 (plist-get task :recap-turns)))
+          (should (= 3 (plist-get task :recap-tools))))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

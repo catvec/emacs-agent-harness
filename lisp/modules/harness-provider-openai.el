@@ -594,7 +594,9 @@ sent."
 
 (cl-defstruct (harness-openai--stream (:copier nil))
   "Accumulated state of one streamed completion."
-  on-event calls finish-reason usage error (finished nil) http endpoint)
+  on-event calls finish-reason usage error (finished nil) http endpoint
+  ;; Slots added later go last, though only a request in flight holds one.
+  status)                ; HTTP status of the response, once headers arrived
 
 (defun harness-openai--stream-tool-call (stream index call)
   "Merge fragment CALL at INDEX into STREAM's accumulated tool calls."
@@ -657,12 +659,24 @@ shows a model writing a large input.  At most one report every
         (when (and finish (stringp finish))
           (setf (harness-openai--stream-finish-reason stream) finish))))))
 
+(defun harness-openai--deepseek-usage-p (usage)
+  "Non-nil when USAGE carries DeepSeek's own cache-token fields.
+DeepSeek reports `prompt_tokens' as the sum of
+`prompt_cache_hit_tokens' and `prompt_cache_miss_tokens' and bills the
+two apart.  A server that reports those fields is billed that way
+whatever the endpoint calls itself, so the split must not depend on
+the endpoint's label alone."
+  (and (listp usage)
+       (or (plist-member usage :prompt_cache_miss_tokens)
+           (plist-member usage :prompt_cache_hit_tokens))))
+
 (defun harness-openai--usage-event (usage endpoint)
   "Build the usage event from an OpenAI USAGE object for ENDPOINT.
 OpenAI-compatible endpoints bill per token, so the event says `api'.
 DeepSeek's `prompt_tokens' includes the cached tokens, so they are
 split: `:input' counts the cache misses, `:cache-read' the hits, and
-`:context' both."
+`:context' both.  A DeepSeek endpoint is recognized by its flavor, by
+an official host, or by the cache fields the server reports."
   (let* ((input (or (plist-get usage :prompt_tokens) 0))
          (hit (or (plist-get usage :prompt_cache_hit_tokens)
                   (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens))
@@ -670,7 +684,8 @@ split: `:input' counts the cache misses, `:cache-read' the hits, and
          (miss (or (plist-get usage :prompt_cache_miss_tokens)
                    (max 0 (- input hit))))
          (cost (plist-get usage :cost))
-         (deepseek (harness-openai--deepseek-p endpoint)))
+         (deepseek (or (harness-openai--deepseek-p endpoint)
+                       (harness-openai--deepseek-usage-p usage))))
     (list :type 'usage
           :input (if deepseek miss input)
           :output (or (plist-get usage :completion_tokens) 0)
@@ -679,6 +694,27 @@ split: `:input' counts the cache misses, `:cache-read' the hits, and
           :cost (and (numberp cost) cost)
           :billing 'api
           :context (if deepseek (+ miss hit) input))))
+
+(defun harness-openai--failure-kind (stream error)
+  "Return the kind of failure STREAM ended with ERROR, or nil.
+An HTTP 402 is out of money, a 401 or 403 a refused login, and a 429
+a short-term rate limit, unless its body says the account's quota is
+used up (`insufficient_quota', DeepSeek's \"Insufficient Balance\").
+Without a status, the error's text is read the same way."
+  (let ((status (harness-openai--stream-status stream))
+        (text (downcase (or error ""))))
+    (cond
+     ((equal status 402) 'billing)
+     ((member status '(401 403)) 'auth)
+     ((equal status 429)
+      (if (string-match-p "insufficient[ _-]quota\\|insufficient[ _-]balance" text)
+          'billing
+        'rate-limit))
+     ((string-match-p "insufficient[ _-]quota" text) 'billing)
+     ((string-match-p "insufficient[ _-]\\(balance\\|credits\\|funds\\)\\|no \\(?:ai \\)?credits\\|out of credits" text)
+      'billing)
+     ((string-match-p "rate[ _-]limit\\|too many requests" text) 'rate-limit)
+     (t nil))))
 
 (defun harness-openai--stream-finish (stream reason &optional error)
   "End STREAM with stop REASON and optional ERROR text, emitting once."
@@ -698,7 +734,9 @@ split: `:input' counts the cache misses, `:cache-read' the hits, and
                                     :input (harness-openai--parse-arguments (plist-get call :arguments))
                                     :respond nil)))))
       (funcall on-event (if error
-                            (list :type 'done :stop-reason reason :error error)
+                            (append (list :type 'done :stop-reason reason :error error)
+                                    (when-let* ((kind (harness-openai--failure-kind stream error)))
+                                      (list :error-kind kind)))
                           (list :type 'done :stop-reason reason))))))
 
 (defun harness-openai--stream-complete (stream)
@@ -741,13 +779,16 @@ split: `:input' counts the cache misses, `:cache-read' the hits, and
                  :headers (harness-openai--headers endpoint key)
                  :json (harness-openai--body endpoint name request)
                  :timeout harness-openai--request-timeout
-                 :on-headers (lambda (s _headers) (setq status s))
+                 :on-headers (lambda (s _headers)
+                               (setq status s)
+                               (setf (harness-openai--stream-status stream) s))
                  :on-chunk (lambda (chunk)
                              (if (and status (or (< status 200) (>= status 300)))
                                  (setq raw (concat raw chunk))
                                (funcall sse chunk)))
                  :callback (lambda (s _headers body err)
                              (let ((s (or s status)))
+                               (setf (harness-openai--stream-status stream) s)
                                (cond
                                 ((harness-openai--stream-finished stream) nil)
                                 ((eq (car-safe err) 'cancelled)

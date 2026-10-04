@@ -150,8 +150,13 @@ Return the chosen backend symbol.  Safe to call again: it refreshes
 ;; commit, so the sandbox mounts it read-write -- except its hooks and
 ;; config, which stay read-only: the harness runs git unconfined in the
 ;; main checkout (the merge queue), and a planted hook or core.hooksPath
-;; would run there outside the jail.  The sandbox hides ~/.gitconfig, so
-;; the host's commit identity is passed in through the environment.
+;; would run there outside the jail.  The main checkout's index and HEAD
+;; stay read-only too: the sandbox does not show the main checkout's
+;; files, so `git -C MAIN …' from a worktree sees every file deleted,
+;; and anything it staged or checked out there would wreck that
+;; checkout's index (a worktree keeps its own index and HEAD under
+;; worktrees/).  The sandbox hides ~/.gitconfig, so the host's commit
+;; identity is passed in through the environment.
 
 (defvar harness-sandbox--git-identity (make-hash-table :test 'equal)
   "Git common dir -> (NAME . EMAIL) as the host's git config gives them.")
@@ -178,7 +183,9 @@ Return (:common DIR :protected (PATH…)) or nil."
           (list :common common
                 :protected (cl-remove-if-not #'file-exists-p
                                              (list (expand-file-name "hooks" common)
-                                                   (expand-file-name "config" common)))))))))
+                                                   (expand-file-name "config" common)
+                                                   (expand-file-name "index" common)
+                                                   (expand-file-name "HEAD" common)))))))))
 
 (defun harness-sandbox--git-identity (common)
   "Return the host's (NAME . EMAIL) for the repository at COMMON, cached."

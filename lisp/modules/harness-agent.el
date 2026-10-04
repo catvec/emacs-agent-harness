@@ -11,7 +11,10 @@
 ;; a turn runs are delivered once, at the next step boundary: with the
 ;; next tool result, or as the next user message when the model stops
 ;; first.  Queued messages wait for the turn to end and then go out
-;; together as a turn of their own.
+;; together as a turn of their own.  A message is delivered when it
+;; starts a turn or steers one, a queued one when its queue goes out;
+;; then, and only then, the `agent/message' filters see it and may
+;; change it (task mode sends a task waiting for review back this way).
 ;;
 ;; A provider may run a tool of its own in place of a harness tool (see
 ;; `tools/builtin'): Claude Code's web search for web_search, say.  It
@@ -33,10 +36,6 @@
 
 (declare-function harness-tool-title "harness-tools")
 
-(defcustom harness-agent-max-steps 200
-  "Maximum model calls in one turn before the harness stops it."
-  :type 'integer :group 'harness)
-
 (defconst harness-agent--base-system-prompt
   "You are an expert software engineering agent working inside the user's GNU Emacs through the Emacs agent harness.
 
@@ -48,6 +47,21 @@ Work carefully and verify what you do. Prefer the provided tools over guessing; 
 
 (defconst harness-agent--progress-interval 0.5
   "Seconds between announcements of a running tool's progress.")
+
+(defconst harness-agent--max-error-retries 8
+  "Most times one turn runs a failed step again for `agent/step-error'.
+Each retry follows a handler's verdict that another try can work (the
+fallback module moves the session to another provider first), so a
+handful covers every provider of a fallback list; the cap only keeps a
+handler that is wrong from looping.")
+
+(defconst harness-agent--handoff-max-chars 120000
+  "Most characters of transcript a handoff to a hosted loop carries.
+About 30k tokens: enough for the turns a provider missed while another
+one worked, without filling its context; the oldest go first.")
+
+(defconst harness-agent--handoff-item-chars 4000
+  "Most characters of one message, tool call or result in a handoff.")
 
 (cl-defstruct (harness-agent-turn (:copier nil))
   session-id promise handle (steps 0) cancelled
@@ -91,6 +105,20 @@ Each is (CALL-ID :tool NAME :title TITLE :since FLOAT :checking BOOL
 The session's model may change while a step runs (it applies from the
 next step), so what the step writes names this one.  Kept beside the
 turn records, as the activity tables are.")
+
+(defvar harness-agent--failures (make-hash-table :test 'equal)
+  "Session id -> the failure of its running turn's last step, if it failed.
+The `done' event's keys (`:error' `:error-kind' `:resets' ...) plus the
+`:model' and `:step' it ran on; read when the turn decides what follows.
+Kept beside the turn records, so a reload keeps the turns working.")
+
+(defvar harness-agent--retries (make-hash-table :test 'equal)
+  "Session id -> how many failed steps its running turn ran again.")
+
+(defvar harness-agent--open-nodes (make-hash-table :test 'equal)
+  "Session id -> the text or thinking node its turn wrote last, until a tool call.
+A provider `checkpoint' event without a call id belongs to that node.
+Kept beside the turn records, as the activity tables are.")
 
 (defun harness-agent--compact (plist)
   "Return PLIST without the keys whose value is nil."
@@ -149,6 +177,7 @@ provider waiting for it."
           (cancel-timer timer)
           (remhash sid harness-agent--progress-timers))
         (remhash sid harness-agent--calls)
+        (remhash sid harness-agent--open-nodes)
         (harness-agent--set-activity sid nil))
     (error (harness-log 'warn "agent: clearing the activity of %s: %S" sid err))))
 
@@ -216,11 +245,34 @@ permission is decided and `:detail', its latest progress, and
 
 ;;;; Prompt assembly
 
+(defconst harness-agent--tmp-dir-line
+  "- Temporary directory: %s (yours alone and already allowed, bash included: put scratch files, logs and screenshots there rather than in the working directory or /tmp)\n"
+  "System prompt line naming the session's own temporary directory (%s).
+It steers scratch files there: inside the sandbox /tmp is private to
+each command and starts empty, so a file a command leaves there is gone
+by the next call, and outside the sandbox /tmp is not an allowed
+directory.")
+
+(defun harness-agent--tmp-dir (session)
+  "Return SESSION's own temporary directory, made if missing, or nil."
+  (let ((id (plist-get session :id)))
+    (and id (harness-method-exists-p 'session/tmp-dir)
+         (condition-case err
+             (harness-call 'session/tmp-dir id)
+           (error (harness-log 'debug "agent: no temporary directory for %s: %s"
+                               id (harness-error-message err))
+                  nil)))))
+
 (defun harness-agent--system-prompt (session)
-  "Return the system prompt for SESSION after the `agent/system-prompt' filter."
-  (let ((base (format "%s\n\n## Environment\n- Working directory: %s\n- Project: %s\n- Date: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
+  "Return the system prompt for SESSION after the `agent/system-prompt' filter.
+Its Environment section names the session's own temporary directory,
+made here when it is missing (see `session/tmp-dir'), so the directory
+the model is told about exists when it reads about it."
+  (let* ((tmp (harness-agent--tmp-dir session))
+         (base (format "%s\n\n## Environment\n- Working directory: %s\n%s- Project: %s\n- Date: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
                       harness-agent--base-system-prompt
                       (plist-get session :cwd)
+                      (if tmp (format harness-agent--tmp-dir-line tmp) "")
                       (or (and (harness-method-exists-p 'project/name)
                                (harness-call 'project/name (plist-get session :project)))
                           (plist-get session :project))
@@ -308,6 +360,137 @@ Messages sent together stay apart as paragraphs."
                              :mime mime :name (plist-get a :name))))))
           attachments))
 
+;;;; Handoff to a hosted loop
+;;
+;; A provider that runs its own loop (Claude Code, Copilot) keeps the
+;; conversation itself and is only sent the newest user message.  When
+;; another provider's model worked in the session meanwhile -- the
+;; fallback moved it there while this one was out of quota, or the
+;; model was switched by hand -- that conversation misses those turns.
+;; They are rendered as text at the head of the message it is sent.
+
+(defun harness-agent--model-provider (model)
+  "Return the provider part of MODEL, a model id, as a string, or nil."
+  (and (stringp model) (string-match "\\`\\([^:]+\\):" model) (match-string 1 model)))
+
+(defun harness-agent--node-provider (node)
+  "Return the provider of the model that produced NODE, or nil when unrecorded."
+  (harness-agent--model-provider (plist-get (plist-get node :meta) :model)))
+
+(defun harness-agent--hosted-p (session)
+  "Non-nil when SESSION's provider runs its own tool loop."
+  (and (harness-method-exists-p 'provider/capabilities)
+       (plist-get (ignore-errors (harness-call 'provider/capabilities (plist-get session :model)))
+                  :hosted-loop)))
+
+(defun harness-agent--handoff-cut (text)
+  "Return TEXT cut to `harness-agent--handoff-item-chars', saying so."
+  (let ((text (string-trim (or text ""))))
+    (if (<= (length text) harness-agent--handoff-item-chars)
+        text
+      (format "%s… [%d more characters]" (substring text 0 harness-agent--handoff-item-chars)
+              (- (length text) harness-agent--handoff-item-chars)))))
+
+(defun harness-agent--handoff-item (node)
+  "Return NODE as one item of a handoff, or nil for a node left out.
+Thinking is another model's own working and hints are the harness's."
+  (pcase (plist-get node :kind)
+    ('user
+     (let ((from (harness-node-sender node)))
+       (format "%s: %s" (if from (concat "Message from " (harness-sender-description from)) "User")
+               (harness-agent--handoff-cut (plist-get node :content)))))
+    ('assistant
+     (unless (harness-string-blank-p (plist-get node :content))
+       (format "Assistant (%s): %s" (or (plist-get (plist-get node :meta) :model) "another model")
+               (harness-agent--handoff-cut (plist-get node :content)))))
+    ('tool-call
+     (format "Tool call %s: %s" (plist-get node :tool)
+             (harness-agent--handoff-cut
+              (or (ignore-errors (harness-json-encode-text (or (plist-get node :input) :empty))) ""))))
+    ('tool-result
+     (format "Tool result%s: %s" (if (plist-get node :is-error) " (error)" "")
+             (harness-agent--handoff-cut (plist-get node :output))))
+    ('plan (format "Plan: %s" (harness-agent--handoff-cut (plist-get node :content))))
+    ('compaction (format "Summary of the conversation before: %s"
+                         (harness-agent--handoff-cut (plist-get node :content))))
+    (_ nil)))
+
+(defun harness-agent--handoff-text (nodes models newest)
+  "Return the handoff text telling a hosted loop what NODES it missed.
+MODELS are the ids of the models that worked meanwhile.  NEWEST non-nil
+means the newest message follows the text; otherwise the request ends
+on tool results the provider never asked for, so it is told to carry
+on.  Items beyond `harness-agent--handoff-max-chars' go, oldest first."
+  (let* ((items (delq nil (mapcar #'harness-agent--handoff-item nodes)))
+         (total (apply #'+ (mapcar (lambda (s) (+ 2 (length s))) items)))
+         (dropped 0))
+    (while (and (cdr items) (> total harness-agent--handoff-max-chars))
+      (setq total (- total (+ 2 (length (car items))))
+            items (cdr items)
+            dropped (1+ dropped)))
+    (concat (format "[While you were unavailable, this conversation went on with %s. This is what happened since your last reply, oldest first.]\n\n"
+                    (string-join models ", "))
+            (if (> dropped 0) (format "[%d earlier item%s left out.]\n\n" dropped (if (= dropped 1) "" "s")) "")
+            (string-join items "\n\n")
+            "\n\n"
+            (if newest
+                "[End of what you missed. The newest message follows.]"
+              "[End of what you missed. Carry on with the task from where it stopped.]"))))
+
+(defun harness-agent--handoff (session messages)
+  "Return MESSAGES for SESSION's hosted loop, caught up on what it missed.
+The provider's own conversation ends at the last node one of its models
+produced; nodes another provider's model produced after that, from the
+last compaction on, are what it missed.  When there are any, MESSAGES
+becomes one user message: the handoff text (see
+`harness-agent--handoff-text'), then the newest message's own blocks.
+Otherwise MESSAGES is returned as it is."
+  (let* ((provider (harness-agent--model-provider (plist-get session :model)))
+         (path (harness-call 'session/nodes (plist-get session :id)))
+         (start (cl-position 'compaction path :key (lambda (n) (plist-get n :kind)) :from-end t))
+         (path (if start (nthcdr start path) path))
+         (own (cl-position-if (lambda (n) (equal (harness-agent--node-provider n) provider)) path :from-end t))
+         ;; A handoff note is the conversation's deliberate opening for this
+         ;; provider, not something it missed: the handoff module wrote it,
+         ;; and a note in the trailing messages already brings the provider
+         ;; up to date, so the catch-up would only repeat it.
+         (trailing (cl-loop for n in (reverse path)
+                            while (memq (plist-get n :kind) '(user hint tool-result compaction))
+                            thereis (harness-node-handoff n)))
+         (missed (cl-remove-if #'harness-node-handoff (if own (nthcdr (1+ own) path) path)))
+         (models (delete-dups
+                  (delq nil (mapcar (lambda (n)
+                                      (let ((p (harness-agent--node-provider n)))
+                                        (and p (not (equal p provider))
+                                             (plist-get (plist-get n :meta) :model))))
+                                    missed)))))
+    (if (or (null models) trailing)
+        messages
+      (let* (;; The newest message: the user nodes after the last other one.
+             (tail (length (seq-take-while (lambda (n) (eq (plist-get n :kind) 'user)) (reverse missed))))
+             (context (butlast missed tail))
+             (last (car (last messages)))
+             (blocks (and (> tail 0) last (eq (plist-get last :role) 'user)
+                          (cl-remove-if (lambda (b) (equal (plist-get b :type) "tool_result"))
+                                        (plist-get last :content)))))
+        (list (list :role 'user
+                    :content (cons (list :type "text"
+                                         :text (harness-agent--handoff-text context models blocks))
+                                   blocks)))))))
+
+(defun harness-agent--request-messages (session)
+  "Return the provider messages of SESSION's next request.
+A hosted loop gets the turns it missed handed over, see
+`harness-agent--handoff'."
+  (let ((messages (harness-agent--prepare-messages
+                   session (harness-call 'session/messages (plist-get session :id)))))
+    (if (harness-agent--hosted-p session)
+        (condition-case err
+            (harness-agent--handoff session messages)
+          (error (harness-log 'warn "agent: handing %s over failed: %S" (plist-get session :id) err)
+                 messages))
+      messages)))
+
 ;;;; Turn start
 
 (defun harness-agent--reanimate (session-id)
@@ -317,6 +500,17 @@ A turn still running in it (it was closed mid-turn) keeps it running."
     (harness-call 'session/resume session-id)
     (when (gethash session-id harness-agent--turns)
       (harness-call 'session/set-status session-id 'running))))
+
+(defun harness-agent--message (session-id blocks from steering)
+  "Return BLOCKS, a message delivered to SESSION-ID, as the filters leave it.
+The sync filter `agent/message' gets BLOCKS and its arguments
+SESSION-ID and (:from FROM :steering STEERING): FROM is who sent the
+message (nil for the user, see `agent/prompt'), STEERING is non-nil
+when the message steers the running turn rather than starting one.
+Each filter returns the blocks to deliver.  A filter that returns
+none leaves the message as it was, so a message is never emptied."
+  (or (harness-run-filter 'agent/message blocks session-id (list :from from :steering steering))
+      blocks))
 
 (harness-defmethod agent/prompt (session-id blocks &optional opts)
   "Send BLOCKS (content blocks, or a string) to SESSION-ID.
@@ -332,7 +526,10 @@ harness (`harness-sender-system') or another session's agent
 model gets the message as a user message all the same.
 An inactive session is resumed first: sending to it brings it back.
 Blank text blocks are dropped; a message left empty signals an error,
-so no turn, steering message or queued item is ever empty."
+so no turn, steering message or queued item is ever empty.
+A message that starts a turn or steers one goes through the
+`agent/message' filters first (see `harness-agent--message'); a queued
+one does when its queue is sent."
   (let* ((blocks (cl-remove-if #'harness-agent--blank-p
                                (if (stringp blocks) (list (list :type "text" :text blocks)) blocks)))
          (queue (harness-json-true-p (plist-get opts :queue)))
@@ -342,7 +539,8 @@ so no turn, steering message or queued item is ever empty."
     (unless (or blocks attachments)
       (signal 'harness-error (list "Nothing to send: the message is empty")))
     (unless queue
-      (harness-agent--reanimate session-id))
+      (harness-agent--reanimate session-id)
+      (setq blocks (harness-agent--message session-id blocks from (and turn t))))
     (cond
      (queue
       (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments from)
@@ -359,6 +557,44 @@ so no turn, steering message or queued item is ever empty."
       (harness-agent-turn-promise turn))
      (t (harness-agent--start session-id blocks from)))))
 
+(defun harness-agent--follow-head (session-id)
+  "Make the provider conversation of SESSION-ID the transcript up to its head.
+Return a promise that settles once it is; it never rejects.  A hosted
+provider holds the conversation itself, and the head may have moved
+off it since the last turn: checked out at an earlier node, or on
+another branch (`session/set-head').  The conversation is then cut at
+the last provider checkpoint on the head's path, a fork of it that
+`provider/fork' makes, or, without a checkpoint or a provider able to
+cut there, dropped, so that the provider starts a new one from the
+transcript.  Either way the model gets nothing that comes after the
+head.  See `session/provider-continuation'."
+  (condition-case err
+      (let ((continuation (harness-call 'session/provider-continuation session-id)))
+        (if (eq (plist-get continuation :mode) 'current)
+            (harness-resolved nil)
+          (let* ((session (harness-call 'session/get session-id))
+                 (checkpoint (plist-get continuation :checkpoint)))
+            (harness-then
+             (if (and checkpoint (harness-method-exists-p 'provider/fork))
+                 (harness-catch (harness-call 'provider/fork (plist-get session :model)
+                                              (plist-get session :provider-state) checkpoint)
+                                (lambda (e)
+                                  (harness-log 'warn "agent: cutting the provider conversation of %s failed: %s"
+                                               session-id (harness-error-message e))
+                                  nil))
+               (harness-resolved nil))
+             (lambda (state)
+               (when (harness-call 'session/exists-p session-id)
+                 (harness-log 'info "agent: %s continues from %s, %s" session-id (plist-get session :head)
+                              (if state (format "its provider conversation cut at node %s"
+                                                (plist-get continuation :node))
+                                "in a new provider conversation"))
+                 (harness-call 'session/set-provider-state session-id state)
+                 (harness-call 'session/set-provider-node session-id (plist-get session :head)))
+               nil)))))
+    (error (harness-log 'warn "agent: following the head of %s failed: %S" session-id err)
+           (harness-resolved nil))))
+
 (defun harness-agent--start (session-id blocks &optional from)
   "Start a turn of SESSION-ID with the message BLOCKS; return its promise.
 FROM, when non-nil, is who sent the message (see `agent/prompt')."
@@ -369,10 +605,18 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
                              :blocks (unless (harness-agent--only-text-p blocks) blocks))
                        (and from (list :meta (list :from from))))))
     (puthash session-id turn harness-agent--turns)
-    ;; The gate runs first so that an automatic compaction lands before
-    ;; the user's new message, never after it.
+    (remhash session-id harness-agent--failures)
+    (remhash session-id harness-agent--retries)
+    ;; The provider conversation follows the head first, then the gate
+    ;; runs, so that an automatic compaction lands before the user's new
+    ;; message, never after it.
     (harness-then
-     (harness-run-filter-async 'agent/before-turn (list :proceed t) session)
+     (harness-then (harness-agent--follow-head session-id)
+                   (lambda (_)
+                     (harness-run-filter-async 'agent/before-turn (list :proceed t)
+                                               (if (harness-call 'session/exists-p session-id)
+                                                   (harness-call 'session/get session-id)
+                                                 session))))
      (lambda (gate)
        (when (harness-call 'session/exists-p session-id)
          (harness-call 'session/append session-id node))
@@ -411,9 +655,6 @@ the state."
   (let ((sid (harness-agent-turn-session-id turn)))
     (cond
      ((harness-agent-turn-cancelled turn) (harness-agent--end turn 'cancelled))
-     ((>= (harness-agent-turn-steps turn) harness-agent-max-steps)
-      (harness-call 'session/hint sid (format "Stopped after %d steps" harness-agent-max-steps))
-      (harness-agent--end turn 'max-steps))
      ((not (harness-call 'session/exists-p sid)) (harness-agent--end turn 'error "session deleted"))
      (t
       (cl-incf (harness-agent-turn-steps turn))
@@ -432,7 +673,7 @@ the state."
              (request (list :model model
                             :session session
                             :system (harness-agent--system-prompt session)
-                            :messages (harness-agent--prepare-messages session (harness-call 'session/messages sid))
+                            :messages (harness-agent--request-messages session)
                             :tools (if (harness-method-exists-p 'tools/list) (harness-call 'tools/list sid) nil)
                             ;; Tools the provider runs itself, in place of these.
                             :builtin-tools (and (harness-method-exists-p 'tools/builtin)
@@ -509,6 +750,7 @@ is that model's provider's, whatever the session's model is by now."
                        (harness-tag-provider-state
                         (plist-get ev :state)
                         (or model (plist-get (harness-call 'session/get sid) :model)))))
+        ('checkpoint (harness-agent--checkpoint turn ev))
         ('quota (harness-call 'session/runtime sid :quota (plist-get ev :windows))
                 (harness-emit 'agent/quota sid (plist-get ev :windows)))
         ('hint (harness-call 'session/hint sid (plist-get ev :text)))
@@ -520,6 +762,11 @@ is that model's provider's, whatever the session's model is by now."
                (harness-agent-turn-error turn) (plist-get ev :error)
                (harness-agent-turn-waiting-done turn) t)
          (when (eq (plist-get ev :stop-reason) 'error)
+           ;; Kept for `agent/step-error', with the model the step ran on.
+           (puthash sid (append (harness-plist-remove ev :type :stop-reason)
+                                (list :model (plist-get (harness-call 'session/get sid) :model)
+                                      :step (harness-agent-turn-steps turn)))
+                    harness-agent--failures)
            (harness-call 'session/hint sid (format "Error: %s" (or (plist-get ev :error) "unknown"))))
          (harness-agent--maybe-continue turn))
         (other (harness-log 'debug "agent: unknown provider event %S" other))))))
@@ -549,6 +796,7 @@ before a tool call never becomes an empty message."
          ((string-blank-p buf))
          (t
           (setq node-id (plist-get (harness-call 'session/append sid (list :kind kind :content buf)) :id))
+          (puthash sid node-id harness-agent--open-nodes)
           (if thinking
               (setf (harness-agent-turn-think-node turn) node-id)
             (setf (harness-agent-turn-text-node turn) node-id))
@@ -593,9 +841,13 @@ loop reads it in the content, a native one with its next request."
     (harness-agent--finalize-live turn)
     (setf (harness-agent-turn-hosted turn) (and respond t))
     (cl-incf (harness-agent-turn-pending turn))
+    (remhash sid harness-agent--open-nodes)
     (let ((node (harness-call 'session/append sid
-                              (list :kind 'tool-call :tool name :call-id call-id :input input
-                                    :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name))))
+                              (append (list :kind 'tool-call :tool name :call-id call-id :input input
+                                            :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name)
+                                            :meta (list :model (plist-get (harness-call 'session/get sid) :model)))
+                                      (and (plist-get ev :checkpoint)
+                                           (list :checkpoint (plist-get ev :checkpoint))))))
           (execution nil))
       (harness-emit 'agent/tool-call sid node)
       ;; Recorded before it starts, so its permission decision finds it.
@@ -643,6 +895,36 @@ loop reads it in the content, a native one with its next request."
            (cl-decf (harness-agent-turn-pending turn))
            (harness-agent--maybe-continue turn)))))))
 
+;;;; Provider checkpoints
+
+(defun harness-agent--result-node (sid call-id)
+  "Return the id of the latest result of tool call CALL-ID on SID's path, or nil."
+  (plist-get (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
+                                          (equal (plist-get n :call-id) call-id)))
+                         (harness-call 'session/nodes sid) :from-end t)
+             :id))
+
+(defun harness-agent--checkpoint (turn ev)
+  "Stamp the provider checkpoint of EV on the node of TURN that it marks.
+A hosted provider reports where its own conversation stands as content
+lands in it, so that a fork or a checkout at a node can later cut that
+conversation there (see `session/provider-continuation').  With
+`:call-id' EV marks that call's result; without, the text or thinking
+node the turn wrote last, unless a tool call came after it (a tool
+call brings its own checkpoint on its `tool-call' event).  A
+checkpoint with no such node is dropped: the node it would mark, such
+as a thinking block without text, has none to show."
+  (let* ((sid (harness-agent-turn-session-id turn))
+         (checkpoint (plist-get ev :checkpoint))
+         (call-id (plist-get ev :call-id))
+         (node-id (if call-id
+                      (harness-agent--result-node sid call-id)
+                    (gethash sid harness-agent--open-nodes))))
+    (when (and checkpoint node-id)
+      (condition-case err
+          (harness-call 'session/update-node sid node-id :checkpoint checkpoint)
+        (error (harness-log 'warn "agent: recording a checkpoint of %s failed: %S" sid err))))))
+
 ;;;; Tools the provider runs itself
 
 (defun harness-agent--current-p (turn)
@@ -661,10 +943,14 @@ or is done."
     (when (and (harness-agent--current-p turn)
                (not (assoc call-id (gethash sid harness-agent--calls))))
       (harness-agent--finalize-live turn)
+      (remhash sid harness-agent--open-nodes)
       (let ((node (harness-call 'session/append sid
-                                (list :kind 'tool-call :tool name :call-id call-id :input input
-                                      :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name)
-                                      :meta (list :builtin t)))))
+                                (append (list :kind 'tool-call :tool name :call-id call-id :input input
+                                              :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name)
+                                              :meta (list :builtin t
+                                                          :model (plist-get (harness-call 'session/get sid) :model)))
+                                        (and (plist-get ev :checkpoint)
+                                             (list :checkpoint (plist-get ev :checkpoint)))))))
         (harness-emit 'agent/tool-call sid node)
         (harness-agent--add-call sid call-id name (plist-get node :title))
         ;; Nothing checks its permission until the provider asks.
@@ -795,8 +1081,41 @@ everything recorded so far."
         ('max-tokens (harness-call 'session/hint sid "The model hit its output limit.")
                      (harness-agent--end turn 'max-tokens))
         ('cancelled (harness-agent--end turn 'cancelled))
-        ('error (harness-agent--end turn 'error (harness-agent-turn-error turn)))
+        ('error (harness-agent--step-failed turn))
         (_ (harness-agent--end turn (or reason 'end-turn)))))))
+
+(defun harness-agent--step-failed (turn)
+  "Decide what follows TURN's failed step: another try, or the turn's end.
+The async filter `agent/step-error' gets (:retry nil), the session and
+the FAILURE (the `done' event's keys, `:model' and `:step').  A handler
+that answers (:retry t) -- the fallback module, having moved the
+session to another provider -- has the step run again, at most
+`harness-agent--max-error-retries' times a turn.  Otherwise, and once
+the turn was cancelled, it ends with `error'."
+  (let* ((sid (harness-agent-turn-session-id turn))
+         (error (harness-agent-turn-error turn))
+         (failure (or (gethash sid harness-agent--failures) (list :error error)))
+         (count (gethash sid harness-agent--retries 0)))
+    (remhash sid harness-agent--failures)
+    (if (or (harness-agent-turn-cancelled turn)
+            (>= count harness-agent--max-error-retries)
+            (not (harness-call 'session/exists-p sid)))
+        (harness-agent--end turn 'error error)
+      (harness-then
+       (harness-run-filter-async 'agent/step-error (list :retry nil)
+                                 (harness-call 'session/get sid) failure)
+       (lambda (decision)
+         (when (harness-agent--current-p turn)
+           (if (and (plist-get decision :retry)
+                    (not (harness-agent-turn-cancelled turn))
+                    (harness-call 'session/exists-p sid))
+               (progn (puthash sid (1+ count) harness-agent--retries)
+                      (harness-agent--step turn))
+             (harness-agent--end turn 'error error))))
+       (lambda (err)
+         (harness-log 'error "agent: agent/step-error for %s failed: %S" sid err)
+         (when (harness-agent--current-p turn)
+           (harness-agent--end turn 'error error)))))))
 
 (defun harness-agent--end (turn reason &optional error)
   (let ((sid (harness-agent-turn-session-id turn)))
@@ -806,10 +1125,15 @@ everything recorded so far."
         (harness-agent--close-builtins turn reason))
       (remhash sid harness-agent--turns)
       (remhash sid harness-agent--step-models)
+      (remhash sid harness-agent--failures)
+      (remhash sid harness-agent--retries)
       (harness-agent--clear-activity sid)
       (when (harness-call 'session/exists-p sid)
         (harness-call 'session/usage-add sid (list :turns 1))
         (let ((session (harness-call 'session/get sid)))
+          ;; The provider conversation got this far: a head moved off it
+          ;; later makes the next turn cut it (`harness-agent--follow-head').
+          (harness-call 'session/set-provider-node sid (plist-get session :head))
           (unless (eq (plist-get session :status) 'inactive)
             (harness-call 'session/set-status sid (if (plist-get session :pending) 'blocked 'idle)))))
       (harness-emit 'agent/turn-ended sid reason)

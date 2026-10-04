@@ -155,10 +155,10 @@ state directory, as they would the user's."
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
     (with-temp-file (expand-file-name ".dir-locals.el" root)
-      (insert "((nil . ((harness-permission-mode . yolo) (harness-tasks-directory . 5))))"))
+      (insert "((nil . ((harness-permission-mode . yolo) (harness-budget . 5))))"))
     (harness-ui-config-test-open root)
     (should (derived-mode-p 'harness-ui-config-mode))
-    (should-not (string-match-p "does not fit" (harness-ui-config-test-block "harness-tasks-directory")))
+    (should-not (string-match-p "does not fit" (harness-ui-config-test-block "harness-budget")))
     (should (equal (format "*harness settings: %s*" (file-name-nondirectory (directory-file-name root)))
                    (buffer-name)))
     (should (eq 'global harness-ui-config--scope))
@@ -166,7 +166,8 @@ state directory, as they would the user's."
       ;; The common settings come in sections named by what they are for.
       (should (string-match-p "^ New sessions$" text))
       (should (string-match-p "^ Files and safety$" text))
-      (should (string-match-p "^ Task board$" text))
+      ;; The tasks module is not loaded here, so its section is absent.
+      (should-not (string-match-p "^ Task board$" text))
       ;; The advanced ones are folded into one line until asked for.
       (should (string-match-p "^ Advanced  \\[?Show [0-9]+ more" text))
       (should-not (string-match-p "Log level: " text)))
@@ -181,12 +182,12 @@ state directory, as they would the user's."
     (should (string-match-p "this project uses YOLO" (harness-ui-config-test-block "harness-permission-mode")))
     (should (string-match-p "Model: " (harness-ui-config-test-block "harness-model")))
     ;; The header line has a mouse target for both scopes.
-    (let ((header (harness-ui-config--header)))
+    (let ((header (harness-ui-config--header most-positive-fixnum)))
       (dolist (label '("Global" "Project"))
-        (let ((seg (cl-find-if (lambda (s) (string-match-p label s)) header)))
-          (should seg)
-          (should (keymapp (get-text-property 1 'local-map seg)))
-          (should (get-text-property 1 'help-echo seg)))))
+        (let ((pos (string-match label header)))
+          (should pos)
+          (should (keymapp (get-text-property pos 'local-map header)))
+          (should (get-text-property pos 'help-echo header)))))
     ;; s switches to the Project scope.
     (goto-char (point-min))
     (execute-kbd-macro "s")
@@ -198,7 +199,7 @@ state directory, as they would the user's."
       (should (string-match-p "Remove override" mode)))
     (should (string-match-p "uses the global value" (harness-ui-config-test-block "harness-model")))
     ;; A project value the harness finds invalid is edited as Lisp, with a warning.
-    (should (string-match-p "does not fit" (harness-ui-config-test-block "harness-tasks-directory")))
+    (should (string-match-p "does not fit" (harness-ui-config-test-block "harness-budget")))
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
       (should (string-match-p "more settings have a global value only" text))
       (should-not (string-match-p "Advanced" text))
@@ -304,7 +305,7 @@ state directory, as they would the user's."
     (harness-ui-config-set-scope 'project)
     (should-not (harness-ui-config--edited-p "harness-model"))
     (should (= 1 (harness-ui-config--edit-count 'global)))
-    (should (string-match-p "Global." (mapconcat #'identity (harness-ui-config--header) "")))
+    (should (string-match-p "Global." (harness-ui-config--header most-positive-fixnum)))
     (harness-ui-config-set-scope 'global)
     (should (equal "demo:edited" (widget-value (harness-ui-config--widget "harness-model"))))
     ;; C-c C-k drops the edit.

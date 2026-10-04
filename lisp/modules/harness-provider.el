@@ -138,7 +138,13 @@ A provider whose listing failed maps to nil; one not asked yet is absent.")
   (remhash id harness-provider--fetching)
   (harness-provider--rebuild-cache))
 
-(cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities tiers)
+(defvar harness-provider--lifecycle (make-hash-table :test 'eq)
+  "Provider id -> (:warm FN :close FN), the hooks `harness-define-provider' got.
+Kept beside the provider records rather than in them, so records made
+before a reload need no slots they lack.")
+
+(cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities tiers
+                                      warm close)
   "Register provider ID.
 LABEL and DOC describe it.  MODELS is a function returning a promise of
 model plists.  COMPLETE takes a request plist and returns a handle
@@ -148,16 +154,24 @@ REFRESH flag and returns a promise of billing and quota information
 \(see `provider/quota').  CAPABILITIES is the static capability plist.
 TIERS names a model per user-facing tier (see `harness-model-tiers'
 and `harness-provider-tier-model') so the harness can pick a model on
-its own.  Defining ID again replaces it and forgets the models it
-listed, which it is asked for again when needed; other providers'
-models stay cached."
+its own.  WARM, when given, takes a request plist without messages and
+prepares what such a request will need, a process say, so it answers
+sooner (`provider/warm'); CLOSE takes a session id and frees what the
+provider keeps for it (`provider/close').  Defining ID again replaces
+it and forgets the models it listed, which it is asked for again when
+needed; other providers' models stay cached."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
                                      :capabilities capabilities :tiers tiers)
            harness-providers)
+  (puthash id (list :warm warm :close close) harness-provider--lifecycle)
   (harness-provider--forget id)
   id)
+
+(defun harness-provider--hook (id key)
+  "Return provider ID's lifecycle hook KEY (`:warm' or `:close'), or nil."
+  (plist-get (gethash id harness-provider--lifecycle) key))
 
 (defun harness-provider-get (id)
   "Return provider ID or nil."
@@ -168,6 +182,7 @@ models stay cached."
 Return non-nil when a provider was registered under ID."
   (prog1 (and (gethash id harness-providers) t)
     (remhash id harness-providers)
+    (remhash id harness-provider--lifecycle)
     (harness-provider--forget id)))
 
 (defun harness-provider-parse-model (model-id)
@@ -378,24 +393,50 @@ A provider names its tiers with keywords, so `cheap', `:cheap' and
         ((stringp value) (intern (concat ":" (string-remove-prefix ":" value))))
         (t :cheap)))
 
+(defun harness-provider--provider-id (id)
+  "Return the provider id (a symbol) that ID names, or nil.
+ID is a model id \"PROVIDER:MODEL\", a provider id alone, as a symbol
+or a string, or nil."
+  (cond ((null id) nil)
+        ((symbolp id) id)
+        ((not (stringp id)) nil)
+        ((string-match-p "\\`[a-z0-9_-]+\\'" id) (intern id))
+        (t (car (harness-provider-parse-model id)))))
+
+(defun harness-provider--listed-models (pid)
+  "Return the cached models of provider PID, asking it first when unlisted.
+A static catalogue answers at once; nil comes back until a provider that
+answers later has, or for an unknown provider."
+  (when-let* ((provider (and pid (harness-provider-get pid))))
+    (when (and (harness-provider-models-fn provider)
+               (not (harness-provider--listed-p pid)))
+      (harness-provider--fetch provider t))
+    (harness-provider--cached-models pid)))
+
+(harness-defmethod provider/cached-models (provider-id)
+  "Return the models PROVIDER-ID has listed, from the cache, without waiting.
+PROVIDER-ID is a symbol or its name.  A provider not listed yet is
+asked first; a static catalogue answers at once, so its models come
+back, while one that answers later gives nil until it has.  Unlike
+`provider/models', no other provider holds the answer up."
+  (harness-provider--listed-models (harness-provider--provider-id provider-id)))
+
 (defun harness-provider-tier-model (model-id &optional tier)
   "Return the id of the TIER model of MODEL-ID's provider, or nil.
-TIER defaults to `cheap'.  The provider's `:tiers' names a model (a
-name, id or regexp) for it; a tier it does not name, and a provider
-that declares none, takes the provider's models sorted by price
-\(`cheap' the least expensive, `frontier' the most, `balanced' the
-middle).  Models whose cost is unknown are never chosen by price.  A
+MODEL-ID may also be a provider id alone (a symbol, or a string
+without a colon).  TIER defaults to `cheap'.  The provider's `:tiers'
+names a model (a name, id or regexp) for it; a tier it does not name,
+and a provider that declares none, takes the provider's models sorted
+by price \(`cheap' the least expensive, `frontier' the most, `balanced'
+the middle).  Models whose cost is unknown are never chosen by price.  A
 provider not listed yet is asked for its models, which a static
 catalogue answers at once; nil comes back until one that answers later
 has."
   (let* ((tier (harness-provider--tier tier))
-         (pid (car (harness-provider-parse-model model-id)))
+         (pid (harness-provider--provider-id model-id))
          (provider (and pid (harness-provider-get pid))))
     (when provider
-      (when (and (harness-provider-models-fn provider)
-                 (not (harness-provider--listed-p pid)))
-        (harness-provider--fetch provider t))
-      (let* ((models (harness-provider--cached-models pid))
+      (let* ((models (harness-provider--listed-models pid))
              (model (and models
                          (or (harness-provider--tier-match
                               models (plist-get (harness-provider-tiers provider) tier))
@@ -404,8 +445,71 @@ has."
 
 (harness-defmethod provider/tier-model (model-id &optional tier)
   "Return the id of the TIER model of MODEL-ID's provider, or nil.
-TIER defaults to `cheap'; see `harness-provider-tier-model'."
+MODEL-ID may be a provider id alone.  TIER defaults to `cheap'; see
+`harness-provider-tier-model'."
   (harness-provider-tier-model model-id tier))
+
+(defconst harness-provider--tier-precedence '(:balanced :frontier :cheap)
+  "The tier a model takes when its provider names it for several.
+A provider that names one model for its cheap and balanced tiers (as
+DeepSeek names Flash) makes it its everyday model, so balanced comes
+first; frontier before cheap, as the model is the better of the two.")
+
+(defun harness-provider--names-model-p (matcher model)
+  "Non-nil when tier MATCHER (a name, id or regexp) names MODEL."
+  (when (and (stringp matcher) model)
+    (let ((name (plist-get model :name)) (id (plist-get model :id)))
+      (or (equal matcher name) (equal matcher id)
+          (ignore-errors
+            (or (and (stringp name) (string-match-p matcher name))
+                (and (stringp id) (string-match-p matcher id))))))))
+
+(defun harness-provider--price-tier (models model)
+  "Return the tier MODEL's price places it in among MODELS, or nil.
+The distinct prices of the priced MODELS are ranked: the cheapest third
+is `:cheap', the dearest third `:frontier', the rest `:balanced'.  Nil
+when MODEL has no price; `:balanced' when every model costs the same."
+  (when-let* ((score (harness-provider--price-score model)))
+    (let* ((scores (sort (delete-dups
+                          (delq nil (mapcar (lambda (m)
+                                              (when-let* ((s (harness-provider--price-score m))) (float s)))
+                                            models)))
+                         #'<))
+           (n (length scores))
+           (rank (or (cl-position (float score) scores :test #'=) 0)))
+      (if (< n 2)
+          :balanced
+        (let ((f (/ (float rank) (1- n))))
+          (cond ((< f (/ 1.0 3)) :cheap)
+                ((> f (/ 2.0 3)) :frontier)
+                (t :balanced)))))))
+
+(defun harness-provider-model-tier (model-id)
+  "Return the tier of MODEL-ID within its provider.
+That is `:cheap', `:balanced' or `:frontier': the tier the provider's
+`:tiers' names the model for (when it names it for several, the first
+of `harness-provider--tier-precedence'), else where the model's price
+places it in the provider's catalogue (see
+`harness-provider--price-tier'), else `:balanced'.  This is the
+inverse of `harness-provider-tier-model': together they map a model to
+a model of similar ability at another provider."
+  (let* ((pid (harness-provider--provider-id model-id))
+         (provider (and pid (harness-provider-get pid)))
+         (models (and provider (harness-provider--listed-models pid)))
+         (model (and models (cl-find model-id models :key (lambda (m) (plist-get m :id)) :test #'equal)))
+         (tiers (and provider (harness-provider-tiers provider))))
+    (or (and model
+             (cl-find-if (lambda (tier) (harness-provider--names-model-p (plist-get tiers tier) model))
+                         harness-provider--tier-precedence))
+        (and model (harness-provider--price-tier models model))
+        :balanced)))
+
+(harness-defmethod provider/model-tier (model-id)
+  "Return the tier of MODEL-ID within its provider.
+That is `cheap', `balanced' or `frontier': the keyword
+`harness-provider-model-tier' returns, without its colon, so it reads
+the same over the wire."
+  (intern (string-remove-prefix ":" (symbol-name (harness-provider-model-tier model-id)))))
 
 (defun harness-provider--guard-events (on-event)
   "Wrap ON-EVENT so errors are contained and `done' is delivered once."
@@ -441,19 +545,154 @@ are reported through the `:on-event' callback as a `done' event with
          (funcall on-event (list :type 'done :stop-reason 'error :error (harness-error-message err)))
          (list :cancel #'ignore)))))))
 
-(harness-defmethod provider/fork (model-id state)
-  "Ask MODEL-ID's provider to fork provider STATE.
-Return a promise of the new state, or of nil when unsupported.  The
-new state names the provider it belongs to (`:provider', see
-`harness-tag-provider-state')."
+(harness-defmethod provider/warm (request)
+  "Have REQUEST's provider get ready for a request like it; non-nil if it did.
+REQUEST is shaped like `provider/complete''s, without messages or
+`:on-event': its `:model' picks the provider, and its `:session',
+`:system' and `:thinking' say what the coming request will be.  A
+provider that keeps a process per session (the Claude CLI) starts it
+now, so a request that comes later with the same settings is answered
+sooner; one with nothing to prepare does nothing.  A failure is
+logged, never signalled: warming is only ever a head start."
+  (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
+               (warm (and pid (harness-provider-get pid) (harness-provider--hook pid :warm))))
+    (when warm
+      (condition-case err
+          (and (funcall warm request) t)
+        (error (harness-log 'warn "provider %s: warming up failed: %s" pid (harness-error-message err))
+               nil)))))
+
+(harness-defmethod provider/close (model-id session-id)
+  "Have MODEL-ID's provider free what it keeps for SESSION-ID: a process, say.
+Requests made under ids of their own, such as a one-off question's,
+have no session whose deletion would free it.  Return non-nil when the
+provider had something to free.  A failure is logged, never signalled."
   (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model model-id))
-               (provider (and pid (harness-provider-get pid))))
-    (if (and provider (harness-provider-fork-fn provider))
-        (condition-case err
-            (harness-then (harness-as-promise (funcall (harness-provider-fork-fn provider) model-id state))
-                          (lambda (new) (harness-tag-provider-state new model-id)))
-          (error (harness-rejected err)))
-      (harness-resolved nil))))
+               (close (and pid (harness-provider-get pid) (harness-provider--hook pid :close))))
+    (when (and close session-id)
+      (condition-case err
+          (and (funcall close session-id) t)
+        (error (harness-log 'warn "provider %s: closing %s failed: %s" pid session-id (harness-error-message err))
+               nil)))))
+
+(harness-defmethod provider/fork (model-id state &optional checkpoint)
+  "Ask MODEL-ID's provider to fork provider STATE.
+Return a promise of the new state, or of nil when unsupported.  With
+CHECKPOINT, a `:checkpoint' the provider put on a node, the fork holds
+the conversation as it was at that node and nothing after it; a
+provider that cannot cut its conversation there, or does not know the
+checkpoint (another provider made it), gives nil, and the conversation
+then starts anew from the transcript."
+  (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model model-id))
+               (provider (and pid (harness-provider-get pid)))
+               (fn (and provider (harness-provider-fork-fn provider))))
+    (cond
+     ((null fn) (harness-resolved nil))
+     ;; A fork function of two arguments cannot cut the conversation.
+     ((and checkpoint (not (harness-provider--accepts-args-p fn 3))) (harness-resolved nil))
+     (t (condition-case err
+            (harness-then
+             (harness-as-promise (if checkpoint
+                                     (funcall fn model-id state checkpoint)
+                                   (funcall fn model-id state)))
+             (lambda (new) (harness-tag-provider-state new model-id)))
+          (error (harness-rejected err)))))))
+
+(defun harness-provider--accepts-args-p (fn n)
+  "Non-nil when function FN can be called with N arguments."
+  (let ((arity (func-arity fn)))
+    (and (<= (car arity) n) (or (eq (cdr arity) 'many) (>= (cdr arity) n)))))
+
+;;;; Replaying a transcript into a new conversation
+
+(defconst harness-provider-history-block-limit 20000
+  "Characters of one tool input or result kept when a transcript is replayed.")
+
+(defconst harness-provider-history-limit 400000
+  "Characters of transcript kept when it is replayed into a new conversation.
+Past it, the oldest messages go, all but the first.")
+
+(defun harness-provider-split-history (messages)
+  "Split provider MESSAGES into (HISTORY . TRAILING).
+TRAILING is the run of user messages at the end, what a hosted loop
+sends as the new message; HISTORY is everything before it, which a
+conversation that continues it already holds."
+  (let ((rest (reverse messages)) trailing)
+    (while (and rest (equal (format "%s" (plist-get (car rest) :role)) "user"))
+      (push (pop rest) trailing))
+    (cons (nreverse rest) trailing)))
+
+(defun harness-provider--history-clip (text)
+  "Return TEXT cut to `harness-provider-history-block-limit' characters."
+  (let ((text (or text "")))
+    (if (<= (length text) harness-provider-history-block-limit) text
+      (concat (substring text 0 harness-provider-history-block-limit)
+              (format "\n[… %d more characters]" (- (length text) harness-provider-history-block-limit))))))
+
+(defun harness-provider--history-message (message names)
+  "Render provider MESSAGE as transcript text, or nil when it shows nothing.
+NAMES maps tool_use ids to tool names, for the results."
+  (let* ((role (format "%s" (plist-get message :role)))
+         (parts
+          (delq nil
+                (mapcar
+                 (lambda (b)
+                   (pcase (plist-get b :type)
+                     ("text" (let ((text (plist-get b :text)))
+                               (unless (harness-string-blank-p text) text)))
+                     ("tool_use"
+                      (format "<tool_call name=\"%s\">\n%s\n</tool_call>" (plist-get b :name)
+                              (harness-provider--history-clip
+                               (harness-json-encode-text (or (plist-get b :input) :empty)))))
+                     ("tool_result"
+                      (format "<tool_result name=\"%s\"%s>\n%s\n</tool_result>"
+                              (or (gethash (plist-get b :tool_use_id) names) "tool")
+                              (if (harness-json-true-p (plist-get b :is_error)) " error=\"true\"" "")
+                              (harness-provider--history-clip
+                               (let ((c (plist-get b :content)))
+                                 (if (stringp c) c
+                                   (mapconcat (lambda (x) (or (plist-get x :text) "")) c "\n"))))))
+                     ("image" "[image]")
+                     ("audio" "[audio]")
+                     ("file" (format "[attached file: %s]" (plist-get b :path)))
+                     ;; Thinking is the model's own and its signature is for
+                     ;; the conversation it was written in.
+                     (_ nil)))
+                 (plist-get message :content)))))
+    (when parts
+      (format "<%s>\n%s\n</%s>" role (string-join parts "\n\n") role))))
+
+(defun harness-provider-history-text (history)
+  "Return provider messages HISTORY as one text a new conversation opens with.
+Nil when HISTORY shows nothing.  A hosted-loop provider that has to
+start a new conversation for a transcript that already has messages
+sends this before the new message, so the model knows what was said:
+its own conversation was cut before any checkpoint, could not be
+resumed, or another provider ran the turns before.  Tool inputs and
+results longer than `harness-provider-history-block-limit' are cut,
+and past `harness-provider-history-limit' the oldest messages but the
+first go."
+  (let ((names (make-hash-table :test 'equal)))
+    (dolist (m history)
+      (dolist (b (plist-get m :content))
+        (when (equal (plist-get b :type) "tool_use")
+          (puthash (plist-get b :id) (plist-get b :name) names))))
+    (let* ((rendered (delq nil (mapcar (lambda (m) (harness-provider--history-message m names)) history)))
+           (size (apply #'+ (mapcar #'length rendered)))
+           (dropped 0))
+      (when rendered
+        (while (and (> size harness-provider-history-limit) (cddr rendered))
+          (cl-decf size (length (cadr rendered)))
+          (setcdr rendered (cddr rendered))
+          (cl-incf dropped))
+        (concat
+         "This conversation continues an earlier one, which is reproduced below so that you know what"
+         " was said; you wrote its assistant messages and made its tool calls.  Carry on from where it"
+         " ends: the message after it is the new one.\n\n<conversation_history>\n"
+         (car rendered)
+         (if (zerop dropped) "" (format "\n\n[… %d earlier messages omitted …]" dropped))
+         (mapconcat (lambda (r) (concat "\n\n" r)) (cdr rendered) "")
+         "\n</conversation_history>")))))
 
 (defun harness-provider--accepts-arg-p (fn)
   "Non-nil when function FN can be called with one argument."

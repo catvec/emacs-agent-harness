@@ -20,6 +20,8 @@
 ;; refinement section) instead looks at the board with task_list, takes
 ;; a quick look at the project and writes it up -- or, when another task
 ;; on the board asks for it in the same words, refuses it as a duplicate.
+;; A task board's search gets the JSON a search model answers with,
+;; matched from the words of the query (`harness-provider-demo--search').
 
 ;;; Code:
 
@@ -32,7 +34,10 @@
   "Seconds between scripted events.")
 
 (defvar harness-provider-demo-script-override nil
-  "When non-nil, a list of events used instead of the built-in scripts.")
+  "When non-nil, the events used instead of the built-in scripts.
+A list of events, or a function of the request returning one: a test
+that needs a reply per request (a search that looks further, then
+answers) gives a function.")
 
 (defconst harness-provider-demo--layouts
   '(("Sidebar on the left"
@@ -76,9 +81,13 @@
   (let ((text (downcase (harness-provider-demo--last-user-text request)))
         (cwd (or (plist-get (plist-get request :session) :cwd) default-directory)))
     (cond
+     ((functionp harness-provider-demo-script-override)
+      (funcall harness-provider-demo-script-override request))
      (harness-provider-demo-script-override harness-provider-demo-script-override)
      ((string-match-p "^## Task refinement" (or (plist-get request :system) ""))
       (harness-provider-demo--write-up request cwd))
+     ((string-prefix-p "You are the search box of a task board" (or (plist-get request :system) ""))
+      (harness-provider-demo--search request))
      ((string-match-p "\\btour\\b" text)
       `((:type thinking :delta "The user wants a tour. ")
         (:type thinking :delta "I will read a file, then summarise.")
@@ -199,6 +208,74 @@ time."
                                     "**Open questions.** None for the demo."
                                     (if feedback (concat "\n\n**Also.** " feedback) "")))
         (:type usage :input 700 :output 120 :cache-read 300 :cost 0.002 :context 900)
+        (:type done :stop-reason end-turn)))))
+
+(defconst harness-provider-demo--search-verbs
+  '(("archive" "get rid of" "archive" "remove" "delete" "hide" "clean up")
+    ("retry" "restart" "retry" "rerun" "resume" "unstick")
+    ("restore" "restore" "unarchive" "bring back")
+    ("stop" "stop" "cancel" "kill")
+    ("verify" "verify" "approve" "accept" "ship")
+    ("start" "start"))
+  "Words that order an action in a search, by action, for the demo's answers.")
+
+(defconst harness-provider-demo--search-states
+  '(("error\\|fail\\|stopped" "errored" "failed" "failing" "broken" "stopped")
+    ("^needs input" "blocked" "stuck" "waiting" "need me" "needs me")
+    ("^review" "review" "to review" "reviewed")
+    ("^in progress" "running" "working" "in progress" "active")
+    ("^pending" "pending" "queued" "backlog")
+    ("^done" "done" "completed" "finished" "merged"))
+  "Words of a search that name a state, with the regexp of the states they mean.")
+
+(defconst harness-provider-demo--search-stopwords
+  '("a" "an" "the" "task" "tasks" "about" "did" "i" "have" "had" "any" "all" "my" "me" "of" "for"
+    "to" "on" "in" "is" "are" "was" "were" "that" "this" "these" "those" "them" "it" "which" "what"
+    "show" "find" "where" "with" "and" "or" "one" "ones" "do" "does" "there" "please" "adding" "add")
+  "Words a demo search ignores when it matches tasks.")
+
+(defun harness-provider-demo--search (request)
+  "Answer a task board search from REQUEST's board, as a scripted model would.
+No model: words of the query that order an action pick it, words that
+name a state keep the tasks in that state, and the other words keep the
+tasks whose lines hold them all (or, when none does, the most of them)."
+  (let* ((text (harness-provider-demo--last-user-text request))
+         (query (downcase (if (string-match "^Query: \\(.*\\)$" text) (match-string 1 text) "")))
+         (entries nil))
+    ;; Each task is a line "ID | STATUS | TITLE" and the indented lines after it.
+    (dolist (line (split-string text "\n"))
+      (cond ((string-match "\\`\\(t-[[:alnum:]]+\\) | \\([^|]*\\) | \\(.*\\)\\'" line)
+             (push (list (match-string 1 line) (match-string 2 line) (downcase line)) entries))
+            ((and entries (string-prefix-p "  " line))
+             (setf (nth 2 (car entries)) (concat (nth 2 (car entries)) " " (downcase line))))))
+    (setq entries (nreverse entries))
+    (let* ((action (car (cl-find-if (lambda (verbs) (cl-some (lambda (w) (string-match-p (concat "\\b" (regexp-quote w) "\\b") query))
+                                                              (cdr verbs)))
+                                    harness-provider-demo--search-verbs)))
+           (state (car (cl-find-if (lambda (states) (cl-some (lambda (w) (string-match-p (concat "\\b" (regexp-quote w) "\\b") query))
+                                                              (cdr states)))
+                                   harness-provider-demo--search-states)))
+           (noise (append harness-provider-demo--search-stopwords
+                          (split-string (string-join (apply #'append (mapcar #'cdr harness-provider-demo--search-verbs)) " "))
+                          (split-string (string-join (apply #'append (mapcar #'cdr harness-provider-demo--search-states)) " "))))
+           (words (cl-remove-if (lambda (w) (or (< (length w) 2) (member w noise)))
+                                (split-string query "[^[:alnum:]]+" t)))
+           (in-state (if state
+                         (cl-remove-if-not (lambda (e) (string-match-p state (nth 1 e))) entries)
+                       entries))
+           (scored (mapcar (lambda (e) (cons (cl-count-if (lambda (w) (string-search w (nth 2 e))) words) e))
+                           in-state))
+           (best (if words (apply #'max 0 (mapcar #'car scored)) 0))
+           (shown (mapcar (lambda (s) (nth 1 s))
+                          (cond ((null words) (mapcar (lambda (e) (cons 0 e)) in-state))
+                                ((> best 0) (cl-remove-if-not (lambda (s) (= (car s) best)) scored)))))
+           (answer (format "{\"show\":[%s],\"do\":[%s]}"
+                           (mapconcat (lambda (id) (format "%S" id)) shown ",")
+                           (if action
+                               (mapconcat (lambda (id) (format "{\"task\":%S,\"action\":%S}" id action)) shown ",")
+                             ""))))
+      `((:type text :delta ,answer)
+        (:type usage :input ,(/ (length text) 4) :output ,(/ (length answer) 4) :cost 0.0004 :context ,(/ (length text) 4))
         (:type done :stop-reason end-turn)))))
 
 (defvar harness-provider-demo--continuations (make-hash-table :test 'equal)

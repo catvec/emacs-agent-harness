@@ -355,6 +355,7 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
   (should (harness-openai--deepseek-p (list :base-url "https://api.deepseek.com")))
   ;; A look-alike host is not DeepSeek, and plain OpenAI stays plain.
   (should-not (harness-openai--deepseek-p (list :base-url "https://deepseek.com.evil.example/v1")))
+  (should-not (harness-openai--deepseek-p (list :base-url "https://api.deepseek.example/v1" :flavor 'openai)))
   (should-not (harness-openai--deepseek-p harness-openai-test-openai-endpoint))
   (should-not (harness-openai--deepseek-p (list :base-url "https://api.openai.example/v1"))))
 
@@ -422,6 +423,33 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
                        :cost nil :billing api :context 100)
                      usage)))))
+
+(ert-deftest harness-provider-openai-deepseek-usage-splits-on-a-custom-host ()
+  ;; DeepSeek's cache fields say prompt_tokens is hit + miss; billing must
+  ;; split them even when the endpoint is not labelled DeepSeek, or the
+  ;; cached input is charged at the cache-miss price.
+  (harness-openai-test-with-fake
+      `(("chat/completions"
+         . (:chunks (,(harness-openai-test--sse
+                      '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                      '(:choices () :usage (:prompt_tokens 1000 :completion_tokens 100
+                                            :prompt_cache_hit_tokens 900 :prompt_cache_miss_tokens 100))
+                      "[DONE]")))))
+    (let* ((events (car (harness-openai-test--complete
+                         harness-openai-test-deepseek-host-endpoint
+                         '(:model "testdscompat:deepseek-flash" :max-tokens 10
+                           :messages ((:role user :content ((:type "text" :text "hi"))))))))
+           (usage (cl-find 'usage events :key (lambda (e) (plist-get e :type)))))
+      (should (equal '(:type usage :input 100 :output 100 :cache-read 900 :cache-write 0
+                       :cost nil :billing api :context 1000)
+                     usage))))
+  ;; A server that reports only the hits still splits: the misses are the rest.
+  (let ((usage (harness-openai--usage-event
+                '(:prompt_tokens 100 :completion_tokens 7 :prompt_cache_hit_tokens 80)
+                '(:id proxy :base-url "https://llm.example/v1" :flavor openai))))
+    (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
+                     :cost nil :billing api :context 100)
+                   usage))))
 
 (ert-deftest harness-provider-openai-text-answer-with-usage ()
   (harness-openai-test-with-fake
@@ -513,6 +541,32 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (eq 'error (plist-get (cadr events) :stop-reason)))
       (should (string-match-p "Invalid API key" (plist-get (cadr events) :error)))
       (should (string-match-p "401" (plist-get (cadr events) :error))))))
+
+(ert-deftest harness-provider-openai-http-errors-say-what-kind ()
+  "HTTP failures carry what kind they are, so the fallback can act on them."
+  (dolist (case '((402 "Insufficient Balance" billing)
+                  (429 "Rate limit exceeded" rate-limit)
+                  (401 "Invalid API key" auth)))
+    (pcase-let ((`(,status ,message ,kind) case))
+      (harness-openai-test-with-fake
+          `(("chat/completions" . (:status ,status
+                                    :body ,(format "{\"error\":{\"message\":%S}}" message))))
+        (let* ((events (car (harness-openai-test--complete
+                             harness-openai-test-endpoint
+                             '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "hi"))))))))
+               (done (car (last events))))
+          (should (eq 'error (plist-get done :stop-reason)))
+          (should (eq kind (plist-get done :error-kind)))))))
+  ;; A 429 whose body says the account's quota is used up is out of
+  ;; money, the way DeepSeek answers a spent prepaid balance.
+  (harness-openai-test-with-fake
+      '(("chat/completions" . (:status 429
+                               :body "{\"error\":{\"message\":\"Insufficient Balance\",\"type\":\"insufficient_quota\"}}")))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-deepseek-endpoint
+                        '(:model "testdeepseek:deepseek-flash"
+                          :messages ((:role user :content ((:type "text" :text "hi")))))))))
+      (should (eq 'billing (plist-get (car (last events)) :error-kind))))))
 
 (ert-deftest harness-provider-openai-missing-key-and-transport-error ()
   (with-environment-variables (("HARNESS_TEST_MISSING_KEY" nil))

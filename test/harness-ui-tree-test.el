@@ -189,17 +189,25 @@
       ;; Live refresh: a node appended over ACP shows up without a manual reload.
       (let ((n4 (harness-ui-tree-test-append cid "assistant" "branch answer")))
         (harness-test-wait (lambda () (member n4 (harness-ui-tree-test-rows))) 5 "live row"))
-      ;; Fork at a node that is not the head moves the head there, forks and restores it.
+      ;; Fork at a node that is not the head: the fork starts there, with
+      ;; the transcript up to it, and the session's head never moves.
       (harness-ui-tree-test-goto n2)
-      (let ((before (length (harness-call 'session/list))))
+      (let* ((before (length (harness-call 'session/list)))
+             (moves nil)
+             (watch (harness-on 'session/head-moved (lambda (id node) (push (cons id node) moves)))))
         (cl-letf (((symbol-function 'harness-ui-display-session) #'ignore))
           (harness-ui-tree-fork))
         (harness-test-wait (lambda () (> (length (harness-call 'session/list)) before)) 5 "fork created")
+        (harness-off watch)
         (let ((fork (car (cl-remove-if-not (lambda (s) (and (equal (plist-get s :parent-id) sid)
                                                              (not (equal (plist-get s :id) cid))))
                                             (harness-call 'session/list)))))
-          (should (equal n2 (plist-get fork :fork-node))))
-        (harness-test-wait (lambda () (equal n1 (plist-get (harness-call 'session/get sid) :head))) 5 "head restored")))))
+          (should (equal n2 (plist-get fork :fork-node)))
+          (should (equal n2 (plist-get fork :head)))
+          (should (equal (list n1 n2) (mapcar (lambda (n) (plist-get n :id))
+                                              (harness-call 'session/nodes (plist-get fork :id))))))
+        (should-not moves)
+        (should (equal n1 (plist-get (harness-call 'session/get sid) :head)))))))
 
 (ert-deftest harness-ui-tree-tells-denied-results-from-failed-ones ()
   ;; A result the permission system refused reads apart from a failure,
@@ -241,3 +249,13 @@
 
 (provide 'harness-ui-tree-test)
 ;;; harness-ui-tree-test.el ends here
+
+(ert-deftest harness-ui-tree-excerpt-holds-tabs-out-of-the-row ()
+  "A tab in a node's text cannot push a row past the columns it fits.
+The excerpt is one plain line: a tab would jump to the next tab stop
+and shove the rest of the row, time and all, out of the tree."
+  (harness-ui-tree-test-with
+    (dolist (text '("a\tb" "one\n\ntwo\tthree" "tab\t\there"))
+      (let ((excerpt (harness-ui-tree--excerpt (list :kind "message" :content text))))
+        (should-not (string-match-p "[\t\n\r]" excerpt))))
+    (should (equal "a b" (harness-ui-tree--excerpt (list :kind "message" :content "a\tb"))))))

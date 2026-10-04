@@ -15,12 +15,19 @@
 ;;
 ;; The window is a side window at the bottom of the frame
 ;; (`harness-ui-popout-window-parameters'), selected, and fitted to its
-;; content up to `harness-ui-popout-max-height'.  Each item has one
+;; content up to `harness-ui-popout-max-height', or the popout's own
+;; :max-height (a report with images grows taller).  Each item has one
 ;; popout, named by a KEY the owner picks, such as (pending SESSION-ID)
 ;; or (report TASK-ID): showing the KEY again reuses its buffer, so state
 ;; the owner keeps buffer-locally there survives.  The owner calls
 ;; `harness-ui-popout-refresh' when the item changes and
 ;; `harness-ui-popout-close' once there is nothing left to show.
+;;
+;; A popout can be opened from another, its :parent: an image of a
+;; report, shown larger.  It takes the parent's window, its header says
+;; [back], and closing it shows the parent there again, where it was.
+;; `harness-ui-popout-image' is that image popout: one image as large as
+;; the frame allows, which Emacs's image keys zoom.
 ;;
 ;; On the content, `q' closes the popout and `g' draws it again; in the
 ;; box, the keys are the box's, and C-c C-c sends it.  C-g closes the
@@ -35,10 +42,13 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'image)
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
 (require 'harness-ui-compose)
+
+(declare-function harness-ui-media-open "harness-ui-media" (path))
 
 (defgroup harness-ui-popout nil
   "Popouts of one item of a session or task." :group 'harness-ui)
@@ -56,6 +66,19 @@ The height is fitted to the content (`harness-ui-popout-max-height')."
 (defcustom harness-ui-popout-min-height 4
   "Height in lines of a popout with little content."
   :type 'integer :group 'harness-ui-popout)
+
+(defcustom harness-ui-popout-image-max-height 0.9
+  "Height an image popout grows to at most, as a fraction of its frame's.
+The image shows as large as that and the frame's width allow
+\(`harness-ui-popout-image')."
+  :type 'number :group 'harness-ui-popout)
+
+(defcustom harness-ui-popout-image-max-scale 4
+  "How many times larger than elsewhere an image popout shows an image at most.
+An image smaller than the popout is scaled up to fill it, by this much
+at most, so a small one shows larger without being blown up past
+recognition; a larger one is scaled down to fit."
+  :type 'number :group 'harness-ui-popout)
 
 ;;;; State
 
@@ -75,6 +98,10 @@ The height is fitted to the content (`harness-ui-popout-max-height')."
 (defvar-local harness-ui-popout--placeholder nil "The empty box's hint: a string or a function.")
 (defvar-local harness-ui-popout--dir nil "The project directory of the box.")
 (defvar-local harness-ui-popout--on-close nil "Function called once the popout closes.")
+(defvar-local harness-ui-popout--parent nil "KEY of the popout this one was opened from, or nil.")
+(defvar-local harness-ui-popout--max-height nil
+  "Height this popout grows to at most, as a fraction of its frame's.
+Nil for `harness-ui-popout-max-height'.")
 (defvar-local harness-ui-popout--content-end nil "Marker: the end of the content, the start of the box.")
 (defvar-local harness-ui-popout--discard nil "Non-nil when closing drops what the box holds.")
 
@@ -95,7 +122,7 @@ They sit under the keymaps the content brings, which win.")
   (define-key map (kbd "g") #'harness-ui-popout-redraw))
 
 (let ((map harness-ui-popout-mode-map))
-  ;; The box's keys (RET newline, C-c C-a, C-c C-v).
+  ;; The box's keys (RET newline, C-c C-a, C-y pasting images).
   (set-keymap-parent map harness-compose-map)
   (define-key map (kbd "C-c C-c") #'harness-ui-popout-submit)
   ;; C-g, as a remapping: completion popups (corfu, company) keep their
@@ -126,12 +153,19 @@ They sit under the keymaps the content brings, which win.")
         ("C-c C-c" "Send the box" harness-ui-popout-submit)]))
 
 (defun harness-ui-popout--header ()
-  "Return the header line: the title, then a [close] button."
-  (concat " " (propertize (harness-ui-popout--title-text) 'face 'harness-label-face)
-          "   "
-          (propertize "[close]" 'face 'harness-dim-face 'mouse-face 'mode-line-highlight
-                      'help-echo "Close this popout (q)"
-                      'keymap (harness-ui-mouse-keymap #'harness-ui-popout-quit))))
+  "Return the header line: the title, then a [close] button.
+A popout opened from another one, which closing shows again, has a
+[back] button instead."
+  (let ((parent (harness-ui-popout--parent-buffer (current-buffer))))
+    (concat " " (propertize (harness-ui-popout--title-text) 'face 'harness-label-face)
+            "   "
+            (propertize (if parent "[back]" "[close]")
+                        'face 'harness-dim-face 'mouse-face 'mode-line-highlight
+                        'help-echo (if parent
+                                       (format "Back to %s (q)"
+                                               (with-current-buffer parent (harness-ui-popout--title-text)))
+                                     "Close this popout (q)")
+                        'keymap (harness-ui-mouse-keymap #'harness-ui-popout-quit)))))
 
 (defun harness-ui-popout--title-text ()
   "Return the title as text."
@@ -253,12 +287,44 @@ The box calls this when its attachments change."
       (set-buffer-modified-p nil)
       (dolist (w (get-buffer-window-list nil nil t)) (harness-ui-popout--fit w)))))
 
+(defun harness-ui-popout--max-lines (frame)
+  "Return how many lines this popout's window takes at most in FRAME.
+That is its :max-height of the frame, or `harness-ui-popout-max-height'."
+  (max harness-ui-popout-min-height
+       (floor (* (or harness-ui-popout--max-height harness-ui-popout-max-height) (frame-height frame)))))
+
 (defun harness-ui-popout--fit (window)
   "Fit WINDOW, showing a popout, to its content within the height limits."
   (when (and (window-live-p window) (window-parameter window 'window-side))
-    (let ((max (max harness-ui-popout-min-height
-                    (floor (* harness-ui-popout-max-height (frame-height (window-frame window)))))))
+    (let ((max (with-current-buffer (window-buffer window)
+                 (harness-ui-popout--max-lines (window-frame window)))))
       (ignore-errors (fit-window-to-buffer window max harness-ui-popout-min-height)))))
+
+(defun harness-ui-popout--frame ()
+  "Return the frame this popout shows in, or will show in: the selected one."
+  (if-let* ((window (car (get-buffer-window-list nil nil t))))
+      (window-frame window)
+    (selected-frame)))
+
+(defun harness-ui-popout-pixel-width (&optional window)
+  "Return how many pixels wide this popout's content may be.
+That is its window's body width while it shows; before it shows, as
+when its content is drawn the first time, the width of a window across
+the bottom of the selected frame, where it will show.  With WINDOW, a
+live window, its body width: for content drawn to be shown there."
+  (if-let* ((windows (if (window-live-p window) (list window) (get-buffer-window-list nil nil t))))
+      (apply #'max (mapcar (lambda (w) (window-body-width w t)) windows))
+    (max 1 (- (frame-inner-width) (frame-fringe-width) (frame-scroll-bar-width)))))
+
+(defun harness-ui-popout-pixel-height (&optional lines)
+  "Return how many pixels high this popout's content may be, less LINES lines.
+That is the height its window grows to at most (its :max-height, or
+`harness-ui-popout-max-height') less its header and mode lines, and
+less LINES lines of text: an image that high shows whole, with LINES
+lines of text beside it."
+  (let ((frame (harness-ui-popout--frame)))
+    (* (frame-char-height frame)
+       (max 1 (- (harness-ui-popout--max-lines frame) 2 (or lines 0))))))
 
 ;;;; Showing and closing
 
@@ -270,9 +336,27 @@ The box calls this when its attachments change."
       (remhash key harness-ui-popout--buffers)
       nil)))
 
+(defun harness-ui-popout--parent-buffer (buffer)
+  "Return the live popout buffer the popout BUFFER was opened from, or nil."
+  (when-let* ((parent (buffer-local-value 'harness-ui-popout--parent buffer)))
+    (harness-ui-popout-buffer parent)))
+
 (defun harness-ui-popout--buffer-name (title)
   "Return the name of a new popout buffer titled TITLE."
   (generate-new-buffer-name (format "*harness popout: %s*" (harness-first-line (or title "") 60))))
+
+(defun harness-ui-popout--display (buffer &optional select)
+  "Show the popout BUFFER in its side window, fitted to it; return the window.
+The side window of popouts is reused: the popout showing there gives
+way.  With SELECT the window is selected, point where the buffer has it."
+  (let ((window (or (get-buffer-window buffer)
+                    (display-buffer-in-side-window buffer harness-ui-popout-window-parameters))))
+    (when (window-live-p window)
+      (harness-ui-popout--fit window)
+      (when select
+        (select-window window)
+        (with-current-buffer buffer (set-window-point window (point)))))
+    window))
 
 (defun harness-ui-popout-show (key title render &rest props)
   "Show the popout of KEY, drawn by RENDER, and select its window.
@@ -298,12 +382,25 @@ PROPS:
                     buffer current.
   :placeholder HINT the empty box's hint, a string or a function.
   :dir DIR          the project directory of the box (@ completion).
+  :max-height FRACTION
+                    the height its window grows to at most, as a
+                    fraction of its frame's, instead of
+                    `harness-ui-popout-max-height': an item with large
+                    images takes more.  RENDER sizes them with
+                    `harness-ui-popout-pixel-width' and
+                    `harness-ui-popout-pixel-height'.
+  :parent KEY       the popout this one is opened from, such as the
+                    report an image is shown larger from.  It shows in
+                    that one's window, its header says [back], and
+                    closing it shows that one there again.  Closing the
+                    parent while this one is hidden closes this one too.
   :on-close FN      called with no arguments, the popout buffer current,
                     once the popout closes."
   (let* ((existing (harness-ui-popout-buffer key))
          (buffer (or existing
                      (get-buffer-create (harness-ui-popout--buffer-name
-                                         (if (functionp title) "" title))))))
+                                         (if (functionp title) "" title)))))
+         (parent (plist-get props :parent)))
     (with-current-buffer buffer
       (unless existing
         (harness-ui-popout-mode)
@@ -318,17 +415,14 @@ PROPS:
             harness-ui-popout--compose (plist-get props :compose)
             harness-ui-popout--placeholder (plist-get props :placeholder)
             harness-ui-popout--dir (plist-get props :dir)
+            harness-ui-popout--max-height (plist-get props :max-height)
+            harness-ui-popout--parent (and (not (equal parent key)) parent)
             harness-ui-popout--on-close (plist-get props :on-close))
       (when harness-ui-popout--dir
         (setq default-directory (file-name-as-directory harness-ui-popout--dir)))
       (harness-ui-popout--render)
       (unless existing (goto-char (point-min))))
-    (let ((window (or (get-buffer-window buffer)
-                      (display-buffer-in-side-window buffer harness-ui-popout-window-parameters))))
-      (when (window-live-p window)
-        (harness-ui-popout--fit window)
-        (select-window window)
-        (with-current-buffer buffer (set-window-point window (point)))))
+    (harness-ui-popout--display buffer t)
     buffer))
 
 (defun harness-ui-popout-refresh (key)
@@ -346,28 +440,45 @@ Point stays where it was and the window is fitted again."
         (puthash harness-ui-popout-key (cons text harness-compose-attachments) harness-ui-popout--drafts)))))
 
 (defun harness-ui-popout--on-kill ()
-  "Forget this popout, and tell its owner it closed."
+  "Forget this popout, and tell its owner it closed.
+The popouts opened from it that no window shows close with it."
   (harness-ui-popout--save-draft)
   (when (eq (gethash harness-ui-popout-key harness-ui-popout--buffers) (current-buffer))
     (remhash harness-ui-popout-key harness-ui-popout--buffers))
+  (let ((key harness-ui-popout-key))
+    (maphash (lambda (child buffer)
+               (when (and (buffer-live-p buffer)
+                          (equal key (buffer-local-value 'harness-ui-popout--parent buffer))
+                          (not (get-buffer-window buffer t)))
+                 (harness-ui-popout-close child)))
+             (copy-hash-table harness-ui-popout--buffers)))
   (when harness-ui-popout--on-close
     (with-demoted-errors "harness-ui-popout on-close: %S"
       (funcall harness-ui-popout--on-close))))
 
 (defun harness-ui-popout-close (key &optional discard)
   "Close the popout of KEY, if it is open: its window goes and its buffer.
-Return non-nil when it was open.  What its box holds is kept for the
-next time KEY shows, unless DISCARD: an owner closing a popout whose
-item is settled (a question answered) drops it."
+Return non-nil when it was open.  A popout opened from another one (its
+:parent) gives its window back instead: the parent shows there again,
+where it was, selected when this one was.  What its box holds is kept
+for the next time KEY shows, unless DISCARD: an owner closing a popout
+whose item is settled (a question answered) drops it."
   (when discard (remhash key harness-ui-popout--drafts))
   (when-let* ((buffer (harness-ui-popout-buffer key)))
-    (with-current-buffer buffer (setq harness-ui-popout--discard discard))
-    (dolist (window (get-buffer-window-list buffer nil t))
-      (if (window-parameter window 'window-side)
-          (ignore-errors (delete-window window))
-        (quit-restore-window window)))
-    (kill-buffer buffer)
-    t))
+    (let* ((parent (harness-ui-popout--parent-buffer buffer))
+           (windows (get-buffer-window-list buffer nil t))
+           (selected (memq (selected-window) windows)))
+      (with-current-buffer buffer (setq harness-ui-popout--discard discard))
+      ;; The parent takes the side window back; the windows still showing
+      ;; this popout after that go.
+      (when (and parent windows (not (get-buffer-window parent t)))
+        (harness-ui-popout--display parent selected))
+      (dolist (window (get-buffer-window-list buffer nil t))
+        (if (window-parameter window 'window-side)
+            (ignore-errors (delete-window window))
+          (quit-restore-window window)))
+      (kill-buffer buffer)
+      t)))
 
 (defun harness-ui-popout--refresh-all ()
   "Draw every open popout again, after a reload or reconnect."
@@ -401,6 +512,91 @@ As C-g, with a region, completion or minibuffer to quit, quit that instead."
     (pcase-let ((`(,text . ,atts) (harness-compose-take)))
       (harness-compose-clear)
       (funcall submit text atts))))
+
+;;;; An image, larger
+
+(defun harness-ui-popout-open-file (file)
+  "Open FILE with the desktop's opener, or visit it when there is none.
+The opener is ui-media's (`harness-ui-media-open'): xdg-open, mpv or open."
+  (if (and (fboundp 'harness-ui-media-open)
+           (cl-find-if #'executable-find '("xdg-open" "mpv" "open")))
+      (harness-ui-media-open file)
+    (find-file-other-window file)))
+
+(defun harness-ui-popout-image (file &rest props)
+  "Show the image FILE in a popout of its own, as large as it fits.
+Return the popout's buffer.  The image fills the frame's width or up to
+`harness-ui-popout-image-max-height' of its height: a larger one is
+scaled down, a smaller one up, by `harness-ui-popout-image-max-scale'
+at most.  Emacs's image keys work on it: i + and i - (or C-wheel) zoom
+it and i r turns it; g fits it again.  Under it, its name, its size and
+how large it shows, and [Open externally] for the desktop's viewer.
+
+PROPS:
+  :title TITLE  the header's title, by default the file's name.
+  :parent KEY   the popout it is shown from, such as a task's report:
+                it takes that one's window, and closing it (q, [back])
+                shows that one again (`harness-ui-popout-show')."
+  (let ((file (expand-file-name file)))
+    (harness-ui-popout-show (list 'image file)
+                            (or (plist-get props :title) (file-name-nondirectory file))
+                            (lambda () (harness-ui-popout--insert-image file))
+                            :parent (plist-get props :parent)
+                            :max-height harness-ui-popout-image-max-height)))
+
+(defun harness-ui-popout--image-size (file)
+  "Return (WIDTH . HEIGHT) of the image FILE, in its own pixels, or nil."
+  (when-let* ((probe (ignore-errors (create-image file nil nil :scale 1))))
+    (prog1 (ignore-errors (image-size probe t))
+      ;; Only measured: it shows scaled, which is another image.
+      (ignore-errors (image-flush probe t)))))
+
+(defun harness-ui-popout--insert-image (file)
+  "Insert the image FILE as large as this popout shows it, and a line on it.
+A remote file is never read, which would block: it can be opened."
+  (let* ((local (not (file-remote-p file)))
+         (readable (and local (file-readable-p file)))
+         (graphic (display-images-p))
+         (natural (and readable graphic (harness-ui-popout--image-size file)))
+         (image (and natural
+                     (ignore-errors
+                       ;; Scaled up by the most it may be, then down to
+                       ;; the box, the max sizes being hard limits: it
+                       ;; fills the box either way.  A column to spare:
+                       ;; an image as wide as the window would wrap.
+                       (create-image file nil nil
+                                     :scale (* harness-ui-popout-image-max-scale
+                                               (image-compute-scaling-factor image-scaling-factor))
+                                     :max-width (max 1 (- (harness-ui-popout-pixel-width) (frame-char-width)))
+                                     :max-height (harness-ui-popout-pixel-height 2)))))
+         (shown (and image (ignore-errors (image-size image t))))
+         (bytes (and readable (harness-file-size file))))
+    (cond
+     (image
+      ;; `insert-image' gives it Emacs's image keys (`image-map').
+      (insert-image image (format "[image %s]" (abbreviate-file-name file)))
+      (insert "\n"))
+     ((not local)
+      (insert (propertize "A remote image is not read here: open it to see it.\n" 'face 'harness-dim-face)))
+     ((not readable)
+      (insert (propertize (format "%s cannot be read.\n" (abbreviate-file-name file))
+                          'face 'harness-tool-error-face)))
+     (t (insert (propertize (if graphic "This image cannot be shown here: open it to see it.\n"
+                              "Images do not show here: open it to see it.\n")
+                            'face 'harness-dim-face))))
+    (insert " " (propertize (file-name-nondirectory file) 'face 'bold)
+            (propertize (concat (if natural (format "  %d×%d" (car natural) (cdr natural)) "")
+                                (if (and natural shown (/= (car shown) (car natural)))
+                                    (format ", shown at %d%%" (round (* 100.0 (car shown)) (car natural)))
+                                  "")
+                                (if bytes (concat "  ·  " (harness-format-bytes bytes)) ""))
+                        'face 'harness-dim-face)
+            "   ")
+    (harness-ui-button "[Open externally]" (lambda () (harness-ui-popout-open-file file))
+                       :help "Open it in the desktop's image viewer")
+    (insert "\n")
+    (when image
+      (insert (propertize " i + and i - zoom (or C-wheel), g fits it again" 'face 'harness-hint-face) "\n"))))
 
 ;;;; The item at point
 

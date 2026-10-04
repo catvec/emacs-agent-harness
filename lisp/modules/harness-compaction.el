@@ -383,14 +383,17 @@ second call while one is running returns the running promise."
 
 (defun harness-compaction--before-turn (value next session)
   "Compact SESSION before its turn when the context is nearly full.
-VALUE and NEXT are the `agent/before-turn' filter arguments."
-  (if (or (not (plist-get value :proceed))
-          (not (harness-compaction-needed-p session))
-          (harness-compaction-hosted-p session))
-      (funcall next value)
-    (harness-then (harness-call 'compaction/compact (plist-get session :id))
-                  (lambda (_node) (funcall next value))
-                  (lambda (_err) (funcall next value))))
+VALUE and NEXT are the `agent/before-turn' filter arguments.  SESSION
+is read again first: a handler earlier in the chain (the fallback) may
+have moved it to another model, whose window and compaction decide."
+  (let ((session (or (ignore-errors (harness-call 'session/get (plist-get session :id))) session)))
+    (if (or (not (plist-get value :proceed))
+            (not (harness-compaction-needed-p session))
+            (harness-compaction-hosted-p session))
+        (funcall next value)
+      (harness-then (harness-call 'compaction/compact (plist-get session :id))
+                    (lambda (_node) (funcall next value))
+                    (lambda (_err) (funcall next value)))))
   nil)
 
 (defun harness-compaction--init ()

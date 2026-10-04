@@ -12,6 +12,13 @@
 ;; the task's title, so when the model names it,
 ;; `harness-tasks--naming-instructions' asks for a ticket title.
 ;;
+;; A task's session also runs on a shorter context than an interactive
+;; one by default: `harness-tasks-context-limit' (256k tokens) caps the
+;; session's context window, so the harness compacts a task sooner and
+;; hands it a smaller transcript to carry on from.  Set it to nil to
+;; give task sessions the whole window, like any other session, or to
+;; another number of tokens to choose how often they compact.
+;;
 ;; In a git project a task owns the whole life of its change: it starts
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
 ;; its session is told to commit there, and when the agent finishes the
@@ -33,10 +40,15 @@
 ;; project.  `task/verify' accepts it: its branch goes through the merge
 ;; queue and the task is done once merged (outside git, at once).
 ;; `task/reject' sends it back with feedback: the feedback goes to the
-;; same session, in its own worktree, as a new prompt, and the task
-;; comes back to review when that turn ends.  Every round of feedback is
-;; kept with the task (`:feedback'), and so is the verification
-;; (`:verified', `:verified-at').
+;; same session, in its own worktree (or the main tree, see below), as a
+;; new prompt, and the task comes back to review when that turn ends.
+;; Every round of feedback is kept with the task (`:feedback'), and so
+;; is the verification (`:verified', `:verified-at').  Any other message
+;; that reaches the session while its task waits for review sends it back
+;; the same way, with the message as the feedback, wherever it was
+;; written: the session's own chat, `task/prompt', another client,
+;; another session's agent, the queue (`harness-tasks--on-message').
+;; Only the harness's own messages do not count.
 ;;
 ;; Backlog refinement (once called grooming): a task submitted with
 ;; `:refine' is jotted down for later, not started.  An agent writes it
@@ -49,6 +61,13 @@
 ;; starting moves that session into the task's worktree and tells it to
 ;; do the work.  A message to a backlog task's session is feedback on
 ;; the write-up, which the agent rewrites.
+;;
+;; Main tree: a task submitted with `:main-tree' (the `task_submit'
+;; tool's `main_tree', or the board's worktree switch) gets no worktree
+;; and no branch.  Its session works in the project's main checkout, so
+;; the task can touch the checkout itself -- cleaning up uncommitted
+;; changes, say -- and nothing merges when its turn ends.  A refined
+;; task keeps the declaration for when it starts.
 ;;
 ;; Duplicates: the agent first looks for related tasks on the board
 ;; (task_list).  When one already asks for exactly the same change it
@@ -68,7 +87,10 @@
 ;;   active    its session is working on it, or stopped part way
 ;;             (`:outcome' says why: error, cancelled, merge-failed…)
 ;;   merging   the agent finished (and, with review, the user verified
-;;             the work); its branch is queued or merging
+;;             the work); its branch is queued or merging, or its
+;;             session resolves the merge's conflicts (`:merge-status'
+;;             queued, merging or conflict; `:merge-queued' says when
+;;             the branch joined the queue)
 ;;   review    the agent finished; the work waits for the user to
 ;;             verify it or send it back with feedback
 ;;   done      merged (or finished, outside git), and verified with
@@ -82,7 +104,10 @@
 ;;                 permission or a question, or it (or its refinement)
 ;;                 stopped part way
 ;;   review        finished, waiting for the user to verify it
-;;   active        in progress, merging included
+;;   merging       its branch holds a place in the merge queue: queued,
+;;                 merging, or its session resolving the conflicts
+;;                 (unless that session waits on the user: needs-input)
+;;   active        in progress
 ;;   done          completed
 ;;
 ;; Records are written shortly after every change and on exit; the
@@ -93,13 +118,6 @@
 ;; Stores below and `harness-tasks-store-in-repository').  The tasks of
 ;; other projects are in tasks.json in the state directory, where git
 ;; projects' were before; they move by themselves.
-;;
-;; Such a git project's board is also a folder of markdown files in its
-;; main checkout, docs/tasks by default (`harness-tasks-directory'): one
-;; file per task, YAML frontmatter for the fields code reads, then the
-;; prompt, the request it was written up from and the plan.  The harness
-;; writes them as tasks change and reads back what people edit or add
-;; (see Task files below).
 ;;
 ;; A harness that stops (Emacs quit, `harness-restart', a crash)
 ;; interrupts the tasks it was working on, so a start picks them up
@@ -179,6 +197,22 @@ own setting, from the board or `task/submit', wins over both."
   :type `(choice (const :tag "Configured default" nil) ,@harness-tasks--thinking-levels)
   :group 'harness)
 
+(defcustom harness-tasks-context-limit 256000
+  "Most tokens of context a task session uses, or nil for its whole window.
+A task session compacts when its context comes within the usual reserve
+of this limit, so unattended tasks compact earlier than interactive
+sessions: the handoff summary keeps them working from a smaller
+transcript, and the turn after a compaction starts cheap.  The limit
+never raises a session above its model's own window.  With nil task
+sessions use the whole window, like any other session, and compact at
+the usual point.  A provider that compacts on its own side is asked to
+compact at the same point where it can be (Claude Code, see the claude
+provider)."
+  :type '(choice (const :tag "The whole window" nil)
+                 (integer :tag "Tokens of context"))
+  :safe (lambda (v) (or (null v) (and (integerp v) (> v 0))))
+  :group 'harness)
+
 (defconst harness-tasks--naming-instructions
   "This conversation is a task the engineer handed to the agent to do unattended, tracked on a task board.  Title it like a ticket on that board: an imperative summary of the work to be done, such as \"Fix login redirect loop\" or \"Add CSV export to reports\"."
   "Text added to the naming system prompt of task sessions, or nil for none.
@@ -217,6 +251,72 @@ A write-up should be quick, so the default thinks little."
 The agent is steered once, to write the task up with what it knows; nil
 never tells it.  It keeps a backlog write-up brief.")
 
+;;;; Recaps
+
+;; A card's subtitle is a recap of the task, written by a cheap model
+;; call (see harness-recap.el).  The recap is refreshed at the first of
+;; `harness-tasks-recap-turns' turns, `harness-tasks-recap-seconds'
+;; seconds or `harness-tasks-recap-tool-calls' tool calls since the
+;; last one, whichever comes first, like a warranty's months or miles:
+;; a card that sat in review for a week should not count that as work.
+
+(defcustom harness-tasks-recap t
+  "When non-nil, task cards get a recap subtitle from a short model call."
+  :type 'boolean :group 'harness)
+
+(defcustom harness-tasks-recap-turns 4
+  "Turns since the last recap that make a new one due.
+Whichever comes first of this, `harness-tasks-recap-seconds' and
+`harness-tasks-recap-tool-calls'; nil never refreshes on turns."
+  :type '(choice (const :tag "Never" nil) (integer :tag "Turns")) :group 'harness)
+
+(defcustom harness-tasks-recap-seconds 120
+  "Seconds of work since the last recap that make a new one due.
+Whichever comes first of this, `harness-tasks-recap-turns' and
+`harness-tasks-recap-tool-calls'; nil never refreshes on time."
+  :type '(choice (const :tag "Never" nil) (number :tag "Seconds")) :group 'harness)
+
+(defcustom harness-tasks-recap-tool-calls 8
+  "Tool calls since the last recap that make a new one due.
+Whichever comes first of this, `harness-tasks-recap-turns' and
+`harness-tasks-recap-seconds'; nil never refreshes on tool calls."
+  :type '(choice (const :tag "Never" nil) (integer :tag "Tool calls")) :group 'harness)
+
+(defcustom harness-tasks-recap-model 'auto
+  "Model that writes task recaps.
+`auto' asks the session's provider for its cheap tier, falling back
+to the session's own model; nil uses the session's own model."
+  :type '(choice (const :tag "Provider's cheap tier" auto)
+                 (const :tag "The task's model" nil)
+                 (string :tag "Model"))
+  :group 'harness)
+
+(defcustom harness-tasks-recap-thinking nil
+  "Thinking level of a recap request, or nil for the provider's default."
+  :type `(choice (const :tag "Provider default" nil) ,@harness-tasks--thinking-levels)
+  :group 'harness)
+
+(defcustom harness-tasks-recap-max-tokens 60
+  "Most tokens a recap request may write."
+  :type 'integer :group 'harness)
+
+(defcustom harness-tasks-recap-max-length 160
+  "Longest recap a card shows, in characters."
+  :type 'integer :group 'harness)
+
+(defcustom harness-tasks-recap-context 8000
+  "Characters of transcript a recap request may carry.
+The tail of the transcript, so the request stays short on a long task."
+  :type 'integer :group 'harness)
+
+(defcustom harness-tasks-recap-interval 30
+  "Seconds between checks for a recap due on time while a task works."
+  :type '(choice (const :tag "No timer" nil) (number :tag "Seconds")) :group 'harness)
+
+(defcustom harness-tasks-recap-retry 60
+  "Seconds before a new recap is tried again after one failed."
+  :type '(choice (const :tag "No wait" nil) (number :tag "Seconds")) :group 'harness)
+
 (defconst harness-tasks--start-message
   "Start working on this task now.  It was written up earlier without doing any of it; that is over, so change files, run commands and so on as the task requires.  If it names related tasks, see where they stand now and coordinate with them as it says before you change the same code."
   "Opening of the message that starts a backlog task's work.
@@ -227,7 +327,9 @@ work coordinates with (see `harness-tasks--refine-prompt').")
 (defconst harness-tasks--reject-message
   "The user reviewed your work on this task and sent it back. Address their feedback below, then finish as before (commit your changes, if you work in a git worktree). Your work goes back to the user for review when your turn ends."
   "Opening of the message that sends a task back to its session after review.
-The user's feedback follows it (`task/reject').")
+The user's feedback follows it (`task/reject'), as it opens any message
+that reaches the session while its task waits for review
+\(`harness-tasks--on-message').")
 
 (defconst harness-tasks--btw-prompt
   "## Task board
@@ -265,6 +367,11 @@ task's write-up: it is written again, or with nil waits for a retry."
   "The harness restarted while you were working on this task, so your last turn was cut short: tool calls that were still running did not finish. Check where you left off, then carry on with the task."
   "Message that resumes a task's session after a restart interrupted it.")
 
+(defconst harness-tasks--retry-prompt
+  "Your last turn on this task stopped before the task was finished: %s. Check where you left off, then carry on with the task."
+  "Message that has a task's session work again after its turn stopped.
+`task/retry' sends it; %s says how the turn stopped.")
+
 (defcustom harness-tasks-store-in-repository t
   "When non-nil, a git project keeps its tasks inside its repository.
 Their records go to harness/tasks.json in the git directory every
@@ -280,24 +387,6 @@ names, which holds the tasks' sessions.  Another harness (one with a
 state directory of its own, like a test run) keeps its tasks of that
 repository in its state directory instead."
   :type 'boolean :group 'harness)
-
-(defconst harness-tasks--directory-poll 2
-  "Seconds between looks at the task folders for files changed by hand.
-A folder is also read when a board lists its tasks and before every
-save; nil only does that.  The folder is `harness-tasks-directory'.")
-
-(defcustom harness-tasks-directory-archive "archive"
-  "Subfolder of a task folder that the files of archived tasks move to.
-Restoring a task moves its file back.  The folder's subfolders are not
-read, so a file moved there by hand archives its task too.  nil deletes
-the files of archived tasks instead.  The task folder is
-`harness-tasks-directory'."
-  :type '(choice (const :tag "Delete the files" nil) (string :tag "Subfolder")) :group 'harness)
-
-(defconst harness-tasks--directory-ignore
-  "\\`\\(?:[._#~].*\\|readme\\.md\\|index\\.md\\|template\\.md\\)\\'"
-  "Names of the files in a task folder that are no tasks, matched ignoring case.
-The folder is `harness-tasks-directory'; only its .md files count.")
 
 (defvar harness-state-directory)
 
@@ -346,15 +435,6 @@ A save skips the stores whose text would not change.")
   "Task ids that are starting: worktree or session made, first turn not begun.
 They hold a slot so a burst of submissions never overshoots the limit.")
 
-(defvar harness-tasks--file-stamps (make-hash-table :test 'equal)
-  "Task file path -> (MTIME SIZE) as this process last wrote or read it.
-A folder read skips the files whose stamp did not change.")
-
-(defvar harness-tasks--file-roots (make-hash-table :test 'equal)
-  "Project -> the folder of its task files, for the projects this process reads.")
-
-(defvar harness-tasks--poll-timer nil "Timer that runs `harness-tasks--poll'.")
-
 ;;;; Records
 
 (defun harness-tasks--get (id)
@@ -392,8 +472,10 @@ A folder read skips the files whose stamp did not change.")
   (harness-tasks--put (apply #'harness-plist-merge (harness-tasks--get id) (list plist))))
 
 (defun harness-tasks--intern (task)
-  "Turn the string enum values of a stored TASK back into symbols."
-  (let ((task (copy-sequence task)))
+  "Turn the string enum values of a stored TASK back into symbols.
+Records from before the task files were removed lose their bookkeeping
+of them (`:file', `:file-base', `:file-synced', `:updated', `:extra')."
+  (let ((task (harness-plist-remove task :file :file-base :file-synced :updated :extra)))
     (dolist (k harness-tasks--symbol-keys task)
       (let ((v (plist-get task k)))
         (when (stringp v) (setq task (plist-put task k (intern v))))))))
@@ -415,6 +497,14 @@ so a board opened from a task's session shows the project's tasks."
 (defun harness-tasks--backlog-p (task)
   "Non-nil when TASK is a backlog task: only `task/start' starts it."
   (harness-json-true-p (plist-get task :backlog)))
+
+(defun harness-tasks--main-tree-p (task)
+  "Non-nil when TASK works in the project's main tree, without a worktree.
+Set at submission (`task/submit' with `:main-tree'), for work that has
+to touch the main checkout itself, such as cleaning up uncommitted
+changes: the task runs where the project is checked out, on no branch,
+and nothing merges when its turn ends."
+  (harness-json-true-p (plist-get task :main-tree)))
 
 (defun harness-tasks--refinement-p (task)
   "Non-nil when a turn of TASK's session refines it rather than doing it.
@@ -629,12 +719,10 @@ this harness's to write any more: its records go to the global store."
 
 (defun harness-tasks--save ()
   "Write every task record now, each into the store of its project.
-The task files go first (see Task files), so the stores record what
-they hold.  Stores whose text would not change are skipped, and a
-repository store left without records is deleted.  Repository stores go
-first, so a record moving out of the global store stays there until its
-repository has it; one that cannot be written leaves its records there."
-  (harness-tasks--save-files)
+Stores whose text would not change are skipped, and a repository store
+left without records is deleted.  Repository stores go first, so a
+record moving out of the global store stays there until its repository
+has it; one that cannot be written leaves its records there."
   (let ((homes (make-hash-table :test 'equal))
         (groups (make-hash-table :test 'equal))
         (global (harness-tasks--global-store))
@@ -677,22 +765,18 @@ repository has it; one that cannot be written leaves its records there."
       (error (harness-log 'error "tasks: could not save the task records: %S" err)))))
 
 (defun harness-tasks--forget-stores ()
-  "Forget what this process read and wrote of the stores and task files."
+  "Forget what this process read and wrote of the stores."
   (clrhash harness-tasks--stores)
   (clrhash harness-tasks--written)
-  (clrhash harness-tasks--file-stamps)
-  (clrhash harness-tasks--file-roots)
   (setq harness-tasks--backup-checked nil))
 
 (defun harness-tasks--load ()
-  "Read the task records from their stores once, then the task files.
+  "Read the task records from their stores once.
 The repository stores of the registry come first, then the global
 store, so a record in both (a move a crash cut short) keeps its
-repository copy.  The task folders of their projects follow: edits made
-while the harness was down are taken and files nobody knows become
-tasks, so the files alone bring a board back.  A save follows, which
-moves the records kept where their project does not keep them, like git
-projects' tasks from before repository stores."
+repository copy.  A save follows, which moves the records kept where
+their project does not keep them, like git projects' tasks from before
+repository stores."
   (unless harness-tasks--loaded
     (setq harness-tasks--loaded t)
     (harness-tasks--forget-stores)
@@ -703,1026 +787,19 @@ projects' tasks from before repository stores."
           (condition-case err
               (harness-tasks--open-store path)
             (error (harness-log 'error "tasks: cannot read %s: %S" path err)))))
-      (harness-tasks--add-records (harness-tasks--read-json (harness-tasks--global-store)))
-      (harness-tasks--scan-roots (delete-dups (mapcar (lambda (task) (plist-get task :project))
-                                                      (harness-tasks--sorted)))))
+      (harness-tasks--add-records (harness-tasks--read-json (harness-tasks--global-store))))
     (harness-tasks--save-soon)))
-
-;;;; Task files
-;;
-;; Besides its store, a git project whose tasks this harness keeps in its
-;; repository (see Stores) has a markdown file for every task on its
-;; board in `harness-tasks-directory' (docs/tasks) of its main checkout,
-;; so the board plays along with projects that keep their tasks and plans
-;; as files.  A task file is YAML frontmatter with the fields code reads,
-;; as in SKILL.md files, then the task: its prompt (the first line a
-;; heading), the request it was written up from (`:note'), the feedback
-;; of every time the user sent it back from review (`:feedback') and its
-;; session's plan:
-;;
-;;   ---
-;;   id: t-k3j9x2ab
-;;   title: Add CSV export to reports
-;;   state: pending
-;;   column: pending
-;;   backlog: true
-;;   created: 2026-10-01T13:20:01Z
-;;   updated: 2026-10-01T13:22:40Z
-;;   ---
-;;
-;;   # Add CSV export to reports
-;;
-;;   Reports should ...
-;;
-;;   <!-- harness:request -->
-;;   ## Request
-;;
-;;   > csv export for the reports page
-;;
-;; A task sent back from review has a review section after the request,
-;; one round of feedback under each heading, and its verification in the
-;; frontmatter (`verified: TIME') once the user accepts it:
-;;
-;;   <!-- harness:review -->
-;;   ## Review
-;;
-;;   ### Sent back 2026-10-01T14:02:11Z
-;;
-;;   > Also export the totals row.
-;;
-;; The store keeps the whole record, with what only the harness needs
-;; (attachments, worktree, merge target); the files show the rest and
-;; take edits.  Only the main checkout gets files, never a task's
-;; worktree, and the harness never commits them.
-;;
-;; - Writing: a save first reads what changed on disk, then writes the
-;;   file of every task that changed since its file was last in step with
-;;   it (`:file-synced'), before the stores.  A file keeps the name it got
-;;   (`<id>-<slug>.md' when the harness makes it).  Archiving a task moves
-;;   its file into the archive subfolder (`harness-tasks-directory-archive')
-;;   and restoring it moves it back; deleting or cancelling a task deletes
-;;   its file.
-;; - Reading: on load, when a board lists the project's tasks, before
-;;   every save and every `harness-tasks--directory-poll' seconds (file
-;;   notifications never reach a batch Emacs), the files whose stamp
-;;   changed are read.  The person's edits are what differs from what the
-;;   file said last (`:file-base'), so a file the harness has yet to
-;;   write again is no edit.  Taken are the prompt, the request, the
-;;   title (the session's name), the model and thinking of a task that
-;;   has not started, and `state: done' (completing it, or verifying a
-;;   task in review).  The other known fields, and the review and plan
-;;   sections, are the harness's: a file that contradicts them is written
-;;   again.  Keys the harness does not know are kept as written.
-;; - A file no task has becomes one: a backlog task, which only the user
-;;   starts, or one in review or done, with its rounds of feedback.  With
-;;   its session still there it is the task it was before the store lost
-;;   it, except that it waits for the user if it was at work.  It stays
-;;   as written until the task changes.
-;; - A file deleted by hand, or moved out of the folder (into the archive
-;;   subfolder, say), archives its task when the task waits (in pending
-;;   or review) or is done; one in progress gets its file back.  A file
-;;   that comes back brings its archived task back.
-
-;;;;; A YAML subset
-;;
-;; Frontmatter needs one level of `key: value' entries whose values are
-;; scalars -- plain, quoted, or | and > blocks -- or lists of scalars,
-;; [a, b] or `- a' lines.  Emacs has no YAML parser, and that is all the
-;; task files use.  Each entry keeps its lines as written too, so keys
-;; the harness does not know (or values this does not read) survive a
-;; rewrite unchanged.
-
-(defconst harness-tasks--yaml-entry-re
-  "\\`\\([A-Za-z0-9_][A-Za-z0-9_.-]*\\)[ \t]*:\\(?:[ \t]+\\(.*\\)\\)?[ \t]*\\'"
-  "A top-level `key: value' line: group 1 is the key, 2 the value text.")
-
-(defun harness-tasks--yaml-special-p (s)
-  "Non-nil when S written plain would read back as something else than S.
-That is a boolean, null or number, in YAML 1.1 or 1.2."
-  (let ((case-fold-search t))
-    (string-match-p
-     (concat "\\`\\(?:~\\|null\\|true\\|false\\|yes\\|no\\|on\\|off\\|y\\|n"
-             "\\|[-+]?\\(?:[0-9][0-9_]*\\(?:\\.[0-9_]*\\)?\\|\\.[0-9_]+\\)\\(?:e[-+]?[0-9]+\\)?"
-             "\\|0x[0-9a-f]+\\|0o[0-7]+\\|[-+]?\\.inf\\|\\.nan\\|[0-9][0-9:]*:[0-9:.]*\\)\\'")
-     s)))
-
-(defun harness-tasks--yaml-plain-p (s)
-  "Non-nil when the string S can be written as a plain YAML scalar."
-  (and (not (string-empty-p s))
-       (not (harness-tasks--yaml-special-p s))
-       (not (string-match-p (rx (or (seq bos (any "] \t!\"#%&'*,:>?@[`{|}-"))
-                                    (seq (any " \t") eos)
-                                    (any (0 . 31) 127)
-                                    ": " " #" (seq ":" eos)))
-                            s))))
-
-(defun harness-tasks--yaml-quote (s)
-  "Return the string S as a double-quoted YAML scalar."
-  (concat "\""
-          (replace-regexp-in-string
-           (rx (any ?\" ?\\ (0 . 31) 127))
-           (lambda (c)
-             (pcase (aref c 0)
-               (?\" "\\\"") (?\\ "\\\\") (?\n "\\n") (?\t "\\t") (?\r "\\r")
-               (ch (format "\\x%02x" ch))))
-           s t t)
-          "\""))
-
-(defun harness-tasks--yaml-scalar (value &optional flow)
-  "Return VALUE written as a YAML scalar, or a [list] when it is a vector.
-Strings are plain when they read back the same, else double-quoted;
-FLOW non-nil quotes the ones that would break a [list] too.  t and
-`:false' are true and false, nil null, symbols their names."
-  (cond ((eq value t) "true")
-        ((eq value :false) "false")
-        ((null value) "null")
-        ((numberp value) (number-to-string value))
-        ((vectorp value)
-         (concat "[" (mapconcat (lambda (v) (harness-tasks--yaml-scalar v t)) value ", ") "]"))
-        ((symbolp value) (harness-tasks--yaml-scalar (symbol-name value) flow))
-        (t (let ((s (format "%s" value)))
-             (if (and (harness-tasks--yaml-plain-p s)
-                      (not (and flow (string-match-p "[],[{}]" s))))
-                 s
-               (harness-tasks--yaml-quote s))))))
-
-(defun harness-tasks--yaml-plain (s)
-  "Return the value of the plain YAML scalar S: a boolean, null, number or S."
-  (let ((case-fold-search t))
-    (cond ((string-match-p "\\`\\(?:~\\|null\\)?\\'" s) nil)
-          ((string-match-p "\\`\\(?:true\\|yes\\|on\\)\\'" s) t)
-          ((string-match-p "\\`\\(?:false\\|no\\|off\\)\\'" s) :false)
-          ((string-match-p "\\`[-+]?\\(?:[0-9]+\\(?:\\.[0-9]*\\)?\\|\\.[0-9]+\\)\\(?:e[-+]?[0-9]+\\)?\\'" s)
-           (string-to-number s))
-          (t s))))
-
-(defun harness-tasks--yaml-uncomment (s)
-  "Return the plain scalar text S without a trailing comment."
-  (if (string-match "\\(?:\\`\\|[ \t]\\)#" s) (substring s 0 (match-beginning 0)) s))
-
-(defun harness-tasks--yaml-quoted (text)
-  "Read the quoted scalar TEXT opens with, its quote \" or \\='.
-Return (STRING . REST), REST being the text after the closing quote, or
-nil when the quote never closes.  Line breaks inside fold as YAML folds
-them: one becomes a space, each empty line a newline."
-  (let ((quote (aref text 0)) (n (length text)) (i 1) (out nil) (done nil))
-    (while (and (not done) (< i n))
-      (let ((c (aref text i)))
-        (cond
-         ((eq c quote)
-          (if (and (eq quote ?') (< (1+ i) n) (eq (aref text (1+ i)) ?'))
-              (progn (push ?' out) (cl-incf i))
-            (setq done t)))
-         ((and (eq c ?\\) (eq quote ?\"))
-          (cl-incf i)
-          (let ((e (and (< i n) (aref text i))))
-            (pcase e
-              (?n (push ?\n out)) (?t (push ?\t out)) (?\t (push ?\t out)) (?r (push ?\r out))
-              (?0 (push 0 out)) (?a (push 7 out)) (?b (push 8 out)) (?e (push 27 out))
-              (?f (push 12 out)) (?v (push 11 out)) (?\s (push ?\s out)) (?/ (push ?/ out))
-              (?\" (push ?\" out)) (?\\ (push ?\\ out))
-              (?N (push #x85 out)) (?_ (push #xa0 out)) (?L (push #x2028 out)) (?P (push #x2029 out))
-              ((or ?x ?u ?U)
-               (let* ((len (pcase e (?x 2) (?u 4) (_ 8)))
-                      (hex (and (<= (+ i 1 len) n) (substring text (1+ i) (+ i 1 len))))
-                      (code (and hex (string-match-p "\\`[0-9a-fA-F]+\\'" hex) (string-to-number hex 16))))
-                 (if (and code (<= code (max-char)))
-                     (progn (push code out) (cl-incf i len))
-                   (push ?\\ out) (push e out))))
-              (?\n ; an escaped line break joins the lines
-               (while (and (< (1+ i) n) (memq (aref text (1+ i)) '(?\s ?\t))) (cl-incf i)))
-              ('nil nil)
-              (_ (push ?\\ out) (push e out)))))
-         ((eq c ?\n)
-          (while (memq (car out) '(?\s ?\t)) (pop out))
-          (let ((breaks 0))
-            (while (and (< (1+ i) n) (memq (aref text (1+ i)) '(?\s ?\t ?\n)))
-              (cl-incf i)
-              (when (eq (aref text i) ?\n) (cl-incf breaks)))
-            (if (> breaks 0) (dotimes (_ breaks) (push ?\n out)) (push ?\s out))))
-         (t (push c out))))
-      (cl-incf i))
-    (and done (cons (apply #'string (nreverse out)) (substring text i)))))
-
-(defun harness-tasks--yaml-flow (text)
-  "Read the [list] of scalars TEXT opens with.
-Return (VECTOR . REST), or nil when it is no such list."
-  (let ((rest (substring text 1)) (items nil) (done nil) (bad nil))
-    (while (not (or done bad))
-      (setq rest (string-trim-left rest "[ \t\n,]+"))
-      (cond
-       ((string-empty-p rest) (setq bad t))
-       ((eq (aref rest 0) ?\]) (setq done t rest (substring rest 1)))
-       ((memq (aref rest 0) '(?\" ?'))
-        (let ((r (harness-tasks--yaml-quoted rest)))
-          (if r (progn (push (car r) items) (setq rest (cdr r))) (setq bad t))))
-       ((memq (aref rest 0) '(?\[ ?\{)) (setq bad t))
-       (t (let ((end (or (string-match "[],\n]" rest) (length rest))))
-            (push (harness-tasks--yaml-plain (string-trim (substring rest 0 end))) items)
-            (setq rest (substring rest end))))))
-    (and done (cons (vconcat (nreverse items)) rest))))
-
-(defun harness-tasks--yaml-item (text)
-  "Return the value of the scalar TEXT, a list item."
-  (let ((text (string-trim text)))
-    (cond ((string-match-p "\\`[\"']" text) (car (harness-tasks--yaml-quoted text)))
-          ((string-prefix-p "[" text) (car (harness-tasks--yaml-flow text)))
-          (t (harness-tasks--yaml-plain (string-trim (harness-tasks--yaml-uncomment text)))))))
-
-(defun harness-tasks--yaml-block (header lines)
-  "Return the block scalar of LINES, whose HEADER is | or > with its indicators."
-  (let* ((header (string-trim (harness-tasks--yaml-uncomment header)))
-         (folded (eq (aref header 0) ?>))
-         (chomp (cond ((string-search "-" header) 'strip) ((string-search "+" header) 'keep) (t 'clip)))
-         (indent (or (and (string-match "[1-9]" header) (string-to-number (match-string 0 header)))
-                     (cl-loop for l in lines unless (string-blank-p l) return (string-match "[^ ]" l))
-                     0))
-         (body (mapcar (lambda (l) (if (string-blank-p l) "" (substring l (min indent (string-match "[^ ]" l)))))
-                       lines))
-         (text (if folded
-                   (mapconcat (lambda (para) (string-join para " "))
-                              (let (paras para)
-                                (dolist (l body (nreverse (if para (cons (nreverse para) paras) paras)))
-                                  (if (string-empty-p l)
-                                      (progn (when para (push (nreverse para) paras)) (setq para nil))
-                                    (push l para))))
-                              "\n")
-                 (string-join body "\n")))
-         (text (string-trim-right text "\n+")))
-    (if (or (eq chomp 'strip) (string-empty-p text)) text (concat text "\n"))))
-
-(defun harness-tasks--yaml-nested (lines)
-  "Return the value an entry gives on the indented LINES under it.
-That is a `- item' list or a plain scalar over several lines; a nested
-mapping is beyond this subset and gives nil."
-  (let ((first (cl-find-if-not #'string-blank-p lines)))
-    (cond
-     ((null first) nil)
-     ((string-match-p "\\`[ \t]*-\\(?:[ \t]\\|\\'\\)" first)
-      (vconcat (delq 'harness-tasks--none
-                     (mapcar (lambda (l)
-                               (if (string-match "\\`[ \t]*-\\(?:[ \t]+\\(.*\\)\\)?\\'" l)
-                                   (harness-tasks--yaml-item (or (match-string 1 l) ""))
-                                 'harness-tasks--none))
-                             lines))))
-     ((string-match-p "\\`[ \t]*[^ \t#\"'][^:]*:\\(?:[ \t]\\|\\'\\)" first) nil)
-     (t (harness-tasks--yaml-plain
-         (string-join (delete "" (mapcar (lambda (l) (string-trim (harness-tasks--yaml-uncomment l))) lines))
-                      " "))))))
-
-(defun harness-tasks--yaml-value (value more)
-  "Return the value of an entry: VALUE, the text after its colon, then lines MORE."
-  (let ((v (string-trim value)))
-    (condition-case nil
-        (cond
-         ((string-match-p "\\`[|>]" v) (harness-tasks--yaml-block v more))
-         ((string-match-p "\\`[\"']" v) (car (harness-tasks--yaml-quoted (string-join (cons v more) "\n"))))
-         ((string-prefix-p "[" v) (car (harness-tasks--yaml-flow (string-join (cons v more) "\n"))))
-         ((string-match-p "\\`[{&*!]" v) nil)
-         ((string-empty-p (string-trim (harness-tasks--yaml-uncomment v))) (harness-tasks--yaml-nested more))
-         (t (harness-tasks--yaml-plain
-             (string-join (delete "" (mapcar (lambda (l) (string-trim (harness-tasks--yaml-uncomment l)))
-                                             (cons v more)))
-                          " "))))
-      (error nil))))
-
-(defun harness-tasks--yaml-parse (text)
-  "Parse TEXT, YAML frontmatter, into a list of entries (KEY VALUE RAW).
-KEY is the key string; VALUE its value: a string, number, t, `:false',
-nil (null) or a vector (a list); RAW the entry's lines as written.
-Values beyond this subset (nested mappings, anchors, tags) are nil, and
-a line that is no entry is one with KEY nil.  Comment lines are dropped."
-  (let ((lines (split-string text "\n")) entries)
-    (while lines
-      (let ((line (pop lines)))
-        (cond
-         ((string-match-p "\\`[ \t]*\\(?:#.*\\)?\\'" line) nil)
-         ((string-match harness-tasks--yaml-entry-re line)
-          (let ((key (match-string 1 line))
-                (value (or (match-string 2 line) ""))
-                (more nil))
-            ;; Its value goes on over indented lines, empty ones and `- item' lines.
-            (while (and lines (string-match-p "\\`\\(?:[ \t]\\|-\\(?:[ \t]\\|\\'\\)\\|\\'\\)" (car lines)))
-              (push (pop lines) more))
-            ;; Empty lines at its end are no part of it.
-            (while (and more (string-blank-p (car more)))
-              (push (pop more) lines))
-            (setq more (nreverse more))
-            (push (list key (harness-tasks--yaml-value value more) (string-join (cons line more) "\n"))
-                  entries)))
-         (t (push (list nil nil line) entries)))))
-    (nreverse entries)))
-
-;;;;; The file format
-
-(defconst harness-tasks--file-keys
-  '("id" "title" "state" "column" "backlog" "outcome" "error" "duplicate-of" "session" "branch" "base"
-    "merge" "model" "thinking" "created" "started" "refined" "finished" "verified" "updated")
-  "Frontmatter keys of a task file, in the order the harness writes them.
-Other keys are kept as written.")
-
-(defconst harness-tasks--file-time-keys '("created" "started" "refined" "finished" "verified" "updated")
-  "Frontmatter keys whose values are times, ISO 8601 in UTC.")
-
-(defconst harness-tasks--section-re "\\`<!-- harness:\\([a-z-]+\\) -->[ \t]*\\'"
-  "A line opening a section of a task file the harness keeps (request, plan).")
-
-(defconst harness-tasks--file-max-size (* 1024 1024) "Larger files are no task files.")
-
-(defun harness-tasks--hash (text)
-  "Return a hash of the string TEXT."
-  (secure-hash 'sha1 (encode-coding-string text 'utf-8-unix t)))
-
-(defun harness-tasks--time-text (time)
-  "Return TIME, a float, as a frontmatter time, or nil."
-  (and (numberp time) (harness-iso-time time)))
-
-(defun harness-tasks--parse-time (value)
-  "Return the frontmatter time VALUE as a float, or nil.
-It may be ISO 8601 (UTC unless it names a zone), a date (UTC midnight)
-or seconds since the epoch."
-  (cond ((numberp value) (float value))
-        ((stringp value)
-         (let ((s (string-trim value)))
-           (ignore-errors
-             (if (string-match "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)\\'" s)
-                 (float-time (encode-time (list 0 0 0 (string-to-number (match-string 3 s))
-                                                (string-to-number (match-string 2 s))
-                                                (string-to-number (match-string 1 s))
-                                                nil nil t)))
-               (let ((time (parse-iso8601-time-string s)))
-                 (and time (float-time time)))))))))
-
-(defun harness-tasks--canon (key value)
-  "Return the frontmatter VALUE of KEY as the harness writes it, nil for none.
-Times are in UTC to the second, booleans true (false is none), symbols
-and numbers their names; strings are trimmed."
-  (cond ((or (null value) (eq value :false)) nil)
-        ((member key harness-tasks--file-time-keys)
-         (let ((time (harness-tasks--parse-time value)))
-           (if time (harness-iso-time time) (format "%s" value))))
-        ((eq value t) "true")
-        ((stringp value) (let ((s (string-trim value))) (and (not (string-empty-p s)) s)))
-        ((symbolp value) (symbol-name value))
-        ((numberp value) (number-to-string value))
-        (t (format "%s" value))))
-
-(defun harness-tasks--title (task &optional session)
-  "Return TASK's title on the board.
-That is its SESSION's name, else its prompt's first line."
-  (let ((name (plist-get session :name)))
-    (if (harness-string-blank-p name)
-        (let ((line (harness-first-line (plist-get task :prompt))))
-          (if (string-match "\\`#+[ \t]+" line) (substring line (match-end 0)) line))
-      (string-trim name))))
-
-(defun harness-tasks--note-shown-p (task)
-  "Non-nil when TASK's file shows the request it was written up from.
-It does once a write-up replaced it."
-  (let ((note (plist-get task :note)))
-    (and (stringp note) (not (string-blank-p note))
-         (not (equal (string-trim note) (string-trim (or (plist-get task :prompt) "")))))))
-
-(defun harness-tasks--file-fields (task session &optional sans-updated)
-  "Return the frontmatter of TASK's file: (KEY . VALUE) pairs, in order.
-SESSION is TASK's session or nil.  Fields without a value are left out,
-and so is `updated' with SANS-UPDATED."
-  (let ((err (plist-get task :error)))
-    (cl-remove-if
-     (lambda (field) (null (cdr field)))
-     (list (cons "id" (plist-get task :id))
-           (cons "title" (harness-tasks--title task session))
-           (cons "state" (plist-get task :state))
-           (cons "column" (harness-tasks--column task))
-           (cons "backlog" (and (harness-tasks--backlog-p task) t))
-           (cons "outcome" (plist-get task :outcome))
-           (cons "error" (and (stringp err) (not (string-blank-p err))
-                              (harness-truncate-end (string-trim err) 300)))
-           (cons "duplicate-of" (plist-get task :duplicate-of))
-           (cons "session" (plist-get task :session))
-           (cons "branch" (plist-get task :branch))
-           (cons "base" (plist-get task :base))
-           (cons "merge" (or (plist-get task :merge-status)
-                             (and (harness-json-true-p (plist-get task :merged)) 'merged)))
-           (cons "model" (plist-get task :model))
-           (cons "thinking" (plist-get task :thinking))
-           (cons "created" (harness-tasks--time-text (plist-get task :created)))
-           (cons "started" (harness-tasks--time-text (plist-get task :started)))
-           (cons "refined" (harness-tasks--time-text (plist-get task :refined)))
-           (cons "finished" (harness-tasks--time-text (plist-get task :finished)))
-           (cons "verified" (and (harness-tasks--verified-p task)
-                                 (harness-tasks--time-text (plist-get task :verified-at))))
-           (cons "updated" (and (not sans-updated) (harness-tasks--time-text (plist-get task :updated))))))))
-
-(defun harness-tasks--title-line-p (line)
-  "Non-nil when LINE, a prompt's first line, reads well as its heading.
-Lines that are markdown of their own (headings, lists, quotes, code,
-tables) or long stay as they are."
-  (and (not (string-blank-p line))
-       (<= (length line) 120)
-       (not (string-match-p
-             (concat "\\`\\(?:[ \t]\\|#\\|>\\||\\|<\\|```\\|~~~\\|[-*+][ \t]\\|[0-9]+[.)][ \t]"
-                     "\\|[-*_=+]+[ \t]*\\'\\)\\|[ \t]#+[ \t]*\\'")
-             line))))
-
-(defun harness-tasks--render-description (prompt)
-  "Return PROMPT as a task file shows it.
-Its first line is a heading when it reads as a title."
-  (let* ((nl (string-search "\n" prompt))
-         (first (if nl (substring prompt 0 nl) prompt)))
-    (if (harness-tasks--title-line-p first)
-        (concat "# " (string-trim-right first) (if nl (substring prompt nl) ""))
-      prompt)))
-
-(defconst harness-tasks--feedback-heading-re
-  "\\`###[ \t]+Sent back\\(?:[ \t]+\\(.*?\\)\\)?[ \t]*\\'"
-  "A heading in a task file's review section: one round of feedback follows.
-Group 1 is the time the task was sent back.")
-
-(defun harness-tasks--feedback-text (task)
-  "Return TASK's rounds of feedback as its file's review section has them.
-That is a `### Sent back TIME' heading over each, quoted; nil for none."
-  (when-let* ((feedback (plist-get task :feedback)))
-    (mapconcat (lambda (round)
-                 (concat "### Sent back"
-                         (if-let* ((time (harness-tasks--time-text (plist-get round :at)))) (concat " " time) "")
-                         "\n\n" (harness-tasks--quote (or (plist-get round :text) ""))))
-               feedback "\n\n")))
-
-(defun harness-tasks--report-text (task)
-  "Return TASK's report as its file's report section has it: a JSON block.
-The JSON holds the summary and the evidence exactly as the task view
-shows them, so a hand-written file and a rendered report agree."
-  (when-let* ((report (plist-get task :report)))
-    (concat "```json\n" (harness-json-encode-text report) "\n```")))
-
-(defun harness-tasks--parse-report (text)
-  "Return the report in TEXT, a task file's report section, or nil.
-It is the JSON block the section holds; a section without a readable
-JSON report is no report."
-  (when (and (stringp text)
-             (string-match "```json[ \t]*\n\\(\\(?:.\\|\n\\)*?\\)\n```" text))
-    (condition-case err
-        (let ((report (harness-json-parse (match-string 1 text))))
-          (and (listp report) (stringp (plist-get report :summary)) report))
-      (error (harness-log 'warn "tasks: cannot parse a report: %S" err) nil))))
-
-(defun harness-tasks--parse-feedback (text)
-  "Return the rounds of feedback in TEXT, a task file's review section.
-Each is (:text TEXT :at TIME), oldest first; text before the first
-heading, and a heading over nothing, are no round."
-  (let (rounds current)
-    (dolist (line (split-string (or text "") "\n"))
-      (if (string-match harness-tasks--feedback-heading-re line)
-          (progn (when current (push current rounds))
-                 (setq current (list (harness-tasks--parse-time (match-string 1 line)))))
-        (when current (setcdr current (cons line (cdr current))))))
-    (when current (push current rounds))
-    (delq nil (mapcar (lambda (round)
-                        (let ((text (harness-tasks--unquote (string-join (reverse (cdr round)) "\n"))))
-                          (and (not (string-empty-p text)) (list :text text :at (car round)))))
-                      (nreverse rounds)))))
-
-(defun harness-tasks--render (task &optional sans-updated)
-  "Return the text of TASK's file; without its `updated' field with SANS-UPDATED."
-  (let* ((session (harness-tasks--session task))
-         (plan (plist-get session :plan))
-         (feedback (harness-tasks--feedback-text task)))
-    (concat "---\n"
-            (mapconcat (lambda (field) (format "%s: %s\n" (car field) (harness-tasks--yaml-scalar (cdr field))))
-                       (harness-tasks--file-fields task session sans-updated) "")
-            (mapconcat (lambda (raw) (concat raw "\n")) (plist-get task :extra) "")
-            "---\n\n"
-            (harness-tasks--render-description (or (plist-get task :prompt) ""))
-            (if (harness-tasks--note-shown-p task)
-                (concat "\n\n<!-- harness:request -->\n## Request\n\n"
-                        (harness-tasks--quote (plist-get task :note)))
-              "")
-            (if (plist-get task :report)
-                (concat "\n\n<!-- harness:report -->\n## Report\n\n" (harness-tasks--report-text task))
-              "")
-            (if feedback (concat "\n\n<!-- harness:review -->\n## Review\n\n" feedback) "")
-            (if (and (stringp plan) (not (string-blank-p plan)))
-                (concat "\n\n<!-- harness:plan -->\n## Plan\n\n" (string-trim plan))
-              "")
-            "\n")))
-
-(defun harness-tasks--split-frontmatter (text)
-  "Split TEXT into (YAML . BODY).
-YAML is nil when TEXT opens with no frontmatter, and `unterminated' when
-its opening --- line has no closing one."
-  (let ((text (string-remove-prefix "\ufeff" text)))
-    (if (not (string-match "\\`---[ \t]*\\(?:\n\\|\\'\\)" text))
-        (cons nil text)
-      (let ((start (match-end 0)))
-        (if (string-match "^\\(?:---\\|\\.\\.\\.\\)[ \t]*\\(?:\n\\|\\'\\)" text start)
-            (cons (substring text start (match-beginning 0)) (substring text (match-end 0)))
-          (cons 'unterminated text))))))
-
-(defun harness-tasks--section-text (lines)
-  "Return the text of a section's LINES, without the heading under its marker."
-  (let ((lines (cl-member-if-not #'string-blank-p lines)))
-    (when (and lines (string-match-p "\\`##[ \t]" (car lines)))
-      (setq lines (cdr lines)))
-    (string-trim (string-join lines "\n"))))
-
-(defun harness-tasks--split-body (body)
-  "Split a task file's BODY into (DESCRIPTION . SECTIONS).
-SECTIONS maps the names of the sections the harness keeps to their text.
-Markers inside code fences do not count."
-  (let (fence current desc sections acc)
-    (dolist (line (split-string body "\n"))
-      (if (and (not fence) (string-match harness-tasks--section-re line))
-          (progn (if current (push (cons current (nreverse acc)) sections) (setq desc (nreverse acc)))
-                 (setq current (match-string 1 line) acc nil))
-        (when (string-match "\\`[ ]\\{0,3\\}\\(```+\\|~~~+\\)" line)
-          (let ((mark (match-string 1 line)))
-            (cond ((null fence) (setq fence mark))
-                  ((and (eq (aref mark 0) (aref fence 0)) (>= (length mark) (length fence)))
-                   (setq fence nil)))))
-        (push line acc)))
-    (if current (push (cons current (nreverse acc)) sections) (setq desc (nreverse acc)))
-    (cons (string-join desc "\n")
-          (mapcar (lambda (s) (cons (car s) (harness-tasks--section-text (cdr s)))) (nreverse sections)))))
-
-(defun harness-tasks--description-prompt (desc)
-  "Return (PROMPT . HEADING) for DESC, the text a task file opens its body with.
-A title heading at its top -- `# Title', or Title underlined with === --
-is the prompt's first line, as plain text; HEADING is non-nil then."
-  (let* ((desc (string-trim desc))
-         (nl (string-search "\n" desc))
-         (first (if nl (substring desc 0 nl) desc))
-         (rest (if nl (substring desc nl) "")))
-    (cond
-     ((string-match "\\`#[ \t]+\\(.*?\\)\\(?:[ \t]+#+\\)?[ \t]*\\'" first)
-      (cons (string-trim (concat (match-string 1 first) rest)) t))
-     ((string-match "\\`\n=+[ \t]*\\(?:\n\\|\\'\\)" rest)
-      (cons (string-trim (concat first "\n" (substring rest (match-end 0)))) t))
-     (t (cons desc nil)))))
-
-(defun harness-tasks--unquote (text)
-  "Return the markdown quote TEXT without its > markers."
-  (string-trim
-   (mapconcat (lambda (line) (if (string-match "\\`[ \t]\\{0,3\\}> ?" line) (substring line (match-end 0)) line))
-              (split-string text "\n") "\n")))
-
-(defun harness-tasks--parse-file (text)
-  "Parse the task file TEXT into a plist.
-`:fields' maps the known frontmatter keys present (lowercase) to their
-values, the file's last of each; `:extra' lists the raw entries of the
-other keys; `:prompt' is the description with its title heading made
-plain, `:heading' non-nil when it had one; `:note', `:report',
-`:review' and `:plan' are the request, report, review and plan
-sections, nil when absent.  A
-file whose frontmatter never ends is just (:unterminated t)."
-  (let* ((split (harness-tasks--split-frontmatter text))
-         (yaml (car split)))
-    (if (eq yaml 'unterminated)
-        (list :unterminated t)
-      (let* ((parts (harness-tasks--split-body (cdr split)))
-             (desc (harness-tasks--description-prompt (car parts)))
-             (request (assoc "request" (cdr parts)))
-             fields extra)
-        (dolist (entry (reverse (and yaml (harness-tasks--yaml-parse yaml))))
-          (let ((key (and (car entry) (downcase (car entry)))))
-            (if (member key harness-tasks--file-keys)
-                (unless (assoc key fields) (push (cons key (nth 1 entry)) fields))
-              (push (nth 2 entry) extra))))
-        (list :fields fields :extra extra
-              :prompt (car desc) :heading (cdr desc)
-              :note (and request (harness-tasks--unquote (cdr request)))
-              :report (harness-tasks--parse-report (cdr (assoc "report" (cdr parts))))
-              :review (cdr (assoc "review" (cdr parts)))
-              :plan (cdr (assoc "plan" (cdr parts))))))))
-
-(defun harness-tasks--field (parsed key)
-  "Return the value of frontmatter KEY in the PARSED file as the harness writes it."
-  (harness-tasks--canon key (cdr (assoc key (plist-get parsed :fields)))))
-
-(defun harness-tasks--file-prompt (parsed &optional own)
-  "Return the prompt the PARSED task file holds.
-A file the harness did not write (OWN nil) may give the task's title
-only in its frontmatter: that title is then the prompt's first line."
-  (let ((prompt (plist-get parsed :prompt))
-        (title (harness-tasks--field parsed "title")))
-    (cond ((or own (plist-get parsed :heading) (null title)) prompt)
-          ((string-blank-p prompt) title)
-          ((equal title (harness-first-line prompt)) prompt)
-          (t (concat title "\n\n" prompt)))))
-
-(defun harness-tasks--file-base (own title state model thinking prompt note)
-  "Return what a task file says of the fields people edit, to tell edits apart.
-OWN is non-nil when the harness wrote the file; TITLE, STATE, MODEL and
-THINKING are canonical frontmatter values; PROMPT and NOTE are hashed."
-  (list :own own :title title :state state :model model :thinking thinking
-        :prompt (and prompt (harness-tasks--hash prompt)) :note (and note (harness-tasks--hash note))))
-
-(defun harness-tasks--written-base (task session)
-  "Return the base of the file the harness writes for TASK.
-SESSION is TASK's session."
-  (harness-tasks--file-base t (harness-tasks--title task session)
-                            (harness-tasks--canon "state" (plist-get task :state))
-                            (harness-tasks--canon "model" (plist-get task :model))
-                            (harness-tasks--canon "thinking" (plist-get task :thinking))
-                            (plist-get task :prompt)
-                            (and (harness-tasks--note-shown-p task) (string-trim (plist-get task :note)))))
-
-(defun harness-tasks--read-base (parsed prompt own)
-  "Return the base of the PARSED task file, whose prompt is PROMPT, OWN as it was."
-  (harness-tasks--file-base own (harness-tasks--field parsed "title") (harness-tasks--field parsed "state")
-                            (harness-tasks--field parsed "model") (harness-tasks--field parsed "thinking")
-                            prompt (plist-get parsed :note)))
-
-(defun harness-tasks--snapshot (task)
-  "Return a hash of what TASK's file shows, the time it was written aside."
-  (harness-tasks--hash (harness-tasks--render task t)))
-
-(defun harness-tasks--file-agrees-p (task parsed prompt)
-  "Non-nil when nothing in TASK's file contradicts TASK.
-PARSED is the file, PROMPT the prompt it holds.  Fields and sections it
-leaves out contradict nothing."
-  (let* ((session (harness-tasks--session task))
-         (mine (harness-tasks--file-fields task session t))
-         (plan (plist-get session :plan))
-         (note (plist-get parsed :note))
-         (file-review (plist-get parsed :review))
-         (file-plan (plist-get parsed :plan)))
-    (and (equal prompt (plist-get task :prompt))
-         (or (null note) (equal note (and (harness-tasks--note-shown-p task) (string-trim (plist-get task :note)))))
-         (or (null (plist-get parsed :report)) (equal (plist-get parsed :report) (plist-get task :report)))
-         (or (null file-review) (equal file-review (harness-tasks--feedback-text task)))
-         (or (null file-plan) (equal file-plan (and (stringp plan) (string-trim plan))))
-         (cl-every (lambda (field)
-                     (or (equal (car field) "updated")
-                         (equal (harness-tasks--canon (car field) (cdr field))
-                                (harness-tasks--canon (car field) (cdr (assoc (car field) mine))))))
-                   (plist-get parsed :fields)))))
-
-;;;;; Folders
-
-(defun harness-tasks--folder (root)
-  "Return the folder of project ROOT's task files, or nil when it keeps none.
-Only a git project whose tasks this harness keeps in its repository
-store has one, `harness-tasks-directory' as configured for ROOT.  A
-folder new to this process, or another than ROOT had, gets a save soon,
-which writes (or moves) the files there."
-  (let ((folder (when (and root harness-tasks-store-in-repository (harness-tasks--repository-store root))
-                  (let ((dir (harness-tasks--config 'harness-tasks-directory root)))
-                    (and (stringp dir) (not (string-blank-p dir)) (harness-tasks--open-project root)
-                         (file-name-as-directory (expand-file-name dir root)))))))
-    (cond ((null folder) (remhash root harness-tasks--file-roots))
-          ((not (equal folder (gethash root harness-tasks--file-roots)))
-           (puthash root folder harness-tasks--file-roots)
-           (harness-tasks--save-soon)))
-    folder))
-
-(defun harness-tasks--in-folder-p (folder path)
-  "Non-nil when PATH is a file right in FOLDER (a directory name)."
-  (and folder path (equal (file-name-directory path) folder)))
-
-(defun harness-tasks--archive-folder (folder)
-  "Return the subfolder of the task FOLDER for archived tasks' files, or nil."
-  (and (stringp harness-tasks-directory-archive)
-       (not (string-blank-p harness-tasks-directory-archive))
-       (file-name-as-directory (expand-file-name harness-tasks-directory-archive folder))))
-
-(defun harness-tasks--stamp (path &optional attrs)
-  "Remember the stamp of the task file PATH (its ATTRS when given)."
-  (when-let* ((attrs (or attrs (file-attributes path))))
-    (puthash path (list (file-attribute-modification-time attrs) (file-attribute-size attrs))
-             harness-tasks--file-stamps)))
-
-(defun harness-tasks--note-file (id &rest plist)
-  "Record PLIST, the bookkeeping of task ID's file, without announcing it."
-  (when-let* ((task (gethash id harness-tasks--table)))
-    (puthash id (harness-plist-merge task plist) harness-tasks--table)
-    (harness-tasks--save-soon)))
-
-(defun harness-tasks--new-file (folder task)
-  "Return the path of a new file for TASK in FOLDER.
-Its name is TASK's id and a slug of its title."
-  (let* ((words (split-string (downcase (harness-tasks--title task (harness-tasks--session task)))
-                              "[^a-z0-9]+" t))
-         (slug (string-trim-right (harness-safe-substring (string-join (take 6 words) "-") 0 48) "-+")))
-    (expand-file-name (concat (plist-get task :id) (if (string-empty-p slug) "" (concat "-" slug)) ".md")
-                      folder)))
-
-(defun harness-tasks--file-owner (root folder rel parsed)
-  "Return the task of project ROOT whose file REL, as PARSED, is; nil for none.
-That is the task with that file, else the one its id names when that
-task's own file is not in the task FOLDER (renamed, deleted, archived
-or moved there from another folder): a copy of a task file still in
-the folder is a new task."
-  (or (cl-find-if (lambda (task) (and (equal (plist-get task :project) root) (equal (plist-get task :file) rel)))
-                  (hash-table-values harness-tasks--table))
-      (when-let* ((id (harness-tasks--field parsed "id"))
-                  (task (gethash id harness-tasks--table)))
-        (and (equal (plist-get task :project) root)
-             (let* ((file (plist-get task :file))
-                    (path (and file (expand-file-name file root))))
-               (not (and path (harness-tasks--in-folder-p folder path) (file-exists-p path))))
-             task))))
-
-(defun harness-tasks--apply-file (task parsed rel)
-  "Take the edits of TASK's file REL, as PARSED, into TASK.
-Edits are what differs from what the file said before; see Task files
-for those taken.  A file come back to the folder (from the archive
-subfolder, say) brings its archived task back."
-  (let* ((id (plist-get task :id))
-         (base (plist-get task :file-base))
-         (own (plist-get base :own))
-         (prompt (string-trim (harness-tasks--file-prompt parsed own)))
-         (note (plist-get parsed :note))
-         (title (harness-tasks--field parsed "title"))
-         (state (harness-tasks--field parsed "state"))
-         (unstarted (and (memq (plist-get task :state) '(pending refining)) (not (harness-tasks--turn-p task))))
-         (changes nil))
-    (when (and (plist-get task :archived) (not (equal (plist-get task :file) rel)))
-      (harness-log 'info "tasks: %s is back, so task %s is too" rel id)
-      (setq changes (list :archived nil)))
-    (when (and (not (string-empty-p prompt))
-               (not (equal (harness-tasks--hash prompt) (plist-get base :prompt)))
-               (not (equal prompt (plist-get task :prompt))))
-      (setq changes (plist-put changes :prompt prompt)))
-    (when (and note (not (equal (harness-tasks--hash note) (plist-get base :note)))
-               (not (equal note (plist-get task :note))))
-      (setq changes (plist-put changes :note (and (not (string-empty-p note)) note))))
-    (unless (equal (plist-get parsed :extra) (plist-get task :extra))
-      (setq changes (plist-put changes :extra (plist-get parsed :extra))))
-    (dolist (key '("model" "thinking"))
-      (when (assoc key (plist-get parsed :fields))
-        (let ((value (harness-tasks--field parsed key))
-              (prop (intern (concat ":" key))))
-          (when (and unstarted (not (equal value (plist-get base prop))) (not (equal value (plist-get task prop))))
-            (setq changes (plist-put changes prop value))))))
-    (when changes (apply #'harness-tasks--set id changes))
-    (let* ((task (harness-tasks--get id))
-           (session (harness-tasks--session task)))
-      (when (and title session (not (equal title (plist-get base :title)))
-                 (not (equal title (harness-tasks--title task session))))
-        (condition-case err
-            (harness-call 'session/update (plist-get session :id) :name title :silent t)
-          (error (harness-log 'warn "tasks: %s: cannot rename the session of task %s: %S" rel id err))))
-      ;; Done by hand: the user accepts the work, so a task in review is verified.
-      (when (and (equal state "done") (not (equal state (plist-get base :state)))
-                 (not (eq (plist-get task :state) 'done)))
-        (condition-case err
-            (harness-call (if (eq (plist-get task :state) 'review) 'task/verify 'task/complete) id)
-          (error (harness-log 'warn "tasks: %s: cannot complete task %s: %S" rel id err)))))
-    (let ((task (harness-tasks--get id)))
-      (harness-tasks--note-file id :file rel
-                                :file-base (harness-tasks--read-base parsed prompt own)
-                                :file-synced (and (harness-tasks--file-agrees-p task parsed prompt)
-                                                  (harness-tasks--snapshot task))))))
-
-(defun harness-tasks--file-session (parsed root)
-  "Return the session the PARSED task file of project ROOT names, or nil.
-It must still exist, work in ROOT's project and be no other task's."
-  (when-let* ((sid (harness-tasks--field parsed "session"))
-              ((harness-method-exists-p 'session/exists-p))
-              ((harness-call 'session/exists-p sid))
-              ((not (harness-tasks--by-session sid)))
-              (session (harness-call 'session/get sid)))
-    (and (equal (harness-tasks--project (plist-get session :cwd)) root) session)))
-
-(defun harness-tasks--add-from-file (root rel parsed mtime)
-  "Add the task the file REL of project ROOT holds, as PARSED; return it.
-MTIME, when the file was last changed, is its creation time unless it
-says.  It is a backlog task, one in review or a done one, with the
-rounds of feedback and the verification the file shows.  With its
-session still around it is the task it was, session and all, except
-that nothing carries on by itself: one that was at work waits for the
-user, `interrupted'.  Return nil for a file without a prompt."
-  (let ((prompt (string-trim (harness-tasks--file-prompt parsed))))
-    (unless (string-empty-p prompt)
-      (let* ((id (let ((id (harness-tasks--field parsed "id")))
-                   (if (and id (string-match-p "\\`[A-Za-z0-9][A-Za-z0-9_.-]\\{0,63\\}\\'" id)
-                            (not (gethash id harness-tasks--table)))
-                       id
-                     (concat "t-" (harness-short-id 8)))))
-             (session (harness-tasks--file-session parsed root))
-             (written (intern (or (harness-tasks--field parsed "state") "pending")))
-             (state (cond ((not (memq written '(pending refining active merging review done))) 'pending)
-                          ;; Both wait for nothing but the user.
-                          ((memq written '(review done)) written)
-                          ((null session) 'pending)
-                          ;; A merge starts again only when the user says so.
-                          ((eq written 'merging) 'active)
-                          (t written)))
-             (outcome (let ((outcome (and session (harness-tasks--field parsed "outcome"))))
-                        (cond (outcome (intern outcome))
-                              ((and session (memq state '(refining active))) 'interrupted))))
-             (worktree (plist-get session :worktree))
-             (time (lambda (key) (harness-tasks--parse-time (cdr (assoc key (plist-get parsed :fields))))))
-             (verified (funcall time "verified"))
-             (task (list :id id :project root :cwd root :prompt prompt
-                         :note (plist-get parsed :note) :extra (plist-get parsed :extra)
-                         :state state
-                         :backlog (and (memq state '(pending refining))
-                                       (or (null session) (harness-tasks--field parsed "backlog"))
-                                       t)
-                         :session (plist-get session :id)
-                         :outcome outcome
-                         :error (and session (harness-tasks--field parsed "error"))
-                         :duplicate-of (and session (harness-tasks--field parsed "duplicate-of"))
-                         :worktree worktree
-                         :worktree-removed (and worktree (not (file-directory-p worktree)) t)
-                         :branch (harness-tasks--field parsed "branch")
-                         :base (harness-tasks--field parsed "base")
-                         :merged (and (equal (harness-tasks--field parsed "merge") "merged") t)
-                         :model (harness-tasks--field parsed "model")
-                         :thinking (harness-tasks--field parsed "thinking")
-                         :created (or (funcall time "created") mtime (float-time))
-                         :started (funcall time "started")
-                         :refined (funcall time "refined")
-                         :finished (funcall time "finished")
-                         :verified (and verified t)
-                         :verified-at verified
-                         :report (plist-get parsed :report)
-                         :feedback (harness-tasks--parse-feedback (plist-get parsed :review))
-                         :updated (funcall time "updated"))))
-        (puthash id task harness-tasks--table)
-        (harness-tasks--note-file id :file rel
-                                  :file-base (harness-tasks--read-base parsed prompt nil)
-                                  :file-synced (and (harness-tasks--file-agrees-p task parsed prompt)
-                                                    (harness-tasks--snapshot task)))
-        (harness-log 'info "tasks: %s is new, now task %s" rel id)
-        (unless harness-tasks--loading
-          (harness-emit 'task/changed (harness-tasks--view (gethash id harness-tasks--table)))
-          (harness-tasks--pick-up))
-        (gethash id harness-tasks--table)))))
-
-(defun harness-tasks--file-gone (task folder)
-  "Follow TASK's file leaving the task FOLDER by hand, deleted or moved.
-A task that waits or is done is archived, its file moved into the
-archive subfolder remembered; one in progress gets its file back at the
-next save."
-  (let ((id (plist-get task :id)))
-    (if (and (memq (plist-get task :state) '(pending review done))
-             (not (harness-tasks--turn-p task))
-             (not (gethash id harness-tasks--starting)))
-        (let* ((session (harness-tasks--session task))
-               (archive (harness-tasks--archive-folder folder))
-               (moved (and archive (expand-file-name (file-name-nondirectory (plist-get task :file)) archive))))
-          (harness-log 'info "tasks: %s is gone from the task folder, so task %s is archived" (plist-get task :file) id)
-          (harness-tasks--note-file id :file (and moved (file-exists-p moved)
-                                                  (file-relative-name moved (plist-get task :project)))
-                                    :file-base nil :file-synced nil)
-          (harness-tasks--set id :archived t)
-          (when (and session (not (eq (plist-get session :status) 'inactive)))
-            (ignore-errors (harness-call 'session/deactivate (plist-get session :id)))))
-      (harness-tasks--note-file id :file-synced nil))))
-
-(defun harness-tasks--read-file (root folder path attrs)
-  "Read the task file PATH in FOLDER of project ROOT, whose attributes are ATTRS."
-  (let ((rel (file-relative-name path root)))
-    (if (> (file-attribute-size attrs) harness-tasks--file-max-size)
-        (harness-log 'warn "tasks: %s is too large for a task file" rel)
-      (when-let* ((text (harness-read-file path)))
-        (let ((parsed (harness-tasks--parse-file text)))
-          (if (plist-get parsed :unterminated)
-              (harness-log 'warn "tasks: %s opens frontmatter with --- but never closes it" rel)
-            (if-let* ((task (harness-tasks--file-owner root folder rel parsed)))
-                (harness-tasks--apply-file task parsed rel)
-              (harness-tasks--add-from-file root rel parsed
-                                            (float-time (file-attribute-modification-time attrs))))))))))
-
-(defun harness-tasks--scan (root &optional folder)
-  "Read the task files of project ROOT that changed since this process saw them.
-FOLDER is ROOT's task folder when known.  Edits are taken, new files
-become tasks and deleted files are followed (see Task files)."
-  (when-let* ((folder (or folder (harness-tasks--folder root))))
-    (let ((present (make-hash-table :test 'equal)))
-      (when (file-directory-p folder)
-        (dolist (entry (sort (directory-files-and-attributes folder t "\\.md\\'" t)
-                             (lambda (a b) (string< (car a) (car b)))))
-          (let ((path (car entry)) (attrs (cdr entry)))
-            (unless (or (eq t (file-attribute-type attrs))
-                        (let ((case-fold-search t))
-                          (string-match-p harness-tasks--directory-ignore (file-name-nondirectory path))))
-              (puthash path t present)
-              (unless (equal (list (file-attribute-modification-time attrs) (file-attribute-size attrs))
-                             (gethash path harness-tasks--file-stamps))
-                (harness-tasks--stamp path attrs)
-                (condition-case err
-                    (harness-tasks--read-file root folder path attrs)
-                  (error (harness-log 'error "tasks: cannot read %s: %S" path err))))))))
-      (dolist (task (harness-tasks--sorted (lambda (task) (and (equal (plist-get task :project) root)
-                                                                (plist-get task :file)
-                                                                (not (plist-get task :archived))))))
-        (let ((path (expand-file-name (plist-get task :file) root)))
-          (when (and (harness-tasks--in-folder-p folder path) (not (gethash path present)))
-            (remhash path harness-tasks--file-stamps)
-            (harness-tasks--file-gone task folder)))))))
-
-(defun harness-tasks--scan-roots (roots)
-  "Read what changed in the task folders of the projects ROOTS."
-  (dolist (root roots)
-    (condition-case err
-        (harness-tasks--scan root)
-      (error (harness-log 'error "tasks: cannot read the task files of %s: %S" root err)))))
-
-(defun harness-tasks--poll ()
-  "Read what changed in the task folders.
-It runs every `harness-tasks--directory-poll' seconds."
-  (when (and harness-tasks--loaded harness-tasks--directory-poll)
-    (harness-tasks--scan-roots (hash-table-keys harness-tasks--file-roots))))
-
-(defun harness-tasks--start-polling ()
-  "Start reading the task folders every `harness-tasks--directory-poll' seconds."
-  (when (timerp harness-tasks--poll-timer) (cancel-timer harness-tasks--poll-timer))
-  (setq harness-tasks--poll-timer
-        (and (numberp harness-tasks--directory-poll) (> harness-tasks--directory-poll 0)
-             (run-with-timer harness-tasks--directory-poll harness-tasks--directory-poll #'harness-tasks--poll))))
-
-(defun harness-tasks--archive-file (task folder path)
-  "Take the file PATH of archived TASK out of the task FOLDER.
-It moves into the archive subfolder, or with none it is deleted."
-  (let ((id (plist-get task :id))
-        (root (plist-get task :project))
-        (archive (harness-tasks--archive-folder folder)))
-    (remhash path harness-tasks--file-stamps)
-    (if (not archive)
-        (progn (when (file-exists-p path) (delete-file path))
-               (harness-log 'info "tasks: deleted %s of archived task %s" (file-relative-name path root) id)
-               (harness-tasks--note-file id :file nil :file-base nil :file-synced nil))
-      (let ((to (expand-file-name (file-name-nondirectory path) archive)))
-        (when (file-exists-p path)
-          (harness-ensure-directory archive)
-          (rename-file path to t)
-          (harness-log 'info "tasks: moved %s of archived task %s to %s"
-                       (file-relative-name path root) id (file-relative-name to root)))
-        (harness-tasks--note-file id :file (and (file-exists-p to) (file-relative-name to root))
-                                  :file-base nil :file-synced nil)))))
-
-(defun harness-tasks--sync-file (task folder)
-  "Bring TASK's file in FOLDER in step with TASK.
-It is written when TASK changed since the file was last in step, or
-when the file is elsewhere: a file in the archive subfolder (TASK
-restored) or in the folder the project had before moves back.  An
-archived task's file moves out (`harness-tasks-directory-archive')."
-  (let* ((id (plist-get task :id))
-         (root (plist-get task :project))
-         (file (plist-get task :file))
-         (path (and file (expand-file-name file root)))
-         (inside (harness-tasks--in-folder-p folder path)))
-    (if (plist-get task :archived)
-        (when inside (harness-tasks--archive-file task folder path))
-      (let ((synced (harness-tasks--snapshot task)))
-        (unless (and inside (equal synced (plist-get task :file-synced)))
-          (let* ((back (and path (expand-file-name (file-name-nondirectory path) folder)))
-                 (new (cond (inside path)
-                            ((and back (file-exists-p path) (not (file-exists-p back))) back)
-                            (t (harness-tasks--new-file folder task))))
-                 (task (plist-put (copy-sequence task) :updated (float-time))))
-            (harness-write-file-atomically new (harness-tasks--render task))
-            (harness-tasks--stamp new)
-            (harness-tasks--note-file id :file (file-relative-name new root) :updated (plist-get task :updated)
-                                      :file-base (harness-tasks--written-base task (harness-tasks--session task))
-                                      :file-synced synced)
-            (when (and path (not inside) (file-exists-p path))
-              (harness-log 'info "tasks: moved %s of task %s to %s" file id (file-relative-name new root))
-              (remhash path harness-tasks--file-stamps)
-              (delete-file path))))))))
-
-(defun harness-tasks--save-files ()
-  "Write the task files of the projects that keep them.
-Their folders are read first, so no edit is written over."
-  (let ((roots (make-hash-table :test 'equal)))
-    (maphash (lambda (_ task) (puthash (plist-get task :project) t roots)) harness-tasks--table)
-    (maphash (lambda (root _) (puthash root t roots)) harness-tasks--file-roots)
-    (maphash
-     (lambda (root _)
-       (condition-case err
-           (when-let* ((folder (harness-tasks--folder root)))
-             (harness-tasks--scan root folder)
-             (dolist (task (harness-tasks--sorted (lambda (task) (equal (plist-get task :project) root))))
-               (condition-case err
-                   (harness-tasks--sync-file task folder)
-                 (error (harness-log 'error "tasks: cannot write the file of task %s: %S"
-                                     (plist-get task :id) err)))))
-         (error (harness-log 'error "tasks: cannot keep the task files of %s: %S" root err))))
-     roots)))
-
-(defun harness-tasks--delete-file (task)
-  "Delete the file of TASK, which is going away, in the task folder or its archive."
-  (when-let* ((file (plist-get task :file))
-              (root (plist-get task :project))
-              (path (expand-file-name file root))
-              (folder (ignore-errors (harness-tasks--folder root)))
-              ((or (harness-tasks--in-folder-p folder path)
-                   (harness-tasks--in-folder-p (harness-tasks--archive-folder folder) path))))
-    (remhash path harness-tasks--file-stamps)
-    (condition-case err
-        (when (file-exists-p path) (delete-file path))
-      (error (harness-log 'warn "tasks: cannot delete %s: %S" path err)))))
 
 ;;;; Columns
 
 (defun harness-tasks--column (task)
-  "Return the kanban column of TASK: pending, needs-input, review, active or done.
+  "Return the kanban column of TASK, a symbol.
+That is pending, needs-input, review, merging, active or done.
 A task being refined shows in pending, where it ends up, unless the
-refinement needs the user."
+refinement needs the user.  A task whose branch holds a place in the
+merge queue shows in merging however it holds it: queued, merging, or
+its session resolving the conflicts; unless that session waits on the
+user, whose answer the queue then waits for too."
   (pcase (plist-get task :state)
     ('pending 'pending)
     ('done 'done)
@@ -1735,15 +812,14 @@ refinement needs the user."
     (_ (let ((session (harness-tasks--session task)))
          (cond ((gethash (plist-get task :id) harness-tasks--starting) 'active)
                ((plist-get session :pending) 'needs-input)
+               ((plist-get task :merge-status) 'merging)
                ((eq (plist-get session :status) 'running) 'active)
                ((plist-get task :outcome) 'needs-input)
                (t 'active))))))
 
 (defun harness-tasks--view (task)
-  "Return TASK as methods and events show it: with its `:column'.
-The bookkeeping of its file stays out."
-  (append (harness-plist-remove task :file-base :file-synced)
-          (list :column (harness-tasks--column task))))
+  "Return TASK as methods and events show it: with its `:column'."
+  (append task (list :column (harness-tasks--column task))))
 
 ;;;; Git
 
@@ -1762,7 +838,7 @@ The bookkeeping of its file stays out."
          (slug (string-join (take 5 words) "-")))
     (concat harness-tasks-branch-prefix
             (if (string-empty-p slug) "" (concat (harness-truncate-end slug 40) "-"))
-            ;; A task file written by hand may name an id of its own.
+            ;; A record from an older store may name an id without the prefix.
             (string-remove-prefix "t-" (plist-get task :id)))))
 
 (defun harness-tasks--make-worktree (task)
@@ -1786,7 +862,8 @@ The bookkeeping of its file stays out."
                :id)))
 
 (defun harness-tasks--enqueue-merge (id)
-  "Queue task ID's branch for the merge queue, or put the task before the user."
+  "Queue task ID's branch for the merge queue, or put the task before the user.
+`:merge-queued' records when the branch joined the queue."
   (let* ((task (harness-tasks--get id))
          (attempts (1+ (or (plist-get task :merge-attempts) 0))))
     (cond
@@ -1799,7 +876,7 @@ The bookkeeping of its file stays out."
       (condition-case err
           (let ((target (harness-tasks--merge-target (plist-get task :project))))
             (harness-tasks--set id :state 'merging :merge-status 'queued :merge-attempts attempts
-                                :merge-target target :outcome nil :error nil)
+                                :merge-target target :merge-queued (float-time) :outcome nil :error nil)
             (harness-call 'merge/enqueue (plist-get task :session) target
                           :message (format "task %s" (harness-first-line (plist-get task :prompt) 60))))
         (error (harness-tasks--set id :state 'active :outcome 'merge-failed :merge-status nil
@@ -1892,7 +969,8 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
   "Tell a task's SESSION what its turns are for (PROMPT filter).
 Before the task starts they write it up (`harness-tasks--refine-prompt');
 afterwards they learn how to hand the finished work in, and, in a
-worktree, how it reaches the main branch."
+worktree, how it reaches the main branch -- or, in the main tree
+(`harness-tasks--main-tree-p'), that the work takes effect there."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
      ((and task (harness-tasks--refinement-p task)
@@ -1901,10 +979,14 @@ worktree, how it reaches the main branch."
      ((not task) prompt)
      (t
       (concat prompt "\n\n## Task mode\n"
-              (if (plist-get task :worktree)
-                  (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
-                          (plist-get task :worktree) (plist-get task :branch))
-                "You are working on one task of a board, unattended. ")
+              (cond
+               ((plist-get task :worktree)
+                (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
+                        (plist-get task :worktree) (plist-get task :branch)))
+               ((harness-tasks--main-tree-p task)
+                (format "You are working on one task, unattended, directly in the project's main working tree %s.  There is no worktree and no branch, and nothing merges your work: what you change, commit or delete takes effect right there.  Do not create a branch or a worktree, and commit only if the task asks for it. "
+                        (abbreviate-file-name (or (plist-get task :project) (plist-get task :cwd)))))
+               (t "You are working on one task of a board, unattended. "))
               "Do the whole task there. "
               (if (plist-get task :worktree)
                   (concat "When you are done, commit all of your changes on that branch "
@@ -1996,7 +1078,9 @@ harness.  The task's prompt and the user's feedback are the user's."
   "Start TASK: make its worktree in a git project, then its session.
 A backlog task already has the session that wrote it up; that session
 moves into the worktree and does the work.  A task started again after a
-restart cut its start short keeps the worktree it got."
+restart cut its start short keeps the worktree it got.  A task that
+declared `:main-tree' gets no worktree: its session works in the
+project's main checkout, where it was submitted from (`task/submit')."
   (let ((id (plist-get task :id))
         (worktree (plist-get task :worktree))
         (launch (if (harness-tasks--session task)
@@ -2006,6 +1090,9 @@ restart cut its start short keeps the worktree it got."
     (harness-tasks--set id :state 'active :outcome nil :error nil :duplicate-of nil
                         :started (float-time) :finished nil)
     (cond
+     ((harness-tasks--main-tree-p task)
+      ;; No worktree even where the project has them: the main checkout.
+      (funcall launch id (plist-get task :project) nil))
      ((not (harness-tasks--git-p (plist-get task :project)))
       (funcall launch id (plist-get task :cwd) nil))
      ((and worktree (not (plist-get task :worktree-removed)) (file-directory-p worktree))
@@ -2022,7 +1109,9 @@ restart cut its start short keeps the worktree it got."
 (defun harness-tasks--work-settings (task)
   "Return the settings TASK's work runs with, as `session/create' keys.
 The task's own, else the `harness-tasks-' defaults; unset ones are left
-out, so the session gets what its directory configures."
+out, so the session gets what its directory configures.  The context
+limit is `harness-tasks-context-limit', which caps a task's window and
+so has it compact sooner."
   (let ((mode (or (plist-get task :permission-mode) harness-tasks-permission-mode))
         (model (or (plist-get task :model) harness-tasks-model))
         (thinking (or (plist-get task :thinking) harness-tasks-thinking))
@@ -2035,7 +1124,9 @@ out, so the session gets what its directory configures."
             ;; The task's own false is set, not unset: off whatever the
             ;; directory configures.
             (cond (non-interactive (list :non-interactive t))
-                  ((plist-member task :non-interactive) (list :non-interactive :false))))))
+                  ((plist-member task :non-interactive) (list :non-interactive :false)))
+            (and harness-tasks-context-limit
+                 (list :context-window-limit harness-tasks-context-limit)))))
 
 (defconst harness-tasks-bulk-columns '(active pending needs-input)
   "Task columns a bulk update reaches by default.
@@ -2109,13 +1200,93 @@ It opens with `harness-tasks--reject-message', unless that is blank."
       feedback
     (concat harness-tasks--reject-message "\n\n" feedback)))
 
+(defun harness-tasks--text-block-p (block)
+  "Non-nil when BLOCK is a text block that says something."
+  (and (equal (plist-get block :type) "text")
+       (not (harness-string-blank-p (plist-get block :text)))))
+
+(defun harness-tasks--reject-blocks (blocks)
+  "Return the message BLOCKS as the one that sends a task back to its session.
+Its text, trimmed, opens with `harness-tasks--reject-message', as
+`harness-tasks--reject-text' has it; a message of attachments alone
+gets a text block of its own for it.  Blank text blocks are dropped."
+  (let ((blocks (cl-remove-if (lambda (b) (and (equal (plist-get b :type) "text")
+                                               (not (harness-tasks--text-block-p b))))
+                              blocks)))
+    (cond
+     ((harness-string-blank-p harness-tasks--reject-message) blocks)
+     ((harness-tasks--text-block-p (car blocks))
+      (cons (plist-put (copy-sequence (car blocks)) :text
+                       (harness-tasks--reject-text (string-trim (plist-get (car blocks) :text))))
+            (cdr blocks)))
+     (t (cons (list :type "text" :text harness-tasks--reject-message) blocks)))))
+
+(defun harness-tasks--feedback-text (blocks)
+  "Return what the message BLOCKS says, as its round of feedback keeps it.
+That is its text, trimmed; a message of attachments alone is named by
+them, such as \"[image]\" or \"[file notes.txt]\"."
+  (let ((texts (cl-loop for b in blocks
+                        when (harness-tasks--text-block-p b)
+                        collect (string-trim (plist-get b :text)))))
+    (if texts
+        (string-join texts "\n\n")
+      (mapconcat (lambda (b)
+                   (let ((type (or (plist-get b :type) "attachment")))
+                     (if (equal type "file")
+                         (format "[file %s]" (or (plist-get b :name)
+                                                 (file-name-nondirectory (or (plist-get b :path) ""))))
+                       (format "[%s]" type))))
+                 (cl-remove "text" blocks :key (lambda (b) (plist-get b :type)) :test #'equal)
+                 " "))))
+
+(defun harness-tasks--send-back (id feedback)
+  "Put task ID, which waits for review, back to work on FEEDBACK.
+The task is active again and its verification gone; FEEDBACK, what the
+message that sends it back says, is kept as a new round of its
+`:feedback'.  Delivering the message is the caller's: `task/reject'
+prompts the session, `harness-tasks--on-message' lets the message
+through.  Return the task's view."
+  (let ((task (harness-tasks--get id)))
+    (harness-tasks--set id :state 'active :outcome nil :error nil :finished nil :archived nil
+                        :verified nil :verified-at nil :merge-attempts 0
+                        :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+                        :feedback (append (plist-get task :feedback)
+                                          (list (list :text feedback :at (float-time)))))))
+
+(defun harness-tasks--on-message (blocks session-id info)
+  "Send SESSION-ID's task back from review with the message BLOCKS.
+An `agent/message' filter, INFO being (:from FROM :steering BOOL): a
+message that reaches the session while its task waits for review is
+feedback on the work, wherever it was written -- the session's chat,
+`task/prompt', a phone or another client, another session's agent
+\(`session_send'), the queue that goes out when a turn ends.  It sends
+the task back as `task/reject' does: the task is active at once, the
+round of feedback is kept, and the message the agent gets opens with
+`harness-tasks--reject-message'.  The harness's own messages (FROM a
+system sender) are left alone, and so is a task whose worktree was
+removed: a turn they start makes the task active all the same
+\(`harness-tasks--on-turn-started').  Return the blocks to deliver."
+  (let ((task (harness-tasks--by-session session-id)))
+    (if (and task
+             (eq (plist-get task :state) 'review)
+             (not (plist-get task :worktree-removed))
+             (not (eq (harness-sender-kind (plist-get info :from)) 'system)))
+        (progn
+          (harness-log 'info "task %s: a message to its session sends it back from review"
+                       (plist-get task :id))
+          (harness-tasks--send-back (plist-get task :id) (harness-tasks--feedback-text blocks))
+          (harness-tasks--reject-blocks blocks))
+      blocks)))
+
 (defun harness-tasks--continue-session (id cwd worktree)
   "Start task ID's work in the session that wrote it up, moved to CWD.
 WORKTREE, when non-nil, is the task's worktree.  The session takes the
 task's settings instead of the refinement's read-only ones.  When the
 directory changes, the provider's conversation is dropped: the Claude
-CLI keeps conversations per directory, and the start message carries
-everything the work needs, while the transcript keeps the refinement."
+CLI keeps conversations per directory.  The start message carries
+everything the work needs, and the new conversation gets the
+transcript, which keeps the refinement, as text
+\(`harness-provider-history-text')."
   (condition-case err
       (let* ((task (harness-tasks--get id))
              (sid (plist-get task :session))
@@ -2136,16 +1307,21 @@ everything the work needs, while the transcript keeps the refinement."
                       :thinking (or (plist-get settings :thinking) (harness-tasks--config 'harness-thinking cwd))
                       :non-interactive (or (plist-get settings :non-interactive)
                                            (and (not (plist-member task :non-interactive))
-                                                (harness-tasks--config 'harness-non-interactive cwd) t)))
+                                                (harness-tasks--config 'harness-non-interactive cwd) t))
+                      ;; The task default applies from the start of the
+                      ;; work on; nil, turned off, clears an earlier one.
+                      :context-window-limit (plist-get settings :context-window-limit))
                 (when-let* ((model (or (plist-get settings :model) (harness-tasks--config 'harness-model cwd))))
                   (list :model model))))
         (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
           (harness-call 'session/resume sid))
         (harness-call 'session/hint sid
-                      (if worktree
-                          (format "Task started in %s on branch %s"
-                                  (abbreviate-file-name worktree) (plist-get task :branch))
-                        "Task started"))
+                      (cond
+                       (worktree (format "Task started in %s on branch %s"
+                                         (abbreviate-file-name worktree) (plist-get task :branch)))
+                       ((harness-tasks--main-tree-p task)
+                        (format "Task started in the main tree %s" (abbreviate-file-name cwd)))
+                       (t "Task started")))
         (harness-catch (harness-call-async 'agent/prompt sid
                                            (harness-tasks--blocks
                                             (list :prompt (harness-tasks--start-text task)
@@ -2199,12 +1375,15 @@ At `harness-tasks--refine-tool-calls' calls it is steered to write up now."
   "Return the `session/create' settings of the session refining TASK.
 Ask mode allows reads, and non-interactive the session never waits for
 the user; whatever would ask `harness-tasks--write-up-gate' denies with
-a hint, which keeps a write-up a write-up."
+a hint, which keeps a write-up a write-up.  The task context limit
+rides along, so a write-up that reads a lot compacts sooner too."
   (let ((model (or harness-tasks-refine-model (plist-get task :model) harness-tasks-model))
         (thinking (or harness-tasks-refine-thinking (plist-get task :thinking) harness-tasks-thinking)))
     (append (list :permission-mode 'ask :non-interactive t)
             (and model (list :model model))
-            (and thinking (list :thinking thinking)))))
+            (and thinking (list :thinking thinking))
+            (and harness-tasks-context-limit
+                 (list :context-window-limit harness-tasks-context-limit)))))
 
 (defconst harness-tasks--write-up-hint
   "Write the task up from what you can read; put what you could not check in the write-up as an open question."
@@ -2382,8 +1561,9 @@ task's worktree is locked again for the new work."
   "Advance SESSION-ID's task when its turn ended with REASON.
 `end-turn' puts the work in review (`harness-tasks-require-verification')
 until the user verified it; after that, or without review, it completes
-the task outside git and queues its merge inside.  A refinement turn
-puts its write-up in the backlog."
+the task outside git -- in the main tree too, which has nothing to
+merge -- and queues its merge inside.  A refinement turn puts its
+write-up in the backlog."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (let ((id (plist-get task :id)))
@@ -2404,22 +1584,9 @@ puts its write-up in the backlog."
       (harness-run-soon #'harness-tasks--schedule))))
 
 (defun harness-tasks--on-pending-changed (session-id &rest _)
-  "Re-announce SESSION-ID's task: requests coming and going move its column.
-Its file shows the column, so it is written again."
+  "Re-announce SESSION-ID's task: requests coming and going move its column."
   (when-let* ((task (harness-tasks--by-session session-id)))
-    (harness-tasks--save-soon)
     (harness-emit 'task/changed (harness-tasks--view task))))
-
-(defun harness-tasks--on-session-updated (session-id changes)
-  "Write the file of SESSION-ID's task again when CHANGES rename the session.
-A task's title is its session's name."
-  (when (and (plist-member changes :name) (harness-tasks--by-session session-id))
-    (harness-tasks--save-soon)))
-
-(defun harness-tasks--on-session-plan (session-id &rest _)
-  "Write the file of SESSION-ID's task again: it shows the session's plan."
-  (when (harness-tasks--by-session session-id)
-    (harness-tasks--save-soon)))
 
 (defun harness-tasks--on-session-deleted (session-id &rest _)
   "Forget the task of deleted SESSION-ID."
@@ -2427,11 +1594,9 @@ A task's title is its session's name."
     (harness-tasks--remove (plist-get task :id))))
 
 (defun harness-tasks--remove (id)
-  "Drop task ID, delete its file and emit `task/deleted'."
-  (let ((task (gethash id harness-tasks--table)))
-    (remhash id harness-tasks--table)
-    (remhash id harness-tasks--starting)
-    (when task (harness-tasks--delete-file task)))
+  "Drop task ID, write the stores and emit `task/deleted'."
+  (remhash id harness-tasks--table)
+  (remhash id harness-tasks--starting)
   (harness-tasks--save-soon)
   (harness-emit 'task/deleted id)
   (harness-run-soon #'harness-tasks--schedule))
@@ -2551,18 +1716,22 @@ records.  Each step leaves alone the tasks something already works on."
   "Submit PROMPT as a new task in directory CWD; return the task.
 It starts at once when a slot is free, otherwise it waits as pending.
 OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
-`:thinking' and `:non-interactive' (an explicit false turns it off);
-missing ones come from the `harness-tasks-' defaults, else from what the
-directory configures: a task is interactive unless
-`harness-tasks-non-interactive' or the directory's
-`harness-non-interactive' is on.  With `:refine'
+`:thinking', `:non-interactive' (an explicit false turns it off) and
+`:main-tree' (work in the project's main checkout, with no worktree,
+no branch and nothing to merge; for work that has to touch the checkout
+itself, such as cleaning up uncommitted changes); missing ones come
+from the `harness-tasks-' defaults, else from what the directory
+configures: a task is interactive unless `harness-tasks-non-interactive'
+or the directory's `harness-non-interactive' is on.  With `:refine'
 the task goes to the backlog instead: an agent writes it up (state
 refining), then it waits in pending until `task/start' -- unless the
-agent finds the board has it already, and refuses it as a duplicate."
+agent finds the board has it already, and refuses it as a duplicate.
+A refined task keeps `:main-tree' for when it finally starts."
   (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
   (harness-tasks--load)
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
          (refine (harness-json-true-p (plist-get opts :refine)))
+         (main-tree (and (harness-json-true-p (plist-get opts :main-tree)) t))
          (task (list :id (concat "t-" (harness-short-id 8))
                      :project (harness-tasks--project cwd) :cwd cwd
                      :prompt (string-trim prompt)
@@ -2575,6 +1744,8 @@ agent finds the board has it already, and refuses it as a duplicate."
     (when (plist-member opts :non-interactive)
       (setq task (plist-put task :non-interactive
                             (if (harness-json-true-p (plist-get opts :non-interactive)) t :false))))
+    (when main-tree
+      (setq task (append task (list :main-tree t))))
     (when refine
       (setq task (append task (list :backlog t :note (string-trim prompt)))))
     (harness-tasks--put task)
@@ -2621,7 +1792,8 @@ are not tasks yet, newest first."
   "Make the ongoing session SESSION-ID a task and return the task.
 Its first message becomes the task's prompt; a session in a git worktree
 keeps it and is merged through the merge queue like any task.  A running
-or blocked session is in progress; an idle one waits for the user."
+or blocked session is in progress; an idle one waits for the user.  The
+task context limit applies from now on when there is one."
   (harness-tasks--load)
   (let ((session (harness-call 'session/get session-id)))
     (unless (harness-tasks--adoptable-p session)
@@ -2639,6 +1811,11 @@ or blocked session is in progress; an idle one waits for the user."
                        :outcome (unless (memq (plist-get session :status) '(running blocked)) 'adopted)
                        :created (plist-get session :created) :started (plist-get session :created))))
       (harness-tasks--put task)
+      ;; The task's shorter context applies from its next turn on; a
+      ;; session adopted after long work may compact on it right away,
+      ;; and nil (turned off) clears a limit the session carried.
+      (harness-call 'session/update session-id
+                    :context-window-limit harness-tasks-context-limit :silent t)
       (when (and worktree (harness-method-exists-p 'worktree/branch))
         (let ((id (plist-get task :id)))
           (harness-then (harness-call-async 'worktree/branch worktree)
@@ -2654,17 +1831,16 @@ Return its session, where the user asks how the tasks are going: a new
 nothing with earlier ones, and without a parent (a BTW over a session is
 listed under it instead, see `session/btw'), which
 `harness-tasks--btw-prompt' tells to answer with the task and session
-tools.  The caller sends the first question."
+tools.  Like every BTW it thinks at `harness-btw-thinking' when its
+model offers that level (see `session/create').  The caller sends the
+first question."
   (harness-call 'session/create :cwd (harness-tasks--project cwd) :kind 'btw :name name))
 
 (harness-defmethod task/list (&optional cwd)
-  "Return the tasks of CWD's project, oldest first; every task without CWD.
-What changed in the project's task folder (every task folder without
-CWD) is read first, so tasks written by hand show."
+  "Return the tasks of CWD's project, oldest first; every task without CWD."
   (harness-tasks--load)
   (let ((project (and cwd (harness-tasks--project cwd))))
     (when project (harness-tasks--open-project project))
-    (harness-tasks--scan-roots (if project (list project) (hash-table-keys harness-tasks--file-roots)))
     (mapcar #'harness-tasks--view
             (harness-tasks--sorted (lambda (task) (or (null project) (equal project (plist-get task :project))))))))
 
@@ -2754,7 +1930,9 @@ waits in the backlog like a refined one."
 
 (harness-defmethod task/prompt (id text &optional attachments)
   "Send TEXT and ATTACHMENTS to the session of task ID: a follow-up, or steering.
-Before a backlog task starts, TEXT is feedback on its write-up."
+Before a backlog task starts, TEXT is feedback on its write-up; while
+the task waits for review, it sends the task back with TEXT as the
+feedback, as `task/reject' does (`harness-tasks--on-message')."
   (let ((task (harness-tasks--get id)))
     (unless (harness-tasks--session task) (error "Task %s has no session yet" id))
     (when (plist-get task :worktree-removed)
@@ -2764,7 +1942,8 @@ Before a backlog task starts, TEXT is feedback on its write-up."
       (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
         (harness-call 'session/resume sid))
       (when (plist-get task :archived) (harness-tasks--set id :archived nil))
-      (harness-tasks--set id :merge-attempts 0)
+      (harness-tasks--set id :merge-attempts 0
+                          :recap nil :recap-at nil :recap-turns nil :recap-tools nil)
       (if (harness-tasks--refinement-p task)
           (harness-tasks--refine-turn id sid blocks)
         (harness-catch (harness-call-async 'agent/prompt sid blocks)
@@ -2781,6 +1960,73 @@ A task in review merges when the user verifies it (`task/verify')."
       (error "Task %s waits for your review; verifying it merges it" id))
     (harness-tasks--set id :merge-attempts 0)
     (harness-tasks--enqueue-merge id)
+    (harness-call 'task/get id)))
+
+(defun harness-tasks--stopped-how (task)
+  "Say how TASK's last turn stopped, for `harness-tasks--retry-prompt'."
+  (let ((err (plist-get task :error)))
+    (concat (pcase (plist-get task :outcome)
+              ('error "it failed with an error")
+              ('cancelled "it was cancelled")
+              ('interrupted "the harness stopped while it was running")
+              ('max-tokens "the model ran out of output tokens")
+              ('nil "it ended")
+              (outcome (format "it ended (%s)" outcome)))
+            (if (harness-string-blank-p err)
+                ""
+              (concat " -- " (harness-truncate-end (string-trim err) 300))))))
+
+(defun harness-tasks--retry-turn (task)
+  "Have the session of stopped TASK work on it again.
+A session that never got the work since the task started gets the task
+itself; otherwise `harness-tasks--retry-prompt' from the harness tells
+it to carry on.  The task holds its slot from now, as when it starts."
+  (let ((id (plist-get task :id))
+        (sid (plist-get task :session)))
+    (when (plist-get task :worktree-removed)
+      (error "Task %s was archived and its worktree removed; submit a new task" id))
+    (puthash id t harness-tasks--starting)
+    (harness-tasks--set id :merge-attempts 0)
+    (let ((begun (harness-tasks--work-begun-p task)))
+      (harness-catch (harness-call-async 'agent/prompt sid
+                                         (if begun
+                                             (list (list :type "text"
+                                                         :text (format harness-tasks--retry-prompt
+                                                                       (harness-tasks--stopped-how task))))
+                                           (harness-tasks--blocks task))
+                                         ;; Carrying on is the harness's doing;
+                                         ;; the task itself is the user's.
+                                         (and begun (harness-tasks--from-harness)))
+                     (lambda (e) (harness-tasks--fail id e))))))
+
+(harness-defmethod task/retry (id)
+  "Have task ID, which stopped part way, work on it again; return the task.
+What that means follows where it stopped: a failed merge is queued
+again (`task/merge'), a write-up that stopped is written again, or
+written up all the same after it refused the task as a duplicate
+\(`task/refine'), and a task that has not started starts (`task/start').
+A task whose turn stopped -- an error, cancelled, interrupted -- has its
+session carry on, told so by the harness (`harness-tasks--retry-prompt');
+one left without a session starts over.  A task at work, waiting for an
+answer, merging, in review or done has nothing to retry."
+  (let* ((task (harness-tasks--get id))
+         (state (plist-get task :state))
+         (session (harness-tasks--session task)))
+    (cond
+     ((plist-get session :pending)
+      (error "Task %s waits for your answer to its %s" id
+             (if (equal (format "%s" (plist-get (car (plist-get session :pending)) :kind)) "question")
+                 "question" "permission request")))
+     ((or (harness-tasks--turn-p task) (gethash id harness-tasks--starting))
+      (error "Task %s is working already" id))
+     ((eq state 'review) (error "Task %s waits for your review: verify it or send it back" id))
+     ((eq state 'done) (error "Task %s is done; send it a message to reopen it" id))
+     ((eq (plist-get task :outcome) 'merge-failed) (harness-call 'task/merge id))
+     ((eq state 'merging) (error "Task %s is merging" id))
+     ((eq state 'refining) (harness-call 'task/refine id))
+     ((eq state 'pending) (harness-call 'task/start id))
+     ((null session) (harness-tasks--start task))
+     (t (harness-tasks--retry-turn task)))
     (harness-call 'task/get id)))
 
 (harness-defmethod task/complete (id)
@@ -2816,27 +2062,27 @@ already, it is done now."
 FEEDBACK and ATTACHMENTS go to the task's own session, in its own
 worktree, as a new prompt opened by `harness-tasks--reject-message'.  The
 round of feedback is kept in the task's `:feedback'.  The task is
-active again and comes back to review when that turn ends.  Return the
-task."
+active again and comes back to review when that turn ends.  Feedback
+may be ATTACHMENTS alone, a screenshot say, but not nothing.  Any
+message sent to the session meanwhile does the same
+\(`harness-tasks--on-message').  Return the task."
   (let ((task (harness-tasks--get id)))
     (unless (eq (plist-get task :state) 'review)
       (error "Task %s is not waiting for review" id))
-    (when (harness-string-blank-p feedback) (error "Sending a task back needs feedback"))
+    (when (and (harness-string-blank-p feedback) (null attachments))
+      (error "Sending a task back needs feedback"))
     (unless (harness-tasks--session task) (error "Task %s has no session to send the feedback to" id))
     (when (plist-get task :worktree-removed)
       (error "Task %s was archived and its worktree removed; submit a new task" id))
     (let ((sid (plist-get task :session))
-          (feedback (string-trim feedback)))
+          (blocks (harness-tasks--blocks (list :prompt (string-trim (or feedback ""))
+                                               :attachments attachments))))
       (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
         (harness-call 'session/resume sid))
-      (harness-tasks--set id :state 'active :outcome nil :error nil :finished nil :archived nil
-                          :verified nil :verified-at nil :merge-attempts 0
-                          :feedback (append (plist-get task :feedback)
-                                            (list (list :text feedback :at (float-time)))))
-      (harness-catch (harness-call-async 'agent/prompt sid
-                                         (harness-tasks--blocks
-                                          (list :prompt (harness-tasks--reject-text feedback)
-                                                :attachments attachments)))
+      ;; Active before the prompt goes out, so the message is not taken
+      ;; for one more sending the task back (`harness-tasks--on-message').
+      (harness-tasks--send-back id (harness-tasks--feedback-text blocks))
+      (harness-catch (harness-call-async 'agent/prompt sid (harness-tasks--reject-blocks blocks))
                      (lambda (e) (harness-tasks--fail id e)))
       (harness-call 'task/get id))))
 
@@ -2847,12 +2093,19 @@ exactly one."
   (let ((task (harness-tasks--by-session session-id)))
     (and task (harness-tasks--view task))))
 
+(harness-defmethod task/set-recap (id &rest plist)
+  "Store recap fields PLIST on task ID; return its view.
+The recap module writes a card's subtitle with it: `:recap' the line
+shown, `:recap-at' when it was made, and `:recap-turns' plus
+`:recap-tools' the counters it was made at.  A nil `:recap' clears it."
+  (apply #'harness-tasks--set id plist))
+
 (harness-defmethod task/hand-in (id report)
   "Record REPORT as the work ID hands in, waiting for the user's review.
 REPORT is what the hand_in tool validated: a plist of `:summary' and
-`:evidence'.  The task writes it in its file and says `task/changed';
-the turn that handed it in then ends cleanly, which the review step
-picks up as usual (`harness-tasks--on-turn-ended')."
+`:evidence'.  The record is written and `task/changed' says so; the
+turn that handed it in then ends cleanly, which the review step picks
+up as usual (`harness-tasks--on-turn-ended')."
   (harness-tasks--get id)               ; signals for an unknown task
   ;; `harness-tasks--set' writes it soon and says `task/changed'.
   (harness-tasks--set id :report report :report-at (float-time) :archived nil))
@@ -2922,8 +2175,6 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-on 'agent/tool-call #'harness-tasks--on-tool-call)
   (harness-on 'session/deleted #'harness-tasks--on-session-deleted)
   (harness-on 'session/pending-changed #'harness-tasks--on-pending-changed)
-  (harness-on 'session/updated #'harness-tasks--on-session-updated)
-  (harness-on 'session/plan #'harness-tasks--on-session-plan)
   (harness-on 'merge/started #'harness-tasks--on-merge-started)
   (harness-on 'merge/conflict #'harness-tasks--on-merge-conflict)
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
@@ -2932,13 +2183,11 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
-  (harness-tasks--start-polling)
+  (harness-add-filter 'agent/message #'harness-tasks--on-message)
   (harness-tasks--pick-up))
 
 (defun harness-tasks--shutdown ()
-  "Stop reading the task folders and write what waits to be written."
-  (when (timerp harness-tasks--poll-timer) (cancel-timer harness-tasks--poll-timer))
-  (setq harness-tasks--poll-timer nil)
+  "Write what waits to be written."
   (harness-tasks-flush))
 
 (harness-declare-event 'task/changed "(TASK) after a task is submitted or changes state or column.")
@@ -2947,15 +2196,18 @@ up again, merges in flight are queued again and waiting tasks start."
 (harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task, from backlog write-up or worktree through your review to merged, with a concurrency limit."
+  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)
 
 ;; A reload does not initialise a running module again, and a write-up
-;; must not go without the stage that keeps it read-only: install it now.
+;; must not go without the stage that keeps it read-only, nor a message
+;; to a task in review without the filter that sends it back: install
+;; them now.
 (when (harness-module-ready-p 'tasks)
-  (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25))
+  (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
+  (harness-add-filter 'agent/message #'harness-tasks--on-message))
 
 (provide 'harness-tasks)
 ;;; harness-tasks.el ends here

@@ -628,6 +628,47 @@ ON-EVENT, when given, is called with each event as well."
     (should (eq 'end-turn (harness-provider-copilot-test--done events))))
   (harness-provider-copilot-close "s5"))
 
+(ert-deftest harness-provider-copilot-new-session-gets-the-transcript ()
+  "A Copilot session created for a conversation with messages gets the transcript first.
+A turn without provider state for a transcript that already has
+messages (a checkout or a fork at an earlier node, a conversation
+another provider held) opens a new Copilot session, whose first message
+carries what was said before the new one.  Later turns send only what
+is new."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file))
+        (history (list '(:role user :content ((:type "text" :text "an earlier question")))
+                       '(:role assistant :content ((:type "text" :text "an earlier answer")))
+                       '(:role user :content ((:type "text" :text "go on"))))))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let* ((first (car (harness-provider-copilot-test--run
+                          (harness-provider-copilot-test--request "replay-1" "go on" :messages history))))
+             (id (plist-get (plist-get (harness-provider-copilot-test--find first 'provider-state) :state)
+                            :copilot-session-id)))
+        (should (eq 'end-turn (harness-provider-copilot-test--done first)))
+        (harness-provider-copilot-test--run
+         (harness-provider-copilot-test--request
+          "replay-1" "and again" :provider-state (list :copilot-session-id id)
+          :messages (append history (list '(:role assistant :content ((:type "text" :text "hello")))
+                                          '(:role user :content ((:type "text" :text "and again")))))))
+        (let ((prompts (mapcar (lambda (p) (plist-get p :prompt))
+                               (harness-provider-copilot-test--requests log "session.send"))))
+          (should (= 2 (length prompts)))
+          (should (string-match-p "<user>\nan earlier question\n</user>" (car prompts)))
+          (should (string-match-p "<assistant>\nan earlier answer\n</assistant>" (car prompts)))
+          (should (string-suffix-p "</conversation_history>\n\ngo on" (car prompts)))
+          (should (equal "and again" (cadr prompts)))))))
+  (harness-provider-copilot-close "replay-1"))
+
+(ert-deftest harness-provider-copilot-fork-at-a-checkpoint-starts-anew ()
+  "Copilot cannot cut its conversation at a checkpoint: a fork there has no state.
+The forked session then starts a new Copilot session, which gets the
+transcript up to the fork."
+  (harness-provider-copilot-test--setup)
+  (should (harness-test-await (harness-call 'provider/fork "copilot:gpt-5.4" '(:copilot-session-id "c-1"))))
+  (should-not (harness-test-await (harness-call 'provider/fork "copilot:gpt-5.4" '(:copilot-session-id "c-1")
+                                                '(:cli-session-id "s-1" :uuid "u-1")))))
+
 (ert-deftest harness-provider-copilot-fork-copies-the-session ()
   (harness-provider-copilot-test--setup)
   (let ((state (harness-test-await (harness-call 'provider/fork "copilot:gpt-5.4"
@@ -794,7 +835,9 @@ ON-EVENT, when given, is called with each event as well."
   (let* ((events (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s11" "fail please"))))
          (done (harness-provider-copilot-test--find events 'done)))
     (should (eq 'error (plist-get done :stop-reason)))
-    (should (equal "Copilot: You have no AI credits left" (plist-get done :error))))
+    (should (equal "Copilot: You have no AI credits left" (plist-get done :error)))
+    ;; Money is out, whatever the CLI calls the error type.
+    (should (eq 'billing (plist-get done :error-kind))))
   (let ((events (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s11" "long answer")))))
     (should (eq 'max-tokens (harness-provider-copilot-test--done events))))
   (let* ((events (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s11" "compact first"))))
@@ -803,6 +846,19 @@ ON-EVENT, when given, is called with each event as well."
     (should (cl-some (lambda (h) (string-match-p "Context compacted by Copilot: 150k → 12.0k tokens" h)) hints))
     (should (eq 'end-turn (harness-provider-copilot-test--done events))))
   (harness-provider-copilot-close "s11"))
+
+(ert-deftest harness-provider-copilot-reports-a-used-up-allowance ()
+  "A session.error of type quota carries its kind and reset to the done event."
+  (harness-provider-copilot-test--setup)
+  (let* ((events (car (harness-provider-copilot-test--run
+                       (harness-provider-copilot-test--request "s11b" "out of quota now"))))
+         (done (harness-provider-copilot-test--find events 'done)))
+    (should (eq 'error (plist-get done :stop-reason)))
+    (should (eq 'quota (plist-get done :error-kind)))
+    ;; 2030-01-01T00:00:00Z, the date the fixture's allowance resets.
+    (should (equal 1893456000.0 (plist-get done :resets)))
+    (should (string-match-p "premium requests" (plist-get done :error))))
+  (harness-provider-copilot-close "s11b"))
 
 (ert-deftest harness-provider-copilot-permission-requests-are-answered ()
   "The harness's own tools are approved: the harness asks the user itself."

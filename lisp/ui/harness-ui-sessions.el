@@ -8,6 +8,10 @@
 ;; their parents.  Scoped to the current project by default; `a'
 ;; toggles all projects; `/' filters fuzzily; column headers sort.
 ;;
+;; SPC pops out what the session at point waits on -- the permission
+;; prompt or question blocking it -- so it can be read and answered
+;; without opening the session (`harness-ui-popout-at-point').
+;;
 ;; A project includes its linked git worktrees: a session there (a
 ;; task's, a sub-agent's) has the worktree as its `:project', and is
 ;; listed with the main checkout that worktree belongs to.
@@ -29,6 +33,9 @@
 (require 'harness-util)
 (require 'harness-ui)
 (require 'harness-files)
+(require 'harness-ui-pending)
+
+(declare-function harness-ui-popout-try-at-point "harness-ui-popout")
 
 (defgroup harness-ui-sessions nil
   "The session list." :group 'harness-ui)
@@ -53,16 +60,12 @@ tasks never does.")
   "Return the main checkout session project ROOT belongs to.
 A linked git worktree belongs to its main checkout.  A root gone from
 disk, like an archived task's worktree, belongs to the project around it.
-Remote roots are not looked at."
+Remote roots are not looked at.  See `harness-files-owning-checkout'."
   (when root
     (let ((memo (or harness-ui-sessions--main-roots
                     (setq harness-ui-sessions--main-roots (make-hash-table :test 'equal)))))
       (or (gethash root memo)
-          (puthash root
-                   (cond ((file-remote-p root) root)
-                         ((file-directory-p root) (harness-files-main-checkout root))
-                         (t (harness-files-main-root root)))
-                   memo)))))
+          (puthash root (harness-files-owning-checkout root) memo)))))
 
 (defun harness-ui-sessions--task (s)
   "Return the task session S works on, or nil."
@@ -128,7 +131,8 @@ model, status, kind and permission mode."
            (concat (make-string (* 2 depth) ?\s)
                    (if (> depth 0) (propertize "↳ " 'face 'harness-dim-face) "")
                    (propertize name 'face (if (equal status "blocked") 'harness-status-blocked-face 'default)))
-           (propertize status 'face (harness-ui-status-face status))
+           (propertize status 'face (harness-ui-status-face status)
+                       'help-echo (or (harness-ui-sessions--waiting-help s) status))
            (if (equal kind "main") "" kind)
            (harness-ui-model-label (plist-get s :model))
            (if-let* ((m (plist-get s :permission-mode))) (harness-ui-permission-mode-label m) "")
@@ -175,6 +179,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
     (define-key map (kbd "a") #'harness-ui-sessions-toggle-scope)
     (define-key map (kbd "i") #'harness-ui-sessions-toggle-inactive)
     (define-key map (kbd "g") #'harness-ui-sessions-reload)
+    (define-key map (kbd "SPC") #'harness-ui-sessions-requests)
     (define-key map (kbd "?") #'harness-menu)
     map))
 
@@ -192,6 +197,10 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
                 (list "Updated" 9 (harness-ui-sessions--number< '(:updated)))
                 (list "Project" 30 t)))
   (setq tabulated-list-padding 1)
+  ;; What the session at point waits on: the popout, and any other command
+  ;; that acts on "the session at point", read it through this.
+  (setq-local harness-ui-session-at-point-function
+              (lambda () (and (derived-mode-p 'harness-ui-sessions-mode) (tabulated-list-get-id))))
   (add-hook 'tabulated-list-revert-hook #'harness-ui-sessions--refresh nil t)
   (tabulated-list-init-header))
 
@@ -205,6 +214,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
         (". r" "Rename" harness-ui-sessions-rename)
         (". k" "Cancel turn" harness-ui-sessions-cancel)
         (". x" "Deactivate" harness-ui-sessions-deactivate)
+        (". SPC" "View what it waits on" harness-ui-sessions-requests)
         (". T" "Make it a task" harness-ui-sessions-make-task)
         (". d" "Delete" harness-ui-sessions-delete)]
        ["List"
@@ -372,6 +382,24 @@ A task's session matches its task's title and the kind task."
     (with-current-buffer buf (setq harness-ui-sessions--main-roots nil)))
   (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw)))
   (harness-ui-sessions--fetch-tasks))
+
+(defun harness-ui-sessions--waiting-help (session)
+  "Return the tooltip of SESSION's status cell, saying what it waits on."
+  (when (equal (plist-get session :status) "blocked")
+    (let ((what (harness-ui-pending-status session)))
+      (format "%s; SPC shows what it waits on"
+              (if (equal what "question") "blocked on a question" "blocked on a permission request")))))
+
+(defun harness-ui-sessions-requests ()
+  "Pop out what the session at point waits on.
+A session that waits on nothing leaves the key to what it did before
+this command existed: SPC scrolls the list."
+  (interactive)
+  (if (and (fboundp 'harness-ui-popout-try-at-point)
+           (harness-ui-popout-try-at-point))
+      nil
+    ;; Without a window (a test run) there is nothing to scroll.
+    (ignore-errors (call-interactively #'scroll-up-command))))
 
 (defun harness-ui-sessions--init ()
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)

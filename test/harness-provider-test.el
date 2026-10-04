@@ -176,5 +176,97 @@ family names rather than whole ids."
     ;; A tier with no name of its own still fits, as a key it does not name.
     (should (harness-test-fits-p type '(:cheap "haiku" :my-tier "other")))))
 
+(ert-deftest harness-provider-warm-and-close-reach-the-provider ()
+  "`provider/warm' and `provider/close' call the hooks of the request's
+provider; a provider without them, an unknown one and a hook that fails
+make no difference to the caller."
+  (harness-provider-test-with (test-warm test-plain)
+    (let (warmed closed)
+      (harness-define-provider 'test-warm
+        :complete #'ignore
+        :warm (lambda (request) (push request warmed) t)
+        :close (lambda (sid) (push sid closed) (equal sid "s-1")))
+      (harness-define-provider 'test-plain :complete #'ignore)
+      (let ((request (list :model "test-warm:m" :session '(:id "s-1") :system "S")))
+        (should (harness-call 'provider/warm request))
+        (should (equal (list request) warmed)))
+      (should (harness-call 'provider/close "test-warm:m" "s-1"))
+      (should-not (harness-call 'provider/close "test-warm:m" "s-2"))
+      (should (equal '("s-2" "s-1") closed))
+      ;; Nothing to prepare or free.
+      (should-not (harness-call 'provider/warm '(:model "test-plain:m" :session (:id "s-1"))))
+      (should-not (harness-call 'provider/close "test-plain:m" "s-1"))
+      (should-not (harness-call 'provider/warm '(:model "nobody:m")))
+      (should-not (harness-call 'provider/close "nobody:m" "s-1"))
+      ;; A hook that fails is logged, not signalled.
+      (harness-define-provider 'test-warm
+        :complete #'ignore
+        :warm (lambda (_) (error "No CLI"))
+        :close (lambda (_) (error "No CLI")))
+      (should-not (harness-call 'provider/warm '(:model "test-warm:m")))
+      (should-not (harness-call 'provider/close "test-warm:m" "s-1"))
+      ;; Defined again without them, it has none.
+      (harness-define-provider 'test-warm :complete #'ignore)
+      (should-not (harness-call 'provider/warm '(:model "test-warm:m"))))))
+
+;;;; Forks at a checkpoint and replayed transcripts
+
+(defvar harness-provider-history-limit)
+(defvar harness-provider-history-block-limit)
+(declare-function harness-provider-split-history "harness-provider")
+(declare-function harness-provider-history-text "harness-provider")
+
+(ert-deftest harness-provider-fork-passes-a-checkpoint-only-to-who-takes-one ()
+  "A checkpoint goes to a fork function of three arguments; one of two gives nil."
+  (harness-provider-test-with (test-cuts test-whole)
+    (harness-define-provider 'test-cuts :complete #'ignore
+                             :fork (lambda (_m state &optional checkpoint) (list state checkpoint)))
+    (harness-define-provider 'test-whole :complete #'ignore
+                             :fork (lambda (_m state) (list :whole state)))
+    (should (equal '(s nil :provider "test-cuts") (harness-test-await (harness-call 'provider/fork "test-cuts:m" 's))))
+    (should (equal '(s c :provider "test-cuts") (harness-test-await (harness-call 'provider/fork "test-cuts:m" 's 'c))))
+    (should (equal '(:whole s :provider "test-whole") (harness-test-await (harness-call 'provider/fork "test-whole:m" 's))))
+    (should-not (harness-test-await (harness-call 'provider/fork "test-whole:m" 's 'c)))))
+
+(ert-deftest harness-provider-history-renders-what-was-said ()
+  "A transcript replayed into a new conversation shows each message, oldest first.
+The trailing user messages are the new message and stay out; tool
+results are named after their calls, thinking is left out, and long
+tool output is cut."
+  (harness-test-reset-bus)
+  (harness-test-load-module 'provider)
+  (let* ((harness-provider-history-block-limit 40)
+         (long (make-string (+ 10 harness-provider-history-block-limit) ?x))
+         (messages (list '(:role user :content ((:type "text" :text "list the files")))
+                         '(:role assistant :content ((:type "thinking" :text "secret musing" :signature "s")
+                                                     (:type "text" :text "Looking.")
+                                                     (:type "tool_use" :id "t1" :name "list_dir" :input (:path "/"))))
+                         (list :role 'user :content (list (list :type "tool_result" :tool_use_id "t1"
+                                                                :content long :is_error :false)))
+                         '(:role assistant :content ((:type "text" :text "Two files.")))
+                         '(:role user :content ((:type "text" :text "now what?")))))
+         (split (harness-provider-split-history messages))
+         (text (harness-provider-history-text (car split))))
+    (should (= 4 (length (car split))))
+    (should (equal '((:role user :content ((:type "text" :text "now what?")))) (cdr split)))
+    (should (string-match-p "<user>\nlist the files\n</user>" text))
+    (should (string-match-p "<assistant>\nLooking\\.\n\n<tool_call name=\"list_dir\">\n{\"path\":\"/\"}\n</tool_call>\n</assistant>"
+                            text))
+    (should (string-match-p "<tool_result name=\"list_dir\">\nx+\n\\[… 10 more characters\\]\n</tool_result>" text))
+    (should (string-match-p "<assistant>\nTwo files\\.\n</assistant>\n</conversation_history>\\'" text))
+    (should-not (string-match-p "secret musing" text))
+    (should-not (string-match-p (regexp-quote "now what?") text))
+    ;; Nothing before the new message: nothing to replay.
+    (should-not (harness-provider-history-text (car (harness-provider-split-history (last messages)))))
+    ;; Past the limit, the oldest messages but the first go.
+    (let* ((harness-provider-history-limit 60)
+           (many (cl-loop for i below 6 collect (list :role (if (cl-evenp i) 'user 'assistant)
+                                                      :content (list (list :type "text" :text (format "message %d" i))))))
+           (text (harness-provider-history-text many)))
+      (should (string-match-p "message 0" text))
+      (should (string-match-p "message 5" text))
+      (should-not (string-match-p "message 1" text))
+      (should (string-match-p "\\[… [0-9]+ earlier messages omitted …\\]" text)))))
+
 (provide 'harness-provider-test)
 ;;; harness-provider-test.el ends here

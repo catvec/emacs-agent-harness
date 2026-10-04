@@ -101,10 +101,10 @@ simply pushed the implementation detail across that line.
 
 | Old option | Constant |
 |---|---|
-| `harness-tools-emacs-value-chars` | `harness-client-tools--value-chars` |
-| `harness-tools-emacs-messages-default` | `harness-client-tools--messages-default` |
-| `harness-elisp-timeout` | `harness-client-tools--elisp-timeout` |
-| `harness-elisp-max-value-chars` | `harness-client-tools--elisp-max-value-chars` |
+| `harness-tools-emacs-value-chars` | `harness-tools-emacs--value-chars` |
+| `harness-tools-emacs-messages-default` | `harness-tools-emacs--messages-default` |
+| `harness-elisp-timeout` | `harness-elisp--timeout` |
+| `harness-elisp-max-value-chars` | `harness-elisp--max-value-chars` |
 | `harness-log-max-lines` | `harness--log-max-lines` |
 | `harness-files-timeout` | `harness-files--timeout` |
 | `harness-http-curl-program` | `harness-http--curl-program` |
@@ -163,8 +163,6 @@ simply pushed the implementation detail across that line.
 | `harness-tasks-merge-attempts` | `harness-tasks--merge-attempts` |
 | `harness-tasks-merge-session-name` | `harness-tasks--merge-session-name` |
 | `harness-tasks-resume-prompt` | `harness-tasks--resume-prompt` |
-| `harness-tasks-directory-poll` | `harness-tasks--directory-poll` |
-| `harness-tasks-directory-ignore` | `harness-tasks--directory-ignore` |
 | `harness-tools-timeout` | `harness-tools--timeout` |
 | `harness-tools-fs-glob-limit` | `harness-tools-fs--glob-limit` |
 | `harness-tools-fs-list-limit` | `harness-tools-fs--list-limit` |
@@ -256,7 +254,7 @@ together by user story, in the order the story is told:
 |---|---|
 | New sessions | `harness-model`, `harness-thinking`, `harness-permission-mode`, `harness-non-interactive`, `harness-budget` |
 | Files and safety | `harness-allowed-directories`, `harness-sandbox-policy`, `harness-perms-rules`, `harness-perms-auto-model` |
-| Task board | `harness-tasks-model`, `harness-tasks-thinking`, `harness-tasks-permission-mode`, `harness-tasks-non-interactive`, `harness-tasks-require-verification`, `harness-tasks-max-running`, `harness-tasks-worktrees`, `harness-tasks-directory` |
+| Task board | `harness-tasks-model`, `harness-tasks-thinking`, `harness-tasks-permission-mode`, `harness-tasks-non-interactive`, `harness-tasks-context-limit`, `harness-tasks-require-verification`, `harness-tasks-max-running`, `harness-tasks-worktrees` |
 | Notifications | `harness-tasks-notify-events`, `harness-notifications-providers`, `harness-gotify-url`, `harness-gotify-token` |
 | Models and services | `harness-openai-endpoints`, `harness-bedrock-endpoints`, `harness-websearch-provider`, `harness-websearch-builtin`, `harness-brave-api-key` |
 
@@ -272,11 +270,11 @@ setting.  A harness whose modules are all disabled, and therefore names
 no sections, lists its layered settings in one *Session defaults*
 section.
 
-## Advanced options kept (26)
+## Advanced options kept (24)
 
 These stayed options because they are real choices, just not common
-ones: `harness-log-level`, `harness-agent-max-steps`,
-`harness-naming-auto`, `harness-notifications-desktop-backend`,
+ones: `harness-log-level`, `harness-naming-auto`,
+`harness-notifications-desktop-backend`,
 `harness-provider-claude-program`, `harness-provider-claude-extra-args`,
 `harness-provider-claude-permission-args`,
 `harness-provider-copilot-program`,
@@ -285,7 +283,7 @@ ones: `harness-log-level`, `harness-agent-max-steps`,
 `harness-sandbox-extra-read-only-dirs`, `harness-skills-directories`,
 `harness-tasks-refine-model`, `harness-tasks-refine-thinking`,
 `harness-tasks-branch-prefix`, `harness-tasks-resume-interrupted`,
-`harness-tasks-store-in-repository`, `harness-tasks-directory-archive`,
+`harness-tasks-store-in-repository`,
 `harness-tasks-notify-providers`, `harness-tools-max-output-chars`,
 `harness-usage-warn-fraction`, `harness-anthropic-admin-api-key`,
 `harness-worktree-directory-function`, `harness-worktree-branch-prefix`.
@@ -304,7 +302,7 @@ marked *done* were fixed, the rest are recommendations, not changes.
 |---|---|
 | `write_file` and `edit_file` | One need ("change a file") with two parameters (whole file, or a patch). Kept separate: the agent chooses per call, and both are documented side by side |
 | `glob`, `grep`, `list_dir`, `file_info`, `read_file` | The fs tools are verbs on files, not duplicates. Their limits are now constants, so they compose |
-| `emacs_*` tools and the `elisp` tool | `elisp` can do everything the `emacs_*` tools do, but the narrow tools are what the agent is allowed to use unaided; keep both, with `elisp` under the stricter permission |
+| `emacs_*` tools and the `elisp` tool | Not one need: `elisp` evaluates in a background Emacs and cannot touch the user's Emacs at all; the narrow `emacs_*` tools are the only way to read or drive the live Emacs, and each is bounded work (no prompt, subprocess, network or file-system wait), so the agent's UI reach is exactly what they allow. Keep both |
 | `web_search` and the provider's own search | Already one feature with a parameter (`harness-websearch-builtin`), exactly the pattern this audit asks for |
 | `session_wait` and `task_wait` | One waiting mechanism with different predicates; both already accept the same timeout options, with one default (now an internal constant) |
 | `fork` and `btw` | Fork copies context, BTW deliberately does not. One "start a side conversation" UI with a parameter would hide the price difference; keep both, they are named for what they do |

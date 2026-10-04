@@ -368,6 +368,37 @@ model of another provider holds (:mode transcript|compact :file PATH
     (or (string= (file-name-as-directory path) dir)
         (string-prefix-p dir path))))
 
+(defun harness-glob-regexp (pattern &optional no-classes)
+  "Translate glob PATTERN into a regexp that matches a whole string.
+`*' matches any run of characters but `/', `**' any run across
+directories (`**/' also matches no directory at all), `?' one
+character but `/', and `[...]' one character of a class (`[!...]'
+negates it), unless NO-CLASSES is non-nil: then a bracket matches
+itself, as in a directory called \"Photos [2024]\".  Every other
+character matches itself.  Match with `case-fold-search' nil: file
+names are case-sensitive."
+  (let ((i 0) (n (length pattern)) (out (list "\\`")))
+    (while (< i n)
+      (let* ((c (aref pattern i))
+             ;; A class: `[', maybe `!' or `^', then at least one
+             ;; character before its `]', so `[]]' holds a `]'.
+             (negated (and (eq c ?\[) (< (1+ i) n) (memq (aref pattern (1+ i)) '(?! ?^))))
+             (body (+ i (if negated 2 1)))
+             (end (and (eq c ?\[) (not no-classes) (< body n) (string-search "]" pattern (1+ body)))))
+        (cond
+         ((and (eq c ?*) (< (1+ i) n) (eq (aref pattern (1+ i)) ?*))
+          (if (and (< (+ i 2) n) (eq (aref pattern (+ i 2)) ?/))
+              (progn (push "\\(?:.*/\\)?" out) (cl-incf i 3))
+            (push ".*" out) (cl-incf i 2)))
+         ((eq c ?*) (push "[^/]*" out) (cl-incf i))
+         ((eq c ??) (push "[^/]" out) (cl-incf i))
+         (end
+          (push (concat "[" (if negated "^" "") (substring pattern body end) "]") out)
+          (setq i (1+ end)))
+         (t (push (regexp-quote (string c)) out) (cl-incf i)))))
+    (push "\\'" out)
+    (apply #'concat (nreverse out))))
+
 (defun harness-relative-path (root path)
   "Return PATH relative to ROOT when inside it, else PATH abbreviated."
   (if (and root (harness-path-within-p root path))
@@ -580,8 +611,11 @@ in use.  Returns nothing useful; failures are logged."
 ;;;; Errors
 
 (defun harness-error-message (err)
-  "Return a readable message for ERR (an error data list or string)."
+  "Return a readable message for ERR (an error data list or string).
+An ACP error, (acp-error CODE MESSAGE DATA), reads as its MESSAGE."
   (cond ((stringp err) err)
+        ((and (eq (car-safe err) 'acp-error) (stringp (nth 2 err)) (not (string-empty-p (nth 2 err))))
+         (nth 2 err))
         ((and (consp err) (symbolp (car err)))
          (condition-case nil (error-message-string err)
            (error (format "%S" err))))

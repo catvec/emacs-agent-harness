@@ -65,8 +65,25 @@
   :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
   :group 'harness)
 
+(defcustom harness-btw-thinking "low"
+  "Thinking level BTW side conversations start at, or nil for the usual one.
+A BTW is for quick questions on the side, so by default it thinks
+little.  It starts at this level only when its model offers it.
+Otherwise, and always with nil, it starts at the level of the session
+it is opened over; a BTW about a task board starts at
+`harness-thinking'.  The level can be changed in the BTW like in any
+session."
+  :type '(choice (const :tag "Same as the session" nil) (const :tag "Low" "low")
+                 (const :tag "Medium" "medium") (const :tag "High" "high")
+                 (const :tag "Extra high" "xhigh") (const :tag "Max" "max"))
+  :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
+  :group 'harness)
+
 (defcustom harness-allowed-directories nil
-  "Extra directories sessions may touch besides their working directory."
+  "Extra directories sessions may touch besides their working directory.
+An entry may also be a glob pattern, such as ~/notes/*.org, to allow
+only the paths it matches: `*' matches within a name, `**' across
+directories."
   :type '(repeat directory)
   :safe (lambda (v) (and (listp v) (cl-every #'stringp v)))
   :group 'harness)
@@ -102,31 +119,17 @@ unless `harness-tasks-non-interactive' is on: then they start
 non-interactive anyway."
   :type 'boolean :safe #'booleanp :group 'harness)
 
-(defcustom harness-tasks-directory "docs/tasks"
-  "Folder of a git project's task files, relative to its main checkout.
-Every task on the project's board is also a markdown file there: YAML
-frontmatter with the fields the harness reads, then the task's prompt,
-the request it was written from and its plan.  The harness writes the
-files when tasks change and reads back the ones people (or other tools)
-edit or add, which then show on the board.  See the tasks module.
-
-nil keeps no task files.  A project's .dir-locals.el can pick another
-folder for that project, or nil to keep none there."
-  :type '(choice (const :tag "No task files" nil) (string :tag "Folder"))
-  :safe (lambda (v) (or (null v) (stringp v)))
-  :group 'harness)
-
 (defconst harness-config-keys
-  '(harness-model harness-permission-mode harness-thinking harness-allowed-directories
-    harness-budget harness-sandbox-policy harness-non-interactive harness-tasks-directory)
+  '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
+    harness-allowed-directories harness-budget harness-sandbox-policy harness-non-interactive)
   "Settings that take part in layering.")
 
 (defconst harness-config-sections
   '((sessions
      :title "New sessions"
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
-     :keys (harness-model harness-thinking harness-permission-mode harness-non-interactive
-            harness-budget))
+     :keys (harness-model harness-thinking harness-btw-thinking harness-permission-mode
+            harness-non-interactive harness-budget))
     (safety
      :title "Files and safety"
      :doc "What sessions may reach, and what may run without asking you."
@@ -136,8 +139,9 @@ folder for that project, or nil to keep none there."
      :title "Task board"
      :doc "The sessions tasks start with, and when their work counts as done."
      :keys (harness-tasks-model harness-tasks-thinking harness-tasks-permission-mode
-            harness-tasks-non-interactive harness-tasks-require-verification
-            harness-tasks-max-running harness-tasks-worktrees harness-tasks-directory))
+            harness-tasks-non-interactive harness-tasks-context-limit
+            harness-tasks-require-verification
+            harness-tasks-max-running harness-tasks-worktrees))
     (notifications
      :title "Notifications"
      :doc "When the harness tells you it needs you, and where."
@@ -146,8 +150,8 @@ folder for that project, or nil to keep none there."
     (services
      :title "Models and services"
      :doc "Model providers besides Claude Code, and the other services the harness talks to."
-     :keys (harness-openai-endpoints harness-bedrock-endpoints harness-websearch-provider
-            harness-websearch-builtin harness-brave-api-key)))
+     :keys (harness-fallback-models harness-openai-endpoints harness-bedrock-endpoints
+            harness-websearch-provider harness-websearch-builtin harness-brave-api-key)))
   "The settings most people change, in sections named by what they are for.
 Each entry is (NAME :title TITLE :doc DOC :keys OPTIONS).
 `config/describe' lists these options first, in this order, each with
@@ -271,7 +275,7 @@ init file only."
 (defun harness-config--module-of (key)
   "Return the name of the module KEY belongs to, or \"core\".
 That is the module whose file defines KEY, else (for an option of a
-shared file such as harness-client-tools.el) the module whose name
+shared file such as harness-elisp.el) the module whose name
 starts KEY's name."
   (let* ((file (symbol-file key 'defvar))
          (base (and file (file-name-base file)))

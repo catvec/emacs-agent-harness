@@ -34,7 +34,7 @@
 (require 'harness-util)
 (require 'harness-acp)
 (require 'harness-server)
-(require 'harness-client-tools)
+(require 'harness-emacs-endpoint)
 (require 'harness-files)
 (require 'harness-notifications-desktop)
 
@@ -161,6 +161,16 @@ A tool call that is running, or that the permission system refused."
     (((background dark)) :background "#1e2127" :extend t))
   "The message composition area." :group 'harness-ui)
 
+(defface harness-compose-message-face
+  '((((background light)) :background "#fdf0d5" :extend t)
+    (((background dark)) :background "#3a3222" :extend t))
+  "The composition area of a message to an existing session.
+A colour of its own, so a box that sends to a session cannot be taken
+for the one that composes a new task." :group 'harness-ui)
+
+(defface harness-compose-message-accent-face '((t :inherit warning))
+  "The prompt and bar of a compose box that sends to an existing session." :group 'harness-ui)
+
 (defface harness-header-face '((t :inherit header-line))
   "Session header line." :group 'harness-ui)
 
@@ -203,6 +213,7 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-collapsed "collapsed" "▸" "+" "Collapsed block.")
 (harness-ui-define-icon harness-icon-expanded "expanded" "▾" "-" "Expanded block.")
 (harness-ui-define-icon harness-icon-attach "attach" "+" "attach" "Attachment.")
+(harness-ui-define-icon harness-icon-question "question" "?" "?" "A question.")
 (harness-ui-define-icon harness-icon-warning "warning" "!" "error" "An error.")
 (harness-ui-define-icon harness-icon-success "success" "●" "ok" "Success: a circle, green.")
 (harness-ui-define-icon harness-icon-caution "caution" "●" "~"
@@ -331,15 +342,35 @@ gives way to this Emacs's own harness: the UI connects to no other."
   (when (and (stringp address) (harness-corporate-p))
     (message "Harness: corporate mode is on, so the UI connects to the local harness, not %s" address)
     (setq address (harness-ui--local-address)))
-  (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
-  (setq harness-ui-connection nil
-        harness-ui-connection-address address)
+  (harness-ui--let-go)
+  (setq harness-ui-connection-address address)
   (if (eq address 'process)
       (if harness-ui--server-address
           (harness-ui--open (car harness-ui--server-address) (cdr harness-ui--server-address))
         (harness-ui--ensure-server)
         nil)
     (harness-ui--open address nil)))
+
+(defun harness-ui--let-go ()
+  "Close the UI's connection, if any, as one replaced on purpose.
+What was pending on it is rejected with the reason \"replaced\" (see
+`harness-ui-connection-replaced-p'): the harness keeps running it, the
+UI just no longer hears the answer, so nobody reports it as failed.  A
+request from the harness that waits for an answer, such as a
+permission prompt, cannot be answered through its old RESPOND any
+more; the session keeps it pending, and the chat answers it with
+`permission/answer' instead."
+  (when harness-ui-connection
+    (ignore-errors (harness-acp-close harness-ui-connection "replaced")))
+  (setq harness-ui-connection nil))
+
+(defun harness-ui-connection-replaced-p (err)
+  "Non-nil when ERR failed a request only because the UI replaced its connection.
+The UI connects again on purpose (`harness-connect-remote', a corporate
+mode change): requests still waiting for an answer on the connection
+it let go of are rejected with this, and are no failure to report.
+They reached the harness or never left, as the transcript shows."
+  (equal (harness-acp-closed-reason err) "replaced"))
 
 (defun harness-ui--open (address token)
   "Open the connection to ADDRESS (nil: in-process) authenticating with TOKEN.
@@ -354,7 +385,9 @@ initialize: one it let go of for another closes on purpose."
     (harness-acp-on-close conn (lambda ()
                                  (when (eq conn harness-ui-connection)
                                    (harness-ui--on-close))))
-    (harness-then (harness-acp-initialize conn)
+    ;; This Emacs lends itself to the harness: its tools about the
+    ;; user's Emacs ask it (lisp/harness-emacs-endpoint.el).
+    (harness-then (harness-acp-initialize conn (harness-emacs-endpoint-client-capabilities))
                   (lambda (_)
                     (harness-ui-refresh-sessions)
                     (harness-ui-refresh-models)
@@ -402,11 +435,16 @@ drop it along with every request it carries."
 
 (defun harness-ui-call (method params callback &optional on-error)
   "Request METHOD with PARAMS and call CALLBACK with the result.
-Errors are shown in the echo area unless ON-ERROR handles them."
+Errors are shown in the echo area unless ON-ERROR handles them, but
+for those of a connection the UI replaced on purpose
+\(`harness-ui-connection-replaced-p'), which are not failures."
   (harness-then (harness-ui-request method params)
                 callback
                 (or on-error
-                    (lambda (e) (message "Harness: %s failed: %s" method (harness-error-message e)) nil))))
+                    (lambda (e)
+                      (unless (harness-ui-connection-replaced-p e)
+                        (message "Harness: %s failed: %s" method (harness-error-message e)))
+                      nil))))
 
 (defun harness-ui-notify (method &optional params)
   "Send notification METHOD with PARAMS."
@@ -428,18 +466,30 @@ later in the init file still reach the process."
    (t
     (remove-hook 'emacs-startup-hook #'harness-ui--ensure-server)
     (setq harness-ui--server-address nil
-          harness-ui--server-stopping nil
-          harness-ui--server
-          (harness-server-spawn
-           :on-address (lambda (address token)
-                         (setq harness-ui--server-address (cons address token))
-                         (when (eq harness-ui-connection-address 'process)
-                           (harness-ui--open address token)
-                           (run-hooks 'harness-ui-redraw-hook)))
-           :on-exit #'harness-ui--on-server-exit)))))
+          harness-ui--server-stopping nil)
+    (let (proc)
+      (setq proc (harness-server-spawn
+                  :on-address (lambda (address token)
+                                ;; One replaced before it listened is nobody to talk to.
+                                (when (eq proc harness-ui--server)
+                                  (setq harness-ui--server-address (cons address token))
+                                  (when (eq harness-ui-connection-address 'process)
+                                    (harness-ui--open address token)
+                                    (run-hooks 'harness-ui-redraw-hook))))
+                  :on-exit #'harness-ui--on-server-exit)
+            harness-ui--server proc)))))
 
-(defun harness-ui--on-server-exit (status)
-  "React to the harness process ending with STATUS: restart it unless stopped."
+(defun harness-ui--on-server-exit (status &optional proc)
+  "React to the harness process PROC ending with STATUS: restart it unless stopped.
+The end of a process the UI no longer runs is not news: a process
+stopped for a restart may be reported gone after its successor
+started, and must neither make the UI forget that one nor start a
+third."
+  (when (or (null proc) (eq proc harness-ui--server))
+    (harness-ui--on-current-server-exit status)))
+
+(defun harness-ui--on-current-server-exit (status)
+  "React to the UI's harness process ending with STATUS: restart it unless stopped."
   (setq harness-ui--server nil harness-ui--server-address nil)
   (unless harness-ui--server-stopping
     (let* ((now (float-time))
@@ -485,10 +535,28 @@ tasks among them carry on once the process is back (see
   "Ask the harness process to reload its modules in place."
   (when (eq harness-ui-connection-address 'process)
     (harness-ui-call "_harness/harness/reload" nil
-                     (lambda (_) (message "Harness process reloaded")))))
+                     (lambda (_) (message "Harness process reloaded"))
+                     (lambda (e) (message "Harness process: %s" (harness-error-message e))))))
+
+(defun harness-ui--advertise ()
+  "Tell the harness again what this Emacs lends it, as `initialize' did.
+After a reload, so that a connection opened by older code, which lent
+nothing, lends this Emacs from now on."
+  (when (harness-acp-open-p harness-ui-connection)
+    (harness-catch (harness-acp-initialize harness-ui-connection
+                                           (harness-emacs-endpoint-client-capabilities))
+                   (lambda (e) (harness-log 'warn "ui: advertising this Emacs failed: %s"
+                                            (harness-error-message e))))))
 
 (defun harness-ui--dispatch (method params respond)
-  "Route an incoming METHOD with PARAMS; RESPOND is non-nil for requests."
+  "Route an incoming METHOD with PARAMS; RESPOND is non-nil for requests.
+The harness's requests for this Emacs, which it lent the harness, are
+answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
+  (unless (harness-emacs-endpoint-answer method params respond)
+    (harness-ui--dispatch-ui method params respond)))
+
+(defun harness-ui--dispatch-ui (method params respond)
+  "Route METHOD with PARAMS to the UI; RESPOND is non-nil for requests."
   (pcase method
     ("session/update"
      (let ((sid (plist-get params :sessionId))
@@ -505,10 +573,8 @@ tasks among them carry on once the process is back (see
        (harness-ui--default-question params respond)))
     ("_harness/client/customize-save"
      (condition-case err
-         (funcall respond (harness-client-tools-customize-save (plist-get params :symbol) (plist-get params :value)))
+         (funcall respond (harness-emacs-endpoint-customize-save (plist-get params :symbol) (plist-get params :value)))
        (error (harness-acp-respond-error respond -32000 (error-message-string err)))))
-    ("_harness/client/tool"
-     (funcall respond (harness-client-tools-run (plist-get params :name) (plist-get params :input))))
     ("_harness/client/notify"
      (harness-then (harness-ui--show-notification params)
                    (lambda (shown) (funcall respond shown) nil)
@@ -516,12 +582,13 @@ tasks among them carry on once the process is back (see
     ("_harness/event"
      (let ((event (plist-get params :event)) (args (plist-get params :args)))
        (when (equal event "tools/file-written")
-         (harness-client-tools-revert-visiting (car args)))
+         (harness-emacs-endpoint-revert-visiting (car args)))
        (when (member event '("session/created" "session/deleted"))
          (harness-ui-refresh-sessions))
        (when (equal event "harness/reloaded")
          ;; Reloaded code may label its tools anew: views fetch them again.
          (harness-ui--forget-tools)
+         (harness-ui--advertise)
          (run-hooks 'harness-ui-redraw-hook))
        (when (member event '("provider/models-updated" "harness/reloaded"))
          (harness-ui-refresh-models))
@@ -651,9 +718,8 @@ yet: it starts after the init file, with the value set there."
          (remote (and on (stringp harness-ui-connection-address) harness-ui-connection-address)))
     (when remote
       ;; Nothing more goes to the remote harness.
-      (when harness-ui-connection (ignore-errors (harness-acp-close harness-ui-connection)))
-      (setq harness-ui-connection nil
-            harness-ui-connection-address (harness-ui--local-address)))
+      (harness-ui--let-go)
+      (setq harness-ui-connection-address (harness-ui--local-address)))
     (cond
      ((and (eq harness-ui-connection-address 'process)
            harness-ui--server (process-live-p harness-ui--server))
@@ -977,33 +1043,35 @@ and any other that is at least 70% used."
       "the subscription"))
 
 (defun harness-ui-spend-help (session)
-  "Return the tooltip that explains what SESSION cost and who pays for it."
+  "Return the tooltip that explains what SESSION cost and who pays for it.
+One line, so showing it in the echo area moves nothing."
   (let* ((usage (plist-get session :usage))
          (quota (harness-ui-session-quota session))
          (billing (harness-ui-session-billing session))
          (cost (float (or (plist-get usage :cost) 0)))
          (covered (harness-usage-covered usage))
          (payer (harness-ui-plan-title quota (plist-get usage :plan))))
-    (string-join
-     (delq nil
-           (append
-            (list
-             (cond ((and (> covered 0) (> cost 0))
-                    (format "%s billed as extra usage; %s more at API prices covered by %s."
-                            (harness-format-cost cost) (harness-format-cost covered) payer))
-                   ((or (> covered 0) (memq billing '(subscription extra-usage)))
-                    (format "Covered by %s, not billed per token.\nThis session at API prices: %s."
-                            payer (harness-format-cost covered)))
-                   ((eq billing 'api)
-                    (format "Session cost: %s, billed per token%s."
-                            (harness-format-cost cost)
-                            (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) "")))
-                   (t (format "Session cost: %s." (harness-format-cost cost)))))
-            (when (memq billing '(subscription extra-usage))
-              (append (mapcar #'harness-ui-describe-window (plist-get quota :windows))
-                      (list (harness-ui-describe-extra (plist-get quota :extra)))))
-            (list "mouse-1: usage and plan quota")))
-     "\n")))
+    (harness-ui-one-line
+     (string-join
+      (delq nil
+            (append
+             (list
+              (cond ((and (> covered 0) (> cost 0))
+                     (format "%s billed as extra usage; %s more at API prices covered by %s."
+                             (harness-format-cost cost) (harness-format-cost covered) payer))
+                    ((or (> covered 0) (memq billing '(subscription extra-usage)))
+                     (format "Covered by %s, not billed per token. This session at API prices: %s."
+                             payer (harness-format-cost covered)))
+                    ((eq billing 'api)
+                     (format "Session cost: %s, billed per token%s."
+                             (harness-format-cost cost)
+                             (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) "")))
+                    (t (format "Session cost: %s." (harness-format-cost cost)))))
+             (when (memq billing '(subscription extra-usage))
+               (append (mapcar #'harness-ui-describe-window (plist-get quota :windows))
+                       (list (harness-ui-describe-extra (plist-get quota :extra)))))
+             (list "mouse-1: usage and plan quota")))
+      "\n"))))
 
 (defun harness-ui-format-spend (session &optional with-quota)
   "Return what SESSION cost, saying when a subscription pays for it.
@@ -1071,6 +1139,14 @@ Those lines read % as the start of a construct such as %b, so a literal
 one -- a quota window's \"23%\" -- would vanish together with the
 character after it.  Text properties are kept."
   (replace-regexp-in-string "%" (lambda (match) (concat match match)) string t t))
+
+(defun harness-ui-one-line (text)
+  "Return TEXT on one line, its runs of whitespace collapsed to a space.
+Hover text belongs on one line: shown in the echo area where tooltips
+are off, a second line grows the mini window, which shrinks every other
+window in the frame and moves the button under the mouse until it is
+hard to click.  Build `help-echo' text from parts through this."
+  (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim (or text ""))))
 
 (defun harness-ui-format-context (session)
   "Return \"12.3k/200k\" for SESSION with the warning face applied."
@@ -1176,8 +1252,10 @@ PROPS are extra text properties; `:help' sets the tooltip."
   "Return a keymap running COMMAND on mouse-1, mouse-2 and RET.
 The bindings also work from header-line and mode-line segments."
   (let ((map (make-sparse-keymap))
+        ;; Not (interactive "e"), which signals for RET, an event without
+        ;; parameters.
         (run (lambda (&optional event)
-               (interactive "e")
+               (interactive (list last-input-event))
                (when (and event (mouse-event-p event))
                  (ignore-errors (select-window (posn-window (event-start event)))))
                (call-interactively command))))
@@ -1186,6 +1264,336 @@ The bindings also work from header-line and mode-line segments."
       (define-key map key run))
     (define-key map (kbd "RET") run)
     map))
+
+;;;; Items at point
+
+;; Views that show sessions -- the session list, the task board, the tree
+;; -- say which session the item at point stands for.  One notion of "the
+;; session at point" then serves every command that acts on it, such as
+;; popping out what it waits on.
+
+(defvar-local harness-ui-session-at-point-function nil
+  "Function returning the session id of the item at point, or nil.
+A view sets it buffer-locally, so commands shared by views (the popout
+of what a session waits on) act on what point is on there.  Without it,
+`harness-ui-session-at-point' falls back to `harness-ui-session-id'.")
+
+(defun harness-ui-session-at-point (&optional noerror)
+  "Return the session id the item at point stands for.
+That is what `harness-ui-session-at-point-function' says in a view that
+sets one, else this buffer's session (`harness-ui-session-id').  Signal
+unless NOERROR when there is none."
+  (or (and harness-ui-session-at-point-function
+           (funcall harness-ui-session-at-point-function))
+      harness-ui-session-id
+      (unless noerror (user-error "No session here"))))
+
+;;;; Drawing helpers shared by the views
+;;
+;; Chat panels, popouts and the task board all draw the same kind of
+;; thing: text with action buttons in it, key hints, images, and regions
+;; that are redrawn in place without moving point or the windows.
+
+(defface harness-ui-panel-face
+  '((((background light)) :background "#d9f7fd" :extend t)
+    (((background dark)) :background "#143c42" :extend t))
+  "Background of a panel asking the user for something.
+The chat's permission and question panels, and a popout of a request.
+A cool teal of its own: it stands apart from the transcript's blocks and
+the queue under it, and asks for an answer without the alarm of a
+warning colour." :group 'harness-ui)
+
+(defface harness-ui-key-face '((t :inherit help-key-binding))
+  "Keyboard shortcut hints in panels." :group 'harness-ui)
+
+(defface harness-ui-output-face '((t :inherit (fixed-pitch harness-md-code-block)))
+  "Fixed-width output, such as the diagram of a question's option." :group 'harness-ui)
+
+(defcustom harness-ui-image-max-height 400
+  "Maximum pixel height of inline images in harness views."
+  :type 'integer :group 'harness-ui)
+
+(defun harness-ui-add-face (string face)
+  "Return STRING with FACE added on top of its faces."
+  (let ((s (copy-sequence string)))
+    (add-face-text-property 0 (length s) face t s)
+    s))
+
+(defun harness-ui-ensure-newline (string)
+  "Return STRING ending in exactly one newline."
+  (concat (string-trim-right (or string "") "\n+") "\n"))
+
+(defun harness-ui-kbd (key)
+  "Return KEY as a key hint string."
+  (propertize key 'face 'harness-ui-key-face))
+
+(defun harness-ui-action-map (command)
+  "Return a keymap running COMMAND on mouse-1, mouse-2 and RET."
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] command)
+    (define-key map [mouse-2] command)
+    (define-key map (kbd "RET") command)
+    map))
+
+(defun harness-ui-action-button (label action &rest props)
+  "Return a button string LABEL running ACTION (a function of no arguments).
+PROPS may hold `:help' and `:face'.  Clicking or pressing RET on it
+anywhere runs the action (`harness-ui-action-push')."
+  (let ((s (copy-sequence label)))
+    (add-text-properties
+     0 (length s)
+     (list 'face (or (plist-get props :face) 'button)
+           'mouse-face 'highlight 'follow-link t 'pointer 'hand
+           'help-echo (plist-get props :help)
+           'harness-ui-action action
+           'keymap (harness-ui-action-map #'harness-ui-action-push))
+     s)
+    s))
+
+(defun harness-ui-action-push (&optional event)
+  "Run the action of the button at point, or at the position of mouse EVENT."
+  (interactive (list last-input-event))
+  (when (mouse-event-p event) (mouse-set-point event))
+  (let ((action (or (get-text-property (point) 'harness-ui-action)
+                    (and (> (point) (point-min)) (get-text-property (1- (point)) 'harness-ui-action)))))
+    (if action (funcall action) (if (get-text-property (point) 'button) (push-button (point))
+                                  (user-error "No button here")))))
+
+(defun harness-ui-add-keymap (start end map)
+  "Give START..END the keymap MAP, composed under any button keymaps."
+  (let ((pos start))
+    (while (< pos end)
+      (let* ((next (min end (or (next-single-property-change pos 'keymap nil end) end)))
+             (existing (get-text-property pos 'keymap)))
+        (put-text-property pos next 'keymap (if existing (make-composed-keymap (list existing map)) map))
+        (setq pos next)))))
+
+(defun harness-ui--fix-positions (fix pt windows)
+  "Move point to (FIX PT) and every window in WINDOWS through FIX.
+WINDOWS holds (WINDOW START POINT) triples recorded before the edit."
+  (goto-char (funcall fix pt))
+  (dolist (w windows)
+    (when (window-live-p (car w))
+      (set-window-start (car w) (funcall fix (nth 1 w)) t)
+      (unless (eq (car w) (selected-window))
+        (set-window-point (car w) (funcall fix (nth 2 w)))))))
+
+(defun harness-ui--window-positions ()
+  "Return (WINDOW START POINT) for every window showing the buffer."
+  (mapcar (lambda (w) (list w (window-start w) (window-point w)))
+          (get-buffer-window-list nil nil t)))
+
+(defun harness-ui-replace-region (from to text)
+  "Replace FROM..TO with TEXT, keeping point and window starts anchored.
+Positions inside the region stay at the same offset from FROM; the
+position just after the region moves to the end of TEXT."
+  (let* ((from (if (markerp from) (marker-position from) from))
+         (to (if (markerp to) (marker-position to) to))
+         (len (length text))
+         (fix (lambda (p)
+                (cond ((< p from) p)
+                      ((< p to) (min p (+ from (max 0 (1- len)))))
+                      ((= p to) (+ from len))
+                      (t (+ p (- len (- to from)))))))
+         (windows (harness-ui--window-positions))
+         (pt (point)))
+    (let ((inhibit-read-only t) (buffer-undo-list t))
+      (delete-region from to)
+      (goto-char from)
+      (insert text))
+    (harness-ui--fix-positions fix pt windows)))
+
+(defun harness-ui-image-string (source &optional mime)
+  "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
+MIME is a hint for the image type.  Without image support, and for a
+path on a remote host, which reading here would block on, a button
+opening the file is returned instead."
+  (let* ((path (and (stringp source) source))
+         (data (and (consp source) (plist-get source :data)))
+         (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
+         (local (and path (not (file-remote-p path))))
+         (open (and path (lambda () (interactive) (find-file-other-window path))))
+         (img (and (display-images-p) (or data (and local (file-readable-p path)))
+                   (let* ((w (car (get-buffer-window-list nil nil t)))
+                          (width (floor (* 0.6 (if w (window-body-width w t) 800)))))
+                     (condition-case nil
+                         (if data
+                             (create-image (base64-decode-string data) nil t
+                                           :max-width width :max-height harness-ui-image-max-height)
+                           (create-image path nil nil
+                                         :max-width width :max-height harness-ui-image-max-height))
+                       (error nil))))))
+    (cond
+     (img (concat (propertize label 'display img 'pointer 'hand
+                              'help-echo (format "mouse-1 or RET: open %s" (or path mime "the image"))
+                              'keymap (and open (harness-ui-action-map open)))
+                  "\n"))
+     (open (concat (harness-ui-action-button label open :help (format "Open %s" path)) "\n"))
+     (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
+
+(defun harness-ui-format-value (value)
+  "Return VALUE for display in a tool input listing."
+  (cond ((stringp value) value)
+        ((eq value :false) "false")
+        ((eq value t) "true")
+        ((null value) "null")
+        ((numberp value) (number-to-string value))
+        (t (format "%S" value))))
+
+(defun harness-ui-option-label (value)
+  "Return the label of VALUE, an option of an ask_user call, or nil.
+An option is a string or an object (a plist) with a `:label'."
+  (cond ((stringp value) value)
+        ((and (consp value) (keywordp (car value)) (stringp (plist-get value :label)))
+         (plist-get value :label))))
+
+(defun harness-ui-summary-value (value)
+  "Return VALUE on one line for a tool input summary.
+A list of strings, or of objects with labels such as the options of an
+ask_user call, reads as a comma-separated list, not a Lisp form."
+  (harness-first-line
+   (if (and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
+       (mapconcat #'harness-ui-option-label value ", ")
+     (harness-ui-format-value value))
+   60))
+
+(defun harness-ui-tool-input-summary (input &optional title)
+  "Return a one-line summary of tool INPUT, or nil when it adds nothing.
+Values TITLE already shows (the command of a bash call, the question
+of an ask_user) are left out."
+  (let (parts)
+    (cl-loop for (k v) on input by #'cddr
+             do (let ((text (harness-ui-summary-value v)))
+                  (unless (and title (not (string-empty-p text))
+                               (string-search (substring text 0 (min 40 (length text))) title))
+                    (push (format "%s: %s" (substring (symbol-name k) 1) text) parts))))
+    (and parts (harness-truncate-end (string-join (nreverse parts) "  ") 110))))
+
+;;;; Layout
+
+;; A view decides whether its text fits a window -- whether a buffer
+;; ends above the bottom, whether a board leaves room for its compose
+;; box -- by measuring it with `harness-ui-text-height'.
+;;
+;; A header line is not the buffer's text: it is drawn by the mode line
+;; machinery, and one wider than its window is simply cut at the right
+;; edge, which is where a view puts its buttons and its keys.  Views
+;; therefore build a header from segments with priorities and fit it
+;; with `harness-ui-fit-header'.
+
+(defun harness-ui-header-width (&optional window)
+  "Return the room WINDOW's header line has, in its units.
+WINDOW defaults to the narrowest visible window showing the current
+buffer, and to the selected window when none does: one header line is
+drawn in every window showing a buffer, so it is fitted to the least
+room any of them gives, which fits them all.  Pixels on a graphic
+frame, columns on a text terminal."
+  (let ((w (or window
+               (car (sort (get-buffer-window-list (current-buffer) nil t)
+                          (lambda (a b) (< (window-pixel-width a) (window-pixel-width b)))))
+               (selected-window))))
+    (if (display-graphic-p (window-frame w))
+        (- (window-pixel-width w)
+           (or (window-scroll-bar-width w) 0)
+           (or (window-right-divider-width w) 0))
+      (window-body-width w))))
+
+(defun harness-ui-header-string-width (string)
+  "Return how wide STRING shows in a header line of the selected window.
+Pixels on a graphic frame, measured in the `header-line' face so icons
+and a header font of another size count; columns on a text terminal."
+  (if (display-graphic-p)
+      (let ((s (copy-sequence string)))
+        (add-face-text-property 0 (length s) 'header-line t s)
+        (if (fboundp 'string-pixel-width) (string-pixel-width s) (* (frame-char-width) (string-width s))))
+    (string-width string)))
+
+(defun harness-ui-fit-header (segments &optional width)
+  "Return the header line made of SEGMENTS, fitted to WIDTH.
+SEGMENTS are in display order, each a string or (TEXT PRIORITY MIN):
+
+- TEXT, with the separator in front of it, such as \"  Model (Claude)\",
+  so that a segment which goes takes its separator with it;
+- PRIORITY, higher for a segment more worth keeping, or t to keep it
+  always;
+- MIN, optional: the same segment shortened, shown when the line still
+  does not fit without it.
+
+When the whole line is wider than WIDTH, segments make room lowest
+priority first, and the rightmost first among equals, until the rest
+fits.  A segment with MIN, a session or project name, shortens to its
+shortened form before it goes: only when even that leaves the line too
+wide is it dropped.  A segment whose priority is t is never dropped,
+only shortened.  What cannot be made to fit is left to the window,
+which cuts it as usual.
+
+WIDTH defaults to the room of the selected window, which is the window
+whose header line is drawn while a `header-line-format' `:eval' form
+runs.  When everything fits this is one measurement, so it can run on
+every redisplay."
+  (let* ((items (cl-loop for s in segments
+                         for i from 0
+                         for text = (if (consp s) (car s) s)
+                         when (and text (stringp text) (not (string-empty-p text)))
+                         collect (list :index i :text text
+                                       :priority (if (consp s) (nth 1 s) t)
+                                       :min (and (consp s) (nth 2 s)))))
+         (width (or width (harness-ui-header-width)))
+         (whole (mapconcat (lambda (it) (plist-get it :text)) items ""))
+         (total (harness-ui-header-string-width whole)))
+    (if (<= total width)
+        whole
+      (let ((droppable (sort (cl-remove-if-not (lambda (it) (numberp (plist-get it :priority)))
+                                               (copy-sequence items))
+                             (lambda (a b) (or (< (plist-get a :priority) (plist-get b :priority))
+                                               (and (= (plist-get a :priority) (plist-get b :priority))
+                                                    (> (plist-get a :index) (plist-get b :index))))))))
+        ;; The least important segments go first, one at a time, and no
+        ;; more of them than the window needs.  One with a shortened form
+        ;; takes it first and goes only when it is not enough: a name is
+        ;; worth a few columns even when the model and the counts are not.
+        (while (and droppable (> total width))
+          (let ((it (pop droppable)))
+            (when-let* ((min (plist-get it :min)))
+              (let ((was (harness-ui-header-string-width (plist-get it :text))))
+                (plist-put it :text min)
+                (cl-decf total (- was (harness-ui-header-string-width min)))))
+            (when (> total width)
+              (cl-decf total (harness-ui-header-string-width (plist-get it :text)))
+              (setq items (delq it items)))))
+        ;; What may not be dropped, a segment a mode puts in front of the
+        ;; session's own, shortens too: nothing else is left to give.
+        (dolist (it (reverse items))
+          (when (and (> total width) (plist-get it :min))
+            (let ((was (harness-ui-header-string-width (plist-get it :text))))
+              (plist-put it :text (plist-get it :min))
+              (cl-decf total (- was (harness-ui-header-string-width (plist-get it :text)))))))
+        (mapconcat (lambda (it) (plist-get it :text)) items "")))))
+
+(defun harness-ui-text-height (window from to limit)
+  "Return how many pixels the text from FROM to TO takes in WINDOW.
+The value is exact while it is LIMIT or less, and more than LIMIT for
+text that takes more, so comparing it with LIMIT tells whether the text
+fits.  Measuring stops about LIMIT pixels in, however long the text.
+The current buffer must be WINDOW's; on a text terminal a pixel is a
+line.
+
+`window-text-pixel-size' with a Y-LIMIT cannot tell: for text taller
+than the limit it returns where the line crossing the limit starts,
+which is the limit or less whenever that line is cut, so text that
+overflows the window reads as text that fits."
+  (let ((lines (+ 2 (/ limit (max 1 (frame-char-height (window-frame window))))))
+        (height nil))
+    ;; A screen line at the default height or more, as most are, fills
+    ;; LIMIT within the first round; lines of a smaller face take more.
+    (while (null height)
+      (let* ((end (save-excursion (goto-char from) (vertical-motion lines window) (point)))
+             ;; To a line's start, the line counts: never more than the text.
+             (h (cdr (window-text-pixel-size window from (min end to)))))
+        (if (or (>= end to) (> h limit))
+            (setq height h)
+          (setq lines (* 2 lines)))))
+    height))
 
 ;;;; Positions
 

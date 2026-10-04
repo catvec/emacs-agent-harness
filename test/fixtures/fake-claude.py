@@ -23,7 +23,20 @@ Behaviour is chosen by the prompt text:
   "list your tools"
                -> answers "tools: " and the names of the tools the
                   harness listed in the MCP handshake ("none" for none)
+  "recall"     -> answers "I remember: " and the user prompts the
+                  conversation holds, oldest first, joined by " | "
 Anything else streams the text "hello" and finishes.
+
+Like the real CLI, the session's chain is a list of entries, each with a
+uuid: the user's prompts, the assistant messages and the tool results.
+Assistant messages and tool-result echoes carry their entry's uuid.
+When HARNESS_FAKE_CLAUDE_STORE names a directory, every session's chain
+is kept there as SESSION-ID.json, so a later process can resume it:
+--resume ID continues ID's chain, --fork-session copies it to a new
+session, and --resume-session-at UUID keeps the copy up to and
+including that entry.  As the real CLI does, it exits with status 1
+when the session to resume or the entry to resume at does not exist.
+Without the variable, --resume starts from an empty chain.
 
 These words add the gaps a real turn has, each as a pause (below) and
 in this order, so one prompt can combine them:
@@ -72,11 +85,12 @@ The environment picks the account:
 The MCP handshake only runs when --mcp-config is given, so the
 provider's quota probe (initialize and get_usage, then end of input)
 works too.  If HARNESS_FAKE_CLAUDE_ARGV names a file, a JSON object
-with the argv, the cwd and the CLAUDECODE environment variable is
-written there.  If HARNESS_FAKE_CLAUDE_INPUT names a file, every user
-message the process gets is appended to it as a JSON line: the CLI
-session it went to, the session it resumed (null for a new one),
-whether it was forked, and the message's text.
+with the argv, the cwd, the CLAUDECODE environment variable and the
+CLAUDE_CODE_* ones (under "env") is written there.  If
+HARNESS_FAKE_CLAUDE_INPUT names a file, every user message the process
+gets is appended to it as a JSON line: the CLI session it went to, the
+session it resumed (null for a new one), whether it was forked, and the
+message's text.
 """
 
 import json
@@ -86,6 +100,7 @@ import time
 import uuid
 
 AUTH = os.environ.get("HARNESS_FAKE_CLAUDE_AUTH", "")
+STORE = os.environ.get("HARNESS_FAKE_CLAUDE_STORE")
 OVERAGE = bool(os.environ.get("HARNESS_FAKE_CLAUDE_OVERAGE"))
 GATE = os.environ.get("HARNESS_FAKE_CLAUDE_GATE")
 PAUSE = float(os.environ.get("HARNESS_FAKE_CLAUDE_PAUSE", "1.5"))
@@ -212,6 +227,24 @@ def rate_limits():
     }
 
 
+def fail(message):
+    """Exit at startup the way the real CLI refuses a resume."""
+    sys.stderr.write(message + "\n")
+    sys.stderr.flush()
+    sys.exit(1)
+
+
+def load_chain(session_id):
+    """The stored chain of SESSION_ID, None when there is none."""
+    if not STORE:
+        return []
+    path = os.path.join(STORE, session_id + ".json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
 class Fake:
     def __init__(self, argv):
         self.argv = argv
@@ -219,14 +252,28 @@ class Fake:
         self.rpc_id = 10
         self.tools = []
         resume = arg_value(argv, "--resume")
+        resume_at = arg_value(argv, "--resume-session-at")
         self.resumed = resume
         self.forked = bool(resume and "--fork-session" in argv)
+        self.chain = []
+        if resume:
+            chain = load_chain(resume)
+            if chain is None:
+                fail("No conversation found with session ID: %s" % resume)
+            self.chain = chain
         if resume and "--fork-session" in argv:
+            if resume_at:
+                kept = [i for i, e in enumerate(self.chain) if e["uuid"] == resume_at]
+                if not kept and STORE:
+                    fail("No message found with message.uuid of: %s" % resume_at)
+                if kept:
+                    self.chain = self.chain[:kept[0] + 1]
             self.session_id = "forked-" + uuid.uuid4().hex[:8]
         elif resume:
             self.session_id = resume
         else:
             self.session_id = "fake-" + uuid.uuid4().hex[:8]
+        self.save()
         self.model = arg_value(argv, "--model") or "fake-model"
         self.total = RESTORED_COST if resume else 0.0
         self.needs_handshake = "--mcp-config" in argv
@@ -237,6 +284,25 @@ class Fake:
         self.denials = []
         self.interrupted = False
         self.pauses = 0
+
+    # -- the session's chain ------------------------------------------------
+
+    def save(self):
+        if STORE:
+            with open(os.path.join(STORE, self.session_id + ".json"), "w") as f:
+                json.dump(self.chain, f)
+
+    def record(self, kind, text):
+        """Add an entry of KIND ("user", "assistant", "tool_result") with
+        TEXT to the chain and return its uuid."""
+        entry = {"uuid": str(uuid.uuid4()), "type": kind, "text": text}
+        self.chain.append(entry)
+        self.save()
+        return entry["uuid"]
+
+    def remembered(self):
+        """The user prompts the conversation holds, oldest first."""
+        return [e["text"] for e in self.chain if e["type"] == "user"]
 
     # -- plumbing ---------------------------------------------------------
 
@@ -290,6 +356,10 @@ class Fake:
         self.rpc_id += 1
         listed = self.mcp({"jsonrpc": "2.0", "id": self.rpc_id, "method": "tools/list"})
         self.tools = listed.get("result", {}).get("tools", [])
+        # Claude Code 2.1.289 refuses a whole listing with "required": null
+        # in a schema, and offers the model none of the server's tools.
+        if any(t.get("inputSchema", {}).get("required", []) is None for t in self.tools):
+            self.tools = []
 
     def answer(self, request_id, response):
         emit({"type": "control_response",
@@ -353,13 +423,40 @@ class Fake:
                 "cache_read_input_tokens": 2000, "output_tokens": 7}
 
     def result(self, subtype="success", is_error=False, text="hello",
-               stop_reason="end_turn"):
+               stop_reason="end_turn", api_error_status=None):
         self.total += TURN_COST
-        emit({"type": "result", "subtype": subtype, "is_error": is_error,
-              "duration_ms": 5, "num_turns": 1, "result": text,
-              "session_id": self.session_id, "total_cost_usd": round(self.total, 6),
-              "usage": self.usage(), "stop_reason": stop_reason,
-              "permission_denials": self.denials})
+        obj = {"type": "result", "subtype": subtype, "is_error": is_error,
+               "duration_ms": 5, "num_turns": 1, "result": text,
+               "session_id": self.session_id, "total_cost_usd": round(self.total, 6),
+               "usage": self.usage(), "stop_reason": stop_reason,
+               "permission_denials": self.denials}
+        if api_error_status is not None:
+            obj["api_error_status"] = api_error_status
+        emit(obj)
+
+    def turn_failure(self, error, text, api_status=None):
+        """End the turn the way the CLI does when a call failed.
+
+        ERROR is the assistant message's `error' field (`rate_limit',
+        `billing_error', `account_on_hold', `authentication_failed' or
+        None); a `rate_limit' one comes after a rejected usage window,
+        which carries when the window comes back."""
+        if error == "rate_limit":
+            emit({"type": "rate_limit_event",
+                  "rate_limit_info": {
+                      "status": "rejected", "resetsAt": 1800000000,
+                      "rateLimitType": "five_hour",
+                      "unifiedWindows": {
+                          "five_hour": {"utilization": 1.0, "resetsAt": 1800000000}}},
+                  "session_id": self.session_id})
+        message = {"id": "msg_err", "role": "assistant", "model": self.model,
+                   "content": [{"type": "text", "text": text}],
+                   "stop_reason": "stop_sequence", "usage": self.usage()}
+        if error is not None:
+            message["error"] = error
+        emit({"type": "assistant", "session_id": self.session_id, "message": message})
+        self.result(subtype="error_during_execution", is_error=True, text=text,
+                    stop_reason="stop_sequence", api_error_status=api_status)
 
     def permit(self, tool, tool_input, tool_use_id):
         """Decide a call of TOOL as the CLI does.
@@ -408,6 +505,8 @@ class Fake:
                          "delta": {"type": "input_json_delta", "partial_json": piece}})
         self.stream({"type": "content_block_stop", "index": 0})
         emit({"type": "assistant", "session_id": self.session_id,
+              "uuid": self.record("assistant", "[called %s]" % tool),
+              "parent_tool_use_id": None,
               "message": {"id": "msg_1", "role": "assistant", "model": self.model,
                           "content": [{"type": "tool_use", "id": tool_use_id,
                                        "name": tool, "input": tool_input}],
@@ -432,6 +531,8 @@ class Fake:
         else:
             content, is_error = "ran %s" % tool, False
         emit({"type": "user", "session_id": self.session_id,
+              "uuid": self.record("tool_result", "[result of %s]" % tool),
+              "parent_tool_use_id": None,
               "message": {"role": "user",
                           "content": [{"type": "tool_result", "tool_use_id": tool_use_id,
                                        "content": content, "is_error": is_error}]}})
@@ -473,8 +574,10 @@ class Fake:
             with open(log, "a") as f:
                 f.write(json.dumps({"session": self.session_id, "resumed": self.resumed,
                                     "forked": self.forked, "text": text}) + "\n")
+        self.record("user", text)
         emit({"type": "system", "subtype": "init", "session_id": self.session_id,
-              "model": self.model, "cwd": os.getcwd(), "tools": [],
+              "model": self.model, "cwd": os.getcwd(),
+              "tools": ["mcp__harness__" + t["name"] for t in self.tools],
               "mcp_servers": [{"name": "harness", "status": "connected"}],
               "apiKeySource": "ANTHROPIC_API_KEY" if AUTH == "api" else "none",
               "permissionMode": self.permission_mode})
@@ -493,6 +596,24 @@ class Fake:
             sys.stderr.write("fake-claude: dying on request\n")
             sys.stderr.flush()
             sys.exit(3)
+        if "out of quota" in text:
+            self.turn_failure("rate_limit", "You've hit your limit · resets 3pm")
+            return
+        if "out of credits" in text:
+            self.turn_failure("billing_error", "Your credit balance is too low to access the API")
+            return
+        if "account on hold" in text:
+            self.turn_failure("account_on_hold", "Your account is on hold")
+            return
+        if "logged out" in text:
+            self.turn_failure("authentication_failed", "Invalid API key · Please run /login")
+            return
+        if "api 402" in text:
+            self.turn_failure(None, "Insufficient Balance", api_status=402)
+            return
+        if "api 429" in text:
+            self.turn_failure(None, "Rate limit exceeded", api_status=429)
+            return
         if "hang" in text:
             self.stream({"type": "content_block_start", "index": 0,
                          "content_block": {"type": "text", "text": ""}})
@@ -545,6 +666,8 @@ class Fake:
             pieces = ["One.", "\n\n", "Two."]
         elif "slow-text" in text:
             pieces = ["Hel", None, "lo"]
+        elif "recall" in text:
+            pieces = ["I remember: " + " | ".join(self.remembered())]
         else:
             pieces = ["hel", "lo"]
         self.stream({"type": "content_block_start", "index": 2,
@@ -562,6 +685,8 @@ class Fake:
                                "cache_read_input_tokens": 2000, "output_tokens": 7}})
         self.stream({"type": "message_stop"})
         emit({"type": "assistant", "session_id": self.session_id,
+              "uuid": self.record("assistant", reply),
+              "parent_tool_use_id": None,
               "message": {"id": "msg_2", "role": "assistant", "model": self.model,
                           "content": [{"type": "thinking", "thinking": "", "signature": "sig"},
                                       {"type": "text", "text": reply}],
@@ -575,9 +700,11 @@ class Fake:
         path = os.environ.get("HARNESS_FAKE_CLAUDE_ARGV")
         if path:
             with open(path, "w") as f:
-                json.dump({"argv": self.argv,
+                json.dump({"env": {k: v for k, v in os.environ.items() if k.startswith("CLAUDE_CODE_")},
+                           "argv": self.argv,
                            "cwd": os.getcwd(),
-                           "claudecode": os.environ.get("CLAUDECODE")}, f)
+                           "claudecode": os.environ.get("CLAUDECODE"),
+                           "max_thinking_tokens": os.environ.get("MAX_THINKING_TOKENS")}, f)
         while True:
             msg = self.next_message()
             if msg is None:

@@ -10,13 +10,16 @@
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
-       (dolist (m '(store project config provider provider-demo tools session agent usage worktree acp ui ui-usage))
+       (dolist (m '(store project config provider provider-demo tools session agent usage fallback worktree acp ui ui-usage))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-ui--sessions)
      (setq harness-usage-budgets nil)
+     ;; The fallback list is a global option; a test that edits it must not
+     ;; change what the next one renders.
+     (setq harness-fallback-models nil)
      (let ((harness-provider-demo--delay 0.005)
            (harness-acp-token nil)
            (default-directory dir))
@@ -69,6 +72,140 @@
         (when (and (stringp help) (string-match-p regexp help)) (setq found t)))
       (setq pos (1+ pos)))
     found))
+
+(defun harness-ui-usage-test--git (dir &rest args)
+  "Run git ARGS in DIR; signal on failure."
+  (with-temp-buffer
+    (let ((default-directory (file-name-as-directory dir)))
+      (unless (zerop (apply #'call-process "git" nil t nil args))
+        (error "git %s failed: %s" args (buffer-string))))))
+
+(defun harness-ui-usage-test--repo (base)
+  "Make BASE/acme a git repository with one commit; return its root."
+  (let ((root (file-name-as-directory (expand-file-name "acme" base))))
+    (make-directory root t)
+    (harness-ui-usage-test--git root "init" "-q" "-b" "main")
+    (harness-ui-usage-test--git root "-c" "user.name=t" "-c" "user.email=t@example.invalid" "-c" "commit.gpgsign=false"
+                                "commit" "-q" "--allow-empty" "-m" "initial")
+    root))
+
+(defun harness-ui-usage-test-lines ()
+  "Return the lines of the dashboard's table, from its header to its end."
+  (let ((text (harness-ui-usage-test-text)))
+    (string-match "^ Project .*\n\\(\\(?:.+\n\\)*\\)" text)
+    (split-string (match-string 1 text) "\n" t)))
+
+(defun harness-ui-usage-test-goto (regexp)
+  "Move to the start of the first dashboard line matching REGEXP."
+  (goto-char (point-min))
+  (re-search-forward regexp)
+  (goto-char (line-beginning-position)))
+
+(defun harness-ui-usage-test-cost-end (line)
+  "Return the column where the Cost cell of table LINE ends."
+  (and (string-match "\\$[0-9.]+ " line) (match-end 0)))
+
+(ert-deftest harness-ui-usage-worktrees-fold-under-their-project ()
+  "By project, a project's worktrees, its tasks', fold into one line with
+their sum; TAB, RET, w and the heading's button show and hide them."
+  (harness-ui-usage-test-with
+    (let* ((base (file-name-as-directory (file-truename (harness-test-temp-dir))))
+           (root (harness-ui-usage-test--repo base))
+           (fast (file-name-as-directory (expand-file-name ".worktrees/task-fast" root)))
+           (slow (file-name-as-directory (expand-file-name ".worktrees/task-slow" root)))
+           (gone (file-name-as-directory (expand-file-name ".worktrees/task-archived" root)))
+           (other (file-name-as-directory (expand-file-name "other" base)))
+           (label (harness-truncate-middle (abbreviate-file-name root) 40))
+           (now (float-time)))
+      (make-directory other)
+      (harness-ui-usage-test--git root "worktree" "add" "-q" "-b" "task/fast" fast)
+      (harness-ui-usage-test--git root "worktree" "add" "-q" "-b" "task/slow" slow)
+      (harness-ui-usage-test-record now root "demo:scripted" 1.0)
+      (harness-ui-usage-test-record now fast "demo:scripted" 0.5)
+      (harness-ui-usage-test-record now slow "demo:scripted" 2.25)
+      ;; An archived task's worktree is gone from disk; its usage stays.
+      (harness-ui-usage-test-record now gone "demo:scripted" 0.25)
+      (harness-ui-usage-test-record now other "demo:scripted" 3.0)
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage--buffer-name
+        ;; Folded: the project's line has the sum and how many worktrees.
+        (let ((lines (harness-ui-usage-test-lines)))
+          (should (= 2 (length lines)))
+          (should (string-match-p (concat "\\` . " (regexp-quote label) "  3 worktrees +\\$4\\.00 .* 4\\'")
+                                  (car lines)))
+          (should (string-match-p (concat "\\`   " (regexp-quote (harness-truncate-middle (abbreviate-file-name other) 40))
+                                          " +\\$3\\.00 ")
+                                  (cadr lines)))
+          ;; The fold icon's gutter ends at one column for every line.
+          (should (= (harness-ui-usage-test-cost-end (car lines)) (harness-ui-usage-test-cost-end (cadr lines)))))
+        (should (string-match-p "By project  \\[show worktrees\\]" (harness-ui-usage-test-text)))
+        (should-not (string-match-p "main checkout\\|task-" (harness-ui-usage-test-text)))
+        (harness-ui-usage-test-goto (regexp-quote label))
+        (should (equal '(space :align-to 3) (get-text-property (+ (point) 2) 'display)))
+        (should (harness-ui-usage-test-line-help "show its 3 worktrees"))
+        ;; TAB unfolds it: its main checkout first, then its worktrees by cost.
+        (forward-char 10)
+        (harness-ui-usage-tab)
+        (let ((lines (harness-ui-usage-test-lines)))
+          (should (equal '("main checkout" "task-slow" "task-fast" "task-archived")
+                         (mapcar (lambda (l) (and (string-match "\\`     \\([^ ]+\\(?: [^ $]+\\)*\\) " l)
+                                                  (match-string 1 l)))
+                                 (seq-subseq lines 1 5))))
+          (should (string-match-p "\\$1\\.00 " (nth 1 lines)))
+          (should (string-match-p "\\$2\\.25 " (nth 2 lines)))
+          (should (= 6 (length lines)))
+          (should (cl-every (lambda (l) (= (harness-ui-usage-test-cost-end (car lines)) (harness-ui-usage-test-cost-end l)))
+                            lines)))
+        (should (string-match-p "\\[hide worktrees\\]" (harness-ui-usage-test-text)))
+        (should (equal root (get-text-property (point) 'harness-ui-usage-fold)))
+        (harness-ui-usage-test-goto "task-slow")
+        (should (harness-ui-usage-test-line-help (regexp-quote (abbreviate-file-name slow))))
+        ;; A refresh keeps it unfolded.
+        (harness-ui-usage-refresh)
+        (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
+        (should (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        ;; TAB on one of its worktrees folds it, and goes to its line.
+        (harness-ui-usage-test-goto "task-fast")
+        (harness-ui-usage-tab)
+        (should-not (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        (should (equal root (get-text-property (point) 'harness-ui-usage-fold)))
+        ;; RET on its line unfolds it, and again folds it.
+        (harness-ui-usage-open)
+        (should (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        (harness-ui-usage-open)
+        (should-not (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        ;; w, or the heading's button, shows every project's; again hides them.
+        (harness-ui-usage-toggle-worktrees)
+        (should (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        (harness-ui-usage-test-goto "\\[hide worktrees\\]")
+        (search-forward "[hide")
+        (push-button)
+        (should-not (string-match-p "main checkout" (harness-ui-usage-test-text)))
+        ;; Elsewhere TAB moves to the next button.
+        (goto-char (point-min))
+        (harness-ui-usage-tab)
+        (should (button-at (point)))
+        ;; Other groupings have no worktrees to fold.
+        (harness-ui-usage-set-group 'model)
+        (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
+        (should-not (string-match-p "worktrees" (harness-ui-usage-test-text)))
+        (should-error (harness-ui-usage-toggle-worktrees) :type 'user-error)))))
+
+(ert-deftest harness-ui-usage-redraw-keeps-the-view ()
+  "A redraw, from a refresh or a fold, scrolls no window showing the dashboard."
+  (harness-ui-usage-test-with
+    (let ((now (float-time)))
+      (dotimes (i 12)
+        (harness-ui-usage-test-record now (format "/tmp/harness-usage-p%d/" i) "demo:scripted" (+ 1.0 i)))
+      (harness-ui-usage-test-open)
+      (let ((window (get-buffer-window harness-ui-usage--buffer-name t)))
+        (should window)
+        (with-current-buffer harness-ui-usage--buffer-name
+          (set-window-start window (harness-ui-usage--line-start 6))
+          (set-window-point window (harness-ui-usage--line-start 9))
+          (harness-ui-usage--render)
+          (should (= 6 (line-number-at-pos (window-start window))))
+          (should (= 9 (line-number-at-pos (window-point window)))))))))
 
 (ert-deftest harness-ui-usage-empty-state ()
   (harness-ui-usage-test-with
@@ -362,6 +499,7 @@
       (should (equal "$0" (funcall text fresh)))
       (should (equal "$2.00" (funcall text old)))
       (should (string-match-p "billed per token" (get-text-property 0 'help-echo (harness-ui-format-spend api))))
+      (should-not (string-match-p "\n" (get-text-property 0 'help-echo (harness-ui-format-spend api))))
       ;; Before its first call a session goes by its provider's account.
       (harness-ui--store-quota "claude" (harness-ui-usage-test-max-quota now))
       (should (equal "Max" (funcall text fresh)))
@@ -372,10 +510,13 @@
         (should (string-match-p "Covered by Claude Max, not billed per token" help))
         (should (string-match-p "at API prices: \\$3\\.40" help))
         (should (string-match-p "Current session (5 hours): 9% used, resets in " help))
-        (should (string-match-p "Extra usage: off" help)))
+        (should (string-match-p "Extra usage: off" help))
+        ;; One line, or showing it in the echo area moves the button.
+        (should-not (string-match-p "\n" help)))
       (let ((help (get-text-property 0 'help-echo (harness-ui-format-spend mixed))))
         (should (string-match-p "\\$0\\.400 billed as extra usage" help))
-        (should (string-match-p "\\$3\\.40 more at API prices covered by Claude Max" help)))
+        (should (string-match-p "\\$3\\.40 more at API prices covered by Claude Max" help))
+        (should-not (string-match-p "\n" help)))
       ;; A window close to its limit joins the header.
       (harness-ui--store-quota "claude" (plist-put (harness-ui-usage-test-max-quota now) :windows
                                                    '((:name "5h" :used 0.2) (:name "7d Fable" :used 0.96))))
@@ -397,6 +538,102 @@
     (should (equal "GPT X (OpenAI)" (harness-ui-model-label "openai:gpt-x")))
     (puthash "claude:claude-opus-5-5" (list :label "Claude Opus 5.5" :provider-label "Claude Code") harness-ui--models)
     (should (equal "Opus 5.5 (Claude)" (harness-ui-model-label "claude:claude-opus-5-5")))))
+
+(ert-deftest harness-ui-usage-chart-tooltip-is-one-line ()
+  "A chart column's tooltip stays on one line.
+Two lines would grow the echo area and move the chart under the mouse."
+  (harness-ui-usage-test-with
+    (dolist (bucket '(hour day))
+      (let* ((key (if (eq bucket 'hour) "2026-10-03 14:00" "2026-10-03"))
+             (help (harness-ui-usage--bar-help
+                    (list :key key :cost 1.5 :list-cost 2.0 :calls 3
+                          :input 1200 :output 345)
+                    bucket)))
+        (should (string-match-p (if (eq bucket 'hour) "14:00" "Oct 3, 2026") help))
+        (should (string-match-p "3 calls" help))
+        (should (string-match-p "1\\.2k in / 345 out" help))
+        (should-not (string-match-p "\n" help))))))
+
+(ert-deftest harness-ui-usage-dashboard-tooltips-are-one-line ()
+  "Every tooltip of the rendered dashboard fits one echo-area line."
+  (harness-ui-usage-test-with
+    (let* ((now (float-time))
+           (project (file-name-as-directory dir)))
+      (harness-ui-usage-test-record now project "demo:scripted" 1.5)
+      (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                     (list :budget (list :scope "project" :target project :amount 8 :hard t)))
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage--buffer-name
+        (let ((pos (point-min)) (found nil) (offenders nil))
+          (while (< pos (point-max))
+            (when-let* ((help (get-text-property pos 'help-echo)))
+              (setq found t)
+              (when (and (stringp help) (string-match-p "\n" help))
+                (push help offenders)))
+            (setq pos (1+ pos)))
+          (should found)
+          (should-not offenders))))))
+
+(ert-deftest harness-ui-usage-fallback-section-shows-and-clears-marks ()
+  "The fallback section lists the entries and says what ran out."
+  (harness-ui-usage-test-with
+    (setq harness-fallback-models '("demo"))
+    (let ((text (harness-ui-usage-test-open)))
+      (should (string-match-p "Fallback" text))
+      (should (string-match-p "1\\. Demo" text))
+      (should (string-match-p "available" text))
+      (should-not (string-match-p "out of quota" text)))
+    ;; A mark shows what ran out, and [try now] clears it.
+    (harness-call 'fallback/mark "demo" :kind 'quota :reason "hit the limit")
+    (harness-ui-usage-refresh)
+    (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5 "reloaded")
+    (let ((text (harness-ui-usage-test-text)))
+      (should (string-match-p "out of quota" text))
+      (should (string-match-p "\\[try now\\]" text)))
+    (with-current-buffer harness-ui-usage--buffer-name
+      (goto-char (point-min))
+      (search-forward "Demo")
+      (harness-ui-usage-fallback-try))
+    (harness-test-wait (lambda () (null (plist-get (harness-call 'fallback/status) :marks))) 5 "mark cleared")
+    (harness-ui-usage-refresh)
+    (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5 "reloaded")
+    (let ((text (harness-ui-usage-test-text)))
+      (should (string-match-p "available" text))
+      (should-not (string-match-p "out of quota" text)))))
+
+(ert-deftest harness-ui-usage-fallback-add-move-and-remove ()
+  "Adding, moving and removing entries saves the option through config/set."
+  (harness-ui-usage-test-with
+    (setq harness-fallback-models '("demo:scripted"))
+    (harness-ui-usage-test-open)
+    ;; Add a provider through the prompt: it lands at the end.
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "demo")))
+      (harness-ui-usage-add-fallback))
+    (harness-test-wait (lambda () (equal '("demo:scripted" "demo") harness-fallback-models)) 5 "added")
+    (harness-test-wait (lambda () (string-match-p "2\\. Demo  " (harness-ui-usage-test-text))) 5 "shown last")
+    ;; Move it to the front with M-<up> (the command behind the key).
+    (with-current-buffer harness-ui-usage--buffer-name
+      (goto-char (point-min))
+      (search-forward "2. Demo")
+      (harness-ui-usage-fallback-up))
+    (harness-test-wait (lambda () (equal '("demo" "demo:scripted") harness-fallback-models)) 5 "moved")
+    (harness-test-wait (lambda () (string-match-p "1\\. Demo  " (harness-ui-usage-test-text))) 5 "shown first")
+    ;; Remove it again through `d': the provider entry, then the model one.
+    (with-current-buffer harness-ui-usage--buffer-name
+      (goto-char (point-min))
+      (search-forward "1. Demo")
+      (harness-ui-usage-remove))
+    (harness-test-wait (lambda () (equal '("demo:scripted") harness-fallback-models)) 5 "removed")
+    (harness-test-wait (lambda () (string-match-p "1\\. Demo scripted" (harness-ui-usage-test-text))) 5 "shown alone")
+    (should-not (string-match-p "2\\." (harness-ui-usage-test-text)))
+    (with-current-buffer harness-ui-usage--buffer-name
+      (goto-char (point-min))
+      (search-forward "1. Demo scripted")
+      (harness-ui-usage-remove))
+    (harness-test-wait (lambda () (null harness-fallback-models)) 5 "empty")
+    (harness-test-wait (lambda () (string-match-p "sessions stop when their provider runs out"
+                                                  (harness-ui-usage-test-text)))
+                       5 "empty list shown")))
 
 (provide 'harness-ui-usage-test)
 ;;; harness-ui-usage-test.el ends here
