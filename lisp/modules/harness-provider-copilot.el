@@ -2187,7 +2187,8 @@ permission judge's (SESSION-ID-perms), lose theirs too."
   :fork #'harness-provider-copilot--fork-state
   :quota #'harness-provider-copilot--quota
   :capabilities harness-provider-copilot-capabilities
-  :tiers harness-provider-copilot-tiers)
+  :tiers harness-provider-copilot-tiers
+  :close #'harness-provider-copilot-close)
 
 (harness-define-module 'provider-copilot
   :doc "GitHub Copilot CLI as a hosted-loop completion provider."

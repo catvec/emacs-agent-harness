@@ -60,8 +60,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A request popped out of the session list, answered there | A question popped out of the task board, answered there |
 | ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
 | A BTW side conversation under its session | The menu, with the chat's own commands |
-| ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) | |
-| Messaging a task's session: the box says so, in its colours | |
+| ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) | ![The task board filtered by a search in words: the query, one task matches, the archive it did and [Undo]](docs/media/tasks-search.png) |
+| Messaging a task's session: the box says so, in its colours | A search in words: the board shows what it is about, and acts |
 
 ## Requirements
 
@@ -187,6 +187,7 @@ named by `harness-server-init-file`.
 | `C-c h l` | `harness-sessions` | Show the session list |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `C-c h a` | `harness-tasks` | Show the task board |
+| `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation |
@@ -509,6 +510,22 @@ your checkout itself can be submitted to the **main tree** instead (the
   permission prompt or the question, with its options and diagrams --
   and answers it there. The card offers the same as [Answer…] or
   [Request…] next to [Allow] and [Deny].
+- `/` searches the board in words: a question ("did I have a task about
+  the question button?") or an order ("restart the errored tasks", "get
+  rid of the pagination task"). The line goes with a dump of the board
+  to a quick, cheap model (`harness-tasks-search-model`, the provider's
+  cheapest tier by default), which answers with the tasks it is about
+  and what to do, never with prose. The board then shows only those
+  tasks, archived ones included, under a banner that says what it shows;
+  `C-g` or `[Clear]` shows every task again. An order that is easily
+  undone or does no harm -- archive of a task not at work, restore,
+  retry, start -- runs at once and the banner says so, with `[Undo]`;
+  one that interrupts work, merges it or sends words to an agent --
+  stop, archive of a working task, verify, mark done, message, send
+  back -- is offered instead, and an empty `/` then `RET` runs it. The
+  model may look further once, in the sessions' transcripts, when the
+  board alone does not say enough. `[Search]` in the header does the
+  same, and `C-c h /` from anywhere opens the project's board first.
 - `RET` opens the session of the task at point. From that session,
   `C-c h a` leads back to the board.
 - A task's session shows in the session list (`C-c h l`) under the

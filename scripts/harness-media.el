@@ -1039,6 +1039,19 @@ with SUMMARY rather than saying it."
   (let ((last (car (last (plist-get request :messages)))))
     (and last (cl-some (lambda (b) (equal (plist-get b :type) "tool_result")) (plist-get last :content)))))
 
+(defun harness-media--search-answer (text)
+  "The scripted search model's answer to TEXT, the message carrying the query.
+TEXT is the board dump the search sends; a query about the slow-request
+warning gets that task shown and archived, so the picture has a filter,
+a toast and an [Undo]."
+  (let* ((tasks (plist-get harness-media--world :tasks))
+         (slow (plist-get tasks :slow)))
+    (cond
+     ((and slow (string-match-p "slow\\|warning\\|500 ms" text))
+      (format "{\"show\":[\"%s\"],\"do\":[{\"task\":\"%s\",\"action\":\"archive\"}]}"
+              slow slow))
+     (t "{\"show\":[],\"do\":[]}"))))
+
 (defun harness-media--script (request)
   "Return the events that answer REQUEST."
   (let* ((system (or (plist-get request :system) ""))
@@ -1052,6 +1065,9 @@ with SUMMARY rather than saying it."
       (list (harness-media--say (or (cdr (cl-find-if (lambda (e) (string-match-p (car e) first)) harness-media--titles))
                                     "Work on the API"))))
      ((string-match-p "^## Task refinement" system) (harness-media--write-up first))
+     ;; The task board's search: answer in JSON, as the prompt asks.
+     ((string-prefix-p "You are the search box" system)
+      (list (harness-media--say (harness-media--search-answer newest))))
      (t (let ((entry (cl-find-if (lambda (e) (string-match-p (car e) newest)) harness-media--scripts)))
           (if entry
               (funcall (cdr entry) request)
@@ -1735,6 +1751,26 @@ or send it back."
     (harness-media--settle 1)
     (harness-media--capture "report-image")))
 
+(defun harness-media-shot-tasks-search ()
+  "The task board after a search in words: filtered, an action done, [Undo].
+The scripted model answers a query about the slow-request warning: the
+board shows that task under the banner, archives it (the toast says so)
+and offers [Undo].  The task is put back after the picture, so the shots
+that follow see the board every other picture shows."
+  (harness-media--view
+   (lambda () (harness-tasks harness-media-project 'full))
+   (lambda ()
+     (cl-letf (((symbol-function 'read-string)
+                (lambda (&rest _) "get rid of the slow request warning")))
+       (call-interactively #'harness-ui-tasks-search))
+     (harness-media--wait (lambda () (plist-get harness-ui-tasks-search--state :results))
+                          20 "the search to act")
+     (harness-media--settle 0.6)))
+  (harness-media--capture "tasks-search")
+  ;; Leave the world as the other shots expect it.
+  (let ((id (plist-get (plist-get harness-media--world :tasks) :slow)))
+    (ignore-errors (harness-call 'task/archive id t))))
+
 (defun harness-media-shot-sessions ()
   "The session list."
   (harness-media--view #'harness-sessions)
@@ -1940,6 +1976,7 @@ progress."
     ("chat-question" . harness-media-shot-chat-question)
     ("attachments" . harness-media-shot-attachments)
     ("tasks" . harness-media-shot-tasks)
+    ("tasks-search" . harness-media-shot-tasks-search)
     ("tasks-long" . harness-media-shot-tasks-long)
     ("tasks-message" . harness-media-shot-tasks-message)
     ("report" . harness-media-shot-report)

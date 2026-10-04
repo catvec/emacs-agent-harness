@@ -48,6 +48,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `attachments` | A compose box holding a picture and a video, their thumbnails in the chips, and a link still downloading with its progress | `harness-media-shot-attachments` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
+| `tasks-search` | The board searched in words: one task matches the query, the archive it did and `[Undo]` | `harness-media-shot-tasks-search` |
 | `tasks-long` | That board after weeks of merges, its completed list held back to keep the box in the window | `harness-media-shot-tasks-long` |
 | `tasks-message` | The task board writing a message to a task's session: the box in its message colours | `harness-media-shot-tasks-message` |
 | `report` | The board with a task's report popped out, at its end: the chart it handed in, the test run it quotes, the review banner and the feedback box | `harness-media-shot-report` |
@@ -156,8 +157,11 @@ it.
 
 Requests that are not a conversation get answers of their own: the
 auto-mode judge always allows, session titles come from
-`harness-media--titles` (matched against the first message), and
-backlog write-ups from `harness-media--write-ups`.
+`harness-media--titles` (matched against the first message), backlog
+write-ups from `harness-media--write-ups`, and the task board's search
+from `harness-media--search-answer`, which reads the query in the board
+dump and answers the JSON the search asks for (the `tasks-search`
+picture archives the pagination task that way).
 
 ## Adding or changing a picture
 

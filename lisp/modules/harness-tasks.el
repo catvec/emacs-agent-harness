@@ -367,6 +367,11 @@ task's write-up: it is written again, or with nil waits for a retry."
   "The harness restarted while you were working on this task, so your last turn was cut short: tool calls that were still running did not finish. Check where you left off, then carry on with the task."
   "Message that resumes a task's session after a restart interrupted it.")
 
+(defconst harness-tasks--retry-prompt
+  "Your last turn on this task stopped before the task was finished: %s. Check where you left off, then carry on with the task."
+  "Message that has a task's session work again after its turn stopped.
+`task/retry' sends it; %s says how the turn stopped.")
+
 (defcustom harness-tasks-store-in-repository t
   "When non-nil, a git project keeps its tasks inside its repository.
 Their records go to harness/tasks.json in the git directory every
@@ -1953,6 +1958,73 @@ A task in review merges when the user verifies it (`task/verify')."
       (error "Task %s waits for your review; verifying it merges it" id))
     (harness-tasks--set id :merge-attempts 0)
     (harness-tasks--enqueue-merge id)
+    (harness-call 'task/get id)))
+
+(defun harness-tasks--stopped-how (task)
+  "Say how TASK's last turn stopped, for `harness-tasks--retry-prompt'."
+  (let ((err (plist-get task :error)))
+    (concat (pcase (plist-get task :outcome)
+              ('error "it failed with an error")
+              ('cancelled "it was cancelled")
+              ('interrupted "the harness stopped while it was running")
+              ('max-tokens "the model ran out of output tokens")
+              ('nil "it ended")
+              (outcome (format "it ended (%s)" outcome)))
+            (if (harness-string-blank-p err)
+                ""
+              (concat " -- " (harness-truncate-end (string-trim err) 300))))))
+
+(defun harness-tasks--retry-turn (task)
+  "Have the session of stopped TASK work on it again.
+A session that never got the work since the task started gets the task
+itself; otherwise `harness-tasks--retry-prompt' from the harness tells
+it to carry on.  The task holds its slot from now, as when it starts."
+  (let ((id (plist-get task :id))
+        (sid (plist-get task :session)))
+    (when (plist-get task :worktree-removed)
+      (error "Task %s was archived and its worktree removed; submit a new task" id))
+    (puthash id t harness-tasks--starting)
+    (harness-tasks--set id :merge-attempts 0)
+    (let ((begun (harness-tasks--work-begun-p task)))
+      (harness-catch (harness-call-async 'agent/prompt sid
+                                         (if begun
+                                             (list (list :type "text"
+                                                         :text (format harness-tasks--retry-prompt
+                                                                       (harness-tasks--stopped-how task))))
+                                           (harness-tasks--blocks task))
+                                         ;; Carrying on is the harness's doing;
+                                         ;; the task itself is the user's.
+                                         (and begun (harness-tasks--from-harness)))
+                     (lambda (e) (harness-tasks--fail id e))))))
+
+(harness-defmethod task/retry (id)
+  "Have task ID, which stopped part way, work on it again; return the task.
+What that means follows where it stopped: a failed merge is queued
+again (`task/merge'), a write-up that stopped is written again, or
+written up all the same after it refused the task as a duplicate
+\(`task/refine'), and a task that has not started starts (`task/start').
+A task whose turn stopped -- an error, cancelled, interrupted -- has its
+session carry on, told so by the harness (`harness-tasks--retry-prompt');
+one left without a session starts over.  A task at work, waiting for an
+answer, merging, in review or done has nothing to retry."
+  (let* ((task (harness-tasks--get id))
+         (state (plist-get task :state))
+         (session (harness-tasks--session task)))
+    (cond
+     ((plist-get session :pending)
+      (error "Task %s waits for your answer to its %s" id
+             (if (equal (format "%s" (plist-get (car (plist-get session :pending)) :kind)) "question")
+                 "question" "permission request")))
+     ((or (harness-tasks--turn-p task) (gethash id harness-tasks--starting))
+      (error "Task %s is working already" id))
+     ((eq state 'review) (error "Task %s waits for your review: verify it or send it back" id))
+     ((eq state 'done) (error "Task %s is done; send it a message to reopen it" id))
+     ((eq (plist-get task :outcome) 'merge-failed) (harness-call 'task/merge id))
+     ((eq state 'merging) (error "Task %s is merging" id))
+     ((eq state 'refining) (harness-call 'task/refine id))
+     ((eq state 'pending) (harness-call 'task/start id))
+     ((null session) (harness-tasks--start task))
+     (t (harness-tasks--retry-turn task)))
     (harness-call 'task/get id)))
 
 (harness-defmethod task/complete (id)
