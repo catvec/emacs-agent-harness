@@ -52,8 +52,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
 | A task's report: verify it or send it back from there | An image of the report, clicked: shown larger |
-| ![The usage dashboard: a month of cost per day, cost by model, the plan's quota and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
-| Usage: cost per day and model, plan quota, budgets | Settings, here as one project overrides them |
+| ![The usage dashboard: a month of cost per day, cost by model, the plan's quota, the fallback list and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
+| Usage: cost per day and model, plan quota, fallback list, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
 | The session list | The worktrees of a project and their sessions |
 | ![The session list with a permission request popped out, its allow and deny buttons under it](docs/media/popout-permission.png) | ![The task board with a question popped out, its options and a box to type another answer under it](docs/media/popout-question.png) |
@@ -702,7 +702,14 @@ archived tasks are history and are left alone.
 
 The usage dashboard (`C-c h u`) lists every quota window with its reset
 time, the plan's extra usage, and the value at API prices that the plan
-covered.
+covered.  Its Fallback section says where sessions carry on when a
+provider runs out of quota or money: the list is tried in order, each
+entry a provider id (that provider's model of similar ability) or one
+model id, set by `harness-fallback-models`.  There `f` adds an entry,
+`c` forgets that one ran out so it is tried again, `M-<up>` and
+`M-<down>` move the entry at point, and `d` removes it.  A session's
+own model always comes first, and it goes back to it once it works
+again.
 
 Grouped by project, every task's git worktree is folded under the
 project it belongs to: one line per project, with the total and how many

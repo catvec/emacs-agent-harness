@@ -56,7 +56,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `popout-permission` | The session list with a session's permission request popped out under it | `harness-media-shot-popout-permission` |
 | `popout-question` | The task board with a task's question popped out under it | `harness-media-shot-popout-question` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
-| `usage` | The usage dashboard over 30 days, by model | `harness-media-shot-usage` |
+| `usage` | The usage dashboard over 30 days, by model, with the fallback list beneath the plan | `harness-media-shot-usage` |
 | `usage-projects` | The usage dashboard by project, the tasks' worktrees folded under the demo project | `harness-media-shot-usage-projects` |
 | `usage-worktrees` | The same, the demo project's worktrees unfolded | `harness-media-shot-usage-worktrees` |
 | `worktrees` | The worktrees of the demo project | `harness-media-shot-worktrees` |

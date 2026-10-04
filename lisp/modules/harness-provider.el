@@ -378,24 +378,50 @@ A provider names its tiers with keywords, so `cheap', `:cheap' and
         ((stringp value) (intern (concat ":" (string-remove-prefix ":" value))))
         (t :cheap)))
 
+(defun harness-provider--provider-id (id)
+  "Return the provider id (a symbol) that ID names, or nil.
+ID is a model id \"PROVIDER:MODEL\", a provider id alone, as a symbol
+or a string, or nil."
+  (cond ((null id) nil)
+        ((symbolp id) id)
+        ((not (stringp id)) nil)
+        ((string-match-p "\\`[a-z0-9_-]+\\'" id) (intern id))
+        (t (car (harness-provider-parse-model id)))))
+
+(defun harness-provider--listed-models (pid)
+  "Return the cached models of provider PID, asking it first when unlisted.
+A static catalogue answers at once; nil comes back until a provider that
+answers later has, or for an unknown provider."
+  (when-let* ((provider (and pid (harness-provider-get pid))))
+    (when (and (harness-provider-models-fn provider)
+               (not (harness-provider--listed-p pid)))
+      (harness-provider--fetch provider t))
+    (harness-provider--cached-models pid)))
+
+(harness-defmethod provider/cached-models (provider-id)
+  "Return the models PROVIDER-ID has listed, from the cache, without waiting.
+PROVIDER-ID is a symbol or its name.  A provider not listed yet is
+asked first; a static catalogue answers at once, so its models come
+back, while one that answers later gives nil until it has.  Unlike
+`provider/models', no other provider holds the answer up."
+  (harness-provider--listed-models (harness-provider--provider-id provider-id)))
+
 (defun harness-provider-tier-model (model-id &optional tier)
   "Return the id of the TIER model of MODEL-ID's provider, or nil.
-TIER defaults to `cheap'.  The provider's `:tiers' names a model (a
-name, id or regexp) for it; a tier it does not name, and a provider
-that declares none, takes the provider's models sorted by price
-\(`cheap' the least expensive, `frontier' the most, `balanced' the
-middle).  Models whose cost is unknown are never chosen by price.  A
+MODEL-ID may also be a provider id alone (a symbol, or a string
+without a colon).  TIER defaults to `cheap'.  The provider's `:tiers'
+names a model (a name, id or regexp) for it; a tier it does not name,
+and a provider that declares none, takes the provider's models sorted
+by price \(`cheap' the least expensive, `frontier' the most, `balanced'
+the middle).  Models whose cost is unknown are never chosen by price.  A
 provider not listed yet is asked for its models, which a static
 catalogue answers at once; nil comes back until one that answers later
 has."
   (let* ((tier (harness-provider--tier tier))
-         (pid (car (harness-provider-parse-model model-id)))
+         (pid (harness-provider--provider-id model-id))
          (provider (and pid (harness-provider-get pid))))
     (when provider
-      (when (and (harness-provider-models-fn provider)
-                 (not (harness-provider--listed-p pid)))
-        (harness-provider--fetch provider t))
-      (let* ((models (harness-provider--cached-models pid))
+      (let* ((models (harness-provider--listed-models pid))
              (model (and models
                          (or (harness-provider--tier-match
                               models (plist-get (harness-provider-tiers provider) tier))
@@ -404,8 +430,71 @@ has."
 
 (harness-defmethod provider/tier-model (model-id &optional tier)
   "Return the id of the TIER model of MODEL-ID's provider, or nil.
-TIER defaults to `cheap'; see `harness-provider-tier-model'."
+MODEL-ID may be a provider id alone.  TIER defaults to `cheap'; see
+`harness-provider-tier-model'."
   (harness-provider-tier-model model-id tier))
+
+(defconst harness-provider--tier-precedence '(:balanced :frontier :cheap)
+  "The tier a model takes when its provider names it for several.
+A provider that names one model for its cheap and balanced tiers (as
+DeepSeek names Flash) makes it its everyday model, so balanced comes
+first; frontier before cheap, as the model is the better of the two.")
+
+(defun harness-provider--names-model-p (matcher model)
+  "Non-nil when tier MATCHER (a name, id or regexp) names MODEL."
+  (when (and (stringp matcher) model)
+    (let ((name (plist-get model :name)) (id (plist-get model :id)))
+      (or (equal matcher name) (equal matcher id)
+          (ignore-errors
+            (or (and (stringp name) (string-match-p matcher name))
+                (and (stringp id) (string-match-p matcher id))))))))
+
+(defun harness-provider--price-tier (models model)
+  "Return the tier MODEL's price places it in among MODELS, or nil.
+The distinct prices of the priced MODELS are ranked: the cheapest third
+is `:cheap', the dearest third `:frontier', the rest `:balanced'.  Nil
+when MODEL has no price; `:balanced' when every model costs the same."
+  (when-let* ((score (harness-provider--price-score model)))
+    (let* ((scores (sort (delete-dups
+                          (delq nil (mapcar (lambda (m)
+                                              (when-let* ((s (harness-provider--price-score m))) (float s)))
+                                            models)))
+                         #'<))
+           (n (length scores))
+           (rank (or (cl-position (float score) scores :test #'=) 0)))
+      (if (< n 2)
+          :balanced
+        (let ((f (/ (float rank) (1- n))))
+          (cond ((< f (/ 1.0 3)) :cheap)
+                ((> f (/ 2.0 3)) :frontier)
+                (t :balanced)))))))
+
+(defun harness-provider-model-tier (model-id)
+  "Return the tier of MODEL-ID within its provider.
+That is `:cheap', `:balanced' or `:frontier': the tier the provider's
+`:tiers' names the model for (when it names it for several, the first
+of `harness-provider--tier-precedence'), else where the model's price
+places it in the provider's catalogue (see
+`harness-provider--price-tier'), else `:balanced'.  This is the
+inverse of `harness-provider-tier-model': together they map a model to
+a model of similar ability at another provider."
+  (let* ((pid (harness-provider--provider-id model-id))
+         (provider (and pid (harness-provider-get pid)))
+         (models (and provider (harness-provider--listed-models pid)))
+         (model (and models (cl-find model-id models :key (lambda (m) (plist-get m :id)) :test #'equal)))
+         (tiers (and provider (harness-provider-tiers provider))))
+    (or (and model
+             (cl-find-if (lambda (tier) (harness-provider--names-model-p (plist-get tiers tier) model))
+                         harness-provider--tier-precedence))
+        (and model (harness-provider--price-tier models model))
+        :balanced)))
+
+(harness-defmethod provider/model-tier (model-id)
+  "Return the tier of MODEL-ID within its provider.
+That is `cheap', `balanced' or `frontier': the keyword
+`harness-provider-model-tier' returns, without its colon, so it reads
+the same over the wire."
+  (intern (string-remove-prefix ":" (symbol-name (harness-provider-model-tier model-id)))))
 
 (defun harness-provider--guard-events (on-event)
   "Wrap ON-EVENT so errors are contained and `done' is delivered once."

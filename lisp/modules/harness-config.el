@@ -150,8 +150,8 @@ non-interactive anyway."
     (services
      :title "Models and services"
      :doc "Model providers besides Claude Code, and the other services the harness talks to."
-     :keys (harness-openai-endpoints harness-bedrock-endpoints harness-websearch-provider
-            harness-websearch-builtin harness-brave-api-key)))
+     :keys (harness-fallback-models harness-openai-endpoints harness-bedrock-endpoints
+            harness-websearch-provider harness-websearch-builtin harness-brave-api-key)))
   "The settings most people change, in sections named by what they are for.
 Each entry is (NAME :title TITLE :doc DOC :keys OPTIONS).
 `config/describe' lists these options first, in this order, each with

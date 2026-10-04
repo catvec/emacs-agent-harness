@@ -88,7 +88,7 @@ is never used for any other failure.")
 (define-error 'harness-acp-invalid-params "Invalid ACP parameters" 'harness-error)
 
 (defconst harness-acp-extension-prefixes
-  '("session/" "agent/" "provider/" "tools/list" "usage/" "worktree/" "merge/"
+  '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "naming/" "sandbox/status"
     "harness/api" "harness/version" "harness/reload" "harness-dev/" "question/" "project/" "task/"
     "notification/" "acp/remote-")
@@ -127,6 +127,7 @@ another pattern; the names speak of the directory, the default.")
   '(session/created session/deleted session/queue-changed session/pending-changed
     session/status agent/turn-started agent/turn-ended agent/quota
     provider/models-updated provider/quota-updated provider/pricing-warning usage/budget-warning usage/budgets-changed
+    fallback/changed fallback/switched
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
     question/answered task/changed task/deleted task/review task/done permission/dir-allowed permission/dir-revoked

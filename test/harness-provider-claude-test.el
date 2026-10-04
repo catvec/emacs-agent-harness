@@ -1514,6 +1514,53 @@ what a user would see."
                      (plist-get (harness-provider-claude-test--find evs 'hint) :text))))
     (harness-provider-claude-close "cmp")))
 
+(ert-deftest harness-provider-claude-reports-a-used-up-quota ()
+  "A rejected usage window ends the turn as a quota failure, with its reset."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment (cons "HARNESS_FAKE_CLAUDE_AUTH=subscription" process-environment))
+         (events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "quota1" "out of quota"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'error (plist-get done :stop-reason)))
+    (should (eq 'quota (plist-get done :error-kind)))
+    (should (equal 1800000000.0 (plist-get done :resets)))
+    (should (string-match-p "hit your limit" (plist-get done :error)))
+    (harness-provider-claude-close "quota1")))
+
+(ert-deftest harness-provider-claude-reports-out-of-money ()
+  "A billing error ends the turn as a billing failure."
+  (harness-provider-claude-test--setup)
+  (let* ((events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "money1" "out of credits"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'billing (plist-get done :error-kind)))
+    (should-not (plist-get done :resets))
+    (should (string-match-p "credit balance" (plist-get done :error)))
+    (harness-provider-claude-close "money1")))
+
+(ert-deftest harness-provider-claude-api-error-status-decides ()
+  "An API 402 is out of money; a plain 429 stays a rate limit."
+  (harness-provider-claude-test--setup)
+  (let* ((events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "status1" "api 402"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'billing (plist-get done :error-kind))))
+  (let* ((events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "status2" "api 429"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'rate-limit (plist-get done :error-kind))))
+  (harness-provider-claude-close "status1")
+  (harness-provider-claude-close "status2"))
+
+(ert-deftest harness-provider-claude-refused-login-is-not-out ()
+  "A refused login is an auth failure, which the fallback never acts on."
+  (harness-provider-claude-test--setup)
+  (let* ((events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "auth1" "logged out"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'auth (plist-get done :error-kind)))
+    (harness-provider-claude-close "auth1")))
+
 ;;;; Integration
 
 (ert-deftest harness-provider-claude-integration-real-cli ()

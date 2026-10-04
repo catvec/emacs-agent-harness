@@ -835,7 +835,9 @@ transcript up to the fork."
   (let* ((events (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s11" "fail please"))))
          (done (harness-provider-copilot-test--find events 'done)))
     (should (eq 'error (plist-get done :stop-reason)))
-    (should (equal "Copilot: You have no AI credits left" (plist-get done :error))))
+    (should (equal "Copilot: You have no AI credits left" (plist-get done :error)))
+    ;; Money is out, whatever the CLI calls the error type.
+    (should (eq 'billing (plist-get done :error-kind))))
   (let ((events (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s11" "long answer")))))
     (should (eq 'max-tokens (harness-provider-copilot-test--done events))))
   (let* ((events (car (harness-provider-copilot-test--run (harness-provider-copilot-test--request "s11" "compact first"))))
@@ -844,6 +846,19 @@ transcript up to the fork."
     (should (cl-some (lambda (h) (string-match-p "Context compacted by Copilot: 150k → 12.0k tokens" h)) hints))
     (should (eq 'end-turn (harness-provider-copilot-test--done events))))
   (harness-provider-copilot-close "s11"))
+
+(ert-deftest harness-provider-copilot-reports-a-used-up-allowance ()
+  "A session.error of type quota carries its kind and reset to the done event."
+  (harness-provider-copilot-test--setup)
+  (let* ((events (car (harness-provider-copilot-test--run
+                       (harness-provider-copilot-test--request "s11b" "out of quota now"))))
+         (done (harness-provider-copilot-test--find events 'done)))
+    (should (eq 'error (plist-get done :stop-reason)))
+    (should (eq 'quota (plist-get done :error-kind)))
+    ;; 2030-01-01T00:00:00Z, the date the fixture's allowance resets.
+    (should (equal 1893456000.0 (plist-get done :resets)))
+    (should (string-match-p "premium requests" (plist-get done :error))))
+  (harness-provider-copilot-close "s11b"))
 
 (ert-deftest harness-provider-copilot-permission-requests-are-answered ()
   "The harness's own tools are approved: the harness asks the user itself."
