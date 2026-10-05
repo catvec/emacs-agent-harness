@@ -87,6 +87,11 @@ Optional dependencies:
 
 ## Installation
 
+The repository is on sourcehut and mirrored on
+[GitHub](https://github.com/catvec/emacs-agent-harness). Where sourcehut
+cannot be reached, use `:host github` in the recipes below, or clone
+`https://github.com/catvec/emacs-agent-harness`.
+
 ### Doom Emacs
 
 In `packages.el`:
@@ -174,6 +179,36 @@ named by `harness-server-init-file`.
   settings.
 - `M-x harness-show-log` (`C-c h L`) shows its log.
 
+### Running the latest version
+
+`C-c h v` (`M-x harness-version`) shows the commit the harness runs and
+compares it with the places newer commits come from:
+
+- the checkout it was loaded from, as that checkout is now: what a pull
+  or a merge brought there runs only after a reload (`C-c h R`) or a
+  restart;
+- the repository that checkout pulls from, which is the remote its
+  branch tracks. straight.el sets it to the recipe's repository, so an
+  install from GitHub is compared with GitHub and one from sourcehut
+  with sourcehut. Nothing needs configuring where one of them cannot be
+  reached;
+- the local checkouts of the harness that your sessions work in, such
+  as a development checkout;
+- `harness-version-origins`: any others you list, such as a mirror the
+  install does not pull from. It is empty by default.
+
+Each origin says whether it has commits the harness lacks, and lists
+them. Nothing is fetched, so the commits are counted only when a local
+repository has them, such as a development checkout. Otherwise the
+page says that the origin has commits the harness lacks, without
+counting them. The page then says what to do: reload, pull into the
+checkout the harness runs from (`M-x straight-pull-package` for a
+straight.el install), or push first. The harness checks by itself, in
+its own process, shortly after it starts or reloads and then every half
+hour. Git never prompts there. The page shows the last result at once,
+and `g` checks again. After a check finds that the harness is behind,
+the menu's Version entry says so.
+
 ## Usage
 
 ### Key bindings
@@ -205,6 +240,7 @@ named by `harness-server-init-file`.
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
 | `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
+| `C-c h v` | `harness-version` | Show whether the harness runs the latest commit |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |

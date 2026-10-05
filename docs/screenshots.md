@@ -63,6 +63,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `settings` | The settings page for the demo project, which overrides two settings | `harness-media-shot-settings` |
 | `btw` | A BTW under the first picture's chat | `harness-media-shot-btw` |
 | `menu` | The menu, opened from that chat | `harness-media-shot-menu` |
+| `version` | The version page of a harness straight.el installed from GitHub, behind GitHub and its development checkout: the commits it lacks and how to pull them | `harness-media-shot-version` |
 
 ## How the pictures are made
 
@@ -100,9 +101,21 @@ calls a model or the network.
   WSGI orders API with tests and a git history of three commits.  Its
   files are the `harness-media--*` string constants.  The scratch HOME
   makes every path read `~/src/acme-api`.
+- `harness-media--make-harness-repos` makes the harness's own
+  repositories, for the version picture: a bare repository standing in
+  for GitHub, straight.el's shallow clone of it in `~/.emacs.d/straight`,
+  and a development checkout, `~/src/emacs-agent-harness`; GitHub and
+  the checkout are ten commits ahead of the clone.  The scratch
+  `~/.gitconfig` sends GitHub's URL to the bare repository, and
+  `GIT_ALLOW_PROTOCOL=file` lets git use no other protocol
+  (`harness-media--harness-origins`), so neither the clone nor the
+  version checks the harness runs by itself reach the network.  The
+  check finds GitHub by itself, as the repository the clone pulls from.
 - `harness-media--seed-usage` records a month of model calls across
   three projects, and `harness-media--seed-budgets` adds three budgets,
-  sized from that usage so their meters land at different levels.
+  sized from that usage so their meters land at different levels.  The
+  weekly one is hard, so it stays at $5 at least: early in the week the
+  seeded spend is small, and the world's own turns must still fit.
 - `harness-media--build-tasks` submits tasks and drives them, as a user
   would, into every column of the board: two verified and merged, one
   verified and waiting in the merge queue, one in review (sent back

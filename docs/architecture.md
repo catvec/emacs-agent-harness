@@ -97,6 +97,10 @@ default) the layers above are split across two Emacs processes:
 - Project roots and file lists (lisp/harness-files.el) are computed on
   both sides with the same code; the UI lists files itself so `@`
   completion uses the user's projectile cache.
+- Each side notes the commit it loaded the harness from
+  (lisp/harness-revision.el, see version): the two load their files
+  separately, so a restart of the process alone can leave them on
+  different commits.
 
 The harness process cannot prompt: TRAMP connections it opens need
 non-interactive authentication (ssh agent), and auth-source secrets
@@ -143,7 +147,7 @@ subscribers with named functions, and make `:init` idempotent.
 `harness-reload` compiles every file first and refuses to load anything
 if one fails.  It loads harness.el, the core files, the libraries of
 lisp/ (`harness--library-files`: files, the Emacs endpoint, desktop
-notifications, server) and the modules, so a module never runs against
+notifications, server, revision) and the modules, so a module never runs against
 a library as it was before an update; a file added to lisp/ that both
 sides load belongs in one of those lists.  Records made before a reload
 keep their layout: a slot added to a struct goes last and is read in a
@@ -2154,6 +2158,62 @@ started|stopped|connected|disconnected|paired|revoked|address|corporate
 closes connections as they are accepted, and its change hook stops the
 listener.
 
+### version
+
+Whether the running harness is the latest.  What runs is noted by
+lisp/harness-revision.el, on both sides: `harness-start-hook` and
+`harness-reload-hook` run `harness-revision-note-loaded`, which reads
+the checkout `harness.el` comes from, links followed (straight.el's
+build directory leads into its clone), and `harness-revision-loaded`
+keeps the promise of `(:directory :loaded :version :commit :branch
+:dirty)` until the next load; `:error` instead of a commit when that is
+not the top of a git working tree (a package archive, or a harness
+inside another repository).
+
+Origins, in this order and each once: the loaded checkout as it is now
+(kind `loaded`); local checkouts (kind `local`): the directories of
+`harness-version-origins`, then the main checkouts of the harness that
+sessions' projects belong to (`session/list`,
+`harness-files-owning-checkout`); repositories by URL (kind `remote`,
+read with `git ls-remote`).  The repository the loaded checkout pulls
+from (`:upstream t`) comes first of its kind: the remote its branch
+tracks and the branch it tracks there (`for-each-ref
+%(upstream:remotename)`, the remote's URL from `git config`), or
+`origin` and the branch its HEAD names on a detached HEAD.  straight.el
+and other package managers set that remote to the recipe's repository,
+so an install from GitHub is compared with GitHub and one from sourcehut
+with sourcehut.  It is named after its host (github, sourcehut, gitlab,
+codeberg, bitbucket, else the host, else upstream) and left out when
+`harness-version-origins` names its URL on its branch or on none.  It is
+read in the harness process, which has no straight.el, and from any
+package manager's clone.  Nothing is fetched: the relation (`rev-list
+--left-right --count`) and the newest eight commits each side lacks
+(`log --no-merges`) are worked out in the first local repository
+holding both commits, local checkouts first and the loaded one last,
+as package managers clone shallowly.  When none holds both and the
+loaded checkout lacks the origin's commit (`cat-file -e`), the harness
+lacks it too: the origin is ahead, uncounted.
+
+`version/check (&optional max-age)` → promise of the report `(:checked
+:version :running :origins :verdict)`, each origin `(:name :kind
+:location :branch :upstream :commit :subject :date :dirty :status
+:missing :extra :missing-commits :extra-commits :error)`, `:status`
+same, newer, older, diverged, ahead (a commit the harness lacks, no
+local repository holding both), unknown (the running commit is in none)
+or error, and `:verdict` behind (an origin is newer, diverged or
+ahead), unknown (one cannot be placed, or none could be read) or
+latest.  The last report answers
+while it is about the revision running now and at most MAX-AGE seconds
+old; otherwise a check runs, or the one running is joined (replaced
+after five minutes).  Checks also run 30 s after the start, 3 s after
+`harness/reloaded` and every half hour; each report is announced as
+`version/checked REPORT`, forwarded to UIs.  Git always runs
+asynchronously, without optional locks, with a timeout and never
+prompting (`harness-revision-git-environment`: no terminal, an empty
+GIT_ASKPASS, ssh in BatchMode, no credential helper for ls-remote).  A
+failing command rejects its promise without signalling in a handler, so
+an origin out of reach is an `error` origin, not an error in the log.
+
 ## Presentation contracts
 
 `harness-ui` owns the connection (`harness-ui-connection`, local by
@@ -2416,6 +2476,22 @@ code expires, and when hidden, which drops the code
 :level :mask :modules)`, byte mode, versions 1–40; `harness-qr-image`
 one SVG path, black on white; `harness-qr-insert`, half blocks without
 images).  In corporate mode the page shows a notice only.
+
+Version page (`harness-ui-version`, `C-c h v`, `harness-version`): the
+verdict, the commit running (with, when the harness runs in its own
+process, the commit this Emacs loaded the UI from, and a reload button
+when the two differ), each origin with its commit and status (the
+repository the loaded checkout pulls from says so), the commits the
+harness lacks (an origin at the same commit with the same status as one
+listed above says so instead of listing them again; an ahead one has
+none to list), and what to do: reload when the loaded checkout moved
+on, pull into the loaded checkout (`straight-pull-package` under
+straight.el) when a remote has newer commits, push when only a local
+checkout has them.
+Opening it shows the last report at once and asks `version/check` with
+a max-age of a minute; `g` asks with 0; `version/checked` redraws it,
+and the menu's Version entry says "not the latest" after a report that
+found the harness behind.
 
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in six
 sections -- requires your input, ready for review, merging, in progress,

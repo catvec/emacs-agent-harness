@@ -2285,6 +2285,8 @@ leaves the buffer's commands out, never the whole menu."
      :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
      :inapt-if harness-corporate-p)
     ("N" "Test notifications" harness-test-notifications)
+    ("v" (lambda () (if (fboundp 'harness-ui-version-menu-label) (harness-ui-version-menu-label) "Version"))
+     harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
     ("R" "Reload harness" harness-reload)
     ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes

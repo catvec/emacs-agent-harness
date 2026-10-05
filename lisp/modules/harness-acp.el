@@ -91,7 +91,7 @@ is never used for any other failure.")
   '("session/" "agent/" "provider/" "tools/list" "usage/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "naming/" "sandbox/status"
     "harness/api" "harness/version" "harness/reload" "harness-dev/" "question/" "project/" "task/"
-    "notification/" "acp/remote-")
+    "notification/" "acp/remote-" "version/")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
 (defconst harness-acp--enum-keys
@@ -130,7 +130,7 @@ another pattern; the names speak of the directory, the default.")
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
     question/answered task/changed task/deleted task/review task/done permission/dir-allowed permission/dir-revoked
-    config/changed harness/reloaded tools/file-written acp/remote-changed)
+    config/changed harness/reloaded tools/file-written acp/remote-changed version/checked)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 
 (defvar harness-acp-authorize-functions nil
