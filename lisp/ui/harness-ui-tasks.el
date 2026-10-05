@@ -1518,9 +1518,8 @@ before a key is pressed."
         (unless (string-empty-p line)
           (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
     (let ((start (point)))
-      ;; The bar only when there is a line to carry it.
-      (when (and messaging harness-compose-attachments) (insert bar))
-      (harness-compose-insert-attachments)
+      ;; The bar down every attachment's line.
+      (harness-compose-insert-attachments (and messaging bar))
       (put-text-property start (point) 'harness-task-tail 'attachments)
       (when band (add-face-text-property start (point) band t)))))
 

@@ -2661,6 +2661,21 @@ host whose box does something else than compose -- the task board's,
 which sends to a session -- marks it; `harness-compose-bar` draws that
 same bar on the host's own lines around the box.  Without either
 argument the box is the plain one.
+A host draws the attachments above the box with
+`harness-compose-insert-attachments`, one a line: the paperclip leads
+the first, the names under it line up with its name, and a prefix the
+host passes starts every line (the board's message box passes its bar).
+Each line is fitted to the narrowest window showing the buffer -- the
+daemon's initial frame, which never shows, aside -- in pixels of the
+frame drawing it (`string-pixel-width`, so icons, thumbnails and text
+scaling count): a name too long is shortened in the middle
+(`harness-compose--shorten`), keeping its start and, room permitting,
+a path's whole file name, while the tooltip tells the whole path; a
+thumbnail takes a third of the room at most, and a download keeps room
+for its progress at its widest, so its line never grows as it ticks.
+When a window showing the box changes size, the box has its host draw
+the lines again (a buffer-local `window-size-change-functions`,
+debounced, and only once the room really changed).
 An attachment chip leads with a thumbnail (`harness-compose-thumbnail-lines`)
 when it is an image, or a video whose thumbnail the media module makes
 with ffmpeg in the background (a chip asks for it through

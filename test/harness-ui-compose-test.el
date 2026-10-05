@@ -345,8 +345,171 @@
           (should (equal thumb (plist-get (cdr (get-text-property 0 'display (harness-compose--chip att))) :file))))
         ;; No thumbnails asked for, or none possible.
         (let ((harness-compose-thumbnail-lines 0))
-          (should-not (get-text-property 0 'display (harness-compose--chip clip)))))
+          (should-not (get-text-property 0 'display (harness-compose--chip clip))))
+        ;; A narrow chip keeps a third of its room for the thumbnail at most.
+        (should (<= (plist-get (cdr (get-text-property 0 'display (harness-compose--chip clip 6))) :max-width) 2)))
       (should-not (get-text-property 0 'display (harness-compose--chip clip))))))
+
+;;;; Laying the attachments out
+
+(defconst harness-ui-compose-test--deep
+  "src/components/a-long-directory-name/another-directory/the-file.tsx"
+  "A file deep in the project: its path fits 80 columns, not 40.")
+
+(defun harness-ui-compose-test--shown (start end)
+  "Return the text from START to END as it shows.
+An overlay's display string, a download's progress, stands in for the
+text under it."
+  (let ((parts nil) (pos start))
+    (while (< pos end)
+      (let* ((ov (cl-find-if (lambda (o) (overlay-get o 'display)) (overlays-at pos)))
+             (next (min end (if ov (overlay-end ov) (next-overlay-change pos)))))
+        (push (if ov (overlay-get ov 'display) (buffer-substring-no-properties pos next)) parts)
+        (setq pos next)))
+    (substring-no-properties (apply #'concat (nreverse parts)))))
+
+(defun harness-ui-compose-test--attachment-lines (window)
+  "Return the attachment lines of the test host as (TEXT COLUMNS INDENT).
+TEXT is a line as it shows, COLUMNS how wide it is in WINDOW and
+INDENT how far in WINDOW its chip starts."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line 1)
+    (let ((inhibit-field-text-motion t)   ; The box's prompt is a field.
+          (end (save-excursion (goto-char harness-compose-start) (pos-bol)))
+          (lines nil))
+      (while (< (point) end)
+        (let ((chip (cl-loop for pos from (point) below (line-end-position)
+                             when (or (get-text-property pos 'button)
+                                      (get-text-property pos 'harness-compose-pending))
+                             return pos)))
+          (push (list (harness-ui-compose-test--shown (point) (line-end-position))
+                      (car (window-text-pixel-size window (point) (line-end-position)))
+                      (car (window-text-pixel-size window (point) chip)))
+                lines))
+        (forward-line 1))
+      (nreverse lines))))
+
+(defun harness-ui-compose-test--attach-all-kinds (dir)
+  "Attach one of each kind and return the path of the file deep in DIR.
+That file, a short one, an image and a page pasted and a download under
+way.  `harness-state-directory' must be outside DIR, the project, so
+that the files go by their paths in it."
+  (let ((deep (expand-file-name harness-ui-compose-test--deep dir))
+        (notes (expand-file-name "notes.txt" dir)))
+    (make-directory (file-name-directory deep) t)
+    (with-temp-file deep (insert "deep"))
+    (with-temp-file notes (insert "notes"))
+    (harness-compose--attach (harness-compose--file-attachment deep))
+    (harness-compose--attach (harness-compose--file-attachment notes))
+    (harness-compose--attach (harness-media-ring-save harness-test-png "image/png"))
+    (harness-compose--attach (harness-media-ring-save "<p>pasted</p>" "text/html"))
+    ;; A download that never ends: no curl behind it.
+    (setq harness-compose-attachments
+          (append harness-compose-attachments
+                  (list (list :pending t :id "dl" :name "a-download-1.2.3.tar.gz"
+                              :url "https://example.com/releases/a-download-1.2.3.tar.gz"))))
+    (harness-compose-redraw)
+    deep))
+
+(ert-deftest harness-ui-compose-attachments-go-one-a-line ()
+  "Every attachment has a line of its own, fitted to the window.
+Files, captures and downloads alike: the names line up under the
+paperclip's, a name too long is shortened in the middle, keeping its
+start and its file's name, and a wide window shows every name whole."
+  (harness-ui-compose-test-with
+    (let* ((harness-state-directory (file-name-as-directory (expand-file-name "state" dir)))
+           (window (selected-window))
+           (side (split-window window 40 'right))
+           (deep (harness-ui-compose-test--attach-all-kinds dir))
+           (names (mapcar #'harness-compose--chip-name harness-compose-attachments)))
+      (should (equal harness-ui-compose-test--deep (car names)))
+      ;; Shown in the narrow window alone.
+      (set-window-buffer side (current-buffer))
+      (set-window-buffer window (get-buffer-create "*scratch*"))
+      (harness-compose-redraw)
+      (let ((lines (harness-ui-compose-test--attachment-lines side)))
+        (should (= 5 (length lines)))
+        (pcase-dolist (`(,text ,columns ,indent) lines)
+          (should (= 1 (cl-count ?× text)))
+          (should (< columns (window-body-width side)))
+          (should (= indent (nth 2 (car lines)))))
+        ;; The paperclip leads the first line.
+        (should (string-match-p (regexp-quote (harness-ui-icon 'harness-icon-attach)) (car (car lines))))
+        ;; The deep file keeps where it starts and what it is called.
+        (should (string-match-p "src/comp.*…/the-file\\.tsx (4 B) ×\\'" (car (nth 0 lines))))
+        (should (string-match-p "notes\\.txt (5 B) ×\\'" (car (nth 1 lines))))
+        (should (string-match-p "a-dow.*…" (car (nth 4 lines))))
+        (should (string-match-p "connecting" (car (nth 4 lines)))))
+      ;; The tooltips tell the whole path and the whole link.
+      (save-excursion
+        (goto-char (point-min))
+        (search-forward "src/comp")
+        (should (string-match-p (regexp-quote (abbreviate-file-name deep)) (get-text-property (point) 'help-echo)))
+        (should-not (string-match-p "\n" (get-text-property (point) 'help-echo))))
+      (should (string-match-p "https://example\\.com/releases/a-download-1\\.2\\.3\\.tar\\.gz\\'"
+                              (overlay-get (cdr (assoc "dl" harness-compose--progress)) 'help-echo)))
+      ;; In the wide window, every name is whole.
+      (set-window-buffer window (current-buffer))
+      (delete-window side)
+      (harness-compose-redraw)
+      (let ((lines (harness-ui-compose-test--attachment-lines window)))
+        (should (= 5 (length lines)))
+        (cl-loop for (text columns) in lines
+                 for name in names
+                 do (should (string-search name text))
+                 (should-not (string-search "…" (string-replace "connecting…" "" text)))
+                 (should (< columns (window-body-width window))))))))
+
+(ert-deftest harness-ui-compose-attachments-fit-again-when-a-window-narrows ()
+  "A window showing the box changing size has the host fit the lines again."
+  (harness-ui-compose-test-with
+    (should (memq #'harness-compose--on-resize window-size-change-functions))
+    (let* ((harness-state-directory (file-name-as-directory (expand-file-name "state" dir)))
+           (window (selected-window))
+           (deep (harness-ui-compose-test--attach-all-kinds dir)))
+      (should (string-search harness-ui-compose-test--deep (car (car (harness-ui-compose-test--attachment-lines window)))))
+      (let ((draws harness-ui-compose-test--draws)
+            (side (split-window window 40 'right)))
+        (set-window-buffer side (current-buffer))
+        ;; A batch Emacs never redisplays, which would run the hook.
+        (harness-compose--on-resize side)
+        (harness-test-wait (lambda () (> harness-ui-compose-test--draws draws)) 2 "the lines fitted again")
+        ;; Both windows show them: they fit the narrower.
+        (dolist (line (harness-ui-compose-test--attachment-lines side))
+          (should (< (nth 1 line) (min (window-body-width side) (window-body-width window)))))
+        (should-not (string-search harness-ui-compose-test--deep
+                                   (car (car (harness-ui-compose-test--attachment-lines side)))))
+        (should (string-search (file-name-nondirectory deep)
+                               (car (car (harness-ui-compose-test--attachment-lines side)))))
+        ;; Fitting them again for the same windows would change nothing:
+        ;; the host is left alone.
+        (setq draws harness-ui-compose-test--draws)
+        (harness-compose--on-resize side)
+        (sleep-for 0.4)
+        (should (= draws harness-ui-compose-test--draws))))))
+
+(ert-deftest harness-ui-compose-long-names-shorten-in-the-middle ()
+  "A name too long keeps its start and its end, a path its file's name."
+  (should (equal "notes.txt" (harness-compose--shorten "notes.txt" 9)))
+  (should (equal "Screens…-11.png" (harness-compose--shorten "Screenshot from 2026-10-05 14-32-11.png" 15)))
+  (should (equal "src/comp…/the-file.tsx" (harness-compose--shorten harness-ui-compose-test--deep 22)))
+  ;; A file's name too long to keep whole: its path's start and its end.
+  (let ((short (harness-compose--shorten "src/a-name-far-too-long-to-keep-whole.tsx" 20)))
+    (should (= 20 (string-width short)))
+    (should (string-prefix-p "src/a-na" short))
+    (should (string-suffix-p "whole.tsx" short)))
+  ;; Wide characters take two columns each.
+  (let ((short (harness-compose--shorten "日本語のとても長いファイルの名前.txt" 15)))
+    (should (<= (string-width short) 15))
+    (should (string-prefix-p "日本語" short))
+    (should (string-suffix-p "前.txt" short)))
+  ;; Fitted to a width, as long as fits, and never shorter than the least.
+  (let ((name "Screenshot from 2026-10-05 14-32-11 with a long name.png"))
+    (should (equal name (harness-compose--fit name 80 #'identity)))
+    (should (= 30 (string-width (harness-compose--fit name 30 #'identity))))
+    (should (= 26 (string-width (harness-compose--fit name 30 (lambda (n) (concat n " ×  "))))))
+    (should (= harness-compose--min-name (string-width (harness-compose--fit name 3 #'identity))))))
 
 ;;;; The media ring
 
