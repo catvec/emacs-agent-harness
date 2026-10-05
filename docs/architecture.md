@@ -2425,6 +2425,11 @@ branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
 the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
+Thinking between two calls of a run does not break it but folds in
+with them, since a model that thinks before every call would never
+have a run otherwise; thinking before a run's first call or after its
+last stays out.  Only the newest block joins a run as the transcript
+grows, and a loaded transcript is grouped as a whole.
 A tool call's header says how it went, marked the way a Japanese table
 marks it (`harness-ui-level-icon`), each ending on a background of
 its own: a green circle when it ran (`harness-tool-face`), a yellow
@@ -2450,7 +2455,8 @@ Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
 title), a summary block counts the calls by label ("5 tool calls: Read
-file ×3, Search files, Find files"), and so do the permission panel,
+file ×3, Search files, Find files", then " · thinking ×2" for the
+thinking folded in with them), and so do the permission panel,
 the activity line and the mode line.  A title recorded before tools had
 labels starts with the tool's name ("read_file x.el"), which the label
 replaces, so old transcripts read the same.

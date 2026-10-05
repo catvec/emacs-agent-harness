@@ -1195,6 +1195,140 @@ opening it where images cannot show or the file is remote."
         (should (= 1 (hash-table-count harness-chat--groups)))
         (should (harness-ui-chat-test-find buf "5 tool calls: Read file ×3, Search files, Find files"))))))
 
+(defun harness-ui-chat-test-check-groups (buf)
+  "Check that every group of BUF is sound and return the groups, oldest first.
+Its members are distinct blocks folded into it, oldest first, starting
+and ending with a call, and its overlay hides them and nothing else."
+  (with-current-buffer buf
+    (let ((groups (sort (hash-table-values harness-chat--groups)
+                        (lambda (a b) (< (harness-chat-group-start a) (harness-chat-group-start b))))))
+      (dolist (g groups)
+        (let* ((members (harness-chat-group-members g))
+               (blocks (mapcar (lambda (m) (gethash m harness-chat--blocks)) members))
+               (ov (harness-chat-group-overlay g)))
+          (should (equal members (delete-dups (copy-sequence members))))
+          (should (cl-every (lambda (b) (equal (harness-chat-block-group b) (harness-chat-group-id g))) blocks))
+          (should (equal "tool-call" (harness-chat-block-kind (car blocks))))
+          (should (equal "tool-call" (harness-chat-block-kind (car (last blocks)))))
+          (should (cl-every (lambda (a b) (< (harness-chat-block-start a) (harness-chat-block-start b)))
+                            blocks (cdr blocks)))
+          (should (= (overlay-start ov) (1- (harness-chat-block-start (car blocks)))))
+          (should (= (overlay-end ov) (1- (harness-chat-block-end (car (last blocks))))))))
+      groups)))
+
+(ert-deftest harness-ui-chat-coalesces-across-thinking ()
+  "Thinking between coalescable calls folds into their group; around them it stays out.
+A model that thinks before every call made runs of none."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (cwd (plist-get (harness-call 'session/get sid) :cwd)))
+      (let ((harness-provider-demo-script-override
+             `((:type thinking :delta "Where to start.")
+               (:type tool-call :id "r1" :name "read_file" :input (:path "a.el"))
+               (:type thinking :delta "Now the other one.")
+               (:type tool-call :id "r2" :name "read_file" :input (:path "b.el"))
+               (:type thinking :delta "And who calls it.")
+               ;; The run reaches the threshold here, then grows by a call.
+               (:type tool-call :id "r3" :name "grep" :input (:pattern "defun" :path ,cwd))
+               (:type thinking :delta "And the files.")
+               (:type tool-call :id "r4" :name "glob" :input (:pattern "*.el" :path ,cwd))
+               (:type thinking :delta "Time to run it.")
+               (:type tool-call :id "r5" :name "bash" :input (:command "echo ran"))
+               (:type text :delta "Done.")
+               (:type done :stop-reason end-turn))))
+        (harness-ui-chat-test-prompt buf "read things"))
+      (cl-flet ((check ()
+                  (with-current-buffer buf
+                    (let* ((groups (harness-ui-chat-test-check-groups buf))
+                           (group (car groups))
+                           (thoughts (harness-ui-chat-test-blocks buf "thinking"))
+                           (calls (harness-ui-chat-test-blocks buf "tool-call"))
+                           (summary (harness-ui-chat-test-find buf "4 tool calls: Read file ×2, Search files, Find files · thinking ×3")))
+                      (should (= 1 (length groups)))
+                      (should (= 5 (length thoughts)))
+                      ;; The four reads and the three thoughts between them, in order.
+                      (should (equal (harness-chat-group-members group)
+                                     (mapcar #'harness-chat-block-id
+                                             (list (nth 0 calls) (nth 1 thoughts) (nth 1 calls) (nth 2 thoughts)
+                                                   (nth 2 calls) (nth 3 thoughts) (nth 3 calls)))))
+                      (should summary)
+                      (should-not (invisible-p summary))
+                      (dolist (b (list (nth 1 thoughts) (nth 2 thoughts) (nth 3 thoughts) (nth 0 calls) (nth 3 calls)))
+                        (should (invisible-p (harness-chat-block-start b))))
+                      ;; The thinking that opens the turn and the one before
+                      ;; the bash call stay out, around the summary.
+                      (dolist (b (list (nth 0 thoughts) (nth 4 thoughts) (nth 4 calls)))
+                        (should-not (harness-chat-block-group b))
+                        (should-not (invisible-p (harness-chat-block-start b))))
+                      (should (< (harness-chat-block-start (nth 0 thoughts))
+                                 summary
+                                 (harness-chat-block-start (nth 4 thoughts))))
+                      ;; The turn's sender line stays on its first block.
+                      (should (harness-chat-block-head (nth 0 thoughts)))
+                      ;; Expanding shows the calls and the thoughts, still collapsed.
+                      (harness-chat-toggle-group (harness-chat-group-id group))
+                      (should-not (invisible-p (harness-chat-block-start (nth 2 thoughts))))
+                      (should (harness-chat-block-collapsed (nth 2 thoughts)))
+                      (harness-chat-toggle-group (harness-chat-group-id group))
+                      (should (invisible-p (harness-chat-block-start (nth 2 thoughts))))))))
+        ;; Grouped live, as the blocks arrived...
+        (check)
+        ;; ...and the same over the history a redraw loads.
+        (with-current-buffer buf
+          (harness-chat-redraw)
+          (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn"))
+        (check)))))
+
+(ert-deftest harness-ui-chat-late-results-leave-runs-alone ()
+  "A result for a call that is not the newest block does not regroup it.
+Results and their updates (checkpoints) come in for older calls; one
+used to fold its call into a run it is not part of, hiding the blocks
+between them."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-flet ((node (&rest plist)
+                    (harness-chat--apply-update (list :sessionUpdate "_harness/node" :node plist)))
+                  (read-call (id call path)
+                    (harness-chat--apply-update
+                     (list :sessionUpdate "_harness/node"
+                           :node (list :id id :kind "tool-call" :tool "read_file" :call-id call
+                                       :input (list :path path) :title (concat "read_file " path))))))
+          (read-call "n-r1" "c1" "a.el")
+          (read-call "n-r2" "c2" "b.el")
+          (node :id "n-b" :kind "tool-call" :tool "bash" :call-id "c3" :input '(:command "ls") :title "bash ls")
+          ;; Two reads and a bash call: no run.  The first read's result
+          ;; comes last.
+          (node :id "n-r1-out" :kind "tool-result" :call-id "c1" :output "a")
+          (should (= 0 (hash-table-count harness-chat--groups)))
+          (should-not (harness-chat-block-group (gethash "n-r1" harness-chat--blocks)))
+          ;; A run after a message of the user.
+          (node :id "n-u" :kind "user" :content "Read three more.")
+          (read-call "n-r3" "c4" "c.el")
+          (read-call "n-r4" "c5" "d.el")
+          (read-call "n-r5" "c6" "e.el")
+          (let* ((group (car (harness-ui-chat-test-check-groups buf)))
+                 (members (copy-sequence (harness-chat-group-members group))))
+            (should (= 1 (hash-table-count harness-chat--groups)))
+            (should (equal '("n-r3" "n-r4" "n-r5") members))
+            ;; The older read's result changes: it stays out of the run,
+            ;; whose overlay still hides its members and nothing else.
+            (node :id "n-r1-out" :kind "tool-result" :call-id "c1" :output "a, checked")
+            (node :id "n-r2-out" :kind "tool-result" :call-id "c2" :output "b")
+            (should (equal (list group) (harness-ui-chat-test-check-groups buf)))
+            (should (equal members (harness-chat-group-members group)))
+            (should-not (harness-chat-block-group (gethash "n-r1" harness-chat--blocks)))
+            (should-not (invisible-p (harness-ui-chat-test-find buf "Read three more")))
+            (should-not (invisible-p (harness-chat-block-start (gethash "n-b" harness-chat--blocks))))
+            ;; A result for a grouped call counts in its summary.
+            (node :id "n-r4-out" :kind "tool-result" :call-id "c5" :output "boom" :is-error t)
+            (should (equal members (harness-chat-group-members group)))
+            (should (string-match-p "3 tool calls: Read file ×3.*1 failed"
+                                    (buffer-substring-no-properties (harness-chat-group-start group)
+                                                                    (harness-chat-group-end group))))))))))
+
 ;;;; Images and videos in the transcript
 
 (defun harness-ui-chat-test--video (dir name seconds)
