@@ -1770,5 +1770,131 @@ scrolled to the top and point was dragged out of the box with it."
               (should (<= (marker-position harness-compose-end) (window-end window t)))))
       (set-frame-height nil 25)))))
 
+;;;; What the tasks cost, in the header
+
+(defvar harness-ui--quotas)
+(declare-function harness-ui--store-quota "harness-ui")
+
+(defun harness-ui-tasks-test--header (board &optional width)
+  "BOARD's header line as it reads, fitted to WIDTH columns, else whole.
+The line shows each %% as one %.  \(`format-mode-line' would do that,
+but formats nothing in batch.)"
+  (with-current-buffer board
+    (replace-regexp-in-string "%%" "%" (harness-ui-tasks--header (or width most-positive-fixnum)) t t)))
+
+(defun harness-ui-tasks-test--sessions (board)
+  "The session ids of BOARD's tasks."
+  (delq nil (mapcar (lambda (task) (plist-get task :session))
+                    (buffer-local-value 'harness-ui-tasks--tasks board))))
+
+(defun harness-ui-tasks-test--multi-line-help (text)
+  "The `help-echo' strings of TEXT that take more than one line."
+  (let ((pos 0) out)
+    (while (< pos (length text))
+      (let ((help (get-text-property pos 'help-echo text)))
+        (when (and (stringp help) (string-match-p "\n" help))
+          (push help out)))
+      (setq pos (or (next-single-property-change pos 'help-echo text) (length text))))
+    out))
+
+(ert-deftest harness-ui-tasks-header-shows-the-plan-and-its-quota ()
+  "Tasks a subscription pays for show the plan and its quota in the header.
+As in a chat's header: the plan's name with its quota windows, and in
+the tooltip, on one line, what the tasks used at API prices.  A click
+opens the usage dashboard."
+  (harness-ui-tasks-test-with
+    (clrhash harness-ui--quotas)
+    (harness-ui--store-quota "demo" '(:billing "subscription" :plan "max" :plan-label "Claude Max"
+                                      :windows ((:name "5h" :label "Current session (5 hours)" :used 0.23)
+                                                (:name "7d" :label "This week, all models" :used 0.41))))
+    ;; Before any task the board says who pays for new ones: their
+    ;; model's provider, once the board knows the model.
+    (harness-test-wait (lambda () (string-match-p "  Max . 5h 23% . 7d 41%  " (harness-ui-tasks-test--header board)))
+                       5 "the plan and its quota")
+    (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
+    (harness-ui-tasks-test--wait-text board "Completed  1")
+    (let ((sid (car (harness-ui-tasks-test--sessions board))))
+      (harness-call 'session/usage-add sid '(:input 100 :output 10 :cost 0.0 :list-cost 2.5
+                                             :billing subscription :plan "max"))
+      (harness-test-wait (lambda () (equal "subscription" (format "%s" (plist-get (plist-get (harness-ui-session sid) :usage)
+                                                                                 :billing))))
+                         5 "the session update")
+      (with-current-buffer board
+        (let* ((header (harness-ui-tasks--header most-positive-fixnum))
+               (pos (string-match "Max" header))
+               (help (get-text-property pos 'help-echo header))
+               (opened nil))
+          (should (string-match-p "Covered by Claude Max, not billed per token\\. These tasks at API prices: \\$2\\.50\\." help))
+          (should (string-match-p "Current session (5 hours): 23% used" help))
+          ;; One line, or showing it in the echo area moves the header.
+          (should-not (harness-ui-tasks-test--multi-line-help header))
+          ;; Escaped for the header line, which would take "23% " for a %-construct.
+          (should (string-match-p "5h 23%% " header))
+          (cl-letf (((symbol-function 'harness-ui-show-usage) (lambda () (interactive) (setq opened t))))
+            (funcall (lookup-key (get-text-property pos 'local-map header) [header-line mouse-1])))
+          (should opened))))))
+
+(ert-deftest harness-ui-tasks-header-shows-cost-and-budgets ()
+  "Tasks billed per token show their summed cost, then the project's budgets.
+The fullest budget shows as a quota window does, its tooltip describes
+each that applies, on one line, and setting a budget reloads them."
+  (harness-ui-tasks-test-with
+    (clrhash harness-ui--quotas)
+    (harness-test-load-module 'usage)
+    (harness-ui-tasks-test--type-and-submit board "First task")
+    (harness-ui-tasks-test--type-and-submit board "Second task")
+    (harness-ui-tasks-test--wait-text board "Completed  2")
+    (pcase-let ((`(,first ,second) (harness-ui-tasks-test--sessions board)))
+      (harness-call 'session/usage-add first '(:input 100 :output 10 :cost 1.25 :billing api))
+      (harness-call 'session/usage-add second '(:input 100 :output 10 :cost 0.5 :billing api)))
+    (harness-test-wait (lambda () (string-match-p "  \\$1\\.75  " (harness-ui-tasks-test--header board)))
+                       5 "the summed cost")
+    (with-current-buffer board
+      (let ((header (harness-ui-tasks--header most-positive-fixnum)))
+        (should (string-match-p "\\`These tasks cost \\$1\\.75, billed per token\\."
+                                (get-text-property (string-match "\\$1\\.75" header) 'help-echo header)))))
+    ;; A budget of everything and a tighter one of the project: the fullest shows.
+    (harness-call 'usage/set-budget '(:scope period :period month :amount 10 :label "monthly cap"))
+    (harness-call 'usage/set-budget (list :scope 'project :target dir :amount 2 :hard t :label "project cap"))
+    (harness-call 'usage/set-budget (list :scope 'project :target (harness-test-temp-dir) :amount 1 :label "elsewhere"))
+    (harness-test-wait (lambda () (string-match-p "  \\$1\\.75 . budget 88%  " (harness-ui-tasks-test--header board)))
+                       5 "the budgets")
+    (with-current-buffer board
+      (let* ((header (harness-ui-tasks--header most-positive-fixnum))
+             (pos (string-match "budget" header))
+             (help (get-text-property pos 'help-echo header)))
+        (should (eq 'harness-context-urgent-face (get-text-property pos 'face header)))
+        (should (string-match-p (concat "\\`project cap: \\$1\\.75 of \\$2\\.00 spent; \\$0\\.250 left (hard)\\. "
+                                        "monthly cap: \\$1\\.75 of \\$10\\.00 spent; \\$8\\.25 left, \\$[0-9.]+/day")
+                                help))
+        (should-not (string-match-p "elsewhere" help))
+        (should-not (harness-ui-tasks-test--multi-line-help header))
+        (should (get-text-property pos 'local-map header))))))
+
+(ert-deftest harness-ui-tasks-header-keeps-the-quota-when-narrow ()
+  "In a narrow window the plan's quota outlasts the counts and the buttons.
+The budget makes room first; the plan and its quota windows stay longest
+but for [Refresh], still opening the usage dashboard."
+  (harness-ui-tasks-test-with
+    (clrhash harness-ui--quotas)
+    (harness-test-load-module 'usage)
+    (harness-ui--store-quota "demo" '(:billing "subscription" :plan "max" :plan-label "Claude Max"
+                                      :windows ((:name "5h" :used 0.23) (:name "7d" :used 0.41))))
+    (harness-call 'usage/set-budget '(:scope period :period month :amount 10 :label "monthly cap"))
+    (harness-test-wait (lambda () (string-match-p "  Max . 5h 23% . 7d 41% . budget 0%  "
+                                                  (harness-ui-tasks-test--header board)))
+                       5 "the plan, its quota and the budget")
+    ;; The counts, the buttons and the Review switch go before the quota.
+    (let ((header (harness-ui-tasks-test--header board 62)))
+      (should (string-match-p "\\` Tasks  Max . 5h 23% . 7d 41% . budget 0% \\[Refresh\\]\\'" header)))
+    ;; Narrower still, the budget goes and the quota stays.
+    (let ((header (harness-ui-tasks-test--header board 50)))
+      (should (string-match-p "\\` Tasks  Max . 5h 23% . 7d 41% \\[Refresh\\]\\'" header)))
+    (with-current-buffer board
+      (let* ((header (harness-ui-tasks--header 50))
+             (pos (string-match "Max" header)))
+        (should (get-text-property pos 'local-map header))
+        (should (string-match-p "Covered by Claude Max" (get-text-property pos 'help-echo header)))))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

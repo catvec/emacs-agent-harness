@@ -525,6 +525,57 @@ their sum; TAB, RET, w and the heading's button show and hide them."
                   (get-text-property (1- (length (harness-ui-format-spend plan t))) 'face
                                      (harness-ui-format-spend plan t)))))))
 
+(ert-deftest harness-ui-sessions-total-reads-as-one-session ()
+  "Several sessions together cost what they add up to, paid as the latest says.
+Their usage sums; its billing and plan are those of the one updated
+last that recorded a billing; MODEL, else the first one's, names the
+provider whose account and quota stand for them all."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (let* ((dot (string #xb7))
+           (api (list :model "demo:scripted" :updated 1 :usage '(:input 10 :cost 1.2 :list-cost 1.2 :billing "api")))
+           (old (list :model "demo:scripted" :updated 3 :usage '(:input 5 :cost 0.3)))
+           (plan (list :model "claude:claude-opus-5-5" :updated 2
+                       :usage '(:input 20 :cost 0.0 :list-cost 3.4 :billing "subscription" :plan "max")))
+           (text (lambda (s &optional quota) (substring-no-properties (harness-ui-format-spend s quota "These tasks")))))
+      (let ((total (harness-ui-sessions-total (list api old))))
+        (should (equal "demo:scripted" (plist-get total :model)))
+        (should (= 15 (plist-get (plist-get total :usage) :input)))
+        (should (equal "$1.50" (funcall text total)))
+        (should (string-match-p "\\`These tasks cost \\$1\\.50, billed per token\\."
+                                (get-text-property 0 'help-echo (harness-ui-format-spend total nil "These tasks")))))
+      (harness-ui--store-quota "claude" (harness-ui-usage-test-max-quota (float-time)))
+      (let ((total (harness-ui-sessions-total (list api plan old) "claude:claude-opus-5-5")))
+        (should (equal "subscription" (plist-get (plist-get total :usage) :billing)))
+        (should (< (abs (- 4.9 (harness-usage-list-cost (plist-get total :usage)))) 1e-9))
+        (should (equal (format "$1.50+Max %s 5h 9%% %s 7d 57%%" dot dot) (funcall text total t)))
+        ;; Billed per token and covered by the plan, not extra usage.
+        (should (string-match-p "\\`\\$1\\.50 billed; \\$3\\.40 more at API prices covered by Claude Max\\."
+                                (get-text-property 0 'help-echo (harness-ui-format-spend total t "These tasks")))))
+      ;; Before any call the provider's account says who will pay.
+      (should (equal "Max" (funcall text (harness-ui-sessions-total nil "claude:claude-opus-5-5")))))))
+
+(ert-deftest harness-ui-format-budgets-shows-the-fullest ()
+  "Budgets read \"budget N%\" for the fullest one; the tooltip describes each.
+The tooltip is one line, a sentence per budget, as hover help must be."
+  (harness-ui-usage-test-with
+    (let* ((dot (string #xb7))
+           (month (list :budget '(:id "m" :scope period :period month :label "monthly cap")
+                        :spent 25.0 :amount 100.0 :remaining 75.0 :fraction 0.25
+                        :per-day 3.75 :days-left 20 :baseline 20.0))
+           (week (list :budget '(:id "w" :scope project :target "/src/acme-api/" :period week)
+                       :spent 45.0 :amount 50.0 :remaining 5.0 :fraction 0.9 :hard t
+                       :per-day 5.0 :days-left 1 :baseline 0.0))
+           (text (harness-ui-format-budgets (list month week))))
+      (should-not (harness-ui-format-budgets nil))
+      (should (equal "budget 90%" (substring-no-properties text)))
+      (should (eq 'harness-context-urgent-face (get-text-property 0 'face text)))
+      (should (equal (concat "weekly acme-api: $45.00 of $50.00 spent; $5.00 left, $5.00/day " dot " 1 day left (hard). "
+                             "monthly cap: $25.00 of $100.00 spent, incl. $20.00 baseline; $75.00 left, $3.75/day "
+                             dot " 20 days left. "
+                             "mouse-1: usage and budgets")
+                     (get-text-property 0 'help-echo text))))))
+
 (ert-deftest harness-ui-model-label-is-readable ()
   "Labels read \"model (provider)\", from the catalogue when it knows the model."
   (harness-ui-usage-test-with

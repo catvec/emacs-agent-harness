@@ -873,27 +873,39 @@ Without a key nothing is fetched and the promise gives (:available nil
 
 ;;;; Enforcement
 
+(defun harness-usage--applies-p (budget project &optional session-id)
+  "Non-nil when explicit BUDGET counts spending in PROJECT, a root.
+SESSION-ID names the session that spends, when there is one.  A session
+budget counts its session's spending, a project budget its project's,
+and a period budget everything's or its project's."
+  (let ((target (plist-get budget :target)))
+    (pcase (plist-get budget :scope)
+      ('session (and session-id (equal target session-id)))
+      ('project (equal target project))
+      ('period (or (null target) (equal target project))))))
+
 (defun harness-usage--session-budgets (session)
   "Return every budget that applies to SESSION, implicit one last."
-  (let ((sid (plist-get session :id))
-        (project (plist-get session :project))
-        out)
-    (dolist (b harness-usage-budgets)
-      (let ((target (plist-get b :target)))
-        (when (pcase (plist-get b :scope)
-                ('session (equal target sid))
-                ('project (equal target project))
-                ('period (or (null target) (equal target project))))
-          (push b out))))
-    (let ((implicit (harness-usage--implicit-budget session)))
-      (when implicit (push implicit out)))
-    (nreverse out)))
+  (let ((implicit (harness-usage--implicit-budget session)))
+    (append (cl-remove-if-not (lambda (b) (harness-usage--applies-p b (plist-get session :project)
+                                                                    (plist-get session :id)))
+                              harness-usage-budgets)
+            (and implicit (list implicit)))))
 
 (harness-defmethod usage/session-budgets (session-id &rest opts)
   "Return the status of every budget applying to SESSION-ID.
 OPTS `:now' fixes the reference time."
   (mapcar (lambda (b) (harness-usage--budget-status b (plist-get opts :now)))
           (harness-usage--session-budgets (harness-call 'session/get session-id))))
+
+(harness-defmethod usage/project-budgets (project &rest opts)
+  "Return the status of every budget applying to PROJECT, a root.
+Those are its project budgets and the period budgets of everything or
+of PROJECT; a session's own budgets are left out.  OPTS `:now' fixes
+the reference time."
+  (let ((root (harness-usage--root project)))
+    (mapcar (lambda (b) (harness-usage--budget-status b (plist-get opts :now)))
+            (cl-remove-if-not (lambda (b) (harness-usage--applies-p b root)) harness-usage-budgets))))
 
 (defun harness-usage--warn (sid budget status threshold text)
   "Warn once per period about BUDGET reaching THRESHOLD for session SID.
