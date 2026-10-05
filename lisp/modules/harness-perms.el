@@ -60,12 +60,15 @@
 ;; auto-mode judge: in every mode, yolo and auto included, a directory is
 ;; granted only by a person answering the prompt.
 ;;
-;; A prompt about paths is answered for a glob pattern, not for one
-;; file: by default everything in the directory (`DIR/**'), the one
-;; holding the file or the directory itself.  The user may edit it,
-;; more or less specific, before answering.  A directory prompt grants
-;; or denies the pattern; a tool prompt's answers for the session or
-;; for always record a rule for the tool on the pattern (`:path').
+;; A prompt about a path outside the allowed directories (the jail's,
+;; or an agent's own request for a directory) is answered for a glob
+;; pattern, not for one file: by default everything in the directory
+;; (`DIR/**'), the one holding the file or the directory itself.  The
+;; user may edit it, more or less specific, before answering, and the
+;; answer grants or denies the pattern.  No other prompt has one: the
+;; mode asking, or the judge objecting, is about the call itself, whose
+;; paths the jail already let through, so its answers for the session
+;; or for always record a rule for the tool.
 ;; Roots and rules alike are directories or patterns (see
 ;; `harness-perms--within-p').
 ;;
@@ -119,8 +122,9 @@ directories) or a directory, which stands for everything in it,
 absolute or relative to the session's working directory.  An allow
 rule then needs every path of the call to match it, a deny rule any
 one.  The first matching rule wins.  Rules are added here when a
-permission request is answered with scope `always'; for a call with
-paths, they hold for the pattern of the prompt."
+permission request is answered with scope `always': a tool prompt's
+answer holds for its tool, and \"Always deny\" for a path outside the
+allowed directories holds for the prompt's pattern, whatever the tool."
   :type '(repeat
           (plist
            :tag "Rule"
@@ -194,9 +198,9 @@ weighs what the call would do, never whether an input looks complete.")
 
 (defconst harness-perms-options '(allow-once allow-session allow-always deny-once deny-always)
   "Answer options offered to the user for a permission request.
-For a call with paths, the rule `allow-session', `allow-always' and
-`deny-always' record holds for the prompt's pattern only (see
-`permission/answer').")
+The prompt is about the call, not about where it reaches: the rule
+`allow-session', `allow-always' and `deny-always' record holds for the
+tool (see `permission/answer').")
 
 (defconst harness-perms-dir-options '(allow-once allow-session allow-always deny-once deny-always)
   "Answer options offered when a tool call reaches outside the allowed directories.
@@ -429,34 +433,19 @@ it carries on there instead of stopping.  Otherwise return \"\"."
                 (abbreviate-file-name tmp))
       "")))
 
-;;;; Patterns a prompt about paths is answered for
+;;;; Patterns a prompt about a directory is answered for
 ;;
-;; A prompt about paths (the jail's, an agent's directory request, a
-;; tool call with paths) is answered for a glob pattern rather than one
-;; file: by default everything in the directory (`DIR/**'), the
-;; directory holding a file or the directory itself.  The prompt's
+;; A prompt about a path outside the allowed directories (the jail's,
+;; an agent's directory request) is answered for a glob pattern rather
+;; than one file: by default everything in the directory (`DIR/**'),
+;; the directory holding a file or the directory itself.  The prompt's
 ;; payload carries it as `:pattern' and the user may answer with
 ;; another one, more or less specific, in the answer's `:pattern'.
+;; Only these prompts carry one (see `harness-perms--ask').
 
 (defun harness-perms--default-pattern (dir)
   "Return the pattern a prompt about DIR offers: everything in DIR."
   (concat (file-name-as-directory dir) "**"))
-
-(defun harness-perms--common-dir (a b)
-  "Return the deepest directory holding both directory names A and B."
-  (let* ((same (compare-strings a nil nil b nil nil))
-         (prefix (if (eq same t) a (substring a 0 (1- (abs same))))))
-    (substring prefix 0 (1+ (or (cl-position ?/ prefix :from-end t) -1)))))
-
-(defun harness-perms--paths-dir (paths)
-  "Return the deepest directory that holds every one of PATHS.
-A path stands for its directory (`harness-perms--dir-of'); paths on
-another host than the first one's are left out."
-  (let* ((dirs (mapcar #'harness-perms--dir-of paths))
-         (host (car (harness-perms--split (car dirs)))))
-    (cl-reduce (lambda (a b)
-                 (if (equal host (car (harness-perms--split b))) (harness-perms--common-dir a b) a))
-               (cdr dirs) :initial-value (car dirs))))
 
 (defun harness-perms--expand-pattern (session pattern)
   "Return PATTERN absolute for SESSION: against its cwd, on its host."
@@ -466,7 +455,7 @@ another host than the first one's are left out."
 (defun harness-perms--answered-pattern (session waiting answer)
   "Return the pattern ANSWER to the prompt WAITING of SESSION is for.
 That is the answer's `:pattern', made absolute, or else the pattern
-the prompt offered; nil for a prompt about no path."
+the prompt offered; nil for a prompt that offered none."
   (let ((typed (plist-get answer :pattern)))
     (and (plist-get waiting :pattern)
          (if (and (stringp typed) (not (harness-string-blank-p typed)))
@@ -1236,30 +1225,29 @@ instead of waiting for the user."
   "Turn an undecided REQUEST into a pending request the user answers.
 DECISION is the current value and NEXT continues the chain once
 `permission/answer' arrives.  Without a session module the call is
-denied because nobody can answer."
+denied because nobody can answer.  The prompt is about the call
+itself, not about where it reaches: the jail already let its paths
+through, asking first about any outside the allowed directories.  So
+it offers no pattern, and its answers for the session or for always
+hold for the tool (see `harness-perms--answer-tool')."
   (let* ((session (plist-get request :session))
-         (sid (plist-get session :id))
-         (paths (plist-get request :paths)))
+         (sid (plist-get session :id)))
     (cond
      ((not (eq (plist-get decision :behavior) 'ask)) (funcall next decision))
      ((not (harness-method-exists-p 'session/pending-add))
       (funcall next (list :behavior 'deny :reason "no user available")))
      (t
-      ;; A call with paths is remembered for a pattern, by default
-      ;; everything in the directory that holds them.
-      (let* ((pattern (and paths (harness-perms--default-pattern (harness-perms--paths-dir paths))))
-             (pending (list :kind 'permission
-                            :payload (append (list :tool (plist-get request :tool)
-                                                   :input (plist-get request :input)
-                                                   :kind (plist-get request :kind)
-                                                   :paths paths
-                                                   :call-id (plist-get request :call-id))
-                                             (and pattern (list :pattern pattern))
-                                             (list :title (harness-perms-describe-request request)
-                                                   :reason (harness-perms--judge-prompt-reason decision)
-                                                   :options harness-perms-options))))
+      (let* ((pending (list :kind 'permission
+                            :payload (list :tool (plist-get request :tool)
+                                           :input (plist-get request :input)
+                                           :kind (plist-get request :kind)
+                                           :paths (plist-get request :paths)
+                                           :call-id (plist-get request :call-id)
+                                           :title (harness-perms-describe-request request)
+                                           :reason (harness-perms--judge-prompt-reason decision)
+                                           :options harness-perms-options)))
              (pid (harness-call 'session/pending-add sid pending)))
-        (puthash pid (list :session-id sid :request request :next next :pattern pattern) harness-perms--waiting)
+        (puthash pid (list :session-id sid :request request :next next) harness-perms--waiting)
         (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid)))))))
 
 (defun harness-perms--parse-answer (answer)
@@ -1288,8 +1276,10 @@ the user answered for, when they edited the prompt's, else nil."
   "Answer the permission request PENDING-ID of SESSION-ID with ANSWER.
 ANSWER is (:behavior allow|deny :scope once|session|always :reason
 :pattern), or an option id such as \"allow-session\".  A prompt about
-paths is answered for a glob pattern: the payload's `:pattern' unless
-ANSWER's names another, absolute or relative to the session's cwd.
+a path outside the allowed directories (one with `:dir') is answered
+for a glob pattern: the payload's `:pattern' unless ANSWER's names
+another, absolute or relative to the session's cwd.  Any other prompt
+is answered for its tool.
 Resolves the pending request, records session or standing rules (for
 a directory prompt: grants the pattern to the session or, with
 `always', to every session, or denies it) and lets the tool call
@@ -1314,24 +1304,20 @@ the final decision, or `continue' when a jail prompt hands the call on."
 
 (defun harness-perms--answer-tool (session-id pending-id waiting answer)
   "Answer the tool permission WAITING (PENDING-ID of SESSION-ID) with ANSWER.
-Record session or standing rules and let the tool call continue.  For
-a call with paths the rule holds for the answer's pattern (see
-`harness-perms--answered-pattern') only, not for the tool everywhere."
+Record session or standing rules and let the tool call continue.  The
+prompt offered no pattern (see `harness-perms--ask'), so a rule holds
+for every call of the tool, a `:pattern' in ANSWER notwithstanding;
+the jail still decides where each call may reach."
   (let* ((answer (harness-perms--parse-answer answer))
          (request (plist-get waiting :request))
          (behavior (plist-get answer :behavior))
          (scope (plist-get answer :scope))
-         (pattern (harness-perms--answered-pattern (harness-perms--session session-id) waiting answer))
          (decision (list :behavior behavior :final t
                          :reason (or (plist-get answer :reason)
                                      (if (eq behavior 'allow) "allowed by the user"
                                        "denied by the user")))))
     (when (memq scope '(session always))
-      (harness-perms-add-rule session-id
-                              (append (list :tool (plist-get request :tool))
-                                      (and pattern (list :path pattern))
-                                      (list :behavior behavior))
-                              scope))
+      (harness-perms-add-rule session-id (list :tool (plist-get request :tool) :behavior behavior) scope))
     (harness-perms--resolve session-id pending-id answer)
     (funcall (plist-get waiting :next) decision)
     decision))

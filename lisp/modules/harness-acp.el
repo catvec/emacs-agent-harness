@@ -960,9 +960,10 @@ an agent's own directory request has no \"Allow once\"."
 
 (defun harness-acp--on-permission-requested (sid pending)
   "Ask the connected clients to decide PENDING permission request of SID.
-A request about paths carries the glob pattern it is answered for in
-`_harness.pattern'; a client may answer for another one with
-`_harness.pattern' in its result, next to the outcome."
+A request about a path outside the allowed directories carries the glob
+pattern it is answered for in `_harness.pattern'; a client may answer
+for another one with `_harness.pattern' in its result, next to the
+outcome."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
