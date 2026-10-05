@@ -23,6 +23,9 @@
 ;; when.  The provider's search is still a web_search call to the
 ;; harness: its permission rules decide it and the transcript shows it
 ;; (see `tools/builtin' and `tools/authorize').
+;;
+;; Corporate mode (`harness-corporate-mode') leaves both searches on and
+;; turns web_fetch off (see harness-tools.el).
 
 ;;; Code:
 
@@ -234,7 +237,7 @@ have passed since it was last asked."
 
 (harness-define-tool "web_search"
   :label "Web search"
-  :description "Search the web. Returns a numbered list of results with title, URL and snippet; use web_fetch to read a result."
+  :description "Search the web. Returns a numbered list of results with title, URL and snippet; use web_fetch, if available, to read a result."
   :schema '(:type "object"
             :properties (:query (:type "string" :description "The search query")
                          :count (:type "integer" :description "Number of results, 1-20. Default 5"))

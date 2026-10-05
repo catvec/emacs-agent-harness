@@ -785,8 +785,9 @@ offers the month's API cost minus what the harness recorded.
 ## Corporate mode
 
 Corporate mode turns off the harness features that could carry data off
-your machine. It is meant for work machines whose policy lets code and
-data go to the model provider in use and nowhere else.
+your machine, except web search. It is meant for work machines whose
+policy lets code and data go to the model provider in use, and search
+queries to a search engine, and nowhere else.
 
 Turn it on in `config.el` (Doom) or your init file, before
 `(harness-start)`:
@@ -801,14 +802,21 @@ It turns off:
   ignores `harness-acp-allow-remote`. Pairing phones and other devices
   is refused, and the UI cannot connect to a harness elsewhere
   (`harness-connect-remote`).
-- Network tools. Sessions do not get `web_fetch`, `web_search` or the
-  web search that Claude Code and Copilot run themselves. When a model
-  calls one anyway, the call is denied and the model is told why.
+- Network tools other than web search. Sessions do not get
+  `web_fetch`, which reaches any URL. When a model calls it anyway, the
+  call is denied and the model is told why.
 
 It leaves alone:
 
 - The model provider. The provider you choose still receives what
   sessions send it.
+- Web search. `web_search` sends its queries to the search provider
+  (`harness-websearch-provider`, Brave by default), and Claude Code and
+  Copilot run their own web search on their side (see
+  `harness-websearch-builtin`). Both are `web_search` calls, which the
+  permission rules decide as usual: if your policy rules out web search
+  too, add `(:tool "web_search" :behavior deny)` to
+  `harness-perms-rules`.
 - Shell commands. They follow the permission mode and the sandbox, as
   always, so a command can still reach the network. Use a permission
   mode that asks before commands run (Ask or Accept edits), and set
