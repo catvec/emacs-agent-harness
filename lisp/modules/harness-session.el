@@ -548,7 +548,9 @@ configured at `:cwd'."
           (harness-session-context-window s) (plist-get plist :context-window)
           (harness-session-context-window-limit s)
           (harness-session--context-window-limit-value (plist-get plist :context-window-limit))
-          (harness-session-budget s) (or (plist-get plist :budget) (harness-session--config 'harness-budget cwd))
+          ;; Only a budget given to this session: the Budget setting
+          ;; (`harness-budget') is one budget for all sessions together.
+          (harness-session-budget s) (plist-get plist :budget)
           (harness-session-provider-state s) (plist-get plist :provider-state)
           (harness-session-loaded s) t)
     (puthash (harness-session-id s) s harness-sessions)
@@ -1405,6 +1407,31 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
         (error (harness-log 'warn "session %s: could not settle its interrupted turn: %S"
                             (harness-session-id (car entry)) err))))))
 
+(defconst harness-session--budget-copies-marker "session-budget-copies-dropped.json"
+  "Store document written once the copies of the Budget setting are dropped.")
+
+(defun harness-session--drop-budget-copies ()
+  "Drop the copies of the Budget setting from the loaded sessions, once.
+Sessions used to copy `harness-budget' into a budget of their own when
+they were made, so the setting became one budget per session instead of
+one for them all.  Nothing else gave a session a budget then, so every
+session budget saved before the marker document exists is such a copy.
+After that, a budget a session has was given to it, and stays."
+  (unless (harness-call 'store/load harness-session--budget-copies-marker)
+    (let ((n 0))
+      (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
+        (let ((s (gethash (file-name-base name) harness-sessions)))
+          (when (and s (harness-session-budget s))
+            (setf (harness-session-budget s) nil)
+            (harness-session--save (harness-session-id s))
+            (harness-session--announce s)
+            (cl-incf n))))
+      (harness-call 'store/save harness-session--budget-copies-marker
+                    (list :dropped n :date (format-time-string "%F")))
+      (when (> n 0)
+        (harness-log 'info "session: dropped the copy of the Budget setting from %d session%s"
+                     n (if (= n 1) "" "s"))))))
+
 (defun harness-session--on-kill-emacs () (harness-session-flush))
 
 (defun harness-session--on-models-updated (&rest _)
@@ -1418,6 +1445,7 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
 
 (defun harness-session--init ()
   (harness-session--load-all)
+  (harness-session--drop-budget-copies)
   (harness-on 'provider/models-updated #'harness-session--on-models-updated)
   (add-hook 'kill-emacs-hook #'harness-session--on-kill-emacs))
 
@@ -1434,6 +1462,11 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
 (unless harness-session--window-slot-holds-overrides
   (maphash (lambda (_ s) (setf (harness-session-context-window s) nil)) harness-sessions)
   (setq harness-session--window-slot-holds-overrides t))
+
+;; Nor does it drop the copies of the Budget setting the loaded sessions
+;; may hold: this does, the first time.
+(when (harness-module-ready-p 'session)
+  (harness-session--drop-budget-copies))
 
 (dolist (ev '((session/created . "(ID SESSION)")
               (session/changed . "(ID SESSION) after any change")

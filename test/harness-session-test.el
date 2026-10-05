@@ -1085,6 +1085,43 @@ set for sessions."
             (should (= 9000 (harness-session-test-window id)))))
       (harness-session-test-drop-provider))))
 
+(defvar harness-budget)
+
+(ert-deftest harness-session-budget-setting-copies-dropped-once ()
+  "Sessions used to copy the Budget setting into a budget of their own:
+one budget per session, where the setting is one for them all.  A new
+session no longer does, and the next start drops the copies saved, once:
+a budget given to a session after that stays."
+  (harness-session-test-with
+    (let* ((harness-budget '(:amount 5.0 :hard t))
+           (fresh (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           ;; Sessions as the old version saved them, each with its copy.
+           (old (cl-loop repeat 2
+                         collect (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                          :budget harness-budget)
+                                            :id))))
+      (should-not (plist-get (harness-call 'session/get fresh) :budget))
+      ;; The old version left no marker.
+      (harness-call 'store/delete harness-session--budget-copies-marker)
+      (clrhash harness-sessions)
+      (harness-session--init)
+      (dolist (id (cons fresh old))
+        (should-not (plist-get (harness-call 'session/get id) :budget))
+        (should-not (plist-get (harness-call 'store/load (format "sessions/%s.json" id)) :budget)))
+      (should (= 2 (plist-get (harness-call 'store/load harness-session--budget-copies-marker) :dropped)))
+      ;; Once only: a budget given to a session from now on stays.
+      (harness-call 'session/update (car old) :budget '(:amount 2.0) :silent t)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--init)
+      (should (equal '(:amount 2.0) (plist-get (harness-call 'session/get (car old)) :budget)))
+      ;; Loaded over the old version in a running harness, this one drops
+      ;; the copies the loaded sessions hold.
+      (harness-call 'store/delete harness-session--budget-copies-marker)
+      (harness-test-load-module 'session)
+      (should-not (plist-get (harness-call 'session/get (car old)) :budget))
+      (should (harness-call 'store/load harness-session--budget-copies-marker)))))
+
 ;;;; The thinking level of a BTW
 
 (defvar harness-thinking)

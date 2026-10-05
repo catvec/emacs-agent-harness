@@ -181,7 +181,7 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
          :billing api|subscription|extra-usage :plan "max")    ; billing and plan of the latest call
  :context-window N                  ; in effect: the override, else the model's
  :context-window-override nil|N     ; a window set for the session
- :budget nil|(:amount F :hard BOOL)
+ :budget nil|(:amount F :hard BOOL)    ; given to the session; the Budget setting is not copied
  :head "node-id"
  :queue ((:id "q1" :text "…" :attachments (ATTACHMENT…)) …)
  :pending ((:id "p1" :kind permission|question :payload PLIST :created FLOAT) …)
@@ -321,8 +321,9 @@ project-root `.dir-locals.el` → customize default.  Variables are
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
 (the level BTWs start at, default "low"; nil for the session's),
-`harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
-`harness-non-interactive`.
+`harness-allowed-directories`, `harness-sandbox-policy`,
+`harness-non-interactive`.  `harness-budget` has a global value only:
+it is one budget for all sessions together (see usage).
 
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
@@ -1484,6 +1485,14 @@ non-interactive session it stays a denial.
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
   count billed cost, so calls a subscription covers spend none; a
   baseline counts toward both.
+- The Budget setting (`harness-budget`, `(:amount F :hard BOOL)`) is
+  one implicit budget, id "settings", for all sessions together: it
+  counts every recorded call and applies to every session, after the
+  explicit ones in `usage/session-budgets`.  `usage/budget-status
+  "settings"` gives its status while it is set; `usage/budgets` lists
+  only the explicit ones.  Sessions no longer copy it into their own
+  `:budget`; the session module drops the copies saved before, once
+  (marker `session-budget-copies-dropped.json`).
 - Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
 
 ### fallback

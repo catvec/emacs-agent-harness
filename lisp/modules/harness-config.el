@@ -89,7 +89,12 @@ directories."
   :group 'harness)
 
 (defcustom harness-budget nil
-  "Default per-session budget plist (:amount USD :hard BOOL), or nil."
+  "One budget for all sessions together, as (:amount USD :hard BOOL), or nil.
+It counts everything the harness recorded, every session of every
+project, and applies to every session: a hard one stops the next turn
+of each once it is spent, a soft one only warns.  It has a global
+value only.  Budgets for one project, one session or a calendar period
+are made in the usage dashboard (`harness-usage')."
   :type '(choice (const :tag "No budget" nil)
                  (plist :tag "Budget" :key-type symbol :value-type sexp
                         :options ((:amount (number :tag "Amount (USD)"))
@@ -121,7 +126,7 @@ non-interactive anyway."
 
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
-    harness-allowed-directories harness-budget harness-sandbox-policy harness-non-interactive)
+    harness-allowed-directories harness-sandbox-policy harness-non-interactive)
   "Settings that take part in layering.")
 
 (defconst harness-config-sections
@@ -129,7 +134,11 @@ non-interactive anyway."
      :title "New sessions"
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
      :keys (harness-model harness-thinking harness-btw-thinking harness-permission-mode
-            harness-non-interactive harness-budget))
+            harness-non-interactive))
+    (spending
+     :title "Spending"
+     :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."
+     :keys (harness-budget))
     (safety
      :title "Files and safety"
      :doc "What sessions may reach, and what may run without asking you."
