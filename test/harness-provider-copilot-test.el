@@ -1355,7 +1355,14 @@ found\"; a new conversation must not replace the old one for that."
                      events))
     ;; Its 50 input tokens count; the conversation's size is the main agent's.
     (should (= 62 (plist-get u :input)))
-    (should (= 2112 (plist-get u :context))))
+    (should (= 2112 (plist-get u :context)))
+    ;; The output rate hears of the main conversation's call alone, before
+    ;; the turn's usage counts both.
+    (should (equal '(7) (mapcar (lambda (e) (plist-get e :output))
+                                (cl-remove 'call-usage events
+                                           :key (lambda (e) (plist-get e :type)) :test-not #'eq))))
+    (should (< (cl-position 'call-usage events :key (lambda (e) (plist-get e :type)))
+               (cl-position 'usage events :key (lambda (e) (plist-get e :type))))))
   ;; So is the context size that usage_info reports.
   (let ((turn (harness-provider-copilot--make-turn)))
     (harness-provider-copilot--turn-event turn "session.usage_info" '(:currentTokens 99999) "agent-1")

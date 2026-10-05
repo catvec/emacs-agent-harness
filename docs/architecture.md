@@ -659,6 +659,7 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type checkpoint :checkpoint PLIST :call-id "…")  ; hosted loops: where the conversation stands
 (:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N
        :list-cost F-OR-NIL :billing api|subscription|extra-usage|nil :plan ID)  ; see Usage record
+(:type call-usage :output N)            ; hosted loops: one model call's output, counted by the turn's usage
 (:type provider-state :state PLIST)     ; persist on the session
 (:type activity :phase PHASE :tool NAME :chars N)  ; what the model is busy with, see below
 (:type quota :windows (…))
@@ -714,6 +715,19 @@ fragments, so without them a turn shows nothing for as long as the model
 thinks or writes a large input.  The OpenAI provider sends `tool-input`.
 Text deltas that are only whitespace are still text (a `"\n\n"` delta
 separates paragraphs); the agent keeps them from opening a message.
+
+`call-usage` reports the output tokens of one model call of a hosted
+loop's turn as soon as the call ends. A hosted loop sends a single
+`usage` event, for the whole turn, at its end, and that event is the one
+that counts: `call-usage` is not recorded anywhere. The agent passes it
+on as `agent/call-usage`, so the usage module can measure the output
+rate during a long turn.
+- Claude Code sends the output that each `message_delta` adds to its
+  message.
+- Copilot sends each main-conversation `assistant.usage`. Sub-agent
+  calls do not count, because their deltas do not stream into the
+  conversation either.
+- Native loops send none: their `usage` event is already per call.
 
 Forking: `provider/fork` returns a new provider state that may be marked
 pending (for the CLI: `(:cli-session-id PARENT :fork-pending t)`); the
@@ -1485,6 +1499,28 @@ non-interactive session it stays a denial.
   count billed cost, so calls a subscription covers spend none; a
   baseline counts toward both.
 - Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
+- Output rate: how fast each session's model writes, measured here in
+  the harness process, never in the UI.
+  - Tokens: the accounting's own counts, never a second count of the
+    stream. Each `session/usage` record supplies them, and on a hosted
+    loop so does each model call's `agent/call-usage` (see provider
+    `call-usage`). A hosted loop's record of the turn's total is not
+    measured again once its calls were.
+  - Seconds: the streaming time, meaning the time the agent's activity
+    (`agent/activity-changed`) is in `thinking`, `writing` or
+    `tool-input`. The wait for the first token, the tools' runs and
+    compaction do not count.
+  - Calls: a call with no output, or with less than 0.25 s of streaming
+    (output that arrived all at once), is left out.
+  - The rate: Σoutput / Σseconds over the session's newest calls on its
+    current model, counting back until they cover
+    `harness-usage-rate-window` seconds of streaming (30). It is kept in
+    memory after the turn, so an idle session keeps its last rate, and
+    is dropped when the session is deleted.
+  - Interface: `usage/rate SID` returns `(:rate F :output N :seconds F
+    :calls N :at FLOAT :model ID)` or nil. `usage/rates` returns every
+    measured session's rate, each with `:session`. Each new rate
+    triggers `usage/rate-updated SID RATE`, which ACP forwards.
 
 ### fallback
 
@@ -2630,8 +2666,17 @@ a notice and the compose box, and the first message sent from it resumes
 it (through `agent/prompt`).  The header line shows the session's
 status, name, model, permission mode, whether it is non-interactive
 ("non-interactive" in `harness-non-interactive-face`, else a dim
-"interactive"), thinking level, context, cost and [menu]; clicking a
-setting changes it, and the non-interactive one toggles.  Other UI
+"interactive"), thinking level, context, output rate, cost and [menu]; clicking a
+setting changes it, and the non-interactive one toggles.  The output
+rate ("48 tok/s", `harness-ui-format-rate`) is the session's rate as the
+usage module measured it. It is dimmed when the session is not running,
+because it is then the last rate measured. The session has no rate
+until it has been measured, and a narrow window drops the rate first.
+The UI keeps the rates in a cache (`harness-ui-session-rate`). It is
+filled with `_harness/usage/rates` on connect and kept current by
+`usage/rate-updated`. Every change runs `harness-ui-rate-functions`,
+which redraws the chat headers, the session list and the task board.
+Other UI
 modules hook into a chat buffer without owning it:
 `harness-chat-send-functions` sees each message sent
 or queued from its box (the text as typed, and the attachments),
@@ -2791,7 +2836,7 @@ images).  In corporate mode the page shows a notice only.
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in six
 sections -- requires your input, ready for review, merging, in progress,
 pending, completed -- with each card's current todo, progress, elapsed
-time, cost and merge state, one-click answers to a blocked task's
+time, output rate (while its session is open), cost and merge state, one-click answers to a blocked task's
 question or
 permission, and a compose box that submits a task, edits a pending one,
 messages a task's session, answers its question or takes the feedback
@@ -2916,7 +2961,8 @@ at point, `d` removes it (or the budget at point), `c` clears its mark.
 It follows `fallback/changed` and `config/changed`.
 
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
-children, filter/sort by any column; SPC on a session pops out what it
+children, filter/sort by any column; a Tok/s column shows each session's
+output rate, dimmed while it is not running; SPC on a session pops out what it
 waits on (a session that waits on nothing leaves SPC scrolling), its
 status cell's tooltip says so (`harness-ui-sessions-requests`);
 scoped to the current project, its
@@ -2941,7 +2987,7 @@ with it or with other BTWs (`session/btw`), or, over a view that sets
 in the session's own chat buffer with point in its compose box, so the
 question is written and sent like any message; nothing is read in the
 minibuffer.  The buffer is the full chat: its header line (model,
-permission mode, non-interactive, thinking, context, cost, [menu]),
+permission mode, non-interactive, thinking, context, output rate, cost, [menu]),
 keys and menu are a session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
 front of the header through `harness-chat-header-functions` (what it
 is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep

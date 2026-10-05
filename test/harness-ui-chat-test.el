@@ -366,6 +366,43 @@ on a background and bar of its own; the user's own messages are as before."
             (should-not (string-match-p "\n" (get-text-property pos 'help-echo header)))
             (should (get-text-property pos 'local-map header))))))))
 
+(ert-deftest harness-ui-chat-header-shows-the-output-rate ()
+  "The header says how fast the session's model wrote, as the harness measured it.
+The harness times the turn's streaming; the figure stays once the
+session is idle, dimmed, and makes room first in a narrow window."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'usage)
+    (clrhash harness-ui--rates)
+    (let* ((sid (harness-ui-chat-test-session "Rate"))
+           (buf (harness-ui-chat-test-open sid))
+           (harness-provider-demo--delay 0.05)
+           (harness-provider-demo-script-override
+            (append (make-list 8 '(:type text :delta "word "))
+                    '((:type usage :input 100 :output 40 :cost 0.0001 :context 100)
+                      (:type done :stop-reason end-turn)))))
+      (with-current-buffer buf
+        (should-not (string-match-p "tok/s" (harness-chat--header most-positive-fixnum))))
+      (harness-ui-chat-test-prompt buf "hello")
+      (harness-test-wait (lambda () (harness-ui-session-rate sid)) 5 "the rate")
+      (let ((rate (harness-ui-session-rate sid)))
+        (should (= 40 (plist-get rate :output)))
+        (should (= 1 (plist-get rate :calls)))
+        (should (equal "demo:scripted" (plist-get rate :model)))
+        (with-current-buffer buf
+          (let* ((full (harness-chat--header most-positive-fixnum))
+                 (text (concat (harness-ui-format-rate-number (plist-get rate :rate)) " tok/s"))
+                 (pos (string-search text full)))
+            (should pos)
+            ;; After the context, before the spend.
+            (should (< (string-search (harness-ui-format-context (harness-ui-session sid)) full) pos))
+            (should (< pos (string-search "$" full)))
+            (should (memq 'harness-dim-face (ensure-list (get-text-property pos 'face full))))
+            (should (string-prefix-p "Last output rate: " (get-text-property pos 'help-echo full)))
+            ;; A column short, the rate goes and the rest stays.
+            (should (equal (string-replace (concat "  " text) "" (substring-no-properties full))
+                           (substring-no-properties
+                            (harness-chat--header (1- (harness-ui-header-string-width full))))))))))))
+
 (ert-deftest harness-ui-chat-hover-help-is-one-line ()
   "Every tooltip of a rendered session fits one echo-area line.
 With tooltips off (`tooltip-mode' nil) the help shows in the echo area,

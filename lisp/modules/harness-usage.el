@@ -36,6 +36,12 @@
 ;; Storage is one code path: rows are loaded from whichever backend is
 ;; in use into plists and aggregated in Lisp.  SQLite only narrows the
 ;; rows it returns; the Lisp filter and aggregation are the reference.
+;;
+;; Output rates say how fast each session's model writes: the output
+;; tokens of its latest model calls, as the usage records count them,
+;; over the seconds the agent's activity spent streaming them (see
+;; "Output rate" below).  They are measured here, in the harness, and
+;; kept in memory; `usage/rate-updated' announces each new one.
 
 ;;; Code:
 
@@ -456,6 +462,160 @@ cost when a subscription paid.  Budgets are checked after."
                           :billing billing
                           :turn (plist-get totals :turns)))
       (harness-usage--check session))))
+
+;;;; Output rate
+
+;; How fast a session's model writes: output tokens per second of
+;; streaming.  The tokens are the ones the accounting counts.  Each
+;; `session/usage' record supplies them, and so does each model call of
+;; a hosted loop's turn (`agent/call-usage'), which the provider reports
+;; without counting it: the turn records its total once, at its end.
+;; The seconds are the ones the agent's activity spends streaming:
+;; thinking, writing, or writing a tool call's input.  Waiting for the
+;; first token and running tools do not count.  A session's rate is the
+;; average of its latest calls on its current model, over up to
+;; `harness-usage-rate-window' seconds of streaming.  It is kept after
+;; the turn, so an idle session still shows how fast it wrote last.
+
+(defcustom harness-usage-rate-window 30
+  "Seconds of streaming that a session's output rate averages over.
+The rate is the output of the session's newest model calls divided by
+the time they streamed, counting back until that time reaches this
+many seconds."
+  :type 'number :group 'harness)
+
+(defconst harness-usage--rate-min-seconds 0.25
+  "Least streaming time over which a model call's output is measured.
+A call whose output arrived all at once, or nearly so, says nothing
+about how fast the model writes, and is left out of the rate.")
+
+(defconst harness-usage--streaming-phases '(thinking writing tool-input)
+  "Agent activity phases during which the model streams its output.")
+
+(defvar harness-usage--meters (make-hash-table :test 'equal)
+  "Session id -> how long its turn has streamed since its last measured call.
+A plist (:since FLOAT-OR-NIL :seconds F :reported BOOL).  `:since' is
+when the stream now open began, and `:seconds' is the streaming already
+closed.  `:reported' says that the turn's calls reported their own
+usage, so the record of the turn's total is not measured again.")
+
+(defvar harness-usage--calls (make-hash-table :test 'equal)
+  "Session id -> its latest measured model calls, newest first.
+Each is (OUTPUT SECONDS MODEL).  Together they cover up to
+`harness-usage-rate-window' seconds of streaming.")
+
+(defvar harness-usage--rates (make-hash-table :test 'equal)
+  "Session id -> its output rate, as `usage/rate' returns it.")
+
+(defun harness-usage--meter (sid)
+  "Return the streaming meter of session SID, starting one if needed."
+  (or (gethash sid harness-usage--meters)
+      (puthash sid (list :since nil :seconds 0.0 :reported nil) harness-usage--meters)))
+
+(defun harness-usage--on-activity (sid activity)
+  "Open or close SID's streaming interval as its ACTIVITY changes.
+`agent/activity-changed' handler: ACTIVITY is nil once the turn ends."
+  (let* ((meter (harness-usage--meter sid))
+         (streaming (memq (plist-get activity :phase) harness-usage--streaming-phases))
+         (since (plist-get meter :since)))
+    (cond ((and streaming (not since))
+           (setf (plist-get meter :since) (float-time)))
+          ((and since (not streaming))
+           (setf (plist-get meter :seconds) (+ (plist-get meter :seconds) (- (float-time) since))
+                 (plist-get meter :since) nil)))))
+
+(defun harness-usage--reset-meter (sid &rest _)
+  "Start SID's streaming meter afresh: its turn starts or has ended."
+  (remhash sid harness-usage--meters))
+
+(defun harness-usage--take-seconds (sid)
+  "Return how long SID streamed since its last measured call; restart the count.
+A stream that is still open goes on counting from now."
+  (if-let* ((meter (gethash sid harness-usage--meters)))
+      (let* ((now (float-time))
+             (since (plist-get meter :since))
+             (seconds (+ (plist-get meter :seconds) (if since (- now since) 0))))
+        (setf (plist-get meter :seconds) 0.0
+              (plist-get meter :since) (and since now))
+        seconds)
+    0.0))
+
+(defun harness-usage--measure (sid output seconds)
+  "Add a model call in which session SID wrote OUTPUT tokens in SECONDS.
+A call without output, or one too short to measure, is left out.
+Calls made on another model than the session's current one are
+dropped.  The new rate is announced as `usage/rate-updated' and returned."
+  (when (and (numberp output) (> output 0)
+             (>= seconds harness-usage--rate-min-seconds)
+             (harness-call 'session/exists-p sid))
+    (let* ((model (plist-get (harness-call 'session/get sid) :model))
+           (calls (cons (list (harness-usage--int output) (float seconds) model)
+                        (cl-remove-if-not (lambda (call) (equal (nth 2 call) model))
+                                          (gethash sid harness-usage--calls))))
+           (kept nil) (tokens 0) (streamed 0.0))
+      (while (and calls (< streamed harness-usage-rate-window))
+        (let ((call (pop calls)))
+          (push call kept)
+          (cl-incf tokens (nth 0 call))
+          (cl-incf streamed (nth 1 call))))
+      (setq kept (nreverse kept))
+      (puthash sid kept harness-usage--calls)
+      (let ((rate (list :rate (/ tokens streamed) :output tokens :seconds streamed
+                        :calls (length kept) :at (float-time) :model model)))
+        (puthash sid rate harness-usage--rates)
+        (harness-emit 'usage/rate-updated sid rate)
+        rate))))
+
+(defun harness-usage--on-usage-rate (id _totals record)
+  "Measure the model call that usage RECORD of session ID stands for.
+`session/usage' handler.  The record that totals a hosted loop's turn
+is not measured if the turn's calls already reported their own usage."
+  (when (numberp (plist-get record :output))
+    (let ((seconds (harness-usage--take-seconds id))
+          (meter (gethash id harness-usage--meters)))
+      (if (plist-get meter :reported)
+          (setf (plist-get meter :reported) nil)
+        (harness-usage--measure id (plist-get record :output) seconds)))))
+
+(defun harness-usage--on-call-usage (sid usage)
+  "Measure a model call of SID's hosted turn: USAGE says what it wrote.
+`agent/call-usage' handler.  USAGE is a plist with `:output'."
+  (let ((seconds (harness-usage--take-seconds sid))
+        (meter (harness-usage--meter sid)))
+    (setf (plist-get meter :reported) t)
+    (harness-usage--measure sid (plist-get usage :output) seconds)))
+
+(defun harness-usage--forget-rate (sid &rest _)
+  "Forget the meter and the output rate of SID, a session that was deleted."
+  (remhash sid harness-usage--meters)
+  (remhash sid harness-usage--calls)
+  (remhash sid harness-usage--rates))
+
+(harness-defmethod usage/rate (session-id)
+  "Return how fast SESSION-ID's model writes, or nil if it was never measured.
+The value is (:rate F :output N :seconds F :calls N :at FLOAT :model
+ID).  The session's latest N calls on MODEL wrote OUTPUT tokens in
+SECONDS of streaming, which is F tokens per second.  The newest call was
+measured at AT.  The rate stays after the turn ends.  See
+`harness-usage-rate-window'."
+  (gethash session-id harness-usage--rates))
+
+(harness-defmethod usage/rates ()
+  "Return the output rate of every measured session, newest first.
+Each is what `usage/rate' returns for the session, with `:session' added."
+  (let (out)
+    (maphash (lambda (sid rate) (push (append (list :session sid) rate) out))
+             harness-usage--rates)
+    (sort out (lambda (a b) (> (plist-get a :at) (plist-get b :at))))))
+
+(defun harness-usage--watch-rates ()
+  "Measure output rates from streaming and usage (idempotent)."
+  (harness-on 'agent/activity-changed #'harness-usage--on-activity)
+  (harness-on 'agent/turn-started #'harness-usage--reset-meter)
+  (harness-on 'agent/turn-ended #'harness-usage--reset-meter)
+  (harness-on 'agent/call-usage #'harness-usage--on-call-usage)
+  (harness-on 'session/usage #'harness-usage--on-usage-rate)
+  (harness-on 'session/deleted #'harness-usage--forget-rate))
 
 ;;;; Queries
 
@@ -949,16 +1109,23 @@ VALUE is the gate so far, NEXT continues the chain, SESSION is the plist."
   (harness-usage--db)
   (harness-usage--load-budgets)
   (harness-on 'session/usage #'harness-usage--on-session-usage)
+  (harness-usage--watch-rates)
   (harness-add-filter 'agent/before-turn #'harness-usage--before-turn 30))
 
 (harness-declare-event 'usage/recorded "(ROW) after a usage row is stored.")
 (harness-declare-event 'usage/budget-warning "(SESSION-ID BUDGET STATUS) when a budget crosses 80% or 100%.")
 (harness-declare-event 'usage/budgets-changed "(BUDGETS) after a budget is added, replaced or removed.")
+(harness-declare-event 'usage/rate-updated "(SESSION-ID RATE) after a model call of the session was measured; RATE as `usage/rate' returns it.")
 
 (harness-define-module 'usage
-  :doc "Cost accounting, usage summaries and budgets."
+  :doc "Cost accounting, usage summaries, budgets and output rates."
   :requires '(store session provider)
   :init #'harness-usage--init)
+
+;; A reload does not initialise a running module again: subscribe the
+;; handlers this version adds now.
+(when (harness-module-ready-p 'usage)
+  (harness-usage--watch-rates))
 
 (provide 'harness-usage)
 ;;; harness-usage.el ends here

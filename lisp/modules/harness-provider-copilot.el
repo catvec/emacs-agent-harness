@@ -1128,9 +1128,13 @@ present, as in the CLI's own accounting."
 (defun harness-provider-copilot--add-usage (turn data agent)
   "Add the model call that assistant.usage DATA reports to TURN.
 AGENT, the sub-agent that made the call, adds to the cost but not to
-the size of the main conversation."
+the size of the main conversation.  A call of the main conversation is
+reported as a `call-usage' event, for the output rate; the turn's
+`usage' event counts it with the rest."
   (let* ((call (harness-provider-copilot-call-usage data))
          (sum (harness-provider-copilot-turn-usage turn)))
+    (unless agent
+      (harness-provider-copilot--emit turn (list :type 'call-usage :output (plist-get call :output))))
     (dolist (k '(:input :output :cache-read :cache-write))
       (setq sum (plist-put sum k (+ (or (plist-get sum k) 0) (plist-get call k)))))
     (dolist (k '(:nano-aiu :requests))

@@ -745,6 +745,10 @@ is that model's provider's, whatever the session's model is by now."
                              :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
                              :billing (plist-get ev :billing) :plan (plist-get ev :plan)
                              :context (plist-get ev :context))))
+        ;; A model call of a hosted loop's turn, which the turn's `usage'
+        ;; counts: announced for the output rate, recorded nowhere.
+        ('call-usage
+         (harness-emit 'agent/call-usage sid (harness-plist-remove ev :type)))
         ('provider-state
          (harness-call 'session/set-provider-state sid
                        (harness-tag-provider-state
@@ -1209,6 +1213,8 @@ from the first item's sender."
               (agent/stream . "(SESSION-ID NODE-ID KIND DELTA)")
               (agent/tool-call . "(SESSION-ID NODE)") (agent/tool-result . "(SESSION-ID NODE)")
               (agent/steered . "(SESSION-ID)") (agent/quota . "(SESSION-ID WINDOWS)")
+              (agent/call-usage
+               . "(SESSION-ID USAGE) when a model call of a hosted loop's turn reports its usage, (:output N); the turn's `usage' event counts it")
               (agent/activity-changed
                . "(SESSION-ID ACTIVITY) when what a running turn does changes; ACTIVITY nil once it ends (see `agent/activity')")))
   (harness-declare-event (car ev) (cdr ev)))

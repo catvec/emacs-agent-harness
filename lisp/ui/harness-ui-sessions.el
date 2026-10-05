@@ -3,7 +3,8 @@
 ;;; Commentary:
 
 ;; A `tabulated-list-mode' buffer of sessions: status, name, kind,
-;; model, permission mode, context, cost, age and project.  Child
+;; model, permission mode, context, output rate (tokens per second,
+;; dimmed once the session is idle), cost, age and project.  Child
 ;; sessions (forks, BTW conversations, sub-agents) are indented under
 ;; their parents.  Scoped to the current project by default; `a'
 ;; toggles all projects; `/' filters fuzzily; column headers sort.
@@ -137,6 +138,7 @@ model, status, kind and permission mode."
            (harness-ui-model-label (plist-get s :model))
            (if-let* ((m (plist-get s :permission-mode))) (harness-ui-permission-mode-label m) "")
            (harness-ui-format-context s)
+           (or (harness-ui-format-rate s t) "")
            (harness-ui-format-spend s)
            (harness-relative-time (or (plist-get s :updated) 0))
            (propertize (file-name-nondirectory (directory-file-name (or (plist-get s :project) ""))) 'face 'harness-dim-face)))))
@@ -155,6 +157,11 @@ model, status, kind and permission mode."
   (lambda (a b)
     (let ((x (harness-ui-session (car a))) (y (harness-ui-session (car b))))
       (< (or (harness-plist-get-in x col) 0) (or (harness-plist-get-in y col) 0)))))
+
+(defun harness-ui-sessions--rate< (a b)
+  "Order entries A and B by their sessions' output rates, unmeasured first."
+  (< (or (plist-get (harness-ui-session-rate (car a)) :rate) -1)
+     (or (plist-get (harness-ui-session-rate (car b)) :rate) -1)))
 
 (defun harness-ui-sessions--spend< (a b)
   "Order entries A and B by what their sessions cost at API prices.
@@ -193,6 +200,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
                 (list "Model" 26 t)
                 (list "Mode" 13 t)
                 (list "Context" 12 (harness-ui-sessions--number< '(:usage :context)))
+                (list "Tok/s" 6 #'harness-ui-sessions--rate< :right-align t)
                 (list "Cost" 10 #'harness-ui-sessions--spend<)
                 (list "Updated" 9 (harness-ui-sessions--number< '(:updated)))
                 (list "Project" 30 t)))
@@ -238,6 +246,11 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
 
 (defun harness-ui-sessions--on-changed ()
   (harness-debounce 'harness-ui-sessions 0.15 #'harness-ui-sessions--redraw))
+
+(defun harness-ui-sessions--on-rate (_id _rate)
+  "Redraw the list, which shows output rates."
+  (when (get-buffer harness-ui-sessions--buffer-name)
+    (harness-ui-sessions--on-changed)))
 
 ;;;; Tasks
 
@@ -403,6 +416,7 @@ this command existed: SPC scrolls the list."
 
 (defun harness-ui-sessions--init ()
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)
+  (add-hook 'harness-ui-rate-functions #'harness-ui-sessions--on-rate)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--redraw)
   ;; After a reload or reconnect the tasks may be another harness's.
   (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--fetch-tasks)

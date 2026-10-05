@@ -543,6 +543,9 @@ card's title, so the prompt shows here."
                         ('done (let ((completed (harness-ui-tasks--completed task)))
                                  (and (> completed 0) (format "done %s" (harness-relative-time completed)))))
                         (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))
+                      ;; How fast the session writes, while it is open.
+                      (and session (not (equal (plist-get session :status) "inactive"))
+                           (harness-ui-format-rate session))
                       (and session (> (harness-usage-list-cost usage) 0)
                            (harness-ui-format-spend session))))))
     (propertize (string-join parts " · ") 'face 'harness-dim-face)))
@@ -1238,15 +1241,16 @@ board, so what was skipped is only skipped while both are unchanged."
 
 (defun harness-ui-tasks--board-key ()
   "Return what the board region's drawing depends on.
-The tasks and their sessions (their status, todos and cost feed the
-cards), the clock, the caps the window allows, and the state a card
-cannot show: which column is folded, which is expanded, which tasks
-are submitting, which cards you folded their recap on, and whether
-finished work waits for your review."
+The tasks and their sessions (their status, todos, cost and output
+rate feed the cards), the clock, the caps the window allows, and the
+state a card cannot show: which column is folded, which is expanded,
+which tasks are submitting, which cards you folded their recap on, and
+whether finished work waits for your review."
   (list harness-ui-tasks--tasks
         (mapcar (lambda (session)
                   (list (plist-get session :id) (plist-get session :name) (plist-get session :status)
-                        (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)))
+                        (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)
+                        (harness-ui-session-rate (plist-get session :id))))
                 (harness-ui-sessions))
         (truncate (float-time) 5)
         (harness-ui-tasks--window)
@@ -1877,6 +1881,14 @@ anything that moves a task without one, so a board never drifts.")
   "Session names, statuses, todos and costs feed the cards."
   (dolist (b (harness-ui-tasks--buffers))
     (when (buffer-local-value 'harness-ui-tasks--tasks b)
+      (harness-ui-tasks--schedule-render b))))
+
+(defun harness-ui-tasks--on-rate (id _rate)
+  "Redraw the boards with a card of session ID, which shows its output rate.
+ID nil, after every rate was fetched again, redraws every board."
+  (dolist (b (harness-ui-tasks--buffers))
+    (when (cl-some (lambda (task) (or (null id) (equal (plist-get task :session) id)))
+                   (buffer-local-value 'harness-ui-tasks--tasks b))
       (harness-ui-tasks--schedule-render b))))
 
 (defun harness-ui-tasks--on-redraw ()
@@ -2638,6 +2650,7 @@ BTW over the board; a failure shows on the board too."
 (defun harness-ui-tasks--init ()
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
+  (add-hook 'harness-ui-rate-functions #'harness-ui-tasks--on-rate)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
   (setq harness-ui-tasks--timer (run-with-timer harness-ui-tasks--tick-interval harness-ui-tasks--tick-interval #'harness-ui-tasks--tick))

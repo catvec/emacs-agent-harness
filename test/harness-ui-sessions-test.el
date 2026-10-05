@@ -93,9 +93,44 @@ It is named ID unless PROPS, which go first, say otherwise."
   (declare (indent 0))
   `(let ((harness-ui-event-functions nil)
          (harness-ui-redraw-hook nil)
-         (harness-ui-sessions-changed-hook nil))
+         (harness-ui-sessions-changed-hook nil)
+         (harness-ui-rate-functions nil))
      (harness-ui-sessions--init)
      ,@body))
+
+(ert-deftest harness-ui-sessions-show-output-rates ()
+  "The Tok/s column shows each measured session's output rate and sorts by it.
+An idle session's figure is its last, dimmed; a new one redraws the list."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (let ((harness-ui--rates (make-hash-table :test 'equal)))
+        (harness-ui-sessions-test--add "fast" root :status "running")
+        (harness-ui-sessions-test--add "slow" root)
+        (harness-ui-sessions-test--add "never" root)
+        (puthash "fast" '(:rate 61.4 :output 600 :seconds 9.8 :calls 2 :at 1000.0 :model "demo:scripted")
+                 harness-ui--rates)
+        (puthash "slow" '(:rate 4.3 :output 17 :seconds 4.0 :calls 1 :at 900.0 :model "demo:scripted")
+                 harness-ui--rates)
+        (let ((default-directory root)) (harness-sessions))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (let* ((column (cl-position "Tok/s" tabulated-list-format :key #'car :test #'equal))
+                 (cell (lambda (id) (aref (cadr (assoc id tabulated-list-entries)) column))))
+            (should (equal "61" (substring-no-properties (funcall cell "fast"))))
+            (should (equal "4.3" (substring-no-properties (funcall cell "slow"))))
+            (should (equal "" (funcall cell "never")))
+            (should-not (get-text-property 0 'face (funcall cell "fast")))
+            (should (eq 'harness-dim-face (get-text-property 0 'face (funcall cell "slow"))))
+            (should (string-prefix-p "Last output rate: 4.3 tokens per second"
+                                     (get-text-property 0 'help-echo (funcall cell "slow"))))
+            ;; Sorting by the column puts the unmeasured first, the fastest last.
+            (let ((sorter (nth 2 (aref tabulated-list-format column))))
+              (should (equal '("never" "slow" "fast")
+                             (mapcar #'car (sort (copy-sequence tabulated-list-entries) sorter)))))
+            ;; A rate from the harness redraws the list.
+            (harness-ui--store-rate "never" '(:rate 120.0 :output 1200 :seconds 10.0 :calls 1
+                                              :at 1100.0 :model "demo:scripted"))
+            (harness-test-wait (lambda () (equal "120" (substring-no-properties (funcall cell "never"))))
+                               5 "the list to show the new rate")))))))
 
 (ert-deftest harness-ui-sessions-project-includes-its-worktrees ()
   "A task's session in a worktree is listed with its project, not another's."
