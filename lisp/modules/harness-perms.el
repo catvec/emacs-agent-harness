@@ -69,6 +69,15 @@
 ;; Roots and rules alike are directories or patterns (see
 ;; `harness-perms--within-p').
 ;;
+;; A shell command's only path is where it runs, which is all the jail
+;; checks; what it reaches is read off the command line (see "What a
+;; shell command reaches").  Its prompt is about the paths it names
+;; outside the session's directories, and its pattern is theirs, so
+;; `ls ~/.claude/projects' run in the project is answered for
+;; ~/.claude/projects/**, not for every command run in the project; a
+;; command that names nothing outside is about where it runs, as
+;; before.
+;;
 ;; Switching a session that is waiting on a prompt into yolo mode answers
 ;; the prompt: the call was open only because the old mode asked, and
 ;; yolo would have allowed it.  A standing rule still decides, and a
@@ -118,9 +127,12 @@ to calls with paths: a glob (`*' within a name, `**' across
 directories) or a directory, which stands for everything in it,
 absolute or relative to the session's working directory.  An allow
 rule then needs every path of the call to match it, a deny rule any
-one.  The first matching rule wins.  Rules are added here when a
-permission request is answered with scope `always'; for a call with
-paths, they hold for the pattern of the prompt."
+one.  A shell command's paths, for an allow rule, are the ones its
+command line names outside the session's directories, or where it
+runs when it names none there; a deny rule weighs every path it names
+and where it runs.  The first matching rule wins.  Rules are added
+here when a permission request is answered with scope `always'; for a
+call with paths, they hold for the pattern of the prompt."
   :type '(repeat
           (plist
            :tag "Rule"
@@ -428,6 +440,215 @@ it carries on there instead of stopping.  Otherwise return \"\"."
         (format " For scratch files use your own temporary directory, %s: it is already allowed, bash included."
                 (abbreviate-file-name tmp))
       "")))
+
+;;;; What a shell command reaches
+;;
+;; The jail knows where a shell command runs, its `:paths' (the bash
+;; tool's working directory), not what the command does there: `ls
+;; ~/.claude' runs in the project and reads elsewhere.  A prompt about
+;; it and the rules about paths need what it reaches, so that is read
+;; off the command line: the words that are paths, as
+;; `harness-perms--command-paths' finds them.  It is a best-effort
+;; reading, not a shell parser, and the jail does not use it: a command
+;; is confined by the sandbox and decided by the mode and the judge,
+;; which read it whole.
+;;
+;; What the call is about, its subject (`harness-perms--subject-paths'),
+;; is then the paths it names outside the session's directories, or,
+;; when it names none there, where it runs, as for every other call.  A
+;; prompt shows those and offers their directory as its pattern, and an
+;; allow rule must hold every one of them; a deny rule applies to any
+;; path the call names or runs in.
+
+(defconst harness-perms--shell-keywords
+  '("!" "{" "}" "if" "then" "else" "elif" "fi" "do" "done" "while" "until"
+    "for" "in" "case" "esac" "select" "function" "time")
+  "Shell words after which a command, not an argument, comes.")
+
+(defconst harness-perms--shell-prefixes
+  '("sudo" "doas" "env" "exec" "command" "builtin" "nohup" "nice" "ionice" "xargs"
+    "stdbuf" "chronic" "unbuffer")
+  "Programs that run the command following them and their options.")
+
+(defconst harness-perms--pseudo-files
+  "\\`/\\(?:dev/\\(?:null\\|zero\\|full\\|random\\|urandom\\|tty\\|stdin\\|stdout\\|stderr\\|fd/[0-9]+\\)\\|proc/self/fd/[0-9]+\\)\\'"
+  "Regexp of the files a command names that hold nothing of anyone's.")
+
+(defun harness-perms--shell-words (command)
+  "Return the words of shell COMMAND as (WORD . PROGRAM) pairs, in order.
+Quotes and backslashes are undone and comments left out.  PROGRAM is
+non-nil for the word a command starts with, the program it runs: the
+first word of the line or after an operator (`;', `&', `|', `(', `$(',
+`<(', an opening backquote), after NAME=VALUE assignments and keywords
+such as `then', and after a prefix such as `sudo' or `xargs' and its
+options.  A word after a redirection (`>', `<') is no program, and
+neither is one after the end of a substitution or a subshell.  It is
+a best-effort reading, not a parser: $HOME and other expansions stay
+as written, and a here-document's lines are read as commands."
+  (let ((i 0) (n (length command))
+        (word nil)                      ; the word being read
+        (program t)                     ; t, `prefix' or nil: a command comes next
+        (target nil)                    ; the next word follows a redirection
+        (backquoted nil)                ; inside `...`
+        (words nil))
+    (cl-labels ((finish ()
+                  (when word
+                    (cond
+                     (target (push (cons word nil) words) (setq target nil))
+                     ((not program) (push (cons word nil) words))
+                     ((or (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" word)
+                          (and (eq program 'prefix) (string-prefix-p "-" word)))
+                      ;; An assignment, or an option of a prefix: the
+                      ;; command is still to come.
+                      (push (cons word nil) words))
+                     ((member word harness-perms--shell-keywords) (push (cons word t) words))
+                     (t (push (cons word t) words)
+                        (setq program (and (member word harness-perms--shell-prefixes) 'prefix))))
+                    (setq word nil)))
+                (add (s) (setq word (concat word s)))
+                (peek (k) (and (< (+ i k) n) (aref command (+ i k))))
+                (command-starts () (finish) (setq program t target nil)))
+      (while (< i n)
+        (let ((c (aref command i)))
+          (cond
+           ((memq c '(?\s ?\t)) (finish))
+           ((eq c ?\n) (command-starts))
+           ((eq c ?\\)
+            (unless (eq (peek 1) ?\n) (add (string (or (peek 1) ?\\))))
+            (setq i (1+ i)))
+           ((eq c ?')
+            (let ((end (or (cl-position ?' command :start (1+ i)) n)))
+              (add (substring command (1+ i) end))
+              (setq i end)))
+           ((eq c ?\")
+            (setq i (1+ i))
+            (add "")
+            (while (and (< i n) (not (eq (aref command i) ?\")))
+              (if (and (eq (aref command i) ?\\) (memq (peek 1) '(?\" ?\\ ?$ ?` ?\n)))
+                  (progn (unless (eq (peek 1) ?\n) (add (string (peek 1))))
+                         (setq i (+ i 2)))
+                (add (string (aref command i)))
+                (setq i (1+ i)))))
+           ((and (eq c ?#) (null word))
+            (setq i (1- (or (cl-position ?\n command :start i) n))))
+           ((or (memq c '(?> ?<)) (and (eq c ?&) (eq (peek 1) ?>)))
+            ;; A redirection: >, >>, >|, >&, &>, &>>, <, <<, <<<, <&.
+            ;; <( and >( are process substitutions, which run a command.
+            (finish)
+            (if (eq (peek 1) ?\()
+                (setq program t i (1+ i))
+              (when (eq c ?&) (setq i (1+ i)))
+              (while (memq (peek 1) '(?> ?< ?| ?&)) (setq i (1+ i)))
+              (setq target t)))
+           ((and (eq c ?$) (eq (peek 1) ?\())
+            (command-starts)
+            (setq i (1+ i)))
+           ;; What follows a substitution or a subshell is an argument,
+           ;; or an operator that starts a command again.
+           ((or (eq c ?\)) (and (eq c ?`) backquoted))
+            (finish)
+            (setq program nil target nil backquoted nil))
+           ((eq c ?`) (command-starts) (setq backquoted t))
+           ((memq c '(?\; ?& ?| ?\()) (command-starts))
+           (t (add (string c)))))
+        (setq i (1+ i)))
+      (finish))
+    (nreverse words)))
+
+(defun harness-perms--path-word (word)
+  "Return the path shell WORD names, as written, or nil.
+That is WORD, or the value of a NAME=VALUE or --option=VALUE word, when
+it is absolute, starts with ~ or $HOME, or is . or .. or starts with ./
+or ../: other relative words could as well be no path at all."
+  (let ((value (if (string-match "\\`-*[A-Za-z0-9_.-]*=" word) (substring word (match-end 0)) word)))
+    (cond ((string-match "\\`\\(?:\\$HOME\\|\\${HOME}\\)\\(/\\|\\'\\)" value)
+           (concat "~" (substring value (match-beginning 1))))
+          ((string-match-p "\\`\\(?:/\\|~\\|\\.\\.?/\\|\\.\\.?\\'\\)" value) value))))
+
+(defun harness-perms--command (request)
+  "Return the shell command REQUEST runs, or nil.
+That is the `:command' of an exec call, such as the bash tool's."
+  (let* ((input (plist-get request :input))
+         (command (and (listp input) (plist-get input :command))))
+    (and (stringp command)
+         (eq (harness-perms--sym (plist-get request :kind)) 'exec)
+         command)))
+
+(defun harness-perms--command-dir (request)
+  "Return the directory REQUEST's shell command runs in."
+  (or (car (plist-get request :paths))
+      (harness-perms--with-host (or (plist-get (plist-get request :session) :cwd) default-directory)
+                                (plist-get (plist-get request :session) :host))))
+
+(defun harness-perms--command-paths (request)
+  "Return the paths REQUEST's shell command names, absolute, or nil.
+They are the words `harness-perms--path-word' takes for paths, other
+than the programs the command runs (see `harness-perms--shell-words')
+and files such as /dev/null; relative ones are relative to where the
+command runs.  On this machine an absolute word counts only when its
+first directory exists, so a pattern such as /api/v1 in a grep is no
+path; on a remote host none is looked up, and words starting with ~
+are left out, since only that host knows its home."
+  (when-let* ((command (harness-perms--command request)))
+    (condition-case err
+        (let* ((host (plist-get (plist-get request :session) :host))
+               (dir (harness-perms--command-dir request))
+               (remote (or host (file-remote-p dir)))
+               (local-dir (or (file-remote-p dir 'localname) dir))
+               paths)
+          (pcase-dolist (`(,word . ,program) (harness-perms--shell-words command))
+            (let ((value (and (not program) (harness-perms--path-word word))))
+              (when (and value (not (string-match-p "\n" value)))
+                (let ((path (cond ((not remote) (expand-file-name value dir))
+                                  ((string-prefix-p "~" value) nil)
+                                  (t (harness-perms--with-host (expand-file-name value local-dir)
+                                                               (or host (file-remote-p dir)))))))
+                  (when (and path
+                             (not (string-match-p harness-perms--pseudo-files (cdr (harness-perms--split path))))
+                             (or remote
+                                 (not (string-prefix-p "/" value))
+                                 (file-exists-p (concat "/" (car (split-string path "/" t)))))
+                             (not (member path paths)))
+                    (push path paths))))))
+          (nreverse paths))
+      (error (harness-log 'warn "perms: could not read the paths of a command: %S" err)
+             nil))))
+
+(defun harness-perms--named-paths (request)
+  "Return the paths REQUEST's command names (see `harness-perms--command-paths').
+A request `harness-perms--with-reach' worked them out for carries them."
+  (if (plist-member request :named-paths)
+      (plist-get request :named-paths)
+    (harness-perms--command-paths request)))
+
+(defun harness-perms--subject-paths (request)
+  "Return the paths REQUEST's call is about, for its prompt and its rules.
+A shell command is about the paths it names (`harness-perms--named-paths')
+outside the session's directories; when it names none there, it is about
+where it runs, its `:paths', as every other call is."
+  (if (plist-member request :subject-paths)
+      (plist-get request :subject-paths)
+    (let* ((named (harness-perms--named-paths request))
+           (roots (and named (harness-perms-roots (plist-get request :session)))))
+      (or (cl-remove-if (lambda (p) (cl-some (lambda (r) (harness-perms--within-p r p)) roots)) named)
+          (plist-get request :paths)))))
+
+(defun harness-perms--every-path (request)
+  "Return every path REQUEST's call runs in or names."
+  (cl-remove-duplicates (append (plist-get request :paths) (harness-perms--named-paths request))
+                        :test #'equal :from-end t))
+
+(defun harness-perms--with-reach (request)
+  "Return REQUEST with what its call reaches worked out once.
+The copy carries `:named-paths' and `:subject-paths', which the
+functions above take instead of reading the command again for every
+rule."
+  (if (plist-member request :subject-paths)
+      request
+    (let ((named (harness-perms--command-paths request)))
+      (append (list :named-paths named
+                    :subject-paths (harness-perms--subject-paths (append (list :named-paths named) request)))
+              request))))
 
 ;;;; Patterns a prompt about paths is answered for
 ;;
@@ -803,25 +1024,34 @@ can name a part of every project, such as docs/**."
 (defun harness-perms--rule-matches-p (rule request)
   "Non-nil when RULE applies to REQUEST.
 A rule with a `:path' pattern applies to calls with paths only: an
-allow rule when the pattern covers every one of them, a deny rule
-when it covers any (see `harness-perms--within-p')."
-  (let ((tool (plist-get rule :tool))
-        (kind (harness-perms--sym (plist-get rule :kind)))
-        (pattern (harness-perms--rule-pattern rule (plist-get request :session)))
-        (paths (plist-get request :paths)))
+allow rule when the pattern covers every path the call is about (see
+`harness-perms--subject-paths'), a deny rule when it covers any path
+the call runs in or names (see `harness-perms--within-p').  For a shell
+command an allow rule so holds the paths it names outside the
+session's directories, or where it runs when it names none there; a
+deny rule also stops it for a path it names inside them."
+  (let* ((tool (plist-get rule :tool))
+         (kind (harness-perms--sym (plist-get rule :kind)))
+         (deny (eq (harness-perms--sym (plist-get rule :behavior)) 'deny))
+         (pattern (harness-perms--rule-pattern rule (plist-get request :session))))
     (and (or (null tool) (equal tool (plist-get request :tool)))
          (or (null kind) (eq kind (harness-perms--sym (plist-get request :kind))))
          (or (null pattern)
-             (and paths
-                  (funcall (if (eq (harness-perms--sym (plist-get rule :behavior)) 'deny) #'cl-some #'cl-every)
-                           (lambda (p) (harness-perms--within-p pattern p))
-                           paths))))))
+             (let ((paths (if deny (harness-perms--every-path request) (harness-perms--subject-paths request))))
+               (and paths
+                    (funcall (if deny #'cl-some #'cl-every)
+                             (lambda (p) (harness-perms--within-p pattern p))
+                             paths)))))))
 
 (defun harness-perms--find-rule (request)
   "Return the first session or global rule that applies to REQUEST."
-  (let ((sid (plist-get (plist-get request :session) :id)))
-    (cl-find-if (lambda (r) (harness-perms--rule-matches-p r request))
-                (append (gethash sid harness-perms--session-rules) harness-perms-rules))))
+  (let* ((sid (plist-get (plist-get request :session) :id))
+         (rules (append (gethash sid harness-perms--session-rules) harness-perms-rules))
+         ;; A command is read once, not once per rule about paths.
+         (request (if (cl-some (lambda (r) (plist-get r :path)) rules)
+                      (harness-perms--with-reach request)
+                    request)))
+    (cl-find-if (lambda (r) (harness-perms--rule-matches-p r request)) rules)))
 
 (defun harness-perms--rule-decision (rule)
   "Return the decision RULE makes, with a reason that names what it is for."
@@ -1238,28 +1468,35 @@ DECISION is the current value and NEXT continues the chain once
 `permission/answer' arrives.  Without a session module the call is
 denied because nobody can answer."
   (let* ((session (plist-get request :session))
-         (sid (plist-get session :id))
-         (paths (plist-get request :paths)))
+         (sid (plist-get session :id)))
     (cond
      ((not (eq (plist-get decision :behavior) 'ask)) (funcall next decision))
      ((not (harness-method-exists-p 'session/pending-add))
       (funcall next (list :behavior 'deny :reason "no user available")))
      (t
       ;; A call with paths is remembered for a pattern, by default
-      ;; everything in the directory that holds them.
-      (let* ((pattern (and paths (harness-perms--default-pattern (harness-perms--paths-dir paths))))
+      ;; everything in the directory that holds them.  A shell command
+      ;; is about the paths it names outside the session's directories,
+      ;; else where it runs (see `harness-perms--subject-paths'), and the
+      ;; prompt says where that is.
+      (let* ((request (harness-perms--with-reach request))
+             (paths (harness-perms--subject-paths request))
+             (cwd (and (harness-perms--command request) (harness-perms--command-dir request)))
+             (pattern (and paths (harness-perms--default-pattern (harness-perms--paths-dir paths))))
              (pending (list :kind 'permission
                             :payload (append (list :tool (plist-get request :tool)
                                                    :input (plist-get request :input)
                                                    :kind (plist-get request :kind)
                                                    :paths paths
                                                    :call-id (plist-get request :call-id))
+                                             (and cwd (list :cwd cwd))
                                              (and pattern (list :pattern pattern))
                                              (list :title (harness-perms-describe-request request)
                                                    :reason (harness-perms--judge-prompt-reason decision)
                                                    :options harness-perms-options))))
              (pid (harness-call 'session/pending-add sid pending)))
-        (puthash pid (list :session-id sid :request request :next next :pattern pattern) harness-perms--waiting)
+        (puthash pid (list :session-id sid :request request :next next :pattern pattern :paths paths :cwd cwd)
+                 harness-perms--waiting)
         (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid)))))))
 
 (defun harness-perms--parse-answer (answer)
@@ -1477,7 +1714,10 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
                    (let ((r (plist-get w :request)))
                      (push (list :id pid :kind 'permission
                                  :payload (list :tool (plist-get r :tool) :input (plist-get r :input)
-                                                :kind (plist-get r :kind) :paths (plist-get r :paths)
+                                                :kind (plist-get r :kind)
+                                                :paths (if (plist-member w :paths) (plist-get w :paths)
+                                                         (plist-get r :paths))
+                                                :cwd (plist-get w :cwd)
                                                 :dir (plist-get w :dir) :pattern (plist-get w :pattern)
                                                 :title (harness-perms-describe-request r)
                                                 :options harness-perms-options))

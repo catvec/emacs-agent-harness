@@ -1132,6 +1132,26 @@ non-interactive session it stays a denial.
   everything below the directories it matches.  A grant of `DIR/**` is
   kept as the directory DIR/, so default grants read as before; a grant
   narrowed to one file keeps its name.
+- What a shell command reaches: the bash tool's `:paths` is where it
+  runs, which is all the jail checks (the sandbox confines the command,
+  and the mode and the judge read it whole).  For an `exec` call with a
+  `:command`, `harness-perms--command-paths` reads the paths the
+  command line names: a best-effort word scan (quotes, backslashes,
+  comments, `;` `&` `|` `(` `$(` and backquotes, redirections) that
+  keeps words that are absolute, start with `~` or `$HOME`, or with
+  `./` or `../`, and the values of `--option=…` and `NAME=…` words;
+  not the programs it runs (the first word of a command, after
+  assignments, keywords and prefixes such as `sudo` or `xargs`), not
+  `/dev/null` and the like, and on this machine not an absolute word
+  whose first directory does not exist, so a `/api/v1` in a grep is no
+  path (on a remote host nothing is looked up, and `~` words are left
+  out).  The call is about its subject paths
+  (`harness-perms--subject-paths`): the ones it names outside the
+  session's directories, or, when it names none there, where it runs,
+  as before.  The tool prompt shows and builds its pattern from them,
+  so `ls -la ~/.claude/projects/x` run in the project is answered for
+  `~/.claude/projects/x/**` and not for every command run in the
+  project, and the rules weigh them (below).
 - The jail asks instead of denying when a path lies outside the roots
   and someone can answer: a pending `permission` request whose payload
   carries `:dir`, `:pattern` and the options allow-once (this call may
@@ -1185,8 +1205,12 @@ non-interactive session it stays a denial.
   `harness-perms-rules`.  A rule with a `:path` (absolute, or relative to
   the session's cwd) applies to calls with paths only: an allow rule when
   the pattern holds every path of the call, a deny rule when it holds
-  any.  The mode stage checks them first, before the auto-allow list and
-  the mode.  A tool prompt for a call with paths offers its `:pattern`,
+  any.  For a shell command an allow rule needs every subject path (the
+  ones it names outside the session's directories, else where it runs),
+  so a rule for the project no longer lets `rm -rf ~` run in it; a deny
+  rule holds when any path it names, inside or out, or where it runs
+  lies in the pattern.  The mode stage checks them first, before the
+  auto-allow list and the mode.  A tool prompt for a call with paths offers its `:pattern`,
   and its allow-session / allow-always / deny-always answers record
   `(:tool NAME :path PATTERN :behavior B)` rather than a rule for the
   tool everywhere; a call without paths records `(:tool NAME :behavior B)`
@@ -1194,7 +1218,9 @@ non-interactive session it stays a denial.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
   `:pattern` for a call with paths and `:dir` and `:reason` for a
-  directory prompt; UIs offer only the listed `:options`),
+  directory prompt; a tool prompt's `:paths` are its subject paths, and
+  a shell command's prompt has `:cwd`, where it runs; UIs offer only
+  the listed `:options`),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
@@ -2357,8 +2383,9 @@ change), `_harness/node` (a finalised or updated node), `_harness/hint`,
 `_harness/activity` (`activity`: what the running turn does, as
 `agent/activity` returns it; null once the turn ends).
 Requests agent → client: `session/request_permission {sessionId, toolCall,
-options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, dir,
-pattern, reason}}` → `{outcome:{outcome:"selected",optionId}}`, plus
+options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
+pattern, reason}}` (`cwd`: where a shell command runs; `paths`: what
+the call is about, see perms) → `{outcome:{outcome:"selected",optionId}}`, plus
 `_harness:{pattern}` when the client answers a request about paths for
 another glob pattern than its `_harness.pattern` (see perms),
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
@@ -2548,7 +2575,12 @@ the chat) to change it in the minibuffer, more or less specific;
 `M-n` offers patterns around the request's own, and the answer carries
 the edited pattern (see perms).  For a call with paths the line also
 says which answers remember the pattern ("s, a, N remember the answer
-for it").
+for it").  The facts above it say what the pattern is made of
+(`harness-ui-pending--permission-facts`): `kind: write   paths:
+~/proj/lisp/a.el` on one line for most calls; for a shell command
+`kind: exec   runs in: ~/proj`, where it runs, and below it `paths:
+~/.claude/projects/x`, what it is about: the paths it names outside
+the session's directories (left out when that is just where it runs).
 
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting

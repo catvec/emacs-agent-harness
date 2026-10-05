@@ -303,6 +303,20 @@ pattern: once, for the session, or always (as an entry of
 for session*, *Always allow* and *Always deny* hold for that tool on the
 pattern only, not for every call of the tool.
 
+A shell command is about what its command line names, not only the
+directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
+run in the project, says `runs in: ~/proj` and, below it, `paths:
+~/.claude/projects/x`, and offers `~/.claude/projects/x/**`, so the
+answer you remember is about that directory and not about every command
+run in the project. A command that names nothing outside the session's
+directories is about where it runs, as before. Paths are read from the
+command line on a best-effort basis: absolute paths, `~` and `$HOME`
+paths, and `./` or `../` paths, but not the program being run or
+`/dev/null`. An allowing rule must cover every path the command names
+outside the session's directories, so allowing commands in the project
+does not let one that reaches elsewhere through. A denying rule stops
+a command that names any path it covers.
+
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
 the picture; so does an SVG, read as text and shown as an image, and a
