@@ -221,7 +221,11 @@ where to show it: `right` (the default, see
 Each session is shown in a chat buffer: a read-only transcript with an
 editable compose box at the bottom. Typing anywhere in the buffer goes
 to the compose box, including `?`, so open the menu with `C-c h ?` or
-the `[menu]` button in the header line.
+the `[menu]` button in the header line. A region selected in the
+transcript is dropped on the way, not deleted. On a request's panel the
+panel's own keys answer it instead: a question's digits, up to its
+number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
+`e` when it has a pattern to edit.
 
 | Key | Action |
 |---|---|
@@ -528,6 +532,10 @@ your checkout itself can be submitted to the **main tree** instead (the
   same, and `C-c h /` from anywhere opens the project's board first.
 - `RET` opens the session of the task at point. From that session,
   `C-c h a` leads back to the board.
+- Typing on the board goes to the compose box, like in a chat: any
+  letter that is not one of the board's keys, and a key for the task at
+  point (`s`, `e`, `m`, `v`, ...) typed off a card, which has no task to
+  act on.
 - A task's session shows in the session list (`C-c h l`) under the
   task's title, of kind task, until the model names it.
 

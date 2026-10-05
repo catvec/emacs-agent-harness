@@ -1893,7 +1893,25 @@ anything that moves a task without one, so a board never drifts.")
 ;;;; Mode
 
 (defvar harness-ui-tasks-board-map (make-sparse-keymap)
-  "Keys on the board (outside the compose box).")
+  "Keys on the board (outside the compose box).
+The keys that act on the task at point act on the card point is on:
+off a card they type, into the compose box, as every letter the board
+does not bind does (`harness-ui-tasks--on-card-p').")
+
+(defun harness-ui-tasks--on-card-p ()
+  "Nil when point is on a task board but not on a card.
+The board's keys for the task at point have nothing to act on there,
+so they type, into the compose box (`harness-compose-acts-p')."
+  (or (not (harness-ui-tasks--board-p (current-buffer)))
+      (get-text-property (point) 'harness-task-id)))
+
+;; Typing off a card, the board's keys for the task at point (see above).
+(dolist (command '(harness-ui-tasks-open-other harness-ui-tasks-start harness-ui-tasks-edit
+                   harness-ui-tasks-reply harness-ui-tasks-requests harness-ui-tasks-refine
+                   harness-ui-tasks-allow harness-ui-tasks-deny harness-ui-tasks-cancel
+                   harness-ui-tasks-complete harness-ui-tasks-verify harness-ui-tasks-reject
+                   harness-ui-tasks-merge harness-ui-tasks-archive harness-ui-tasks-delete))
+  (put command 'harness-compose-acts-p #'harness-ui-tasks--on-card-p))
 
 ;; Filled at top level, not in the `defvar', so a reload updates the map.
 (let ((map harness-ui-tasks-board-map))
@@ -1948,6 +1966,10 @@ anything that moves a task without one, so a board never drifts.")
 
 (define-derived-mode harness-ui-tasks-mode special-mode "Tasks"
   "Major mode of the task board: a kanban of tasks above a compose box.
+On the board the keys below act on the board, or on the task whose card
+point is on.  Any other letter goes into the compose box, and so does a
+task's key typed off a card.
+
 \\{harness-ui-tasks-board-map}"
   (setq buffer-read-only nil)
   ;; Lines wrap, for the compose box (`harness-compose-setup'): the board

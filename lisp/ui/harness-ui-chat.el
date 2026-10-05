@@ -2702,7 +2702,10 @@ message sent from it resumes it."
   "Major mode of a harness session buffer.
 The transcript is read-only; the compose box at the bottom is editable.
 Typing anywhere goes to the box, `?' included, so the harness menu is
-on \\[harness-menu] here, or the [menu] button in the header line.
+on \\[harness-menu] here, or the [menu] button in the header line.  On
+a request's panel its own keys answer it instead: a question's digits,
+up to its number of options, and a permission's y, s, a, n and N, and
+e when it has a pattern to edit.
 
 \\{harness-chat-mode-map}"
   (setq buffer-read-only nil)
