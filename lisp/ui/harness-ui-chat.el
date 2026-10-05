@@ -26,9 +26,9 @@
 ;; end of the live node's region, and a block is rendered through the
 ;; Markdown renderer only when it is finalised or at most every
 ;; `harness-chat--render-interval' seconds.  Thinking, tool calls,
-;; compaction summaries and runs of coalescable tools collapse under
-;; overlays that isearch opens, so every word of the conversation stays
-;; searchable.  History loads lazily: the newest
+;; compaction summaries and runs of coalescable tools (with the thinking
+;; between their calls) collapse under overlays that isearch opens, so
+;; every word of the conversation stays searchable.  History loads lazily: the newest
 ;; `harness-chat--history-limit' nodes at open, an older page whenever a
 ;; window scrolls near the top, and blocks far above every window are
 ;; dropped again so a long session never fills the buffer.
@@ -85,7 +85,8 @@ Once two pages of nodes lie above every window, all but one are dropped.")
   "Seconds between Markdown re-renders of a streaming block.")
 
 (defconst harness-chat--coalesce-threshold 3
-  "Consecutive coalescable tool calls needed to fold into one summary block.")
+  "Coalescable tool calls a run needs to fold into one summary block.
+Thinking between the calls does not break the run and is not counted.")
 
 (defconst harness-chat--image-max-height 400
   "Maximum pixel height of inline images.")
@@ -145,7 +146,9 @@ under it." :group 'harness-ui-chat)
   head)                                 ; non-nil: first agent block of a turn, carries the sender name
 
 (cl-defstruct (harness-chat-group (:constructor harness-chat--make-group-record) (:copier nil))
-  "A run of coalesced tool blocks folded under one summary."
+  "A run of coalesced tool calls folded under one summary.
+MEMBERS are the ids of its blocks, oldest first: the calls and the
+thinking between them."
   id members start end overlay expanded)
 
 (defvar harness-chat--buffers (make-hash-table :test 'equal)
@@ -876,25 +879,31 @@ down with it: the transcript below it and the compose box still draw."
              (propertize (format "(shown unformatted: rendering failed with %s)\n" (error-message-string err))
                          'face 'harness-dim-face)))))
 
+(defun harness-chat--group-calls (group)
+  "Return the blocks of GROUP's tool calls, oldest first.
+The thinking folded in between them is left out."
+  (cl-loop for nid in (harness-chat-group-members group)
+           for b = (gethash nid harness-chat--blocks)
+           when (and b (equal (harness-chat-block-kind b) "tool-call")) collect b))
+
 (defun harness-chat--group-outcomes (group)
   "Return the status text counting GROUP's failed and denied tool calls.
 Empty when none failed or was denied; a collapsed group would hide them."
   (let ((failed 0) (denied 0))
-    (dolist (nid (harness-chat-group-members group))
-      (let ((b (gethash nid harness-chat--blocks)))
-        (pcase (and b (harness-ui-tool-outcome (harness-chat-block-result b)))
-          ('failed (cl-incf failed))
-          ('denied (cl-incf denied)))))
+    (dolist (b (harness-chat--group-calls group))
+      (pcase (harness-ui-tool-outcome (harness-chat-block-result b))
+        ('failed (cl-incf failed))
+        ('denied (cl-incf denied))))
     (concat (if (> failed 0) (concat "  " (harness-chat--outcome-status 'failed failed)) "")
             (if (> denied 0) (concat "  " (harness-chat--outcome-status 'denied denied)) ""))))
 
 (defun harness-chat--render-group (group)
-  "Return the body of the summary block of GROUP."
+  "Return the body of the summary block of GROUP.
+It counts the calls by label, then the thinking folded between them."
   (let* ((gid (harness-chat-group-id group))
-         (names (mapcar (lambda (nid)
-                          (let ((b (gethash nid harness-chat--blocks)))
-                            (harness-ui-tool-label (plist-get (harness-chat-block-node b) :tool))))
-                        (harness-chat-group-members group)))
+         (names (mapcar (lambda (b) (harness-ui-tool-label (plist-get (harness-chat-block-node b) :tool)))
+                        (harness-chat--group-calls group)))
+         (thoughts (cl-count-if #'harness-chat--thinking-block-p (harness-chat-group-members group)))
          (counts nil))
     (dolist (n names)
       (let ((cell (assoc n counts)))
@@ -909,9 +918,13 @@ Empty when none failed or was denied; a collapsed group would hide them."
                                         (lambda () (interactive) (harness-chat-toggle-group gid))
                                         "mouse-1, TAB: show or hide the individual tool calls")
              " "
-             (propertize (format "%s %d tool calls: %s" (harness-ui-icon 'harness-icon-tool) (length names)
+             (propertize (format "%s %d tool calls: %s%s" (harness-ui-icon 'harness-icon-tool) (length names)
                                  (mapconcat (lambda (c) (if (> (cdr c) 1) (format "%s ×%d" (car c) (cdr c)) (car c)))
-                                            counts ", "))
+                                            counts ", ")
+                                 (pcase thoughts
+                                   (0 "")
+                                   (1 " · thinking")
+                                   (n (format " · thinking ×%d" n))))
                          'face 'harness-summary-face)
              (harness-chat--group-outcomes group)
              "  "
@@ -1128,6 +1141,18 @@ A block whose result shows media is not coalescable."
          (not (harness-chat--block-shows-media-p b))
          (member (plist-get (harness-chat-block-node b) :tool) harness-chat--coalescable))))
 
+(defun harness-chat--thinking-block-p (id)
+  "Non-nil when block ID is thinking.
+Thinking between coalescable tool calls does not break their run: a
+model that thinks before every call would otherwise never have one, so
+it folds into their group with them."
+  (when-let* ((b (gethash id harness-chat--blocks)))
+    (equal (harness-chat-block-kind b) "thinking")))
+
+(defun harness-chat--run-calls (ids)
+  "Return how many of the blocks IDS are coalescable tool calls."
+  (cl-count-if #'harness-chat--coalescable-block-p ids))
+
 (defun harness-chat--group-text (group)
   "Return the summary text of GROUP followed by its separator newline."
   (let ((text (concat (harness-chat--with-display (harness-chat--render-group group)) "\n")))
@@ -1179,35 +1204,46 @@ arriving for one of them changes it."
               (group (gethash gid harness-chat--groups)))
     (harness-chat--update-group-summary group)))
 
-(defun harness-chat--extend-group (group id)
-  "Add block ID to GROUP, which ends right before it."
-  (let ((block (gethash id harness-chat--blocks))
+(defun harness-chat--extend-group (group ids)
+  "Add the blocks IDS (oldest first) to GROUP, which ends right before them."
+  (let ((last (gethash (car (last ids)) harness-chat--blocks))
         (ov (harness-chat-group-overlay group)))
-    (setf (harness-chat-group-members group) (append (harness-chat-group-members group) (list id)))
-    (setf (harness-chat-block-group block) (harness-chat-group-id group))
-    (move-overlay ov (overlay-start ov) (1- (marker-position (harness-chat-block-end block))))
+    (setf (harness-chat-group-members group) (append (harness-chat-group-members group) ids))
+    (dolist (id ids)
+      (setf (harness-chat-block-group (gethash id harness-chat--blocks)) (harness-chat-group-id group)))
+    (move-overlay ov (overlay-start ov) (1- (marker-position (harness-chat-block-end last))))
     (harness-chat--update-group-summary group)))
 
 (defun harness-chat--maybe-coalesce (id)
   "Fold block ID into a run of coalescable tool calls when there is one.
-A block whose result shows media is not folded, and one that was
-folded before its result arrived is taken out of its group again, so
-the picture stays visible."
+Only the newest block joins a run, with the thinking since the call
+before it: the transcript grows at its end, and a result arriving for
+an older call must not pull it into a run (`harness-chat--regroup'
+groups a whole transcript).  A block whose result shows media is not
+folded, and one that was folded before its result arrived is taken
+out of its group again, so the picture stays visible."
   (let ((block (gethash id harness-chat--blocks)))
     (cond
      ((harness-chat--block-shows-media-p block) (harness-chat--uncoalesce block))
-     ((and (harness-chat--coalescable-block-p id) (not (harness-chat-block-group block)))
-      (let* ((previous (cadr harness-chat--order))
-             (prev-block (and previous (gethash previous harness-chat--blocks)))
-             (gid (and prev-block (harness-chat-block-group prev-block))))
-        (if gid
-            (harness-chat--extend-group (gethash gid harness-chat--groups) id)
-          (let ((run (list id)) (rest (cdr harness-chat--order)))
-            (while (and rest (harness-chat--coalescable-block-p (car rest)))
-              (push (car rest) run)
-              (setq rest (cdr rest)))
-            (when (>= (length run) harness-chat--coalesce-threshold)
-              (harness-chat--make-group run)))))))))
+     ((and (equal id (car harness-chat--order))
+           (harness-chat--coalescable-block-p id)
+           (not (harness-chat-block-group block)))
+      ;; Walk back over the run ID ends: coalescable calls and the
+      ;; thinking between them, up to a group it continues.
+      (let ((run (list id)) (rest (cdr harness-chat--order)) (gid nil))
+        (while (and rest (not gid)
+                    (or (harness-chat--coalescable-block-p (car rest))
+                        (harness-chat--thinking-block-p (car rest))))
+          (if-let* ((g (harness-chat-block-group (gethash (car rest) harness-chat--blocks))))
+              (setq gid g)
+            (push (car rest) run)
+            (setq rest (cdr rest))))
+        (if-let* ((group (and gid (gethash gid harness-chat--groups))))
+            (harness-chat--extend-group group run)
+          ;; Thinking before the run's first call stays out of it.
+          (while (harness-chat--thinking-block-p (car run)) (pop run))
+          (when (>= (harness-chat--run-calls run) harness-chat--coalesce-threshold)
+            (harness-chat--make-group run))))))))
 
 (defun harness-chat--remove-group (group)
   "Remove GROUP: its summary block, its overlay and its membership."
@@ -1242,14 +1278,21 @@ state the group had."
   (clrhash harness-chat--groups))
 
 (defun harness-chat--regroup ()
-  "Recompute every coalesced run over the rendered transcript."
+  "Recompute every coalesced run over the rendered transcript.
+A run is coalescable tool calls with nothing but thinking between them;
+the thinking before its first call and after its last stays out."
   (harness-chat--clear-groups)
-  (let ((run nil))
-    (cl-flet ((flush () (when (>= (length run) harness-chat--coalesce-threshold)
-                          (harness-chat--make-group (nreverse run)))
-                      (setq run nil)))
+  (let ((run nil))                      ; Newest first.
+    (cl-flet ((flush ()
+                (while (and run (harness-chat--thinking-block-p (car run))) (pop run))
+                (when (>= (harness-chat--run-calls run) harness-chat--coalesce-threshold)
+                  (harness-chat--make-group (nreverse run)))
+                (setq run nil)))
       (dolist (id (reverse harness-chat--order))
-        (if (harness-chat--coalescable-block-p id) (push id run) (flush)))
+        (if (or (harness-chat--coalescable-block-p id)
+                (and run (harness-chat--thinking-block-p id)))
+            (push id run)
+          (flush)))
       (flush))))
 
 (defun harness-chat-toggle-group (&optional gid)
