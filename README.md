@@ -303,6 +303,11 @@ pattern: once, for the session, or always (as an entry of
 for session*, *Always allow* and *Always deny* hold for that tool on the
 pattern only, not for every call of the tool.
 
+A link in the agent's reply opens with a click or `RET`, and the
+transcript stays as it was: a web address goes to `browse-url`, a file
+opens in another window. A relative file name is taken in the session's
+directory, and a `#L12` or `:12` after it goes to that line.
+
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
 the picture; so does an SVG, read as text and shown as an image, and a

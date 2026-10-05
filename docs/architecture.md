@@ -2572,7 +2572,17 @@ stays snappy.  A checkout (`session/head-moved`) makes the transcript
 another path, so the buffer loads it again rather than leave the
 branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
-the language's major mode, lists, quotes, links).  Tool and thinking
+the language's major mode, lists, quotes, links).  A click or `RET` on
+a link opens it (`harness-ui-markdown-open-link`): a URL with
+`browse-url`, anything else as a file in `default-directory` -- the
+session's directory, in a chat -- in another window, at the line a
+`#L12` or `:12` suffix names.  The link's keymap binds `mouse-2` as well
+as `mouse-1`: its `follow-link` property makes a quick `mouse-1` a
+`mouse-2`, and an unbound one reached the global `mouse-yank-primary`,
+which pasted the primary selection into the transcript (read-only, but
+rear-nonsticky, so an insertion inside it gets through).  Its double and
+triple clicks are bound to `ignore`: unbound, they ran as single clicks
+and opened the link again after the first click had.  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
 Thinking between two calls of a run does not break it but folds in
 with them, since a model that thinks before every call would never

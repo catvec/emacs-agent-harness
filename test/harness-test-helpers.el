@@ -378,5 +378,24 @@ C-k clears that line only."
         (should (= harness-compose-start (point)))
         (should (equal "\nsecond line" (harness-compose-text)))))))
 
+;;;; Mouse clicks
+
+(defun harness-test-click (pos &optional button count)
+  "Click mouse BUTTON (1 by default) on POS in the selected window, quickly.
+COUNT clicks (1 by default, at most 3) make a double or a triple click,
+read as Emacs reads one: a single click, then a double one, and so on.
+The presses and releases go through the command loop as a real click's
+do: through `key-translation-map', which makes a quick `mouse-1' on a
+link a `mouse-2' (`mouse-1-click-follows-link'), then the keymaps at POS."
+  (let ((n (or button 1))
+        (posn (list (selected-window) pos '(0 . 0) 0 nil pos '(0 . 0) nil '(0 . 0) '(1 . 1)))
+        (events nil))
+    (dotimes (i (or count 1))
+      (let ((prefix (nth i '("" "double-" "triple-")))
+            (click-count (and (> i 0) (list (1+ i)))))
+        (push `(,(intern (format "%sdown-mouse-%d" prefix n)) ,posn ,@click-count) events)
+        (push `(,(intern (format "%smouse-%d" prefix n)) ,posn ,@click-count) events)))
+    (execute-kbd-macro (vconcat (nreverse events)))))
+
 (provide 'harness-test-helpers)
 ;;; harness-test-helpers.el ends here
