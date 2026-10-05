@@ -21,7 +21,9 @@
 ;; a quick look at the project and writes it up -- or, when another task
 ;; on the board asks for it in the same words, refuses it as a duplicate.
 ;; A task board's search gets the JSON a search model answers with,
-;; matched from the words of the query (`harness-provider-demo--search').
+;; matched from the words of the query (`harness-provider-demo--search'),
+;; and a request to name a session the first words of its opening
+;; message (`harness-provider-demo--title').
 
 ;;; Code:
 
@@ -84,6 +86,8 @@ answers) gives a function.")
      ((functionp harness-provider-demo-script-override)
       (funcall harness-provider-demo-script-override request))
      (harness-provider-demo-script-override harness-provider-demo-script-override)
+     ((string-prefix-p "You write short titles" (or (plist-get request :system) ""))
+      (harness-provider-demo--title request))
      ((string-match-p "^## Task refinement" (or (plist-get request :system) ""))
       (harness-provider-demo--write-up request cwd))
      ((string-prefix-p "You are the search box of a task board" (or (plist-get request :system) ""))
@@ -156,6 +160,28 @@ answers) gives a function.")
       `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask` or `diagram`." text))
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
+
+(defun harness-provider-demo--title (request)
+  "Answer the naming REQUEST as a model would: the gist of the opening message.
+That message is REQUEST's first user text, quoted between message tags
+when the session is named from its first message (see `naming/name').
+The title is the first words of its first clause, capitalised."
+  (let* ((first (or (cl-loop for m in (plist-get request :messages)
+                             when (eq (plist-get m :role) 'user)
+                             thereis (cl-loop for b in (plist-get m :content)
+                                              when (equal (plist-get b :type) "text")
+                                              return (plist-get b :text)))
+                    ""))
+         (opening (if (string-match "<message>\n\\(\\(?:.\\|\n\\)*?\\)\n</message>" first)
+                      (match-string 1 first)
+                    first))
+         (clause (car (split-string (harness-first-line opening)
+                                    "[,;:!?]\\|\\.\\(?:[[:space:]]\\|\\'\\)" t "[[:space:]]+")))
+         (words (take 6 (split-string (or clause "") "[[:space:]]+" t)))
+         (title (if words (string-join words " ") "Demo conversation")))
+    `((:type text :delta ,(concat (upcase (substring title 0 1)) (substring title 1)))
+      (:type usage :input 80 :output 8 :cost 0.0001)
+      (:type done :stop-reason end-turn))))
 
 (defun harness-provider-demo--same-task (request note)
   "Return another task on the board that asks for NOTE in the same words.

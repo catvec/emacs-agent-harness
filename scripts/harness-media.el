@@ -1108,13 +1108,18 @@ a toast and an [Undo]."
 (defun harness-media--complete (request)
   "Answer REQUEST with its script, one event at a time.
 A tool call ends the request, as with a real model: the agent runs the
-tool and asks again, and the script goes on from there."
+tool and asks again, and the script goes on from there.  A request made
+beside a session's turn (`:ephemeral', as naming the session is) leaves
+the turn's script alone."
   (let* ((on-event (plist-get request :on-event))
          (sid (or (plist-get (plist-get request :session) :id) "none"))
-         (rest (if (harness-media--continuing-p request) (gethash sid harness-media--rest 'none) 'none))
+         (side (plist-get request :ephemeral))
+         (rest (if (and (not side) (harness-media--continuing-p request))
+                   (gethash sid harness-media--rest 'none)
+                 'none))
          (script (if (eq rest 'none) (harness-media--script request) rest))
          (written 0) (reported nil) (cancelled nil) (timer nil))
-    (remhash sid harness-media--rest)
+    (unless side (remhash sid harness-media--rest))
     (cl-labels ((emit (event) (funcall on-event event))
                 (finish (reason)
                   (unless reported (emit (harness-media--usage request written)))
@@ -1142,9 +1147,9 @@ tool and asks again, and the script goes on from there."
                     (setq cancelled t)
                     (when timer (cancel-timer timer))
                     ;; A turn a tool ended (hand_in cancels it) takes no
-                    ;; more of its script: the next request -- naming the
-                    ;; session, say -- must not get the rest.
-                    (remhash sid harness-media--rest)
+                    ;; more of its script: the next request -- a task sent
+                    ;; back, say -- must not get the rest.
+                    (unless side (remhash sid harness-media--rest))
                     (funcall on-event '(:type done :stop-reason cancelled))))))
 
 (defun harness-media--claude-models ()

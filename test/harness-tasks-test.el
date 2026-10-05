@@ -1179,20 +1179,34 @@ Written up all the same, it goes to the backlog."
       (harness-tasks-test-wait-state id 'done))))
 
 (ert-deftest harness-tasks-auto-named-like-tickets ()
-  "Naming a task's session after its first turn asks for a ticket title."
+  "A task's session is named like a ticket as soon as the task starts.
+Its first turn usually lasts until the task is done: the board must
+not show the raw prompt as the task's title until then."
   (harness-tasks-test-with
     (harness-test-load-module 'naming)
     (let ((harness-naming-auto t)
-          (systems nil))
+          (systems nil)
+          (held nil))
       (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
                  ((symbol-function 'harness-method/provider/complete)
-                  (lambda (req) (push (plist-get req :system) systems) (funcall orig req))))
+                  (lambda (req)
+                    (if (plist-get req :ephemeral)
+                        (progn (push (plist-get req :system) systems) (funcall orig req))
+                      ;; The task works on until the test lets its turn end.
+                      (push (plist-get req :on-event) held)
+                      (list :cancel #'ignore)))))
         (let* ((id (harness-tasks-test-submit "fix the parser"))
                (sid (plist-get (harness-tasks-test-task id) :session)))
           (harness-test-wait (lambda () (plist-get (harness-call 'session/get sid) :name)) 5 "the task's name")
           (should (equal "Working on it" (plist-get (harness-call 'session/get sid) :name)))
-          (harness-tasks-test-wait-state id 'done)))
-      (should (member (concat harness-naming--base-system-prompt "\n\n" harness-tasks--naming-instructions) systems)))))
+          (should (eq 'active (harness-tasks-test-state id)))
+          (should (eq 'active (plist-get (harness-tasks-test-task id) :column)))
+          (should (equal (list (concat harness-naming--base-system-prompt "\n\n" harness-tasks--naming-instructions))
+                         systems))
+          (let ((on-event (car held)))
+            (funcall on-event '(:type text :delta "Fixed it."))
+            (funcall on-event '(:type done :stop-reason end-turn)))
+          (harness-tasks-test-wait-state id 'done))))))
 
 ;;;; Git: worktree, merge queue, done only when merged
 
