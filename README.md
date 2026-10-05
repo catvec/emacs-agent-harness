@@ -774,13 +774,19 @@ worktrees it holds. `TAB`, `RET` or a click on a project shows its main
 checkout's usage and each worktree's, and hides them again; `w` (or
 `[show worktrees]`) does it for every project at once.
 
-Budgets count billed cost only. A budget created partway through a
-month can start from what was already spent outside the harness: press
-`s` on its line in the dashboard (or use the add-budget wizard) to set
-that baseline, which counts until the period rolls over. Organisations
-billed per token can fetch the baseline instead: with an Anthropic Admin
-API key (`harness-anthropic-admin-api-key`), `I` on a monthly budget
-offers the month's API cost minus what the harness recorded.
+Budgets count billed cost only. A budget over everything (a day, week
+or month budget for no one project) also counts what providers report
+they billed in its period beyond what the harness recorded, so one
+created partway through a month does not start at $0: a plan's extra
+usage this month (Claude Code's usage credits, Copilot's additional
+requests) and, with an Anthropic Admin API key
+(`harness-anthropic-admin-api-key`), what Anthropic billed per token,
+fetched again every ten minutes (`I` fetches it now). The budget's line
+says how much, as "incl. $5.00 reported by Claude Code". What was spent
+outside the harness that no provider reports, such as a project
+budget's spending, which no provider can single out, is a baseline:
+press `s` on the budget's line in the dashboard (or use the add-budget
+wizard) to set it; it counts until the period rolls over.
 
 ## Corporate mode
 
