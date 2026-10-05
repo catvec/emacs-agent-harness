@@ -37,6 +37,7 @@
 (require 'harness-emacs-endpoint)
 (require 'harness-files)
 (require 'harness-notifications-desktop)
+(require 'harness-ui-drag)
 
 (defvar harness-directory)
 
@@ -1405,9 +1406,10 @@ position just after the region moves to the end of TEXT."
 
 (defun harness-ui-image-string (source &optional mime)
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
-MIME is a hint for the image type.  Without image support, and for a
-path on a remote host, which reading here would block on, a button
-opening the file is returned instead."
+MIME is a hint for the image type.  The image can be dragged into
+another application (`harness-ui-drag-source').  Without image support,
+and for a path on a remote host, which reading here would block on, a
+button opening the file is returned instead."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
          (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
@@ -1424,9 +1426,11 @@ opening the file is returned instead."
                                          :max-width width :max-height harness-ui-image-max-height))
                        (error nil))))))
     (cond
-     (img (concat (propertize label 'display img 'pointer 'hand
-                              'help-echo (format "mouse-1 or RET: open %s" (or path mime "the image"))
-                              'keymap (and open (harness-ui-action-map open)))
+     (img (concat (harness-ui-drag-source
+                   (propertize label 'display img 'pointer 'hand
+                               'help-echo (if open (format "mouse-1 or RET: open %s" path) mime)
+                               'keymap (and open (harness-ui-action-map open)))
+                   path)
                   "\n"))
      (open (concat (harness-ui-action-button label open :help (format "Open %s" path)) "\n"))
      (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
