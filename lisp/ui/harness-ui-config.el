@@ -486,7 +486,9 @@ The page draws such a type as a form."
         (or (cl-some (lambda (o) (and (consp o) (harness-ui-config--form-p (cadr o))))
                      (plist-get props :options))
             (and (not (harness-ui-config--type-is type 'const 'item))
-                 (cl-some (lambda (a) (and (or (consp a) (get a 'widget-type)) (harness-ui-config--form-p a)))
+                 ;; Not every argument is a type: (integer 0 23) has numbers.
+                 (cl-some (lambda (a) (and (or (consp a) (and (symbolp a) (get a 'widget-type)))
+                                           (harness-ui-config--form-p a)))
                           args))))))
 
 (defun harness-ui-config--untagged-format (type)

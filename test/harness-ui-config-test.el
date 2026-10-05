@@ -35,6 +35,10 @@ Each is a plist with these keys:
   "A number option for the tests, an advanced one: no section shows it."
   :type 'integer :group 'harness)
 
+(defcustom harness-ui-config-test-hours '((1 . 4))
+  "Hours, whose type has numbers among its arguments, like DeepSeek's peak windows."
+  :type '(repeat (cons (integer 0 23) (integer 1 24))) :group 'harness)
+
 (defun harness-ui-config-test--project ()
   "Return a fresh git project."
   (let ((root (harness-test-temp-dir)))
@@ -405,6 +409,21 @@ state directory, as they would the user's."
                                              when (consp item) collect (nth 2 item)))))
       (should (memq 'harness-ui-config-toggle-advanced commands))
       (should (memq 'harness-ui-config-customize-interface commands)))))
+
+(ert-deftest harness-ui-config-draws-types-with-numbers-in-them ()
+  "A type with numbers among its arguments draws, and so does the rest.
+DeepSeek's peak windows are (repeat (cons (integer 0 23) (integer 1
+24))): looking a number up as a widget type signalled, so the page
+stopped drawing at that setting and never set its widgets up."
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (harness-ui-config-test-open root)
+    (should-not (harness-ui-config--form-p '(repeat (cons (integer 0 23) (integer 1 24)))))
+    (harness-ui-config-toggle-advanced)
+    (should (string-match-p "Hours" (harness-ui-config-test-block "harness-ui-config-test-hours")))
+    ;; The page goes on to its end.
+    (should (string-match-p "Customize the interface"
+                            (buffer-substring-no-properties (point-min) (point-max))))))
 
 (ert-deftest harness-ui-config-entry-points ()
   (harness-ui-config-test-with
