@@ -77,11 +77,15 @@
   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"180\"><rect width=\"320\" height=\"180\" fill=\"#1f3a22\"/></svg>\n"
   "The image the fixture's task hands in, as shot.svg in its directory.")
 
+(defvar harness-ui-review-test--script nil
+  "The script of the fixture's provider, or nil for the one handing in.")
+
 (defmacro harness-ui-review-test-with (&rest body)
   "Like the board tests, with review on and a task that hands a report in.
 The provider's script makes the task call hand_in, so the task reaches
 review with a report, an image among its evidence; BODY gets `board',
-`id' and `sid'."
+`id' and `sid'.  `harness-ui-review-test--script', bound around it,
+gives the task another script."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -98,14 +102,15 @@ review with a report, an image among its evidence; BODY gets `board',
      (harness-test-load-module 'tools-handin)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override
-            '((:type text :delta "All done.\n")
-              (:type tool-call :id "h1" :name "hand_in"
-                     :input (:summary "# Done\n\nThe flaky test is fixed."
-                             :evidence ("a note" (:code "(fix-flaky)" :language "elisp"
-                                             :caption "the fix")
-                                        (:image "shot.svg" :caption "the board, fixed")
-                                        (:tool_call "h1"))))
-              (:type text :delta " this must not matter")))
+            (or harness-ui-review-test--script
+                '((:type text :delta "All done.\n")
+                  (:type tool-call :id "h1" :name "hand_in"
+                         :input (:summary "# Done\n\nThe flaky test is fixed."
+                                 :evidence ("a note" (:code "(fix-flaky)" :language "elisp"
+                                                 :caption "the fix")
+                                            (:image "shot.svg" :caption "the board, fixed")
+                                            (:tool_call "h1"))))
+                  (:type text :delta " this must not matter"))))
            (harness-naming-auto nil)
            (harness-tasks-max-running 3)
            (harness-tasks-require-verification t)
@@ -679,6 +684,46 @@ It follows the task back to review, and closes once that review is decided."
                                          (plist-get (gethash key harness-ui-report--reports) :archived))))
                          5 "the popout to follow the task")
       (should (harness-ui-popout-buffer key)))))
+
+(ert-deftest harness-ui-review-missing-report-says-so ()
+  "A task whose turn ended without hand_in says so wherever it is reviewed.
+Its card offers [No report] where [Report] would be, never a review
+with nothing to read; the popout says it was not handed in, shows the
+session's last message and still verifies; the session's banner says it
+in a line, the message being right above, with no [Report]."
+  (let ((harness-ui-review-test--script
+         '((:type text :delta "I think the flaky test passes now.\n")
+           (:type done :stop-reason end-turn))))
+    (harness-ui-review-test-with
+      (let ((key (list 'report id)))
+        (with-current-buffer board
+          (harness-ui-tasks--render)
+          (harness-ui-review-test--wait-text board "\\[No report\\]")
+          (should-not (string-search "[Report]" (buffer-string))))
+        (harness-ui-review-test--push board "[No report]")
+        (should (harness-ui-popout-buffer key))
+        (let ((popout (harness-ui-popout-buffer key)))
+          (harness-ui-review-test--wait-text popout "Not handed in")
+          (let ((text (harness-ui-review-test--text popout)))
+            (should (string-search "Its turn ended without hand_in" text))
+            (should (string-search "Its last message" text))
+            (should (string-search "I think the flaky test passes now." text))
+            (should (string-search "[Open the session]" text))
+            (should-not (string-search "Handed in" text))
+            (should-not (string-search "Evidence (" text))
+            ;; It is reviewed from there as any report.
+            (should (string-search "Ready for review" text))
+            (should (string-search "[Verify]" text)))
+          (harness-ui-popout-close key))
+        (let ((chat (harness-ui-review-test--open-session sid)))
+          (harness-ui-review-test--wait-text chat "Ready for review")
+          (harness-test-wait (lambda () (string-search "It handed no report in"
+                                                       (harness-ui-review-test--tail chat)))
+                             5 "the banner to say no report was handed in")
+          (let ((tail (harness-ui-review-test--tail chat)))
+            (should-not (string-search "[Report]" tail))
+            (should-not (string-search "Not handed in" tail))
+            (should (string-search "[Verify]" tail))))))))
 
 (provide 'harness-ui-review-test)
 ;;; harness-ui-review-test.el ends here

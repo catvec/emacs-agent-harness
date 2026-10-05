@@ -21,6 +21,10 @@
 ;; Inside the session the report is not behind a button either: it is
 ;; shown in full and always expanded, between the heading and the
 ;; buttons (`harness-ui-review--report', `harness-ui-report-string').
+;; A round whose turn ended without `hand_in' has no report, only what
+;; the harness recorded for it (`harness-tasks--missing-report'): the
+;; banner says in a line that nothing was handed in, its last message
+;; being right above, and has no [Report].
 ;;
 ;; Under the banner the compose box writes the feedback that sends the
 ;; task back: C-c C-c takes what the box holds to the task's session,
@@ -205,20 +209,34 @@ on the same background, so no stretch of a line goes without it."
         (setq pos next)))
     s))
 
+(defun harness-ui-review--missing-p (task)
+  "Non-nil when TASK's report says its round of work handed none in.
+The harness records one such when the turn ends without `hand_in'
+\(`harness-tasks--missing-report')."
+  (harness-json-true-p (plist-get (plist-get task :report) :missing)))
+
+(defconst harness-ui-review--missing-text
+  "It handed no report in: its turn ended without hand_in, so there is no summary and no evidence.  Its last message is above; check the work before you verify it."
+  "What the banner says of a task whose round handed no report in.")
+
 (defun harness-ui-review--report (task)
   "Return the report TASK handed in, drawn in full for the banner, or nil.
 Inside the session the report is always expanded -- the summary and
 every piece of evidence, each referenced call with its whole output --
 and indented as the banner's text.  It is the drawing of the [Report]
 popout (`harness-ui-report-string'), sized for this buffer's window.
+A round that handed no report in says so instead, in a line: the
+session's last message, all the harness has for it, is right above.
 A report that cannot be drawn says so rather than take the compose box
 down with it."
   (when (and (plist-get task :report) (fboundp 'harness-ui-report-string))
     (harness-ui-review--indent
-     (condition-case err
-         (or (harness-ui-report-string task (car (get-buffer-window-list nil nil t))) "")
-       (error (propertize (format "The report could not be drawn: %s\n" (error-message-string err))
-                          'face 'harness-dim-face))))))
+     (if (harness-ui-review--missing-p task)
+         (propertize (concat harness-ui-review--missing-text "\n") 'face 'warning)
+       (condition-case err
+           (or (harness-ui-report-string task (car (get-buffer-window-list nil nil t))) "")
+         (error (propertize (format "The report could not be drawn: %s\n" (error-message-string err))
+                            'face 'harness-dim-face)))))))
 
 (defun harness-ui-review--banner (task &optional report in-report)
   "Return the banner string for TASK, waiting for review.
@@ -255,7 +273,10 @@ leaves [Report] out, the report being the window it is drawn in."
      (harness-ui-review--button "[Send back]" #'harness-ui-review-reject
                                 "Type the feedback in the box below, then C-c C-c")
      (harness-ui-review--key #'harness-ui-review-reject)
-     (when (and (not in-report) (plist-get task :report) (fboundp 'harness-ui-report-popout))
+     ;; A round that handed none in has nothing for [Report] to pop out
+     ;; that the session does not show already.
+     (when (and (not in-report) (plist-get task :report) (not (harness-ui-review--missing-p task))
+                (fboundp 'harness-ui-report-popout))
        (concat "   " (harness-ui-review--button "[Report]" (lambda () (harness-ui-report-popout task))
                                                 "Pop the final message and evidence out in a window of their own")))
      "\n"

@@ -48,7 +48,10 @@
 ;; the same way, with the message as the feedback, wherever it was
 ;; written: the session's own chat, `task/prompt', another client,
 ;; another session's agent, the queue (`harness-tasks--on-message').
-;; Only the harness's own messages do not count.
+;; Only the harness's own messages do not count.  What the user reviews
+;; is the report the session hands in (`hand_in', `:report'); a round
+;; that ends without one gets a report marked `:missing' that says so,
+;; holding the session's last message (`harness-tasks--missing-report').
 ;;
 ;; Backlog refinement (once called grooming): a task submitted with
 ;; `:refine' is jotted down for later, not started.  An agent writes it
@@ -1534,6 +1537,70 @@ write-up that merely opens \"Duplicate of a task …\" is a write-up."
      (t (harness-tasks--set id :state 'pending :backlog t :prompt (string-trim reply)
                             :refined (float-time) :outcome nil :error nil :duplicate-of nil)))))
 
+;;;; Reports
+;;
+;; What a round of work hands in (`hand_in', `task/hand-in') is the
+;; task's `:report', which the user reviews.  A round whose turn ends
+;; without one -- the model replied instead, or could not call the tool:
+;; a provider that offers it no tools leaves it writing its calls as
+;; text -- would leave the review with nothing to read, or with the
+;; report of a round the user already sent back.  It gets a report
+;; marked `:missing' instead: no evidence, and as its `:summary' the
+;; last message the session wrote in the round.  The views say it was
+;; not handed in, so the user sees at once that the work was not
+;; reported, and what the session said.
+
+(defconst harness-tasks--missing-summary-limit 20000
+  "Characters of a session's last message a missing report keeps.")
+
+(defun harness-tasks--round-start (task)
+  "Return when TASK's current round of work began, a float time.
+A round starts with the task (`:started'), with each round of feedback
+that sends it back (`:feedback'), and with new work on a task that was
+in review or done (`:reopened'): it is the work a report speaks for."
+  (max (or (plist-get task :started) 0)
+       (or (plist-get (car (last (plist-get task :feedback))) :at) 0)
+       (or (plist-get task :reopened) 0)))
+
+(defun harness-tasks--report-missing-p (report)
+  "Non-nil when REPORT is one recorded for a round that handed none in."
+  (harness-json-true-p (plist-get report :missing)))
+
+(defun harness-tasks--handed-in-p (task)
+  "Non-nil when TASK's current round handed its report in."
+  (let ((report (plist-get task :report)))
+    (and report
+         (not (harness-tasks--report-missing-p report))
+         (>= (or (plist-get task :report-at) (plist-get report :at) 0)
+             (harness-tasks--round-start task)))))
+
+(defun harness-tasks--last-message (sid since)
+  "Return the last message session SID's model wrote at SINCE or later, or nil.
+SINCE is a float time.  A fork's messages from its parent do not count."
+  (when (and sid (harness-method-exists-p 'session/nodes))
+    (cl-loop for n in (reverse (ignore-errors (harness-call 'session/nodes sid)))
+             for text = (plist-get n :content)
+             when (and (eq (plist-get n :kind) 'assistant)
+                       (member (plist-get n :session) (list nil sid))
+                       (>= (or (plist-get n :ts) 0) since)
+                       (stringp text) (not (harness-string-blank-p text)))
+             return (harness-truncate-end (string-trim text) harness-tasks--missing-summary-limit))))
+
+(defun harness-tasks--missing-report (task)
+  "Return the fields recording that TASK's round handed no report in, or nil.
+Nil when the round handed one in (`harness-tasks--handed-in-p').
+Otherwise (:report REPORT), REPORT marked `:missing', with the session's
+last message of the round as its `:summary' when it wrote one.  It
+replaces the report of an earlier round, which speaks for work the user
+already sent back."
+  (unless (harness-tasks--handed-in-p task)
+    (let ((message (harness-tasks--last-message (plist-get task :session)
+                                                (harness-tasks--round-start task))))
+      (harness-log 'info "task %s: its turn ended without hand_in; no report to review"
+                   (plist-get task :id))
+      (list :report (append (and message (list :summary message))
+                            (list :at (float-time) :missing t))))))
+
 ;;;; Following the sessions
 
 (defun harness-tasks--on-turn-started (session-id)
@@ -1542,7 +1609,9 @@ A turn during a merge (resolving a conflict) keeps the task merging; a
 turn before the task started (a backlog task's) refines it.  A message
 sent to an archived task's session brings the task back too.  New work
 needs a new review, so a verification goes, unless the turn is part of
-a merge: the merge queue steering the agent to commit, say.  A merged
+a merge: the merge queue steering the agent to commit, say.  New work
+on a task that was in review or done starts a round that needs a report
+of its own (`:reopened', see `harness-tasks--round-start').  A merged
 task's worktree is locked again for the new work."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
@@ -1555,15 +1624,18 @@ task's worktree is locked again for the new work."
      (t (harness-tasks--relock-worktree task)
         (apply #'harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
                :merged nil :archived nil
-               (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil)))))))
+               (append
+                (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil))
+                (when (memq (plist-get task :state) '(review done)) (list :reopened (float-time)))))))))
 
 (defun harness-tasks--on-turn-ended (session-id reason)
   "Advance SESSION-ID's task when its turn ended with REASON.
 `end-turn' puts the work in review (`harness-tasks-require-verification')
 until the user verified it; after that, or without review, it completes
 the task outside git -- in the main tree too, which has nothing to
-merge -- and queues its merge inside.  A refinement turn puts its
-write-up in the backlog."
+merge -- and queues its merge inside.  A round that ends without a
+report handed in gets one saying so (`harness-tasks--missing-report').
+A refinement turn puts its write-up in the backlog."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (let ((id (plist-get task :id)))
@@ -1577,10 +1649,14 @@ write-up in the backlog."
        ;; Merged mid-turn: done, or in review when that merge needs one.
        ((and (memq (plist-get task :state) '(done review)) (harness-tasks--merged-p task)) nil)
        ((harness-tasks--needs-review-p task)
-        (harness-tasks--to-review id :outcome reason :error nil :finished (float-time)))
+        (apply #'harness-tasks--to-review id :outcome reason :error nil :finished (float-time)
+               (harness-tasks--missing-report task)))
        ((and (plist-get task :worktree) (not (plist-get task :worktree-removed)))
+        (when-let* ((missing (harness-tasks--missing-report task)))
+          (apply #'harness-tasks--set id missing))
         (harness-tasks--enqueue-merge id))
-       (t (harness-tasks--to-done id 'finished :outcome reason :finished (float-time))))
+       (t (apply #'harness-tasks--to-done id 'finished :outcome reason :finished (float-time)
+                 (harness-tasks--missing-report task))))
       (harness-run-soon #'harness-tasks--schedule))))
 
 (defun harness-tasks--on-pending-changed (session-id &rest _)

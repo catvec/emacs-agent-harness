@@ -659,8 +659,12 @@ may lag, so it is asked first."
 (defun harness-ui-tasks--card-buttons (task)
   "Buttons for TASK's two most useful actions besides opening it.
 A task that handed a report in (`hand_in') gets a [Report] button too:
-its final message and evidence, in a popout."
-  (let ((id (plist-get task :id)))
+its final message and evidence, in a popout.  One whose turn ended
+without it gets [No report] there instead, which pops out what the
+harness recorded for it: that nothing was handed in, and the session's
+last message (`harness-tasks--missing-report')."
+  (let ((id (plist-get task :id))
+        (missing (harness-json-true-p (plist-get (plist-get task :report) :missing))))
     (concat
      (mapconcat (lambda (a)
                   (harness-ui-tasks--button
@@ -671,9 +675,12 @@ its final message and evidence, in a popout."
                 " ")
      (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
        (concat " " (harness-ui-tasks--button
-                     "[Report]"
+                     (if missing "[No report]" "[Report]")
                      (lambda () (harness-ui-report-popout task))
-                     "What it handed in: the final message and the evidence" "report")))
+                     (if missing
+                         "It handed no report in: no summary, no evidence; see what its session said last"
+                       "What it handed in: the final message and the evidence")
+                     "report")))
      (when (harness-ui-tasks--open-harness-p task)
        (concat " " (harness-ui-tasks--button
                     "[Open harness]"

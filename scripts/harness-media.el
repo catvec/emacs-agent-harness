@@ -871,7 +871,9 @@ The orders endpoints only touch a list in memory, and authentication is a set lo
 TODOS are the item texts.  With HOLD the turn stops working half way
 and never ends, so the task stays in progress, and nothing is committed.
 With EVIDENCE, hand_in's evidence items, the turn hands its work in
-with SUMMARY rather than saying it."
+with SUMMARY rather than saying it.  Every finished round should hand
+in, as a task session is told to: one that ends without it puts [No
+report] on the task's card (`harness-tasks--missing-report')."
   (let* ((n (length todos))
          (at (lambda (done)
                (apply #'harness-media--todos
@@ -897,7 +899,9 @@ with SUMMARY rather than saying it."
    (list (harness-media--tool "read_file" :path "acme/auth.py")
          (harness-media--tool "write_file" :path "acme/auth.py" :content harness-media--auth-constant-time))
    "Compare API keys in constant time"
-   "`authenticate()` now compares the key with every known key through `hmac.compare_digest`."))
+   "`authenticate()` now compares the key with every known key through `hmac.compare_digest`."
+   nil
+   (list (list :file "acme/auth.py" :caption "The key check, through hmac.compare_digest"))))
 
 (defun harness-media--task-python (_request)
   "Task: require Python 3.12."
@@ -908,7 +912,9 @@ with SUMMARY rather than saying it."
                               :old_string "requires-python = \">=3.11\"\n"
                               :new_string "requires-python = \">=3.12\"\nclassifiers = [\n    \"Programming Language :: Python :: 3.12\",\n    \"Programming Language :: Python :: 3.13\",\n]\n"))
    "Require Python 3.12"
-   "pyproject.toml requires Python 3.12 and lists 3.12 and 3.13."))
+   "pyproject.toml requires Python 3.12 and lists 3.12 and 3.13."
+   nil
+   (list (list :file "pyproject.toml" :caption "requires-python and the supported versions"))))
 
 (defun harness-media--task-pagination (_request)
   "Task: paginate GET /orders, handed in with a chart and the test run."
@@ -935,14 +941,18 @@ with SUMMARY rather than saying it."
    (list (harness-media--tool "read_file" :path "acme/app.py")
          (harness-media--tool "write_file" :path "acme/timing.py" :content harness-media--timing))
    "Log slow requests"
-   "`acme.timing.timed()` wraps the app and logs every request slower than 500 ms."))
+   "`acme.timing.timed()` wraps the app and logs every request slower than 500 ms."
+   nil
+   (list (list :file "acme/timing.py" :caption "The timing middleware and its threshold"))))
 
 (defun harness-media--task-slow-again (_request)
-  "Task: log slow requests, after review."
+  "Task: log slow requests, after review: the round hands its work in again."
   (list (harness-media--tool "edit_file" :path "acme/timing.py"
                              :old_string "SLOW_SECONDS = 0.5" :new_string "SLOW_SECONDS = 0.5  # seconds")
         (harness-media--git-commit "Say the threshold is in seconds")
-        (harness-media--say "The threshold says it is in seconds now.")))
+        (harness-media--say "The threshold says it is in seconds now: handing it in again.")
+        (harness-media--tool "hand_in" :summary "`SLOW_SECONDS`, the threshold of `acme.timing`, says it is in seconds."
+                             :evidence (list (list :file "acme/timing.py" :caption "The threshold, in seconds")))))
 
 (defun harness-media--task-settings (_request)
   "Task in progress: typed settings."
@@ -1115,7 +1125,12 @@ tool and asks again, and the script goes on from there."
                     (let ((event (pop script)))
                       (pcase (plist-get event :type)
                         ('nil (finish 'end-turn))
-                        ('tool-call (emit event) (puthash sid script harness-media--rest) (finish 'tool-use))
+                        ;; The rest is kept before the call goes out: a
+                        ;; tool that ends the turn (hand_in) can cancel it
+                        ;; while the call is emitted, and the cancel drops
+                        ;; it, or the round after -- a task sent back --
+                        ;; would replay an empty rest.
+                        ('tool-call (puthash sid script harness-media--rest) (emit event) (finish 'tool-use))
                         ('hold nil)
                         ('usage (setq reported t) (emit event) (later))
                         (_ (setq written (+ written (length (or (plist-get event :delta) ""))))
