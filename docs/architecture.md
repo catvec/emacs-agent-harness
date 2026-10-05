@@ -832,6 +832,19 @@ than at its own default.  The percentage is part of the settings a
 process was started with, so changing the cap restarts the CLI with
 `--resume`, like the model and system prompt.
 
+The CLI loads the CLAUDE.md files as `claude` does, but not Claude
+Code's auto memory: every process it starts gets
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` unless
+`harness-provider-claude-auto-memory` is on.  The memory's index,
+MEMORY.md, lists notes kept under `~/.claude/projects/PROJECT/memory/`,
+which Claude Code reads and writes with its own file tools, following
+instructions in its own system prompt.  A harness session has neither,
+so the model opened the notes with the harness's file tools, outside
+the allowed directories, and every session asked the user for that
+directory (or, unattended, was refused it).  Whether a process loads
+the memory is part of the settings it was started with, so changing the
+option restarts the CLI with `--resume`.
+
 The one exception is WebSearch, which stands in for web_search
 (`harness-provider-claude-builtin-tools`; capability `:builtin-tools`).
 A request whose `:builtin-tools` names web_search starts the CLI with

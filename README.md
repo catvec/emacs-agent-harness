@@ -633,6 +633,16 @@ billed depends on how it is logged in:
   token. Sessions show the plan and its quota instead, for example `Max`
   with the 5-hour and weekly windows in the chat header.
 
+Sessions get your CLAUDE.md files, as `claude` loads them, but not
+Claude Code's auto memory, the notes Claude Code keeps on each
+repository in `~/.claude/projects/`. Harness sessions cannot use those
+notes as Claude Code does: the model would read them from outside the
+session's allowed directories, so every session would ask you for
+access. To give sessions that memory anyway, turn on
+`harness-provider-claude-auto-memory` (Claude Code, under Advanced on
+the settings page). Reading a note then asks for its directory: answer
+Always allow and no session asks again.
+
 ### GitHub Copilot
 
 Install GitHub Copilot CLI 1.0 or later with
