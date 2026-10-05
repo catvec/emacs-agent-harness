@@ -2915,6 +2915,17 @@ similar ability") and each model.  `M-<up>`/`M-<down>` move the entry
 at point, `d` removes it (or the budget at point), `c` clears its mark.
 It follows `fallback/changed` and `config/changed`.
 
+The Budgets section lists the harness's budgets and the sessions' own
+(`usage/budget-status` on "session:SID").  A budget's line has [delete]
+[baseline] [plan] right after its name, padded to one width so the
+meters line up: the dashboard does not wrap lines, and buttons at the
+end of a budget's long line were out of sight.  [delete] or `d` deletes
+the budget with `usage/remove-budget`, or a session's own one with
+`session/update :budget nil`; `harness-delete-budget` (`C-c h B`,
+"Delete budget" in the harness menu) does it from anywhere, the budget
+read by name (on a budget's line, that one is the default).  A hard
+budget's refusal says it is deleted there.
+
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; SPC on a session pops out what it
 waits on (a session that waits on nothing leaves SPC scrolling), its

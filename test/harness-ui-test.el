@@ -256,6 +256,16 @@ KEYS default to C-g, which closes the menu."
         (should-not (string-match-p (concat "^" (regexp-quote title) "$") text))))
     (should-not transient--prefix)))
 
+(ert-deftest harness-ui-menu-offers-deleting-a-budget ()
+  "Deleting a budget is in the menu from any buffer, not only the dashboard,
+whose own group says d deletes the budget at point."
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (should (string-match-p "B +Delete budget" (harness-ui-test-menu))))
+  (harness-ui-test-with-menu-buffer #'harness-ui-usage-mode
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "B +Delete budget" text))
+      (should (string-match-p "\\. d +Delete budget (or fallback) at point" text)))))
+
 (ert-deftest harness-ui-menu-shows-the-chat-commands-in-a-chat ()
   (harness-ui-test-with-menu-buffer #'harness-chat-mode
     (let ((text (harness-ui-test-menu)))

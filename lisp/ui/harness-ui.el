@@ -2547,6 +2547,7 @@ leaves the buffer's commands out, never the whole menu."
     ("r" "Rename" harness-rename-session)]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
+    ("B" "Delete budget" harness-delete-budget :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
     ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)

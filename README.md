@@ -201,6 +201,7 @@ named by `harness-server-init-file`.
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
+| `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
@@ -781,6 +782,13 @@ that baseline, which counts until the period rolls over. Organisations
 billed per token can fetch the baseline instead: with an Anthropic Admin
 API key (`harness-anthropic-admin-api-key`), `I` on a monthly budget
 offers the month's API cost minus what the harness recorded.
+
+To delete a budget, click `[delete]` beside its name in the dashboard or
+press `d` on its line; from anywhere, `C-c h B` (Delete budget in the
+harness menu) asks for it by name. A session's own budget (a `session`
+line) is deleted from that session alone. The default budget in the
+settings (`harness-budget`, under New sessions) is removed there: choose
+No budget.
 
 ## Corporate mode
 
