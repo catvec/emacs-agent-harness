@@ -2694,10 +2694,24 @@ so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
 when the buffer changed since the last key, and a host changes all the
 time (a chat streams, a board follows its tasks): once the token stops
-changing, the box asks them again (`harness-compose--popup`).  `C-c C-a`
-reads a project file by part of its name over the same list, never
-listing while you wait; `C-u C-c C-a`, or a directory that is no
-project, reads any file.
+changing, the box asks them again (`harness-compose--popup`).  @ and
+`C-c C-a` find files through one table (`harness-compose--file-table`):
+part of a name matches the project's files, never listing while you
+wait, and a path -- starting with `/`, `~`, `./` or `../`, the relative
+ones against the box's project root -- completes over the file system
+directory by directory in the `file` category, with file name handlers
+off so that a remote name never opens a connection.  A completed path
+attaches only a regular file; a directory stays in the box for its
+files to complete.  `C-c C-a` ignores a leading @, and a directory
+chosen there reads again from inside it; `C-u C-c C-a`, or a directory
+that is no project, browses with `read-file-name`.  An @
+reference typed out in full, or pasted, names its file all the same:
+`harness-compose-take` attaches the regular files the references in the
+text name (`@skill:` ones and missing files aside, trailing punctuation
+tolerated) and leaves the references in the text.  An answer to a
+question, on the board or in a popout, carries no attachment: there a
+file the text names goes as its reference
+(`harness-compose-without-references`).
 
 Views share positions with sessions: the task board, session list,
 usage dashboard, worktree list, conversation tree and log open through

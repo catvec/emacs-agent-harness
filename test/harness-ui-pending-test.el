@@ -316,6 +316,33 @@ Once nothing is left the popout closes itself."
       (should (equal (list 'question sid "q1" "purple") (car harness-ui-pending-test-answers)))
       (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the popout to close"))))
 
+(defvar harness-compose-attachments)
+(declare-function harness-compose-add-attachment "harness-ui-compose")
+
+(ert-deftest harness-ui-pending-popup-answer-mentioning-a-file-is-text ()
+  "An answer naming a file with @ goes as the text it is.
+An attachment of the box's own still cannot go with an answer."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Free text"))
+           (key (list 'pending sid)))
+      (harness-ui-pending-test-record-answers)
+      (with-temp-file (expand-file-name "notes.txt" dir) (insert "Some notes\n"))
+      (with-temp-file (expand-file-name "other.txt" dir) (insert "Other notes\n"))
+      (harness-ui-pending-sync sid (list (list :id "q1" :kind "question"
+                                               :payload (list :question "Which file?" :options nil))))
+      (harness-ui-pending-popout sid)
+      (with-current-buffer (harness-ui-popout-buffer key)
+        (harness-compose-add-attachment (expand-file-name "other.txt" dir))
+        (goto-char harness-compose-end)
+        (insert "@notes.txt")
+        (should-error (harness-ui-popout-submit) :type 'user-error)
+        (should-not harness-ui-pending-test-answers)
+        (goto-char harness-compose-end)
+        (insert "@notes.txt")
+        (harness-ui-popout-submit))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the typed answer")
+      (should (equal (list 'question sid "q1" "@notes.txt") (car harness-ui-pending-test-answers))))))
+
 (ert-deftest harness-ui-pending-popup-learns-a-cached-sessions-request ()
   "A popout shows a request the store has only heard of from the session.
 No chat is open to sync it, which is the case the session list and the
