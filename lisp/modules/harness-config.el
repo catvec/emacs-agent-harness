@@ -31,6 +31,15 @@
 ;; harness only needs to work (prompts, timeouts, polling intervals,
 ;; limits of the tools) is no option at all: those are constants of the
 ;; modules.  See docs/configuration-audit.md.
+;;
+;; A string that names a model says so in its customize type, with a
+;; `:names' property, which customize and the widget library ignore:
+;; `model' for a model id, PROVIDER:MODEL; (provider model) for a
+;; provider id or a model id; `model' with `:provider ID' for the name
+;; provider ID knows one of its models by, without the provider part.
+;; A settings page offers the models the providers list for such a
+;; string, in a picker, rather than a field to type an id in, whose typo
+;; would go unnoticed (`harness-model' is (string :names model)).
 
 ;;; Code:
 
@@ -48,7 +57,7 @@
 
 (defcustom harness-model "claude:claude-fable-5-1"
   "Default model as PROVIDER:MODEL."
-  :type 'string :safe #'stringp :group 'harness)
+  :type '(string :names model) :safe #'stringp :group 'harness)
 
 (defcustom harness-permission-mode 'ask
   "Default permission mode for new sessions."

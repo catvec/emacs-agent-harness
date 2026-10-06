@@ -107,7 +107,7 @@ GH_TOKEN or GITHUB_TOKEN."
   "Copilot model that the model id \"copilot:default\" stands for.
 It is listed first in the catalogue.  Copilot's own model \"auto\" lets
 Copilot choose a model for each request."
-  :type 'string :group 'harness)
+  :type '(string :names model :provider copilot) :group 'harness)
 
 (defcustom harness-provider-copilot-tiers
   '(:cheap "haiku" :balanced "sonnet" :frontier "opus")

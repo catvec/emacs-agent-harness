@@ -2716,8 +2716,8 @@ project).  Session defaults, the layered settings, come first in both
 scopes; the other options are listed by module in the Global scope and
 folded into one line in the Project scope.  Each setting is a
 `wid-edit` widget built from its customize type, with its doc and
-where its value in effect comes from; toggles and menus save at once,
-text saves with RET (C-x C-s saves every edit).  A type whose plist
+where its value in effect comes from; toggles, menus and models save
+at once, text saves with RET (C-x C-s saves every edit).  A type whose plist
 names its keys (`:options`) is drawn as a form: one line per key,
 `[X] Base URL: …` with the key's help under it, the key's name width
 aligned, and a key the value does not set greyed out with the value it
@@ -2726,8 +2726,16 @@ values it accepts do not change).  In a list, each record folds into a
 line summing it up, `[Edit]` opens it into the form and `[Hide]` folds
 it again; `[INS]` adds a record, open, from the type's starting value.
 [More] unfolds a long documentation, whose first line shows with the
-keys' help doing the rest.  A string key of a `*-model` setting
-completes model ids, menus included.  [Remove override]
+keys' help doing the rest.  A string whose customize type says what it
+names, with `:names` (`model` for PROVIDER:MODEL, `provider` for a
+provider id, and `:provider ID` for the names provider ID gives its own
+models; see `harness-model`), is a dropdown, `harness-ui-config-model`,
+alone or with the constants of its menu, in a list too: a button naming
+the model, then its id and context window.  The button opens a picker
+(`completing-read`) of the UI's catalogue of `provider/models`, grouped
+by provider and annotated with context window and price.  Text that
+matches no candidate is taken as typed, and a model no provider lists
+gets a warning line.  [Remove override]
 deletes a project value, [Reset to default] a customized global one.
 Secrets show as set or not and are set through `read-passwd`; long
 texts open in `string-edit`.  The page reloads on `config/changed`,
