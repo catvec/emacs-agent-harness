@@ -2703,7 +2703,10 @@ Dragging images out (`harness-ui-drag`): the images the UI shows -- the
 transcript's (`harness-chat--image-string`, `harness-ui-image-string`),
 a compose chip's thumbnail and name, a report's and the image popout's
 -- drag into another application as a file.  `harness-ui-drag-source`
-(a string) and `harness-ui-drag-region` (buffer text) set the
+(a string), `harness-ui-drag-region` (buffer text) and
+`harness-ui-drag-props` (a plist of text properties about to be put on
+text, the image strings' click properties, so that an image drawn in
+pieces, line-high strips say, drags from each) set the
 `harness-ui-drag` property, the file or t for the image displayed
 there, lay `harness-ui-drag-map` (down-mouse-1) over the keymap the
 text already has, and add a word to its `help-echo`.

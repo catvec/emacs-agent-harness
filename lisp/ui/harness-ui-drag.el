@@ -6,8 +6,10 @@
 ;; application -- a file manager, a browser, a chat app -- as a file:
 ;; those of the transcript, the attachments of the compose box, and
 ;; those of reports and their popouts.  `harness-ui-drag-source' makes a
-;; string draggable and `harness-ui-drag-region' a stretch of buffer
-;; text.  Each lays `harness-ui-drag-map' over the keymap the text
+;; string draggable, `harness-ui-drag-region' a stretch of buffer text
+;; and `harness-ui-drag-props' the text properties some code is about to
+;; put on text (an image drawn as several line-high strips gets them on
+;; each).  Each lays `harness-ui-drag-map' over the keymap the text
 ;; already has, so that down-mouse-1 there runs `harness-ui-drag-start',
 ;; and adds a word about it to the hover text.
 ;;
@@ -78,27 +80,56 @@ that far is a click."
   (or (eq map harness-ui-drag-map)
       (and (keymapp map) (memq harness-ui-drag-map (cdr-safe map)) t)))
 
+(defun harness-ui-drag--layer (map)
+  "Return keymap MAP with `harness-ui-drag-map' laid over it (MAP may be nil)."
+  (cond ((harness-ui-drag--layered-p map) map)
+        (map (make-composed-keymap (list harness-ui-drag-map map)))
+        (t harness-ui-drag-map)))
+
+(defun harness-ui-drag--hint (help)
+  "Return the help-echo HELP with the word about dragging added.
+A function stays as it is: what it says cannot be added to."
+  (cond ((null help) harness-ui-drag-hint)
+        ((and (stringp help) (not (string-suffix-p harness-ui-drag-hint help)))
+         (concat help "; " harness-ui-drag-hint))
+        (t help)))
+
 (defun harness-ui-drag--apply (start end object file)
   "Make START..END of OBJECT draggable as FILE (nil: the image shown there).
 OBJECT is a string, or nil for the current buffer."
   (put-text-property start end 'harness-ui-drag (or file t) object)
-  (let ((pos start))
-    (while (< pos end)
-      (let ((next (next-single-property-change pos 'keymap object end))
-            (map (get-text-property pos 'keymap object)))
-        (unless (harness-ui-drag--layered-p map)
-          (put-text-property pos next 'keymap
-                             (if map (make-composed-keymap (list harness-ui-drag-map map)) harness-ui-drag-map)
-                             object))
-        (setq pos next))))
-  (let ((pos start))
-    (while (< pos end)
-      (let ((next (next-single-property-change pos 'help-echo object end))
-            (help (get-text-property pos 'help-echo object)))
-        (cond ((null help) (put-text-property pos next 'help-echo harness-ui-drag-hint object))
-              ((and (stringp help) (not (string-suffix-p harness-ui-drag-hint help)))
-               (put-text-property pos next 'help-echo (concat help "; " harness-ui-drag-hint) object)))
-        (setq pos next)))))
+  (dolist (prop '(keymap help-echo))
+    (let ((pos start))
+      (while (< pos end)
+        (let* ((next (next-single-property-change pos prop object end))
+               (old (get-text-property pos prop object))
+               (new (if (eq prop 'keymap) (harness-ui-drag--layer old) (harness-ui-drag--hint old))))
+          (unless (eq new old)
+            (put-text-property pos next prop new object))
+          (setq pos next))))))
+
+(defun harness-ui-drag--can-p (file)
+  "Non-nil when something can be made draggable as FILE (nil: its image)."
+  (and (harness-ui-drag-available-p) (harness-ui-drag--local-p file)))
+
+(defun harness-ui-drag-props (props &optional file)
+  "Return the text properties PROPS made draggable, as FILE or the image shown.
+PROPS is a plist of text properties: the click properties of an image's
+text, say, for the code that puts them on it (each line-high strip of a
+tall image gets them, so it drags from any part of the picture).  FILE
+is what `harness-ui-drag-source' takes.  The result has
+`harness-ui-drag' too, `harness-ui-drag-map' laid over the keymap of
+PROPS and the word about dragging added to its help-echo.  PROPS comes
+back as it is when this Emacs cannot drag, or FILE is on another host;
+it is never changed."
+  (if (not (harness-ui-drag--can-p file))
+      props
+    (let ((props (copy-sequence props)))
+      (setq props (plist-put props 'harness-ui-drag (or file t)))
+      (setq props (plist-put props 'keymap (harness-ui-drag--layer (plist-get props 'keymap))))
+      (setq props (plist-put props 'help-echo (harness-ui-drag--hint (plist-get props 'help-echo))))
+      (unless file (harness-ui-drag-prefetch))
+      props)))
 
 (defun harness-ui-drag-source (string &optional file)
   "Return STRING made draggable out of Emacs, as FILE or as the image it shows.
@@ -110,8 +141,7 @@ bytes are written to (`harness-ui-drag-image-file').  STRING gets
 and moving the mouse drags it while a click does what it did, and its
 hover text says so.  STRING comes back unchanged when this Emacs cannot
 drag, or FILE is on another host."
-  (if (not (and (harness-ui-drag-available-p) (harness-ui-drag--local-p file)
-                (stringp string) (> (length string) 0)))
+  (if (not (and (harness-ui-drag--can-p file) (stringp string) (> (length string) 0)))
       string
     (let ((s (copy-sequence string)))
       (harness-ui-drag--apply 0 (length s) s file)
@@ -121,7 +151,7 @@ drag, or FILE is on another host."
 (defun harness-ui-drag-region (start end &optional file)
   "Make START..END of the current buffer draggable, as FILE or the image there.
 The same as `harness-ui-drag-source' does to a string."
-  (when (and (harness-ui-drag-available-p) (harness-ui-drag--local-p file) (< start end))
+  (when (and (harness-ui-drag--can-p file) (< start end))
     (let ((inhibit-read-only t))
       (harness-ui-drag--apply start end nil file))
     (unless file (harness-ui-drag-prefetch))))

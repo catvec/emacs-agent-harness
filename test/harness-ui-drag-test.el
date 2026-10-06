@@ -124,11 +124,15 @@ for letting go there.  The command loop reads them all."
 
 (ert-deftest harness-ui-drag-source-leaves-what-cannot-drag ()
   "A file on another host is not draggable, nor is anything where Emacs cannot drag."
-  (let ((s (propertize "[image]" 'help-echo "mouse-1: open")))
+  (let ((s (propertize "[image]" 'help-echo "mouse-1: open"))
+        (props (list 'help-echo "mouse-1: open")))
     (cl-letf (((symbol-function 'harness-ui-drag-available-p) (lambda () t)))
-      (should (eq s (harness-ui-drag-source s "/ssh:far:/srv/cat.png"))))
+      (should (eq s (harness-ui-drag-source s "/ssh:far:/srv/cat.png")))
+      (should (eq props (harness-ui-drag-props props "/ssh:far:/srv/cat.png"))))
     (cl-letf (((symbol-function 'harness-ui-drag-available-p) (lambda () nil)))
       (should (eq s (harness-ui-drag-source s "/tmp/cat.png")))
+      (should (eq props (harness-ui-drag-props props "/tmp/cat.png")))
+      (should (eq props (harness-ui-drag-props props)))
       (with-temp-buffer
         (insert s)
         (harness-ui-drag-region (point-min) (point-max) "/tmp/cat.png")
@@ -264,6 +268,45 @@ A drop back on this frame does nothing: the drag is not allowed one."
     (should (eq image (harness-ui-drag--image-in (vector '(space :width 3) image))))
     (should-not (harness-ui-drag--image-in '(margin . left-margin)))
     (should-not (harness-ui-drag--image-in "text"))))
+
+(ert-deftest harness-ui-drag-props-on-every-strip ()
+  "Click properties made draggable drag a tall image from any of its strips.
+A tall image is drawn as line-high slices of it, each of them with the
+properties and the newlines between them without; a drag from the
+second hands over the whole image, and a click there still clicks."
+  (harness-ui-drag-test-with-display
+    (let* ((harness-ui-drag--own-dir nil)
+           (image (list 'image :type 'png :data harness-test-png))
+           (opened 0)
+           (map (let ((m (make-sparse-keymap)))
+                  (define-key m [mouse-1] (lambda () (interactive) (cl-incf opened)))
+                  m))
+           (given (list 'pointer 'hand 'help-echo "image/png" 'keymap map))
+           (props (harness-ui-drag-props given)))
+      (should (eq t (plist-get props 'harness-ui-drag)))
+      (should (eq 'hand (plist-get props 'pointer)))
+      (should (equal (concat "image/png; " harness-ui-drag-hint) (plist-get props 'help-echo)))
+      (should (eq 'harness-ui-drag-start (lookup-key (plist-get props 'keymap) [down-mouse-1])))
+      ;; The properties it was given are left as they were.
+      (should (equal (list 'pointer 'hand 'help-echo "image/png" 'keymap map) given))
+      ;; Made draggable again, they are the same: one drag map, one hint.
+      (let ((again (harness-ui-drag-props props)))
+        (should (eq (plist-get props 'keymap) (plist-get again 'keymap)))
+        (should (equal (plist-get props 'help-echo) (plist-get again 'help-echo))))
+      (unwind-protect
+          (harness-ui-drag-test-in-buffer
+              (concat (apply #'propertize "[image]" 'display (list '(slice 0 0.0 1.0 0.5) image) props)
+                      (propertize "\n" 'line-height t)
+                      (apply #'propertize " " 'display (list '(slice 0 0.5 1.0 0.5) image) props))
+            (let ((second (+ pos (length "[image]\n"))))
+              (harness-ui-drag-test--press second 'release)
+              (should (= 1 opened))
+              (harness-ui-drag-test--press second (list 0 harness-ui-drag-threshold))
+              (should (= 1 opened))
+              (let ((file (car (car harness-ui-drag-test--drags))))
+                (should (equal harness-ui-drag--own-dir (file-name-directory file)))
+                (should (equal harness-test-png (harness-ui-drag-test--bytes file))))))
+        (harness-ui-drag--delete-own-dir)))))
 
 ;;;; In the harness: the session's directory, the views
 
