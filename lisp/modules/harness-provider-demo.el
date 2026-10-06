@@ -21,7 +21,9 @@
 ;; a quick look at the project and writes it up -- or, when another task
 ;; on the board asks for it in the same words, refuses it as a duplicate.
 ;; A task board's search gets the JSON a search model answers with,
-;; matched from the words of the query (`harness-provider-demo--search').
+;; matched from the words of the query (`harness-provider-demo--search'),
+;; and the companion pet gets its name and its lines
+;; (`harness-provider-demo--pet').
 
 ;;; Code:
 
@@ -88,6 +90,8 @@ answers) gives a function.")
       (harness-provider-demo--write-up request cwd))
      ((string-prefix-p "You are the search box of a task board" (or (plist-get request :system) ""))
       (harness-provider-demo--search request))
+     ((string-match-p "\\`You \\(?:name newly hatched\\|are a\\) coding companion" (or (plist-get request :system) ""))
+      (harness-provider-demo--pet request))
      ((string-match-p "\\btour\\b" text)
       `((:type thinking :delta "The user wants a tour. ")
         (:type thinking :delta "I will read a file, then summarise.")
@@ -209,6 +213,47 @@ time."
                                     (if feedback (concat "\n\n**Also.** " feedback) "")))
         (:type usage :input 700 :output 120 :cache-read 300 :cost 0.002 :context 900)
         (:type done :stop-reason end-turn)))))
+
+(defconst harness-provider-demo--pet-lines
+  '(("hatched" . "*blinks* Oh. Hello. Is it always this bright in here?")
+    ("petted" . "*leans into it* Yes. That. Do that again after the next commit.")
+    ("Tests just failed" . "*peers at the red* Somebody's assertion has feelings.")
+    ("failed" . "*winces* That one went sideways. I saw nothing.")
+    ("big change" . "*whistles* That diff needs its own postcode.")
+    ("by name" . "*perks up* You called? I was only pretending to nap.")
+    ("grew a level" . "*stretches* I feel taller. Probably am."))
+  "The demo pet's line for what happened, by words of the request.")
+
+(defun harness-provider-demo--pet (request)
+  "Answer the companion pet's REQUEST, as a scripted cheap model would.
+Hatching names it after the first of its inspiration words; otherwise
+it says the line of `harness-provider-demo--pet-lines' for what
+happened, or remarks on the longest word of the user's last message."
+  (let* ((text (harness-provider-demo--last-user-text request))
+         (answer
+          (if (string-prefix-p "You name" (plist-get request :system))
+              (let ((word (if (string-match "^Inspiration words: \\([[:alpha:]]+\\)" text)
+                              (match-string 1 text)
+                            "pebble"))
+                    (species (if (string-match "^Species: \\(.*\\)$" text) (match-string 1 text) "creature")))
+                (format "{\"name\":%S,\"personality\":%S}"
+                        (capitalize word)
+                        (format "%s %s that rates every function by how it would taste, and hums when the tests pass."
+                                (if (string-match-p "\\`[aeiou]" species) "An" "A") species)))
+            ;; What happened is the first line; the user's last words, the last "user:" line.
+            (or (let ((what (car (split-string text "\n"))))
+                  (cdr (cl-find-if (lambda (line) (string-search (car line) what)) harness-provider-demo--pet-lines)))
+                (let* ((last (car (last (cl-remove-if-not (lambda (line) (string-prefix-p "user: " line))
+                                                          (split-string text "\n")))))
+                       (said (and last
+                                  (car (sort (split-string (substring last 6) "[^[:alnum:]']+" t)
+                                             (lambda (a b) (> (length a) (length b))))))))
+                  (if said
+                      (format "*tilts head* %s? Bold. I like it." (capitalize said))
+                    "..."))))))
+    `((:type text :delta ,answer)
+      (:type usage :input 300 :output 30 :cost 0.0003 :context 330)
+      (:type done :stop-reason end-turn))))
 
 (defconst harness-provider-demo--search-verbs
   '(("archive" "get rid of" "archive" "remove" "delete" "hide" "clean up")
