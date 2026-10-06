@@ -355,7 +355,7 @@ secrets."
                   (lambda (json)
                     (condition-case err
                         (let ((data (plist-get json :data)))
-                          (unless (listp data) (error "no list of models"))
+                          (unless (listp data) (error "No list of models"))
                           (delq nil
                                 (mapcar (lambda (e)
                                           (and (consp e) (plist-get e :id)
