@@ -2578,7 +2578,15 @@ Thinking between two calls of a run does not break it but folds in
 with them, since a model that thinks before every call would never
 have a run otherwise; thinking before a run's first call or after its
 last stays out.  Only the newest block joins a run as the transcript
-grows, and a loaded transcript is grouped as a whole.
+grows, and a loaded transcript is grouped as a whole.  Two calls of a
+coalescable tool stay out of runs: one whose result shows a picture or
+a video, which a group would hide, and one the session waits on, whose
+permission prompt is open (the pending record names the call), until
+the user answers it.  A page of history can start with the result of a
+call on the page before it: the result shows alone, as the result of
+an earlier tool call, until that page loads, then joins its call
+(`harness-chat--adopt-orphans`), so the run folds as it would in a
+single load.
 A tool call's header says how it went, marked the way a Japanese table
 marks it (`harness-ui-level-icon`), each ending on a background of
 its own: a green circle when it ran (`harness-tool-face`), a yellow
@@ -2608,7 +2616,12 @@ file ×3, Search files, Find files", then " · thinking ×2" for the
 thinking folded in with them), and so do the permission panel,
 the activity line and the mode line.  A title recorded before tools had
 labels starts with the tool's name ("read_file x.el"), which the label
-replaces, so old transcripts read the same.
+replaces, so old transcripts read the same.  Under a folded call's
+header one dim line sums up the input its title leaves out
+(`harness-ui-tool-input-summary`): a list reads as its labels,
+comma-separated, and a list of other objects, such as the items of a
+todo list, as how many there are, never as a Lisp form; a todo_write,
+whose title already counts its items, has no such line.
 Auto-scroll follows unless the user scrolled up.  While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a

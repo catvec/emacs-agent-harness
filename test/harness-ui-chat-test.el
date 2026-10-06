@@ -1365,6 +1365,64 @@ between them."
                                     (buffer-substring-no-properties (harness-chat-group-start group)
                                                                     (harness-chat-group-end group))))))))))
 
+(ert-deftest harness-ui-chat-call-waiting-on-the-user-stays-out-of-groups ()
+  "A coalescable call waiting for the user's permission is not folded away.
+It used to fold into the run it ended, so the call the session waited
+on hid behind a summary line.  Once answered, it folds in with its run."
+  (harness-ui-chat-test-with
+    (let ((waiting nil))
+      ;; Reading outside the project asks the user, as the directory jail does.
+      (harness-add-filter 'permission/decide
+                          (lambda (decision next request)
+                            (if (not (equal (plist-get (plist-get request :input) :path) "/outside/x.el"))
+                                (funcall next decision)
+                              (let* ((sid (plist-get (plist-get request :session) :id))
+                                     (pending (list :kind 'permission
+                                                    :payload (list :tool "read_file" :kind 'read
+                                                                   :input (plist-get request :input)
+                                                                   :call-id (plist-get request :call-id)
+                                                                   :title "Access /outside/")))
+                                     (pid (harness-call 'session/pending-add sid pending)))
+                                (setq waiting next)
+                                (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid)))))
+                          5)
+      (harness-register-method 'permission/answer
+                               (lambda (session-id pending-id answer)
+                                 (harness-call 'session/pending-resolve session-id pending-id answer)
+                                 (funcall waiting (list :behavior 'allow :final t))
+                                 answer))
+      (let* ((sid (harness-ui-chat-test-session))
+             (buf (harness-ui-chat-test-open sid))
+             (cwd (plist-get (harness-call 'session/get sid) :cwd))
+             (harness-provider-demo-script-override
+              `((:type tool-call :id "r1" :name "list_dir" :input (:path ,cwd))
+                (:type tool-call :id "r2" :name "glob" :input (:pattern "*.el" :path ,cwd))
+                (:type tool-call :id "r3" :name "read_file" :input (:path "/outside/x.el"))
+                (:type done :stop-reason end-turn))))
+        (harness-ui-chat-test-type buf "read things")
+        (with-current-buffer buf (harness-chat-send))
+        (harness-test-wait (lambda () (with-current-buffer buf
+                                        (and harness-chat--pending
+                                             (= 3 (length (harness-ui-chat-test-blocks buf "tool-call"))))))
+                           5 "waiting on the user")
+        (with-current-buffer buf
+          (let ((read (car (last (harness-ui-chat-test-blocks buf "tool-call")))))
+            ;; The three reads would be a run, but it ends on the call the
+            ;; session waits on: no group hides it.
+            (should (equal "/outside/x.el" (plist-get (plist-get (harness-chat-block-node read) :input) :path)))
+            (should (harness-chat--waiting-p read))
+            (should (= 0 (hash-table-count harness-chat--groups)))
+            (should-not (invisible-p (harness-chat-block-start read)))
+            (harness-chat--answer-permission (plist-get (car harness-chat--pending) :id) "allow-once")))
+        (harness-test-wait (lambda () (equal "idle" (plist-get (harness-ui-session sid) :status))) 10 "turn ended")
+        (with-current-buffer buf
+          (let ((calls (harness-ui-chat-test-blocks buf "tool-call"))
+                (groups (harness-ui-chat-test-check-groups buf)))
+            (should (cl-every #'harness-chat-block-result calls))
+            (should (= 1 (length groups)))
+            (should (equal (mapcar #'harness-chat-block-id calls)
+                           (harness-chat-group-members (car groups))))))))))
+
 ;;;; Images and videos in the transcript
 
 (defun harness-ui-chat-test--video (dir name seconds)
@@ -1764,6 +1822,53 @@ calls around it regroup."
         (with-current-buffer buf
           (should (= (+ kept 20) (length harness-chat--order)))
           (harness-ui-chat-test-check-markers))))))
+
+(ert-deftest harness-ui-chat-history-page-joins-split-results ()
+  "A result whose call is on the page before it joins the call when that page loads.
+The newest page can start with the result of a call made just before
+it, which shows alone until the older page comes.  It used to stay
+alone after that: the call said it had no result, and the stray block
+split the run of reads around it, so part of the run stayed unfolded."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session "Split"))
+          (w (selected-window))
+          (harness-chat--history-limit 5))
+      (harness-call 'session/append sid (list :kind 'user :content "read them"))
+      (dotimes (i 6)
+        (let ((call (format "c%d" i)))
+          (harness-call 'session/append sid (list :kind 'tool-call :tool "read_file" :call-id call
+                                                  :input (list :path (format "f%d.el" i))
+                                                  :title (format "Read file: f%d.el" i)))
+          (harness-call 'session/append sid (list :kind 'tool-result :call-id call
+                                                  :output (format "contents %d" i)))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          ;; The newest five nodes start with the result of the fourth call.
+          (should harness-chat--has-more)
+          (should (equal "tool-result" (harness-chat-block-kind (gethash (harness-chat--oldest-id) harness-chat--blocks))))
+          (set-window-buffer w buf)
+          (set-window-start w (point-min))
+          (set-window-point w (point-min))
+          (harness-chat--manage-history))
+        (harness-test-wait (lambda () (with-current-buffer buf (not harness-chat--has-more))) 5 "older page")
+        (with-current-buffer buf
+          (let ((calls (harness-ui-chat-test-blocks buf "tool-call"))
+                (groups (harness-ui-chat-test-check-groups buf)))
+            (should-not (harness-ui-chat-test-blocks buf "tool-result"))
+            (should-not (harness-ui-chat-test-find buf "result of an earlier tool call"))
+            (should-not (harness-ui-chat-test-find buf "no result"))
+            (should (= 7 (length harness-chat--order)))
+            (should (= 6 (length calls)))
+            (should (equal "contents 3" (plist-get (harness-chat-block-result (nth 3 calls)) :output)))
+            (should (cl-every #'harness-chat-block-result calls))
+            (should-not harness-chat--unfinished)
+            ;; Every node still finds its block: the result its call's.
+            (should (= 13 (hash-table-count harness-chat--blocks)))
+            ;; The six reads are one run, folded under one summary.
+            (should (= 1 (length groups)))
+            (should (equal (mapcar #'harness-chat-block-id calls)
+                           (harness-chat-group-members (car groups))))
+            (should (harness-ui-chat-test-find buf "6 tool calls"))))))))
 
 ;;;; Redraw and deletion
 
@@ -2239,7 +2344,14 @@ from the buffer: it shows what the next message continues."
                  "options: A, B"))
   (let ((long "/home/someone/projects/a-rather-long-directory-name/sub"))
     (should-not (harness-chat--input-summary (list :path long) (concat "Find files: *.el in " long "/"))))
-  (should (equal (harness-chat--input-summary '(:path "a.el")) "path: a.el")))
+  (should (equal (harness-chat--input-summary '(:path "a.el")) "path: a.el"))
+  ;; Other objects, the items of a todo list, read as their count, not as
+  ;; a Lisp form: one the title already shows leaves no line at all.
+  (let ((todos '((:id "1" :text "Read the code" :status "done")
+                 (:id "2" :text "Fix it" :status "in-progress"))))
+    (should-not (harness-chat--input-summary (list :todos todos) "Todo list: 2 items"))
+    (should (equal (harness-chat--input-summary (list :todos (vconcat todos))) "todos: 2 items"))
+    (should (equal (harness-chat--input-summary (list :todos (list (car todos)))) "todos: 1 item"))))
 
 (ert-deftest harness-ui-chat-input-listing-of-objects ()
   "A list of objects in a tool's input, such as options with diagrams or
