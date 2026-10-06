@@ -700,11 +700,12 @@ profile or a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`). See
 #### Through a gateway
 
 A gateway or proxy in front of Bedrock gets an endpoint of its own. On
-the settings page, under **Advanced** → **AWS Bedrock**, add one to
-**Endpoints** (`INS`). Its **ID** names its models
-(`ID:MODEL`). Set **Runtime URL** to the gateway's URL, path prefix
-included. For example, `https://gateway.example.com/bedrock` sends
-ConverseStream to
+the settings page (`C-c h S`), under **Models and services**, add one
+with `INS` to the **Endpoints** described as "AWS Bedrock endpoints"
+(the **Endpoints** above it is for OpenAI-compatible APIs). Its **ID**
+names its models (`ID:MODEL`). Set **Runtime URL** to the gateway's
+URL, path prefix included. For example,
+`https://gateway.example.com/bedrock` sends ConverseStream to
 `https://gateway.example.com/bedrock/model/MODEL/converse-stream`. A
 query in the URL is added to every request.
 
