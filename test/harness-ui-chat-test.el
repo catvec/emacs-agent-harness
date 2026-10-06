@@ -1423,6 +1423,69 @@ on hid behind a summary line.  Once answered, it folds in with its run."
             (should (equal (mapcar #'harness-chat-block-id calls)
                            (harness-chat-group-members (car groups))))))))))
 
+(ert-deftest harness-ui-chat-answered-call-rejoins-its-run-and-open-groups-stay-open ()
+  "A call waiting on the user regroups the transcript as a fresh load would.
+Answered after another call of the same step came in, it is no longer
+the newest block, and used to stay out of its run for good.  Taking it
+out of a run the user had opened used to open every other group too,
+and either change closed the groups the user had opened."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-labels ((node (&rest plist)
+                      (harness-chat--apply-update (list :sessionUpdate "_harness/node" :node plist)))
+                    (read (id call path &optional result)
+                      (node :id id :kind "tool-call" :tool "read_file" :call-id call
+                            :input (list :path path) :title (concat "read_file " path))
+                      (when result (node :id (concat id "-out") :kind "tool-result" :call-id call :output "ok")))
+                    (group-of (id)
+                      (gethash (harness-chat-block-group (gethash id harness-chat--blocks)) harness-chat--groups))
+                    (members (id) (harness-chat-group-members (group-of id)))
+                    (open-p (id)
+                      ;; Shown, and its summary offers to collapse it.
+                      (let ((g (group-of id)))
+                        (and (harness-chat-group-expanded g)
+                             (not (overlay-get (harness-chat-group-overlay g) 'invisible))
+                             (string-match-p "\\[collapse\\]"
+                                             (buffer-substring-no-properties (harness-chat-group-start g)
+                                                                             (harness-chat-group-end g))))))
+                    (toggle (id) (harness-chat-toggle-group (harness-chat-group-id (group-of id)))))
+          (read "n-a1" "a1" "a.el" t)
+          (read "n-a2" "a2" "b.el" t)
+          (read "n-a3" "a3" "c.el" t)
+          (node :id "n-u" :kind "user" :content "Now the rest.")
+          (read "n-r1" "c1" "d.el" t)
+          (read "n-r2" "c2" "e.el" t)
+          (read "n-r3" "c3" "f.el" t)
+          (read "n-r4" "c4" "/outside/x.el")
+          (should (equal '("n-r1" "n-r2" "n-r3" "n-r4") (members "n-r1")))
+          ;; The user watches the run; its last read asks for permission.
+          (toggle "n-r1")
+          (harness-ui-pending-add sid (list :id "p4" :kind "permission" :call-id "c4" :created (float-time)
+                                            :title "Access /outside/" :tool "read_file" :tool-kind "read"
+                                            :input '(:path "/outside/x.el")))
+          (should (harness-chat--waiting-p (gethash "n-r4" harness-chat--blocks)))
+          (should-not (harness-chat-block-group (gethash "n-r4" harness-chat--blocks)))
+          ;; The rest of the run stays open, the other group folded.
+          (should (equal '("n-r1" "n-r2" "n-r3") (members "n-r1")))
+          (should (open-p "n-r1"))
+          (should-not (open-p "n-a1"))
+          ;; Another call of the step finishes while the read waits.
+          (read "n-r5" "c5" "g.el" t)
+          (should-not (harness-chat-block-group (gethash "n-r5" harness-chat--blocks)))
+          (toggle "n-r1")
+          (toggle "n-a1")
+          ;; Answered, the read folds into its run with the call after it,
+          ;; and the group the user opened stays open.
+          (harness-ui-pending-remove sid "p4")
+          (node :id "n-r4-out" :kind "tool-result" :call-id "c4" :output "ok")
+          (should (equal '("n-r1" "n-r2" "n-r3" "n-r4" "n-r5") (members "n-r1")))
+          (should-not (open-p "n-r1"))
+          (should (open-p "n-a1"))
+          (should (= 2 (length (harness-ui-chat-test-check-groups buf))))
+          (should-not (invisible-p (harness-ui-chat-test-find buf "Now the rest"))))))))
+
 ;;;; Images and videos in the transcript
 
 (defun harness-ui-chat-test--video (dir name seconds)

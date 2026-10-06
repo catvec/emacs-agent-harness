@@ -1303,18 +1303,27 @@ once it waits on the user, until it is answered."
 
 (defun harness-chat--uncoalesce (block)
   "Take BLOCK out of the group it is folded into, splitting the group.
-The runs before and after it are grouped anew, keeping the expanded
-state the group had."
-  (when-let* ((gid (harness-chat-block-group block))
-              (group (gethash gid harness-chat--groups)))
-    (let ((expanded (harness-chat-group-expanded group)))
-      (harness-chat--remove-group group)
-      (harness-chat--regroup)
-      (when expanded
-        (maphash (lambda (_ g)
-                   (setf (harness-chat-group-expanded g) t)
-                   (overlay-put (harness-chat-group-overlay g) 'invisible nil))
-                 harness-chat--groups)))))
+The runs before and after it are grouped anew; what the user opened
+stays open (see `harness-chat--regroup-keeping-open')."
+  (when-let* ((gid (harness-chat-block-group block)))
+    (when (gethash gid harness-chat--groups)
+      (harness-chat--regroup-keeping-open))))
+
+(defun harness-chat--regroup-keeping-open ()
+  "Group the transcript anew, keeping open the groups the user opened.
+A new group with a block of a group that was expanded is expanded too,
+and the others are folded, as `harness-chat--regroup' makes them."
+  (let ((open nil))
+    (maphash (lambda (_ g)
+               (when (harness-chat-group-expanded g)
+                 (setq open (append (harness-chat-group-members g) open))))
+             harness-chat--groups)
+    (harness-chat--regroup)
+    (when open
+      (maphash (lambda (gid g)
+                 (when (cl-intersection (harness-chat-group-members g) open :test #'equal)
+                   (harness-chat-toggle-group gid)))
+               harness-chat--groups))))
 
 (defun harness-chat--clear-groups ()
   "Remove every group: summary blocks and overlays."
@@ -1583,13 +1592,16 @@ On `harness-ui-pending-changed-hook'."
     (with-current-buffer buf
       (let ((before (harness-chat--waiting-calls)))
         (setq harness-chat--pending (harness-ui-pending-items sid))
-        ;; A call now waiting on the user leaves its group; an answered
-        ;; one may fold into its run again.
-        (when harness-chat--calls
-          (dolist (call (cl-set-exclusive-or before (harness-chat--waiting-calls) :test #'equal))
-            (when-let* ((id (gethash call harness-chat--calls)))
-              (when (gethash id harness-chat--blocks)
-                (harness-chat--maybe-coalesce id))))))
+        ;; A call now waiting on the user leaves its group, and an
+        ;; answered one folds into its run again.  Other calls of its step
+        ;; may have come after it meanwhile, so the transcript is grouped
+        ;; anew, as a fresh load groups it.
+        (when (and harness-chat--calls
+                   (cl-some (lambda (call)
+                              (when-let* ((b (gethash (gethash call harness-chat--calls) harness-chat--blocks)))
+                                (member (plist-get (harness-chat-block-node b) :tool) harness-chat--coalescable)))
+                            (cl-set-exclusive-or before (harness-chat--waiting-calls) :test #'equal)))
+          (harness-chat--regroup-keeping-open)))
       (harness-chat--render-tail)
       (harness-chat--start-spinner))))
 

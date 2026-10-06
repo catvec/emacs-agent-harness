@@ -2582,7 +2582,11 @@ grows, and a loaded transcript is grouped as a whole.  Two calls of a
 coalescable tool stay out of runs: one whose result shows a picture or
 a video, which a group would hide, and one the session waits on, whose
 permission prompt is open (the pending record names the call), until
-the user answers it.  A page of history can start with the result of a
+the user answers it.  Such a call leaving its run, or coming back to it
+once answered, has the transcript grouped anew, as a load groups it:
+other calls of its step may have come after it meanwhile.  A group
+with a call of a group the user had opened is open too, and no other.
+A page of history can start with the result of a
 call on the page before it: the result shows alone, as the result of
 an earlier tool call, until that page loads, then joins its call
 (`harness-chat--adopt-orphans`), so the run folds as it would in a
