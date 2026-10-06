@@ -2696,7 +2696,9 @@ message sent from it resumes it."
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
   (define-key map (kbd "C-c C-t") #'harness-chat-toggle-todos)
   (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
-  (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom))
+  (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom)
+  ;; Plain q is typing here.
+  (define-key map (kbd "C-c C-z") #'harness-ui-bury))
 
 (define-derived-mode harness-chat-mode special-mode "Chat"
   "Major mode of a harness session buffer.
@@ -2742,7 +2744,8 @@ on \\[harness-menu] here, or the [menu] button in the header line.
         ("C-c C-s" "Search" harness-chat-search)
         ("C-c C-w" "Copy last reply" harness-chat-copy-last-response)
         ("C-c C-e" "Jump to bottom" harness-chat-scroll-to-bottom)
-        ("C-c C-r" "Redraw" harness-chat-redraw)]))
+        ("C-c C-r" "Redraw" harness-chat-redraw)
+        ("C-c C-z" "Bury: back to the buffer before" harness-ui-bury)]))
 
 (defun harness-chat--post-command ()
   "Keep the new-messages indicator current.

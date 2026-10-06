@@ -4,7 +4,7 @@ Emacs Agent Harness runs AI coding agents in GNU Emacs. It is written
 in Emacs Lisp and supports Claude, GitHub Copilot, DeepSeek,
 OpenAI-compatible APIs and AWS Bedrock.
 
-![A session beside the code it wrote: the agent read the project, added rate limiting, ran the tests and summed up](docs/media/chat.png)
+![The task board in the fullscreen layout, a task's session beside it: the feedback the task was sent back with, its fix, and the report it handed in again, waiting to be verified or sent back](docs/media/chat.png)
 
 ## Features
 
@@ -188,6 +188,7 @@ named by `harness-server-init-file`.
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
+| `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board or session list on the left, a session beside it |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation |
@@ -214,7 +215,8 @@ The menu (`C-c h ?`) also renames the session (`r`).
 
 With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
-`harness-ui-default-position`), `left`, `bottom`, `full` or `other`.
+`harness-ui-default-position`), `left`, `bottom`, `full`, `other` or
+`fullscreen` (see [Fullscreen overviews](#fullscreen-overviews)).
 
 ### Chat buffers
 
@@ -243,6 +245,7 @@ the `[menu]` button in the header line.
 | `C-c C-w` | Copy the last reply |
 | `C-c C-e` | Jump to the bottom |
 | `C-c C-r` | Redraw the buffer |
+| `C-c C-z` | Bury the session: its window shows the buffer it showed before (a side window closes) |
 
 Drag a file from your file browser onto a chat or the task board and it
 attaches. Drag a *link* — an image from a web page, a video, any address
@@ -527,12 +530,38 @@ your checkout itself can be submitted to the **main tree** instead (the
   board alone does not say enough. `[Search]` in the header does the
   same, and `C-c h /` from anywhere opens the project's board first.
 - `RET` opens the session of the task at point. From that session,
-  `C-c h a` leads back to the board.
+  `C-c h a` leads back to the board. `F` lays the board out fullscreen,
+  with that session beside it (see
+  [Fullscreen overviews](#fullscreen-overviews)).
 - A task's session shows in the session list (`C-c h l`) under the
   task's title, of kind task, until the model names it.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
+
+### Fullscreen overviews
+
+The task board and the session list can take the whole frame: press `F`
+on either, or `C-c h F` from anywhere. The overview stays on the left
+and a session shows on the right: the one already in sight, else the
+task or session at point, else the most recent one. Every session you
+open from the overview takes the right side in turn, and so does
+anything else the harness shows while the layout lasts.
+
+- `C-c C-z` in the session on the right buries it: the buffer that was
+  there before comes back, such as the file the session took the place
+  of, and the layout stays, so the next session you open takes the
+  right side again. It is a key chord because plain keys in a session
+  type into its compose box.
+- `q` on the overview (or `F` again) ends the layout, and the windows
+  come back as they were. A file you visited on the right stays in
+  sight.
+- Opening the other overview while the layout is on (`C-c h l` beside
+  the board, say) puts it on the left instead.
+- `harness-ui-fullscreen-width` sets the width of the overview: a
+  fraction of the frame (half, by default) or a number of columns.
+- `fullscreen` is a position too, so `C-u C-c h a` and then `fullscreen`
+  opens the board in the layout.
 
 ### Notifications
 

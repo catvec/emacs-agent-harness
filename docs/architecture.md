@@ -2513,7 +2513,8 @@ fetched once per connection and again after `harness/reloaded`;
 `harness-ui-fetch-tools`), through which views name every tool by its
 label (`harness-ui-tool-label`, `harness-ui-tool-title`), window
 positions (`harness-ui-display-session SID &optional POSITION`; presets
-`right`, `bottom`, `full`, `other`; one session per position, replacing),
+`right`, `left`, `bottom`, `full`, `other`, `fullscreen`; one session
+per position, replacing),
 the global keymap and the transient menu `harness-menu` (with a group for
 the commands of the buffer it is opened from, which each mode lists in
 its `harness-menu-group` property; opened from a side window it gets a
@@ -2705,6 +2706,22 @@ usage dashboard, worktree list, conversation tree and log open through
 returning to the position they had last); a session opened from a view
 (`harness-ui-session-opener`) replaces the view.  Menus, help and the
 BTW overlay keep their own windows.
+
+Fullscreen layout (`harness-fullscreen`, `F` on an overview, `C-c h F`):
+an overview -- a view that sets `harness-ui-overview-function`, the
+task board and the session list -- takes the left of the frame in a
+side window (`harness-ui-fullscreen-width`), and every other window but
+one, the slot, makes way for it.  The slot shows the session in sight,
+else the one the overview function names (at point, else the most
+recent).  While the layout lasts the `fullscreen` position is the
+default: sessions and views shown without a position take the slot, and
+an overview takes the left.  The layout is kept per frame in a weak
+table (`harness-ui--fullscreen-layouts`), with the window configuration
+from before it.  `harness-ui-bury` (`C-c C-z` in a chat, where plain
+keys type) puts the slot's buffer away and brings back the last buffer
+of the user's the slot showed, keeping the layout; `q` on the overview
+(`harness-ui-quit-view`) ends it, restoring the configuration, but for
+a buffer of the user's left in the slot, which stays in sight.
 
 Settings page (`harness-ui-config`, `C-c h S`, `harness-settings`):
 every harness option on one page, like a customize buffer, about the

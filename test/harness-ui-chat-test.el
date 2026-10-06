@@ -2510,5 +2510,41 @@ was forced back to the top, and redisplay moved point out of the box."
       (set-window-buffer window buf)
       (harness-test-compose-grows-past-the-window buf window 1))))
 
+;;;; The fullscreen layout
+
+(defvar harness-ui--fullscreen-layouts)
+(declare-function harness-ui--fullscreen-layout "harness-ui")
+(declare-function harness-ui--main-window "harness-ui")
+
+(ert-deftest harness-ui-chat-fullscreen-keeps-the-session-in-sight ()
+  "The session in sight shows beside an overview that takes the fullscreen
+layout, and C-c C-z there buries it, back to the user's buffer."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (file (get-buffer-create "fullscreen chat test file"))
+           (view (get-buffer-create "*harness fullscreen chat test view*")))
+      (unwind-protect
+          (progn
+            (delete-other-windows)
+            (switch-to-buffer file)
+            (let ((main (selected-window)))
+              (harness-ui-display-buffer buf 'right)
+              ;; An overview with no session of its own to show.
+              (with-current-buffer view (setq-local harness-ui-overview-function #'ignore))
+              (harness-ui-display-buffer view 'fullscreen)
+              (should (eq buf (window-buffer main)))
+              (should (= 2 (length (window-list))))
+              (select-window main)
+              (should (eq 'harness-ui-bury (key-binding (kbd "C-c C-z"))))
+              (call-interactively (key-binding (kbd "C-c C-z")))
+              (should (eq file (window-buffer main)))
+              (should (harness-ui--fullscreen-layout))))
+        (clrhash harness-ui--fullscreen-layouts)
+        (let ((ignore-window-parameters t))
+          (ignore-errors (delete-other-windows (harness-ui--main-window))))
+        (kill-buffer file)
+        (kill-buffer view)))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
