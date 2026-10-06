@@ -260,43 +260,52 @@ them have wins, and BASIS is the id of one that has it."
            (window (harness-provider--most-common (mapcar #'car pool))))
       (cons window (cdr (cl-find window pool :key #'car))))))
 
+(defun harness-provider--closest-window (pid name)
+  "Return (WINDOW . BASIS) of the models of PID closest to NAME by name, or nil.
+Closest are those sharing the most leading words with NAME's key, two
+at least, so \"claude-opus-5-6\" takes after \"claude-opus-5-5\" but
+not after \"claude-haiku-4-5\".  Only models PID sizes count; of
+several as close, the window most of them have wins, and BASIS is the
+id of one that has it."
+  (let ((words (harness-provider--key-words (harness-provider-model-key name)))
+        (best 1) pool)
+    (dolist (entry (gethash pid (cdr (harness-provider--estimate-index))))
+      (let ((n (harness-provider--common-words words (car entry))))
+        (cond ((> n best) (setq best n pool (list entry)))
+              ((and (= n best) (> n 1)) (push entry pool)))))
+    (when pool
+      (let ((window (harness-provider--most-common (mapcar #'cadr pool))))
+        (cons window (nth 2 (cl-find window pool :key #'cadr)))))))
+
 (defun harness-provider--estimate (pid name)
   "Return (WINDOW . BASIS), the context window to assume for model NAME of PID.
 BASIS says what the window comes from: the id of the same model at a
-provider that sizes it (its own first), else of the model of PID that
-shares the most leading words with NAME (two at least, so
-\"claude-opus-5-6\" takes after \"claude-opus-5-5\" but not after
-\"claude-haiku-4-5\"), else \"PID's models\" for the window most of
-PID's models have, else \"default\" for
-`harness-provider-fallback-context-window'."
-  (let* ((index (harness-provider--estimate-index))
-         (key (harness-provider-model-key name))
-         (words (harness-provider--key-words key))
-         (own (gethash pid (cdr index))))
-    (or (harness-provider--same-model-window pid name)
-        (let ((best 1) pool)
-          (dolist (entry own)
-            (let ((n (harness-provider--common-words words (car entry))))
-              (cond ((> n best) (setq best n pool (list entry)))
-                    ((and (= n best) (> n 1)) (push entry pool)))))
-          (when pool
-            (let ((window (harness-provider--most-common (mapcar #'cadr pool))))
-              (cons window (nth 2 (cl-find window pool :key #'cadr))))))
-        (when own
-          (cons (harness-provider--most-common (mapcar #'cadr own)) (format "%s's models" pid)))
-        (cons harness-provider-fallback-context-window "default"))))
+provider that sizes it (its own first, see
+`harness-provider--same-model-window'), else of the model of PID
+closest to it by name (see `harness-provider--closest-window'), else
+\"PID's models\" for the window most of PID's models have, else
+\"default\" for `harness-provider-fallback-context-window'."
+  (or (harness-provider--same-model-window pid name)
+      (harness-provider--closest-window pid name)
+      (when-let* ((own (gethash pid (cdr (harness-provider--estimate-index)))))
+        (cons (harness-provider--most-common (mapcar #'cadr own)) (format "%s's models" pid)))
+      (cons harness-provider-fallback-context-window "default")))
 
 (defun harness-provider--with-estimate (pid model)
   "Return MODEL of provider PID with a context window: its own, else an estimate.
 An estimated window comes with `:context-window-estimated' t and
 `:context-window-basis', what it was drawn from.  A window PID itself
 flags as an estimate (one it guessed from the model's family, say)
-gives way to the window the same model has where it is sized."
+gives way to the window the same model has where it is sized, or else
+to that of PID's models closest to it by name; a broader estimate does
+not replace it."
   (let* ((window (plist-get model :context-window))
+         (name (plist-get model :name))
          (estimate (cond ((not (harness-provider--window-p window))
-                          (harness-provider--estimate pid (plist-get model :name)))
+                          (harness-provider--estimate pid name))
                          ((plist-get model :context-window-estimated)
-                          (harness-provider--same-model-window pid (plist-get model :name))))))
+                          (or (harness-provider--same-model-window pid name)
+                              (harness-provider--closest-window pid name))))))
     (if (not estimate)
         model
       (append (list :context-window (car estimate) :context-window-estimated t

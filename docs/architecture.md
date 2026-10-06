@@ -640,7 +640,7 @@ flagged `:context-window-estimated t`, drawn in this order from:
    `claude-opus-5-5`, not after `claude-haiku-4-5`);
 3. the window most of its provider's models have;
 4. `harness-provider-fallback-context-window` (200000).
-A provider's own guess gives way to the first only.  Estimates are
+A provider's own guess gives way to the first two only.  Estimates are
 drawn from windows providers gave, never from another estimate, and
 made again whenever a listing changes.  A name no listing holds goes to
 its provider's `:resolve` first (Claude Code's aliases, Copilot's
@@ -971,7 +971,8 @@ endpoint; a refresh lists again, and a listing that fails keeps the
 models listed before.  Context windows and prices, which Bedrock does
 not report, come from `harness-bedrock--model-defaults`; a family's
 catch-all window there is flagged as a guess, which the same model's
-window at another provider replaces.  A model no default knows gets
+window at another provider replaces, or else that of the endpoint's
+closest model by name that the defaults size.  A model no default knows gets
 the endpoint's `:default-context`, else an estimate, and a name the
 listing lacks (an application inference profile ARN) is described from
 the defaults by its `:resolve`.  Usage events carry tokens and

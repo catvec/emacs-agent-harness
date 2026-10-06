@@ -14,9 +14,10 @@
 ;; Bedrock reports neither context windows nor prices, so
 ;; `harness-bedrock--model-defaults' supplies them by model family.  A
 ;; family's catch-all window is flagged as an estimate, which the window
-;; another provider lists for the same model replaces (see
-;; `harness-provider--estimate'); a model no default knows gets the
-;; endpoint's `:default-context', else such an estimate.  A model the
+;; another provider lists for the same model replaces, or else that of
+;; the endpoint's closest model by name that the defaults size (see
+;; `harness-provider--with-estimate'); a model no default knows gets
+;; the endpoint's `:default-context', else the catalogue's estimate.  A model the
 ;; listing lacks (an application inference profile ARN, say) is still
 ;; described from the defaults when a session names it.
 ;;
@@ -90,7 +91,7 @@ prices."
                                             :doc "Tokens the model accepts: input plus output."))
                   (:context-window-estimated
                    (const :tag "The window is a guess for the family" t
-                          :doc "The window another provider lists for the same model replaces it."))
+                          :doc "The same model's window elsewhere, or a close model's, replaces it."))
                   (:max-output (integer :tag "Max output" :value 8192
                                         :doc "Most output tokens per request."))
                   (:input-modalities ,harness-provider-modalities-type)
@@ -201,7 +202,9 @@ keys:
   :context-window   input plus output tokens the model accepts
   :context-window-estimated non-nil when that window is a guess for the
                     family rather than the model's own; the window
-                    another provider lists for the same model replaces it
+                    another provider lists for the same model replaces
+                    it, or else that of the closest model by name
+                    sized here (see `harness-provider--with-estimate')
   :max-output       most output tokens per request
   :input-modalities (\"text\") or (\"text\" \"image\")
   :thinking         `adaptive' (effort levels), `adaptive-only' (the

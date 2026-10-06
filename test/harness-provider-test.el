@@ -240,8 +240,9 @@ or fails on, is estimated."
 
 (ert-deftest harness-provider-guessed-window-gives-way-to-a-sized-one ()
   "A window a provider flags as its own guess yields to the same model sized elsewhere.
-It stays flagged, now drawn from that model; with nothing sized to go
-by, the provider's guess stands."
+Or to the provider's model closest by name that it sizes.  It stays
+flagged, now drawn from that model; with nothing so close to go by,
+the provider's guess stands."
   (harness-provider-test-with (test-sizer test-guesser)
     (harness-provider-test-static 'test-sizer '(("claude-opus-9" . 2000000)))
     (harness-define-provider 'test-guesser
@@ -250,6 +251,11 @@ by, the provider's guess stands."
                           '((:name "us.anthropic.claude-opus-9-v1:0" :context-window 200000
                              :context-window-estimated t :context-window-basis "family")
                             (:name "anthropic.claude-zeta-1-v1:0" :context-window 200000
+                             :context-window-estimated t :context-window-basis "family")
+                            (:name "mistral.mistral-large-2407-v1:0" :context-window 128000)
+                            (:name "mistral.mistral-large-3-675b-instruct" :context-window 32000
+                             :context-window-estimated t :context-window-basis "family")
+                            (:name "mistral.mistral-7b-instruct-v0:2" :context-window 32000
                              :context-window-estimated t :context-window-basis "family"))))
       :resolve (lambda (_name) (list :context-window 200000 :context-window-estimated t
                                      :context-window-basis "family")))
@@ -262,6 +268,16 @@ by, the provider's guess stands."
       (let ((zeta (funcall by-id "test-guesser:anthropic.claude-zeta-1-v1:0")))
         (should (= 200000 (plist-get zeta :context-window)))
         (should (equal "family" (plist-get zeta :context-window-basis))))
+      ;; Nor elsewhere, but the provider sizes one of its kind: that one.
+      (let ((large (funcall by-id "test-guesser:mistral.mistral-large-3-675b-instruct")))
+        (should (= 128000 (plist-get large :context-window)))
+        (should (plist-get large :context-window-estimated))
+        (should (equal "test-guesser:mistral.mistral-large-2407-v1:0" (plist-get large :context-window-basis))))
+      ;; Only one word in common: the provider's guess stands, not the
+      ;; window most of its models have.
+      (let ((small (funcall by-id "test-guesser:mistral.mistral-7b-instruct-v0:2")))
+        (should (= 32000 (plist-get small :context-window)))
+        (should (equal "family" (plist-get small :context-window-basis))))
       ;; What `:resolve' guesses for a name the listing lacks, likewise.
       (let ((global (harness-call 'provider/model "test-guesser:global.anthropic.claude-opus-9-v1:0"))
             (other (harness-call 'provider/model "test-guesser:anthropic.claude-omega-2-v1:0")))
