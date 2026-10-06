@@ -1440,6 +1440,89 @@ the call's text stays folded."
           ;; The call's own output, which the fold hides, is there for search.
           (should (invisible-p (1- (harness-ui-chat-test-find buf "Image shot.png (image/png, 17 B) attached.")))))))))
 
+(defvar harness-ui-chat-test--line 17
+  "Pixel height of a line of text in `harness-ui-chat-test-with-images'.")
+
+(defmacro harness-ui-chat-test-with-images (&rest body)
+  "Run BODY as on a graphic display, lines `harness-ui-chat-test--line' high.
+A picture is the image spec `create-image' would make, unchecked."
+  (declare (indent 0))
+  `(cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+             ((symbol-function 'harness-ui--image-line-height) (lambda () harness-ui-chat-test--line))
+             ((symbol-function 'create-image)
+              (lambda (file-or-data &optional type data-p &rest props)
+                (append (list 'image :type (or type 'png) (if data-p :data :file) file-or-data) props))))
+     ,@body))
+
+(defun harness-ui-chat-test--png-header (dir name width height)
+  "Write the header of a WIDTH by HEIGHT PNG at DIR/NAME, all that sizes it."
+  (let ((path (expand-file-name name dir))
+        (coding-system-for-write 'binary))
+    (cl-flet ((be (n) (list (logand (ash n -24) 255) (logand (ash n -16) 255) (logand (ash n -8) 255) (logand n 255))))
+      (with-temp-file path
+        (set-buffer-multibyte nil)
+        (insert (apply #'unibyte-string (append '(#x89 ?P ?N ?G ?\r ?\n #x1a ?\n 0 0 0 13 ?I ?H ?D ?R)
+                                                (be width) (be height) '(8 6 0 0 0))))))
+    path))
+
+(defun harness-ui-chat-test--strips (file)
+  "Return the positions of the current buffer drawing FILE, whole or a strip."
+  (let ((pos (point-min)) found)
+    (while (< pos (point-max))
+      (let* ((d (get-text-property pos 'display))
+             (img (cond ((eq (car-safe d) 'image) d)
+                        ((eq (car-safe (car-safe d)) 'slice) (cadr d)))))
+        (when (equal file (plist-get (cdr img) :file))
+          (push pos found)))
+      (setq pos (next-single-property-change pos 'display nil (point-max))))
+    (nreverse found)))
+
+(ert-deftest harness-ui-chat-draws-a-tall-image-a-line-at-a-time ()
+  "A tall image a tool read is drawn in strips a line high, one per
+line, so the transcript scrolls past it as past text, all of it above
+the fold.  A click on any strip opens the image.  Scaling the text cuts
+it again for lines of the new height."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           ;; Narrow, so 400 pixels high (`harness-chat--image-max-height')
+           ;; however narrow the window.
+           (image (harness-ui-chat-test--png-header (harness-test-temp-dir) "tall.png" 40 1200))
+           (harness-ui-chat-test--line 17)
+           (opened nil))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "read_file" :call-id "m1"
+                                              :input '(:path "tall.png") :title "Read file: tall.png"))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "m1"
+                                              :output "Image tall.png (image/png, 33 B) attached."
+                                              :attachments (list (list :path image :mime "image/png"
+                                                                       :size 33 :name "tall.png"))))
+      (harness-ui-chat-test-with-images
+        (let* ((buf (harness-ui-chat-test-open sid))
+               (block (car (harness-ui-chat-test-blocks buf "tool-call"))))
+          (with-current-buffer buf
+            (let* ((strips (harness-ui-chat-test--strips image))
+                   (first (line-number-at-pos (car strips))))
+              ;; 400 pixels: 23 lines of 17, one after the other.
+              (should (= 23 (length strips)))
+              (should (equal (number-sequence first (+ first 22)) (mapcar #'line-number-at-pos strips)))
+              (should (equal (concat "[image " (abbreviate-file-name image) "]")
+                             (buffer-substring-no-properties (car strips) (next-single-property-change (car strips) 'display))))
+              (dolist (pos strips)
+                (should-not (invisible-p pos))
+                (should (< pos (overlay-start (harness-chat-block-fold block))))
+                (should (eq 'hand (get-text-property pos 'pointer))))
+              (cl-letf (((symbol-function 'find-file-other-window) (lambda (file &rest _) (setq opened file))))
+                (call-interactively (lookup-key (get-text-property (nth 11 strips) 'keymap) [mouse-1])))
+              (should (equal image opened)))
+            ;; Lines of 24: 16 strips.  Back to 17: 23 again.
+            (setq harness-ui-chat-test--line 24)
+            (text-scale-set 2)
+            (should (= 16 (length (harness-ui-chat-test--strips image))))
+            (should-not (harness-ui-image-recut-positions))
+            (setq harness-ui-chat-test--line 17)
+            (text-scale-set 0)
+            (should (= 23 (length (harness-ui-chat-test--strips image))))
+            (should-not (invisible-p (car (harness-ui-chat-test--strips image))))))))))
+
 (ert-deftest harness-ui-chat-media-rerender-keeps-it-visible ()
   "When the media module redraws a video (a thumbnail landing, or a
 player advancing), the chat redraws the block, so the fold never

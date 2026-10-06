@@ -101,16 +101,20 @@ The chat module sets it; when nil the path is only reported.")
   (or (plist-get attachment :name)
       (file-name-nondirectory (or (plist-get attachment :path) "attachment"))))
 
-(defun harness-ui-media--clickable (string action help)
-  "Return STRING running ACTION (a thunk) on mouse-1, mouse-2 and RET.
-HELP is its tooltip; the mouse pointer turns into a hand over it."
+(defun harness-ui-media--click-properties (action help)
+  "Return text properties running ACTION (a thunk) on a click or RET.
+HELP is the tooltip; the mouse pointer turns into a hand over the text."
   (let ((map (make-sparse-keymap))
         (run (lambda () (interactive) (funcall action))))
     (define-key map [mouse-1] run)
     (define-key map [mouse-2] run)
     (define-key map (kbd "RET") run)
-    (propertize string 'help-echo help 'pointer 'hand
-                'keymap map 'follow-link t 'harness-ui-media-button t)))
+    (list 'help-echo help 'pointer 'hand 'keymap map 'follow-link t 'harness-ui-media-button t)))
+
+(defun harness-ui-media--clickable (string action help)
+  "Return STRING running ACTION (a thunk) on mouse-1, mouse-2 and RET.
+HELP is its tooltip; the mouse pointer turns into a hand over it."
+  (apply #'propertize string (harness-ui-media--click-properties action help)))
 
 (defun harness-ui-media--button (label action help &optional face)
   "Return LABEL as a text button with HELP running ACTION (a thunk).
@@ -128,7 +132,7 @@ FACE overrides the button face."
     (format "%d:%02d" (/ s 60) (% s 60))))
 
 (defconst harness-ui-media--own-properties
-  '(face display keymap help-echo pointer follow-link mouse-face
+  '(face display keymap help-echo pointer follow-link mouse-face line-height harness-ui-image-rows
          harness-ui-media-button harness-ui-media-id harness-ui-media-attachment harness-ui-media-mime)
   "Text properties a rendering of an attachment sets itself.")
 
@@ -603,9 +607,11 @@ seconds or nil, in the bottom right corner."
   "Return the poster and the caption of the video ATTACHMENT.
 The poster, its thumbnail under a play button, and the Play button of
 the caption both play the video on mouse-1, mouse-2 or RET; while a
-player the harness started plays it, they stop it.  A terminal shows no
-poster: the caption starts with a video icon.  A remote file is never
-read, which would block: it has no thumbnail and no duration."
+player the harness started plays it, they stop it.  The poster is drawn
+a line at a time, so a view scrolls past it like text
+\(`harness-ui-image-lines').  A terminal shows no poster: the caption
+starts with a video icon.  A remote file is never read, which would
+block: it has no thumbnail and no duration."
   (let* ((path (plist-get attachment :path))
          (name (harness-ui-media--name attachment))
          (local (and path (not (file-remote-p path))))
@@ -617,14 +623,12 @@ read, which would block: it has no thumbnail and no duration."
          (size (plist-get attachment :size))
          (action (and path (lambda () (harness-ui-media-toggle-video path))))
          (help (format "%s %s: mouse-1 or RET" (if proc "Stop" "Play") name))
-         (poster (and action (harness-ui-media--graphic-p)
-                      (let ((dims (harness-ui-media--poster-size ready)))
-                        (harness-ui-media--poster-image ready (car dims) (cdr dims) proc duration)))))
+         (dims (and action (harness-ui-media--graphic-p) (harness-ui-media--poster-size ready)))
+         (poster (and dims (harness-ui-media--poster-image ready (car dims) (cdr dims) proc duration))))
     (concat
      (if poster
-         (concat (harness-ui-media--clickable (propertize (format "[video %s]" name) 'display poster)
-                                              action help)
-                 "\n")
+         (harness-ui-image-lines poster (format "[video %s]" name)
+                                 (harness-ui-media--click-properties action help) dims)
        (propertize (format " %s " (harness-ui-icon 'harness-icon-video)) 'face 'harness-dim-face))
      (if action
          (concat (harness-ui-media--button (format " %s %s " (harness-ui-icon (if proc 'harness-icon-stop 'harness-icon-play))

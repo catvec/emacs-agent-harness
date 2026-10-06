@@ -1100,6 +1100,250 @@ shrinks every window and moves the button under the mouse."
   (should (equal "path mouse-1: open" (harness-ui-one-line " path\nmouse-1: open ")))
   (should (equal "" (harness-ui-one-line nil))))
 
+;;;; Images a line at a time
+
+(defun harness-ui-test--be (n bytes)
+  "Return N as a list of BYTES bytes, big-endian."
+  (nreverse (harness-ui-test--le n bytes)))
+
+(defun harness-ui-test--le (n bytes)
+  "Return N as a list of BYTES bytes, little-endian."
+  (let (out)
+    (dotimes (i bytes)
+      (push (logand (ash n (* -8 i)) 255) out))
+    (nreverse out)))
+
+(defun harness-ui-test--bytes (&rest parts)
+  "Return PARTS, ASCII strings and lists of bytes, as one unibyte string."
+  (apply #'unibyte-string (mapcan (lambda (p) (append p nil)) parts)))
+
+(defun harness-ui-test--png (width height)
+  "Return the start of a PNG of WIDTH by HEIGHT pixels: its header."
+  (harness-ui-test--bytes '(#x89) "PNG\r\n" '(#x1a) "\n" '(0 0 0 13) "IHDR"
+                          (harness-ui-test--be width 4) (harness-ui-test--be height 4) '(8 6 0 0 0)))
+
+(defun harness-ui-test--jpeg-segment (marker payload)
+  "Return the JPEG segment MARKER holding PAYLOAD, a list of bytes."
+  (append (list #xff marker) (harness-ui-test--be (+ 2 (length payload)) 2) payload))
+
+(defun harness-ui-test--jpeg (width height &optional frame)
+  "Return a JPEG of WIDTH by HEIGHT pixels, its frame header of type FRAME.
+FRAME is the marker, #xc0 (baseline) by default.  Metadata comes
+first, its bytes all #xff, and a Huffman table, whose marker is among
+the frame headers' but is none."
+  (harness-ui-test--bytes
+   '(#xff #xd8)
+   (harness-ui-test--jpeg-segment #xe0 (append "JFIF" '(0 1 1 0 0 1 0 1 0 0) nil))
+   (harness-ui-test--jpeg-segment #xe1 (append "Exif" (make-list 300 #xff)))
+   (harness-ui-test--jpeg-segment #xc4 (make-list 20 1))
+   '(#xff)                              ; a fill byte
+   (harness-ui-test--jpeg-segment (or frame #xc0)
+                                  (append '(8) (harness-ui-test--be height 2) (harness-ui-test--be width 2)
+                                          '(3 1 #x22 0 2 #x11 1 3 #x11 1)))
+   (harness-ui-test--jpeg-segment #xda (make-list 10 0))
+   '(#xff #xd9)))
+
+(defun harness-ui-test--webp (chunk payload)
+  "Return a WebP file whose first chunk is CHUNK holding PAYLOAD, a list of bytes."
+  (harness-ui-test--bytes "RIFF" (harness-ui-test--le (+ 12 (length payload)) 4) "WEBP"
+                          chunk (harness-ui-test--le (length payload) 4) payload))
+
+(defmacro harness-ui-test-with-lines (line &rest body)
+  "Run BODY with lines of text LINE pixels high, as on a graphic display.
+Nil LINE is a terminal's: images are not cut."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'harness-ui--image-line-height) (lambda () ,line)))
+     ,@body))
+
+(defun harness-ui-test--strips (string)
+  "Return (POSITION . DISPLAY) for each run of STRING showing an image."
+  (let ((pos 0) out)
+    (while (< pos (length string))
+      (when-let* ((d (get-text-property pos 'display string)))
+        (push (cons pos d) out))
+      (setq pos (next-single-property-change pos 'display string (length string))))
+    (nreverse out)))
+
+(ert-deftest harness-ui-image-header-gives-the-picture-size ()
+  "PNG, GIF, JPEG and WebP headers give the size of the picture without
+decoding it.  A JPEG's frame header is found past its metadata by the
+segments' lengths.  Anything else, or a header cut short, gives nil."
+  (should (equal '(600 . 1200) (harness-ui--image-header-size (harness-ui-test--png 600 1200))))
+  (should (equal '(320 . 200) (harness-ui--image-header-size
+                               (harness-ui-test--bytes "GIF89a" (harness-ui-test--le 320 2)
+                                                       (harness-ui-test--le 200 2) '(0 0 0)))))
+  (should (equal '(640 . 480) (harness-ui--image-header-size (harness-ui-test--jpeg 640 480))))
+  ;; A progressive JPEG.
+  (should (equal '(1024 . 768) (harness-ui--image-header-size (harness-ui-test--jpeg 1024 768 #xc2))))
+  ;; WebP, lossy, lossless and extended.
+  (should (equal '(600 . 1200)
+                 (harness-ui--image-header-size
+                  (harness-ui-test--webp "VP8 " (append '(0 0 0 #x9d 1 #x2a) (harness-ui-test--le 600 2)
+                                                        (harness-ui-test--le 1200 2) (make-list 4 0))))))
+  (should (equal '(600 . 1200)
+                 (harness-ui--image-header-size
+                  (harness-ui-test--webp "VP8L" (append '(#x2f) (harness-ui-test--le (logior 599 (ash 1199 14)) 4)
+                                                        (make-list 6 0))))))
+  (should (equal '(601 . 1203)
+                 (harness-ui--image-header-size
+                  (harness-ui-test--webp "VP8X" (append '(16 0 0 0) (harness-ui-test--le 600 3)
+                                                        (harness-ui-test--le 1202 3) (make-list 4 0))))))
+  ;; Cut short, not a picture, or text rather than bytes.
+  (should-not (harness-ui--image-header-size (substring (harness-ui-test--png 600 1200) 0 20)))
+  (should-not (harness-ui--image-header-size (substring (harness-ui-test--jpeg 640 480) 0 100)))
+  (should-not (harness-ui--image-header-size "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"))
+  (should-not (harness-ui--image-header-size (string-to-multibyte (harness-ui-test--png 600 1200))))
+  ;; The scan data starts before any frame header: no size.
+  (should-not (harness-ui--image-header-size
+               (harness-ui-test--bytes '(#xff #xd8) (harness-ui-test--jpeg-segment #xda (make-list 10 0))
+                                       (make-list 20 0)))))
+
+(ert-deftest harness-ui-image-native-size-reads-data-or-a-local-file ()
+  "The header comes from an image's data, or from the start of its file
+when that is local; a remote file is never read."
+  (harness-test-with-temp-state
+    (let ((file (expand-file-name "shot.png" dir)))
+      (let ((coding-system-for-write 'binary))
+        (with-temp-file file
+          (set-buffer-multibyte nil)
+          (insert (harness-ui-test--png 640 360) (make-string 1000 0))))
+      (should (equal '(640 . 360) (harness-ui--image-native-size (list 'image :type 'png :file file))))
+      (should (equal '(64 . 36) (harness-ui--image-native-size
+                                 (list 'image :type 'png :data (harness-ui-test--png 64 36)))))
+      (should-not (harness-ui--image-native-size (list 'image :type 'png :file "/ssh:far:/srv/shot.png")))
+      (should-not (harness-ui--image-native-size (list 'image :type 'png :file (expand-file-name "nope.png" dir))))
+      (should-not (harness-ui--image-native-size (list 'image :type 'svg :data "<svg/>"))))))
+
+(ert-deftest harness-ui-image-fit-sizes-a-picture-as-emacs-shows-it ()
+  "The size a picture shows at follows `compute_image_size' in image.c:
+its scale, then the maximum width, then the maximum height, each
+rounding up.  An image sized some other way is left to Emacs."
+  (let ((image-scaling-factor 1.5))
+    (cl-flet ((fit (props size) (harness-ui--image-fit (cons 'image (cons :type (cons 'png props))) size)))
+      (should (equal '(600 . 1200) (fit nil '(600 . 1200))))
+      (should (equal '(200 . 400) (fit '(:max-width 600 :max-height 400) '(600 . 1200))))
+      (should (equal '(62 . 123) (fit '(:max-width 1000 :max-height 123) '(600 . 1200))))
+      (should (equal '(333 . 667) (fit '(:max-width 333) '(601 . 1203))))
+      (should (equal '(600 . 23) (fit '(:max-width 600 :max-height 400) '(1000 . 37))))
+      (should (equal '(1200 . 2400) (fit '(:scale 2) '(600 . 1200))))
+      ;; The default scale is `image-scaling-factor', or with `auto' a
+      ;; tenth of the column's width, from 10 pixels up.
+      (should (equal '(900 . 1800) (fit '(:scale default) '(600 . 1200))))
+      (let ((image-scaling-factor 'auto))
+        (cl-letf (((symbol-function 'frame-char-width) (lambda (&rest _) 20)))
+          (should (equal '(1200 . 2400) (fit '(:scale default) '(600 . 1200)))))
+        (cl-letf (((symbol-function 'frame-char-width) (lambda (&rest _) 9)))
+          (should (equal '(600 . 1200) (fit '(:scale default) '(600 . 1200))))))
+      (should-not (fit '(:width 100) '(600 . 1200)))
+      (should-not (fit '(:max-width (20 . em)) '(600 . 1200)))
+      (should-not (fit nil '(0 . 0))))))
+
+(ert-deftest harness-ui-image-lines-cuts-a-tall-image-into-strips ()
+  "A tall image is drawn in strips a line high, one per line: LABEL
+under the first, a space under each other.  The strips tile the
+picture as redisplay reads their edges, every one of them does what a
+click on the picture did, and every newline takes no height."
+  (harness-ui-test-with-lines 17
+    (let* ((map (harness-ui-action-map #'ignore))
+           (image (list 'image :type 'png :data (harness-ui-test--png 600 1200)
+                        :max-width 600 :max-height 400 :ascent 100))
+           (s (harness-ui-image-lines image "[image tall.png]" (list 'keymap map 'help-echo "open" 'pointer 'hand)))
+           (strips (harness-ui-test--strips s))
+           (cut (get-text-property 0 'harness-ui-image-rows s))
+           (top 0))
+      ;; 400 pixels high: 23 lines of 17.
+      (should (equal (concat "[image tall.png]\n" (apply #'concat (make-list 22 " \n")))
+                     (substring-no-properties s)))
+      (should (= 23 (length strips)))
+      (should (equal '(23 . 400) cut))
+      ;; The caller's image is not changed; the strips' is centred on the line.
+      (should (eq 100 (plist-get (cdr image) :ascent)))
+      (cl-loop
+       for (pos . display) in strips
+       for i from 0
+       do (pcase-let ((`((slice ,x ,y ,w ,h) ,img) display))
+            (should (eq 'center (plist-get (cdr img) :ascent)))
+            (should (eq (plist-get (cdr image) :data) (plist-get (cdr img) :data)))
+            (should (equal '(0 1.0) (list x w)))
+            ;; Redisplay truncates the fraction times the picture's height.
+            (should (= top (truncate (* y 400))))
+            (should (= (- (/ (* (1+ i) 400) 23) top) (truncate (* h 400))))
+            (setq top (+ top (truncate (* h 400)))))
+          (should (eq map (get-text-property pos 'keymap s)))
+          (should (equal "open" (get-text-property pos 'help-echo s)))
+          (should (eq 'hand (get-text-property pos 'pointer s)))
+          ;; One cut, shared by every strip.
+          (should (eq cut (get-text-property pos 'harness-ui-image-rows s)))
+          (let ((newline (next-single-property-change pos 'display s)))
+            (should (eq ?\n (aref s newline)))
+            (should (eq t (get-text-property newline 'line-height s)))
+            (should-not (get-text-property newline 'keymap s))
+            (should-not (get-text-property newline 'harness-ui-image-rows s))))
+      (should (= 400 top)))))
+
+(ert-deftest harness-ui-image-lines-leaves-a-short-image-whole ()
+  "An image under two lines high is one line, LABEL showing it whole;
+so is any image off a graphic display, where nothing is measured."
+  (harness-ui-test-with-lines 17
+    (let ((s (harness-ui-image-lines (list 'image :type 'png :data (harness-ui-test--png 100 33)) "[image]"
+                                     (list 'help-echo "open"))))
+      (should (equal "[image]\n" (substring-no-properties s)))
+      (should (eq 'image (car (get-text-property 0 'display s))))
+      (should (eq 'center (plist-get (cdr (get-text-property 0 'display s)) :ascent)))
+      (should (equal "open" (get-text-property 6 'help-echo s)))
+      (should (equal '(1 . 33) (get-text-property 0 'harness-ui-image-rows s)))
+      (should-not (get-text-property 7 'line-height s))))
+  (harness-ui-test-with-lines nil
+    (let ((s (harness-ui-image-lines (list 'image :type 'png :data (harness-ui-test--png 600 1200)) "[image]")))
+      (should (equal "[image]\n" (substring-no-properties s)))
+      (should (eq 'image (car (get-text-property 0 'display s))))
+      (should-not (get-text-property 0 'harness-ui-image-rows s)))))
+
+(ert-deftest harness-ui-image-lines-measures-other-pictures-as-shown ()
+  "A picture whose header tells nothing, an SVG say, is measured as Emacs
+shows it, its margins left out; one whose size the caller gives is not
+measured at all."
+  (harness-ui-test-with-lines 17
+    (cl-letf (((symbol-function 'image-size)
+               (lambda (_image &optional pixels _frame) (should pixels) '(300 . 206))))
+      (let ((s (harness-ui-image-lines (list 'image :type 'svg :data "<svg/>" :margin '(2 . 3)) "[diagram]")))
+        ;; 206 pixels less two margins of 3: 200, so 11 strips.
+        (should (equal '(11 . 200) (get-text-property 0 'harness-ui-image-rows s)))
+        (should (= 11 (length (harness-ui-test--strips s))))))
+    (cl-letf (((symbol-function 'image-size) (lambda (&rest _) (error "Decoded"))))
+      (let ((s (harness-ui-image-lines (list 'image :type 'svg :data "<svg/>") "[video]" nil '(320 . 180))))
+        (should (equal '(10 . 180) (get-text-property 0 'harness-ui-image-rows s)))))))
+
+(ert-deftest harness-ui-image-recut-positions-finds-what-scaled-text-outgrew ()
+  "Once the text is scaled, the images whose cut a new one would change
+are found, by the first strip of each; the others are left alone."
+  (with-temp-buffer
+    (let (a b c)
+      (harness-ui-test-with-lines 17
+        (insert "text\n")
+        (setq a (point))
+        (insert (harness-ui-image-lines (list 'image :type 'png :data (harness-ui-test--png 200 400)) "[a]"))
+        (insert "more text\n")
+        (setq b (point))
+        (insert (harness-ui-image-lines (list 'image :type 'png :data (harness-ui-test--png 100 40)) "[b]"))
+        (setq c (point))
+        (insert (harness-ui-image-lines (list 'image :type 'png :data (harness-ui-test--png 100 20)) "[c]"))
+        (should (= 23 (car (get-text-property a 'harness-ui-image-rows))))
+        (should (= 2 (car (get-text-property b 'harness-ui-image-rows))))
+        (should (= 1 (car (get-text-property c 'harness-ui-image-rows))))
+        (should-not (harness-ui-image-recut-positions)))
+      ;; Lines of 24: 400 makes 16, 40 is under two lines, 20 still one.
+      (harness-ui-test-with-lines 24
+        (should (equal (list a b) (harness-ui-image-recut-positions))))
+      ;; Lines of 18: 400 makes 22, 40 still 2.
+      (harness-ui-test-with-lines 18
+        (should (equal (list a) (harness-ui-image-recut-positions))))
+      ;; Lines of 10: each a new cut.
+      (harness-ui-test-with-lines 10
+        (should (equal (list a b c) (harness-ui-image-recut-positions))))
+      (harness-ui-test-with-lines nil
+        (should-not (harness-ui-image-recut-positions))))))
+
 ;;;; Mouse targets
 
 (ert-deftest harness-ui-mouse-keymap-runs-on-ret-too ()

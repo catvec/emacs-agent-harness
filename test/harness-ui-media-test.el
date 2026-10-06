@@ -182,6 +182,42 @@ plain card, and a terminal shows the caption alone."
           (should (string-match-p "Play" plain))
           (should-not (string-match-p "making a thumbnail" plain)))))))
 
+(ert-deftest harness-ui-media-video-poster-is-drawn-a-line-at-a-time ()
+  "On a graphic display the poster is cut into strips a line high, so a
+view scrolls past it as past text, and a click on any of them plays the
+video.  The whole rendering, the newlines between the strips included,
+is the video's, for a redraw in place to replace it whole."
+  (harness-ui-media-test-with
+    (let* ((video (harness-ui-media-test--fake-video (expand-file-name "movie.mp4" dir)))
+           (thumb (harness-ui-media-thumbnail-path video))
+           (played nil))
+      (clrhash harness-ui-media--thumbnail-failed)
+      (clrhash harness-ui-media--video-players)
+      (puthash video 42 harness-ui-media--durations)
+      (harness-ui-media-test--png thumb 640 360)
+      (cl-letf (((symbol-function 'harness-ui-media--graphic-p) (lambda () t))
+                ((symbol-function 'harness-ui--image-line-height) (lambda () 17))
+                ((symbol-function 'harness-ui-media-toggle-video) (lambda (path) (setq played path))))
+        (let* ((s (harness-ui-media-render-attachment (list :path video :mime "video/mp4" :size 1024 :name "movie.mp4")))
+               (strips (let ((pos 0) out)
+                         (while (< pos (length s))
+                           (let ((d (get-text-property pos 'display s)))
+                             (when (eq 'slice (car-safe (car-safe d))) (push pos out)))
+                           (setq pos (next-single-property-change pos 'display s (length s))))
+                         (nreverse out))))
+          ;; 180 pixels high: 10 lines of 17, the label under the first.
+          (should (= 10 (length strips)))
+          (should (string-prefix-p (concat "[video movie.mp4]\n" (apply #'concat (make-list 9 " \n")))
+                                   (substring-no-properties s)))
+          (should (equal '(10 . 180) (get-text-property 0 'harness-ui-image-rows s)))
+          (dolist (pos strips)
+            (should (eq 'svg (plist-get (cdr (cadr (get-text-property pos 'display s))) :type)))
+            (should (get-text-property pos 'harness-ui-media-button s))
+            (should (eq 'hand (get-text-property pos 'pointer s))))
+          (should (= (length s) (next-single-property-change 0 'harness-ui-media-id s (length s))))
+          (call-interactively (lookup-key (get-text-property (nth 6 strips) 'keymap s) [mouse-1]))
+          (should (equal video played)))))))
+
 (ert-deftest harness-ui-media-video-play-and-stop ()
   "Playing a video runs the player with it; while it runs the poster
 shows Stop, and stopping it kills the player."
