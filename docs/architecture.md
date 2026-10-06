@@ -918,6 +918,29 @@ reasoning returned with tool calls is kept and sent back with them while
 the tool loop lasts.  `harness-http-request` takes `:binary t` for such
 framings: the response then reaches `:on-chunk` as unibyte strings.
 
+An endpoint can point at a gateway in front of Bedrock instead.  Its
+`:endpoint-url` holds the prefix that Bedrock's paths go under, and a
+query that every request keeps (`harness-bedrock--url`).  Listing
+follows a runtime URL whose host is not AWS's
+(`harness-bedrock--control-url`), so a gateway's keys and headers never
+go to AWS.  Requests are authenticated in one of three ways:
+
+- An API key in the header the endpoint names.  It comes from a
+  variable, auth-source, or `:bearer-token-command`, whose output is
+  kept until the key expires.  The command runs again once when the
+  gateway refuses the key, for a chat request or a listing.
+- SigV4 for the gateway's own URL.
+- SigV4 for Bedrock's own URL, with `:sign-for-aws`, for a gateway that
+  passes requests on unchanged.  The AWS host is signed but not sent.
+
+`${NAME}` in `:headers` is read from the environment and kept out of
+every message.  Saving the setting re-registers the providers.  It also
+forgets the cached models, quirks and kept keys of each endpoint whose
+entry changed (`harness-bedrock--forget-endpoint`), so an edit shows
+at once.  The tests run a stub gateway from harness-bedrock-mock.el
+(`:prefix` and `:checks`), and nothing else is reachable while they
+run.
+
 The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
 OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
 harness-provider-openai.el, which splits DeepSeek's cached input out of
