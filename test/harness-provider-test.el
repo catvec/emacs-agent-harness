@@ -238,6 +238,41 @@ or fails on, is estimated."
       (should (= 1000000 (harness-provider-test-window "test-alias1:x[1m]")))
       (should (plist-get (harness-call 'provider/model "test-alias1:x") :context-window-estimated)))))
 
+(ert-deftest harness-provider-guessed-window-gives-way-to-a-sized-one ()
+  "A window a provider flags as its own guess yields to the same model sized elsewhere.
+It stays flagged, now drawn from that model; with nothing sized to go
+by, the provider's guess stands."
+  (harness-provider-test-with (test-sizer test-guesser)
+    (harness-provider-test-static 'test-sizer '(("claude-opus-9" . 2000000)))
+    (harness-define-provider 'test-guesser
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          '((:name "us.anthropic.claude-opus-9-v1:0" :context-window 200000
+                             :context-window-estimated t :context-window-basis "family")
+                            (:name "anthropic.claude-zeta-1-v1:0" :context-window 200000
+                             :context-window-estimated t :context-window-basis "family"))))
+      :resolve (lambda (_name) (list :context-window 200000 :context-window-estimated t
+                                     :context-window-basis "family")))
+    (let* ((models (harness-test-await (harness-call 'provider/models)))
+           (by-id (lambda (id) (cl-find id models :key (lambda (m) (plist-get m :id)) :test #'equal))))
+      (let ((opus (funcall by-id "test-guesser:us.anthropic.claude-opus-9-v1:0")))
+        (should (= 2000000 (plist-get opus :context-window)))
+        (should (plist-get opus :context-window-estimated))
+        (should (equal "test-sizer:claude-opus-9" (plist-get opus :context-window-basis))))
+      (let ((zeta (funcall by-id "test-guesser:anthropic.claude-zeta-1-v1:0")))
+        (should (= 200000 (plist-get zeta :context-window)))
+        (should (equal "family" (plist-get zeta :context-window-basis))))
+      ;; What `:resolve' guesses for a name the listing lacks, likewise.
+      (let ((global (harness-call 'provider/model "test-guesser:global.anthropic.claude-opus-9-v1:0"))
+            (other (harness-call 'provider/model "test-guesser:anthropic.claude-omega-2-v1:0")))
+        (should (= 2000000 (plist-get global :context-window)))
+        (should (equal "test-sizer:claude-opus-9" (plist-get global :context-window-basis)))
+        (should (= 200000 (plist-get other :context-window)))
+        (should (equal "family" (plist-get other :context-window-basis))))
+      ;; A guess is no source for another estimate.
+      (should (= harness-provider-fallback-context-window
+                 (harness-provider-test-window "nobody:claude-zeta-1"))))))
+
 (ert-deftest harness-provider-relist-picks-up-what-a-provider-learned ()
   "`harness-provider-relist' caches and announces a provider's new listing.
 A models function that takes an argument is told when a refresh asks."

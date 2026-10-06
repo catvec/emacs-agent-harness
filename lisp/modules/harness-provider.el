@@ -247,6 +247,19 @@ from another."
       (setq n (1+ n) a (cdr a) b (cdr b)))
     n))
 
+(defun harness-provider--same-model-window (pid name)
+  "Return (WINDOW . BASIS) of model NAME of PID as other listings size it, or nil.
+The models of the same key (see `harness-provider-model-key') that a
+provider sizes count, PID's own first; of several, the window most of
+them have wins, and BASIS is the id of one that has it."
+  (when-let* ((same (gethash (harness-provider-model-key name) (car (harness-provider--estimate-index)))))
+    (let* ((mine (cl-remove-if-not
+                  (lambda (cell) (equal (car (harness-provider-parse-model (cdr cell))) pid))
+                  same))
+           (pool (or mine same))
+           (window (harness-provider--most-common (mapcar #'car pool))))
+      (cons window (cdr (cl-find window pool :key #'car))))))
+
 (defun harness-provider--estimate (pid name)
   "Return (WINDOW . BASIS), the context window to assume for model NAME of PID.
 BASIS says what the window comes from: the id of the same model at a
@@ -259,15 +272,8 @@ PID's models have, else \"default\" for
   (let* ((index (harness-provider--estimate-index))
          (key (harness-provider-model-key name))
          (words (harness-provider--key-words key))
-         (own (gethash pid (cdr index)))
-         (same (gethash key (car index))))
-    (or (when same
-          (let* ((mine (cl-remove-if-not
-                        (lambda (cell) (equal (car (harness-provider-parse-model (cdr cell))) pid))
-                        same))
-                 (pool (or mine same))
-                 (window (harness-provider--most-common (mapcar #'car pool))))
-            (cons window (cdr (cl-find window pool :key #'car)))))
+         (own (gethash pid (cdr index))))
+    (or (harness-provider--same-model-window pid name)
         (let ((best 1) pool)
           (dolist (entry own)
             (let ((n (harness-provider--common-words words (car entry))))
@@ -283,24 +289,32 @@ PID's models have, else \"default\" for
 (defun harness-provider--with-estimate (pid model)
   "Return MODEL of provider PID with a context window: its own, else an estimate.
 An estimated window comes with `:context-window-estimated' t and
-`:context-window-basis', what it was drawn from."
-  (if (harness-provider--window-p (plist-get model :context-window))
-      model
-    (pcase-let ((`(,window . ,basis) (harness-provider--estimate pid (plist-get model :name))))
-      (append (list :context-window window :context-window-estimated t :context-window-basis basis)
+`:context-window-basis', what it was drawn from.  A window PID itself
+flags as an estimate (one it guessed from the model's family, say)
+gives way to the window the same model has where it is sized."
+  (let* ((window (plist-get model :context-window))
+         (estimate (cond ((not (harness-provider--window-p window))
+                          (harness-provider--estimate pid (plist-get model :name)))
+                         ((plist-get model :context-window-estimated)
+                          (harness-provider--same-model-window pid (plist-get model :name))))))
+    (if (not estimate)
+        model
+      (append (list :context-window (car estimate) :context-window-estimated t
+                    :context-window-basis (cdr estimate))
               (harness-plist-remove model :context-window :context-window-estimated
                                     :context-window-basis)))))
 
 (defun harness-provider--fill-windows (pid models)
   "Return MODELS of provider PID, each with a context window.
-Models PID lists without a size get an estimate; how many did is logged
-when that number changes."
+Models PID lists without a size get an estimate, and those it sizes by
+an estimate of its own may get a better one (see
+`harness-provider--with-estimate'); how many came without a size is
+logged when that number changes."
   (let ((unsized 0))
     (prog1 (mapcar (lambda (m)
-                     (if (harness-provider--window-p (plist-get m :context-window))
-                         m
-                       (cl-incf unsized)
-                       (harness-provider--with-estimate pid m)))
+                     (unless (harness-provider--window-p (plist-get m :context-window))
+                       (cl-incf unsized))
+                     (harness-provider--with-estimate pid m))
                    models)
       (let ((key (list 'unsized pid)))
         (unless (eql unsized (gethash key harness-provider--warned 0))
