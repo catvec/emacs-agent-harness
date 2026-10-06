@@ -928,6 +928,7 @@ itself is left alone."
 
 (defvar harness-providers)
 (defvar harness-session--window-slot-holds-overrides)
+(defvar harness-provider-fallback-context-window)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider--forget "harness-provider")
 
@@ -977,6 +978,24 @@ announced, so the UI does not keep showing the old one."
             (harness-call 'provider/models)
             (harness-test-wait (lambda () updated) 2 "provider/models-updated")
             (should-not changed)))
+      (harness-session-test-drop-provider))))
+
+(ert-deftest harness-session-window-of-a-model-nobody-lists ()
+  "A session on a model its provider does not list gets an estimate, not a small stand-in.
+The bug once was a new slug the catalogue did not know, which got a
+small window and compacted far too early."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("claude-opus-5-5" . 1000000) ("claude-haiku-4-5" . 200000)))
+          (let ((newer (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                :model "test-win:claude-opus-5-6")
+                                  :id))
+                (gone (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                               :model "nobody:some-model")
+                                 :id)))
+            (should (= 1000000 (harness-session-test-window newer)))
+            (should (= harness-provider-fallback-context-window (harness-session-test-window gone)))))
       (harness-session-test-drop-provider))))
 
 (ert-deftest harness-session-window-set-for-the-session ()
