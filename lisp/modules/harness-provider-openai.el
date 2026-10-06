@@ -12,11 +12,17 @@
 ;; "openai:gpt-4.1".  Keys come from the endpoint plist, an environment
 ;; variable, or auth-source, and are never logged.
 ;;
-;; OpenRouter's /models schema (pricing, context length, modalities,
+;; The models are what the server lists at /models, asked again once
+;; the listing is older than `harness-openai--models-ttl' or a refresh
+;; asks.  OpenRouter's schema (pricing, context length, modalities,
 ;; supported parameters) is mapped onto the harness model plist so the
-;; catalogue carries live prices; plain OpenAI endpoints only give ids
-;; and get defaults.  Endpoints without a /models route can list their
-;; models statically with `:models'.
+;; catalogue carries live prices, and so are the windows other servers
+;; give under their own names (vLLM, Groq, Mistral, LM Studio,
+;; LiteLLM).  Plain OpenAI only gives ids: a model without a window
+;; gets an estimate from the catalogue (the same model as another
+;; provider lists it, say), unless the endpoint names one with
+;; `:default-context'.  Endpoints without a /models route can list
+;; their models statically with `:models'.
 
 ;;; Code:
 
@@ -31,7 +37,9 @@
 ;;;; Customisation
 
 (defconst harness-openai--models-ttl 3600
-  "Seconds a fetched model list stays cached per endpoint.")
+  "Seconds a fetched model list stays cached per endpoint.
+A refresh (`provider/models' with REFRESH) asks the server again
+however fresh it is.")
 
 (defconst harness-openai--request-timeout 600
   "Maximum seconds a completion request may take, including streaming.")
@@ -78,7 +86,9 @@ auth-source is searched for the URL's host and the user \"apikey\"."))
                               (string :tag "Name")
                               ,(harness-provider-model-type))))
      (:default-context (integer :tag "Default context" :value 128000
-                                :doc "Context window of the models the server does not size."))
+                                :doc "Context window of the models the server does not size.  Without
+it such a model's window is estimated: the same model's at another
+provider, else that of the endpoint's models most like it."))
      (:tiers ,harness-provider-tiers-type)
      (:flavor (choice :tag "Flavor" :value openai
                       :doc "Dialect of the API; guessed from the URL when not set.  DeepSeek
@@ -113,7 +123,9 @@ Every entry is a plist with these keys:
   :headers         extra request headers, an alist of (NAME . VALUE)
   :models          static list of model names or model plists, for servers
                    without a /models route
-  :default-context context window used for models that do not report one
+  :default-context context window used for models that do not report one;
+                   without it their window is an estimate (see
+                   `harness-provider-fallback-context-window')
   :flavor          `openrouter', `openai' or `deepseek'; guessed from
                    the URL when absent (`deepseek' is never guessed, but
                    an official DeepSeek host gets its handling anyway;
@@ -268,16 +280,41 @@ since its thinking mode is on by default."
            '("low" "medium" "high"))
           (t nil))))
 
+(defconst harness-openai--window-fields
+  '((:context_length) (:top_provider :context_length) (:context_window)
+    (:max_context_length) (:max_model_len) (:max_input_tokens))
+  "Where servers give a model's context window in a /models entry.
+OpenRouter, Together and Fireworks say `context_length', Groq
+`context_window', Mistral and LM Studio `max_context_length', vLLM
+`max_model_len', LiteLLM `max_input_tokens'.  The first that holds a
+positive number counts.")
+
+(defconst harness-openai--output-fields
+  '((:top_provider :max_completion_tokens) (:max_completion_tokens) (:max_output_tokens))
+  "Where servers give the most tokens of a reply in a /models entry.")
+
+(defun harness-openai--entry-count (entry fields)
+  "Return the first positive number of ENTRY at one of FIELDS, or nil.
+Each of FIELDS is a key path; a number in a string counts too."
+  (cl-loop for path in fields
+           for v = (harness-plist-get-in entry path)
+           for n = (cond ((numberp v) v)
+                         ((and (stringp v) (string-match-p "\\`[0-9]+\\'" v)) (string-to-number v)))
+           when (and n (> n 0)) return (round n)))
+
 (defun harness-openai--model-from-entry (endpoint entry)
   "Build a model plist from a /models ENTRY of ENDPOINT.
-OpenRouter fields are mapped when present; plain OpenAI entries only
-carry an id."
+OpenRouter fields are mapped when present, and the windows other
+servers give (`harness-openai--window-fields'); plain OpenAI entries
+only carry an id, and get the endpoint's `:default-context' if any."
   (let* ((name (plist-get entry :id))
-         (context (or (plist-get entry :context_length)
-                      (harness-plist-get-in entry '(:top_provider :context_length))
+         (context (or (harness-openai--entry-count entry harness-openai--window-fields)
                       (plist-get endpoint :default-context)))
-         (max-output (harness-plist-get-in entry '(:top_provider :max_completion_tokens)))
-         (modalities (harness-plist-get-in entry '(:architecture :input_modalities)))
+         (max-output (harness-openai--entry-count entry harness-openai--output-fields))
+         ;; OpenRouter says them under `architecture', DeepSeek at the top.
+         (modalities (cl-find-if (lambda (m) (and (consp m) (cl-every #'stringp m)))
+                                 (list (harness-plist-get-in entry '(:architecture :input_modalities))
+                                       (plist-get entry :input_modalities))))
          (params (plist-get entry :supported_parameters))
          (efforts (harness-openai--entry-efforts endpoint entry))
          (pricing (harness-openai--pricing (plist-get entry :pricing)))
@@ -306,10 +343,9 @@ carry an id."
 
 (defun harness-openai--fetch-models (endpoint)
   "GET /models from ENDPOINT; return a promise of model plists.
-Failures resolve to nil after a warning so one bad endpoint never
-hides the others."
-  (let* ((id (plist-get endpoint :id))
-         (url (concat (harness-openai--base-url endpoint) "/models"))
+A failure rejects it with an error that says what went wrong, without
+secrets."
+  (let* ((url (concat (harness-openai--base-url endpoint) "/models"))
          (key (harness-openai--api-key endpoint))
          (promise (condition-case err
                       (harness-http-request-json url :headers (harness-openai--headers endpoint key)
@@ -318,18 +354,16 @@ hides the others."
     (harness-then promise
                   (lambda (json)
                     (condition-case err
-                        (delq nil
-                              (mapcar (lambda (e)
-                                        (and (plist-get e :id)
-                                             (harness-openai--model-from-entry endpoint e)))
-                                      (plist-get json :data)))
-                      (error (harness-log 'warn "openai %s: cannot read /models: %s"
-                                          id (harness-error-message err))
-                             nil)))
+                        (let ((data (plist-get json :data)))
+                          (unless (listp data) (error "no list of models"))
+                          (delq nil
+                                (mapcar (lambda (e)
+                                          (and (consp e) (plist-get e :id)
+                                               (harness-openai--model-from-entry endpoint e)))
+                                        data)))
+                      (error (error "Cannot read /models: %s" (harness-error-message err)))))
                   (lambda (err)
-                    (harness-log 'warn "openai %s: listing models failed: %s"
-                                 id (harness-openai--describe-error err))
-                    nil))))
+                    (error "%s" (harness-openai--describe-error err))))))
 
 (defun harness-openai--describe-error (err)
   "Return a short description of a request rejection ERR without secrets."
@@ -340,23 +374,33 @@ hides the others."
     (`(json-error ,status ,msg) (format "HTTP %s: bad JSON (%s)" status msg))
     (_ (harness-error-message err))))
 
-(defun harness-openai--models (endpoint)
-  "Return a promise of ENDPOINT's models, cached for `harness-openai--models-ttl'."
+(defun harness-openai--models (endpoint &optional refresh)
+  "Return a promise of ENDPOINT's models, cached for `harness-openai--models-ttl'.
+REFRESH asks the server again however fresh the cache is.  A listing
+that fails answers with the models listed before, when there are any,
+and is logged; else the promise is rejected, which the catalogue logs,
+and nothing is cached."
   (let* ((id (plist-get endpoint :id))
          (cached (gethash id harness-openai--models-cache)))
     (cond
-     ((and cached (< (- (float-time) (car cached)) harness-openai--models-ttl))
-      (harness-resolved (cdr cached)))
      ((plist-get endpoint :models)
       (let ((models (harness-openai--static-models endpoint)))
         (puthash id (cons (float-time) models) harness-openai--models-cache)
         (harness-resolved models)))
+     ((and cached (not refresh) (< (- (float-time) (car cached)) harness-openai--models-ttl))
+      (harness-resolved (cdr cached)))
      (t
       (harness-then (harness-openai--fetch-models endpoint)
                     (lambda (models)
                       (when models
                         (puthash id (cons (float-time) models) harness-openai--models-cache))
-                      models))))))
+                      models)
+                    (lambda (err)
+                      (if (not cached)
+                          (signal (car err) (cdr err))
+                        (harness-log 'warn "openai %s: listing models failed: %s; keeping the %d listed before"
+                                     id (harness-error-message err) (length (cdr cached)))
+                        (cdr cached))))))))
 
 ;;;; Request body
 
@@ -816,12 +860,16 @@ Without a status, the error's text is read the same way."
 ENDPOINT is a plist as described by `harness-openai-endpoints'.  It
 is captured as it is, not looked up by id, so a module can register an
 endpoint of its own without adding it to that option; call this again
-to pick up a changed plist."
+to pick up a changed plist.  Such an endpoint may list its models its
+own way with `:models-fn', a function that takes an optional REFRESH
+flag and returns a promise of model plists, as the models function of
+`harness-define-provider' does."
   (let ((id (plist-get endpoint :id)))
     (harness-define-provider id
       :label (or (plist-get endpoint :label) (symbol-name id))
       :doc (format "OpenAI-compatible endpoint at %s" (harness-openai--base-url endpoint))
-      :models (lambda () (harness-openai--models endpoint))
+      :models (or (plist-get endpoint :models-fn)
+                  (lambda (&optional refresh) (harness-openai--models endpoint refresh)))
       :complete (lambda (request) (harness-openai--complete endpoint request))
       :capabilities (harness-openai--capabilities endpoint)
       :tiers (plist-get endpoint :tiers))

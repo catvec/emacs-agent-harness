@@ -41,6 +41,11 @@ may reach the user's real `harness-state-directory'.")
 ;; the environment holds.  Tests of that listing bind it to a test key.
 (setq harness-provider-claude-api-key 'none)
 
+(defvar harness-deepseek-list-models)
+;; Nor DeepSeek's: its catalogue is its specs.  Tests of the listing
+;; turn it on against a server of their own.
+(setq harness-deepseek-list-models nil)
+
 (defvar harness-tasks-store-in-repository)
 ;; Tasks stay in the throwaway state directory whatever directory a test
 ;; submits them in, so no test writes into a real repository's .git.
