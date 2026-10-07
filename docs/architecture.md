@@ -1670,7 +1670,10 @@ non-interactive session it stays a denial.
   session's implicit budget) → `(:budget :spent :amount :remaining
   :fraction :hard :per-day :days-left :period-start :period-end
   :baseline :reported :sources)`;
-  `usage/session-budgets SID`, `usage/plan-budget AMOUNT PERIOD DAYS`,
+  `usage/session-budgets SID` (every budget that applies to the
+  session), `usage/project-budgets ROOT` (the project budgets of ROOT
+  and the period budgets of everything or of ROOT, as statuses; what
+  the task board shows), `usage/plan-budget AMOUNT PERIOD DAYS`,
   `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`.
   BUDGET = `(:id :scope session|project|period :target ID-OR-ROOT
   :amount F :hard BOOL :period day|week|month :days business|all
@@ -1731,7 +1734,8 @@ non-interactive session it stays a denial.
 - The Budget setting (`harness-budget`, `(:amount F :hard BOOL)`) is
   one implicit budget, id "settings", for all sessions together: it
   counts every recorded call and applies to every session, after the
-  explicit ones in `usage/session-budgets`.  `usage/budget-status
+  explicit ones in `usage/session-budgets` and `usage/project-budgets`
+  (so the task board's header shows it too).  `usage/budget-status
   "settings"` gives its status while it is set; `usage/budgets` lists
   only the explicit ones.  Sessions no longer copy it into their own
   `:budget`; the session module drops the copies saved before, once
@@ -3408,7 +3412,10 @@ also shows [Report], popping the report out; it is one of the items
 for review, the report ends with the banner of its session, [Verify]
 and [Send back], and a box for the feedback.  The header counts the
 tasks to review, and `task/review` says in the echo area that one is
-ready (`harness-ui-tasks--notify-review`).  The header's Review switch
+ready (`harness-ui-tasks--notify-review`).  The header also says, as a
+chat's does for its session, what the board's tasks cost and who pays
+(see Cost display below), then the fullest budget that applies to the
+project.  The header's Review switch
 ([Review: on], `V`) turns review off and on again for every project
 (`harness-tasks-require-verification`, saved through `config/set`):
 off, finished tasks merge and complete by themselves, and Ready for
@@ -3453,7 +3460,7 @@ question its session waits on, a task's report -- through the shared
 registered for it.  The board reads what a session waits on through
 `harness-ui-pending`, its shared notion of it.
 Boards reload after any
-task, merge, turn, status, worktree or reload event.  New tasks show at
+task, merge, turn, status, worktree, budget or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
 finished first and completed the latest completed (verified, else
 finished) first; merging is the queue's own order, from when each
@@ -3519,7 +3526,22 @@ and opens the usage dashboard.  The dashboard's Plan section shows
 every quota window with its reset time and the plan's extra usage,
 and its chart stacks what a plan covered on top of the billed cost.
 The UI keeps each provider's QUOTA from `provider/quota` and
-`provider/quota-updated` (`harness-ui-quota`).  Under the Plan section
+`provider/quota-updated` (`harness-ui-quota`).  The task board's header
+shows its tasks the same way: `harness-ui-sessions-total` takes their
+sessions as one (their usage summed, the billing and plan of the one
+updated last, the provider of the new-task model), which
+`harness-ui-format-spend` formats with the plan's windows, saying
+"These tasks" in its tooltip; `harness-ui-spend-segment` makes the
+chat's and the board's text a header segment, its `%` escaped, that
+opens the dashboard.  The board adds the fullest budget of the
+project from `usage/project-budgets`: `harness-ui-format-budgets`
+reads `budget 62%`, coloured as a quota window, and describes each
+budget in its one-line tooltip (`harness-ui-describe-budget`).  In a
+narrow window the board's segment (`harness-ui-tasks--spend-segment`)
+outlasts the counts and most buttons, its budget making room first.
+The dashboard's budget lines are made from the same pieces
+(`harness-ui-budget-label`, `harness-ui-budget-spent`,
+`harness-ui-budget-pace`).  Under the Plan section
 the dashboard's Fallback section edits `harness-fallback-models` (from
 `fallback/status`, saved with `config/set`, global): the entries in
 order, each with whether it is available, out of quota until when, out

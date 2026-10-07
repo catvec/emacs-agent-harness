@@ -442,6 +442,45 @@ once spent, stops them all; no session has a budget of its own."
         (should-not (funcall ids a))
         (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt a "again")) :stop-reason)))))))
 
+(ert-deftest harness-usage-project-budgets ()
+  "A project's budgets are its project budgets and the period budgets of
+everything or of it; another project's and a session's are not."
+  (harness-usage-test-with
+    ;; Wednesday 2026-09-16 at noon; both rows fall in its week and month.
+    (let* ((now (harness-usage-test-ts 2026 9 16))
+           (root (harness-test-temp-dir))
+           (other (harness-test-temp-dir))
+           (sid (harness-usage-test-session))
+           (labels (lambda (statuses) (mapcar (lambda (st) (plist-get (plist-get st :budget) :label)) statuses))))
+      (harness-call 'usage/record (list :ts (harness-usage-test-ts 2026 9 15) :session "s" :project root
+                                        :model "m" :cost 3.0))
+      (harness-call 'usage/record (list :ts (harness-usage-test-ts 2026 9 15) :session "t" :project other
+                                        :model "m" :cost 5.0))
+      (harness-call 'usage/set-budget (list :scope 'project :target (directory-file-name root) :amount 10 :label "mine"))
+      (harness-call 'usage/set-budget '(:scope period :period month :amount 100 :label "everything"))
+      (harness-call 'usage/set-budget (list :scope 'period :period 'week :target root :amount 20 :label "weekly mine"))
+      (harness-call 'usage/set-budget (list :scope 'project :target other :amount 10 :label "theirs"))
+      (harness-call 'usage/set-budget (list :scope 'session :target sid :amount 1 :label "a session's"))
+      ;; The root names the project however it is written.
+      (let ((statuses (harness-call 'usage/project-budgets (directory-file-name root) :now now)))
+        (should (equal '("mine" "everything" "weekly mine") (funcall labels statuses)))
+        (should (harness-usage-test-near 3.0 (plist-get (nth 0 statuses) :spent)))
+        (should (harness-usage-test-near 8.0 (plist-get (nth 1 statuses) :spent)))
+        (should (harness-usage-test-near 0.15 (plist-get (nth 2 statuses) :fraction))))
+      ;; Without a project only the budgets of everything apply.
+      (should (equal '("everything") (funcall labels (harness-call 'usage/project-budgets nil :now now))))
+      ;; A session in the project gets the same ones, and its own.
+      (let ((in-root (plist-get (harness-call 'session/create :cwd root :model "demo:scripted") :id)))
+        (harness-call 'usage/set-budget (list :scope 'session :target in-root :amount 2 :label "own"))
+        (should (equal '("mine" "everything" "weekly mine" "own")
+                       (funcall labels (harness-call 'usage/session-budgets in-root :now now))))
+        ;; The Budget setting applies to them all, after the explicit ones.
+        (let ((harness-budget '(:amount 50)))
+          (should (equal '("mine" "everything" "weekly mine" "all sessions (setting)")
+                         (funcall labels (harness-call 'usage/project-budgets root :now now))))
+          (should (equal '("mine" "everything" "weekly mine" "own" "all sessions (setting)")
+                         (funcall labels (harness-call 'usage/session-budgets in-root :now now)))))))))
+
 (ert-deftest harness-usage-baseline-counts-toward-hard-budgets ()
   "What was spent before the harness counted can exhaust a hard budget."
   (harness-usage-test-with

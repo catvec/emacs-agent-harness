@@ -821,22 +821,6 @@ absent."
                           'face 'harness-dim-face)))
     (insert "\n")))
 
-
-(defun harness-ui-usage--budget-label (budget)
-  "Return a label for BUDGET."
-  (or (plist-get budget :label)
-      (let* ((scope (format "%s" (plist-get budget :scope)))
-             (period (plist-get budget :period))
-             (target (plist-get budget :target))
-             (subject (pcase scope
-                        ("session" (let ((s (harness-ui-session target)))
-                                     (or (and s (plist-get s :name)) (format "session %s" (substring (or target "?") 0 (min 8 (length (or target "?"))))))))
-                        ("project" (file-name-nondirectory (directory-file-name (or target "?"))))
-                        (_ "everything"))))
-        (string-trim (format "%s %s" (pcase (format "%s" period)
-                                       ("day" "daily") ("week" "weekly") ("month" "monthly") (_ ""))
-                             subject)))))
-
 (defconst harness-ui-usage--budget-buttons-width 28
   "Columns the buttons of a budget's line take, their padding included.")
 
@@ -864,13 +848,11 @@ own budget has no baseline: a session spends only through the harness."
          (color (harness-ui-usage--color (cond ((>= fraction 1) 'danger) ((>= fraction 0.8) 'warning) (t 'accent))))
          (hard (harness-json-true-p (plist-get status :hard)))
          (outside (harness-budget-outside-text status t))
+         (pace (harness-ui-budget-pace status))
          (start (point)))
-    (insert (format "  %-28s " (harness-truncate-end (harness-ui-usage--budget-label budget) 28)))
+    (insert (format "  %-28s " (harness-truncate-end (harness-ui-budget-label budget) 28)))
     (harness-ui-usage--insert-budget-buttons budget)
-    (insert (harness-ui-usage--meter-string fraction color 120 15
-                                            (concat (format "%s of %s spent" (harness-format-cost (plist-get status :spent))
-                                                            (harness-format-cost (plist-get status :amount)))
-                                                    (if outside (concat ", " outside) "")))
+    (insert (harness-ui-usage--meter-string fraction color 120 15 (harness-ui-budget-spent status t))
             (propertize (format " %3.0f%%" (* 100 fraction)) 'face (if (>= fraction 0.8) 'warning 'default))
             (propertize (format "  %s / %s" (harness-format-cost (plist-get status :spent))
                                 (harness-format-cost (plist-get status :amount)))
@@ -880,12 +862,7 @@ own budget has no baseline: a session spends only through the harness."
                             'help-echo (harness-ui-usage--outside-help status))
               "")
             (propertize (format "  %s left" (harness-format-cost (max 0 (or (plist-get status :remaining) 0)))) 'face 'harness-dim-face)
-            (if (plist-get status :per-day)
-                (propertize (format "  %s/day · %s day%s left" (harness-format-cost (plist-get status :per-day))
-                                    (or (plist-get status :days-left) "?")
-                                    (if (eql (plist-get status :days-left) 1) "" "s"))
-                            'face 'harness-dim-face)
-              "")
+            (if pace (propertize (concat "  " pace) 'face 'harness-dim-face) "")
             (propertize (if hard "  hard" "  soft") 'face (if hard 'warning 'harness-dim-face)
                         'help-echo (if hard "Turns are blocked once this budget is spent"
                                      "Warnings only at 80% and 100%"))
@@ -915,9 +892,7 @@ own budget has no baseline: a session spends only through the harness."
     (insert (propertize "  budgets count billed cost; calls a plan covers do not spend them\n"
                         'face 'harness-dim-face)))
   (if statuses
-      (dolist (st (sort (copy-sequence statuses)
-                        (lambda (a b) (> (or (plist-get a :fraction) 0) (or (plist-get b :fraction) 0)))))
-        (harness-ui-usage--insert-budget st))
+      (mapc #'harness-ui-usage--insert-budget (harness-ui-budgets-by-use statuses))
     (insert (propertize "  no budgets yet — a budget warns at 80% and 100%, a hard one stops the next turn\n"
                         'face 'harness-dim-face)))
   (insert "\n"))
@@ -1368,7 +1343,7 @@ line on the dashboard does not show."
         (format "session %s" (if (and (stringp name) (not (string-empty-p name)))
                                  name
                                (substring sid 0 (min 8 (length sid))))))
-    (harness-ui-usage--budget-label budget)))
+    (harness-ui-budget-label budget)))
 
 (defun harness-ui-usage--delete-budget (budget)
   "Delete BUDGET once the user says yes, then reload the dashboard.

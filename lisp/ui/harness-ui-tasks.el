@@ -47,8 +47,15 @@
 ;; switch is the harness option `harness-tasks-require-verification', so
 ;; it holds for every board and across restarts.
 ;;
+;; The header line counts the tasks of each column and, as a chat's
+;; header does for its session, says what they cost and who pays: their
+;; summed cost, or the plan that pays for them with its quota windows,
+;; then the fullest budget that applies to the project.  A click there
+;; opens the usage dashboard.
+;;
 ;; Everything comes over ACP (`_harness/task/…', `_harness/config/set'
-;; for the Review switch, plus the session cache), so the board works
+;; for the Review switch, `_harness/usage/project-budgets' for the
+;; header's budgets, plus the session cache), so the board works
 ;; against a remote harness too.  The list region is
 ;; redrawn as a whole when anything changes -- a board holds tens of
 ;; tasks, not a transcript -- while the compose box is never touched.
@@ -180,6 +187,9 @@ write-up) or reject (feedback that sends a task back from review).")
 (defvar-local harness-ui-tasks--bulk nil
   "Non-nil when the setting buttons change every current task at once.")
 (defvar-local harness-ui-tasks--list-end nil "Marker: end of the board, start of the tail.")
+(defvar-local harness-ui-tasks--budgets nil
+  "Status of every budget that applies to the project, for the header.
+What `_harness/usage/project-budgets' returned; nil without the usage module.")
 
 (defvar-local harness-ui-tasks-filter nil
   "When non-nil, the board shows some of its tasks only, and says so.
@@ -1696,16 +1706,44 @@ it stands out: work then merges without anyone looking at it."
                                (propertize "[Review: off]" 'face 'harness-task-review-off-face))
                              #'harness-ui-tasks-toggle-review #'harness-ui-tasks--review-help))
 
+(defun harness-ui-tasks--spend (groups)
+  "Return what the tasks of GROUPS cost and who pays, for the header.
+GROUPS is what `harness-ui-tasks--visible' returns.  As a chat's header
+does for its session, it shows their summed cost, or the plan that pays
+for them with its quota windows; the model of new tasks names the
+provider whose account stands for them all."
+  (harness-ui-format-spend
+   (harness-ui-sessions-total
+    (delq nil (mapcar #'harness-ui-tasks--session (apply #'append (mapcar #'cdr groups))))
+    (plist-get harness-ui-tasks--new :model))
+   t "These tasks"))
+
+(defun harness-ui-tasks--spend-segment (groups sep)
+  "Return the header's (TEXT PRIORITY MIN) of what the tasks of GROUPS cost.
+TEXT, after SEP, is `harness-ui-tasks--spend' and the fullest budget
+that applies to the project; MIN leaves the budget out.  A click on
+either opens the usage dashboard.  It stays longer than the counts and
+most buttons: the board says nowhere else how much of the plan is left."
+  (let ((spend (harness-ui-tasks--spend groups))
+        (budgets (harness-ui-format-budgets harness-ui-tasks--budgets)))
+    (list (concat sep (harness-ui-spend-segment
+                       (if budgets (concat spend " " harness-ui-tasks--dot " " budgets) spend)))
+          75
+          (and budgets (concat sep (harness-ui-spend-segment spend))))))
+
 (defun harness-ui-tasks--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
 In a window too narrow for all of it, [Add session] goes first, then
 the counts of completed, merging, pending and working tasks and the
 bulk-edit segment; the project's name shortens after those, then the
 other modules' segments (`harness-ui-tasks-header-functions', the
-search's [Search]) and [BTW] and [Archived].  What needs you, what
-waits for your review, the Review switch, [Refresh] and a board still
-loading stay longest.  WIDTH is as `harness-ui-fit-header' takes it."
-  (let* ((counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) (harness-ui-tasks--visible)))
+search's [Search]) and [BTW] and [Archived], then the Review switch.
+What the tasks cost and the plan's quota stay longer, the budget going
+first (`harness-ui-tasks--spend-segment'); what needs you, what waits
+for your review, [Refresh] and a board still loading stay longest.
+WIDTH is as `harness-ui-fit-header' takes it."
+  (let* ((groups (harness-ui-tasks--visible))
+         (counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) groups))
          (needs (alist-get 'needs-input counts))
          (review (alist-get 'review counts))
          (name (if harness-ui-tasks--project
@@ -1741,6 +1779,7 @@ loading stay longest.  WIDTH is as `harness-ui-fit-header' takes it."
       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
             40)
       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)
+      (harness-ui-tasks--spend-segment groups (funcall gap))
       (list (concat (funcall gap)
                     (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
             (if harness-ui-tasks--bulk 82 30))
@@ -1773,6 +1812,17 @@ loading stay longest.  WIDTH is as `harness-ui-fit-header' takes it."
             harness-ui-tasks--error (format "%s failed: %s" what (harness-error-message err)))
       (harness-ui-tasks--render)
       (harness-ui-tasks--render-tail))))
+
+(defun harness-ui-tasks--fetch-budgets (buffer root)
+  "Load the status of the budgets that apply to ROOT, BUFFER's project.
+The header shows them; without the usage module there are none."
+  (harness-ui-call "_harness/usage/project-budgets" (list :project root)
+                   (lambda (statuses)
+                     (when (harness-ui-tasks--board-p buffer)
+                       (with-current-buffer buffer
+                         (setq harness-ui-tasks--budgets statuses)
+                         (force-mode-line-update))))
+                   #'ignore))
 
 (defun harness-ui-tasks--fetch (buffer &optional quiet)
   "Load BUFFER's project root, tasks and settings from the harness.
@@ -1807,6 +1857,7 @@ QUIET refreshes in the background, without the loading indicator."
          (lambda (root)
            (when (buffer-live-p buffer)
              (with-current-buffer buffer (setq harness-ui-tasks--project root)))
+           (harness-ui-tasks--fetch-budgets buffer root)
            (harness-ui-call
             "_harness/task/list" (list :cwd dir)
             (lambda (tasks)
@@ -1827,10 +1878,11 @@ QUIET refreshes in the background, without the loading indicator."
   '("merge/queued" "merge/started" "merge/conflict" "merge/finished"
     "agent/turn-started" "agent/turn-ended" "session/status" "session/pending-changed"
     "session/created" "session/deleted" "worktree/created" "worktree/removed"
-    "harness/reloaded" "config/changed")
-  "Events after which every board quietly reloads its tasks.
+    "harness/reloaded" "config/changed" "usage/budgets-changed" "usage/budget-warning")
+  "Events after which every board quietly reloads its tasks and budgets.
 `task/changed' and `task/deleted' update a board directly; these catch
-anything that moves a task without one, so a board never drifts.")
+anything that moves a task without one, so a board never drifts.  A
+turn's end and the budget events also change what its budgets show.")
 
 (defun harness-ui-tasks--refresh-soon (buffer)
   "Reload BUFFER's tasks in the background, once a burst of events settles."
@@ -1896,6 +1948,11 @@ ID nil, after every rate was fetched again, redraws every board."
 (defun harness-ui-tasks--on-redraw ()
   "Reload every board after a reload or reconnect."
   (mapc #'harness-ui-tasks--fetch (harness-ui-tasks--buffers)))
+
+(defun harness-ui-tasks--on-quota (_provider _quota)
+  "Redraw the boards' header lines, which show the plan's quota."
+  (dolist (b (harness-ui-tasks--buffers))
+    (with-current-buffer b (force-mode-line-update))))
 
 (defvar harness-ui-tasks--timer nil "Refreshes elapsed times on visible boards.")
 
@@ -2701,6 +2758,7 @@ BTW over the board; a failure shows on the board too."
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
   (add-hook 'harness-ui-rate-functions #'harness-ui-tasks--on-rate)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
+  (add-hook 'harness-ui-quota-functions #'harness-ui-tasks--on-quota)
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
   (setq harness-ui-tasks--timer (run-with-timer harness-ui-tasks--tick-interval harness-ui-tasks--tick-interval #'harness-ui-tasks--tick))
   (define-key harness-ui-map (kbd "a") #'harness-tasks))

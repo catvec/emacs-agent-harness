@@ -656,6 +656,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   model may look further once, in the sessions' transcripts, when the
   board alone does not say enough. `[Search]` in the header does the
   same, and `C-c h /` from anywhere opens the project's board first.
+- The header line shows what the board's tasks cost or, when a
+  subscription pays, the plan with its 5-hour and weekly quota, as a
+  chat's header does, then the fullest budget of the project. Click it
+  to open the usage dashboard. A narrow window keeps it after the
+  counts and most buttons are gone.
 - `RET` opens the session of the task at point. From that session,
   `C-c h a` leads back to the board. `F` lays the board out fullscreen,
   with that session beside it (see
@@ -825,7 +830,8 @@ billed depends on how it is logged in:
   turn shows what it costs.
 - With a Claude subscription (Pro, Max or Team), turns cost nothing per
   token. Sessions show the plan and its quota instead, for example `Max`
-  with the 5-hour and weekly windows in the chat header.
+  with the 5-hour and weekly windows in the chat header, and so does the
+  task board for its tasks.
 
 Sessions get your CLAUDE.md files, as `claude` loads them, but not
 Claude Code's auto memory, the notes Claude Code keeps on each
