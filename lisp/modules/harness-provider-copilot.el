@@ -107,7 +107,7 @@ GH_TOKEN or GITHUB_TOKEN."
   "Copilot model that the model id \"copilot:default\" stands for.
 It is listed first in the catalogue.  Copilot's own model \"auto\" lets
 Copilot choose a model for each request."
-  :type 'string :group 'harness)
+  :type '(string :names model :provider copilot) :group 'harness)
 
 (defcustom harness-provider-copilot-tiers
   '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
@@ -1487,6 +1487,24 @@ before it is logged in.  Without the program there are no models."
                             (harness-provider-copilot--sort-models
                              (harness-provider-copilot--builtin-models result)))))))))))
 
+(defun harness-provider-copilot--resolve (name models)
+  "Return what model NAME stands for when MODELS, the catalogue, lack it.
+\"default\" is `harness-provider-copilot-default-model', which a request
+naming it runs: it has that model's window, levels and prices, or an
+estimate of its window when the catalogue lacks it too.  Nil for
+another name; the catalogue estimates it."
+  (when (equal name "default")
+    (let* ((target harness-provider-copilot-default-model)
+           (model (cl-find target models :key (lambda (m) (plist-get m :name)) :test #'equal))
+           (estimate (and (not model) (fboundp 'harness-provider--estimate)
+                          (harness-provider--estimate 'copilot target))))
+      (append (list :label (format "Default (%s)" (or (plist-get model :label)
+                                                      (harness-provider-copilot--model-label target)))
+                    :resolves-to target)
+              (and estimate (list :context-window (car estimate) :context-window-estimated t
+                                  :context-window-basis (cdr estimate)))
+              (and model (harness-plist-remove model :id :name :label :provider :provider-label))))))
+
 (defun harness-provider-copilot--program-p ()
   "Non-nil when the `copilot' program can be found locally."
   (let ((program harness-provider-copilot-program))
@@ -2192,7 +2210,8 @@ permission judge's (SESSION-ID-perms), lose theirs too."
   :quota #'harness-provider-copilot--quota
   :capabilities harness-provider-copilot-capabilities
   :tiers harness-provider-copilot-tiers
-  :close #'harness-provider-copilot-close)
+  :close #'harness-provider-copilot-close
+  :resolve #'harness-provider-copilot--resolve)
 
 (harness-define-module 'provider-copilot
   :doc "GitHub Copilot CLI as a hosted-loop completion provider."

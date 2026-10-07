@@ -58,7 +58,8 @@ on it), `:created', and what its panel draws: `:title' `:tool' `:tool-kind'
 `:input' `:paths' `:pattern' `:dir' `:reason' `:options' for a
 permission (`:pattern' is the glob the answer holds for, and
 `:edited-pattern' the one the user typed), `:question' `:options'
-`:diagrams' for a question.")
+`:diagrams' for a question.  A permission also has the `:call-id' of
+the tool call that waits on it.")
 
 (defvar harness-ui-pending--diagrams (make-hash-table :test 'equal)
   "Session id -> (PID . INDEX) of the diagram its panel shows.
@@ -188,6 +189,7 @@ ITEM is (:id :kind :payload) in the wire shape."
               :diagrams (plist-get payload :diagrams))
       (list :id (plist-get item :id) :kind "permission" :created (float-time)
             :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
+            :call-id (plist-get payload :call-id)
             :tool (plist-get payload :tool) :tool-kind (harness-ui-pending--str (plist-get payload :kind))
             :input (plist-get payload :input) :paths (plist-get payload :paths)
             :dir (plist-get payload :dir) :pattern (plist-get payload :pattern)
@@ -786,6 +788,7 @@ clients, or the session's own pending list, answer it."
          (list :id pid :kind "permission" :respond respond :connection harness-ui-connection
                :created (float-time)
                :title (or (plist-get tc :title) (plist-get extra :tool) "tool call")
+               :call-id (plist-get tc :toolCallId)
                :tool (plist-get extra :tool) :tool-kind (format "%s" (plist-get tc :kind))
                :input (plist-get tc :rawInput) :paths (plist-get extra :paths)
                :dir (plist-get extra :dir) :pattern (plist-get extra :pattern)

@@ -461,6 +461,13 @@ ON-EVENT, when given, is called with each event as well."
       (should (plist-get caps :vision))
       (should (eq 'hosted (plist-get caps :compaction))))
     (should-not (plist-get (harness-call 'provider/capabilities "copilot:gpt-5-mini") :vision))
+    ;; "default" is the model a request naming it runs, window and all.
+    (let ((default (harness-call 'provider/model "copilot:default")))
+      (should (equal "Default (Claude Sonnet 5)" (plist-get default :label)))
+      (should (equal "claude-sonnet-5" (plist-get default :resolves-to)))
+      (should (= 200000 (plist-get default :context-window)))
+      (should-not (plist-get default :context-window-estimated))
+      (should (equal '("low" "medium" "high") (plist-get default :thinking-levels))))
     ;; Logging in told who pays.
     (should (eq 'subscription (plist-get harness-provider-copilot--status :billing)))
     (harness-test-wait (lambda () (null harness-provider-copilot--probe)) 15 "the probe to exit")))

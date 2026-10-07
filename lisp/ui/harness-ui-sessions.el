@@ -9,6 +9,10 @@
 ;; their parents.  Scoped to the current project by default; `a'
 ;; toggles all projects; `/' filters fuzzily; column headers sort.
 ;;
+;; F gives the list the fullscreen layout: the list stays on the left
+;; of the frame and the sessions it opens show beside it, until q on the
+;; list ends it (`harness-fullscreen').
+;;
 ;; SPC pops out what the session at point waits on -- the permission
 ;; prompt or question blocking it -- so it can be read and answered
 ;; without opening the session (`harness-ui-popout-at-point').
@@ -190,6 +194,12 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
     (define-key map (kbd "?") #'harness-menu)
     map))
 
+;; At top level, not in the `defvar', so a reload binds them in a running
+;; Emacs too.
+(define-key harness-ui-sessions-mode-map (kbd "F") #'harness-fullscreen)
+(define-key harness-ui-sessions-mode-map (kbd "q") #'harness-ui-quit-view)
+(define-key harness-ui-sessions-mode-map (kbd "C-c C-z") #'harness-ui-bury)
+
 (define-derived-mode harness-ui-sessions-mode tabulated-list-mode "Sessions"
   "Major mode listing harness sessions."
   (setq tabulated-list-format
@@ -209,6 +219,8 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
   ;; that acts on "the session at point", read it through this.
   (setq-local harness-ui-session-at-point-function
               (lambda () (and (derived-mode-p 'harness-ui-sessions-mode) (tabulated-list-get-id))))
+  ;; An overview: the list can take the fullscreen layout (F).
+  (setq-local harness-ui-overview-function #'harness-ui-sessions--overview-session)
   (add-hook 'tabulated-list-revert-hook #'harness-ui-sessions--refresh nil t)
   (tabulated-list-init-header))
 
@@ -229,7 +241,21 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
         (". /" "Filter" harness-ui-sessions-filter)
         (". a" "This project or all" harness-ui-sessions-toggle-scope)
         (". i" "Show or hide inactive" harness-ui-sessions-toggle-inactive)
+        (". F" "Fullscreen layout" harness-fullscreen)
         (". g" "Reload" harness-ui-sessions-reload)]))
+
+(defun harness-ui-sessions--overview-session ()
+  "Return the session to show beside the list in the fullscreen layout.
+That is the session at point, else the most recently updated session
+listed, BTW conversations aside."
+  (or (and (derived-mode-p 'harness-ui-sessions-mode) (tabulated-list-get-id))
+      (let (best newest)
+        (dolist (entry (and (listp tabulated-list-entries) tabulated-list-entries) best)
+          (let* ((session (harness-ui-session (car entry)))
+                 (updated (or (plist-get session :updated) 0)))
+            (when (and session (not (equal (plist-get session :kind) "btw"))
+                       (or (null best) (> updated newest)))
+              (setq best (car entry) newest updated)))))))
 
 (defun harness-ui-sessions--redraw ()
   "Redraw the list buffer if it exists, keeping point on the same session."
@@ -296,11 +322,16 @@ A task changes session when it starts, so it is looked up by its id."
     (harness-ui-sessions--on-changed)))
 
 ;;;###autoload
-(defun harness-sessions (&optional all-projects)
+(defun harness-sessions (&optional all-projects position)
   "Show the session list, scoped to the current project unless ALL-PROJECTS.
 The project includes its git worktrees, so its tasks' sessions are
 listed, and from a task's worktree the list shows the whole project.
-A task's session shows its task's title until it is named."
+A task's session shows its task's title until it is named.
+
+The list shows in POSITION, by default where it was last
+\(`harness-ui-display-view').  In the `fullscreen' position it stays on
+the left of the frame and the sessions open beside it (see
+`harness-fullscreen'): F on the list starts or ends that layout."
   (interactive "P")
   (let ((project (unless all-projects
                    (harness-files-main-root default-directory)))
@@ -312,7 +343,7 @@ A task's session shows its task's title until it is named."
       (tabulated-list-print t))
     (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw)))
     (harness-ui-sessions--fetch-tasks)
-    (harness-ui-display-view buf)))
+    (harness-ui-display-view buf position)))
 
 (defun harness-ui-sessions--id ()
   (or (tabulated-list-get-id) (user-error "No session on this line")))

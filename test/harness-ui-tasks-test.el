@@ -1793,5 +1793,60 @@ scrolled to the top and point was dragged out of the box with it."
               (should (<= (marker-position harness-compose-end) (window-end window t)))))
       (set-frame-height nil 25)))))
 
+;;;; The fullscreen layout
+
+(declare-function harness-fullscreen "harness-ui")
+(declare-function harness-ui-quit-view "harness-ui")
+(declare-function harness-ui--fullscreen-layout "harness-ui")
+(declare-function harness-ui--overview-window-p "harness-ui")
+
+(ert-deftest harness-ui-tasks-fullscreen-layout ()
+  "F gives the board the fullscreen layout, a task's session beside it;
+q on the board ends it.  C-c C-z does q's job from the compose box."
+  (harness-ui-tasks-test-with
+    (let* ((sessions nil)
+           (harness-ui-open-session-function
+            (lambda (id)
+              (or (cdr (assoc id sessions))
+                  (let ((buf (get-buffer-create (format " *fake session %s*" id))))
+                    (push (cons id buf) sessions)
+                    buf))))
+           (main (get-buffer-window board)))
+      (unwind-protect
+          (progn
+            (with-current-buffer board
+              (goto-char (point-min))
+              (should (eq 'harness-fullscreen (key-binding (kbd "F"))))
+              (should (eq 'harness-ui-quit-view (key-binding (kbd "q"))))
+              (goto-char harness-compose-end)
+              (should (eq 'self-insert-command (key-binding (kbd "q"))))
+              (should (eq 'harness-ui-bury (key-binding (kbd "C-c C-z")))))
+            (harness-ui-tasks-test--type-and-submit board "First task")
+            (harness-ui-tasks-test--wait-text board "Completed  1")
+            (harness-ui-tasks-test--type-and-submit board "Second task")
+            (harness-ui-tasks-test--wait-text board "Completed  2")
+            (let* ((tasks (buffer-local-value 'harness-ui-tasks--tasks board))
+                   (first (plist-get (cl-find "First task" tasks :key (lambda (task) (plist-get task :prompt))
+                                              :test #'equal)
+                                     :session)))
+              ;; Beside the board: the session of the task at point.
+              (with-selected-window main
+                (goto-char (point-min))
+                (search-forward "First task")
+                (should (equal first (harness-ui-tasks--overview-session)))
+                (harness-fullscreen))
+              (let ((overview (get-buffer-window board)))
+                (should (harness-ui--overview-window-p overview))
+                (should (eq 'left (window-parameter overview 'window-side)))
+                (should (eq (cdr (assoc first sessions)) (window-buffer main)))
+                ;; q on the board ends the layout and buries the board.
+                (with-selected-window overview
+                  (goto-char (point-min))
+                  (call-interactively (key-binding (kbd "q"))))
+                (should-not (harness-ui--fullscreen-layout))
+                (should-not (get-buffer-window board))
+                (should (eq 'full (buffer-local-value 'harness-ui-position board))))))
+        (mapc (lambda (entry) (kill-buffer (cdr entry))) sessions)))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here
