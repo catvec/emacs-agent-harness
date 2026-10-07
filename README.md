@@ -692,7 +692,8 @@ shows where its effective value comes from.
 
 The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
-non-interactive, budget), **Files and safety** (directory access,
+non-interactive), **Spending** (the budget, one for all sessions
+together), **Files and safety** (directory access,
 sandbox policy, standing permission rules), **Task board** (what task
 sessions start with, and when their work counts as done),
 **Notifications** (which task events notify you, and through which
@@ -714,7 +715,6 @@ project's, and a project's over the global value.
 - `harness-btw-thinking`
 - `harness-permission-mode`
 - `harness-allowed-directories`
-- `harness-budget`
 - `harness-sandbox-policy`
 - `harness-non-interactive`
 

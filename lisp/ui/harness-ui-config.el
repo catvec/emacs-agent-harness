@@ -12,13 +12,14 @@
 ;;            directory), which overrides the global value there.
 ;;
 ;; The page leads with the settings most people change, in the sections
-;; the harness names (`harness-config-sections'): new sessions, files
-;; and safety, the task board, notifications, models and services.
+;; the harness names (`harness-config-sections'): new sessions,
+;; spending, files and safety, the task board, notifications, models and
+;; services.
 ;; Everything else is advanced: the Global scope folds it into one line
 ;; saying how many there are and how many were changed, and `a' (or the
 ;; button there) shows them, by module.  The Project scope shows only
 ;; the settings that layer (model, permission mode, thinking, allowed
-;; directories, budget, sandbox policy, non-interactive), in their
+;; directories, sandbox policy, non-interactive), in their
 ;; sections, and folds the rest, which have a global value
 ;; only, into one line.  The options of the interface itself live in
 ;; this Emacs, not the harness: a button at the end opens Customize on
