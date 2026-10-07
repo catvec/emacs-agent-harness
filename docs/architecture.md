@@ -832,7 +832,9 @@ the provider reports none:
 ```
 
 Event `provider/quota-updated PROVIDER-ID QUOTA` fires whenever a
-provider learns something new; the UI caches QUOTA from it.
+provider learns something new; the UI caches QUOTA from it, and the
+usage module counts `:extra :used` in month budgets over everything
+(see usage).
 
 The Claude provider learns the billing from the `account` of each CLI
 process's initialize answer:
@@ -1643,35 +1645,65 @@ non-interactive session it stays a denial.
   `usage/budget-status ID &rest (:now)` (ID may be "session:SID" for a
   session's implicit budget) → `(:budget :spent :amount :remaining
   :fraction :hard :per-day :days-left :period-start :period-end
-  :baseline)`;
+  :baseline :reported :sources)`;
   `usage/session-budgets SID`, `usage/plan-budget AMOUNT PERIOD DAYS`,
   `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`.
   BUDGET = `(:id :scope session|project|period :target ID-OR-ROOT
   :amount F :hard BOOL :period day|week|month :days business|all
   :baseline F :baseline-period-start "YYYY-MM-DD")`.
-- A baseline is what was spent that the harness never recorded (other
-  tools, the console, days before it kept usage), set by hand so a
-  budget made mid-month does not start at $0.  `:spent` is the recorded cost plus
-  the baseline that counts: a period budget's only while the current
-  period starts on `:baseline-period-start` (set-budget fills in the
-  period containing now, and moves any date or float time to its
+- `:spent` is the recorded cost, plus `:reported`, plus `:baseline`.
+- A budget over everything (scope period, no target, a day, week or
+  month: `harness-usage-backfills-p`) backfills from what providers
+  report they billed in its period.  `:reported` is the sum of each
+  source's `:outside`, and `:sources` lists them as `(:source ID :label
+  NAME :kind extra-usage|cost-report :amount :recorded :outside :at
+  :detail TEXT)`, plus `:since :until` for a cost report.  `:amount` is
+  what the source reported as of `:at`, `:recorded` what the harness
+  recorded before then that the source counts too, and `:outside` the
+  rest, never below 0.  Two sources:
+  - Extra usage: a `provider/quota-updated` QUOTA whose `:extra :used`
+    is in US dollars covers the calendar month of its `:updated` time.
+    That is Claude Code's usage credits (the CLI's `get_usage`) or
+    Copilot's overage.  It counts in month budgets, less that
+    provider's rows billed `extra-usage`.  A QUOTA without `:extra`
+    (per-token billing) drops the provider's report.
+  - Anthropic's cost report (below), for the UTC days of the period's
+    local dates, less the Claude rows billed per token.  It is fetched
+    in the background, from the command loop, when a status is computed
+    without `:now` and the last try for that period is older than
+    `harness-usage-cost-report-interval` (600 s).  A failure, or a
+    missing key, is remembered for as long and keeps the amount fetched
+    before.
+  Reports live in memory, and `usage/reported-changed REPORT` fires when
+  one changes (forwarded to clients, and the dashboard reloads).
+  Project, session and per-project budgets do not backfill: a provider
+  cannot say what one project spent, and a session spends only through
+  the harness.
+- A baseline is what was spent that the harness never recorded and no
+  provider reports (other tools, the console, days before it kept
+  usage), set by hand so a budget made mid-month does not start at $0.
+  It counts besides `:reported`: a period budget's only while the
+  current period starts on `:baseline-period-start` (set-budget fills
+  in the period containing now, and moves any date or float time to its
   period's start), one without a period always.  The status's
   `:baseline` is that part, 0 otherwise.  nil or 0 clears it.
-- `usage/fetch-api-cost &rest (:now)` gives a promise of this month's
-  cost from Anthropic's Admin API (`GET /v1/organizations/cost_report`,
-  UTC days, amounts in cents): `(:available t :amount :recorded
-  :outside :period-start :since :until)`.  `:recorded` is what the
-  harness recorded in that time for Claude calls billed per token,
-  which the report counts too, and `:outside` the rest, offered as a
-  month budget's baseline.  It needs an Admin API key
+- `usage/fetch-api-cost &rest (:period :now)` gives a promise of what
+  Anthropic billed in the calendar `:period` (day, week or month, the
+  default) containing `:now`, from its Admin API (`GET
+  /v1/organizations/cost_report`, UTC days, amounts in cents):
+  `(:available t :amount :recorded :outside :period :period-start
+  :since :until)`.  `:recorded` is what the harness recorded in that
+  time for Claude calls billed per token, which the report counts too,
+  and `:outside` the rest.  The answer also updates what budgets over
+  everything count, at once.  It needs an Admin API key
   (`harness-anthropic-admin-api-key`, ANTHROPIC_ADMIN_KEY, or
   auth-source host api.anthropic.com user admin); without one nothing
   is fetched and it gives `(:available nil :reason)`.  Pro and Max
   subscriptions have no cost report.
 - Hard budgets block via `agent/before-turn`; soft ones emit
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
-  count billed cost, so calls a subscription covers spend none; a
-  baseline counts toward both.
+  count billed cost, so calls a subscription covers spend none; what
+  providers report and a baseline count toward both.
 - The Budget setting (`harness-budget`, `(:amount F :hard BOOL)`) is
   one implicit budget, id "settings", for all sessions together: it
   counts every recorded call and applies to every session, after the
