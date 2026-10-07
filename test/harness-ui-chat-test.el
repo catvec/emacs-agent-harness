@@ -2371,6 +2371,41 @@ from the buffer: it shows what the next message continues."
             (harness-ui-chat-test-type buf "still works")
             (should (equal "still works" (harness-compose-text)))))))))
 
+(ert-deftest harness-ui-chat-link-click-opens-it ()
+  "A click on a link in a response opens it; the transcript stays as it was.
+A URL goes to `browse-url', a file name opens beside the chat, taken in
+the session's directory.  The click used to paste the primary selection
+into the response where it landed, read-only as the transcript is."
+  (harness-ui-chat-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))
+           (opened nil))
+      (with-temp-file (expand-file-name "notes.md" cwd) (insert "one\ntwo\nthree\n"))
+      (harness-call 'session/append sid '(:kind user :content "where is it written down?"))
+      (harness-call 'session/append sid '(:kind assistant :content "In [the manual](https://www.gnu.org/software/emacs/manual/) and [the notes](notes.md#L2)."))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf (file-equal-p default-directory cwd)))
+                           5 "the session's directory")
+        (save-window-excursion
+          (switch-to-buffer buf)
+          (delete-other-windows)
+          (let ((text (buffer-string)))
+            (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened)))
+                      ((symbol-function 'gui-get-primary-selection)
+                       (lambda () "Open private configuration C-c f P")))
+              (harness-test-click (harness-ui-chat-test-find buf "the man"))
+              (should (equal '("https://www.gnu.org/software/emacs/manual/") opened))
+              (harness-test-click (harness-ui-chat-test-find buf "the no")))
+            (let ((notes (window-buffer (selected-window))))
+              (unwind-protect
+                  (progn
+                    (should (equal (expand-file-name "notes.md" cwd) (buffer-file-name notes)))
+                    (should (= 2 (with-current-buffer notes (line-number-at-pos))))
+                    (should (eq buf (window-buffer (next-window)))))
+                (unless (eq notes buf) (kill-buffer notes))))
+            (with-current-buffer buf
+              (should (equal text (buffer-string))))))))))
+
 (ert-deftest harness-ui-chat-completion-sources ()
   (harness-ui-chat-test-with
     ;; Only projects are listed, so the session runs in a repository.

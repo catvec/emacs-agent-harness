@@ -426,6 +426,11 @@ outside the session's directories, so allowing commands in the project
 does not let one that reaches elsewhere through. A denying rule stops
 a command that names any path it covers.
 
+A link in the agent's reply opens with a click or `RET`, and the
+transcript stays as it was: a web address goes to `browse-url`, a file
+opens in another window. A relative file name is taken in the session's
+directory, and a `#L12` or `:12` after it goes to that line.
+
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
 the picture; so does an SVG, read as text and shown as an image, and a
