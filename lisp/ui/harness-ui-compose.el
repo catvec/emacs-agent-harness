@@ -11,12 +11,15 @@
 ;;     the box jumps into it, a placeholder shows while it is empty;
 ;;   - a prompt that is a field of its own: C-a stops after it, as in
 ;;     the minibuffer, so C-a C-k clears the box's first line;
-;;   - @file completion over the project's files (each completed file
-;;     becomes an attachment) and /skill completion at its start; a
-;;     popup that shows as you type (corfu, company) shows for them even
-;;     while the host redraws around the box;
-;;   - attachments: C-c C-a finds a project file by part of its name
-;;     (C-u C-c C-a: any file), C-y pastes what the clipboard holds (an
+;;   - @file completion over the project's files, or over the file
+;;     system for a path (/, ~/, ./, ../); each completed file becomes
+;;     an attachment, and so does the file an @ reference typed out in
+;;     full names, once the message is sent; /skill completion at its
+;;     start; a popup that shows as you type (corfu, company) shows for
+;;     them even while the host redraws around the box;
+;;   - attachments: C-c C-a finds a file the same way, by part of a
+;;     project file's name or by path (C-u C-c C-a: browse the file
+;;     system), C-y pastes what the clipboard holds (an
 ;;     image or copied files go on the media ring; M-x
 ;;     harness-compose-attach-clipboard for other MIME types), files
 ;;     dropped on the window attach;
@@ -55,6 +58,7 @@
 (require 'harness-http)
 (require 'harness-ui-media-ring)
 (require 'harness-ui)
+(require 'harness-ui-drag)
 
 ;;;; State
 
@@ -522,14 +526,18 @@ commands, rather than scroll."
 
 (defun harness-compose-take ()
   "Return (TEXT . ATTACHMENTS) from the box, or signal when both are empty.
-A link still downloading signals too: the message waits for it."
+The files that @ references typed out in TEXT name are attached too,
+after the box's own attachments (`harness-compose--references'); the
+references stay in TEXT.  A link still downloading signals too: the
+message waits for it."
   (let ((text (string-trim (harness-compose-text)))
         (atts harness-compose-attachments))
     (when (and (string-empty-p text) (null atts)) (user-error "Nothing to send"))
     (when-let* ((pending (cl-find-if (lambda (a) (plist-get a :pending)) atts)))
       (user-error "%s is still downloading: wait for it, or remove it (×)"
                   (or (plist-get pending :name) "An attachment")))
-    (cons text atts)))
+    (cons text (append atts (cl-remove-if (lambda (a) (harness-compose--attached-p (plist-get a :path)))
+                                          (harness-compose--references text))))))
 
 (defun harness-compose-newline ()
   "Insert a newline in the box, or jump there from elsewhere."
@@ -568,6 +576,126 @@ A link still downloading signals too: the message waits for it."
             :name (or (plist-get att :name) (file-name-nondirectory path))
             :size (plist-get att :size) :mimeType mime))))
 
+;;;; Finding files
+
+;; @ references and the attach command find a file the same way.  Part
+;; of a name finds a project file in any subdirectory, among the files
+;; listed from the projectile cache (`harness-compose--files').  A path
+;; finds any file of this machine: one starting with / or ~ (absolute,
+;; or in a home directory), or with ./ or ../, relative to the root the
+;; project's files are named from, so ../other-repo/README.md is the
+;; README next door.  Paths complete directory by directory, the way
+;; `read-file-name' does, but only on this machine: completing as you
+;; type must never open a connection to a remote host.
+
+(defun harness-compose--root ()
+  "Return the directory the box's file names are relative to.
+That is the project's root (`harness-compose-project-function'), as a
+directory name."
+  (file-name-as-directory (expand-file-name (or (harness-compose--project) default-directory))))
+
+(defun harness-compose--path-p (name)
+  "Non-nil when NAME is a path rather than part of a project file's name.
+A path starts with / or ~, or with ./ or ../, or is just \"..\"."
+  (string-match-p "\\`\\(?:[/~]\\|\\.\\.?/\\|\\.\\.\\'\\)" name))
+
+(defun harness-compose--complete-path (root string pred action)
+  "Complete the path STRING, relative to ROOT, for completion ACTION with PRED.
+Only files of this machine complete: file name handlers are off, so a
+remote name, which TRAMP would connect for, completes to nothing.  A
+directory's ./ and ../ are offered only once a name starting with a dot
+is typed, so a popup lists what the directory holds."
+  (let* ((default-directory root)
+         (file-name-handler-alist nil)
+         (non-essential t)
+         (found (completion-file-name-table string pred action)))
+    (if (and (eq action t) (not (string-prefix-p "." (file-name-nondirectory string))))
+        (cl-remove-if (lambda (name) (member name '("./" "../"))) found)
+      found)))
+
+(defun harness-compose--file-table ()
+  "Return the completion table @ references and the attach command find files in.
+Part of a name completes over the project's files, in the
+`harness-compose-file' category, which matches with `flex' unless
+configured otherwise.  A path (`harness-compose--path-p') completes
+over the file system, relative to the box's root, directory by
+directory, in the `file' category: the styles and the UI (vertico,
+marginalia) of file names apply to it."
+  (let ((files (harness-compose--table 'harness-compose--files 'harness-compose-file))
+        (root (harness-compose--root)))
+    (lambda (string pred action)
+      (if (harness-compose--path-p string)
+          (harness-compose--complete-path root string pred action)
+        (funcall files string pred action)))))
+
+(defun harness-compose--attach-table ()
+  "Return the table the attach command reads a file with.
+That of @ references (`harness-compose--file-table'), but a leading @,
+typed out of the habit of the box, is ignored: \"@notes\" finds what
+\"notes\" does."
+  (let ((table (harness-compose--file-table)))
+    (lambda (string pred action)
+      (if (not (string-prefix-p "@" string))
+          (funcall table string pred action)
+        (let ((name (substring string 1)))
+          (pcase action
+            ;; The @ is out of the field being completed.
+            (`(boundaries . ,_)
+             (let ((inner (funcall table name pred action)))
+               `(boundaries ,(1+ (or (cadr inner) 0)) . ,(cddr inner))))
+            ('nil (let ((found (funcall table name pred nil)))
+                    (if (stringp found) (concat "@" found) found)))
+            (_ (funcall table name pred action))))))))
+
+(defun harness-compose--local-file (name root)
+  "Return NAME, relative to ROOT, absolute when it is a regular file here, or nil.
+A remote name is never looked at, as completing it never is."
+  (let* ((file-name-handler-alist nil)
+         (path (expand-file-name name root)))
+    (and (file-regular-p path) path)))
+
+;; An @ reference typed out in full, or pasted, rather than completed
+;; names its file all the same: sending the message attaches it
+;; (`harness-compose-take'), and the reference stays in the text, where
+;; it says what the file is for.
+
+(defconst harness-compose--reference-regexp "\\(?:\\`\\|[ \t\n]\\)@\\([^ \t\n]+\\)"
+  "An @ reference: an @ starting a word, then the name up to a space.
+That is the token @ completes in the box (`harness-compose--capf-bounds').")
+
+(defun harness-compose--reference-file (name root)
+  "Return the absolute name of the file the @ reference NAME means, or nil.
+NAME is what follows the @: a file the project lists, or a path
+relative to ROOT, absolute or under ~, of a regular file of this
+machine.  Punctuation ending a sentence or a bracket after it is no
+part of it (\"see @notes.txt.\"), and an @skill: reference names a
+skill, not a file."
+  (unless (string-prefix-p "skill:" name)
+    (cl-some (lambda (candidate)
+               (cond ((string-empty-p candidate) nil)
+                     ((member candidate harness-compose--files) (expand-file-name candidate root))
+                     (t (harness-compose--local-file candidate root))))
+             (delete-dups (list name (replace-regexp-in-string "[]),.;:!?'\"`>}]+\\'" "" name))))))
+
+(defun harness-compose--references (text)
+  "Return the attachments of the files the @ references in TEXT name.
+In the order of TEXT, each file once; see
+`harness-compose--reference-file' for what a reference may name."
+  (let ((root (harness-compose--root)) (start 0) (paths nil))
+    (while (string-match harness-compose--reference-regexp text start)
+      (setq start (match-end 0))
+      (when-let* ((path (harness-compose--reference-file (match-string 1 text) root)))
+        (cl-pushnew path paths :test #'equal)))
+    (mapcar #'harness-compose--file-attachment (nreverse paths))))
+
+(defun harness-compose-without-references (atts text)
+  "Return ATTS without the files the @ references in TEXT name.
+ATTS are the attachments `harness-compose-take' returned with TEXT.
+For what can only be text, an answer to a question say: a file the text
+names goes as its reference, while any other attachment cannot go."
+  (let ((named (mapcar (lambda (att) (plist-get att :path)) (harness-compose--references text))))
+    (cl-remove-if (lambda (att) (member (plist-get att :path) named)) atts)))
+
 ;;;; Attachments
 
 (defun harness-compose--mime-of (path)
@@ -576,26 +704,37 @@ A link still downloading signals too: the message waits for it."
 
 (defun harness-compose-read-file (&optional any)
   "Read a file to attach and return its absolute name.
-Part of a name finds a project file in any subdirectory: the files are
-those @ completes, in the `harness-compose-file' category, which
-matches with `flex' unless configured otherwise.  With ANY, or when the
-project lists no files, browse the file system instead.  The project is
-never listed while you wait: a listing still running fills the
-candidates in when it returns."
-  (let ((root (harness-compose--project))
+Part of a name finds a project file in any subdirectory, and a path any
+file: absolute, under ~, or relative to the project with ./ or ../,
+completing directory by directory.  It is what @ completes in the box
+\(`harness-compose--file-table'), so the project's files match with
+`flex' unless configured otherwise, and a leading @ is ignored.  A
+directory is no file to attach: choosing one reads again, from inside
+it, and so does an empty answer.  With ANY, or when the project lists
+no files, browse the file system instead.  The project is never listed
+while you wait: a listing still running fills the candidates in when it
+returns."
+  (let ((root (harness-compose--root))
         (listing (harness-compose-fetch-files)))
     (expand-file-name
      (if (or any (and (harness-promise-settled-p listing) (null harness-compose--files)))
          (read-file-name "Attach file: " root nil t)
-       (completing-read "Attach project file (C-u: any file): "
-                        (harness-compose--table 'harness-compose--files 'harness-compose-file)
-                        nil t))
+       (let ((table (harness-compose--attach-table)) (initial nil) (name nil))
+         (while (progn
+                  (setq name (string-remove-prefix
+                              "@" (completing-read "Attach a project file, or a path (/ ~/ ../): "
+                                                   table nil t initial)))
+                  (let ((file-name-handler-alist nil))
+                    (file-directory-p (expand-file-name name root))))
+           (setq initial (and (not (string-empty-p name)) (file-name-as-directory name))))
+         name))
      root)))
 
 (defun harness-compose-add-attachment (path &optional mime)
   "Attach the file PATH (with MIME) to the next message.
 Interactively, part of its name finds a project file in any
-subdirectory; with a prefix argument, any file is read instead (see
+subdirectory, and a path (/, ~/, ./, ../) any file; with a prefix
+argument, the file system is browsed instead (see
 `harness-compose-read-file')."
   (interactive (list (harness-compose-read-file current-prefix-arg)))
   (let ((path (expand-file-name path)))
@@ -714,13 +853,32 @@ one did offers it once it has."
         (complete-with-action action (and (buffer-live-p buf) (buffer-local-value var buf))
                               string pred)))))
 
+(defun harness-compose--attach-token (name root)
+  "Attach the file the @ token NAME, just completed before point, names.
+The token goes, its file taking its place among the attachments.  A
+project file's name attaches its file; a path (relative to ROOT) only a
+regular file of this machine: a directory stays in the box, for its
+files to complete next."
+  (when-let* ((path (if (harness-compose--path-p name)
+                        (harness-compose--local-file name root)
+                      (expand-file-name name root))))
+    (let* ((end (point))
+           (start (- end (length name) 1)))
+      (when (and (harness-compose-in-p start)
+                 (equal (buffer-substring-no-properties start end) (concat "@" name)))
+        (delete-region start end)))
+    (harness-compose-add-attachment path)))
+
 (defun harness-compose-completion-at-point ()
   "Complete @files and /skills in the box.
-The sigil is what starts completion, the way an LSP trigger character
-does: popups that wait for a few characters show right after it."
+An @ completes a project file by part of its name, or any file by its
+path (see `harness-compose--file-table'); a completed file becomes an
+attachment.  The sigil is what starts completion, the way an LSP
+trigger character does: popups that wait for a few characters show
+right after it."
   (let ((file (harness-compose--capf-bounds ?@))
         (skill (harness-compose--capf-bounds ?/))
-        (root (harness-compose--project)))
+        (root (harness-compose--root)))
     (cond
      (file
       ;; A new @ token refreshes the list, so files created since the
@@ -729,15 +887,14 @@ does: popups that wait for a few characters show right after it."
         (setq harness-compose--files-at (car file))
         (harness-compose-fetch-files))
       (list (car file) (cdr file)
-            (harness-compose--table 'harness-compose--files 'harness-compose-file)
+            (harness-compose--file-table)
             :exclusive 'no
             :company-prefix-length t
+            :company-kind (lambda (name) (if (string-suffix-p "/" name) 'folder 'file))
             :exit-function
             (lambda (str status)
               (when (memq status '(finished sole))
-                (let ((end (point)))
-                  (delete-region (- end (length str) 1) end)
-                  (harness-compose-add-attachment (expand-file-name str root)))))))
+                (harness-compose--attach-token str root)))))
      ((and skill (= (1- (car skill)) harness-compose-start))
       (list (car skill) (cdr skill)
             (harness-compose--table 'harness-compose--skills 'harness-compose-skill)
@@ -800,7 +957,8 @@ download of the harness by its name, any other file by its path."
 ROOM, in pixels, is how wide the chip may show: the name is shortened
 in the middle as much as that needs, and a thumbnail takes a third of
 it at most.  Without ROOM the name is whole.  The tooltip leads with
-the file's whole path."
+the file's whole path.  The thumbnail and the name drag the file into
+another application (`harness-ui-drag-source')."
   (let* ((path (plist-get att :path))
          (size (harness-format-bytes (plist-get att :size)))
          (help (harness-ui-one-line
@@ -811,8 +969,10 @@ the file's whole path."
          (open (lambda (&rest _) (interactive) (harness-compose-open-attachment att)))
          (thumb (harness-compose--thumbnail att (and room (/ room 3))))
          (head (if thumb
-                   (concat (propertize thumb 'help-echo help 'pointer 'hand
-                                       'keymap (harness-ui-mouse-keymap open))
+                   (concat (harness-ui-drag-source
+                            (propertize thumb 'help-echo help 'pointer 'hand
+                                        'keymap (harness-ui-mouse-keymap open))
+                            path)
                            " ")
                  ""))
          (remove (concat " " (propertize (buttonize "×" (lambda (_) (harness-compose-remove-attachment path)) nil
@@ -822,11 +982,13 @@ the file's whole path."
          ;; One line each, whatever a file is called.
          (name (replace-regexp-in-string "[\n\r\t]" " " (harness-compose--chip-name att))))
     (concat head
-            (funcall label (if room
-                               (harness-compose--fit name (- room (harness-compose--pixels head)
-                                                             (harness-compose--pixels remove))
-                                                     label)
-                             name))
+            (harness-ui-drag-source
+             (funcall label (if room
+                                (harness-compose--fit name (- room (harness-compose--pixels head)
+                                                              (harness-compose--pixels remove))
+                                                      label)
+                              name))
+             path)
             remove)))
 
 (defun harness-compose-open-attachment (att)

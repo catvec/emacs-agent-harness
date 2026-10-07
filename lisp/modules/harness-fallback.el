@@ -57,7 +57,7 @@ back to it once its provider works again (when its limit resets, or an
 hour on when the provider did not say).  nil leaves sessions on their
 provider, which then stop.  The usage dashboard (\\[harness-usage])
 shows and edits this list beside the plans' quota."
-  :type '(repeat (string :tag "Provider or model id"))
+  :type '(repeat (string :tag "Provider or model id" :names (provider model)))
   :group 'harness)
 
 (defconst harness-fallback--retry-after 3600

@@ -1859,5 +1859,188 @@ to its own temporary directory, so it carries on rather than stops."
     (should (harness-test-fits-p (get 'harness-perms-rules 'custom-type)
                                  '((:tool "bash" :kind exec :behavior deny) (:behavior allow))))))
 
+;;;; What a shell command reaches
+
+(ert-deftest harness-perms-shell-words-mark-the-programs ()
+  "A command line is read into its words, each saying whether it is a program run."
+  (dolist (case '(("ls -la '/a b/c' | head -5"
+                   ("ls" . t) ("-la") ("/a b/c") ("head" . t) ("-5"))
+                  ;; Quotes and backslashes are undone, comments left out.
+                  ("echo \"say \\\"hi\\\" $x\" a\\ b # not /etc/passwd\ncat /etc/os-release"
+                   ("echo" . t) ("say \"hi\" $x") ("a b") ("cat" . t) ("/etc/os-release"))
+                  ;; What a redirection names is a file, wherever it stands.
+                  (">/tmp/out cmd 2>&1 arg &>>/tmp/log"
+                   ("/tmp/out") ("cmd" . t) ("2") ("1") ("arg") ("/tmp/log"))
+                  ;; Assignments, keywords, and prefixes with their options
+                  ;; come before the program.
+                  ("FOO=1 sudo -n env BAR=2 /usr/bin/python3 x.py && if true; then xargs -0 rm /y; fi"
+                   ("FOO=1") ("sudo" . t) ("-n") ("env" . t) ("BAR=2") ("/usr/bin/python3" . t) ("x.py")
+                   ("if" . t) ("true" . t) ("then" . t) ("xargs" . t) ("-0") ("rm" . t) ("/y") ("fi" . t))
+                  ;; Substitutions and subshells run commands; what follows
+                  ;; one is an argument again.
+                  ("x=$(cat /etc/hostname) y=`ls /srv`"
+                   ("x=") ("cat" . t) ("/etc/hostname") ("y=") ("ls" . t) ("/srv"))
+                  ("diff <(sort /a) /b; echo $(date) /c `pwd` /d"
+                   ("diff" . t) ("sort" . t) ("/a") ("/b") ("echo" . t) ("date" . t) ("/c") ("pwd" . t) ("/d"))
+                  ("(cd /x && make) 2>&1 | tee ./log"
+                   ("cd" . t) ("/x") ("make" . t) ("2") ("1") ("tee" . t) ("./log"))))
+    (should (equal (cdr case) (harness-perms--shell-words (car case)))))
+  ;; The words that are paths: absolute, from home, or plainly relative.
+  (should (equal "/etc/x" (harness-perms--path-word "/etc/x")))
+  (should (equal "~/.claude" (harness-perms--path-word "$HOME/.claude")))
+  (should (equal "~" (harness-perms--path-word "${HOME}")))
+  (should (equal "/tmp/r.json" (harness-perms--path-word "--out=/tmp/r.json")))
+  (should (equal "../lib" (harness-perms--path-word "LIB=../lib")))
+  (should (equal "." (harness-perms--path-word ".")))
+  (dolist (word '("src/a.el" "-la" ".git" "$HOMEDIR/x" "https://example.com/a" "origin/main"))
+    (should-not (harness-perms--path-word word))))
+
+(ert-deftest harness-perms-command-paths-are-the-files-it-names ()
+  "A shell command's paths are the words naming files, made absolute; its programs are not."
+  (let* ((s (harness-perms-test--setup))
+         (cwd (harness-perms-test--real (plist-get s :cwd)))
+         (nowhere "/harness-test-no-such-root")
+         (paths (lambda (command) (harness-perms--command-paths (harness-perms-test--bash command)))))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd cwd))
+    (should-not (file-exists-p nowhere))
+    ;; The call a judge doubted: it runs in the project and lists elsewhere.
+    (should (equal (list (expand-file-name "~/.claude/projects/x"))
+                   (funcall paths "ls -la ~/.claude/projects/x")))
+    (should (equal (list (expand-file-name "~/.netrc") (expand-file-name "~/notes"))
+                   (funcall paths "cat $HOME/.netrc \"${HOME}/notes\" ~/.netrc")))
+    ;; Relative to where it runs; /dev/null and the like are nobody's.
+    (should (equal (list (expand-file-name "lisp" cwd) (expand-file-name "../out.log" cwd))
+                   (funcall paths "make -C ./lisp test > ../out.log 2>/dev/null </dev/zero")))
+    (should (equal (list "/tmp/r.json") (funcall paths "/usr/bin/env python3 --out=/tmp/r.json")))
+    (should (equal (list "/") (funcall paths "rm -rf /")))
+    ;; An absolute word under no directory of this machine is no path,
+    ;; such as what a grep looks for.
+    (should (equal (list (directory-file-name cwd)) (funcall paths (format "grep -r %s/v1 ." nowhere))))
+    (should-not (funcall paths "git status"))
+    (should-not (funcall paths "printf '/etc\n/usr'"))
+    ;; Only a shell command has any.
+    (should-not (harness-perms--command-paths (list :session harness-perms-test--session :tool "t" :kind 'read
+                                                    :input '(:command "ls /etc") :paths (list cwd))))
+    (should-not (harness-perms--command-paths (harness-perms-test--request "bash" 'exec cwd)))
+    ;; On a remote host nothing is looked up, and only that host knows
+    ;; where ~ is.
+    (let ((harness-perms-test--session (list :id "s1" :cwd "/home/u/proj/" :host "/ssh:u@box:")))
+      (should (equal (list "/ssh:u@box:/etc/hosts" "/ssh:u@box:/home/u/proj/a" (concat "/ssh:u@box:" nowhere "/x"))
+                     (harness-perms--command-paths
+                      (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                            :input (list :command (format "cat /etc/hosts ./a ~/b %s/x 2>/dev/null" nowhere))
+                            :paths (list "/ssh:u@box:/home/u/proj"))))))))
+
+(ert-deftest harness-perms-command-is-about-what-it-reaches-outside ()
+  "A shell command is about the paths it names outside the session's directories.
+When it names none there, it is about where it runs, as before."
+  (let* ((s (harness-perms-test--setup))
+         (cwd (harness-perms-test--real (plist-get s :cwd)))
+         (outside (harness-perms-test--real (harness-test-temp-dir)))
+         (subject (lambda (command) (harness-perms--subject-paths (harness-perms-test--bash command)))))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd cwd))
+    (should (equal (list cwd) (funcall subject "git status")))
+    (should (equal (list cwd) (funcall subject "cp ./a ./b/c > ./log")))
+    (should (equal (list outside) (funcall subject (format "ls -la %s" outside))))
+    (should (equal (list (concat outside "a")) (funcall subject (format "cp %sa ./b" outside))))
+    ;; A directory granted to the session is one of its own.
+    (harness-call 'permission/allow-dir "s1" outside)
+    (should (equal (list cwd) (funcall subject (format "cp %sa ./b" outside))))
+    ;; Worked out once, a request carries it.
+    (let ((r (harness-perms--with-reach (harness-perms-test--bash "cat /etc/hosts ./a"))))
+      (should (equal (list "/etc/hosts" (expand-file-name "a" cwd)) (plist-get r :named-paths)))
+      (should (equal (list "/etc/hosts") (plist-get r :subject-paths)))
+      (should (eq r (harness-perms--with-reach r))))))
+
+(ert-deftest harness-perms-command-prompt-is-about-what-it-reaches ()
+  "A judge's doubt about what a command reads elsewhere is put to the user for there.
+The prompt used to name, and offer as its pattern, the directory the
+command runs in: remembering the answer then allowed every command run
+in the project, whatever the judge had been against."
+  (let* ((s (harness-perms-test--setup :permission-mode 'auto))
+         (cwd (harness-perms-test--real (plist-get s :cwd)))
+         (projects (file-name-as-directory (expand-file-name "projects" (harness-perms-test--real (harness-test-temp-dir)))))
+         (judge (harness-perms-test--scripted-judge
+                 (list '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it reads other projects' data\"}")
+                         (:type done :stop-reason end-turn))
+                       '((:type text :delta "{\"decision\":\"allow\",\"reason\":\"a read in the project\"}")
+                         (:type done :stop-reason end-turn)))))
+         (harness-perms-auto-model "judge:x"))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd cwd))
+    (make-directory projects)
+    (harness-perms-test--install-pending)
+    (let* ((p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                        (harness-perms-test--bash (format "ls -la %sx 2>/dev/null" projects))))
+           (pending (progn (harness-test-wait (lambda () harness-perms-test--pending) 2 "the judge's prompt")
+                           (car harness-perms-test--pending)))
+           (payload (plist-get pending :payload)))
+      (should (equal "The permission judge would deny this call: it reads other projects' data"
+                     (plist-get payload :reason)))
+      ;; It names what the command reaches and where it runs, and is
+      ;; answered for the former.
+      (should (equal (list (concat projects "x")) (plist-get payload :paths)))
+      (should (equal cwd (plist-get payload :cwd)))
+      (should (equal (concat projects "**") (plist-get payload :pattern)))
+      ;; So does the list of waiting prompts.
+      (let ((listed (plist-get (car (harness-call 'permission/pending "s1")) :payload)))
+        (should (equal (list (concat projects "x")) (plist-get listed :paths)))
+        (should (equal cwd (plist-get listed :cwd)))
+        (should (equal (concat projects "**") (plist-get listed :pattern))))
+      (harness-call 'permission/answer "s1" (plist-get pending :id) "allow-session")
+      (should (eq 'allow (plist-get (harness-test-await p) :behavior))))
+    (should (equal (list (list :tool "bash" :path (concat projects "**") :behavior 'allow))
+                   (gethash "s1" harness-perms--session-rules)))
+    (should (= 1 (length (funcall judge))))
+    ;; Another command reading there runs without the judge...
+    (let ((d (harness-perms-test--decide (harness-perms-test--bash (format "cat %sx/a %sy" projects projects)))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (string-match-p "standing rule for bash in .*projects/\\*\\*" (plist-get d :reason))))
+    (should (= 1 (length (funcall judge))))
+    ;; ...and the commands that stay in the project are still the judge's.
+    (let ((d (harness-perms-test--decide (harness-perms-test--bash "git status"))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (equal "a read in the project" (plist-get d :reason))))
+    (should (= 2 (length (funcall judge))))))
+
+(ert-deftest harness-perms-command-rules-weigh-what-it-reaches ()
+  "An allow rule holds a shell command when it holds what the command reaches outside.
+A deny rule stops it for any path it runs in or names."
+  (let* ((s (harness-perms-test--setup :permission-mode 'ask))
+         (cwd (harness-perms-test--real (plist-get s :cwd)))
+         (outside (harness-perms-test--real (harness-test-temp-dir)))
+         (matches (lambda (rule command) (harness-perms--rule-matches-p rule (harness-perms-test--bash command)))))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd cwd))
+    ;; Allowed in the project: what runs there and stays there, not
+    ;; what reaches out of it.
+    (let ((project (list :tool "bash" :path (concat cwd "**") :behavior 'allow)))
+      (should (funcall matches project "git status"))
+      (should (funcall matches project "make -C ./lisp > ./build.log"))
+      (should-not (funcall matches project (format "ls %s" outside)))
+      (should-not (funcall matches project "rm -rf ~")))
+    ;; Allowed there: the commands reaching it from the project, and
+    ;; only those.
+    (let ((there (list :tool "bash" :path (concat outside "**") :behavior 'allow)))
+      (should (funcall matches there (format "ls %s" outside)))
+      (should (funcall matches there (format "cp %sa ./b" outside)))
+      (should-not (funcall matches there "git status"))
+      (should-not (funcall matches there (format "cp %sa ~/b" outside))))
+    ;; Denied: any path named, inside the project too, or where it runs.
+    (let ((secret '(:path "secret/**" :behavior deny)))
+      (should (funcall matches secret "cat ./secret/key"))
+      (should-not (funcall matches secret "cat ./README"))
+      (should (harness-perms--rule-matches-p
+               secret (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                            :input '(:command "ls") :paths (list (concat cwd "secret/"))))))
+    (should (funcall matches (list :path (concat outside "**") :behavior 'deny) (format "cp ./a %sb" outside)))
+    ;; Through the chain, the first rule that applies wins.
+    (let ((harness-perms-rules (list '(:path "secret/**" :behavior deny)
+                                     (list :tool "bash" :path (concat cwd "**") :behavior 'allow))))
+      (should (eq 'deny (plist-get (harness-perms-test--decide (harness-perms-test--bash "cat ./secret/key")) :behavior)))
+      (should (eq 'allow (plist-get (harness-perms-test--decide (harness-perms-test--bash "cat ./README")) :behavior)))
+      ;; Nobody can answer here, so what no rule decides is denied.
+      (let ((d (harness-perms-test--decide (harness-perms-test--bash (format "cat %sa" outside)))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (equal "no user available" (plist-get d :reason)))))))
+
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here

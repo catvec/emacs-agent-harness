@@ -879,14 +879,17 @@ Folded header lines continue the header above them."
               (should (equal '("low" "medium" "high") (plist-get sonnet :thinking-levels)))
               (should (equal '(:input 3.0 :output 15.0 :cache-read 0.3 :cache-write 3.75) (plist-get sonnet :pricing)))
               (should (equal "anthropic.claude-sonnet-4-5-20250929-v1:0" (plist-get sonnet :base)))
-              (should (eq t (plist-get (plist-get sonnet :capabilities) :prompt-caching))))
+              (should (eq t (plist-get (plist-get sonnet :capabilities) :prompt-caching)))
+              (should-not (plist-get sonnet :context-window-estimated)))
             (let ((opus (funcall by-name "global.anthropic.claude-opus-5-5")))
               (should (= 1000000 (plist-get opus :context-window)))
               (should (eq 'adaptive (plist-get opus :thinking-style))))
             (should (= 300000 (plist-get (funcall by-name "amazon.nova-pro-v1:0") :context-window)))
             (should (equal '("text" "image") (plist-get (funcall by-name "amazon.nova-pro-v1:0") :input-modalities)))
             (let ((llama (funcall by-name "meta.llama3-1-8b-instruct-v1:0")))
+              ;; The Llama 3 family's window, a guess for this one.
               (should (= 128000 (plist-get llama :context-window)))
+              (should (plist-get llama :context-window-estimated))
               (should (equal '("text") (plist-get llama :input-modalities)))
               (should-not (plist-get llama :thinking-levels))
               (should-not (plist-get (plist-get llama :capabilities) :vision)))
@@ -939,6 +942,106 @@ Folded header lines continue the header above them."
         (should (cl-some (lambda (w) (string-match-p "ListFoundationModels failed: HTTP 403: not allowed to list" w))
                          warnings))
         (should-not (gethash 'failing harness-bedrock--models-cache))))))
+
+(ert-deftest harness-provider-bedrock-model-catalogue-refresh-and-failure ()
+  ;; A refresh lists the models again however fresh the cache is, and a
+  ;; listing that fails keeps the models listed before.
+  (harness-bedrock-test-with-keys
+    (let ((endpoint '(:id refreshing :region "us-east-1" :inference-profiles nil))
+          (names (lambda (models) (mapcar (lambda (m) (plist-get m :name)) models))))
+      (remhash 'refreshing harness-bedrock--models-cache)
+      (unwind-protect
+          (let (listed)
+            (harness-bedrock-test-with-fake
+                (list (cons "/foundation-models"
+                            (list :status 200 :body (harness-json-encode harness-bedrock-mock-models))))
+              (setq listed (funcall names (harness-test-await (harness-bedrock--models endpoint))))
+              (should (equal '("meta.llama3-1-8b-instruct-v1:0" "amazon.nova-pro-v1:0") listed))
+              (harness-test-await (harness-bedrock--models endpoint))
+              (should (= 1 (length harness-bedrock-test--requests)))
+              (should (equal listed (funcall names (harness-test-await (harness-bedrock--models endpoint t)))))
+              (should (= 2 (length harness-bedrock-test--requests))))
+            (harness-bedrock-test-with-fake
+                '(("/foundation-models" . (:status 403 :body "{\"message\":\"not allowed to list\"}")))
+              (let* ((warnings nil)
+                     (models (let ((harness-log-hook
+                                    (list (lambda (level msg) (when (eq level 'warn) (push msg warnings))))))
+                               (harness-test-await (harness-bedrock--models endpoint t)))))
+                (should (= 1 (length harness-bedrock-test--requests)))
+                (should (equal listed (funcall names models)))
+                (should (cl-some (lambda (w) (string-match-p "keeping the 2 models listed before" w)) warnings)))))
+        (remhash 'refreshing harness-bedrock--models-cache)))))
+
+(ert-deftest harness-provider-bedrock-family-windows-are-estimates ()
+  ;; The window of a family's catch-all is flagged as a guess.
+  (let ((opus (harness-bedrock--model-entry '(:id e) "us.anthropic.claude-opus-9-v1:0")))
+    (should (= 200000 (plist-get opus :context-window)))
+    (should (plist-get opus :context-window-estimated))
+    (should (stringp (plist-get opus :context-window-basis)))
+    (should (eq t (plist-get (plist-get opus :capabilities) :prompt-caching)))
+    (should (equal '("text" "image") (plist-get opus :input-modalities))))
+  ;; Neither the window of a model the defaults know nor one given with a
+  ;; static model is.
+  (should-not (plist-get (harness-bedrock--model-entry '(:id e) harness-bedrock-test-sonnet)
+                         :context-window-estimated))
+  (let ((own (car (harness-bedrock--static-models
+                   '(:id e :models ((:name "anthropic.claude-new-v1:0" :context-window 500000)))))))
+    (should (= 500000 (plist-get own :context-window)))
+    (should-not (plist-get own :context-window-estimated))
+    (should-not (plist-get own :context-window-basis)))
+  ;; A model of no known family gets the endpoint's default context, else
+  ;; no window, for the catalogue to estimate.
+  (let ((default (harness-bedrock--model-entry '(:id e :default-context 64000) "acme.mystery-v1")))
+    (should (= 64000 (plist-get default :context-window)))
+    (should-not (plist-get default :context-window-estimated)))
+  (should-not (plist-get (harness-bedrock--model-entry '(:id e) "acme.mystery-v1") :context-window))
+  ;; A family's guess does not beat the endpoint's default either way round:
+  ;; the family knows the model better.
+  (should (= 200000 (plist-get (harness-bedrock--model-entry '(:id e :default-context 64000)
+                                                             "anthropic.claude-opus-9-v1:0")
+                               :context-window))))
+
+(ert-deftest harness-provider-bedrock-resolves-what-the-listing-lacks ()
+  "A model the endpoint does not list is described from the defaults.
+The window its family guesses gives way to the one another provider
+lists for the same model."
+  (harness-bedrock-test-with-env ()
+    (harness-test-reset-bus)
+    (dolist (m '(provider provider-bedrock))
+      (harness-test-load-module m))
+    (unwind-protect
+        (let ((harness-bedrock-endpoints
+               '((:id statrock :label "Static Bedrock" :region "us-east-1"
+                  :models ("us.anthropic.claude-sonnet-4-5-20250929-v1:0")))))
+          (harness-bedrock--register-all)
+          (harness-bedrock-clear-models-cache)
+          ;; The catalogue warms up from a timer once its module loads: let
+          ;; that run now, while these are the endpoints, not in a later test.
+          (harness-test-wait (let ((spun nil)) (lambda () (prog1 spun (setq spun t)))))
+          (let ((opus (harness-call 'provider/model "statrock:us.anthropic.claude-opus-9-v1:0"))
+                (arn (harness-call 'provider/model
+                                   "statrock:arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc")))
+            (should (equal "Static Bedrock" (plist-get opus :provider-label)))
+            (should (= 200000 (plist-get opus :context-window)))
+            (should (plist-get opus :context-window-estimated))
+            (should (equal '("text" "image") (plist-get opus :input-modalities)))
+            (should (plist-get (plist-get opus :capabilities) :prompt-caching))
+            ;; An ARN no default knows: an estimate from the endpoint's models.
+            (should (= 200000 (plist-get arn :context-window)))
+            (should (equal "statrock's models" (plist-get arn :context-window-basis))))
+          (harness-define-provider 'test-sizer
+            :complete #'ignore
+            :models (lambda () (harness-resolved '((:name "claude-opus-9" :context-window 2000000)))))
+          (harness-test-await (harness-call 'provider/models))
+          (let ((opus (harness-call 'provider/model "statrock:us.anthropic.claude-opus-9-v1:0")))
+            (should (= 2000000 (plist-get opus :context-window)))
+            (should (plist-get opus :context-window-estimated))
+            (should (equal "test-sizer:claude-opus-9" (plist-get opus :context-window-basis)))))
+      (remhash 'test-sizer harness-providers)
+      (harness-provider--forget 'test-sizer)
+      (harness-provider--forget 'statrock)
+      (harness-bedrock-clear-models-cache)
+      (harness-bedrock--register-all))))
 
 (ert-deftest harness-provider-bedrock-registration ()
   (should (harness-provider-get 'bedrock))
@@ -1034,6 +1137,378 @@ Folded header lines continue the header above them."
         (should (equal "You said: héllo ✓" (harness-bedrock-test--text events)))
         (should (equal '(:type done :stop-reason end-turn) (car (last events))))
         (should (null (plist-get (car (harness-bedrock-mock-requests mock)) :auth-problem)))))))
+
+;;;; Gateways
+;;
+;; A gateway in front of Bedrock (a company's, a proxy, API Gateway)
+;; serves Bedrock's paths under a prefix and authenticates requests its
+;; own way.  The stub gateway of harness-bedrock-mock.el stands in for
+;; one; every URL and key here is made up.
+
+(defconst harness-bedrock-test-prefix "/gateway/bedrock"
+  "The path the stub gateway serves Bedrock's paths under.")
+
+(defconst harness-bedrock-test-gateway-key "gateway-key-EXAMPLE-0123456789"
+  "The key the stub gateway takes, made up.")
+
+(defmacro harness-bedrock-test-local-only (&rest body)
+  "Run BODY with HTTP requests anywhere but 127.0.0.1 refused unsent.
+`elsewhere' is bound to the URLs refused, newest first, so a test can
+show that no request, and so no key, left for AWS."
+  (declare (indent 0))
+  (let ((real (make-symbol "real")))
+    `(let ((elsewhere nil)
+           (,real (symbol-function 'harness-http-request)))
+       (cl-letf (((symbol-function 'harness-http-request)
+                  (lambda (url &rest args)
+                    (if (string-prefix-p "http://127.0.0.1:" url)
+                        (apply ,real url args)
+                      (push url elsewhere)
+                      (let ((callback (plist-get args :callback)))
+                        (harness-run-soon
+                         (lambda () (funcall callback nil nil "" '(curl "refused by the test: not a local URL"))))
+                        (make-harness-http-handle :url url :callback callback :started (float-time)))))))
+         ,@body))))
+
+(defmacro harness-bedrock-test-with-gateway (checks &rest body)
+  "Run BODY with `mock' bound to a stub gateway, nothing else reachable.
+The gateway serves under `harness-bedrock-test-prefix' and CHECKS
+authenticate its requests (see `harness-bedrock-mock-start'); see
+`harness-bedrock-test-local-only' for `elsewhere'."
+  (declare (indent 1))
+  `(let ((mock (harness-bedrock-mock-start #'harness-bedrock-mock-agent-handler
+                                           :prefix harness-bedrock-test-prefix :checks ,checks)))
+     (harness-bedrock-clear-models-cache)
+     (unwind-protect (harness-bedrock-test-local-only ,@body)
+       (harness-bedrock-mock-stop mock)
+       (harness-bedrock-clear-models-cache))))
+
+(defun harness-bedrock-test--ask (endpoint model text)
+  "Send TEXT to MODEL at ENDPOINT; return the events of the answer."
+  (car (harness-bedrock-test--complete
+        endpoint (list :model model :messages `((:role user :content ,text))) 10)))
+
+(ert-deftest harness-provider-bedrock-gateway-urls ()
+  (harness-bedrock-test-with-env ()
+    ;; Models are listed where a gateway's runtime URL points, not at AWS.
+    (should (equal "https://gateway.example.com/bedrock"
+                   (harness-bedrock--control-url '(:id g :endpoint-url "https://gateway.example.com/bedrock/"))))
+    (should (equal "https://gateway.example.com/list"
+                   (harness-bedrock--control-url '(:id g :endpoint-url "https://gateway.example.com/bedrock"
+                                                   :control-url "https://gateway.example.com/list/"))))
+    ;; An AWS runtime URL, a VPC endpoint's say, has the regional listing URL.
+    (should (equal "https://bedrock.eu-west-1.amazonaws.com"
+                   (harness-bedrock--control-url
+                    '(:id v :region "eu-west-1"
+                      :endpoint-url "https://vpce-0abc-1xyz.bedrock-runtime.eu-west-1.vpce.amazonaws.com"))))
+    (should (equal "https://bedrock.cn-north-1.amazonaws.com.cn" (harness-bedrock--control-url '(:id c :region "cn-north-1"))))
+    (with-environment-variables (("AWS_ENDPOINT_URL_BEDROCK_RUNTIME" "https://gateway.example.com/rt"))
+      (should (equal "https://gateway.example.com/rt" (harness-bedrock--control-url '(:id e))))
+      (should (equal "https://gateway.example.com/own"
+                     (harness-bedrock--control-url '(:id e :endpoint-url "https://gateway.example.com/own"))))
+      (with-environment-variables (("AWS_ENDPOINT_URL_BEDROCK" "https://control.example.com"))
+        (should (equal "https://control.example.com" (harness-bedrock--control-url '(:id e))))
+        ;; The endpoint's own gateway wins over the environment.
+        (should (equal "https://gateway.example.com/own"
+                       (harness-bedrock--control-url '(:id e :endpoint-url "https://gateway.example.com/own"))))))
+    (with-environment-variables (("AWS_ENDPOINT_URL_BEDROCK_RUNTIME" "https://bedrock-runtime-fips.us-east-1.amazonaws.com"))
+      (should (equal "https://bedrock.us-east-1.amazonaws.com" (harness-bedrock--control-url '(:id e))))))
+  ;; AWS's hosts, and others.
+  (dolist (url '("https://bedrock-runtime.us-east-1.amazonaws.com" "https://bedrock.cn-north-1.amazonaws.com.cn"
+                 "https://bedrock-runtime.us-east-1.api.aws"
+                 "https://vpce-1.bedrock-runtime.us-east-1.vpce.amazonaws.com:443/x"))
+    (should (harness-bedrock--aws-url-p url)))
+  (dolist (url '("https://gateway.example.com/bedrock" "https://amazonaws.com.example.com"
+                 "https://notamazonaws.com" "http://127.0.0.1:8080/gateway"))
+    (should-not (harness-bedrock--aws-url-p url)))
+  ;; Paths go under a prefix, and a base URL's query stays.
+  (should (equal "https://gw.example.com/p/model/m/converse"
+                 (harness-bedrock--url "https://gw.example.com/p/" "/model/m/converse")))
+  (should (equal "https://gw.example.com/p/foundation-models?api-version=2&byOutputModality=TEXT"
+                 (harness-bedrock--url "https://gw.example.com/p?api-version=2" "/foundation-models?byOutputModality=TEXT")))
+  (should (equal "https://gw.example.com/model/m/converse?v=1"
+                 (harness-bedrock--url "https://gw.example.com/?v=1" "/model/m/converse")))
+  (should (equal "https://gw.example.com/model/m/converse" (harness-bedrock--url "https://gw.example.com?" "/model/m/converse")))
+  ;; A gateway that passes requests on unchanged has them signed for Bedrock's own URL.
+  (let ((url "https://gw.example.com/p/model/m/converse"))
+    (should (equal url (harness-bedrock--signing-url '(:id g) url "/model/m/converse" 'runtime "eu-west-1")))
+    (should (equal "https://bedrock-runtime.eu-west-1.amazonaws.com/model/m/converse"
+                   (harness-bedrock--signing-url '(:id g :sign-for-aws t) url "/model/m/converse" 'runtime "eu-west-1")))
+    (should (equal "https://bedrock.us-west-2.amazonaws.com/foundation-models?byOutputModality=TEXT"
+                   (harness-bedrock--signing-url '(:id g :sign-for-aws t :signing-region "us-west-2")
+                                                 "https://gw.example.com/p/foundation-models?byOutputModality=TEXT"
+                                                 "/foundation-models?byOutputModality=TEXT" 'control "eu-west-1")))))
+
+(ert-deftest harness-provider-bedrock-gateway-headers ()
+  (harness-bedrock-test-with-env (("GATEWAY_TEAM" "team-EXAMPLE") ("GATEWAY_SECRET" "gateway-secret-EXAMPLE"))
+    (let ((url "https://gateway.example.com/bedrock/model/m/converse"))
+      ;; An API key in the header the gateway names carries the key alone.
+      (should (equal '(("Content-Type" . "application/json") ("x-api-key" . "tok"))
+                     (harness-bedrock--request-headers '(:id g :bearer-token-header "x-api-key")
+                                                       '(:type bearer :token "tok") "POST" url "{}" "us-east-1"
+                                                       '(("Content-Type" . "application/json")))))
+      (should (equal '(("authorization" . "Bearer tok"))
+                     (harness-bedrock--request-headers '(:id g :bearer-token-header "authorization")
+                                                       '(:type bearer :token "tok") "GET" url "" "us-east-1")))
+      ;; ${NAME} in a header value is environment variable NAME...
+      (let ((endpoint '(:id g :headers (("X-Team" . "${GATEWAY_TEAM}") ("X-Key" . "k=${GATEWAY_SECRET};v=1")
+                                        ("X-Plain" . "$HOME and ${not-a-name}")))))
+        (should (equal '(("X-Team" . "team-EXAMPLE") ("X-Key" . "k=gateway-secret-EXAMPLE;v=1")
+                         ("X-Plain" . "$HOME and ${not-a-name}"))
+                       (harness-bedrock--request-headers endpoint '(:type none) "GET" url "" "us-east-1")))
+        (should (equal '("GATEWAY_TEAM" "GATEWAY_SECRET") (harness-bedrock--header-variables endpoint)))
+        ;; ... whose value no message shows.
+        (should (equal "the gateway refused [redacted] of [redacted]"
+                       (harness-bedrock--redact "the gateway refused gateway-secret-EXAMPLE of team-EXAMPLE"
+                                                nil endpoint))))
+      ;; An unset one is an error that names it.
+      (let ((err (should-error (harness-bedrock--request-headers '(:id g :headers (("X-Team" . "${GATEWAY_UNSET}")))
+                                                                 '(:type none) "GET" url "" "us-east-1"))))
+        (should (equal "Header X-Team of g needs environment variable GATEWAY_UNSET, which is not set"
+                       (error-message-string err))))
+      ;; Signed for Bedrock's own URL: its host is signed but not sent,
+      ;; so the gateway gets a Host of its own.
+      (let* ((aws "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse")
+             (headers (harness-bedrock--request-headers
+                       '(:id g) '(:type sigv4 :access-key-id "AKID" :secret-access-key "secret")
+                       "POST" url "{}" "us-east-1" '(("Content-Type" . "application/json")) aws))
+             (expected (harness-bedrock-sigv4
+                        :method "POST" :url aws :headers '(("Content-Type" . "application/json")) :body "{}"
+                        :access-key-id "AKID" :secret-access-key "secret" :region "us-east-1" :service "bedrock"
+                        :time (harness-bedrock-mock--parse-time (cdr (assoc "X-Amz-Date" headers))))))
+        (should-not (assoc-string "host" headers t))
+        (should (string-match-p "SignedHeaders=content-type;host;x-amz-date," (cdr (assoc "Authorization" headers))))
+        (should (equal (cdr (assoc "Authorization" (plist-get expected :headers)))
+                       (cdr (assoc "Authorization" headers))))))))
+
+(ert-deftest harness-provider-bedrock-api-key-command ()
+  ;; A key that is a JWT is kept until it expires, any other for an hour.
+  (let ((jwt (concat "eyJhbGciOiJIUzI1NiJ9."
+                     (base64url-encode-string "{\"sub\":\"me\",\"exp\":4102444800}" t)
+                     ".c2lnbmF0dXJl")))
+    (should (= 4102444800.0 (harness-bedrock--jwt-expiry jwt)))
+    (should-not (harness-bedrock--jwt-expiry "plain-token"))
+    (should-not (harness-bedrock--jwt-expiry "a.!!!.c"))
+    (let ((key (harness-bedrock--printed-api-key (concat "Logged in as me.\n\nBearer " jwt "\n") "cmd")))
+      (should (equal jwt (plist-get key :token)))
+      (should (= 4102444800.0 (plist-get key :expires)))
+      (should (plist-get key :command)))
+    (let ((key (harness-bedrock--printed-api-key "tok-1\r\n" "cmd")))
+      (should (equal "tok-1" (plist-get key :token)))
+      (should (< (abs (- (plist-get key :expires) (+ (float-time) harness-bedrock--api-key-ttl))) 5))))
+  (should-not (harness-bedrock--printed-api-key " \n\n" "cmd"))
+  ;; The command runs once, and again once its key is dropped.
+  (let* ((dir (harness-test-temp-dir))
+         (counter (expand-file-name "runs" dir))
+         (script (harness-bedrock-test--write
+                  dir "print-token"
+                  (format "#!/bin/sh\nn=$(( $(cat %s 2>/dev/null || echo 0) + 1 ))\necho $n > %s\necho 'Logged in.'\necho \"token-$n\"\n"
+                          (shell-quote-argument counter) (shell-quote-argument counter))))
+         (endpoint (list :id 'gw :auth 'bearer :endpoint-url "https://gateway.example.com/bedrock"
+                         :bearer-token-command (shell-quote-argument script))))
+    (set-file-modes script #o700)
+    (unwind-protect
+        ;; Bedrock's own API key is not sent to a gateway with a command of its own.
+        (harness-bedrock-test-with-env (("AWS_BEARER_TOKEN_BEDROCK" "bedrock-api-key-not-for-the-gateway"))
+          (should (equal "token-1" (plist-get (harness-bedrock-test--auth endpoint) :token)))
+          (should (equal "token-1" (plist-get (harness-bedrock-test--auth endpoint) :token)))
+          (should (equal "1" (string-trim (harness-bedrock-test--read counter))))
+          (harness-bedrock--forget-keys endpoint)
+          (should (equal "token-2" (plist-get (harness-bedrock-test--auth endpoint) :token)))
+          ;; Another command never gets the first one's key.
+          (should-not (equal (harness-bedrock--api-key-cache-key endpoint)
+                             (harness-bedrock--api-key-cache-key
+                              (plist-put (copy-sequence endpoint) :bearer-token-command "other-command"))))
+          ;; A command that fails says why.
+          (should (equal (cons 'error "no API key for gw: add an auth-source entry for gateway.example.com (user apikey) (the API key command failed (exit 3): not logged in)")
+                         (harness-bedrock-test--auth '(:id gw :auth bearer :endpoint-url "https://gateway.example.com/bedrock"
+                                                       :bearer-token-command "echo 'not logged in' >&2; exit 3")))))
+      (delete-directory dir t)))
+  ;; What to set, by the kind of keys an endpoint takes.
+  (harness-bedrock-test-with-env ()
+    (should (equal (cons 'error "no API key for gw: set GATEWAY_API_KEY, or add an auth-source entry for gateway.example.com (user apikey)")
+                   (harness-bedrock-test--auth '(:id gw :auth bearer :endpoint-url "https://gateway.example.com/bedrock"
+                                                 :bearer-token-env "GATEWAY_API_KEY"))))
+    (should (equal (cons 'error "no AWS credentials for aws: set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or AWS_PROFILE (now profile default), or add an auth-source entry for bedrock-runtime.us-east-1.amazonaws.com")
+                   (harness-bedrock-test--auth '(:id aws :auth sigv4))))))
+
+(ert-deftest harness-provider-bedrock-gateway-api-key-end-to-end ()
+  "A gateway that takes a key of its own in x-api-key, under a prefix:
+it answers and lists models, and nothing goes to AWS."
+  (skip-unless harness-http--curl-program)
+  (harness-bedrock-test-with-env (("GATEWAY_API_KEY" harness-bedrock-test-gateway-key)
+                                  ("GATEWAY_TEAM" "team-EXAMPLE")
+                                  ;; Keys for Bedrock itself, which must stay here.
+                                  ("AWS_BEARER_TOKEN_BEDROCK" harness-bedrock-mock-api-key)
+                                  ("AWS_ACCESS_KEY_ID" harness-bedrock-mock-key-id)
+                                  ("AWS_SECRET_ACCESS_KEY" harness-bedrock-mock-key-secret))
+    (harness-bedrock-test-with-gateway
+        (list (harness-bedrock-mock-key-check "x-api-key" harness-bedrock-test-gateway-key)
+              (harness-bedrock-mock-header-check "x-team" "team-EXAMPLE")
+              (harness-bedrock-mock-no-header-check "authorization")
+              (harness-bedrock-mock-no-header-check "x-amz-date"))
+      (let* ((endpoint (list :id 'gw :label "Gateway" :auth 'bearer :region "us-east-1"
+                             :endpoint-url (harness-bedrock-mock-url mock)
+                             :bearer-token-env "GATEWAY_API_KEY" :bearer-token-header "x-api-key"
+                             :headers '(("X-Team" . "${GATEWAY_TEAM}"))))
+             (events (harness-bedrock-test--ask endpoint "gw:us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                                                "hello gateway")))
+        (should (equal "You said: hello gateway" (harness-bedrock-test--text events)))
+        (should (equal '(:type done :stop-reason end-turn) (car (last events))))
+        ;; The models are listed at the gateway, under its prefix too.
+        (should (= 4 (length (harness-test-await (harness-bedrock--models endpoint) 10))))
+        (let ((requests (harness-bedrock-mock-requests mock)))
+          (should (= 5 (length requests)))
+          (should (equal "/gateway/bedrock/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse-stream"
+                         (plist-get (car (last requests)) :full-target)))
+          (dolist (r requests)
+            (should (string-prefix-p (concat harness-bedrock-test-prefix "/") (plist-get r :full-target)))
+            (should-not (plist-get r :auth-problem))))
+        ;; A key the gateway refuses is said so.
+        (with-environment-variables (("GATEWAY_API_KEY" "gateway-key-WRONG-0123456789"))
+          (let ((done (car (last (harness-bedrock-test--ask endpoint "gw:amazon.nova-pro-v1:0" "hi")))))
+            (should (eq 'error (plist-get done :stop-reason)))
+            (should (equal "HTTP 401: Mock gateway: wrong key in x-api-key" (plist-get done :error)))))
+        ;; Nothing went anywhere else: Bedrock's keys never left.
+        (should-not elsewhere)))))
+
+(ert-deftest harness-provider-bedrock-gateway-token-command-end-to-end ()
+  "A gateway token a command prints is kept, and printed anew when refused."
+  (skip-unless harness-http--curl-program)
+  (let* ((dir (harness-test-temp-dir))
+         (counter (expand-file-name "runs" dir))
+         (script (harness-bedrock-test--write
+                  dir "gateway-login"
+                  (format "#!/bin/sh\nn=$(( $(cat %s 2>/dev/null || echo 0) + 1 ))\necho $n > %s\necho 'Logged in.'\necho \"token-$n\"\n"
+                          (shell-quote-argument counter) (shell-quote-argument counter))))
+         (accepted "token-1"))
+    (set-file-modes script #o700)
+    (unwind-protect
+        (harness-bedrock-test-with-env ()
+          (harness-bedrock-test-with-gateway
+              (list (harness-bedrock-mock-key-check "authorization" (lambda () accepted)))
+            (let ((endpoint (list :id 'gw :auth 'bearer :region "us-east-1"
+                                  :endpoint-url (harness-bedrock-mock-url mock)
+                                  :bearer-token-command (shell-quote-argument script)))
+                  (runs (lambda () (string-to-number (harness-bedrock-test--read counter)))))
+              (should (equal "You said: one" (harness-bedrock-test--text
+                                              (harness-bedrock-test--ask endpoint "gw:amazon.nova-pro-v1:0" "one"))))
+              (should (equal "You said: two" (harness-bedrock-test--text
+                                              (harness-bedrock-test--ask endpoint "gw:amazon.nova-pro-v1:0" "two"))))
+              (should (= 1 (funcall runs)))
+              ;; The gateway moves on to a new token: the request is
+              ;; refused once, the command runs again, the answer comes.
+              (setq accepted "token-2")
+              (let ((events (harness-bedrock-test--ask endpoint "gw:amazon.nova-pro-v1:0" "three")))
+                (should (equal "You said: three" (harness-bedrock-test--text events)))
+                (should (equal '(:type done :stop-reason end-turn) (car (last events)))))
+              (should (= 2 (funcall runs)))
+              ;; The listing too.
+              (setq accepted "token-3")
+              (should (= 4 (length (harness-test-await (harness-bedrock--models endpoint) 10))))
+              (should (= 3 (funcall runs)))
+              ;; A gateway that refuses every token: an error, after one more try.
+              (setq accepted "token-never")
+              (let ((done (car (last (harness-bedrock-test--ask endpoint "gw:amazon.nova-pro-v1:0" "four")))))
+                (should (eq 'error (plist-get done :stop-reason)))
+                (should (equal "HTTP 401: Mock gateway: wrong key in authorization" (plist-get done :error))))
+              (should (= 4 (funcall runs)))
+              (should-not elsewhere))))
+      (delete-directory dir t))))
+
+(ert-deftest harness-provider-bedrock-gateway-sigv4-end-to-end ()
+  "AWS keys sign for a gateway's own URL, prefix and query included, or
+for Bedrock's own when the gateway passes requests on unchanged."
+  (skip-unless harness-http--curl-program)
+  (harness-bedrock-test-with-keys
+    (with-environment-variables (("GATEWAY_TEAM" "team-EXAMPLE"))
+      ;; An API Gateway in front of Bedrock checks signatures itself.
+      (harness-bedrock-test-with-gateway
+          (list (harness-bedrock-mock-sigv4-check) (harness-bedrock-mock-header-check "x-team" "team-EXAMPLE"))
+        (let ((endpoint (list :id 'apigw :region "us-east-1" :auth 'sigv4 :signing-service "execute-api"
+                              :endpoint-url (concat (harness-bedrock-mock-url mock) "?stage=prod")
+                              :headers '(("X-Team" . "${GATEWAY_TEAM}")))))
+          (should (equal "You said: signed"
+                         (harness-bedrock-test--text (harness-bedrock-test--ask endpoint "apigw:amazon.nova-pro-v1:0" "signed"))))
+          (should (= 4 (length (harness-test-await (harness-bedrock--models endpoint) 10))))
+          (should (= 5 (length (harness-bedrock-mock-requests mock))))
+          (dolist (r (harness-bedrock-mock-requests mock))
+            (should-not (plist-get r :auth-problem))
+            (should (string-match-p "\\`stage=prod\\(?:&\\|\\'\\)" (plist-get r :query)))
+            (should (string-match-p "/us-east-1/execute-api/aws4_request, "
+                                    (cdr (assoc "authorization" (plist-get r :headers))))))
+          (should-not elsewhere)))
+      ;; A gateway that passes requests on to Bedrock unchanged.
+      (harness-bedrock-test-with-gateway (list (harness-bedrock-mock-sigv4-check 'bedrock))
+        (let ((endpoint (list :id 'relay :region "us-east-1" :auth 'sigv4 :sign-for-aws t
+                              :endpoint-url (harness-bedrock-mock-url mock))))
+          (should (equal "You said: relayed"
+                         (harness-bedrock-test--text (harness-bedrock-test--ask endpoint "relay:amazon.nova-pro-v1:0" "relayed"))))
+          (should (= 4 (length (harness-test-await (harness-bedrock--models endpoint) 10))))
+          (should (= 5 (length (harness-bedrock-mock-requests mock))))
+          (should (cl-every (lambda (r) (null (plist-get r :auth-problem))) (harness-bedrock-mock-requests mock)))
+          ;; Signed for the gateway's URL instead, Bedrock would refuse it.
+          (let ((done (car (last (harness-bedrock-test--ask (plist-put (copy-sequence endpoint) :sign-for-aws nil)
+                                                            "relay:amazon.nova-pro-v1:0" "hi")))))
+            (should (equal "HTTP 401: Mock gateway: signature mismatch" (plist-get done :error))))
+          (should-not elsewhere))))))
+
+(ert-deftest harness-provider-bedrock-gateway-from-the-settings-page ()
+  "A gateway endpoint saved as the settings page saves it registers and
+lists the gateway's models, and an edit shows at once."
+  (skip-unless harness-http--curl-program)
+  (harness-bedrock-test-with-env (("GATEWAY_API_KEY" harness-bedrock-test-gateway-key))
+    (harness-bedrock-test-with-gateway
+        (list (harness-bedrock-mock-key-check "x-api-key" harness-bedrock-test-gateway-key))
+      (harness-test-with-temp-state
+        (harness-test-reset-bus)
+        (dolist (m '(project config provider provider-bedrock))
+          (harness-test-load-module m))
+        (let* ((saved harness-bedrock-endpoints)
+               (gateway (list :id 'gw :label "Gateway" :auth 'bearer
+                              :endpoint-url (harness-bedrock-mock-url mock)
+                              :bearer-token-env "GATEWAY_API_KEY" :bearer-token-header "x-api-key"))
+               (save (lambda (endpoints)
+                       ;; As the settings page saves: the printed value, globally.
+                       (harness-call 'config/set "harness-bedrock-endpoints"
+                                     (let ((print-length nil) (print-level nil)) (prin1-to-string endpoints))
+                                     :printed t :scope 'global)))
+               (names (lambda ()
+                        (sort (mapcar (lambda (m) (plist-get m :name)) (harness-call 'provider/cached-models 'gw))
+                              #'string<)))
+               (listed (lambda ()
+                         (harness-test-wait (lambda () (harness-call 'provider/cached-models 'gw)) 10 "the gateway's models")
+                         (funcall names))))
+          (unwind-protect
+              (progn
+                (funcall save (append saved (list gateway)))
+                (should (equal "Gateway" (harness-provider-label (harness-provider-get 'gw))))
+                (should (equal '("amazon.nova-pro-v1:0" "global.anthropic.claude-opus-5-5" "meta.llama3-1-8b-instruct-v1:0"
+                                 "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+                               (funcall listed)))
+                (dolist (r (harness-bedrock-mock-requests mock))
+                  (should (string-prefix-p (concat harness-bedrock-test-prefix "/") (plist-get r :full-target)))
+                  (should-not (plist-get r :auth-problem)))
+                ;; Naming the models instead shows them at once, and what
+                ;; was learnt about the endpoint goes.
+                (puthash "gw/amazon.nova-pro-v1:0" '(:no-cache t) harness-bedrock--quirks)
+                (puthash "other/amazon.nova-pro-v1:0" '(:no-cache t) harness-bedrock--quirks)
+                (funcall save (append saved (list (append gateway '(:models ("model-a" "model-b"))))))
+                (should (equal '("model-a" "model-b") (funcall names)))
+                (should-not (gethash "gw/amazon.nova-pro-v1:0" harness-bedrock--quirks))
+                (should (gethash "other/amazon.nova-pro-v1:0" harness-bedrock--quirks))
+                ;; Back to listing them: the gateway is asked again.
+                (let ((before (length (harness-bedrock-mock-requests mock))))
+                  (funcall save (append saved (list gateway)))
+                  (should (= 4 (length (funcall listed))))
+                  (should (> (length (harness-bedrock-mock-requests mock)) before)))
+                ;; Removed, it is gone.
+                (funcall save saved)
+                (should-not (harness-provider-get 'gw))
+                (should-not (gethash 'gw harness-bedrock--models-cache))
+                (should-not elsewhere))
+            (remhash "other/amazon.nova-pro-v1:0" harness-bedrock--quirks)
+            (customize-set-variable 'harness-bedrock-endpoints saved)))))))
 
 ;;;; A whole agent turn
 
