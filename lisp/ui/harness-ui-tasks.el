@@ -2274,7 +2274,9 @@ and attachments go along, as in a chat."
                (target harness-ui-tasks--target)
                (refine harness-ui-tasks--refine)
                (buffer (current-buffer)))
-    (when (and (eq (car target) 'answer) atts)
+    ;; The box's own attachments, not the files its @ references name:
+    ;; an answer mentioning a file goes as the text it is.
+    (when (and (eq (car target) 'answer) harness-compose-attachments)
       (user-error "Answers cannot carry attachments"))
     (setq harness-ui-tasks--error nil
           harness-compose-attachments nil)

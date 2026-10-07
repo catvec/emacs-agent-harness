@@ -181,7 +181,7 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
          :billing api|subscription|extra-usage :plan "max")    ; billing and plan of the latest call
  :context-window N                  ; in effect: the override, else the model's
  :context-window-override nil|N     ; a window set for the session
- :budget nil|(:amount F :hard BOOL)
+ :budget nil|(:amount F :hard BOOL)    ; given to the session; the Budget setting is not copied
  :head "node-id"
  :queue ((:id "q1" :text "…" :attachments (ATTACHMENT…)) …)
  :pending ((:id "p1" :kind permission|question :payload PLIST :created FLOAT) …)
@@ -321,8 +321,9 @@ project-root `.dir-locals.el` → customize default.  Variables are
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
 (the level BTWs start at, default "low"; nil for the session's),
-`harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
-`harness-non-interactive`.
+`harness-allowed-directories`, `harness-sandbox-policy`,
+`harness-non-interactive`.  `harness-budget` has a global value only:
+it is one budget for all sessions together (see usage).
 
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
@@ -1183,13 +1184,16 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   or deny; a denial carries `:message`, the text `tools/execute` would
   have returned.
 - Corporate mode (`harness-corporate-mode`) turns off the tools of kind
-  `net`.  No session gets them, so `tools/builtin` never picks a
-  provider's own web search either; the list without a session still
-  has them.  `tools/execute` and `tools/authorize` deny a call to one
-  before the `permission/decide` chain, whatever the mode and the
-  standing rules: reason "corporate mode: network tools are off", a
-  hint to work with the project and the tools the session has,
+  `net` other than web search (`harness-tools--corporate-net-tools`:
+  web_search).  No session gets them; the list without a session still
+  has them.  `tools/execute` and `tools/authorize` deny a call of kind
+  `net` to any other tool (one the harness lacks included) before the
+  `permission/decide` chain, whatever the mode and the standing rules:
+  reason "corporate mode: network tools other than web search are
+  off", a hint to work with the project and the tools the session has,
   `:denied t`, and `permission/decided` as for any decision.
+  web_search stays, and so does a provider's own search standing in
+  for it (`tools/builtin`); their calls go to the chain as in any mode.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.
@@ -1239,6 +1243,26 @@ non-interactive session it stays a denial.
   everything below the directories it matches.  A grant of `DIR/**` is
   kept as the directory DIR/, so default grants read as before; a grant
   narrowed to one file keeps its name.
+- What a shell command reaches: the bash tool's `:paths` is where it
+  runs, which is all the jail checks (the sandbox confines the command,
+  and the mode and the judge read it whole).  For an `exec` call with a
+  `:command`, `harness-perms--command-paths` reads the paths the
+  command line names: a best-effort word scan (quotes, backslashes,
+  comments, `;` `&` `|` `(` `$(` and backquotes, redirections) that
+  keeps words that are absolute, start with `~` or `$HOME`, or with
+  `./` or `../`, and the values of `--option=…` and `NAME=…` words;
+  not the programs it runs (the first word of a command, after
+  assignments, keywords and prefixes such as `sudo` or `xargs`), not
+  `/dev/null` and the like, and on this machine not an absolute word
+  whose first directory does not exist, so a `/api/v1` in a grep is no
+  path (on a remote host nothing is looked up, and `~` words are left
+  out).  The call is about its subject paths
+  (`harness-perms--subject-paths`): the ones it names outside the
+  session's directories, or, when it names none there, where it runs,
+  as before.  The tool prompt shows and builds its pattern from them,
+  so `ls -la ~/.claude/projects/x` run in the project is answered for
+  `~/.claude/projects/x/**` and not for every command run in the
+  project, and the rules weigh them (below).
 - The jail asks instead of denying when a path lies outside the roots
   and someone can answer: a pending `permission` request whose payload
   carries `:dir`, `:pattern` and the options allow-once (this call may
@@ -1292,8 +1316,12 @@ non-interactive session it stays a denial.
   `harness-perms-rules`.  A rule with a `:path` (absolute, or relative to
   the session's cwd) applies to calls with paths only: an allow rule when
   the pattern holds every path of the call, a deny rule when it holds
-  any.  The mode stage checks them first, before the auto-allow list and
-  the mode.  A tool prompt for a call with paths offers its `:pattern`,
+  any.  For a shell command an allow rule needs every subject path (the
+  ones it names outside the session's directories, else where it runs),
+  so a rule for the project no longer lets `rm -rf ~` run in it; a deny
+  rule holds when any path it names, inside or out, or where it runs
+  lies in the pattern.  The mode stage checks them first, before the
+  auto-allow list and the mode.  A tool prompt for a call with paths offers its `:pattern`,
   and its allow-session / allow-always / deny-always answers record
   `(:tool NAME :path PATTERN :behavior B)` rather than a rule for the
   tool everywhere; a call without paths records `(:tool NAME :behavior B)`
@@ -1301,7 +1329,9 @@ non-interactive session it stays a denial.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
   `:pattern` for a call with paths and `:dir` and `:reason` for a
-  directory prompt; UIs offer only the listed `:options`),
+  directory prompt; a tool prompt's `:paths` are its subject paths, and
+  a shell command's prompt has `:cwd`, where it runs; UIs offer only
+  the listed `:options`),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
@@ -1591,6 +1621,14 @@ non-interactive session it stays a denial.
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
   count billed cost, so calls a subscription covers spend none; a
   baseline counts toward both.
+- The Budget setting (`harness-budget`, `(:amount F :hard BOOL)`) is
+  one implicit budget, id "settings", for all sessions together: it
+  counts every recorded call and applies to every session, after the
+  explicit ones in `usage/session-budgets`.  `usage/budget-status
+  "settings"` gives its status while it is set; `usage/budgets` lists
+  only the explicit ones.  Sessions no longer copy it into their own
+  `:budget`; the session module drops the copies saved before, once
+  (marker `session-budget-copies-dropped.json`).
 - Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
 
 ### fallback
@@ -2431,6 +2469,8 @@ has WebSearch, Copilot its web_search).  tools-web's filter on
 search provider cannot search, so searching works before anything is
 set up; `always`; or `never`.  The session then has no `web_search` of
 the harness's, and the provider's searches show as `web_search` calls.
+Corporate mode leaves both searches on and turns `web_fetch` off (see
+tools).
 
 The session and task tools (`tools-sessions`) let an agent coordinate the
 rest of the harness.  Sessions are named by id, a unique id prefix or a
@@ -2548,8 +2588,9 @@ change), `_harness/node` (a finalised or updated node), `_harness/hint`,
 `_harness/activity` (`activity`: what the running turn does, as
 `agent/activity` returns it; null once the turn ends).
 Requests agent → client: `session/request_permission {sessionId, toolCall,
-options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, dir,
-pattern, reason}}` → `{outcome:{outcome:"selected",optionId}}`, plus
+options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
+pattern, reason}}` (`cwd`: where a shell command runs; `paths`: what
+the call is about, see perms) → `{outcome:{outcome:"selected",optionId}}`, plus
 `_harness:{pattern}` when the client answers a request about paths for
 another glob pattern than its `_harness.pattern` (see perms),
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
@@ -2740,7 +2781,12 @@ the chat) to change it in the minibuffer, more or less specific;
 `M-n` offers patterns around the request's own, and the answer carries
 the edited pattern (see perms).  For a call with paths the line also
 says which answers remember the pattern ("s, a, N remember the answer
-for it").
+for it").  The facts above it say what the pattern is made of
+(`harness-ui-pending--permission-facts`): `kind: write   paths:
+~/proj/lisp/a.el` on one line for most calls; for a shell command
+`kind: exec   runs in: ~/proj`, where it runs, and below it `paths:
+~/.claude/projects/x`, what it is about: the paths it names outside
+the session's directories (left out when that is just where it runs).
 
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting
@@ -2903,10 +2949,24 @@ so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
 when the buffer changed since the last key, and a host changes all the
 time (a chat streams, a board follows its tasks): once the token stops
-changing, the box asks them again (`harness-compose--popup`).  `C-c C-a`
-reads a project file by part of its name over the same list, never
-listing while you wait; `C-u C-c C-a`, or a directory that is no
-project, reads any file.
+changing, the box asks them again (`harness-compose--popup`).  @ and
+`C-c C-a` find files through one table (`harness-compose--file-table`):
+part of a name matches the project's files, never listing while you
+wait, and a path -- starting with `/`, `~`, `./` or `../`, the relative
+ones against the box's project root -- completes over the file system
+directory by directory in the `file` category, with file name handlers
+off so that a remote name never opens a connection.  A completed path
+attaches only a regular file; a directory stays in the box for its
+files to complete.  `C-c C-a` ignores a leading @, and a directory
+chosen there reads again from inside it; `C-u C-c C-a`, or a directory
+that is no project, browses with `read-file-name`.  An @
+reference typed out in full, or pasted, names its file all the same:
+`harness-compose-take` attaches the regular files the references in the
+text name (`@skill:` ones and missing files aside, trailing punctuation
+tolerated) and leaves the references in the text.  An answer to a
+question, on the board or in a popout, carries no attachment: there a
+file the text names goes as its reference
+(`harness-compose-without-references`).
 
 Dragging images out (`harness-ui-drag`): the images the UI shows -- the
 transcript's (`harness-chat--image-string`, `harness-ui-image-string`),

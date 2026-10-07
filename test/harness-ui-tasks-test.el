@@ -592,6 +592,44 @@ told from, like a worktree git lost track of, still leads back."
               (should (= 1 escapes)))
           (define-key global-map [remap keyboard-quit] old))))))
 
+(declare-function harness-compose-remove-attachment "harness-ui-compose")
+(declare-function harness-compose-set "harness-ui-compose")
+
+(ert-deftest harness-ui-tasks-answer-mentioning-a-file-goes-as-text ()
+  "An answer naming a file with @ goes as the text it is.
+An attachment of the box's own still cannot go with an answer, and the
+box keeps what it holds."
+  (harness-ui-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type tool-call :id "demo-q" :name "ask_user"
+                    :input (:question "Which file?" :options ("notes.txt" "none")))
+             (:type text :delta "Noted.")
+             (:type done :stop-reason end-turn)))
+          (notes (expand-file-name "notes.txt" dir)))
+      (harness-test-load-module 'tools-agent)
+      (with-temp-file notes (insert "Some notes\n"))
+      (harness-ui-tasks-test--type-and-submit board "Pick a file")
+      (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*has a question for you")
+      (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
+        (with-current-buffer board
+          (goto-char (point-min))
+          (search-forward "Pick a file")
+          (harness-ui-tasks-reply)
+          (should (eq 'answer (car harness-ui-tasks--target)))
+          (harness-compose-add-attachment notes)
+          (harness-compose-set "this one")
+          (should-error (harness-ui-tasks-submit) :type 'user-error)
+          (should (equal "this one" (harness-compose-text)))
+          (should (= 1 (length harness-compose-attachments)))
+          (harness-compose-remove-attachment notes)
+          (harness-compose-set "@notes.txt")
+          (harness-ui-tasks-submit)
+          (should-not harness-compose-attachments))
+        (harness-test-wait (lambda () (null (harness-call 'question/pending sid))) 5 "the question to be answered")
+        (harness-ui-tasks-test--wait-text board "Completed  1")
+        (should (string-match-p "@notes\\.txt" (format "%S" (harness-call 'session/nodes sid))))
+        (should-not (string-match-p "Attached file" (format "%S" (harness-call 'session/nodes sid))))))))
+
 ;;;; The box wraps and never scrolls sideways
 
 (defvar harness-compose-overlay)
