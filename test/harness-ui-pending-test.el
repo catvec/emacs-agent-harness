@@ -159,10 +159,12 @@ goes over ACP when no client holds the request."
                sid (list (list :id "q1" :kind "question"
                                :payload (list :question "Which?" :options '("a" "b")))
                          (list :id "p1" :kind "permission"
-                               :payload (list :title "Bash: ls" :tool "bash"
+                               :payload (list :title "Bash: ls" :tool "bash" :call-id "c1"
                                               :options '("allow-once" "deny-once"))))))
       (should (equal '("q1" "p1") (mapcar (lambda (r) (plist-get r :id)) (harness-ui-pending-items sid))))
       (should (equal "Which?" (plist-get (car (harness-ui-pending-items sid)) :question)))
+      ;; A permission knows the call waiting on it, which the chat keeps unfolded.
+      (should (equal "c1" (plist-get (harness-ui-pending-record sid "p1") :call-id)))
       ;; The one line views say, and the status a list column would show.
       (let ((session (list :id sid :pending (list (list :id "q1" :kind "question")))))
         (should (equal "has a question for you" (harness-ui-pending-summary session)))
@@ -210,6 +212,7 @@ Otherwise it stays pending, and the session's own list answers it."
                            :toolCall (list :toolCallId "c1" :title "Bash: ls" :kind "execute")
                            :_harness (list :pendingId "p9" :tool "bash"))
                      respond))
+            (should (equal "c1" (plist-get (harness-ui-pending-record "drawn" "p9") :call-id)))
             (harness-ui-pending-answer-permission "drawn" "p9" "allow-once")
             (should (equal '((:outcome (:outcome "selected" :optionId "allow-once"))
                              (:answer "yes"))

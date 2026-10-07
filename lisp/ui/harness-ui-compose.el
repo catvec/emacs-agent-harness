@@ -56,6 +56,7 @@
 (require 'harness-http)
 (require 'harness-ui-media-ring)
 (require 'harness-ui)
+(require 'harness-ui-drag)
 
 ;;;; State
 
@@ -740,7 +741,9 @@ download of the harness by its name, any other file by its path."
           (t (harness-relative-path (harness-compose--project) path)))))
 
 (defun harness-compose--chip (att)
-  "Return the chip of attachment ATT: its thumbnail, name and size, and ×."
+  "Return the chip of attachment ATT: its thumbnail, name and size, and ×.
+The thumbnail and the name drag the file into another application
+\(`harness-ui-drag-source')."
   (let* ((path (plist-get att :path))
          (help (harness-ui-one-line
                 (concat (abbreviate-file-name path) "\n"
@@ -751,13 +754,17 @@ download of the harness by its name, any other file by its path."
          (thumb (harness-compose--thumbnail att)))
     (concat
      (if thumb
-         (concat (propertize thumb 'help-echo help 'pointer 'hand
-                             'keymap (harness-ui-mouse-keymap open))
+         (concat (harness-ui-drag-source
+                  (propertize thumb 'help-echo help 'pointer 'hand
+                              'keymap (harness-ui-mouse-keymap open))
+                  path)
                  " ")
        "")
-     (buttonize (format "%s (%s)" (harness-truncate-middle (harness-compose--chip-name att) 40)
-                        (harness-format-bytes (plist-get att :size)))
-                open nil help)
+     (harness-ui-drag-source
+      (buttonize (format "%s (%s)" (harness-truncate-middle (harness-compose--chip-name att) 40)
+                         (harness-format-bytes (plist-get att :size)))
+                 open nil help)
+      path)
      (propertize (buttonize "×" (lambda (_) (harness-compose-remove-attachment path)) nil
                             "Remove this attachment")
                  'face 'harness-dim-face))))
