@@ -1463,11 +1463,16 @@ An option is a string or an object (a plist) with a `:label'."
 (defun harness-ui-summary-value (value)
   "Return VALUE on one line for a tool input summary.
 A list of strings, or of objects with labels such as the options of an
-ask_user call, reads as a comma-separated list, not a Lisp form."
+ask_user call, reads as a comma-separated list, and a list of other
+objects, such as the items of a todo list, as how many there are: not
+as a Lisp form."
   (harness-first-line
-   (if (and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
-       (mapconcat #'harness-ui-option-label value ", ")
-     (harness-ui-format-value value))
+   (cond ((and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
+          (mapconcat #'harness-ui-option-label value ", "))
+         ((and (or (consp value) (vectorp value)) (not (keywordp (car (append value nil))))
+               (cl-every (lambda (v) (and (consp v) (keywordp (car v)))) value))
+          (let ((n (length value))) (format "%d item%s" n (if (= n 1) "" "s"))))
+         (t (harness-ui-format-value value)))
    60))
 
 (defun harness-ui-tool-input-summary (input &optional title)
