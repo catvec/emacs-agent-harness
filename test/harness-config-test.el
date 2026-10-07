@@ -285,6 +285,31 @@ A misspelt name would quietly drop a setting from the settings page."
       (should (cl-some (lambda (section) (memq key (plist-get (cdr section) :keys)))
                        harness-config-sections)))))
 
+(ert-deftest harness-config-model-options-name-models ()
+  "Every option holding models says so in its type, with `:names'.
+The settings page then offers the models the providers list, rather
+than a text field, whose typo would go unnoticed.  Customize and the
+widget library ignore the property."
+  (require 'wid-edit)
+  (let (found)
+    (dolist (dir '("lisp" "lisp/modules" "lisp/ui"))
+      (dolist (file (directory-files (expand-file-name dir harness-test-root) t "\\.el\\'"))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          (while (re-search-forward "^(defcustom \\(harness\\(?:-[a-z-]+\\)?-models?\\)[ \n]" nil t)
+            (goto-char (match-beginning 0))
+            (let* ((form (read (current-buffer)))
+                   (type (eval (plist-get (nthcdr 4 form) :type) t)))
+              (push (nth 1 form) found)
+              (should (memq :names (flatten-tree type)))
+              ;; The type takes the option's value as before.
+              (should (harness-test-fits-p type (eval (nth 2 form) t))))))))
+    (dolist (key '(harness-model harness-tasks-model harness-tasks-refine-model harness-tasks-recap-model
+                   harness-tasks-search-model harness-perms-auto-model harness-fallback-models
+                   harness-provider-copilot-default-model))
+      (should (memq key found)))))
+
 (ert-deftest harness-config-works-over-acp-with-json ()
   "A client whose wire is JSON describes, sets and unsets by name."
   (skip-unless (executable-find "git"))

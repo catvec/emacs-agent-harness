@@ -153,7 +153,7 @@ own model when the provider names none and its prices are unknown.  A
 PROVIDER:NAME forces that model, and nil uses the session's own model."
   :type '(choice (const :tag "The session provider's cheap model" auto)
                  (const :tag "The session's own model" nil)
-                 (string :tag "Model"))
+                 (string :tag "Model" :names model))
   :group 'harness)
 
 (defconst harness-perms--auto-timeout 30

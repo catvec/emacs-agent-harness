@@ -646,7 +646,15 @@ endpoints, Bedrock's per-model defaults, the standing permission rules
 Context window, Thinking…), has a value of its own kind, and says what
 it is for. Each record in a list folds to one line; `Edit` opens it and
 `INS` adds one, filled in from what that kind of record starts as.
-Model fields complete model ids.
+
+Settings that name a model (the default model, the task, refine, recap,
+search and auto-mode judge models, Copilot's default model, and the
+fallback list) are dropdowns rather than text fields. The button names
+the model (`Fable 5.1 (Claude) ▾`), next to its id and context window,
+and opens a picker of the models the configured providers list, grouped
+by provider, with their context window and price. A pick saves at once.
+An id no provider lists can still be typed in the picker, and the page
+then warns that the harness does not know that model's context window.
 
 ## Providers and billing
 
