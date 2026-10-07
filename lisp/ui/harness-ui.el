@@ -1123,10 +1123,16 @@ Signal unless NOERROR when none can be found."
   "Tokens the harness keeps free below a context window for compaction.
 The same as `harness-compaction--context-reserve' in the harness process.")
 
+(defconst harness-ui--fallback-context-window 200000
+  "Context window assumed while a session's is not known.
+The harness gives every session one, estimated where no provider sizes
+its model; this is the default of `harness-provider-fallback-context-window'
+there, which estimates fall back to.")
+
 (defun harness-ui-context-face (context window)
   "Return the warning face for CONTEXT tokens against WINDOW."
   (let* ((reserve harness-ui--context-reserve)
-         (limit (max 1 (- (or window 128000) reserve)))
+         (limit (max 1 (- (or window harness-ui--fallback-context-window) reserve)))
          (f (/ (float (or context 0)) limit)))
     (cond ((>= f 0.95) 'harness-context-critical-face)
           ((>= f 0.85) 'harness-context-urgent-face)
@@ -1156,6 +1162,13 @@ hard to click.  Build `help-echo' text from parts through this."
     (propertize (format "%s/%s" (harness-format-tokens context) (harness-format-tokens window))
                 'face (harness-ui-context-face context window)
                 'help-echo "Context tokens in use / context window")))
+
+(defun harness-ui-format-model-window (model)
+  "Return the context window of catalogue entry MODEL as text: \"200k\".
+A window the catalogue estimated, as its provider does not give it,
+reads \"~200k\"."
+  (concat (if (eq t (plist-get model :context-window-estimated)) "~" "")
+          (harness-format-tokens (plist-get model :context-window))))
 
 (defun harness-ui--prettify-model-name (name)
   "Return a readable form of model slug NAME, or nil when it has no known shape.
@@ -1758,7 +1771,7 @@ available is offered."
                      (let ((m (cdr (assoc choice table))))
                        (format "  %s · %s ctx%s"
                                (plist-get m :id)
-                               (harness-format-tokens (plist-get m :context-window))
+                               (harness-ui-format-model-window m)
                                (if-let* ((p (plist-get m :pricing)))
                                    (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
                                  ""))))))

@@ -9,9 +9,17 @@
 ;; and turned into harness events.  The agent runs the tool loop.
 ;;
 ;; Models come from ListFoundationModels and ListInferenceProfiles,
-;; cached for `harness-bedrock--models-ttl'.  Bedrock reports neither
-;; context windows nor prices, so `harness-bedrock--model-defaults'
-;; supplies them by model family.
+;; cached for `harness-bedrock--models-ttl'; a refresh lists them
+;; again, and a listing that fails keeps the models listed before.
+;; Bedrock reports neither context windows nor prices, so
+;; `harness-bedrock--model-defaults' supplies them by model family.  A
+;; family's catch-all window is flagged as an estimate, which the window
+;; another provider lists for the same model replaces, or else that of
+;; the endpoint's closest model by name that the defaults size (see
+;; `harness-provider--with-estimate'); a model no default knows gets
+;; the endpoint's `:default-context', else the catalogue's estimate.  A model the
+;; listing lacks (an application inference profile ARN, say) is still
+;; described from the defaults when a session names it.
 ;;
 ;; Claude and Nova requests carry prompt cache points.  Claude thinks
 ;; adaptively or within a token budget, by model, at the session's
@@ -81,6 +89,9 @@ prices."
                  :options
                  ((:context-window (integer :tag "Context window" :value 128000
                                             :doc "Tokens the model accepts: input plus output."))
+                  (:context-window-estimated
+                   (const :tag "The window is a guess for the family" t
+                          :doc "The same model's window elsewhere, or a close model's, replaces it."))
                   (:max-output (integer :tag "Max output" :value 8192
                                         :doc "Most output tokens per request."))
                   (:input-modalities ,harness-provider-modalities-type)
@@ -162,8 +173,8 @@ prices."
     ("claude-3-opus" :context-window 200000 :max-output 4096
      :input-modalities ("text" "image")
      :pricing (:input 15.0 :output 75.0 :cache-read 15.0 :cache-write 15.0))
-    ("anthropic\\.claude" :context-window 200000 :max-output 32000 :prompt-caching t
-     :input-modalities ("text" "image"))
+    ("anthropic\\.claude" :context-window 200000 :context-window-estimated t :max-output 32000
+     :prompt-caching t :input-modalities ("text" "image"))
     ("nova-premier" :context-window 1000000 :max-output 32000 :prompt-caching t
      :input-modalities ("text" "image")
      :pricing (:input 2.5 :output 12.5 :cache-read 0.625 :cache-write 2.5))
@@ -175,12 +186,13 @@ prices."
      :pricing (:input 0.06 :output 0.24 :cache-read 0.015 :cache-write 0.06))
     ("nova-micro" :context-window 128000 :max-output 10000 :prompt-caching t
      :pricing (:input 0.035 :output 0.14 :cache-read 0.00875 :cache-write 0.035))
-    ("amazon\\.nova" :context-window 300000 :max-output 10000 :prompt-caching t)
-    ("meta\\.llama4" :context-window 128000 :max-output 8192)
-    ("meta\\.llama3" :context-window 128000 :max-output 2048)
+    ("amazon\\.nova" :context-window 300000 :context-window-estimated t :max-output 10000
+     :prompt-caching t)
+    ("meta\\.llama4" :context-window 128000 :context-window-estimated t :max-output 8192)
+    ("meta\\.llama3" :context-window 128000 :context-window-estimated t :max-output 2048)
     ("mistral\\.\\(mistral-large-2407\\|pixtral\\)" :context-window 128000 :max-output 8192)
-    ("mistral\\." :context-window 32000 :max-output 8192)
-    ("deepseek\\." :context-window 128000 :max-output 32768)
+    ("mistral\\." :context-window 32000 :context-window-estimated t :max-output 8192)
+    ("deepseek\\." :context-window 128000 :context-window-estimated t :max-output 32768)
     ("openai\\.gpt-oss" :context-window 128000 :max-output 32768))
   "What Bedrock does not report about its models, by model family.
 Each entry is (REGEXP . PLIST); the first REGEXP matching a model id
@@ -188,6 +200,11 @@ Each entry is (REGEXP . PLIST); the first REGEXP matching a model id
 keys:
 
   :context-window   input plus output tokens the model accepts
+  :context-window-estimated non-nil when that window is a guess for the
+                    family rather than the model's own; the window
+                    another provider lists for the same model replaces
+                    it, or else that of the closest model by name
+                    sized here (see `harness-provider--with-estimate')
   :max-output       most output tokens per request
   :input-modalities (\"text\") or (\"text\" \"image\")
   :thinking         `adaptive' (effort levels), `adaptive-only' (the
@@ -201,8 +218,9 @@ keys:
                     per million tokens; approximate list prices
   :request-fields   plist merged into additionalModelRequestFields
 
-Models nothing matches get the endpoint's `:default-context' and no
-price, so their calls are recorded without a cost.")
+Models nothing matches get the endpoint's `:default-context', else a
+window the catalogue estimates (see `harness-provider--estimate'), and
+no price, so their calls are recorded without a cost.")
 
 (defvar harness-bedrock--registered nil
   "Provider ids registered from `harness-bedrock-endpoints'.")
@@ -1130,8 +1148,13 @@ inference profile and MODALITIES the input modalities Bedrock lists."
          (modalities (or modalities (plist-get defaults :input-modalities) '("text")))
          (style (plist-get defaults :thinking))
          (model (list :name id :label (or label id))))
-    (when-let* ((context (or (plist-get defaults :context-window) (plist-get endpoint :default-context))))
-      (setq model (plist-put model :context-window context)))
+    (cond ((plist-get defaults :context-window)
+           (setq model (plist-put model :context-window (plist-get defaults :context-window)))
+           (when (plist-get defaults :context-window-estimated)
+             (setq model (plist-put (plist-put model :context-window-estimated t)
+                                    :context-window-basis "Bedrock's defaults for the model's family"))))
+          ((plist-get endpoint :default-context)
+           (setq model (plist-put model :context-window (plist-get endpoint :default-context)))))
     (dolist (key '(:max-output :pricing :request-fields :thinks-by-default))
       (when (plist-get defaults key)
         (setq model (plist-put model key (plist-get defaults key)))))
@@ -1154,6 +1177,9 @@ inference profile and MODALITIES the input modalities Bedrock lists."
             (let* ((plist (if (stringp m) (list :name m) m))
                    (entry (harness-bedrock--model-entry endpoint (plist-get plist :name)
                                                         (plist-get plist :label) (plist-get plist :base))))
+              ;; A window given here is the model's own, not a family's guess.
+              (when (plist-get plist :context-window)
+                (setq entry (harness-plist-remove entry :context-window-estimated :context-window-basis)))
               (harness-plist-merge entry
                                    (harness-plist-remove plist :capabilities)
                                    (list :capabilities (harness-plist-merge (plist-get entry :capabilities)
@@ -1243,8 +1269,9 @@ the pagination."
 
 (defun harness-bedrock--fetch-models (endpoint)
   "List ENDPOINT's models through the Bedrock API.
-Return a promise of model plists.  Failures resolve to nil after a
-warning, so one bad endpoint never hides the others."
+Return a promise of model plists, nil when there are no credentials to
+list with.  A failure resolves to `failed' after a warning, so one bad
+endpoint never hides the others."
   (let ((id (plist-get endpoint :id))
         (region (harness-bedrock--region endpoint)))
     (harness-then
@@ -1276,21 +1303,23 @@ warning, so one bad endpoint never hides the others."
            (harness-then (harness-all (cons foundation profiles))
                          (lambda (results)
                            (if (cl-every (lambda (r) (eq r 'failed)) results)
-                               nil
+                               'failed
                              (harness-bedrock--catalogue
                               endpoint
                               (if (eq (car results) 'failed) nil (car results))
                               (cl-loop for r in (cdr results) unless (eq r 'failed) append r))))))))
      (lambda (err)
        (harness-log 'warn "bedrock %s: listing models failed: %s" id (harness-bedrock--describe-error err))
-       nil))))
+       'failed))))
 
-(defun harness-bedrock--models (endpoint)
-  "Return a promise of ENDPOINT's models, cached for `harness-bedrock--models-ttl'."
+(defun harness-bedrock--models (endpoint &optional refresh)
+  "Return a promise of ENDPOINT's models, cached for `harness-bedrock--models-ttl'.
+REFRESH non-nil lists them again however fresh the cache is.  When the
+listing fails the models listed before stay, if there are any."
   (let* ((id (plist-get endpoint :id))
          (cached (gethash id harness-bedrock--models-cache)))
     (cond
-     ((and cached (< (- (float-time) (car cached)) harness-bedrock--models-ttl))
+     ((and cached (not refresh) (< (- (float-time) (car cached)) harness-bedrock--models-ttl))
       (harness-resolved (cdr cached)))
      ((or (plist-get endpoint :models)
           (and (plist-member endpoint :list-models)
@@ -1301,9 +1330,14 @@ warning, so one bad endpoint never hides the others."
      (t
       (harness-then (harness-bedrock--fetch-models endpoint)
                     (lambda (models)
-                      (when models
-                        (puthash id (cons (float-time) models) harness-bedrock--models-cache))
-                      models))))))
+                      (cond ((not (eq models 'failed))
+                             (when models
+                               (puthash id (cons (float-time) models) harness-bedrock--models-cache))
+                             models)
+                            ((cdr cached)
+                             (harness-log 'warn "bedrock %s: keeping the %d models listed before"
+                                          id (length (cdr cached)))
+                             (cdr cached)))))))))
 
 (defun harness-bedrock-clear-models-cache ()
   "Forget every listed model catalogue so the next listing asks Bedrock again."
@@ -1312,7 +1346,9 @@ warning, so one bad endpoint never hides the others."
 
 (defun harness-bedrock--model-info (endpoint name)
   "Return the model plist of model NAME at ENDPOINT.
-The listed catalogue is used when it knows the model, else the defaults."
+The listed catalogue is used when it knows the model, else the defaults.
+It is also the provider's `:resolve', which describes a model the
+listing lacks."
   (or (cl-find name (cdr (gethash (plist-get endpoint :id) harness-bedrock--models-cache))
                :key (lambda (m) (plist-get m :name)) :test #'equal)
       (cl-find name (harness-bedrock--static-models endpoint)
@@ -2152,7 +2188,8 @@ at all (`:no-tools')."
       :label (or (plist-get endpoint :label) (symbol-name id))
       :doc (format "AWS Bedrock Converse API at %s"
                    (or (ignore-errors (harness-bedrock--runtime-url endpoint)) "?"))
-      :models (lambda () (harness-bedrock--models (harness-bedrock-endpoint id)))
+      :models (lambda (&optional refresh) (harness-bedrock--models (harness-bedrock-endpoint id) refresh))
+      :resolve (lambda (name) (harness-bedrock--model-info (harness-bedrock-endpoint id) name))
       :complete (lambda (request) (harness-bedrock--complete (harness-bedrock-endpoint id) request))
       :capabilities (or (plist-get endpoint :capabilities) '(:vision t :thinking t))
       :tiers (or (plist-get endpoint :tiers) harness-bedrock-tiers))

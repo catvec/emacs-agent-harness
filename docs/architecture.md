@@ -205,8 +205,8 @@ record".
 `:context-window` is looked up in the model catalogue (`provider/model`)
 each time the session is described, so it follows the catalogue; only
 `:context-window-override` is stored.  A copy of the catalogue's window
-would go stale when the catalogue changes, or keep the 128000 stand-in
-given for a model whose provider has not answered yet.  When the
+would go stale when the catalogue changes, or keep the estimate given
+for a model whose provider has not answered yet.  When the
 catalogue changes, the sessions whose window moved get `session/changed`.
 
 ### Node (conversation DAG)
@@ -559,21 +559,27 @@ gone.
 ```elisp
 (harness-define-provider 'ID
   :label "Claude Code" :doc "…"
-  :models FN            ; () → promise of MODEL plists
+  :models FN            ; (&optional REFRESH) → promise of MODEL plists
   :complete FN          ; (REQUEST) → HANDLE plist (:cancel FN)
   :fork FN              ; (MODEL PROVIDER-STATE &optional CHECKPOINT) → promise of new state [optional]
   :quota FN             ; (&optional REFRESH) → promise of QUOTA (below)     [optional]
   :warm FN              ; (REQUEST) → BOOL: get ready for a request like it  [optional]
   :close FN             ; (SESSION-ID) → BOOL: free what it keeps for one   [optional]
+  :resolve FN           ; (NAME &optional MODELS) → MODEL plist or nil: a name
+                        ; its listing lacks (an alias, a variant)          [optional]
   :capabilities PLIST   ; static defaults, merged with per-model ones
   :tiers PLIST)         ; a model per tier, see below
 ```
 
 MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
-:context-window N :max-output N :input-modalities ("text" "image")
+:context-window N :context-window-estimated BOOL :context-window-basis "…"
+:max-output N :input-modalities ("text" "image")
 :thinking-levels (…) :pricing (:input F :output F :cache-read F :cache-write F)
-:pricing-fn SYMBOL :capabilities (…))`.  Pricing is USD per million
-tokens.  A model whose rates change with the clock carries `:pricing-fn`,
+:pricing-fn SYMBOL :resolves-to "NAME" :capabilities (…))`.  Pricing is
+USD per million tokens.  `:context-window-estimated` marks a window
+nobody gave for this model, and `:context-window-basis` says what it
+was drawn from (see below); `:resolves-to` is the model an alias stands
+for.  A model whose rates change with the clock carries `:pricing-fn`,
 a symbol called as `(MODEL USAGE AT)` that returns the pricing plist in
 effect at AT; `usage/price` uses its answer instead of `:pricing`.  This
 is how the DeepSeek provider follows its peak and off-peak tiers, and it
@@ -603,12 +609,45 @@ The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
 other's.  A provider whose models are not cached is asked by the first
 `provider/model` that needs one: a static catalogue answers at once and
-is cached before the call returns.  Until a slower provider answers,
-and for a model its provider does not list, a stand-in MODEL with a
-128000-token window is returned.  A failed listing is cached as empty
+is cached before the call returns.  A failed listing is cached as empty
 (or keeps the models listed before), so lookups do not ask again before
-a refresh (`provider/models t`).  `provider/models-updated` follows
-every listing that is cached.
+a refresh (`provider/models t`), which a models function that takes an
+argument is told of, so it asks its source rather than its cache.
+`provider/models-updated` follows every listing that is cached.  A
+provider that learns something its listing should show (a new list
+from its source, the window a model really ran with) calls
+`harness-provider-relist ID` to have it listed and announced again.
+
+The model lists are not hard-coded.  Each provider lists what its
+source lists, with the windows the source gives: the Claude CLI's
+`initialize` answer and results, the Anthropic, OpenAI-compatible,
+DeepSeek and Copilot model listings, Bedrock's (sections below).  What
+a provider ships is a seed for before its source answered, and for
+prices.  So a new model works without a code change.
+
+Every MODEL has a context window, and an unknown slug never silently
+gets a small one.  A model its provider lists without a window, one
+its provider flags as its own guess (Bedrock's family defaults), and a
+name no listing holds (an alias, a model a slower provider has not
+listed yet, a model of a provider that is gone) get an estimate,
+flagged `:context-window-estimated t`, drawn in this order from:
+1. the same model where a provider sizes it, its own provider first:
+   `harness-provider-model-key` drops vendor and region prefixes, dates
+   and Bedrock versions, so `us.anthropic.claude-opus-4-5-20251101-v1:0`,
+   `anthropic/claude-opus-4.5` and `claude-opus-4-5` are one model;
+2. the model of its own provider that shares the most leading name
+   words with it, two at least (`claude-opus-5-6` takes after
+   `claude-opus-5-5`, not after `claude-haiku-4-5`);
+3. the window most of its provider's models have;
+4. `harness-provider-fallback-context-window` (200000).
+A provider's own guess gives way to the first two only.  Estimates are
+drawn from windows providers gave, never from another estimate, and
+made again whenever a listing changes.  A name no listing holds goes to
+its provider's `:resolve` first (Claude Code's aliases, Copilot's
+`default`, a Bedrock profile ARN), whose answer is estimated only where
+it gives no window; the log says once per model when a listed
+provider's model got an estimate.  The model picker shows an estimated
+window as `~200k`.
 
 Capabilities: `:hosted-loop` (provider runs the tool loop and keeps the
 history; the agent only sends new user content, so switching to it
@@ -806,6 +845,24 @@ asked for again after a turn once `harness-provider-claude--quota-ttl`
 (60 s) has passed.  With no CLI process running, a short-lived probe
 process answers instead, sending no message.
 
+The Claude provider's models are what the CLI says they are.  Every
+`initialize` answer (each new process's, the quota probe's, and a
+probe's started when a refresh asks) lists what its /model picker
+offers: aliases such as `opus` and `sonnet[1m]`, their labels and effort
+levels and, from Claude Code 2.1.197 on, the model each resolves to.
+Every result's `modelUsage` gives the context window the CLI ran each
+model with, and the name a process was started with takes the window
+of the model it ran.  With an Anthropic API key
+(`harness-provider-claude-api-key`, else ANTHROPIC_API_KEY or
+auth-source), `GET /v1/models` adds every model the API serves, with
+its window, output limit and effort levels.  What was learned is kept
+in `claude-models.json` in the state directory;
+`harness-provider-claude-models` only seeds the catalogue and gives
+prices.  An alias or a name nothing lists is resolved
+(`harness-provider-claude--resolve`): a learned window, a `[1m]`
+variant's million tokens, the window of the model it resolves to, else
+the window of its family's newest listed model, flagged as an estimate.
+
 Each result's `total_cost_usd` is a running total for the process,
 seeded on `--resume` with the session's restored spend.  A turn
 therefore costs the difference to the previous total, starting from the
@@ -909,14 +966,32 @@ Converse API: one ConverseStream request per call, its binary event
 stream decoded into `text`, `thinking`, `usage` and `tool-call` events.
 Each entry of `harness-bedrock-endpoints` is a provider (default
 `bedrock`); model ids are `ID:MODEL-ID`.  Its catalogue comes from
-ListFoundationModels and ListInferenceProfiles; context windows and
-prices, which Bedrock does not report, come from
-`harness-bedrock--model-defaults`.  Usage events carry tokens and
+ListFoundationModels and ListInferenceProfiles, cached an hour per
+endpoint; a refresh lists again, and a listing that fails keeps the
+models listed before.  Context windows and prices, which Bedrock does
+not report, come from `harness-bedrock--model-defaults`; a family's
+catch-all window there is flagged as a guess, which the same model's
+window at another provider replaces, or else that of the endpoint's
+closest model by name that the defaults size.  A model no default knows gets
+the endpoint's `:default-context`, else an estimate, and a name the
+listing lacks (an application inference profile ARN) is described from
+the defaults by its `:resolve`.  Usage events carry tokens and
 `:billing api` but no cost, so `session/usage-add` prices them from the
 catalogue.  Claude and Nova requests carry prompt cache points; Claude
 reasoning returned with tool calls is kept and sent back with them while
 the tool loop lasts.  `harness-http-request` takes `:binary t` for such
 framings: the response then reaches `:on-chunk` as unibyte strings.
+
+The OpenAI-compatible provider (`provider-openai`) makes a provider of
+each entry of `harness-openai-endpoints`.  Its models are what the
+server lists at /models, asked again after an hour or when a refresh
+asks; a listing that fails keeps the models listed before.  The window
+comes from whichever field the server names it with (`context_length`
+and `top_provider.context_length` of OpenRouter and others,
+`context_window` of Groq, `max_context_length` of Mistral and LM
+Studio, `max_model_len` of vLLM, `max_input_tokens` of LiteLLM), else
+the endpoint's `:default-context`, else the catalogue's estimate:
+plain OpenAI lists ids alone.
 
 The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
 OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
@@ -940,7 +1015,13 @@ still gets it (even when it names `:flavor openai'), so its tool loops
 do not 400, and the cache fields it reports are split so cached input is
 billed at the cache-hit rate, while OpenAI and OpenRouter hosts still
 drop thinking.
-`harness-deepseek-*` adds registration and prices.
+`harness-deepseek-*` adds registration and prices.  Its models are
+what DeepSeek's /models lists (names, windows, output limits,
+modalities, effort levels), asked in the background once the listing
+is an hour old, so the catalogue never waits on the network;
+`harness-deepseek-model-specs` adds prices and labels, and is what is
+listed before /models answered or when it cannot be reached.  A model
+DeepSeek adds is priced by the tier its name says (flash or pro).
 The provider is created only while a key is found
 (`harness-deepseek-api-key`, DEEPSEEK_API_KEY, or auth-source), so
 nothing uncallable is listed; see `harness-deepseek-always-register`.
@@ -1016,7 +1097,9 @@ additional usage is on.  Quota comes from `account.getQuota`
 comes from `models.list` (context window, image input, reasoning
 efforts, token prices as `:pricing`), or before `copilot login` from
 `models.getBuiltInCatalog`, asked of a short-lived probe process when
-no session process runs.
+no session process runs.  `copilot:default` resolves to
+`harness-provider-copilot-default-model`, with that model's window,
+levels and prices.
 
 ### tools
 
