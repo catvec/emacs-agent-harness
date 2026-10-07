@@ -1834,12 +1834,21 @@ so switching to either loses nothing.
   refuses, changing nothing, when it would overwrite uncommitted or
   untracked work there or a merge is already in progress (the merge
   fails; a HEAD that moved meanwhile is merged again).  On conflict the
-  parent is untouched and the lock passes on at once: the child session
-  receives a steering message (from `harness-sender-system "merge
-  queue"`) naming the files and the parent's commit to `git merge` into
-  its own branch, in its own worktree.  A merged child's worktree loses
+  parent is untouched and the lock passes on at once, and the parent's
+  commit is to be `git merge`d into the child's branch, in its own
+  worktree.  By default (`harness-merge-conflict-resolver` `fresh`) the
+  harness starts a fresh `subagent` session for it -- a child of the
+  child session, in its worktree, with its settings and
+  `harness-merge-resolver-model` or its model -- prompted (from
+  `harness-sender-system "merge queue"`) with only the files, both
+  sides' commits and what to do: a child that waited long in the queue
+  would pay for its whole history on a cold prompt cache.  Its turn
+  ending without `merge_done` fails the merge (event `merge/resolver
+  CHILD PARENT RESOLVER`; `merge/queue` items carry `:resolver`).  With
+  `child`, the child session itself gets that as a steering message.  A merged child's worktree loses
   the harness's lock (`worktree/unlock`; see worktree).
-- `merge/status CHILD-SID`; the `merge_done` tool checks the child's
+- `merge/status CHILD-SID`; the `merge_done` tool (called by the child
+  or its resolver) checks the child's
   worktree contains the parent's commit, merged and committed, and
   queues the branch again.
 - Events `merge/queued CHILD PARENT POSITION`, `merge/started`,

@@ -493,7 +493,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   `V` again to turn review back on.
 - A verified task waits in *Merging* while its branch goes through the
   merge queue: queued for the queue's turn, merging, or, when the merge
-  conflicts, its session resolving them. The card says where it stands;
+  conflicts, a fresh session the harness starts in its worktree
+  resolving them (`harness-merge-conflict-resolver`; it spares the
+  task's long, long-cold session). The card says where it stands;
   the task moves to *Completed* once the branch is in.
 - A task's session finishes by *handing its work in* (`hand_in`): the
   agent gives a final summary and the evidence for it -- an image or a
