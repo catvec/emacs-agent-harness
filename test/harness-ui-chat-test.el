@@ -316,7 +316,8 @@ on a background and bar of its own; the user's own messages are as before."
 (ert-deftest harness-ui-chat-fold-icon-follows-the-block ()
   (harness-ui-chat-test-with
     (cl-letf (((symbol-function 'icon-string)
-               (lambda (name) (propertize " " 'display (list 'image :type 'svg :file (format "%s.svg" name))))))
+               (lambda (name) (propertize " " 'display (list 'image :type 'svg :file (format "%s.svg" name)))))
+              (harness-ui--icons (make-hash-table :test 'equal)))
       (let* ((sid (harness-ui-chat-test-session "Arrows"))
              (buf (harness-ui-chat-test-open sid)))
         (harness-ui-chat-test-prompt buf "give me the tour")
@@ -2632,7 +2633,8 @@ into the response where it landed, read-only as the transcript is."
 ;; which drew the icons of a tool block as dark boxes.
 (ert-deftest harness-ui-chat-icons-show-face-background ()
   (cl-letf (((symbol-function 'icon-string)
-             (lambda (_) (propertize " " 'display '(image :type svg :file "tool.svg" :background "#12111E" :scale 1)))))
+             (lambda (_) (propertize " " 'display '(image :type svg :file "tool.svg" :background "#12111E" :scale 1))))
+            (harness-ui--icons (make-hash-table :test 'equal)))
     (let ((spec (get-text-property 0 'display (harness-ui-icon 'harness-icon-tool))))
       (should (equal spec '(image :type svg :file "tool.svg" :scale 1))))))
 

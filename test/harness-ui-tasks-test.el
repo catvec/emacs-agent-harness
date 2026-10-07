@@ -817,6 +817,101 @@ box, up a line or onto the board, whose letters are commands."
         (delete-window side)
         (set-window-buffer window board)))))
 
+(declare-function harness-compose--pre-command "harness-ui-compose")
+
+(defun harness-ui-tasks-test--laid-out (thunk)
+  "Call THUNK; return where it laid out text from, in order.
+Each `window-text-pixel-size' and `vertical-motion' is noted by the
+position it starts from, each `pos-visible-in-window-p' as `visible'."
+  (let ((froms nil))
+    (cl-letf* ((size (symbol-function 'window-text-pixel-size))
+               ((symbol-function 'window-text-pixel-size)
+                (lambda (&optional window from &rest rest)
+                  (push (if (integer-or-marker-p from) (+ 0 from) from) froms)
+                  (apply size window from rest)))
+               (motion (symbol-function 'vertical-motion))
+               ((symbol-function 'vertical-motion)
+                (lambda (&rest args) (push (point) froms) (apply motion args)))
+               (visible (symbol-function 'pos-visible-in-window-p))
+               ((symbol-function 'pos-visible-in-window-p)
+                (lambda (&rest args) (push 'visible froms) (apply visible args))))
+      (funcall thunk))
+    (nreverse froms)))
+
+(defun harness-ui-tasks-test--box-alone-p (froms)
+  "Non-nil when FROMS, from `harness-ui-tasks-test--laid-out', are all in the box."
+  (cl-every (lambda (from) (and (integerp from) (>= from harness-compose-start))) froms))
+
+(ert-deftest harness-ui-tasks-typing-lays-out-the-box-alone ()
+  "A key typed in the box measures the box, not the window.
+The box is kept at the bottom before every redisplay, so after every
+key, and measuring the window from its top on each one made typing lag.
+The window is measured again once something changed outside the box:
+its text, with the change hooks running or not, but not text properties
+put on silently, as `jit-lock' does all the time."
+  (harness-ui-tasks-test-with
+    (let ((window (get-buffer-window board)))
+      (with-current-buffer board
+        (goto-char harness-compose-end)
+        (set-window-point window (point))
+        (set-window-start window (point-min))
+        (harness-compose-pad-window window)
+        (cl-flet ((measure (change)
+                    (harness-ui-tasks-test--laid-out
+                     (lambda () (funcall change) (harness-compose-pad-window window)))))
+          (dolist (c '("h" "i" " " "t" "h" "e" "r" "e"))
+            (should (harness-ui-tasks-test--box-alone-p (measure (lambda () (insert c))))))
+          (should (equal "hi there" (harness-compose-text)))
+          ;; Changed outside the box: the window is measured again.
+          (should (memq (point-min)
+                        (measure (lambda () (let ((inhibit-read-only t))
+                                              (save-excursion (goto-char (point-min)) (insert "x")))))))
+          ;; Even with the change hooks inhibited.
+          (should (memq (point-min)
+                        (measure (lambda () (let ((inhibit-read-only t) (inhibit-modification-hooks t))
+                                              (save-excursion (goto-char (point-min)) (delete-char 1)))))))
+          ;; Not for a face put on silently, nor for nothing at all.
+          (should (harness-ui-tasks-test--box-alone-p
+                   (measure (lambda () (let ((inhibit-read-only t))
+                                         (with-silent-modifications
+                                           (put-text-property (point-min) (1+ (point-min)) 'face 'bold)))))))
+          (should (harness-ui-tasks-test--box-alone-p (measure #'ignore))))))))
+
+(ert-deftest harness-ui-tasks-typing-brings-the-box-back ()
+  "Typing brings an out-of-sight box back, though it changes no height.
+A letter typed with point on the board goes to the box; the first key
+typed after the window scrolled goes where point is.  Either way the
+window shows the box at its bottom again, and later keys measure the
+box alone again."
+  (harness-ui-tasks-test-with
+    (let ((window (get-buffer-window board)))
+      (with-current-buffer board
+        (goto-char harness-compose-end)
+        (insert (mapconcat #'identity (make-list 40 "a line") "\n"))
+        ;; Point on the board, the window at its top.
+        (goto-char (point-min))
+        (set-window-point window (point-min))
+        (set-window-start window (point-min))
+        (harness-compose-pad-window window)
+        (should (= (point-min) (window-start window)))
+        (let ((this-command 'self-insert-command))
+          (harness-compose--pre-command))
+        (should (= (point) harness-compose-end))
+        (insert "s")
+        (set-window-point window (point))
+        (harness-compose-pad-window window)
+        (should (> (window-start window) (point-min)))
+        ;; Scrolled by hand, the window stays put until a key is typed.
+        (set-window-start window (point-min))
+        (harness-compose-pad-window window)
+        (should (= (point-min) (window-start window)))
+        (insert "t")
+        (harness-compose-pad-window window)
+        (should (> (window-start window) (point-min)))
+        (should (harness-ui-tasks-test--box-alone-p
+                 (harness-ui-tasks-test--laid-out
+                  (lambda () (insert "u") (harness-compose-pad-window window)))))))))
+
 ;;;; Submit or Refine: the backlog
 
 (defvar harness-ui-tasks--refine)
