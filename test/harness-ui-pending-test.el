@@ -159,10 +159,12 @@ goes over ACP when no client holds the request."
                sid (list (list :id "q1" :kind "question"
                                :payload (list :question "Which?" :options '("a" "b")))
                          (list :id "p1" :kind "permission"
-                               :payload (list :title "Bash: ls" :tool "bash"
+                               :payload (list :title "Bash: ls" :tool "bash" :call-id "c1"
                                               :options '("allow-once" "deny-once"))))))
       (should (equal '("q1" "p1") (mapcar (lambda (r) (plist-get r :id)) (harness-ui-pending-items sid))))
       (should (equal "Which?" (plist-get (car (harness-ui-pending-items sid)) :question)))
+      ;; A permission knows the call waiting on it, which the chat keeps unfolded.
+      (should (equal "c1" (plist-get (harness-ui-pending-record sid "p1") :call-id)))
       ;; The one line views say, and the status a list column would show.
       (let ((session (list :id sid :pending (list (list :id "q1" :kind "question")))))
         (should (equal "has a question for you" (harness-ui-pending-summary session)))
@@ -210,6 +212,7 @@ Otherwise it stays pending, and the session's own list answers it."
                            :toolCall (list :toolCallId "c1" :title "Bash: ls" :kind "execute")
                            :_harness (list :pendingId "p9" :tool "bash"))
                      respond))
+            (should (equal "c1" (plist-get (harness-ui-pending-record "drawn" "p9") :call-id)))
             (harness-ui-pending-answer-permission "drawn" "p9" "allow-once")
             (should (equal '((:outcome (:outcome "selected" :optionId "allow-once"))
                              (:answer "yes"))
@@ -315,6 +318,33 @@ Once nothing is left the popout closes itself."
       (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the typed answer")
       (should (equal (list 'question sid "q1" "purple") (car harness-ui-pending-test-answers)))
       (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the popout to close"))))
+
+(defvar harness-compose-attachments)
+(declare-function harness-compose-add-attachment "harness-ui-compose")
+
+(ert-deftest harness-ui-pending-popup-answer-mentioning-a-file-is-text ()
+  "An answer naming a file with @ goes as the text it is.
+An attachment of the box's own still cannot go with an answer."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Free text"))
+           (key (list 'pending sid)))
+      (harness-ui-pending-test-record-answers)
+      (with-temp-file (expand-file-name "notes.txt" dir) (insert "Some notes\n"))
+      (with-temp-file (expand-file-name "other.txt" dir) (insert "Other notes\n"))
+      (harness-ui-pending-sync sid (list (list :id "q1" :kind "question"
+                                               :payload (list :question "Which file?" :options nil))))
+      (harness-ui-pending-popout sid)
+      (with-current-buffer (harness-ui-popout-buffer key)
+        (harness-compose-add-attachment (expand-file-name "other.txt" dir))
+        (goto-char harness-compose-end)
+        (insert "@notes.txt")
+        (should-error (harness-ui-popout-submit) :type 'user-error)
+        (should-not harness-ui-pending-test-answers)
+        (goto-char harness-compose-end)
+        (insert "@notes.txt")
+        (harness-ui-popout-submit))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the typed answer")
+      (should (equal (list 'question sid "q1" "@notes.txt") (car harness-ui-pending-test-answers))))))
 
 (ert-deftest harness-ui-pending-popup-learns-a-cached-sessions-request ()
   "A popout shows a request the store has only heard of from the session.

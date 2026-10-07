@@ -29,10 +29,31 @@
 
 (defconst harness-version "3.0.0" "Version of the harness.")
 
+(defun harness--source-directory (file)
+  "Return the directory of the harness sources, given FILE, the harness.el loading.
+FILE may be harness.el or its .elc.  Symbolic links are followed:
+straight.el and elpaca build a package as links into their git clone,
+and the harness runs from the clone itself, so that updating the clone
+\(`harness-update', a git pull) reaches every file, the ones it adds
+included, without rebuilding the package."
+  (let ((source (expand-file-name "harness.el" (file-name-directory file))))
+    (file-name-directory (file-truename (if (file-exists-p source) source file)))))
+
+(defun harness--stale-compiled-p (file)
+  "Non-nil when FILE is a compiled harness.el older than the source it links to.
+A package manager's build keeps the copy it compiled while the clone
+moves on (`harness-update', a git pull): loading only the copy would
+run the old harness.el with every other file new."
+  (and file
+       (string-suffix-p ".elc" file)
+       (file-newer-than-file-p (expand-file-name "harness.el" (harness--source-directory file))
+                               file)))
+
 (defconst harness-directory
-  (file-name-directory (or load-file-name buffer-file-name
-                           (locate-library "harness") default-directory))
-  "Directory containing harness.el.")
+  (harness--source-directory (or load-file-name buffer-file-name
+                                 (locate-library "harness") default-directory))
+  "Directory containing harness.el, symbolic links followed.
+See `harness--source-directory'.")
 
 (defgroup harness nil
   "Emacs native agent harness."
@@ -328,6 +349,289 @@ Return non-nil when every file loaded again."
           (push (file-notify-add-watch full '(change) #'harness--auto-reload-callback)
                 harness--watches))))))
 
+;;;; Version and updates
+
+;; The harness has no numbered releases to follow: its branch is the
+;; release, and the commit a checkout is at is its version.  So
+;; `harness-update' updates the git checkout the harness runs from (a
+;; clone of its own, or the one straight.el or elpaca keeps, see
+;; `harness--source-directory') to its upstream branch, then reloads.
+;;
+;; That checkout is the live harness, which must load at the next start
+;; whatever an update brought.  So the update only ever fast-forwards,
+;; which cannot conflict, and only to a commit checked first in another
+;; Emacs, out of the checkout: its harness.el loads, every file compiles
+;; and none has a merge conflict marker in its code.  A broken version
+;; stays out.  Git and that Emacs run in the background, so this Emacs
+;; stays responsive meanwhile.
+
+(defun harness--fail (format-string &rest args)
+  "Return a promise rejected with an error saying FORMAT-STRING with ARGS."
+  (harness-rejected (list 'error (apply #'format-message format-string args))))
+
+(defun harness--git-environment ()
+  "Return the environment alist under which git runs in the background.
+Nothing may prompt for a password or a passphrase nobody waits on: not
+the terminal (there is none), not an askpass program or a credential
+manager, which would put a dialog on the screen, nor ssh, run in batch
+mode (keys in the agent still work) unless the user set up an ssh
+command.  An empty GIT_ASKPASS keeps git from falling back to
+core.askPass and SSH_ASKPASS."
+  (append '(("GIT_TERMINAL_PROMPT" . "0")
+            ("GIT_ASKPASS" . "")
+            ("SSH_ASKPASS_REQUIRE" . "never")
+            ("GCM_INTERACTIVE" . "never"))
+          (unless (or (getenv "GIT_SSH_COMMAND") (getenv "GIT_SSH"))
+            '(("GIT_SSH_COMMAND" . "ssh -o BatchMode=yes")))))
+
+(defun harness--git (dir &rest args)
+  "Run git with ARGS in DIR; return a promise of its trimmed output.
+The promise is rejected with an error carrying git's message when git
+fails, a prompt for credentials included: git cannot prompt, see
+`harness--git-environment'."
+  (harness-then
+   (harness-run-command (cons "git" args) :cwd dir :name "harness-git"
+                        :env (harness--git-environment))
+   (lambda (result)
+     (let ((exit (plist-get result :exit))
+           (lines (cl-remove-if (lambda (line) (string-prefix-p "hint:" line))
+                                (split-string (plist-get result :stderr) "\n" t "[ \t]+"))))
+       (if (eql exit 0)
+           (string-trim (plist-get result :stdout))
+         (harness--fail "git %s: %s" (car args)
+                        (cond ((eq exit 'timeout) "timed out")
+                              (lines (string-join lines "; "))
+                              (t (format "exited with status %s" exit)))))))))
+
+(defun harness--checkout-top (dir)
+  "Return a promise resolved when DIR is the top of a git checkout.
+It is rejected when DIR is not in a git checkout, or is in one whose
+top is another directory: a harness kept inside a larger repository,
+such as a configuration's, is that repository's to update."
+  (harness-then
+   (harness--git dir "rev-parse" "--show-toplevel")
+   (lambda (top)
+     (or (file-equal-p top dir)
+         (harness--fail "%s is inside the git repository %s, not a checkout of its own" dir top)))
+   (lambda (err)
+     (if (locate-dominating-file dir ".git")
+         (harness-rejected err)
+       (harness--fail "%s is not a git checkout; update the harness with the package manager that installed it"
+                      dir)))))
+
+(defconst harness--conflict-marker-regexp
+  (rx bol (or (seq (or "<<<<<<<" "|||||||" ">>>>>>>") (opt " " (* nonl))) "=======") eol)
+  "Regexp matching a line git writes around the sides of a merge conflict.")
+
+(defun harness--verify-program (tree out)
+  "Return a form that checks the harness sources in TREE, compiling into OUT.
+`emacs --batch -Q' evaluates it on a version about to be installed.  It
+loads harness.el first, into an Emacs as fresh as one starting up, then
+byte-compiles every source file.  It prints a line for each file that
+does not load or compile, or has a merge conflict marker in its code,
+and exits non-zero when there is one.  The markers need a check of
+their own: a conflict between two balanced sides compiles, its markers
+read as variables, and fails only as it runs.  The form uses nothing of
+the harness, so that any version can check any other."
+  `(let ((problems nil)
+         (conflict-line
+          (lambda (file)
+            (with-temp-buffer
+              (insert-file-contents file)
+              (emacs-lisp-mode)
+              (let ((line nil))
+                (while (and (not line) (re-search-forward ,harness--conflict-marker-regexp nil t))
+                  (let ((end (match-end 0)))
+                    ;; In code only: a line of a string may be anything.
+                    (unless (nth 3 (syntax-ppss (match-beginning 0)))
+                      (setq line (line-number-at-pos (match-beginning 0))))
+                    (goto-char end)))
+                line))))
+         (compile-problem
+          (lambda (file name)
+            (unless (byte-compile-file file)
+              (with-current-buffer (get-buffer-create byte-compile-log-buffer)
+                (goto-char (point-max))
+                (if (re-search-backward "Error: \\(.*\\)" nil t)
+                    (format "%s: %s" name (match-string 1))
+                  (format "%s does not compile" name)))))))
+     (make-directory ,out t)
+     (dolist (dir '("" "lisp" "lisp/modules" "lisp/ui"))
+       (push (expand-file-name dir ,tree) load-path))
+     (setq byte-compile-dest-file-function
+           (lambda (file) (expand-file-name (concat (file-name-nondirectory file) "c") ,out)))
+     (dolist (file (cons (expand-file-name "harness.el" ,tree)
+                         (and (file-directory-p (expand-file-name "lisp" ,tree))
+                              (directory-files-recursively (expand-file-name "lisp" ,tree)
+                                                           "\\`harness-.*\\.el\\'"))))
+       (let* ((name (file-relative-name file ,tree))
+              (problem
+               (condition-case err
+                   (let ((line (funcall conflict-line file)))
+                     (cond
+                      (line (format "%s:%d: a merge conflict marker" name line))
+                      ((and (equal name "harness.el")
+                            (condition-case load-error (progn (load file nil t t) nil)
+                              (error (format "%s does not load: %s"
+                                             name (error-message-string load-error))))))
+                      (t (funcall compile-problem file name))))
+                 (error (format "%s: %s" name (error-message-string err))))))
+         (when problem (push problem problems))))
+     (dolist (problem (nreverse problems))
+       (princ (concat problem "\n")))
+     (kill-emacs (if problems 1 0))))
+
+(defun harness--verify-commit (dir rev)
+  "Return a promise resolved when the sources of commit REV of DIR pass a check.
+REV is checked out of the repository of DIR into a temporary directory
+and checked there by another Emacs, `harness-server-emacs', so that
+neither DIR nor this Emacs is touched: harness.el must load, and every
+source file compile, with no merge conflict marker in its code (see
+`harness--verify-program').  The promise is rejected with the problems
+otherwise."
+  (let* ((tmp (file-name-as-directory (make-temp-file "harness-update-" t)))
+         (tree (expand-file-name "tree/" tmp))
+         (archive (expand-file-name "update.tar" tmp))
+         (emacs (if (boundp 'harness-server-emacs) harness-server-emacs
+                  (expand-file-name invocation-name invocation-directory))))
+    (make-directory tree)
+    (harness-then
+     (thread-first
+       (harness--git dir "archive" "--format=tar" "-o" archive rev)
+       (harness-then (lambda (_)
+                       (harness-run-command (list "tar" "-xf" archive "-C" tree) :name "harness-tar")))
+       (harness-then (lambda (result)
+                       (if (eql 0 (plist-get result :exit))
+                           (harness-run-command
+                            (list emacs "--batch" "-Q" "--eval"
+                                  (prin1-to-string (harness--verify-program tree (expand-file-name "elc/" tmp))))
+                            :cwd tree :timeout 600 :name "harness-verify")
+                         (harness--fail "tar: %s" (string-trim (plist-get result :stderr))))))
+       (harness-then (lambda (result)
+                       (or (eql 0 (plist-get result :exit))
+                           (harness--fail "%s is broken, so it was not installed: %s"
+                                          (substring rev 0 (min 12 (length rev)))
+                                          (let ((problems (split-string (plist-get result :stdout) "\n" t)))
+                                            (cond
+                                             ((null problems)
+                                              (format "the check exited with %s" (plist-get result :exit)))
+                                             ((cdr (cdr (cdr problems)))
+                                              (format "%s; and %d more" (string-join (seq-take problems 3) "; ")
+                                                      (- (length problems) 3)))
+                                             (t (string-join problems "; ")))))))))
+     (lambda (value) (delete-directory tmp t) value)
+     (lambda (err) (delete-directory tmp t) (harness-rejected err)))))
+
+(defun harness--update-checkout (dir)
+  "Fast-forward DIR, a git checkout of the harness, to its upstream branch.
+Fetch the upstream first, then check its commit elsewhere
+\(`harness--verify-commit') before DIR moves to it, so a broken version
+is never installed; a fast-forward cannot conflict.  Return a promise
+of (:from FROM :to TO :commits COMMITS): FROM and TO are the
+abbreviated commits before and after, the same when nothing was new,
+and COMMITS lists the commits that came in, oldest first, as \"COMMIT
+SUBJECT\".  The promise is rejected, and DIR left as it was, when DIR
+is not the top of a git checkout, its tracked files have changes, HEAD
+is not on a branch with an upstream, the branch has commits the
+upstream lacks, or the upstream's commit fails the check."
+  (let ((dir (file-name-as-directory (expand-file-name dir)))
+        from target commits)
+    (thread-first
+      (harness--checkout-top dir)
+      (harness-then (lambda (_) (harness--git dir "status" "--porcelain" "--untracked-files=no")))
+      (harness-then (lambda (changes)
+                      (if (string-empty-p changes)
+                          (harness-then (harness--git dir "rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{upstream}")
+                                        nil
+                                        (lambda (e)
+                                          (harness--fail "%s follows no upstream branch to update from (%s)"
+                                                         dir (harness-error-message e))))
+                        (harness--fail "%s has local changes; commit or discard them first" dir))))
+      (harness-then (lambda (_) (harness--git dir "fetch" "--quiet")))
+      ;; The commit fetched, by name: the one checked is the one installed,
+      ;; whatever fetches the upstream meanwhile.
+      (harness-then (lambda (_) (harness--git dir "rev-parse" "--verify" "@{upstream}^{commit}")))
+      (harness-then (lambda (commit)
+                      (setq target commit)
+                      (harness--git dir "rev-list" "--left-right" "--count" (concat "HEAD..." target))))
+      (harness-then (lambda (counts)
+                      (pcase-let ((`(,ours ,theirs) (mapcar #'string-to-number (split-string counts))))
+                        (if (and (> ours 0) (> theirs 0))
+                            (harness--fail "%s has %d commit%s the upstream lacks; not updating"
+                                           dir ours (if (= ours 1) "" "s"))
+                          (harness--git dir "log" "--reverse" "--format=%h %s" (concat "HEAD.." target))))))
+      (harness-then (lambda (log)
+                      (setq commits (split-string log "\n" t))
+                      (harness--git dir "rev-parse" "--short" "HEAD")))
+      (harness-then (lambda (head)
+                      (setq from head)
+                      (if (null commits)
+                          head
+                        (thread-first
+                          (harness--verify-commit dir target)
+                          (harness-then (lambda (_) (harness--git dir "merge" "--ff-only" "--quiet" target)))
+                          (harness-then (lambda (_) (harness--git dir "rev-parse" "--short" "HEAD")))))))
+      (harness-then (lambda (to) (list :from from :to to :commits commits))))))
+
+(defun harness--updated (dir result)
+  "Report RESULT of `harness--update-checkout' on DIR, reloading what came in.
+Return the message shown."
+  (let* ((from (plist-get result :from))
+         (to (plist-get result :to))
+         (commits (plist-get result :commits))
+         (summary (format "Harness updated from %s to %s (%d commit%s)"
+                          from to (length commits) (if (cdr commits) "s" ""))))
+    (if (null commits)
+        (message "Harness is up to date (%s)" to)
+      (harness-log 'info "update: %s..%s brought:\n  %s" from to (string-join commits "\n  "))
+      (if (not harness-started)
+          (message "%s; `harness-start' loads it" summary)
+        (let ((reload (harness--reload)))
+          (cond
+           ((plist-get reload :refused)
+            (message "%s, but the reload was refused: %s.  The harness still runs %s: restart Emacs to load the update, or go back with git -C %s reset --keep %s"
+                     summary (string-join (plist-get reload :refused) "; ") from
+                     (shell-quote-argument (directory-file-name dir)) from))
+           ((plist-get reload :errors)
+            (message "%s and reloaded, but these failed to load: %s"
+                     summary (string-join (plist-get reload :errors) "; ")))
+           (t (message "%s and reloaded" summary))))))))
+
+(defvar harness--updating nil
+  "Non-nil while `harness-update' runs, so that two updates never overlap.")
+
+;;;###autoload
+(defun harness-update ()
+  "Update the harness from its git repository, then reload it in place.
+The harness must run from a git checkout of its own on a branch with
+an upstream: a clone of its repository, or the clone straight.el (Doom
+Emacs included) or elpaca keeps.  The upstream is fetched; when it has
+new commits, the newest is checked by another Emacs, out of the
+checkout: its harness.el must load, and every source file compile with
+no merge conflict marker in its code.  Only then is the checkout
+fast-forwarded to it and `harness-reload' run, which loads it in this
+Emacs and in the harness process, keeping running sessions.  Nothing
+changes when the update fails the check, or the checkout has local
+changes or commits of its own.  Git and the checking Emacs run in the
+background: this Emacs stays responsive.  The harness log lists the
+commits that came in."
+  (interactive)
+  (when harness--updating
+    (user-error "The harness is updating already"))
+  (setq harness--updating t)
+  (message "Harness: fetching and checking updates…")
+  (let ((dir harness-directory))
+    (harness-then (harness--update-checkout dir)
+                  (lambda (result)
+                    (setq harness--updating nil)
+                    ;; From the command loop, not the dynamic extent of git's sentinel.
+                    (harness-run-soon #'harness--updated dir result)
+                    nil)
+                  (lambda (err)
+                    (setq harness--updating nil)
+                    (message "Harness update failed: %s" (harness-error-message err))
+                    nil))))
+
 ;; A reload loads this file first, then every module file by name, and
 ;; the modules that define tools (harness-tools-fs.el, harness-merge.el,
 ;; harness-perms.el ...) sort before harness-tools.el, whose
@@ -338,6 +642,11 @@ Return non-nil when every file loaded again."
   (condition-case err
       (harness--load-file (harness--path "lisp/modules/harness-tools.el"))
     (error (harness-log 'error "reloading the tool registry first failed: %S" err))))
+
+;; Loaded from a compiled copy older than the source: the source is
+;; what is installed, so it loads over the copy, as a reload would.
+(when (harness--stale-compiled-p load-file-name)
+  (load harness--self-file nil t t))
 
 (provide 'harness)
 ;;; harness.el ends here

@@ -177,10 +177,20 @@ Every other project's worktrees are folded into its one line.")
 ;;;; Data
 
 (defun harness-ui-usage--implicit-budget-ids ()
-  "Return \"session:SID\" ids of cached sessions that carry a budget."
-  (mapcar (lambda (s) (concat "session:" (plist-get s :id)))
-          (harness-ui-sessions (lambda (s) (let ((b (plist-get s :budget)))
-                                             (and (listp b) (numberp (plist-get b :amount))))))))
+  "Return the ids of the budgets the harness makes itself.
+\"settings\", the Budget setting's for all sessions together, which the
+harness refuses when it is not set, and the \"session:SID\" ids of
+cached sessions that carry a budget of their own."
+  (cons "settings"
+        (mapcar (lambda (s) (concat "session:" (plist-get s :id)))
+                (harness-ui-sessions (lambda (s) (let ((b (plist-get s :budget)))
+                                                   (and (listp b) (numberp (plist-get b :amount)))))))))
+
+(defun harness-ui-usage--implicit-where (budget)
+  "Say where BUDGET, one the harness makes itself, is changed instead."
+  (if (equal (plist-get budget :id) "settings")
+      "This is the Budget setting, for all sessions together; change it with M-x harness-settings"
+    "This is the session's own budget; change it on the session"))
 
 (defun harness-ui-usage--load (buffer)
   "Request everything the dashboard shows and render BUFFER when it arrives."
@@ -1326,7 +1336,7 @@ DEFAULT is offered (0 when nil); a negative amount is refused."
          (budget (plist-get status :budget))
          (buf (current-buffer)))
     (when (plist-get budget :implicit)
-      (user-error "This is the session's own budget; change it on the session"))
+      (user-error "%s" (harness-ui-usage--implicit-where budget)))
     (when (yes-or-no-p (format "Remove budget %s? " (harness-ui-usage--budget-label budget)))
       (harness-ui-call "_harness/usage/remove-budget" (list :id (plist-get budget :id))
                        (lambda (_) (message "Budget removed") (when (buffer-live-p buf) (harness-ui-usage--load buf)))))))
@@ -1355,7 +1365,7 @@ over.  0 clears it."
   (let* ((status (or (harness-ui-usage--budget-at-point) (user-error "No budget on this line")))
          (budget (plist-get status :budget)))
     (when (plist-get budget :implicit)
-      (user-error "This is the session's own budget; change it on the session"))
+      (user-error "%s" (harness-ui-usage--implicit-where budget)))
     (harness-ui-usage--save-baseline
      budget
      (harness-ui-usage--read-baseline (plist-get budget :period) (plist-get status :baseline))
@@ -1377,7 +1387,7 @@ Pro or Max have no cost report."
          (id (plist-get budget :id))
          (buf (current-buffer)))
     (when (plist-get budget :implicit)
-      (user-error "This is the session's own budget; change it on the session"))
+      (user-error "%s" (harness-ui-usage--implicit-where budget)))
     (unless (equal (format "%s" (plist-get budget :period)) "month")
       (user-error "Anthropic reports the cost of a calendar month: pick a month budget"))
     (message "Asking Anthropic for this month's API cost...")
@@ -1463,7 +1473,7 @@ Defaults come from the budget on the current line when there is one."
                     "fallback/changed" "fallback/switched"))
     (harness-ui-usage--refresh-soon))
    ((and (equal event "config/changed")
-         (equal (format "%s" (car args)) "harness-fallback-models"))
+         (member (format "%s" (car args)) '("harness-fallback-models" "harness-budget")))
     (harness-ui-usage--refresh-soon))))
 
 (defun harness-ui-usage--on-quota (_provider _quota)

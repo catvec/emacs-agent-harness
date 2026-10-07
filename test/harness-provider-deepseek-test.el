@@ -83,6 +83,82 @@
       (harness-provider-unregister 'deepseek)
       (setq harness-deepseek--registered nil))))
 
+(defconst harness-deepseek-test--listing
+  '(:object "list"
+    :data ((:id "deepseek-flash" :object "model" :owned_by "deepseek" :name "DeepSeek-V4.1-Flash"
+            :context_window 2097152 :max_output_tokens 400000 :input_modalities ("text" "image")
+            :output_modalities ("text")
+            :effort (:supported_levels ("low" "high" "max") :default_level "high"))
+           (:id "deepseek-v5-pro" :object "model" :owned_by "deepseek" :name "DeepSeek-V5-Pro"
+            :context_window 1048576 :max_output_tokens 393216 :input_modalities ("text")
+            :effort (:supported_levels ("high" "max")))
+           (:id "deepseek-lab" :object "model" :owned_by "deepseek")))
+  "What DeepSeek's GET /models answers, as its API reference documents it.")
+
+(ert-deftest harness-deepseek-lists-what-models-lists ()
+  "The catalogue is what /models lists, with what the specs add.
+A listed model keeps its spec's rates and label and takes the window,
+output limit and levels the listing gives; a model no spec names is
+priced by the tier its name says, and one the listing does not size is
+the catalogue's to estimate; the specs the listing lacks stay; a failed
+listing keeps what was listed."
+  (let* ((server (harness-test-http-serve
+                  (list (list "/models" 200 '(("Content-Type" . "application/json"))
+                              (harness-json-encode harness-deepseek-test--listing)))))
+         (harness-deepseek-api-key "sk-test-deepseek")
+         (harness-deepseek-base-url (harness-test-http-url server ""))
+         (harness-deepseek-list-models t)
+         (auth-sources nil))
+    (unwind-protect
+        (progn
+          (setq harness-deepseek--listing nil harness-deepseek--listed-at nil)
+          (harness-deepseek-refresh)
+          (let* ((list-models (harness-provider-models-fn (harness-provider-get 'deepseek)))
+                 ;; Before /models answered: the specs.
+                 (before (harness-test-await (funcall list-models)))
+                 (models (harness-test-await (funcall list-models t)))
+                 (get (lambda (name) (cl-find name models :key (lambda (m) (plist-get m :name)) :test #'equal)))
+                 (flash (funcall get "deepseek-flash"))
+                 (pro (funcall get "deepseek-v5-pro"))
+                 (lab (funcall get "deepseek-lab")))
+            (should (equal (mapcar (lambda (s) (plist-get s :name)) harness-deepseek-model-specs)
+                           (mapcar (lambda (m) (plist-get m :name)) before)))
+            ;; The listing's order first, then the specs it lacks.
+            (should (equal '("deepseek-flash" "deepseek-v5-pro" "deepseek-lab"
+                             "deepseek-v4-flash" "deepseek-v4-flash-vision-exp" "deepseek-v4-pro")
+                           (mapcar (lambda (m) (plist-get m :name)) models)))
+            (should (= 2097152 (plist-get flash :context-window)))
+            (should (= 400000 (plist-get flash :max-output)))
+            (should (equal "DeepSeek-V4.1-Flash" (plist-get flash :label)))
+            (should (harness-deepseek-test-near 0.15 (plist-get (plist-get flash :pricing) :input)))
+            (should (eq t (plist-get (plist-get flash :capabilities) :vision)))
+            ;; A model DeepSeek added: its own window and levels, its tier's rates.
+            (should (equal "DeepSeek-V5-Pro" (plist-get pro :label)))
+            (should (= 1048576 (plist-get pro :context-window)))
+            (should (equal '("high" "max") (plist-get pro :thinking-levels)))
+            (should (harness-deepseek-test-near 0.66 (plist-get (plist-get pro :pricing) :input)))
+            (should (eq 'harness-deepseek-rates-at (plist-get pro :pricing-fn)))
+            (should-not (plist-get (plist-get pro :capabilities) :vision))
+            ;; Nothing says its window, nor its price.
+            (should-not (plist-get lab :context-window))
+            (should-not (plist-get lab :pricing))
+            ;; The catalogue lists it again, and estimates what nobody sized.
+            (harness-test-await (harness-provider-relist 'deepseek))
+            (let ((lab (harness-call 'provider/model "deepseek:deepseek-lab")))
+              (should (plist-get lab :context-window-estimated))
+              (should (>= (plist-get lab :context-window) 1048576)))
+            (should (= 2097152 (plist-get (harness-call 'provider/model "deepseek:deepseek-flash")
+                                          :context-window)))
+            ;; DeepSeek cannot be reached: what it listed stays.
+            (delete-process server)
+            (should (equal (mapcar (lambda (m) (plist-get m :name)) models)
+                           (mapcar (lambda (m) (plist-get m :name))
+                                   (harness-test-await (funcall list-models t)))))))
+      (when (process-live-p server) (delete-process server))
+      (harness-provider-unregister 'deepseek)
+      (setq harness-deepseek--registered nil
+            harness-deepseek--listing nil harness-deepseek--listed-at nil harness-deepseek--asked-at nil))))
+
 (ert-deftest harness-deepseek-not-registered-without-key ()
   (let ((harness-deepseek-api-key nil) (harness-deepseek-always-register nil) (auth-sources nil))
     (with-environment-variables (("DEEPSEEK_API_KEY" nil))

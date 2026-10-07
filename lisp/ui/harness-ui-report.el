@@ -41,6 +41,8 @@
 ;; taller than others for them (`harness-ui-report-max-height').
 ;; Clicking one, or RET on it, shows it larger still in a popout of its
 ;; own (`harness-ui-popout-image'), which q closes, back to the report.
+;; Dragging one, from either, drops its file into another application,
+;; a chat app or a browser, to pass the evidence on (harness-ui-drag.el).
 ;;
 ;; Other modules add to the popout as they add to a chat:
 ;; `harness-ui-report-panel-functions' draws a panel at the end of the
@@ -58,6 +60,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-ui-drag)
 (require 'harness-ui-markdown)
 (require 'harness-ui-popout)
 (require 'harness-ui-tasks)
@@ -163,7 +166,7 @@ feedback to `:feedback'."
                          (and (stringp m) (not (string= m "application/octet-stream")) m))
                      (error nil))
                    "application/octet-stream"))
-         (size (nth 1 (file-attributes path))))
+         (size (file-attribute-size (file-attributes path))))
     (list :path path :mime mime :size size :name (file-name-nondirectory path))))
 
 (defun harness-ui-report--insert-media (path)
@@ -210,8 +213,10 @@ TITLE names the task.  Closing it shows the report again."
   "Insert the image PATH as large as the popout lets it be.
 It takes the popout's width and up to `harness-ui-report-image-max-height';
 clicking it, or RET on it, shows it larger still, in a popout of its
-own.  Without image support, and for a remote file, which reading here
-would block on, a button opening the file is inserted instead."
+own, and dragging it drops the file into another application
+\(`harness-ui-drag-source').  Without image support, and for a remote
+file, which reading here would block on, a button opening the file is
+inserted instead."
   (let* ((label (format "[image %s]" (abbreviate-file-name path)))
          (task harness-ui-report--task)
          (image (and (display-images-p) (not (file-remote-p path)) (file-readable-p path)
@@ -223,9 +228,11 @@ would block on, a button opening the file is inserted instead."
         (let ((view (let ((id (plist-get task :id))
                           (title (harness-ui-report--title task)))
                       (lambda () (interactive) (harness-ui-report--view-image path id title)))))
-          (insert (propertize label 'display image 'pointer 'hand
-                              'help-echo (format "%s\nmouse-1 or RET: view it larger" (abbreviate-file-name path))
-                              'keymap (harness-ui-mouse-keymap view))
+          (insert (harness-ui-drag-source
+                   (propertize label 'display image 'pointer 'hand
+                               'help-echo (format "%s\nmouse-1 or RET: view it larger" (abbreviate-file-name path))
+                               'keymap (harness-ui-mouse-keymap view))
+                   path)
                   "\n"))
       (harness-ui-button label (lambda () (harness-ui-report--open-file path))
                          :help "Open the image")
