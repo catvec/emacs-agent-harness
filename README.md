@@ -273,7 +273,7 @@ the `[menu]` button in the header line.
 | `C-c C-p` | Edit the pattern the newest permission request about paths is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
-| `TAB` | Complete in the compose box; elsewhere, fold or unfold the block at point |
+| `TAB` | Complete in the compose box; on a permission request cut short, show its whole input; elsewhere, fold or unfold the block at point |
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
@@ -321,6 +321,17 @@ Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list, or the waiting session itself when only one needs you.
+
+A permission request shows the call's input on one line, cut short to
+fit. When that line leaves something out, such as the rest of a long
+command or a second line of it, it ends in `[Show all]`
+(`[Show all 2 lines]` when a value has lines the first one hides).
+Click it or press `TAB` on the request to see the whole input in place,
+each value on a line of its own and a long one verbatim under its name;
+`[Show less]` or `TAB` again puts it back on one line. This works the
+same in the chat and in the popout the session list and the task board
+open with `SPC`, and a request shown whole in one shows whole in the
+other.
 
 While the agent works through a todo list (`todo_write`), the list stays
 in view: the header line names the progress and the item in hand, and a

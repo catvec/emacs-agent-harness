@@ -67,6 +67,11 @@ the tool call that waits on it.")
 The state belongs to the request, not to the buffer drawing it, so a
 chat and a popout showing the same question show the same diagram.")
 
+(defvar harness-ui-pending--expanded (make-hash-table :test 'equal)
+  "Session id -> the ids of its permission requests whose input shows whole.
+Like a question's diagram, this belongs to the request, so a chat and a
+popout showing the same request show it the same.")
+
 (defvar harness-ui-pending--answered (make-hash-table :test 'equal)
   "Session id -> (PID . TIME) of requests answered here.
 The session's own pending list lags an answer by a round trip; this
@@ -92,9 +97,11 @@ popout sets it to the session its item belongs to.")
       (and (boundp 'harness-ui-session-id) harness-ui-session-id)))
 
 (defun harness-ui-pending--forget-all ()
-  "Forget every request, its diagrams and the answers just given."
+  "Forget every request, its diagrams and the answers just given.
+Which requests show their input whole is forgotten too."
   (clrhash harness-ui-pending--requests)
   (clrhash harness-ui-pending--diagrams)
+  (clrhash harness-ui-pending--expanded)
   (clrhash harness-ui-pending--answered))
 
 (defun harness-ui-pending-items (session-id)
@@ -430,6 +437,16 @@ The question's digits, and n and p to switch whose diagram shows.")
 (define-key harness-ui-pending-diagram-map (kbd "n") #'harness-ui-pending-next-diagram)
 (define-key harness-ui-pending-diagram-map (kbd "p") #'harness-ui-pending-previous-diagram)
 
+(defvar harness-ui-pending-long-input-map (make-sparse-keymap)
+  "Keys active while point is on a permission panel whose input is cut short.
+The permission's keys, and TAB to show the input whole or put it back
+on one line (`harness-ui-pending-toggle-input').")
+
+;; Filled at top level, not in the `defvar', so a reload updates it.
+(set-keymap-parent harness-ui-pending-long-input-map harness-ui-pending-permission-map)
+(define-key harness-ui-pending-long-input-map (kbd "TAB") #'harness-ui-pending-toggle-input)
+(define-key harness-ui-pending-long-input-map (kbd "<tab>") #'harness-ui-pending-toggle-input)
+
 (defun harness-ui-pending--diagram-question ()
   "Return the question whose diagrams the diagram commands switch.
 That is the one whose panel point is on, else the newest with diagrams."
@@ -572,8 +589,8 @@ is made of, and they are left out when they are just where it runs."
             "\n")
     (dolist (line (harness-ui-pending--permission-facts r))
       (insert (propertize (concat "   " line "\n") 'face 'harness-dim-face)))
-    (when-let* ((input (plist-get r :input)))
-      (insert (propertize (concat "   " (harness-ui-tool-input-summary input) "\n") 'face 'harness-dim-face)))
+    (when (plist-get r :input)
+      (harness-ui-pending--insert-input r))
     (when-let* ((reason (plist-get r :reason)))
       (insert (propertize (format "   %s\n" reason) 'face 'harness-hint-face)))
     (when (plist-get r :pattern)
@@ -586,7 +603,147 @@ is made of, and they are left out when they are just where it runs."
                                           :help (format "Answer %s (%s)" (nth 0 o) (nth 1 o)))
                 " " (harness-ui-kbd (nth 1 o)) "  ")))
     (insert "\n")
-    (harness-ui-pending--decorate start (point) pid harness-ui-pending-permission-map)))
+    (harness-ui-pending--decorate start (point) pid (harness-ui-pending--permission-map r))))
+
+;;;;; A long input, whole
+;;
+;; A permission panel words the call's input on one line, each value cut
+;; to its first line and the line to a width (see
+;; `harness-ui-tool-input-summary'): a long command is cut short, and
+;; the further lines of one are not shown at all.  When the line leaves
+;; something out it ends in a toggle, [Show all] (with the number of
+;; lines, when a value has several), which TAB anywhere on the panel
+;; pushes too.  The panel then shows the input whole in place: each
+;; value on a line of its own, and one the line cut short verbatim, in a
+;; block of fixed-width lines under its key; [Show less] puts it back.
+;; Which requests show their input whole belongs to the request, as the
+;; diagram a question shows does, so a chat and a popout of it agree
+;; (`harness-ui-pending--expanded').
+
+(defun harness-ui-pending--value-text (value)
+  "Return VALUE, a value of a tool input, whole, worded as on the panel.
+That is how `harness-ui-summary-value' words it, before cutting it."
+  (if (and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
+      (mapconcat #'harness-ui-option-label value ", ")
+    (harness-ui-format-value value)))
+
+(defun harness-ui-pending--input-entries (input)
+  "Return tool INPUT, a plist, as (KEY VALUE TEXT) entries.
+KEY is the name the panel shows, VALUE the value and TEXT it whole."
+  (cl-loop for (k v) on input by #'cddr
+           collect (list (substring (symbol-name k) 1) v (harness-ui-pending--value-text v))))
+
+(defun harness-ui-pending--value-cut-p (value text)
+  "Non-nil when the panel's one line cuts VALUE short; TEXT is it whole."
+  (not (equal (harness-ui-summary-value value) (string-trim text))))
+
+(defun harness-ui-pending--input-long-p (r)
+  "Non-nil when the one line of permission record R's input leaves some out.
+A value cut short or with further lines does, and so does a line too
+long for the panel."
+  (when-let* ((input (and (equal (plist-get r :kind) "permission") (plist-get r :input))))
+    (not (equal (or (harness-ui-tool-input-summary input) "")
+                (mapconcat (lambda (e) (format "%s: %s" (nth 0 e) (string-trim (nth 2 e))))
+                           (harness-ui-pending--input-entries input) "  ")))))
+
+(defun harness-ui-pending-input-whole-p (session-id pid)
+  "Non-nil when permission request PID of SESSION-ID shows its input whole."
+  (and (member pid (gethash session-id harness-ui-pending--expanded)) t))
+
+(defun harness-ui-pending--permission-map (r)
+  "Return the keymap of the panel of permission record R.
+A panel whose input the one line cuts short takes TAB, which shows it
+whole; on the others TAB keeps the meaning it has in the buffer."
+  (if (harness-ui-pending--input-long-p r)
+      harness-ui-pending-long-input-map
+    harness-ui-pending-permission-map))
+
+(defun harness-ui-pending--block-string (text)
+  "Return TEXT, a value of a tool input, as a block of lines under its key.
+It is verbatim, in fixed-width lines, which wrap under their indentation."
+  (let ((indent (propertize "     " 'face 'harness-ui-panel-face)))
+    (propertize (harness-ui-ensure-newline text)
+                'face 'harness-ui-output-face 'line-prefix indent 'wrap-prefix indent)))
+
+(defun harness-ui-pending--show-all-label (entries)
+  "Return the label of the toggle that shows input ENTRIES whole.
+When a value the line cuts short has further lines, it counts the
+lines of those values, so that lines past the first never go unseen."
+  (let* ((cut (cl-remove-if-not (lambda (e) (harness-ui-pending--value-cut-p (nth 1 e) (nth 2 e))) entries))
+         (lines (mapcar (lambda (e) (cl-count ?\n (harness-ui-ensure-newline (nth 2 e)))) cut)))
+    (if (cl-some (lambda (n) (> n 1)) lines)
+        (format "[Show all %d lines]" (apply #'+ lines))
+      "[Show all]")))
+
+(defun harness-ui-pending--input-toggle (session-id r whole)
+  "Return the toggle of permission record R of SESSION-ID.
+That is [Show all], or [Show less] when WHOLE: the input shows whole now."
+  (let ((pid (plist-get r :id)))
+    (propertize
+     (concat (harness-ui-action-button
+              (if whole "[Show less]" (harness-ui-pending--show-all-label
+                                       (harness-ui-pending--input-entries (plist-get r :input))))
+              (lambda () (harness-ui-pending-show-input session-id pid (not whole)))
+              :help (if whole "Put the input back on one line (TAB)" "Show the whole input, every line of it (TAB)"))
+             " " (harness-ui-kbd "TAB"))
+     'harness-ui-pending-input-toggle pid)))
+
+(defun harness-ui-pending--insert-input (r)
+  "Insert the lines of permission record R's input.
+That is one line (`harness-ui-tool-input-summary'), with a toggle when
+it leaves something out, or, once the toggle was pushed, the input
+whole: every value on a line of its own, and one the line cut short
+in a block under its key, the toggle on the first line."
+  (let* ((session-id (harness-ui-pending--session))
+         (input (plist-get r :input))
+         (long (harness-ui-pending--input-long-p r)))
+    (if (not (and long (harness-ui-pending-input-whole-p session-id (plist-get r :id))))
+        (insert (propertize (concat "   " (harness-ui-tool-input-summary input)) 'face 'harness-dim-face)
+                (if long (concat "  " (harness-ui-pending--input-toggle session-id r nil)) "")
+                "\n")
+      (let ((toggle (concat "  " (harness-ui-pending--input-toggle session-id r t))))
+        (pcase-dolist (`(,key ,value ,text) (harness-ui-pending--input-entries input))
+          (let ((cut (harness-ui-pending--value-cut-p value text)))
+            (insert (propertize (concat "   " key ":" (if cut "" (concat " " (string-trim text))))
+                                'face 'harness-dim-face 'wrap-prefix "     ")
+                    toggle "\n")
+            (setq toggle "")
+            (when cut (insert (harness-ui-pending--block-string text)))))))))
+
+(defun harness-ui-pending-show-input (session-id pid whole)
+  "Show the input of permission request PID of SESSION-ID whole, or on one line.
+WHOLE non-nil shows it whole.  The hosts drawing the request are
+redrawn; point goes to the request's toggle when this buffer draws it,
+so that TAB there puts it back."
+  (let ((pids (cl-remove-if (lambda (p) (or (equal p pid) (not (harness-ui-pending-record session-id p))))
+                            (gethash session-id harness-ui-pending--expanded))))
+    (if (or whole pids)
+        (puthash session-id (if whole (cons pid pids) pids) harness-ui-pending--expanded)
+      (remhash session-id harness-ui-pending--expanded)))
+  (harness-ui-pending--changed session-id)
+  ;; The text property is compared with `equal', so the loop walks the changes.
+  (let ((pos (point-min)))
+    (while (and pos (not (equal (get-text-property pos 'harness-ui-pending-input-toggle) pid)))
+      (setq pos (next-single-property-change pos 'harness-ui-pending-input-toggle)))
+    (when pos (goto-char pos))))
+
+(defun harness-ui-pending-toggle-input (&optional pid)
+  "Show the whole input of a permission request, or put it back on one line.
+PID defaults to the request at point, or else the newest whose one
+line leaves something out: a long command, or one of several lines.
+The panel shows it in place, every value whole, in the chat and in a
+popout of the request alike.  TAB on such a panel, and its [Show all]
+and [Show less] buttons, run this."
+  (interactive)
+  (let* ((session-id (harness-ui-pending--session))
+         (pid (or pid (harness-ui-pending-at-point)))
+         (r (and pid (harness-ui-pending-record session-id pid))))
+    (unless (harness-ui-pending--input-long-p r)
+      (setq r (cl-find-if #'harness-ui-pending--input-long-p
+                          (reverse (harness-ui-pending-items session-id)))))
+    (unless r (user-error "No permission request has more of its input to show"))
+    (harness-ui-pending-show-input session-id (plist-get r :id)
+                                   (not (harness-ui-pending-input-whole-p session-id (plist-get r :id))))))
 
 ;;;;; Diagrams of a question's options
 ;;

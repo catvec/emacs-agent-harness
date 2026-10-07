@@ -2935,9 +2935,18 @@ at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
 it (all of it in `harness-ui-pending`).  Switching redraws the options
 and that area alone, in place, so point, the windows and the compose box
-stay put.  A module hosted by a chat buffer can put a read-only panel of
-its own above the box with `harness-chat-panel-functions` and take the
-box's message with `harness-chat-send-function`.
+stay put.  A permission panel whose one line of input leaves something
+out (a value past its width, a further line of one, a line too long)
+ends that line in `[Show all]`, `[Show all N lines]` when values have
+lines it hides, and binds TAB on the panel
+(`harness-ui-pending-toggle-input`); whole, each value takes a line of
+its own and a cut one a verbatim block under its key, until `[Show
+less]`.  Which requests show whole is the request's state, like the
+diagram shown, so the chat and the popout agree, and point stays on
+the toggle through the redraw.  A module hosted by a chat buffer can
+put a read-only panel of its own above the box with
+`harness-chat-panel-functions` and take the box's message with
+`harness-chat-send-function`.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the

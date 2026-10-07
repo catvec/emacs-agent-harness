@@ -847,6 +847,81 @@ It is never added to the running turn."
         (should (equal "deny-once" (plist-get (plist-get (car answers) :outcome) :optionId)))
         (should (null harness-chat--pending))))))
 
+(ert-deftest harness-ui-chat-permission-panel-shows-a-long-command-whole ()
+  "A command the panel's one line cuts short shows whole in place, and back.
+TAB on the panel and its [Show all] / [Show less] button toggle it, the
+command's further lines included; the panel's keys still answer it.  A
+short command gets no toggle, and TAB keeps the chat's meaning there."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (first "cd ~/src/acme-api && python3 -m pip install 'httpx>=0.28' && python3 -m pytest tests/test_webhooks.py -x -q")
+           (command (concat first "\nrm -rf build/ dist/"))
+           (recorded nil)
+           (pid nil)
+           (toggle-at (lambda () (get-text-property (point) 'harness-ui-pending-input-toggle))))
+      (harness-register-method 'permission/answer
+                               (lambda (session-id pending-id answer)
+                                 (push (list session-id pending-id answer) recorded)
+                                 (harness-call 'session/pending-resolve session-id pending-id answer)
+                                 answer))
+      (setq pid (harness-call 'session/pending-add sid
+                              (list :kind 'permission
+                                    :payload (list :tool "bash" :kind 'exec
+                                                   :title (concat "Bash: " (harness-first-line command 70))
+                                                   :input (list :command command :timeout 600)
+                                                   :options '(allow-once allow-session deny-once)))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
+        (with-current-buffer buf
+          ;; One line, cut short, and the second line nowhere: the toggle
+          ;; counts the lines it would show.
+          (should (harness-ui-chat-test-find buf "command: cd ~/src/acme-api && python3 -m pip install 'httpx>=0.28' &…  timeout: 600  [Show all 2 lines] TAB\n"))
+          (should-not (harness-ui-chat-test-find buf "rm -rf build/"))
+          ;; TAB anywhere on the panel shows it whole, in place.
+          (goto-char (harness-ui-chat-test-find buf "Permission"))
+          (should (eq 'harness-ui-pending-toggle-input (key-binding (kbd "TAB"))))
+          (should (eq 'harness-ui-pending-toggle-input (key-binding (kbd "<tab>"))))
+          (call-interactively (key-binding (kbd "TAB")))
+          (should (harness-ui-chat-test-find buf (concat "   command:  [Show less] TAB\n" first "\nrm -rf build/ dist/\n"
+                                                         "   timeout: 600\n")))
+          (should (harness-ui-chat-test-face-at (- (harness-ui-chat-test-find buf "rm -rf build/") 2)
+                                                'harness-ui-output-face))
+          (should (equal "     " (get-text-property (harness-ui-chat-test-find buf "rm -rf") 'line-prefix)))
+          (should (harness-ui-pending-input-whole-p sid pid))
+          ;; Point stays on the toggle, so TAB again puts it back on one line.
+          (should (equal pid (funcall toggle-at)))
+          (call-interactively (key-binding (kbd "TAB")))
+          (should-not (harness-ui-chat-test-find buf "rm -rf build/"))
+          (should (harness-ui-chat-test-find buf "[Show all 2 lines] TAB"))
+          (should-not (harness-ui-pending-input-whole-p sid pid))
+          (should (equal pid (funcall toggle-at)))
+          ;; The button does the same.
+          (goto-char (harness-ui-chat-test-find buf "[Show all"))
+          (harness-chat-push)
+          (should (harness-ui-chat-test-find buf "rm -rf build/ dist/\n"))
+          (goto-char (harness-ui-chat-test-find buf "[Show less"))
+          (harness-chat-push)
+          (should-not (harness-ui-chat-test-find buf "rm -rf build/"))
+          ;; Shown whole, the panel still answers with its keys.
+          (call-interactively (key-binding (kbd "TAB")))
+          (goto-char (harness-ui-chat-test-find buf "Permission"))
+          (call-interactively (key-binding (kbd "y"))))
+        (harness-test-wait (lambda () recorded) 5 "answered through the method")
+        (should (equal (list sid pid "allow-once") (car recorded)))
+        (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--pending))) 5 "the panel gone")
+        ;; A command the line shows whole has no toggle, and TAB is the chat's.
+        (harness-call 'session/pending-add sid
+                      (list :kind 'permission
+                            :payload (list :tool "bash" :kind 'exec :title "Bash: ls -la"
+                                           :input '(:command "ls -la") :options '(allow-once deny-once))))
+        (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "the short one rendered")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-find buf "command: ls -la\n"))
+          (should-not (harness-ui-chat-test-find buf "[Show all"))
+          (goto-char (harness-ui-chat-test-find buf "Permission"))
+          (should (eq 'harness-chat-tab (key-binding (kbd "TAB"))))
+          (should-error (harness-ui-pending-toggle-input) :type 'user-error))))))
+
 (ert-deftest harness-ui-chat-directory-permission-panel ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
