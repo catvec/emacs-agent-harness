@@ -83,7 +83,8 @@ default) the layers above are split across two Emacs processes:
   set of `_harness/emacs/*` requests of lisp/harness-emacs-endpoint.el
   through `emacs/request` (see the tools and acp sections).  The
   `emacs_*` tools ask it for plain data and a few bounded actions
-  (show a buffer, insert text, save one); none evaluates code.  The
+  (show a buffer, insert text, save one, trace a function or a
+  variable); none evaluates code.  The
   `elisp` tool evaluates in a child `emacs --batch'
   (lisp/harness-elisp.el), never in the lent Emacs: model-written Lisp
   does not run there at all, since a blocking call would freeze it
@@ -2387,7 +2388,9 @@ TRAMP prefixes come from the session host):
 | `emacs_open` | Open buffer | name (buffer or path), line | read |
 | `emacs_insert` | Insert text | name, text, position (point/start/end) | write |
 | `emacs_save_buffer` | Save buffer | name | write |
-| `emacs_describe` | Describe symbol | symbol | read |
+| `emacs_describe` | Describe symbol | symbol, buffer | read |
+| `emacs_find_definition` | Find definition | symbol, type (function/variable/face) | read |
+| `emacs_trace` | Trace symbol | action (start/stop/list), symbol, type (function/variable), callers, limit | write |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read |
@@ -2511,13 +2514,25 @@ lisp/harness-emacs-endpoint.el, which knows no tool: `buffers` (every
 buffer's name, mode, modified flag, size and file), `windows` (the
 window tree, frame by frame), `buffer` (a range of lines, stopping at
 the characters the tool names, so a long buffer comes in ranges),
-`describe` (a symbol as function, variable and face, its value printed
-in part) and `messages`; and it does the few bounded actions the same
-tools need: `open` (show a live buffer, or visit an existing local
-regular file under the size the tool names -- never a directory, a
-remote path or a prompt), `insert` (text into a live editable buffer,
-left unsaved) and `save` (a buffer to its local file, every question
-the save could ask turned into an error).  With no Emacs lent -- a
+`describe` (a symbol as function, variable and face, as
+`describe-function` and `describe-variable` would: its value printed in
+part, in a buffer the tool names or the user's, where it is
+buffer-local, its standard value, watchers, advice, keys, aliases and
+file), `definition` (where a function, variable or face is defined and
+the text of its definition, found as `find-function` finds it but read
+into a temporary buffer, never visited and never macroexpanded, so none
+of its code runs; a buffer visiting the file is read as it stands) and
+`messages`; and it does the few bounded actions the same tools need:
+`open` (show a live buffer, or visit an existing local regular file
+under the size the tool names -- never a directory, a remote path or a
+prompt), `insert` (text into a live editable buffer, left unsaved),
+`save` (a buffer to its local file, every question the save could ask
+turned into an error) and `trace` (record the calls of a function, an
+:around advice under trace.el's name so `untrace-all` removes it too,
+or the changes of a variable, a watcher, into `*trace-output*`: bounded
+printing, optional callers from the backtrace, `inhibit-trace` around
+the recording, and a limit of records after which the trace removes
+itself).  With no Emacs lent -- a
 headless harness, or only clients such as a phone -- the call fails at
 once, saying so and pointing at read_file and the elisp tool; one that
 does not answer in time fails the call, logs, and shows a desktop
@@ -2635,9 +2650,16 @@ file}]}`; `buffer {name, offset, limit, maxChars}` → `{exists, mode,
 file, modified, total, first, lines, truncated}`; `open {name, path,
 line, maxBytes}` → `{name, mode, size, modified, file, visited}`;
 `insert {name, text, position, maxChars}` → `{name, inserted, line}`;
-`save {name}` → `{name, path, size}`; `describe {symbol, maxValueChars}`
-→ `{known, function: {kind, signature, doc}, variable: {kind, value,
-doc}, face: {doc}}`; `messages {count}` → `{text}`.  There is no `eval`
+`save {name}` → `{name, path, size}`; `describe {symbol, buffer,
+maxValueChars}` → `{known, function: {kind, signature, definition,
+aliases, file, advice, keys, doc}, variable: {kind, value, buffer,
+local, global, locals, localCount, standard, watchers, file, doc},
+face: {doc, file}}`; `definition {symbol, type, maxChars}` → `{known,
+type, name, aliases, kind, advised, loaded, native, autoload, file,
+visiting, modified, line, endLine, lines, truncated, printed, note}`;
+`trace {action, symbol, type, limit, callers}` → `{started: {symbol,
+type, count, limit, callers}, line, stopped: [...], traces: [...],
+buffer, lines}`; `messages {count}` → `{text}`.  There is no `eval`
 request: a lent Emacs never evaluates model-written code, so nothing
 that asks it can freeze it.
 
