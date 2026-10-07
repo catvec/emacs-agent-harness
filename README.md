@@ -289,7 +289,9 @@ name when it arrives, and sending waits for it. A link to a web page is
 not downloaded: its address goes into the message as text, which is
 usually what you wanted. Images and videos show a thumbnail in the
 attachment chip (`harness-compose-thumbnail-lines`; videos need
-`ffmpeg`), so you can see what you are about to send.
+`ffmpeg`), so you can see what you are about to send. Each attachment
+has a line of its own above the box, fitted to the window: a long name
+is shortened in the middle, and hovering over it shows the whole path.
 
 Images drag *out* too: press on an image in the transcript, on an
 attachment chip's thumbnail or name, or on an image of a report or its
