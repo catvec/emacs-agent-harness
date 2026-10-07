@@ -29,6 +29,8 @@
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
+(defvar harness-anthropic-admin-api-key)
+(defvar auth-sources)
 (defvar harness-ui--sessions)
 (defvar harness-ui-tasks--loading)
 (defvar harness-ui-tasks--tasks)
@@ -75,6 +77,12 @@ Finished tasks are completed at once, without review, unless BODY turns
            ;; Full width: the content checks below are not about narrow windows.
            (harness-ui-default-position (quote full))
            (harness-acp-token nil)
+           ;; A budget over everything fetches Anthropic's cost report in
+           ;; the background, and the header's budgets show one: no key
+           ;; may reach a real one.
+           (harness-anthropic-admin-api-key nil)
+           (auth-sources nil)
+           (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment))
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
@@ -174,6 +182,29 @@ Finished tasks are completed at once, without review, unless BODY turns
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 
+(ert-deftest harness-ui-tasks-card-shows-the-output-rate ()
+  "A card says how fast its session writes, once the harness measured it.
+The figure comes with the harness's `usage/rate-updated' event, which
+redraws the board by itself."
+  (harness-ui-tasks-test-with
+    ;; A turn that never ends keeps the task in progress.
+    (let ((harness-provider-demo-script-override '((:type text :delta "Working on it."))))
+      (unwind-protect
+          (progn
+            (harness-ui-tasks-test--type-and-submit board "Write quickly")
+            (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Write quickly")
+            (should-not (string-match-p "tok/s" (harness-ui-tasks-test--board-text board)))
+            (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
+              (should sid)
+              (harness-emit 'usage/rate-updated sid
+                            (list :rate 42.0 :output 420 :seconds 10.0 :calls 1
+                                  :at (float-time) :model "demo:scripted"))
+              (harness-test-wait (lambda () (string-match-p "Write quickly\\(.\\|\n\\)*42 tok/s"
+                                                            (harness-ui-tasks-test--board-text board)))
+                                 5 "the rate on the card")))
+        (dolist (task (harness-call 'task/list default-directory))
+          (harness-call 'task/cancel (plist-get task :id)))))))
+
 (ert-deftest harness-ui-tasks-stopped-task-needs-input ()
   (harness-ui-tasks-test-with
     (let ((harness-provider-demo-script-override
@@ -230,6 +261,45 @@ as a one-column symbol, already in line, so they keep the old layout."
         (goto-char harness-compose-end)
         (should (eq 'self-insert-command (key-binding (kbd "s"))))
         (should (eq 'harness-ui-tasks-submit (key-binding (kbd "C-c C-c"))))))))
+
+(ert-deftest harness-ui-tasks-typing-goes-to-the-box ()
+  "Typing on the board goes into the compose box, but for the board's keys.
+A letter the board does not bind types into the box from anywhere on
+the board, and so does a key for the task at point typed off a card,
+which has no task to act on.  On a card that key acts on its task, and
+the board's own keys stay its own off the cards."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "Waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  1")
+      (with-current-buffer board
+        ;; Keys reach the buffer of the selected window.
+        (should (eq board (window-buffer (selected-window))))
+        (cl-flet ((off-card ()
+                    (goto-char (point-min))
+                    (search-forward "nothing working")
+                    (should-not (get-text-property (point) 'harness-task-id))))
+          ;; Start, edit, message, verify, what it needs; and no key at all.
+          (dolist (key '("s" "e" "m" "v" "SPC" "h"))
+            (off-card)
+            (execute-kbd-macro (kbd key))
+            (should (= (point) harness-compose-end)))
+          (should (equal "semv h" (harness-compose-text)))
+          (off-card)
+          (should (eq 'harness-ui-tasks-refresh (key-binding "g")))
+          (should (eq 'harness-ui-quit-view (key-binding "q")))
+          (should (eq 'harness-ui-tasks-compose (key-binding "a")))
+          ;; Help still lists the task's keys, wherever point is.
+          (goto-char harness-compose-end)
+          (should (string-match-p "harness-ui-tasks-verify"
+                                  (substitute-command-keys "\\{harness-ui-tasks-board-map}")))
+          ;; On the card, `e' edits its task's prompt in the box.
+          (harness-compose-set "")
+          (goto-char (point-min))
+          (search-forward "Waiting task")
+          (should (get-text-property (point) 'harness-task-id))
+          (execute-kbd-macro "e")
+          (should (equal "Waiting task" (harness-compose-text))))))))
 
 (defvar harness-ui-open-session-function)
 (declare-function harness-ui-display-buffer "harness-ui")
@@ -1179,6 +1249,44 @@ tests that check a card's detail line show it first."
         (delete-window side)
         (set-window-buffer window board)))))
 
+(ert-deftest harness-ui-tasks-message-bar-runs-down-the-attachments ()
+  "In a message box every attachment has a line, the bar and band on it.
+Each line fits the narrow window the board is in, and one wrapping all
+the same would carry the bar on."
+  (harness-ui-tasks-test-with
+    (let* ((window (get-buffer-window board))
+           (side (split-window window 40 'right))
+           (files (mapcar (lambda (name)
+                            (let ((file (expand-file-name name dir)))
+                              (with-temp-file file (insert "x"))
+                              file))
+                          '("notes.txt" "a-file-whose-name-is-far-too-long-for-a-window-forty-columns-wide.txt"))))
+      (unwind-protect
+          (with-current-buffer board
+            (set-window-buffer side board)
+            (set-window-buffer window (get-buffer-create "*scratch*"))
+            (harness-ui-tasks--set-compose "" (cons 'reply "t1"))
+            (dolist (file files) (harness-compose-add-attachment file))
+            (harness-ui-tasks--refit-tail)
+            (let ((lines (save-excursion
+                           (goto-char harness-ui-tasks--list-end)
+                           (cl-loop while (< (point) (overlay-start harness-compose-overlay))
+                                    when (eq 'attachments (get-text-property (point) 'harness-task-tail))
+                                    collect (cons (point) (line-end-position))
+                                    do (forward-line 1)))))
+              (should (= 2 (length lines)))
+              (pcase-dolist (`(,start . ,end) lines)
+                (should (equal "▌ " (buffer-substring-no-properties start (+ start 2))))
+                (should (memq 'harness-compose-message-accent-face (ensure-list (get-text-property start 'face))))
+                (should (memq 'harness-compose-message-face (ensure-list (get-text-property end 'face))))
+                (should (string-prefix-p "▌ " (get-text-property start 'wrap-prefix)))
+                (should (< (car (window-text-pixel-size side start end)) (window-body-width side))))
+              (should (string-match-p "notes\\.txt" (buffer-substring (car (nth 0 lines)) (cdr (nth 0 lines)))))
+              (should (string-match-p "\\`▌ .*a-file-whose.*….*-wide\\.txt (1 B) ×\\'"
+                                      (buffer-substring-no-properties (car (nth 1 lines)) (cdr (nth 1 lines)))))))
+        (delete-window side)
+        (set-window-buffer window board)))))
+
 ;;;; Review: finished work waits for you
 
 (declare-function harness-ui-tasks-reject "harness-ui-tasks")
@@ -1902,6 +2010,132 @@ scrolled to the top and point was dragged out of the box with it."
               (should (harness-compose-in-p (window-point window)))
               (should (<= (marker-position harness-compose-end) (window-end window t)))))
       (set-frame-height nil 25)))))
+
+;;;; What the tasks cost, in the header
+
+(defvar harness-ui--quotas)
+(declare-function harness-ui--store-quota "harness-ui")
+
+(defun harness-ui-tasks-test--header (board &optional width)
+  "BOARD's header line as it reads, fitted to WIDTH columns, else whole.
+The line shows each %% as one %.  \(`format-mode-line' would do that,
+but formats nothing in batch.)"
+  (with-current-buffer board
+    (replace-regexp-in-string "%%" "%" (harness-ui-tasks--header (or width most-positive-fixnum)) t t)))
+
+(defun harness-ui-tasks-test--sessions (board)
+  "The session ids of BOARD's tasks."
+  (delq nil (mapcar (lambda (task) (plist-get task :session))
+                    (buffer-local-value 'harness-ui-tasks--tasks board))))
+
+(defun harness-ui-tasks-test--multi-line-help (text)
+  "The `help-echo' strings of TEXT that take more than one line."
+  (let ((pos 0) out)
+    (while (< pos (length text))
+      (let ((help (get-text-property pos 'help-echo text)))
+        (when (and (stringp help) (string-match-p "\n" help))
+          (push help out)))
+      (setq pos (or (next-single-property-change pos 'help-echo text) (length text))))
+    out))
+
+(ert-deftest harness-ui-tasks-header-shows-the-plan-and-its-quota ()
+  "Tasks a subscription pays for show the plan and its quota in the header.
+As in a chat's header: the plan's name with its quota windows, and in
+the tooltip, on one line, what the tasks used at API prices.  A click
+opens the usage dashboard."
+  (harness-ui-tasks-test-with
+    (clrhash harness-ui--quotas)
+    (harness-ui--store-quota "demo" '(:billing "subscription" :plan "max" :plan-label "Claude Max"
+                                      :windows ((:name "5h" :label "Current session (5 hours)" :used 0.23)
+                                                (:name "7d" :label "This week, all models" :used 0.41))))
+    ;; Before any task the board says who pays for new ones: their
+    ;; model's provider, once the board knows the model.
+    (harness-test-wait (lambda () (string-match-p "  Max . 5h 23% . 7d 41%  " (harness-ui-tasks-test--header board)))
+                       5 "the plan and its quota")
+    (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
+    (harness-ui-tasks-test--wait-text board "Completed  1")
+    (let ((sid (car (harness-ui-tasks-test--sessions board))))
+      (harness-call 'session/usage-add sid '(:input 100 :output 10 :cost 0.0 :list-cost 2.5
+                                             :billing subscription :plan "max"))
+      (harness-test-wait (lambda () (equal "subscription" (format "%s" (plist-get (plist-get (harness-ui-session sid) :usage)
+                                                                                 :billing))))
+                         5 "the session update")
+      (with-current-buffer board
+        (let* ((header (harness-ui-tasks--header most-positive-fixnum))
+               (pos (string-match "Max" header))
+               (help (get-text-property pos 'help-echo header))
+               (opened nil))
+          (should (string-match-p "Covered by Claude Max, not billed per token\\. These tasks at API prices: \\$2\\.50\\." help))
+          (should (string-match-p "Current session (5 hours): 23% used" help))
+          ;; One line, or showing it in the echo area moves the header.
+          (should-not (harness-ui-tasks-test--multi-line-help header))
+          ;; Escaped for the header line, which would take "23% " for a %-construct.
+          (should (string-match-p "5h 23%% " header))
+          (cl-letf (((symbol-function 'harness-ui-show-usage) (lambda () (interactive) (setq opened t))))
+            (funcall (lookup-key (get-text-property pos 'local-map header) [header-line mouse-1])))
+          (should opened))))))
+
+(ert-deftest harness-ui-tasks-header-shows-cost-and-budgets ()
+  "Tasks billed per token show their summed cost, then the project's budgets.
+The fullest budget shows as a quota window does, its tooltip describes
+each that applies, on one line, and setting a budget reloads them."
+  (harness-ui-tasks-test-with
+    (clrhash harness-ui--quotas)
+    (harness-test-load-module 'usage)
+    (harness-ui-tasks-test--type-and-submit board "First task")
+    (harness-ui-tasks-test--type-and-submit board "Second task")
+    (harness-ui-tasks-test--wait-text board "Completed  2")
+    (pcase-let ((`(,first ,second) (harness-ui-tasks-test--sessions board)))
+      (harness-call 'session/usage-add first '(:input 100 :output 10 :cost 1.25 :billing api))
+      (harness-call 'session/usage-add second '(:input 100 :output 10 :cost 0.5 :billing api)))
+    (harness-test-wait (lambda () (string-match-p "  \\$1\\.75  " (harness-ui-tasks-test--header board)))
+                       5 "the summed cost")
+    (with-current-buffer board
+      (let ((header (harness-ui-tasks--header most-positive-fixnum)))
+        (should (string-match-p "\\`These tasks cost \\$1\\.75, billed per token\\."
+                                (get-text-property (string-match "\\$1\\.75" header) 'help-echo header)))))
+    ;; A budget of everything and a tighter one of the project: the fullest shows.
+    (harness-call 'usage/set-budget '(:scope period :period month :amount 10 :label "monthly cap"))
+    (harness-call 'usage/set-budget (list :scope 'project :target dir :amount 2 :hard t :label "project cap"))
+    (harness-call 'usage/set-budget (list :scope 'project :target (harness-test-temp-dir) :amount 1 :label "elsewhere"))
+    (harness-test-wait (lambda () (string-match-p "  \\$1\\.75 . budget 88%  " (harness-ui-tasks-test--header board)))
+                       5 "the budgets")
+    (with-current-buffer board
+      (let* ((header (harness-ui-tasks--header most-positive-fixnum))
+             (pos (string-match "budget" header))
+             (help (get-text-property pos 'help-echo header)))
+        (should (eq 'harness-context-urgent-face (get-text-property pos 'face header)))
+        (should (string-match-p (concat "\\`project cap: \\$1\\.75 of \\$2\\.00 spent; \\$0\\.250 left (hard)\\. "
+                                        "monthly cap: \\$1\\.75 of \\$10\\.00 spent; \\$8\\.25 left, \\$[0-9.]+/day")
+                                help))
+        (should-not (string-match-p "elsewhere" help))
+        (should-not (harness-ui-tasks-test--multi-line-help header))
+        (should (get-text-property pos 'local-map header))))))
+
+(ert-deftest harness-ui-tasks-header-keeps-the-quota-when-narrow ()
+  "In a narrow window the plan's quota outlasts the counts and the buttons.
+The budget makes room first; the plan and its quota windows stay longest
+but for [Refresh], still opening the usage dashboard."
+  (harness-ui-tasks-test-with
+    (clrhash harness-ui--quotas)
+    (harness-test-load-module 'usage)
+    (harness-ui--store-quota "demo" '(:billing "subscription" :plan "max" :plan-label "Claude Max"
+                                      :windows ((:name "5h" :used 0.23) (:name "7d" :used 0.41))))
+    (harness-call 'usage/set-budget '(:scope period :period month :amount 10 :label "monthly cap"))
+    (harness-test-wait (lambda () (string-match-p "  Max . 5h 23% . 7d 41% . budget 0%  "
+                                                  (harness-ui-tasks-test--header board)))
+                       5 "the plan, its quota and the budget")
+    ;; The counts, the buttons and the Review switch go before the quota.
+    (let ((header (harness-ui-tasks-test--header board 62)))
+      (should (string-match-p "\\` Tasks  Max . 5h 23% . 7d 41% . budget 0% \\[Refresh\\]\\'" header)))
+    ;; Narrower still, the budget goes and the quota stays.
+    (let ((header (harness-ui-tasks-test--header board 50)))
+      (should (string-match-p "\\` Tasks  Max . 5h 23% . 7d 41% \\[Refresh\\]\\'" header)))
+    (with-current-buffer board
+      (let* ((header (harness-ui-tasks--header 50))
+             (pos (string-match "Max" header)))
+        (should (get-text-property pos 'local-map header))
+        (should (string-match-p "Covered by Claude Max" (get-text-property pos 'help-echo header)))))))
 
 ;;;; The fullscreen layout
 

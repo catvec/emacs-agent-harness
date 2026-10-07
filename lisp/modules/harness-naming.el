@@ -2,17 +2,35 @@
 
 ;;; Commentary:
 
-;; A session that was not given a name gets one from the model after
-;; its first turn.  The cheap way to do that is to reuse the prefix the
-;; provider has just cached: when the provider can fork its state
-;; (`:fork' capability) the naming request goes out on a fork of the
-;; session's state, so a hosted loop only sends the naming question and
-;; an API provider hits the cache for the transcript.  Otherwise the
-;; transcript is sent again as plain messages.
+;; A session that was not given a name gets one from the model as soon
+;; as its first message is sent: when its turn starts
+;; (`agent/turn-started'), not when it ends.  A task's first turn lasts
+;; until the task is done, so naming after it left the board showing the
+;; task's raw first message as its title all along.
+;;
+;; That request runs beside the turn.  It is a request of its own, to the
+;; naming model (`harness-naming-model': by default the cheap tier of the
+;; session's provider), holding only the conversation's opening message
+;; (and its latest one, when it has moved on since, as a fork's has) and
+;; the question.  It carries no provider state and is `:ephemeral', so a
+;; hosted provider answers it apart from the session's conversation (a
+;; CLI process of its own for Claude Code, a throwaway session for
+;; Copilot) and the turn never sees it.  A session still nameless when a
+;; later turn starts (its naming failed, say) is named then.
+;;
+;; `naming/name' can also be called at any time to title the whole
+;; conversation as it stands.  Then the cheap way is to reuse the prefix
+;; the provider has cached: when the provider can fork its state
+;; (`:fork' capability) the request goes out on a fork of the session's
+;; state, so a hosted loop only sends the naming question and an API
+;; provider hits the cache for the transcript.  Otherwise the transcript
+;; is sent again as plain messages.
 ;;
 ;; The result is sanitised (first line, no quotes or markdown, at most
 ;; `harness-naming--max-length' characters) and stored with
-;; `session/update', which adds the "renamed to" hint.
+;; `session/update', which adds the "renamed to" hint, unless the
+;; session's name changed while the model was asked: a name the user
+;; gave meanwhile stays.
 ;;
 ;; The request's system prompt goes through the sync filter
 ;; `naming/system-prompt' (value the prompt, args the session), as a
@@ -27,11 +45,26 @@
 (require 'harness-util)
 
 (defcustom harness-naming-auto t
-  "When non-nil, name a nameless session after its first turn."
+  "When non-nil, name a nameless session as soon as its first message is sent."
   :type 'boolean :group 'harness)
+
+(defcustom harness-naming-model 'auto
+  "Model that names a session from its first message, as PROVIDER:NAME, or `auto'.
+`auto' (the default) asks the session's provider for its `cheap' tier
+\(see `harness-provider-tier-model'): a title is a few words, which the
+fastest, cheapest model writes as well as any, falling back to the
+session's own model when the provider names none.  A PROVIDER:NAME
+forces that model, and nil uses the session's own model."
+  :type '(choice (const :tag "The session provider's cheap model" auto)
+                 (const :tag "The session's own model" nil)
+                 (string :tag "Model" :names model))
+  :group 'harness)
 
 (defconst harness-naming--max-length 60
   "Longest name the model may give a session.")
+
+(defconst harness-naming--max-tokens 40
+  "Output budget of a naming request: a title is a handful of words.")
 
 (defconst harness-naming--base-system-prompt
   "You write short titles for conversations between a software engineer and a coding agent.  A good title says what the conversation is about in 3 to 6 words, like a commit subject or a ticket title."
@@ -40,7 +73,24 @@ Modules add to it per session through the `naming/system-prompt' filter.")
 
 (defconst harness-naming--request-text
   "Give the conversation above a title of 3 to 6 words.  Reply with the title only: no quotes, no trailing period, no markdown, no explanation."
-  "User message that asks the model for a title.")
+  "User message that asks the model for a title of the whole conversation.")
+
+(defconst harness-naming--opening-text
+  "The engineer opened a conversation with the agent with this message:"
+  "Line before the opening message in a request that names a session from it.")
+
+(defconst harness-naming--latest-text
+  "Their latest message in it:"
+  "Line before the latest message, when the conversation has moved on since.")
+
+(defconst harness-naming--opening-request-text
+  "Give the conversation a title of 3 to 6 words.  Do not answer the message or carry it out.  Reply with the title only: no quotes, no trailing period, no markdown, no explanation."
+  "Text that asks the model for a title of a conversation from its messages.")
+
+(defconst harness-naming--message-chars 3000
+  "Characters of a message that a request naming a session from it carries.
+The start of a long message (a task's whole write-up, say) is enough to
+title it, and keeps the request short.")
 
 (defconst harness-naming--skip-kinds '(btw subagent)
   "Session kinds that are never named automatically.")
@@ -63,11 +113,63 @@ trailing period, collapses whitespace and truncates to
     (unless (string-empty-p line)
       (harness-truncate-end line harness-naming--max-length))))
 
-;;;; Naming
+;;;; What the model is asked
 
 (defun harness-naming--system-prompt (session)
   "Return the naming system prompt for SESSION after `naming/system-prompt'."
   (harness-run-filter 'naming/system-prompt harness-naming--base-system-prompt session))
+
+(defun harness-naming--model (session)
+  "Return the model that names SESSION from its first message.
+See `harness-naming-model'."
+  (let ((model (plist-get session :model))
+        (choice harness-naming-model))
+    (cond ((or (eq choice 'auto) (equal choice "auto"))
+           (or (and model (harness-method-exists-p 'provider/tier-model)
+                    (ignore-errors (harness-call 'provider/tier-model model 'cheap)))
+               model))
+          ((and (stringp choice) (not (string-empty-p choice))) choice)
+          (t model))))
+
+(defun harness-naming--user-texts (session-id)
+  "Return the texts of SESSION-ID's user messages that title it, oldest first.
+That is every message the user (or another session's agent) wrote:
+what the harness sent on its own and the notes that hand a conversation
+over to another model say nothing of what it is about.  The opening
+message counts whoever sent it, as a task's prompt does."
+  (let ((texts nil) (first t))
+    (dolist (node (harness-call 'session/nodes session-id))
+      (when (and (eq (plist-get node :kind) 'user)
+                 (not (harness-node-handoff node))
+                 (not (harness-string-blank-p (plist-get node :content)))
+                 (or first (not (eq (harness-sender-kind (harness-node-sender node)) 'system))))
+        (setq first nil)
+        (push (string-trim (plist-get node :content)) texts)))
+    (nreverse texts)))
+
+(defun harness-naming--opening (session-id)
+  "Return (OPENING . LATEST), the messages SESSION-ID is named from, or nil.
+OPENING is the conversation's first user message, LATEST its last one
+when that is another (nil otherwise).  Nil when it has no user message."
+  (let ((texts (harness-naming--user-texts session-id)))
+    (when texts
+      (cons (car texts) (and (cdr texts) (car (last texts)))))))
+
+(defun harness-naming--quote (text)
+  "Return TEXT cut to `harness-naming--message-chars', between message tags."
+  (format "<message>\n%s\n</message>" (harness-truncate-end text harness-naming--message-chars)))
+
+(defun harness-naming--opening-blocks (opening)
+  "Return the content of a request naming a session from OPENING.
+OPENING is what `harness-naming--opening' returns.  The question comes
+last, in a block of its own."
+  (list (list :type "text"
+              :text (concat harness-naming--opening-text "\n\n" (harness-naming--quote (car opening))
+                            (if (cdr opening)
+                                (concat "\n\n" harness-naming--latest-text "\n\n"
+                                        (harness-naming--quote (cdr opening)))
+                              "")))
+        (list :type "text" :text harness-naming--opening-request-text)))
 
 (defun harness-naming--messages (session-id)
   "Return the naming messages for SESSION-ID: the transcript plus the question."
@@ -96,34 +198,7 @@ Only a state the session's model can continue is forked (see
                          nil))
       (harness-resolved nil))))
 
-(defun harness-naming--request (session state promise)
-  "Send the naming request for SESSION with provider STATE, settling PROMISE."
-  (let ((sid (plist-get session :id)) (text ""))
-    (harness-call
-     'provider/complete
-     (list :model (plist-get session :model) :session session
-           :system (harness-naming--system-prompt session)
-           :messages (harness-naming--messages sid)
-           :tools nil :provider-state state :max-tokens 40
-           :on-event
-           (lambda (ev)
-             (pcase (plist-get ev :type)
-               ('text (setq text (concat text (plist-get ev :delta))))
-               ('done
-                (let* ((reason (plist-get ev :stop-reason))
-                       (name (harness-naming-sanitise text))
-                       (problem (cond ((memq reason '(error cancelled))
-                                       (or (plist-get ev :error) (format "%s" reason)))
-                                      ((null name) "the model returned no usable title"))))
-                  (if problem
-                      (harness-naming--fail sid promise problem)
-                    (condition-case err
-                        (progn
-                          (harness-call 'session/update sid :name name)
-                          (harness-emit 'naming/done sid name)
-                          (harness-resolve promise name))
-                      (error (harness-naming--fail sid promise err))))))
-               (_ nil)))))))
+;;;; Asking
 
 (defun harness-naming--fail (session-id promise err)
   "Reject PROMISE with ERR and tell SESSION-ID about it."
@@ -133,46 +208,126 @@ Only a state the session's model can continue is forked (see
     (harness-emit 'naming/failed session-id msg)
     (harness-reject promise err)))
 
-(harness-defmethod naming/name (session-id)
+(defun harness-naming--store (sid name before promise)
+  "Store NAME as session SID's name and resolve PROMISE with it.
+BEFORE is the name SID had when it was asked for; a session renamed
+since keeps its new name, which PROMISE resolves with instead."
+  (let ((now (plist-get (harness-call 'session/get sid) :name)))
+    (if (equal now before)
+        (progn
+          (harness-call 'session/update sid :name name)
+          (harness-emit 'naming/done sid name)
+          (harness-resolve promise name))
+      (harness-log 'info "naming %s: renamed to %S meanwhile, so %S is dropped" sid now name)
+      (harness-resolve promise now))))
+
+(defun harness-naming--on-event (sid before promise)
+  "Return the event handler of a naming request for session SID.
+It gathers the reply and settles PROMISE when the request is done,
+storing the name unless the session's name is no longer BEFORE."
+  (let ((text ""))
+    (lambda (ev)
+      (pcase (plist-get ev :type)
+        ('text (setq text (concat text (plist-get ev :delta))))
+        ('done
+         (let* ((reason (plist-get ev :stop-reason))
+                (name (harness-naming-sanitise text))
+                (problem (cond ((memq reason '(error cancelled))
+                                (or (plist-get ev :error) (format "%s" reason)))
+                               ((null name) "the model returned no usable title"))))
+           (if problem
+               (harness-naming--fail sid promise problem)
+             (condition-case err
+                 (harness-naming--store sid name before promise)
+               (error (harness-naming--fail sid promise err))))))
+        (_ nil)))))
+
+(defun harness-naming--request (session state promise)
+  "Name SESSION from its whole conversation with provider STATE, settling PROMISE."
+  (let ((sid (plist-get session :id)))
+    (harness-call
+     'provider/complete
+     (list :model (plist-get session :model) :session session
+           :system (harness-naming--system-prompt session)
+           :messages (harness-naming--messages sid)
+           :tools nil :provider-state state :max-tokens harness-naming--max-tokens
+           :on-event (harness-naming--on-event sid (plist-get session :name) promise)))))
+
+(defun harness-naming--opening-request (session promise)
+  "Name SESSION from its opening message with the naming model, settling PROMISE.
+The request stands on its own, beside the session's turn: no transcript,
+no provider state, and `:ephemeral', so a hosted provider answers it
+apart from the session's conversation.  The session record it carries
+has no provider state for the same reason."
+  (let* ((sid (plist-get session :id))
+         (opening (or (harness-naming--opening sid)
+                      (signal 'harness-error (list "the session has no message to name it from")))))
+    (harness-call
+     'provider/complete
+     (list :model (harness-naming--model session)
+           :session (list :id sid :cwd (plist-get session :cwd) :host (plist-get session :host))
+           :ephemeral t
+           :system (harness-naming--system-prompt session)
+           :messages (list (list :role 'user :content (harness-naming--opening-blocks opening)))
+           :tools nil :no-thinking t :max-tokens harness-naming--max-tokens
+           :on-event (harness-naming--on-event sid (plist-get session :name) promise)))))
+
+(harness-defmethod naming/name (session-id &optional opts)
   "Ask the model for a title for SESSION-ID; return a promise of the name.
-The name is stored with `session/update'.  A second call while one is
-running returns the running promise."
+With OPTS `:opening' non-nil the title comes from the conversation's
+opening message (and its latest one, when it has moved on since), in a
+request of its own to `harness-naming-model' that runs beside the
+session's turn: how a session is named as soon as its first message is
+sent.  Without it the whole conversation is titled, on the session's
+own model and a fork of its provider state where the provider can fork
+one, so the cached prefix is reused.
+The name is stored with `session/update', unless the session was renamed
+while the model was asked: the promise then resolves with the name it
+has.  A second call while one is running returns the running promise."
   (or (gethash session-id harness-naming--running)
       (let ((session (harness-call 'session/get session-id))
             (promise (harness-make-promise)))
         (puthash session-id promise harness-naming--running)
         (harness-finally promise (lambda () (remhash session-id harness-naming--running)))
         (harness-call 'session/hint session-id "Naming session…")
-        (harness-then (harness-naming--forked-state session)
-                      (lambda (state)
-                        (condition-case err
-                            (harness-naming--request session state promise)
-                          (error (harness-naming--fail session-id promise err))))
-                      (lambda (err) (harness-naming--fail session-id promise err)))
+        (if (harness-json-true-p (plist-get opts :opening))
+            (condition-case err
+                (harness-naming--opening-request session promise)
+              (error (harness-naming--fail session-id promise err)))
+          (harness-then (harness-naming--forked-state session)
+                        (lambda (state)
+                          (condition-case err
+                              (harness-naming--request session state promise)
+                            (error (harness-naming--fail session-id promise err))))
+                        (lambda (err) (harness-naming--fail session-id promise err))))
         promise)))
 
 ;;;; Automatic naming
 
-(defun harness-naming--first-turn-p (session-id)
-  "Non-nil when SESSION-ID has at least one user and one assistant node."
-  (let ((kinds (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes session-id))))
-    (and (memq 'user kinds) (memq 'assistant kinds))))
-
-(defun harness-naming--on-turn-ended (session-id reason)
-  "Name SESSION-ID after its first turn when it has no name.
-REASON is the turn's stop reason; only `end-turn' counts."
+(defun harness-naming--on-turn-started (session-id)
+  "Name SESSION-ID from its first message as its turn starts, if it is nameless.
+That is as soon as its first message is sent: the request runs beside
+the turn (`naming/name' with `:opening'), so the name is there while
+the turn works, however long it takes.  A session still nameless when
+a later turn starts, because its naming failed, say, is named then."
   (when (and harness-naming-auto
-             (eq reason 'end-turn)
              (harness-call 'session/exists-p session-id))
     (let ((session (harness-call 'session/get session-id)))
       (when (and (harness-string-blank-p (plist-get session :name))
                  (not (memq (plist-get session :kind) harness-naming--skip-kinds))
-                 (harness-naming--first-turn-p session-id))
-        (harness-call 'naming/name session-id)))))
+                 (harness-naming--opening session-id))
+        (harness-call 'naming/name session-id '(:opening t))))))
 
 (defun harness-naming--init ()
-  "Subscribe automatic naming to the end of turns."
-  (harness-on 'agent/turn-ended #'harness-naming--on-turn-ended))
+  "Subscribe automatic naming to the start of turns.
+Naming once followed the end of turns: a harness reloaded from that
+version drops that subscription here."
+  (harness-off (cons 'agent/turn-ended 'harness-naming--on-turn-ended))
+  (harness-on 'agent/turn-started #'harness-naming--on-turn-started))
+
+(defun harness-naming--shutdown ()
+  "Stop naming sessions automatically."
+  (harness-off (cons 'agent/turn-started #'harness-naming--on-turn-started)))
 
 (harness-naming--init)
 
@@ -180,9 +335,10 @@ REASON is the turn's stop reason; only `end-turn' counts."
 (harness-declare-event 'naming/failed "(SESSION-ID MESSAGE) when naming fails.")
 
 (harness-define-module 'naming
-  :doc "Name nameless sessions with the model after their first turn."
+  :doc "Name nameless sessions with a cheap model as soon as their first message is sent."
   :requires '(session provider agent)
-  :init #'harness-naming--init)
+  :init #'harness-naming--init
+  :shutdown #'harness-naming--shutdown)
 
 (provide 'harness-naming)
 ;;; harness-naming.el ends here

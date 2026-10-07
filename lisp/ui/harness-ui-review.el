@@ -10,7 +10,8 @@
 ;; user is.  One banner, one set of commands and keys, in two places:
 ;;
 ;;   the session  above its compose box, a chat panel
-;;                (`harness-chat-panel-functions'), with [Report] too;
+;;                (`harness-chat-panel-functions'), with [Review] too,
+;;                which pops the report out;
 ;;                in the session's own window, in a BTW over it, and in
 ;;                a task's session opened from the board -- the width is
 ;;                the window's;
@@ -24,7 +25,7 @@
 ;; A round whose turn ended without `hand_in' has no report, only what
 ;; the harness recorded for it (`harness-tasks--missing-report'): the
 ;; banner says in a line that nothing was handed in, its last message
-;; being right above, and has no [Report].
+;; being right above, and has no [Review].
 ;;
 ;; Under the banner the compose box writes the feedback that sends the
 ;; task back: C-c C-c takes what the box holds to the task's session,
@@ -223,8 +224,9 @@ The harness records one such when the turn ends without `hand_in'
   "Return the report TASK handed in, drawn in full for the banner, or nil.
 Inside the session the report is always expanded -- the summary and
 every piece of evidence, each referenced call with its whole output --
-and indented as the banner's text.  It is the drawing of the [Report]
-popout (`harness-ui-report-string'), sized for this buffer's window.
+and indented as the banner's text.  It is the drawing of the report
+popout [Review] opens (`harness-ui-report-string'), sized for this
+buffer's window.
 A round that handed no report in says so instead, in a line: the
 session's last message, all the harness has for it, is right above.
 A report that cannot be drawn says so rather than take the compose box
@@ -247,7 +249,7 @@ goes between what verifying does and the buttons: the work is read
 before it is verified or sent back.  IN-REPORT is non-nil when the banner
 is drawn at the end of TASK's report popout
 (`harness-ui-report-panel-functions'): it speaks of the task then, and
-leaves [Report] out, the report being the window it is drawn in."
+leaves [Review] out, the report being the window it is drawn in."
   (let* ((in-report (or in-report (and (fboundp 'harness-ui-report-task)
                                        (harness-ui-report-task))))
          (title (harness-ui-tasks--title task))
@@ -273,12 +275,13 @@ leaves [Report] out, the report being the window it is drawn in."
      (harness-ui-review--button "[Send back]" #'harness-ui-review-reject
                                 "Type the feedback in the box below, then C-c C-c")
      (harness-ui-review--key #'harness-ui-review-reject)
-     ;; A round that handed none in has nothing for [Report] to pop out
-     ;; that the session does not show already.
+     ;; A round that handed none in has nothing for [Review] to pop out
+     ;; that the session does not show already.  [Review] as on the
+     ;; board's card (`harness-ui-tasks--card-buttons'), not [Report].
      (when (and (not in-report) (plist-get task :report) (not (harness-ui-review--missing-p task))
                 (fboundp 'harness-ui-report-popout))
-       (concat "   " (harness-ui-review--button "[Report]" (lambda () (harness-ui-report-popout task))
-                                                "Pop the final message and evidence out in a window of their own")))
+       (concat "   " (harness-ui-review--button "[Review]" (lambda () (harness-ui-report-popout task))
+                                                "Review the final message and evidence in a window of their own")))
      "\n"
      "   " (propertize "C-c C-c in the box sends what you write back to this task."
                     'face 'harness-hint-face)
@@ -384,7 +387,7 @@ task's session for the feedback that sends it back
 (defun harness-ui-review--report-panel (task)
   "Return the review banner for the end of TASK's report, when it waits for review.
 On `harness-ui-report-panel-functions': the banner of TASK's session,
-less its [Report] button.  While it shows, the review keys are on, and
+less its [Review] button.  While it shows, the review keys are on, and
 the box under it sends TASK back (`harness-ui-review--report-compose')."
   (let ((review (harness-ui-review--reviewing-p task)))
     (harness-ui-review--keys review)

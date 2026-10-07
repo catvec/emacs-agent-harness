@@ -13,6 +13,7 @@
 
 (defvar harness-provider-claude-program)
 (defvar harness-provider-claude-permission-args)
+(defvar harness-provider-claude-auto-memory)
 (defvar harness-provider-claude--interrupt-timeout)
 (defvar harness-provider-claude--sessions)
 (defvar harness-sessions)
@@ -27,6 +28,9 @@
 (defvar harness-provider-claude--listing)
 (declare-function harness-provider-claude--forget-listing "harness-provider-claude")
 (declare-function harness-provider--forget "harness-provider")
+(defvar harness-provider-claude--call-output)
+(declare-function harness-provider-claude--handle-stream "harness-provider-claude")
+(declare-function harness-provider-claude--finish "harness-provider-claude")
 (declare-function harness-provider-claude-close "harness-provider-claude")
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 (declare-function harness-provider-claude--command "harness-provider-claude")
@@ -404,14 +408,14 @@ That is the harness's shorter budget for a task's session."
     ;; No cap: nothing is overridden, and the CLI's default stands.
     (should-not (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=25"
                         (harness-provider-claude--environment-for request)))
-    (should-not (car (last (harness-provider-claude--spawn-key request))))
+    (should-not (nth 4 (harness-provider-claude--spawn-key request)))
     ;; 256k of the model's 1M is 26%.
     (let ((capped (funcall with-window 256000)))
       (should (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=26"
                       (harness-provider-claude--environment-for capped)))
       ;; The percentage is part of the settings a process was spawned
       ;; with, so changing the cap restarts the CLI with the new one.
-      (should (equal 26 (car (last (harness-provider-claude--spawn-key capped))))))
+      (should (equal 26 (nth 4 (harness-provider-claude--spawn-key capped)))))
     ;; A tiny cap is clamped to the CLI's scale, and a window at or above
     ;; the model's is no cap at all.
     (should (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=1"
@@ -419,6 +423,41 @@ That is the harness's shorter budget for a task's session."
     (should-not (member "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=100"
                         (harness-provider-claude--environment-for
                          (funcall with-window 1000000))))))
+
+(ert-deftest harness-provider-claude-call-usage-follows-the-stream ()
+  "Each streamed message's output goes out as `call-usage', in parts.
+A `message_delta' counts its message's output so far, so only what it
+adds is reported; the next message counts from zero again, and a
+sub-agent's stream is left out."
+  (harness-provider-claude-test--setup)
+  (let* ((events nil)
+         (entry (harness-provider-claude--make-session
+                 :id "s-call-usage" :active t
+                 :on-event (lambda (ev) (push ev events))))
+         (stream (lambda (event &optional sub-agent)
+                   (harness-provider-claude--handle-stream entry event sub-agent)))
+         (reported (lambda ()
+                     (mapcar (lambda (e) (plist-get e :output))
+                             (cl-remove 'call-usage (reverse events)
+                                        :key (lambda (e) (plist-get e :type)) :test-not #'eq)))))
+    (funcall stream '(:type "message_start" :message (:usage (:input_tokens 10 :output_tokens 1))))
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 5)))
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 9)))
+    ;; A delta that adds nothing reports nothing.
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 9)))
+    (should (equal '(5 4) (funcall reported)))
+    ;; A sub-agent's message neither reports nor starts the count over.
+    (funcall stream '(:type "message_start" :message (:usage (:output_tokens 0))) "toolu_sub")
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 30)) "toolu_sub")
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 12)))
+    (should (equal '(5 4 3) (funcall reported)))
+    ;; The next message of the main conversation counts from zero.
+    (funcall stream '(:type "message_start" :message (:usage (:output_tokens 0))))
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 2)))
+    (should (equal '(5 4 3 2) (funcall reported)))
+    ;; The end of the turn forgets the count.
+    (harness-provider-claude--finish entry '(:type done :stop-reason end-turn))
+    (should-not (gethash "s-call-usage" harness-provider-claude--call-output))))
 
 (ert-deftest harness-provider-claude-turn-with-hosted-tool-call ()
   (harness-provider-claude-test--setup)
@@ -459,6 +498,12 @@ That is the harness's shorter budget for a task's session."
       (should (= 2000 (plist-get usage :cache-read)))
       (should (= 100 (plist-get usage :cache-write)))
       (should (= 2112 (plist-get usage :context))))
+    ;; The streamed message's output was reported as it came, for the
+    ;; output rate, before the turn's usage counted it.
+    (should (equal '(7) (mapcar (lambda (e) (plist-get e :output))
+                                (cl-remove 'call-usage events
+                                           :key (lambda (e) (plist-get e :type)) :test-not #'eq))))
+    (should (< (cl-position 'call-usage types) (cl-position 'usage types)))
     (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
     ;; Quota windows were reported and remembered.
     (let ((q (harness-provider-claude-test--find events 'quota)))
@@ -632,7 +677,7 @@ session's own process is left alone."
          (env (plist-get dump :env))
          (ran-in (file-name-as-directory (file-truename (plist-get dump :cwd)))))
     (should (eq 'end-turn (plist-get (harness-provider-claude-test--find turn 'done) :stop-reason)))
-    ;; A session's turn loads what the CLI loads.
+    ;; A session's turn loads the CLAUDE.md files, as the CLI does.
     (should-not (plist-get own-env :CLAUDE_CODE_DISABLE_CLAUDE_MDS))
     ;; The one-off is answered...
     (should (equal "hello" (harness-provider-claude-test--text (car first))))
@@ -662,6 +707,57 @@ session's own process is left alone."
     (should (eq own (harness-provider-claude-session-process (gethash "s9" harness-provider-claude--sessions))))
     (should (process-live-p own))
     (harness-provider-claude-close "s9")))
+
+(ert-deftest harness-provider-claude-session-loads-no-auto-memory ()
+  "A session's CLI loads CLAUDE.md but not Claude Code's auto memory.
+The memory's index, MEMORY.md, lists notes under ~/.claude/projects/,
+and the model went to read them with the harness's tools, outside the
+allowed directories, so every session asked for that directory.
+`harness-provider-claude-auto-memory' loads it again, and changing it
+restarts the process in its conversation.  A one-off request loads
+none either way."
+  (harness-provider-claude-test--setup)
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment
+          (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file)
+                ;; Whatever runs the tests has no say in it.
+                (cl-remove-if (lambda (e) (string-prefix-p "CLAUDE_CODE_DISABLE_AUTO_MEMORY=" e))
+                              process-environment)))
+         (harness-provider-claude-auto-memory nil)
+         (cwd (harness-test-temp-dir))
+         (request (lambda (text)
+                    (harness-provider-claude-test--request "s-mem" text :session (list :id "s-mem" :cwd cwd))))
+         (process (lambda () (harness-provider-claude-session-process
+                              (gethash "s-mem" harness-provider-claude--sessions))))
+         (first (car (harness-provider-claude-test--run (funcall request "hi"))))
+         (env (plist-get (harness-provider-claude-test--read-argv argv-file) :env))
+         (proc (funcall process)))
+    ;; By default the CLI loads the CLAUDE.md files and no auto memory.
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find first 'done) :stop-reason)))
+    (should (equal "1" (plist-get env :CLAUDE_CODE_DISABLE_AUTO_MEMORY)))
+    (should-not (plist-get env :CLAUDE_CODE_DISABLE_CLAUDE_MDS))
+    ;; Unchanged, the next turn goes to the same process.
+    (harness-provider-claude-test--run (funcall request "hi again"))
+    (should (eq proc (funcall process)))
+    ;; Turned on, the next turn restarts the CLI in its conversation, and
+    ;; it loads the memory as `claude' does.
+    (setq harness-provider-claude-auto-memory t)
+    (let* ((again (car (harness-provider-claude-test--run (funcall request "and again"))))
+           (dump (harness-provider-claude-test--read-argv argv-file))
+           (argv (plist-get dump :argv)))
+      (should (eq 'end-turn (plist-get (harness-provider-claude-test--find again 'done) :stop-reason)))
+      (should-not (eq proc (funcall process)))
+      (should (equal (harness-provider-claude-test--cli-session first)
+                     (nth (1+ (cl-position "--resume" argv :test #'equal)) argv)))
+      (should-not (plist-get (plist-get dump :env) :CLAUDE_CODE_DISABLE_AUTO_MEMORY))
+      (should-not (plist-get (plist-get dump :env) :CLAUDE_CODE_DISABLE_CLAUDE_MDS)))
+    ;; A one-off request (the permission judge's) loads none even so.
+    (let ((one-off (harness-provider-claude-test--one-off "s-mem-perms" cwd "is this call safe")))
+      (should (eq 'end-turn (plist-get (harness-provider-claude-test--find (car one-off) 'done) :stop-reason)))
+      (should (equal "1" (plist-get (plist-get (cdr one-off) :env) :CLAUDE_CODE_DISABLE_AUTO_MEMORY))))
+    (harness-test-wait (lambda () (null (harness-provider-claude-test--one-off-processes "s-mem-perms")))
+                       5 "the one-off's process to exit")
+    (harness-provider-claude-close "s-mem")))
 
 (ert-deftest harness-provider-claude-one-off-request-ends-every-way ()
   "A one-off request's process goes however the request ends.

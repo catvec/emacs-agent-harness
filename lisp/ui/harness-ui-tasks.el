@@ -47,8 +47,15 @@
 ;; switch is the harness option `harness-tasks-require-verification', so
 ;; it holds for every board and across restarts.
 ;;
+;; The header line counts the tasks of each column and, as a chat's
+;; header does for its session, says what they cost and who pays: their
+;; summed cost, or the plan that pays for them with its quota windows,
+;; then the fullest budget that applies to the project.  A click there
+;; opens the usage dashboard.
+;;
 ;; Everything comes over ACP (`_harness/task/…', `_harness/config/set'
-;; for the Review switch, plus the session cache), so the board works
+;; for the Review switch, `_harness/usage/project-budgets' for the
+;; header's budgets, plus the session cache), so the board works
 ;; against a remote harness too.  The list region is
 ;; redrawn as a whole when anything changes -- a board holds tens of
 ;; tasks, not a transcript -- while the compose box is never touched.
@@ -180,6 +187,9 @@ write-up) or reject (feedback that sends a task back from review).")
 (defvar-local harness-ui-tasks--bulk nil
   "Non-nil when the setting buttons change every current task at once.")
 (defvar-local harness-ui-tasks--list-end nil "Marker: end of the board, start of the tail.")
+(defvar-local harness-ui-tasks--budgets nil
+  "Status of every budget that applies to the project, for the header.
+What `_harness/usage/project-budgets' returned; nil without the usage module.")
 
 (defvar-local harness-ui-tasks-filter nil
   "When non-nil, the board shows some of its tasks only, and says so.
@@ -546,6 +556,9 @@ card's title, so the prompt shows here."
                         ('done (let ((completed (harness-ui-tasks--completed task)))
                                  (and (> completed 0) (format "done %s" (harness-relative-time completed)))))
                         (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))
+                      ;; How fast the session writes, while it is open.
+                      (and session (not (equal (plist-get session :status) "inactive"))
+                           (harness-ui-format-rate session))
                       (and session (> (harness-usage-list-cost usage) 0)
                            (harness-ui-format-spend session))))))
     (propertize (string-join parts " · ") 'face 'harness-dim-face)))
@@ -661,7 +674,7 @@ may lag, so it is asked first."
 
 (defun harness-ui-tasks--card-buttons (task)
   "Buttons for TASK's two most useful actions besides opening it.
-A task that handed a report in (`hand_in') gets a [Report] button too:
+A task that handed a report in (`hand_in') gets a [Review] button too:
 its final message and evidence, in a popout.  One whose turn ended
 without it gets [No report] there instead, which pops out what the
 harness recorded for it: that nothing was handed in, and the session's
@@ -677,12 +690,15 @@ last message (`harness-tasks--missing-report')."
                 (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))
                 " ")
      (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
+       ;; [Review] rather than [Report], which reads as reporting the
+       ;; agent for something bad: the button opens the work it handed
+       ;; in, to look it over.
        (concat " " (harness-ui-tasks--button
-                     (if missing "[No report]" "[Report]")
+                     (if missing "[No report]" "[Review]")
                      (lambda () (harness-ui-report-popout task))
                      (if missing
                          "It handed no report in: no summary, no evidence; see what its session said last"
-                       "What it handed in: the final message and the evidence")
+                       "Review what it handed in: the final message and the evidence")
                      "report")))
      (when (harness-ui-tasks--open-harness-p task)
        (concat " " (harness-ui-tasks--button
@@ -1241,15 +1257,16 @@ board, so what was skipped is only skipped while both are unchanged."
 
 (defun harness-ui-tasks--board-key ()
   "Return what the board region's drawing depends on.
-The tasks and their sessions (their status, todos and cost feed the
-cards), the clock, the caps the window allows, and the state a card
-cannot show: which column is folded, which is expanded, which tasks
-are submitting, which cards you folded their recap on, and whether
-finished work waits for your review."
+The tasks and their sessions (their status, todos, cost and output
+rate feed the cards), the clock, the caps the window allows, and the
+state a card cannot show: which column is folded, which is expanded,
+which tasks are submitting, which cards you folded their recap on, and
+whether finished work waits for your review."
   (list harness-ui-tasks--tasks
         (mapcar (lambda (session)
                   (list (plist-get session :id) (plist-get session :name) (plist-get session :status)
-                        (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)))
+                        (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)
+                        (harness-ui-session-rate (plist-get session :id))))
                 (harness-ui-sessions))
         (truncate (float-time) 5)
         (harness-ui-tasks--window)
@@ -1521,9 +1538,8 @@ before a key is pressed."
         (unless (string-empty-p line)
           (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
     (let ((start (point)))
-      ;; The bar only when there is a line to carry it.
-      (when (and messaging harness-compose-attachments) (insert bar))
-      (harness-compose-insert-attachments)
+      ;; The bar down every attachment's line.
+      (harness-compose-insert-attachments (and messaging bar))
       (put-text-property start (point) 'harness-task-tail 'attachments)
       (when band (add-face-text-property start (point) band t)))))
 
@@ -1693,16 +1709,44 @@ it stands out: work then merges without anyone looking at it."
                                (propertize "[Review: off]" 'face 'harness-task-review-off-face))
                              #'harness-ui-tasks-toggle-review #'harness-ui-tasks--review-help))
 
+(defun harness-ui-tasks--spend (groups)
+  "Return what the tasks of GROUPS cost and who pays, for the header.
+GROUPS is what `harness-ui-tasks--visible' returns.  As a chat's header
+does for its session, it shows their summed cost, or the plan that pays
+for them with its quota windows; the model of new tasks names the
+provider whose account stands for them all."
+  (harness-ui-format-spend
+   (harness-ui-sessions-total
+    (delq nil (mapcar #'harness-ui-tasks--session (apply #'append (mapcar #'cdr groups))))
+    (plist-get harness-ui-tasks--new :model))
+   t "These tasks"))
+
+(defun harness-ui-tasks--spend-segment (groups sep)
+  "Return the header's (TEXT PRIORITY MIN) of what the tasks of GROUPS cost.
+TEXT, after SEP, is `harness-ui-tasks--spend' and the fullest budget
+that applies to the project; MIN leaves the budget out.  A click on
+either opens the usage dashboard.  It stays longer than the counts and
+most buttons: the board says nowhere else how much of the plan is left."
+  (let ((spend (harness-ui-tasks--spend groups))
+        (budgets (harness-ui-format-budgets harness-ui-tasks--budgets)))
+    (list (concat sep (harness-ui-spend-segment
+                       (if budgets (concat spend " " harness-ui-tasks--dot " " budgets) spend)))
+          75
+          (and budgets (concat sep (harness-ui-spend-segment spend))))))
+
 (defun harness-ui-tasks--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
 In a window too narrow for all of it, [Add session] goes first, then
 the counts of completed, merging, pending and working tasks and the
 bulk-edit segment; the project's name shortens after those, then the
 other modules' segments (`harness-ui-tasks-header-functions', the
-search's [Search]) and [BTW] and [Archived].  What needs you, what
-waits for your review, the Review switch, [Refresh] and a board still
-loading stay longest.  WIDTH is as `harness-ui-fit-header' takes it."
-  (let* ((counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) (harness-ui-tasks--visible)))
+search's [Search]) and [BTW] and [Archived], then the Review switch.
+What the tasks cost and the plan's quota stay longer, the budget going
+first (`harness-ui-tasks--spend-segment'); what needs you, what waits
+for your review, [Refresh] and a board still loading stay longest.
+WIDTH is as `harness-ui-fit-header' takes it."
+  (let* ((groups (harness-ui-tasks--visible))
+         (counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) groups))
          (needs (alist-get 'needs-input counts))
          (review (alist-get 'review counts))
          (name (if harness-ui-tasks--project
@@ -1738,6 +1782,7 @@ loading stay longest.  WIDTH is as `harness-ui-fit-header' takes it."
       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
             40)
       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)
+      (harness-ui-tasks--spend-segment groups (funcall gap))
       (list (concat (funcall gap)
                     (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
             (if harness-ui-tasks--bulk 82 30))
@@ -1770,6 +1815,17 @@ loading stay longest.  WIDTH is as `harness-ui-fit-header' takes it."
             harness-ui-tasks--error (format "%s failed: %s" what (harness-error-message err)))
       (harness-ui-tasks--render)
       (harness-ui-tasks--render-tail))))
+
+(defun harness-ui-tasks--fetch-budgets (buffer root)
+  "Load the status of the budgets that apply to ROOT, BUFFER's project.
+The header shows them; without the usage module there are none."
+  (harness-ui-call "_harness/usage/project-budgets" (list :project root)
+                   (lambda (statuses)
+                     (when (harness-ui-tasks--board-p buffer)
+                       (with-current-buffer buffer
+                         (setq harness-ui-tasks--budgets statuses)
+                         (force-mode-line-update))))
+                   #'ignore))
 
 (defun harness-ui-tasks--fetch (buffer &optional quiet)
   "Load BUFFER's project root, tasks and settings from the harness.
@@ -1804,6 +1860,7 @@ QUIET refreshes in the background, without the loading indicator."
          (lambda (root)
            (when (buffer-live-p buffer)
              (with-current-buffer buffer (setq harness-ui-tasks--project root)))
+           (harness-ui-tasks--fetch-budgets buffer root)
            (harness-ui-call
             "_harness/task/list" (list :cwd dir)
             (lambda (tasks)
@@ -1824,10 +1881,11 @@ QUIET refreshes in the background, without the loading indicator."
   '("merge/queued" "merge/started" "merge/conflict" "merge/finished"
     "agent/turn-started" "agent/turn-ended" "session/status" "session/pending-changed"
     "session/created" "session/deleted" "worktree/created" "worktree/removed"
-    "harness/reloaded" "config/changed")
-  "Events after which every board quietly reloads its tasks.
+    "harness/reloaded" "config/changed" "usage/budgets-changed" "usage/budget-warning")
+  "Events after which every board quietly reloads its tasks and budgets.
 `task/changed' and `task/deleted' update a board directly; these catch
-anything that moves a task without one, so a board never drifts.")
+anything that moves a task without one, so a board never drifts.  A
+turn's end and the budget events also change what its budgets show.")
 
 (defun harness-ui-tasks--refresh-soon (buffer)
   "Reload BUFFER's tasks in the background, once a burst of events settles."
@@ -1882,9 +1940,22 @@ anything that moves a task without one, so a board never drifts.")
     (when (buffer-local-value 'harness-ui-tasks--tasks b)
       (harness-ui-tasks--schedule-render b))))
 
+(defun harness-ui-tasks--on-rate (id _rate)
+  "Redraw the boards with a card of session ID, which shows its output rate.
+ID nil, after every rate was fetched again, redraws every board."
+  (dolist (b (harness-ui-tasks--buffers))
+    (when (cl-some (lambda (task) (or (null id) (equal (plist-get task :session) id)))
+                   (buffer-local-value 'harness-ui-tasks--tasks b))
+      (harness-ui-tasks--schedule-render b))))
+
 (defun harness-ui-tasks--on-redraw ()
   "Reload every board after a reload or reconnect."
   (mapc #'harness-ui-tasks--fetch (harness-ui-tasks--buffers)))
+
+(defun harness-ui-tasks--on-quota (_provider _quota)
+  "Redraw the boards' header lines, which show the plan's quota."
+  (dolist (b (harness-ui-tasks--buffers))
+    (with-current-buffer b (force-mode-line-update))))
 
 (defvar harness-ui-tasks--timer nil "Refreshes elapsed times on visible boards.")
 
@@ -1896,7 +1967,25 @@ anything that moves a task without one, so a board never drifts.")
 ;;;; Mode
 
 (defvar harness-ui-tasks-board-map (make-sparse-keymap)
-  "Keys on the board (outside the compose box).")
+  "Keys on the board (outside the compose box).
+The keys that act on the task at point act on the card point is on:
+off a card they type, into the compose box, as every letter the board
+does not bind does (`harness-ui-tasks--on-card-p').")
+
+(defun harness-ui-tasks--on-card-p ()
+  "Nil when point is on a task board but not on a card.
+The board's keys for the task at point have nothing to act on there,
+so they type, into the compose box (`harness-compose-acts-p')."
+  (or (not (harness-ui-tasks--board-p (current-buffer)))
+      (get-text-property (point) 'harness-task-id)))
+
+;; Typing off a card, the board's keys for the task at point (see above).
+(dolist (command '(harness-ui-tasks-open-other harness-ui-tasks-start harness-ui-tasks-edit
+                   harness-ui-tasks-reply harness-ui-tasks-requests harness-ui-tasks-refine
+                   harness-ui-tasks-allow harness-ui-tasks-deny harness-ui-tasks-cancel
+                   harness-ui-tasks-complete harness-ui-tasks-verify harness-ui-tasks-reject
+                   harness-ui-tasks-merge harness-ui-tasks-archive harness-ui-tasks-delete))
+  (put command 'harness-compose-acts-p #'harness-ui-tasks--on-card-p))
 
 ;; Filled at top level, not in the `defvar', so a reload updates the map.
 (let ((map harness-ui-tasks-board-map))
@@ -1954,6 +2043,10 @@ anything that moves a task without one, so a board never drifts.")
 
 (define-derived-mode harness-ui-tasks-mode special-mode "Tasks"
   "Major mode of the task board: a kanban of tasks above a compose box.
+On the board the keys below act on the board, or on the task whose card
+point is on.  Any other letter goes into the compose box, and so does a
+task's key typed off a card.
+
 \\{harness-ui-tasks-board-map}"
   (setq buffer-read-only nil)
   ;; Lines wrap, for the compose box (`harness-compose-setup'): the board
@@ -2666,7 +2759,9 @@ BTW over the board; a failure shows on the board too."
 (defun harness-ui-tasks--init ()
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
+  (add-hook 'harness-ui-rate-functions #'harness-ui-tasks--on-rate)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
+  (add-hook 'harness-ui-quota-functions #'harness-ui-tasks--on-quota)
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
   (setq harness-ui-tasks--timer (run-with-timer harness-ui-tasks--tick-interval harness-ui-tasks--tick-interval #'harness-ui-tasks--tick))
   (define-key harness-ui-map (kbd "a") #'harness-tasks))

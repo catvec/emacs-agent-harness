@@ -22,6 +22,11 @@
      (setq harness-fallback-models nil)
      (let ((harness-provider-demo--delay 0.005)
            (harness-acp-token nil)
+           ;; A budget over everything fetches Anthropic's cost report in
+           ;; the background: no key may reach a real one.
+           (harness-anthropic-admin-api-key nil)
+           (auth-sources nil)
+           (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment))
            (default-directory dir))
        (unwind-protect
            (progn ,@body)
@@ -268,15 +273,132 @@ their sum; TAB, RET, w and the heading's button show and hide them."
           (should (string-match-p "███░" text))))
       (with-current-buffer harness-ui-usage--buffer-name
         (goto-char (point-min))
-        (should (search-forward "[remove]" nil t))
+        (should (search-forward "[delete]" nil t))
         (let ((status (harness-ui-usage--budget-at-point)))
           (should status)
           (should (= 8.0 (plist-get status :amount)))
           (should (< (abs (- 0.25 (plist-get status :fraction))) 1e-6)))
-        ;; Removing through the command asks, then calls the method.
-        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
-          (harness-ui-usage-remove-budget))
+        ;; Deleting through the button asks, then calls the method.
+        (let ((asked nil))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (prompt) (setq asked prompt) t)))
+            (backward-char 2)
+            (push-button))
+          (should (string-match-p "\\`Delete budget harness-test-.+\\? \\'" asked)))
         (harness-test-wait (lambda () (null (harness-call 'usage/budgets))) 5 "budget removed")))))
+
+(defun harness-ui-usage-test-budget-lines ()
+  "Return (BUDGET . LINE) for each budget's line of the dashboard, in order."
+  (with-current-buffer harness-ui-usage--buffer-name
+    (save-excursion
+      (goto-char (point-min))
+      (let (lines)
+        (while (search-forward "[delete]" nil t)
+          (push (cons (plist-get (get-text-property (line-beginning-position) 'harness-ui-usage-budget) :budget)
+                      (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+                lines))
+        (nreverse lines)))))
+
+(defun harness-ui-usage-test-own-budget-session (name amount)
+  "Create a session NAME with a hard budget of its own of AMOUNT; return its id.
+The id is returned once the UI's session cache has the session."
+  (let ((sid (plist-get (harness-call 'session/create :cwd default-directory :model "demo:scripted"
+                                      :name name :budget (list :amount amount :hard t))
+                        :id)))
+    (harness-ui-refresh-sessions)
+    (harness-test-wait (lambda () (harness-ui-session sid)) 5 "session cached")
+    sid))
+
+(ert-deftest harness-ui-usage-budget-buttons-follow-its-name ()
+  "A budget's buttons come right after its name, [delete] first and in the
+same column on every line, so a window too narrow for the whole line,
+which is not wrapped, still shows them; the meters after them line up.
+A session's own budget has [delete] too, but no [baseline]."
+  (harness-ui-usage-test-with
+    (harness-ui-usage-test-own-budget-session "fix the login" 5)
+    (harness-ui-usage-test-record (float-time) (file-name-as-directory dir) "demo:scripted" 1.0)
+    (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                   (list :budget (list :scope "period" :period "month" :amount 100
+                                                       :baseline 20 :label "monthly cap")))
+    (harness-ui-usage-test-open)
+    (let* ((lines (harness-ui-usage-test-budget-lines))
+           (month (cdr (cl-find "monthly cap" lines :key (lambda (l) (plist-get (car l) :label)) :test #'equal)))
+           (own (cdr (cl-find-if (lambda (l) (plist-get (car l) :implicit)) lines))))
+      (should (= 2 (length lines)))
+      (should (string-match-p "\\`  monthly cap +\\[delete\\] \\[baseline\\] \\[plan\\]  " month))
+      (should (string-match-p "\\[delete\\] \\[plan\\]  " own))
+      (should-not (string-match-p "\\[baseline\\]" own))
+      (should (= (string-search "[delete]" month) (string-search "[delete]" own)))
+      ;; Every button fits in 60 columns; the whole line does not fit in 100.
+      (should (<= (+ (string-search "[plan]" month) (length "[plan]")) 60))
+      (should (> (length month) 100))
+      ;; The meters, and so the percentages after them, line up.
+      (should (= (string-search "%" month) (string-search "%" own))))))
+
+(ert-deftest harness-ui-usage-delete-a-sessions-own-budget ()
+  "A session's own budget is deleted on the dashboard like any other: d on
+its line asks, naming the session, and clears the budget on the session."
+  (harness-ui-usage-test-with
+    (let ((sid (harness-ui-usage-test-own-budget-session "fix the login" 5))
+          (asked nil))
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage--buffer-name
+        (goto-char (point-min))
+        (search-forward "[delete]")
+        (should (equal (concat "session:" sid)
+                       (plist-get (plist-get (harness-ui-usage--budget-at-point) :budget) :id)))
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (prompt) (setq asked prompt) t)))
+          (harness-ui-usage-remove)))
+      (should (equal "Delete the budget of session fix the login? " asked))
+      (harness-test-wait (lambda () (null (plist-get (harness-call 'session/get sid) :budget))) 5 "budget cleared")
+      (harness-test-wait (lambda () (string-match-p "no budgets yet" (harness-ui-usage-test-text))) 5 "line gone")
+      ;; The session says so in its transcript.
+      (should (cl-some (lambda (n) (and (eq 'hint (plist-get n :kind))
+                                        (string-match-p "budget removed" (plist-get n :content))))
+                       (harness-call 'session/nodes sid))))))
+
+(ert-deftest harness-ui-usage-delete-budget-anywhere-reads-one-by-name ()
+  "`harness-delete-budget' (C-c h B) offers every budget by name, the
+sessions' own too, and deletes the one chosen; on a budget's line of the
+dashboard, that budget is the default."
+  (harness-ui-usage-test-with
+    (let ((sid (harness-ui-usage-test-own-budget-session "fix the login" 5))
+          (offered nil))
+      (should (eq 'harness-delete-budget (lookup-key harness-ui-map (kbd "B"))))
+      (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                     (list :budget (list :scope "period" :period "month" :amount 100 :label "monthly cap")))
+      (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                     (list :budget (list :scope "period" :period "week" :amount 30 :label "weekly cap")))
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt table &rest _)
+                     (setq offered (mapcar #'car table))
+                     (cl-find-if (lambda (c) (string-prefix-p "weekly cap" c)) offered)))
+                  ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+          (call-interactively #'harness-delete-budget)
+          (harness-test-wait (lambda () (= 1 (length (harness-call 'usage/budgets)))) 5 "weekly cap deleted")))
+      (should (equal '("monthly cap  $0 / $100.00, soft" "weekly cap  $0 / $30.00, soft"
+                       "session fix the login  $0 / $5.00, hard")
+                     offered))
+      (should (equal "monthly cap" (plist-get (car (harness-call 'usage/budgets)) :label)))
+      (should (plist-get (harness-call 'session/get sid) :budget))
+      ;; On the dashboard, the budget on the current line is the default.
+      (harness-ui-usage-test-open)
+      (let (prompt default asked)
+        (with-current-buffer harness-ui-usage--buffer-name
+          (goto-char (point-min))
+          (search-forward "monthly cap")
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (p _table _pred _req _init _hist def &rest _)
+                       (setq prompt p default def)
+                       def))
+                    ((symbol-function 'yes-or-no-p) (lambda (p) (setq asked p) nil)))
+            (call-interactively #'harness-delete-budget)
+            (harness-test-wait (lambda () asked) 5 "asked")))
+        (should (equal "monthly cap  $0 / $100.00, soft" default))
+        (should (string-prefix-p "Delete budget (default monthly cap" prompt))
+        (should (equal "Delete budget monthly cap? " asked))
+        ;; Answering no deletes nothing.
+        (should (= 1 (length (harness-call 'usage/budgets))))))))
 
 (defvar harness-budget)
 
@@ -300,7 +422,7 @@ there are, and d on it says where to change it."
           (should-not (cl-some (lambda (l) (string-match-p "\\`  session " l)) lines)))
         (harness-ui-usage-test-goto "all sessions (setting)")
         (should (string-match-p "M-x harness-settings"
-                                (cadr (should-error (harness-ui-usage-remove-budget) :type 'user-error))))))
+                                (cadr (should-error (harness-ui-usage-remove) :type 'user-error))))))
     ;; Unset, it is gone.
     (with-current-buffer harness-ui-usage--buffer-name
       (harness-ui-usage-refresh)
@@ -397,65 +519,54 @@ there are, and d on it says where to change it."
         (cl-letf (((symbol-function 'read-number) (lambda (&rest _) -3)))
           (should-error (harness-ui-usage-set-baseline) :type 'user-error))))))
 
-(ert-deftest harness-ui-usage-import-api-cost-offers-a-baseline ()
-  "With an Admin API key, the month's Anthropic cost is offered as a month budget's baseline."
+(ert-deftest harness-ui-usage-import-api-cost-counts-in-budgets-over-everything ()
+  "I fetches what Anthropic billed now; a budget over everything counts it, beyond what was recorded."
   (harness-ui-usage-test-with
-    (let ((harness-anthropic-admin-api-key nil)
-          (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment))
-          (messages nil)
-          (requests 0))
-      (cl-letf (((symbol-function 'auth-source-search) (lambda (&rest _) nil))
-                ((symbol-function 'harness-http-request-json)
-                 (lambda (&rest _)
-                   (cl-incf requests)
+    (let ((messages nil)
+          (requests nil))
+      (cl-letf (((symbol-function 'harness-http-request-json)
+                 (lambda (url &rest _)
+                   (push url requests)
                    (harness-resolved '(:data ((:results ((:amount "1234" :currency "USD")))) :has_more :false))))
                 ((symbol-function 'message)
                  (lambda (format &rest args) (when format (push (apply #'format-message format args) messages)))))
         (harness-ui-usage-test-request "_harness/usage/set-budget"
                                        (list :budget (list :scope "period" :period "month" :amount 100 :label "monthly cap")))
         (harness-ui-usage-test-request "_harness/usage/set-budget"
-                                       (list :budget (list :scope "period" :period "week" :amount 30 :label "weekly cap")))
+                                       (list :budget (list :scope "project" :target (file-name-as-directory dir)
+                                                           :amount 30 :label "project cap")))
         (harness-ui-usage-test-open)
         (with-current-buffer harness-ui-usage--buffer-name
-          ;; Only a month budget can take a month's cost.
-          (goto-char (point-min))
-          (search-forward "weekly cap")
-          (should-error (harness-ui-usage-import-api-cost) :type 'user-error)
-          ;; Without a key the step is skipped and says why.
-          (goto-char (point-min))
-          (search-forward "monthly cap")
+          ;; Without a key nothing is fetched, in the background or now, and I says why.
+          (harness-ui-usage-test-goto "monthly cap")
           (harness-ui-usage-import-api-cost)
           (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "No Anthropic Admin API key" m)) messages))
                              5 "no key")
-          (should (= 0 requests))
-          (should-not harness-ui-usage--api-cost)
-          ;; With one, the cost shows under the budget with a button.
+          (should-not requests)
+          (should-not (string-match-p "reported by" (harness-ui-usage-test-text)))
+          ;; What an account was billed says nothing of one project.
+          (harness-ui-usage-test-goto "project cap")
+          (should-error (harness-ui-usage-import-api-cost) :type 'user-error)
+          ;; With a key, the month's cost counts in the month budget at once.
           (setq harness-anthropic-admin-api-key "sk-ant-admin01-test")
-          (goto-char (point-min))
-          (search-forward "monthly cap")
+          (harness-ui-usage-test-goto "monthly cap")
           (harness-ui-usage-import-api-cost)
-          (harness-test-wait (lambda () (string-match-p "Anthropic billed \\$12\\.34 this month" (harness-ui-usage-test-text)))
-                             5 "offer shown")
-          (should (= 1 requests))
-          (should (string-match-p "monthly cap.*\n +Anthropic billed \\$12\\.34 this month  \\[use \\$12\\.34 as baseline\\] \\[dismiss\\]"
-                                  (harness-ui-usage-test-text)))
-          (goto-char (point-min))
-          (search-forward "[use $12.34")
-          (push-button)
-          (harness-test-wait (lambda () (string-match-p "incl\\. \\$12\\.34 baseline" (harness-ui-usage-test-text)))
-                             5 "baseline from the API cost")
-          (should-not (string-match-p "Anthropic billed" (harness-ui-usage-test-text)))
-          (let ((b (cl-find "monthly cap" (harness-call 'usage/budgets) :key (lambda (b) (plist-get b :label)) :test #'equal)))
-            (should (< (abs (- 12.34 (or (plist-get b :baseline) 0))) 1e-9))
-            (should (equal (harness-usage--date-key (car (harness-usage-period-bounds 'month)))
-                           (plist-get b :baseline-period-start))))
-          ;; An offer can be dismissed.
-          (goto-char (point-min))
-          (search-forward "monthly cap")
-          (harness-ui-usage-import-api-cost)
-          (harness-test-wait (lambda () (string-match-p "\\[dismiss\\]" (harness-ui-usage-test-text))) 5 "offer again")
-          (harness-ui-usage-dismiss-api-cost)
-          (should-not (string-match-p "Anthropic billed" (harness-ui-usage-test-text))))))))
+          (harness-test-wait (lambda () (string-match-p "incl\\. \\$12\\.34 reported by Anthropic" (harness-ui-usage-test-text)))
+                             5 "reported cost counted")
+          (should (= 1 (length requests)))
+          (should (cl-some (lambda (m) (string-match-p "\\`Anthropic billed \\$12\\.34 this month; \\$12\\.34 of it counts" m))
+                           messages))
+          (should (string-match-p
+                   "monthly cap .* 12%  \\$12\\.34 / \\$100\\.00  incl\\. \\$12\\.34 reported by Anthropic  \\$87\\.66 left"
+                   (harness-ui-usage-test-text)))
+          (should-not (string-match-p "project cap.*reported" (harness-ui-usage-test-text)))
+          (harness-ui-usage-test-goto "monthly cap")
+          (should (harness-ui-usage-test-line-help
+                   "\\`Anthropic reports \\$12\\.34 billed per token (UTC days) this month, as of .*; \\$0 of it was recorded here, so \\$12\\.34 more counts\\.\\'"))
+          ;; It is no baseline: the budget itself is unchanged.
+          (should-not (plist-get (cl-find "monthly cap" (harness-call 'usage/budgets)
+                                          :key (lambda (b) (plist-get b :label)) :test #'equal)
+                                 :baseline)))))))
 
 (defun harness-ui-usage-test-max-quota (now)
   "Return a Claude Max quota plist as the provider reports it at NOW."
@@ -553,6 +664,57 @@ there are, and d on it says where to change it."
       (should (eq 'harness-context-critical-face
                   (get-text-property (1- (length (harness-ui-format-spend plan t))) 'face
                                      (harness-ui-format-spend plan t)))))))
+
+(ert-deftest harness-ui-sessions-total-reads-as-one-session ()
+  "Several sessions together cost what they add up to, paid as the latest says.
+Their usage sums; its billing and plan are those of the one updated
+last that recorded a billing; MODEL, else the first one's, names the
+provider whose account and quota stand for them all."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (let* ((dot (string #xb7))
+           (api (list :model "demo:scripted" :updated 1 :usage '(:input 10 :cost 1.2 :list-cost 1.2 :billing "api")))
+           (old (list :model "demo:scripted" :updated 3 :usage '(:input 5 :cost 0.3)))
+           (plan (list :model "claude:claude-opus-5-5" :updated 2
+                       :usage '(:input 20 :cost 0.0 :list-cost 3.4 :billing "subscription" :plan "max")))
+           (text (lambda (s &optional quota) (substring-no-properties (harness-ui-format-spend s quota "These tasks")))))
+      (let ((total (harness-ui-sessions-total (list api old))))
+        (should (equal "demo:scripted" (plist-get total :model)))
+        (should (= 15 (plist-get (plist-get total :usage) :input)))
+        (should (equal "$1.50" (funcall text total)))
+        (should (string-match-p "\\`These tasks cost \\$1\\.50, billed per token\\."
+                                (get-text-property 0 'help-echo (harness-ui-format-spend total nil "These tasks")))))
+      (harness-ui--store-quota "claude" (harness-ui-usage-test-max-quota (float-time)))
+      (let ((total (harness-ui-sessions-total (list api plan old) "claude:claude-opus-5-5")))
+        (should (equal "subscription" (plist-get (plist-get total :usage) :billing)))
+        (should (< (abs (- 4.9 (harness-usage-list-cost (plist-get total :usage)))) 1e-9))
+        (should (equal (format "$1.50+Max %s 5h 9%% %s 7d 57%%" dot dot) (funcall text total t)))
+        ;; Billed per token and covered by the plan, not extra usage.
+        (should (string-match-p "\\`\\$1\\.50 billed; \\$3\\.40 more at API prices covered by Claude Max\\."
+                                (get-text-property 0 'help-echo (harness-ui-format-spend total t "These tasks")))))
+      ;; Before any call the provider's account says who will pay.
+      (should (equal "Max" (funcall text (harness-ui-sessions-total nil "claude:claude-opus-5-5")))))))
+
+(ert-deftest harness-ui-format-budgets-shows-the-fullest ()
+  "Budgets read \"budget N%\" for the fullest one; the tooltip describes each.
+The tooltip is one line, a sentence per budget, as hover help must be."
+  (harness-ui-usage-test-with
+    (let* ((dot (string #xb7))
+           (month (list :budget '(:id "m" :scope period :period month :label "monthly cap")
+                        :spent 25.0 :amount 100.0 :remaining 75.0 :fraction 0.25
+                        :per-day 3.75 :days-left 20 :baseline 20.0))
+           (week (list :budget '(:id "w" :scope project :target "/src/acme-api/" :period week)
+                       :spent 45.0 :amount 50.0 :remaining 5.0 :fraction 0.9 :hard t
+                       :per-day 5.0 :days-left 1 :baseline 0.0))
+           (text (harness-ui-format-budgets (list month week))))
+      (should-not (harness-ui-format-budgets nil))
+      (should (equal "budget 90%" (substring-no-properties text)))
+      (should (eq 'harness-context-urgent-face (get-text-property 0 'face text)))
+      (should (equal (concat "weekly acme-api: $45.00 of $50.00 spent; $5.00 left, $5.00/day " dot " 1 day left (hard). "
+                             "monthly cap: $25.00 of $100.00 spent, incl. $20.00 baseline; $75.00 left, $3.75/day "
+                             dot " 20 days left. "
+                             "mouse-1: usage and budgets")
+                     (get-text-property 0 'help-echo text))))))
 
 (ert-deftest harness-ui-model-label-is-readable ()
   "Labels read \"model (provider)\", from the catalogue when it knows the model."

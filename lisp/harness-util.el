@@ -227,6 +227,29 @@ Per-token billing reads \"$1.20\"; usage a plan paid for reads
                               (harness-format-cost cost) (harness-format-cost covered) payer))
           (t (format "%s at API prices, covered by %s" (harness-format-cost covered) payer)))))
 
+(defun harness-budget-outside-text (status &optional all)
+  "Say what budget STATUS spent that the harness did not record, or nil.
+STATUS is a `usage/budget-status' plist.  The text reads \"incl. $5.00
+reported by Claude Code, $2.00 baseline\": what providers reported was
+billed beyond the harness's records, and who reported it, then the
+baseline set by hand.  A reported $0 is left out unless ALL, which
+shows that providers were asked; nil when there is nothing to say."
+  (let* ((sources (plist-get status :sources))
+         (reported (or (plist-get status :reported) 0))
+         (baseline (or (plist-get status :baseline) 0))
+         (labels (delete-dups
+                  (mapcar (lambda (s) (plist-get s :label))
+                          (or (seq-filter (lambda (s) (> (or (plist-get s :outside) 0) 0)) sources)
+                              sources))))
+         (parts (delq nil
+                      (list (and labels (or all (> reported 0))
+                                 (format "%s reported by %s" (harness-format-cost reported)
+                                         (if (cdr labels)
+                                             (concat (string-join (butlast labels) ", ") " and " (car (last labels)))
+                                           (car labels))))
+                            (and (> baseline 0) (format "%s baseline" (harness-format-cost baseline)))))))
+    (and parts (concat "incl. " (string-join parts ", ")))))
+
 (defun harness-format-bytes (n)
   "Format byte count N as a human readable size."
   (file-size-human-readable (or n 0) 'iec " "))

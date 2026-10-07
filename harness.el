@@ -103,14 +103,17 @@ They define the macros modules expand, so a change to one recompiles
 every file (see `harness--compiled-fresh-p').")
 
 (defconst harness--library-files '("lisp/harness-files.el" "lisp/harness-emacs-endpoint.el"
-                                  "lisp/harness-notifications-desktop.el" "lisp/harness-server.el")
+                                  "lisp/harness-notifications-desktop.el" "lisp/harness-server.el"
+                                  "lisp/harness-revision.el")
   "Libraries loaded after the core files and before any module, in order.
 Both sides of the process split use them: the UI requires them all, and
-the harness process's modules require harness-files and
-harness-notifications-desktop.  They are loaded compiled as the core
-files are and every `harness-reload' loads them again, so a reloaded
-module never calls a library function as it was before the update; they
-define no macros, so a change to one does not recompile the modules.")
+the harness process's modules require harness-files,
+harness-notifications-desktop and harness-revision (which notes, on
+each side, the commit the harness was loaded from).  They are loaded
+compiled as the core files are and every `harness-reload' loads them
+again, so a reloaded module never calls a library function as it was
+before the update; they define no macros, so a change to one does not
+recompile the modules.")
 
 (add-to-list 'load-path (expand-file-name "lisp" harness-directory))
 (require 'harness-core)

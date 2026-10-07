@@ -6,7 +6,7 @@
 ;;
 ;;   header line   status, name, todo progress, model, permission mode,
 ;;                 non-interactive or interactive, thinking, context,
-;;                 cost, menu, after what
+;;                 output rate (tokens per second), cost, menu, after what
 ;;                 `harness-chat-header-functions' put in front (a BTW's buttons)
 ;;   transcript    one block per node, rendered incrementally with markers
 ;;   activity      while a turn runs, what it does and for how long, on a
@@ -1575,7 +1575,8 @@ continues, not the branch left behind."
 
 (defun harness-chat-edit-permission-pattern (&optional pid)
   "Edit the glob pattern the permission request PID is answered for.
-PID defaults to the request at point, or else the newest one.  The
+PID defaults to the request at point, or else the newest one with a
+pattern: one about a path outside the allowed directories.  The
 pattern, and editing it, belong to the pending module, so a popout
 edits the same request the same way."
   (interactive)
@@ -2546,24 +2547,14 @@ are searched on hover, not on every redisplay of the header line."
   (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
     (substitute-command-keys "The harness menu (\\[harness-menu])" t)))
 
-(defun harness-chat-show-usage ()
-  "Show the usage dashboard, with the plan's quota."
-  (interactive)
-  (if (fboundp 'harness-usage)
-      (harness-usage)
-    (user-error "The usage dashboard (module ui-usage) is not loaded")))
+(defalias 'harness-chat-show-usage #'harness-ui-show-usage
+  "Alias of `harness-ui-show-usage', which the task board shares.")
 
 (defun harness-chat--spend-segment (session)
   "Return the header segment showing what SESSION cost and who pays for it.
 Per-token billing shows the cost; a subscription shows its plan and
-quota.  Clicking it opens the usage dashboard.  Its percentages are
-escaped, or the header line would take \"23% \" for a %-construct."
-  (let ((text (harness-ui-mode-line-escape (harness-ui-format-spend session t))))
-    (add-text-properties 0 (length text)
-                         (list 'mouse-face 'mode-line-highlight
-                               'local-map (harness-chat--segment-map #'harness-chat-show-usage))
-                         text)
-    text))
+quota.  Clicking it opens the usage dashboard (`harness-ui-spend-segment')."
+  (harness-ui-spend-segment (harness-ui-format-spend session t)))
 
 (defun harness-chat--non-interactive-segment (session)
   "Return the header segment saying whether SESSION waits for the user.
@@ -2580,6 +2571,14 @@ It reads \"non-interactive\" or \"interactive\"; clicking it toggles."
 (defun harness-chat--on-quota (_provider _quota)
   "Redraw the header lines, which show the plan's quota."
   (force-mode-line-update t))
+
+(defun harness-chat--on-rate (id _rate)
+  "Redraw the header line of session ID's chat, which shows its output rate.
+ID nil, after every rate was fetched again, redraws them all."
+  (if (null id)
+      (force-mode-line-update t)
+    (when-let* ((buf (harness-chat--buffer-for id)))
+      (with-current-buffer buf (force-mode-line-update)))))
 
 (defvar harness-chat-header-functions nil
   "Functions putting segments in front of the chat header line.
@@ -2603,9 +2602,9 @@ conversation and gives it its [close] and [keep] buttons this way.")
 
 (defun harness-chat--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
-In a window too narrow for all of it, the spend goes first, then the
-thinking level, the context, the non-interactive mode, the model and
-the todos; the name shortens after those.  What
+In a window too narrow for all of it, the output rate goes first, then
+the spend, the thinking level, the context, the non-interactive mode,
+the model and the todos; the name shortens after those.  What
 `harness-chat-header-functions' put in front, the status, the
 permission mode, [menu] and the notice of new messages stay.  WIDTH is
 as `harness-ui-fit-header' takes it."
@@ -2613,6 +2612,7 @@ as `harness-ui-fit-header' takes it."
          (status (or (plist-get s :status) "idle"))
          (running (equal status "running"))
          (todos (harness-chat--todos-segment))
+         (rate (harness-ui-format-rate s))
          (name (or (plist-get s :name) "unnamed")))
     (harness-ui-fit-header
      (list
@@ -2643,6 +2643,7 @@ as `harness-ui-fit-header' takes it."
                                                 'harness-dim-face))
             20)
       (list (concat "  " (harness-ui-format-context s)) 30)
+      (and rate (list (concat "  " rate) 5))
       (list (concat "  " (harness-chat--spend-segment s)) 10)
       (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
             95)
@@ -2793,7 +2794,10 @@ message sent from it resumes it."
   "Major mode of a harness session buffer.
 The transcript is read-only; the compose box at the bottom is editable.
 Typing anywhere goes to the box, `?' included, so the harness menu is
-on \\[harness-menu] here, or the [menu] button in the header line.
+on \\[harness-menu] here, or the [menu] button in the header line.  On
+a request's panel its own keys answer it instead: a question's digits,
+up to its number of options, and a permission's y, s, a, n and N, and
+e when it has a pattern to edit.
 
 \\{harness-chat-mode-map}"
   (setq buffer-read-only nil)
@@ -2875,6 +2879,7 @@ Point moved onto an option of a question with diagrams shows its diagram."
   (add-hook 'harness-ui-update-functions #'harness-chat--on-update)
   (add-hook 'harness-ui-event-functions #'harness-chat--on-event)
   (add-hook 'harness-ui-quota-functions #'harness-chat--on-quota)
+  (add-hook 'harness-ui-rate-functions #'harness-chat--on-rate)
   ;; The pending module owns the requests themselves (it registers with
   ;; `harness-ui-permission-functions' and `harness-ui-question-functions');
   ;; a chat buffer drawing them makes them its own, and this mirror redraws.
