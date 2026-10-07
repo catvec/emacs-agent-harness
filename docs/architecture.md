@@ -3407,7 +3407,7 @@ message to a task in review sends it back.  A verified task waits in
 merging -- queued for the queue's turn, merging, or its session
 resolving the conflicts -- saying so on its card until the branch is in
 and it moves to completed.  A card of a task that handed a report in
-also shows [Report], popping the report out; it is one of the items
+also shows [Review], popping the report out; it is one of the items
 `harness-ui-popout-at-point-functions' offers.  While the task waits
 for review, the report ends with the banner of its session, [Verify]
 and [Send back], and a box for the feedback.  The header counts the
@@ -3633,7 +3633,7 @@ at most, with Emacs's image keys and [Open externally]), the review of
 a task (`harness-ui-review`: one banner, the board's Ready for
 review -- its heading, the handed-in report in full and always
 expanded, then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`) and
-[Report] -- shown above the compose box of the task's session, a chat
+[Review] -- shown above the compose box of the task's session, a chat
 panel (`harness-chat-panel-functions`), and at the end of its report
 popout (`harness-ui-report-panel-functions`); the session's box sends
 as always and the harness takes any message to the task's session for
@@ -3657,7 +3657,7 @@ growing to `harness-ui-report-max-height` for them, a click or RET
 showing one larger in an image popout whose [back] returns to the
 report; videos and files through ui-media, code as a block, notes, and
 a referenced tool call drawn as the call it links to, with [Open in
-the session]; opened from the board's [Report] button and from the
+the session]; opened from the board's [Review] button and from the
 banner, in a popout of its own, to which other modules add panels and a
 box, which follows `task/changed` and closes once the review is decided
 -- the task turns verified, or is sent back with a new round of

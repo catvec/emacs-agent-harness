@@ -8,10 +8,13 @@
 ;; in a popout (`harness-ui-popout'), so it can be read without opening
 ;; the session, from
 ;;
-;;   the board  [Report] on a card that has one; the board's item at
+;;   the board  [Review] on a card that has one; the board's item at
 ;;              point (`SPC', through the shared
 ;;              `harness-ui-popout-at-point-functions') too;
-;;   the chat   the review banner's [Report] button.
+;;   the chat   the review banner's [Review] button.
+;;
+;; The button reads [Review], to look the work over, not [Report],
+;; which reads as reporting the agent for something bad.
 ;;
 ;; Inside the task's session the report is not behind a button: while
 ;; the task waits for review, the review banner shows it in full,

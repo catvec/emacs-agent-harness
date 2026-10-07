@@ -616,11 +616,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   that report in full, already expanded -- the summary, then every piece
   of evidence, a referenced call with its whole output -- and offers
   `[Verify]` (`C-c C-v`), `[Send back]` (`C-c C-x`; type the feedback
-  in the box, `C-c C-c` sends it) and `[Report]`, which pops it out, so
+  in the box, `C-c C-c` sends it) and `[Review]`, which pops it out, so
   you can read the work and accept it without going back to the board.
   The two keys work only while the banner shows; otherwise `C-c C-v`
   is nothing there, the box pasting with `C-y`.
-- `[Report]` on a card that has one, or on the banner, pops the
+- `[Review]` on a card that has a report, or on the banner, pops the
   handed-in summary and evidence out beside the board: images large, as
   wide as the popout, videos as thumbnails, files as buttons, and each
   referenced tool call as the call it links to, with
