@@ -723,17 +723,53 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
     (let ((models (harness-test-await (harness-openai--models
                                        (append harness-openai-test-openai-endpoint '(:default-context 400000))))))
       (should (equal '(:name "gpt-x" :label "gpt-x" :context-window 400000) (car models)))))
-  ;; A failing endpoint resolves to an empty list with a warning, never rejects.
+  ;; A failing endpoint with nothing listed before rejects, saying why
+  ;; without its key; the catalogue logs it and keeps what it had.
   (harness-openai-test-with-fake '(("/models" . (:status 401 :body "{\"error\":{\"message\":\"nope\"}}")))
     (harness-openai-clear-models-cache)
-    (let ((warned nil))
-      (add-hook 'harness-log-hook (lambda (level msg) (when (and (eq level 'warn) (string-match-p "nope" msg)) (setq warned t))))
-      (unwind-protect
-          (should (null (harness-test-await (harness-openai--models harness-openai-test-endpoint))))
-        (setq harness-log-hook nil))
-      (should warned)
-      ;; failures are not cached
-      (should-not (gethash 'testrouter harness-openai--models-cache))))
+    (let ((err (should-error (harness-test-await (harness-openai--models harness-openai-test-endpoint)))))
+      (should (string-match-p "401.*nope" (harness-error-message err)))
+      (should-not (string-match-p "sk-test" (harness-error-message err))))
+    ;; failures are not cached
+    (should-not (gethash 'testrouter harness-openai--models-cache)))
+  (harness-openai-clear-models-cache))
+
+(ert-deftest harness-provider-openai-models-windows-of-other-servers ()
+  "The window and the output limit come from whichever field the server uses.
+A model no field sizes has none: the catalogue estimates it."
+  (harness-openai-test-with-fake
+      `(("/models"
+         . (:body ,(harness-json-encode
+                    '(:object "list"
+                      :data ((:id "vllm-model" :max_model_len 32768)
+                             (:id "groq-model" :context_window 131072 :max_completion_tokens 8192)
+                             (:id "mistral-model" :max_context_length 256000)
+                             (:id "litellm-model" :max_input_tokens 400000 :max_output_tokens 128000)
+                             (:id "bare-model")))))))
+    (harness-openai-clear-models-cache)
+    (let ((models (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint))))
+      (should (equal '(32768 131072 256000 400000 nil)
+                     (mapcar (lambda (m) (plist-get m :context-window)) models)))
+      (should (= 8192 (plist-get (nth 1 models) :max-output)))
+      (should (= 128000 (plist-get (nth 3 models) :max-output)))))
+  (harness-openai-clear-models-cache))
+
+(ert-deftest harness-provider-openai-models-refresh-and-failure ()
+  "A refresh asks the server again; a failed listing keeps the models listed before."
+  (harness-openai-test-with-fake
+      `(("/models" . (:body ,(harness-json-encode '(:object "list" :data ((:id "gpt-x")))))))
+    (harness-openai-clear-models-cache)
+    (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint))
+    (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint))
+    (should (= 1 (length harness-openai-test--requests)))
+    (setq harness-openai-test--responses
+          `(("/models" . (:body ,(harness-json-encode '(:object "list" :data ((:id "gpt-x") (:id "gpt-y"))))))))
+    (should (= 2 (length (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint t)))))
+    (should (= 2 (length harness-openai-test--requests)))
+    (setq harness-openai-test--responses '(("/models" . (:status 500 :body "{\"error\":{\"message\":\"down\"}}"))))
+    (should (equal '("gpt-x" "gpt-y")
+                   (mapcar (lambda (m) (plist-get m :name))
+                           (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint t))))))
   (harness-openai-clear-models-cache))
 
 ;;;; Integration

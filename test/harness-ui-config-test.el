@@ -9,6 +9,7 @@
 (defvar harness-thinking)
 (defvar harness-log-level)
 (defvar harness-non-interactive)
+(defvar harness-ui--models)
 
 (defcustom harness-ui-config-test-api-key nil
   "A secret option for the tests."
@@ -39,6 +40,60 @@ Each is a plist with these keys:
   "Hours, whose type has numbers among its arguments, like DeepSeek's peak windows."
   :type '(repeat (cons (integer 0 23) (integer 1 24))) :group 'harness)
 
+(defcustom harness-ui-config-test-judge-model nil
+  "A model or none, a menu for the tests."
+  :type '(choice (const :tag "The session's model" nil) (string :tag "Model" :names model))
+  :group 'harness)
+
+(defcustom harness-ui-config-test-fallbacks nil
+  "Providers and models, a list for the tests."
+  :type '(repeat (string :tag "Provider or model id" :names (provider model))) :group 'harness)
+
+(defconst harness-ui-config-test--models
+  '((:id "claude:claude-fable-5-1" :label "Claude Fable 5.1" :provider "claude"
+     :provider-label "Claude Code" :context-window 1000000 :pricing (:input 5.0 :output 25.0))
+    (:id "claude:claude-opus-5-5" :label "Claude Opus 5.5" :provider "claude"
+     :provider-label "Claude Code" :context-window 1000000)
+    (:id "deepseek:deepseek-flash" :label "DeepSeek-V4.1-Flash" :provider "deepseek"
+     :provider-label "DeepSeek" :context-window 128000 :pricing (:input 0.15 :output 0.6))
+    (:id "copilot:gpt-5" :label "GPT-5" :provider "copilot" :provider-label "GitHub Copilot"
+     :context-window 400000))
+  "The models three providers list, as `provider/models' answers.")
+
+(defun harness-ui-config-test--catalogue ()
+  "Make the tests' models the UI's catalogue."
+  (clrhash harness-ui--models)
+  (dolist (m harness-ui-config-test--models)
+    (puthash (plist-get m :id) m harness-ui--models)))
+
+(defvar harness-ui-config-test--picker nil
+  "What the last model picker offered: (PROMPT DEFAULT ROWS).
+Each of ROWS is (GROUP CANDIDATE ANNOTATION).")
+
+(defmacro harness-ui-config-test-picking (answer &rest body)
+  "Run BODY answering the model picker with ANSWER.
+ANSWER is text, answered as typed, or a function of the candidates
+that returns the answer.  `harness-ui-config-test--picker' then says
+what the picker offered."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'completing-read)
+              (lambda (prompt table _pred _require _initial _history &optional default &rest _)
+                (let* ((all (all-completions "" table))
+                       (metadata (completion-metadata "" table nil))
+                       (group (completion-metadata-get metadata 'group-function))
+                       (note (completion-metadata-get metadata 'annotation-function))
+                       (answer ,answer))
+                  (setq harness-ui-config-test--picker
+                        (list prompt default
+                              (mapcar (lambda (c) (list (funcall group c nil) c (funcall note c))) all)))
+                  (if (functionp answer) (funcall answer all) answer)))))
+     ,@body))
+
+(defun harness-ui-config-test-candidate (regexp)
+  "Return a function picking the first candidate matching REGEXP."
+  (lambda (all) (or (cl-find-if (lambda (c) (string-match-p regexp c)) all)
+                    (error "No candidate matches %s" regexp))))
+
 (defun harness-ui-config-test--project ()
   "Return a fresh git project."
   (let ((root (harness-test-temp-dir)))
@@ -67,6 +122,10 @@ state directory, as they would the user's."
             (harness-permission-mode harness-permission-mode)
             (harness-thinking harness-thinking)
             (harness-ui-config-test-limit 20000)
+            (harness-ui-config-test-judge-model nil)
+            (harness-ui-config-test-fallbacks nil)
+            ;; The providers have listed nothing, unless a test says what.
+            (harness-ui--models (make-hash-table :test 'equal))
             (harness-log-level 'info)
             (harness-non-interactive harness-non-interactive)
             (harness-ui-config-test-api-key nil)
@@ -159,16 +218,17 @@ state directory, as they would the user's."
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
     (with-temp-file (expand-file-name ".dir-locals.el" root)
-      (insert "((nil . ((harness-permission-mode . yolo) (harness-budget . 5))))"))
+      (insert "((nil . ((harness-permission-mode . yolo) (harness-sandbox-policy . 5))))"))
     (harness-ui-config-test-open root)
     (should (derived-mode-p 'harness-ui-config-mode))
-    (should-not (string-match-p "does not fit" (harness-ui-config-test-block "harness-budget")))
+    (should-not (string-match-p "does not fit" (harness-ui-config-test-block "harness-sandbox-policy")))
     (should (equal (format "*harness settings: %s*" (file-name-nondirectory (directory-file-name root)))
                    (buffer-name)))
     (should (eq 'global harness-ui-config--scope))
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
       ;; The common settings come in sections named by what they are for.
       (should (string-match-p "^ New sessions$" text))
+      (should (string-match-p "^ Spending$" text))
       (should (string-match-p "^ Files and safety$" text))
       ;; The tasks module is not loaded here, so its section is absent.
       (should-not (string-match-p "^ Task board$" text))
@@ -203,7 +263,9 @@ state directory, as they would the user's."
       (should (string-match-p "Remove override" mode)))
     (should (string-match-p "uses the global value" (harness-ui-config-test-block "harness-model")))
     ;; A project value the harness finds invalid is edited as Lisp, with a warning.
-    (should (string-match-p "does not fit" (harness-ui-config-test-block "harness-budget")))
+    (should (string-match-p "does not fit" (harness-ui-config-test-block "harness-sandbox-policy")))
+    ;; The Budget is one for all sessions, set globally only.
+    (should-not (harness-ui-config--setting-start "harness-budget"))
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
       (should (string-match-p "more settings have a global value only" text))
       (should-not (string-match-p "Advanced" text))
@@ -259,11 +321,12 @@ state directory, as they would the user's."
     (should (equal '((nil . ((harness-permission-mode . yolo)))) (harness-ui-config-test-dir-locals root)))
     ;; The global value is untouched.
     (should-not (eq 'yolo harness-permission-mode))
-    ;; A text edit waits for C-x C-s.
-    (harness-ui-config-test-type "harness-model" "demo:scripted")
-    (should (harness-ui-config--edited-p "harness-model"))
+    ;; So does a model.  Before the providers list theirs, the picker
+    ;; takes one typed.
     (should (null (plist-get (harness-ui-config-test-setting "harness-model") :project)))
-    (execute-kbd-macro (kbd "C-x C-s"))
+    (harness-ui-config-test-picking "demo:scripted"
+      (harness-ui-config-test-press "harness-model" "\u25be"))
+    (should (string-match-p "no models listed yet" (car harness-ui-config-test--picker)))
     (harness-ui-config-test-wait "harness-model" :project "\"demo:scripted\"")
     (should (equal "demo:scripted"
                    (cdr (assq 'harness-model (cdr (assq nil (harness-ui-config-test-dir-locals root)))))))
@@ -297,28 +360,32 @@ state directory, as they would the user's."
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
     (harness-ui-config-test-open root)
-    (harness-ui-config-test-type "harness-model" "demo:edited")
-    ;; A change elsewhere redraws the page; the edit and point stay.
-    (let ((pos (point)))
-      (harness-call 'config/set 'harness-thinking "low" :scope 'global :cwd root)
-      (harness-ui-config-test-wait "harness-thinking" :global "\"low\"")
-      (should (= pos (point))))
-    (should (equal "demo:edited" (widget-value (harness-ui-config--widget "harness-model"))))
-    (should (harness-ui-config--edited-p "harness-model"))
+    (harness-ui-config-toggle-advanced)
+    (harness-ui-config-test-type "harness-ui-config-test-limit" "30000")
+    ;; A change elsewhere redraws the page; the edit and point stay, in
+    ;; the setting, which the change above it moved down.
+    (let ((offset (lambda () (- (point) (harness-ui-config--setting-start "harness-ui-config-test-limit"))))
+          (pos (point)))
+      (let ((before (funcall offset)))
+        (harness-call 'config/set 'harness-thinking "low" :scope 'global :cwd root)
+        (harness-ui-config-test-wait "harness-thinking" :global "\"low\"")
+        (should (< pos (point)))
+        (should (= before (funcall offset)))))
+    (should (equal 30000 (widget-value (harness-ui-config--widget "harness-ui-config-test-limit"))))
+    (should (harness-ui-config--edited-p "harness-ui-config-test-limit"))
     ;; Edits belong to their scope.
     (harness-ui-config-set-scope 'project)
-    (should-not (harness-ui-config--edited-p "harness-model"))
+    (should-not (harness-ui-config--edited-p "harness-ui-config-test-limit"))
     (should (= 1 (harness-ui-config--edit-count 'global)))
     (should (string-match-p "Global." (harness-ui-config--header most-positive-fixnum)))
     (harness-ui-config-set-scope 'global)
-    (should (equal "demo:edited" (widget-value (harness-ui-config--widget "harness-model"))))
+    (should (equal 30000 (widget-value (harness-ui-config--widget "harness-ui-config-test-limit"))))
     ;; C-c C-k drops the edit.
-    (goto-char (harness-ui-config--setting-start "harness-model"))
+    (goto-char (harness-ui-config--setting-start "harness-ui-config-test-limit"))
     (execute-kbd-macro (kbd "C-c C-k"))
-    (should-not (harness-ui-config--edited-p "harness-model"))
-    (should (equal harness-model (widget-value (harness-ui-config--widget "harness-model"))))
+    (should-not (harness-ui-config--edited-p "harness-ui-config-test-limit"))
+    (should (equal 20000 (widget-value (harness-ui-config--widget "harness-ui-config-test-limit"))))
     ;; Invalid input is refused on the page, with the reason on the setting.
-    (harness-ui-config-toggle-advanced)
     (harness-ui-config-test-type "harness-ui-config-test-limit" "12x")
     (should-error (execute-kbd-macro (kbd "RET")) :type 'user-error)
     (should (eq 'error (car-safe (harness-ui-config--state-of "harness-ui-config-test-limit"))))
@@ -555,19 +622,35 @@ stopped drawing at that setting and never set its widgets up."
                   (:id a) (:id a :url "u" :port 1 :secure t) (:port "x" :odd 2) nil)
                  ((repeat ,harness-ui-config-test--server-type) ((:id a) (:url "u")) nil)
                  ((cons (regexp :tag "Name") ,harness-ui-config-test--server-type) ("re" :port 2) ("re"))
-                 ((choice (const :tag "None" nil) (string :tag "Model")) nil "claude:x")
+                 ((choice (const :tag "None" nil) (string :tag "Model" :names model)) nil "claude:x" "")
+                 ((choice (const :tag "Cheap tier" auto) (const nil) (string :names model)) auto nil "x")
+                 ((string :names model) "claude:x" "")
+                 ((repeat (string :names (provider model))) ("claude" "deepseek:x") nil)
                  ((alist :key-type (string :tag "Level") :value-type (integer :tag "Tokens")) (("low" . 1))))))
     (dolist (case types)
-      (let ((presented (widget-convert (harness-ui-config--present (car case) t))))
+      (let ((presented (widget-convert (harness-ui-config--present (car case)))))
         (dolist (value (cdr case))
           (should (widget-apply presented :match value))))
       (should-not (widget-apply (widget-convert (harness-ui-config--present (car case)))
                                 :match 'not-a-fitting-value))))
-  ;; A text field of a model setting completes model ids, in a menu too.
-  (let* ((presented (harness-ui-config--present '(choice (const nil) (string :tag "Model")) t))
-         (string (car (last presented))))
-    (should (eq 'string (car string)))
-    (should (plist-member (cdr string) :completions)))
+  ;; A string that names a model is a picker, saved at once, alone or
+  ;; with constants, which it offers first; a new one starts from the
+  ;; menu's first value.
+  (let ((picker (harness-ui-config--present '(choice (const :tag "Configured default" nil)
+                                                     (string :tag "Model" :names model)))))
+    (should (eq 'harness-ui-config-model (car picker)))
+    (should (equal '(model) (plist-get (cdr picker) :names)))
+    (should (equal '(("Configured default")) (plist-get (cdr picker) :choices)))
+    (should (plist-member (cdr picker) :value))
+    (should (null (plist-get (cdr picker) :value))))
+  (should (harness-ui-config--discrete-p '(string :names model)))
+  (should (equal '(provider model)
+                 (plist-get (cdr (cadr (harness-ui-config--present '(repeat (string :names (provider model))))))
+                            :names)))
+  (should-not (harness-ui-config--discrete-p '(repeat (string :names model))))
+  ;; Other strings stay fields, and a menu with more than constants a menu.
+  (should (eq 'string (car (harness-ui-config--present '(string :tag "Name")))))
+  (should (eq 'choice (car (harness-ui-config--present '(choice (integer) (string :names model))))))
   ;; Summaries name a record, then say what it has.
   (should (equal "alpha · http://alpha · Port 8080 · Speaks TLS"
                  (substring-no-properties
@@ -579,6 +662,133 @@ stopped drawing at that setting and never set its widgets up."
                                               '("re" :port 2)))))
   (should (equal "1,000,000" (harness-ui-config--short-number 1000000)))
   (should (equal "8192" (harness-ui-config--short-number 8192))))
+
+;;;; Models
+
+(ert-deftest harness-ui-config-picks-models-the-providers-list ()
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (harness-ui-config-test--catalogue)
+    (harness-ui-config-test-open root)
+    ;; A dropdown: the model by name, then its id and context window.
+    (should (string-match-p "Model: \\[?Fable 5\\.1 (Claude) \u25be\\]? +claude:claude-fable-5-1 \u00b7 1\\.00M context"
+                            (harness-ui-config-test-block "harness-model")))
+    ;; The picker offers the providers' models by provider, with their
+    ;; context and price, and starts on the model set.  A pick saves at once.
+    (harness-ui-config-test-picking (harness-ui-config-test-candidate "Opus")
+      (harness-ui-config-test-press "harness-model" "\u25be"))
+    (pcase-let ((`(,prompt ,default ,rows) harness-ui-config-test--picker))
+      (should (equal "Model (default Fable 5.1 (Claude)): " prompt))
+      (should (string-match-p "\\`Fable 5\\.1 (Claude) +claude:claude-fable-5-1\\'" (car default)))
+      (should (equal '("Claude Code" "Claude Code" "DeepSeek" "GitHub Copilot") (mapcar #'car rows)))
+      (should (string-match-p "1\\.00M context \u00b7 \\$5/\\$25 per M tokens" (nth 2 (car rows))))
+      (should (string-match-p "\\`DeepSeek-V4\\.1-Flash (DeepSeek) +deepseek:deepseek-flash\\'"
+                              (nth 1 (nth 2 rows)))))
+    (harness-ui-config-test-wait "harness-model" :global "\"claude:claude-opus-5-5\"")
+    (should (equal "claude:claude-opus-5-5" harness-model))
+    (should (string-match-p "customized \u00b7 default is Fable 5\\.1 (Claude)"
+                            (harness-ui-config-test-block "harness-model")))
+    ;; Text that matches nothing offered is taken as typed: a model no
+    ;; provider lists, which the page warns of.
+    (harness-ui-config-test-picking "mistral:large-3"
+      (harness-ui-config-test-press "harness-model" "\u25be"))
+    (harness-ui-config-test-wait "harness-model" :global "\"mistral:large-3\"")
+    (should (string-match-p "Model: \\[?mistral:large-3 \u25be\\]?\n +.*No provider lists this model, so its context window is a guess"
+                            (harness-ui-config-test-block "harness-model")))
+    ;; An id typed in full is that model.
+    (harness-ui-config-test-picking " deepseek:deepseek-flash "
+      (harness-ui-config-test-press "harness-model" "\u25be"))
+    (harness-ui-config-test-wait "harness-model" :global "\"deepseek:deepseek-flash\"")
+    ;; Drawn again while the picker is open, the page still takes the pick.
+    (let ((page (current-buffer)))
+      (harness-ui-config-test-picking
+          (lambda (all)
+            (let ((before (harness-ui-config--widget "harness-model")))
+              (with-current-buffer page (harness-ui-config--render))
+              (should-not (eq before (harness-ui-config--widget "harness-model"))))
+            (funcall (harness-ui-config-test-candidate "GPT-5") all))
+        (harness-ui-config-test-press "harness-model" "\u25be")))
+    (harness-ui-config-test-wait "harness-model" :global "\"copilot:gpt-5\"")
+    ;; Nothing typed changes nothing.
+    (harness-ui-config-test-picking ""
+      (harness-ui-config-test-press "harness-model" "\u25be"))
+    (should-not (harness-ui-config--edited-p "harness-model"))
+    (should-not (harness-ui-config--state-of "harness-model"))
+    (should (equal "copilot:gpt-5" harness-model))))
+
+(ert-deftest harness-ui-config-picks-constants-and-providers ()
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (harness-ui-config-test--catalogue)
+    (harness-ui-config-test-open root)
+    (harness-ui-config-toggle-advanced)
+    ;; A menu of constants and a model: the constants come first.
+    (should (string-match-p "Test judge model: \\[?The session's model \u25be"
+                            (harness-ui-config-test-block "harness-ui-config-test-judge-model")))
+    (harness-ui-config-test-picking (harness-ui-config-test-candidate "DeepSeek-V4")
+      (harness-ui-config-test-press "harness-ui-config-test-judge-model" "\u25be"))
+    (should (equal '("Choices" "The session's model" nil) (car (nth 2 harness-ui-config-test--picker))))
+    (harness-ui-config-test-wait "harness-ui-config-test-judge-model" :global "\"deepseek:deepseek-flash\"")
+    (should (string-match-p "customized \u00b7 default is The session's model"
+                            (harness-ui-config-test-block "harness-ui-config-test-judge-model")))
+    (harness-ui-config-test-picking "The session's model"
+      (harness-ui-config-test-press "harness-ui-config-test-judge-model" "\u25be"))
+    (harness-ui-config-test-wait "harness-ui-config-test-judge-model" :global "nil")
+    ;; In a list each entry is a picker, of providers too; the list
+    ;; saves with C-c C-c, and an entry that names nothing is refused.
+    (harness-ui-config-test-press "harness-ui-config-test-fallbacks" "INS" t)
+    (harness-ui-config-test-await-block "harness-ui-config-test-fallbacks" "Choose a provider or model")
+    (should (harness-ui-config--edited-p "harness-ui-config-test-fallbacks"))
+    (goto-char (harness-ui-config--setting-start "harness-ui-config-test-fallbacks"))
+    (should-error (execute-kbd-macro (kbd "C-c C-c")) :type 'user-error)
+    (should (equal '(error . "Pick a provider or a model")
+                   (harness-ui-config--state-of "harness-ui-config-test-fallbacks")))
+    (harness-ui-config-test-picking (harness-ui-config-test-candidate "\\`DeepSeek ")
+      (harness-ui-config-test-press "harness-ui-config-test-fallbacks" "\u25be"))
+    (let ((rows (nth 2 harness-ui-config-test--picker)))
+      (should (equal '("Providers" "Providers" "Providers") (mapcar #'car (cl-subseq rows 0 3))))
+      (should (string-match-p "its model of similar ability" (nth 2 (car rows)))))
+    (should (string-match-p "DeepSeek \u25be\\]? +deepseek \u00b7 that provider's model of similar ability"
+                            (harness-ui-config-test-block "harness-ui-config-test-fallbacks")))
+    (execute-kbd-macro (kbd "C-c C-c"))
+    (harness-test-wait (lambda () (equal '("deepseek") harness-ui-config-test-fallbacks)) 5 "list saved")
+    (harness-ui-config-test-await-block "harness-ui-config-test-fallbacks" "customized")))
+
+(ert-deftest harness-ui-config-names-models-and-flags-unknown-ones ()
+  (require 'harness-ui-config)
+  (let ((harness-ui--models (make-hash-table :test 'equal)))
+    ;; Before the providers list anything, nothing looks wrong.
+    (should-not (plist-get (harness-ui-config--model-about "claude:typo" '(model) nil nil) :problem))
+    (harness-ui-config-test--catalogue)
+    (should (equal "No provider lists this model, so its context window is a guess"
+                   (plist-get (harness-ui-config--model-about "claude:typo" '(model) nil nil) :problem)))
+    (should (string-match-p "PROVIDER:MODEL"
+                            (plist-get (harness-ui-config--model-about "fable" '(model) nil nil) :problem)))
+    (should (string-match-p "No provider has this id"
+                            (plist-get (harness-ui-config--model-about "mistral" '(provider model) nil nil)
+                                       :problem)))
+    ;; A provider's own name for one of its models, as Copilot's default.
+    (let ((picker (harness-ui-config--present '(string :names model :provider copilot)))
+          (rows (harness-ui-config--model-rows '(model) 'copilot nil)))
+      (should (equal "GPT-5 (GitHub)" (harness-ui-config--model-label picker "gpt-5")))
+      (should (equal "GitHub Copilot lists no model by this name"
+                     (plist-get (harness-ui-config--model-about "gpt-9" '(model) 'copilot nil) :problem)))
+      (should (equal '("gpt-5") (mapcar (lambda (r) (nth 2 r)) rows)))
+      (should (equal '("gpt-6") (harness-ui-config--model-input "copilot:gpt-6" rows 'copilot))))
+    ;; What the picker reads: a candidate, a name or id alone, or else
+    ;; text as typed; nothing is no pick.
+    (let ((rows (harness-ui-config--model-rows '(model) nil '(("Configured default")))))
+      (should (equal '(nil) (harness-ui-config--model-input "Configured default" rows nil)))
+      (should (equal '("claude:claude-opus-5-5") (harness-ui-config--model-input (nth 0 (nth 2 rows)) rows nil)))
+      (should (equal '("claude:claude-opus-5-5") (harness-ui-config--model-input "Opus 5.5 (Claude)" rows nil)))
+      (should (equal '("openai:gpt-6") (harness-ui-config--model-input "openai:gpt-6" rows nil)))
+      (should-not (harness-ui-config--model-input "  " rows nil)))
+    ;; Sentences name models and providers, in a list too.
+    (should (equal "Claude Code, DeepSeek-V4.1-Flash (DeepSeek)"
+                   (harness-ui-config--show '("claude" "deepseek:deepseek-flash")
+                                            (list :key "harness-fallback-models"
+                                                  :type (prin1-to-string
+                                                         '(repeat (string :names (provider model))))))))))
 
 (provide 'harness-ui-config-test)
 ;;; harness-ui-config-test.el ends here
