@@ -553,6 +553,44 @@ told from, like a worktree git lost track of, still leads back."
               (should (= 1 escapes)))
           (define-key global-map [remap keyboard-quit] old))))))
 
+(declare-function harness-compose-remove-attachment "harness-ui-compose")
+(declare-function harness-compose-set "harness-ui-compose")
+
+(ert-deftest harness-ui-tasks-answer-mentioning-a-file-goes-as-text ()
+  "An answer naming a file with @ goes as the text it is.
+An attachment of the box's own still cannot go with an answer, and the
+box keeps what it holds."
+  (harness-ui-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type tool-call :id "demo-q" :name "ask_user"
+                    :input (:question "Which file?" :options ("notes.txt" "none")))
+             (:type text :delta "Noted.")
+             (:type done :stop-reason end-turn)))
+          (notes (expand-file-name "notes.txt" dir)))
+      (harness-test-load-module 'tools-agent)
+      (with-temp-file notes (insert "Some notes\n"))
+      (harness-ui-tasks-test--type-and-submit board "Pick a file")
+      (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*has a question for you")
+      (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
+        (with-current-buffer board
+          (goto-char (point-min))
+          (search-forward "Pick a file")
+          (harness-ui-tasks-reply)
+          (should (eq 'answer (car harness-ui-tasks--target)))
+          (harness-compose-add-attachment notes)
+          (harness-compose-set "this one")
+          (should-error (harness-ui-tasks-submit) :type 'user-error)
+          (should (equal "this one" (harness-compose-text)))
+          (should (= 1 (length harness-compose-attachments)))
+          (harness-compose-remove-attachment notes)
+          (harness-compose-set "@notes.txt")
+          (harness-ui-tasks-submit)
+          (should-not harness-compose-attachments))
+        (harness-test-wait (lambda () (null (harness-call 'question/pending sid))) 5 "the question to be answered")
+        (harness-ui-tasks-test--wait-text board "Completed  1")
+        (should (string-match-p "@notes\\.txt" (format "%S" (harness-call 'session/nodes sid))))
+        (should-not (string-match-p "Attached file" (format "%S" (harness-call 'session/nodes sid))))))))
+
 ;;;; The box wraps and never scrolls sideways
 
 (defvar harness-compose-overlay)
@@ -1895,6 +1933,61 @@ but for [Refresh], still opening the usage dashboard."
              (pos (string-match "Max" header)))
         (should (get-text-property pos 'local-map header))
         (should (string-match-p "Covered by Claude Max" (get-text-property pos 'help-echo header)))))))
+
+;;;; The fullscreen layout
+
+(declare-function harness-fullscreen "harness-ui")
+(declare-function harness-ui-quit-view "harness-ui")
+(declare-function harness-ui--fullscreen-layout "harness-ui")
+(declare-function harness-ui--overview-window-p "harness-ui")
+
+(ert-deftest harness-ui-tasks-fullscreen-layout ()
+  "F gives the board the fullscreen layout, a task's session beside it;
+q on the board ends it.  C-c C-z does q's job from the compose box."
+  (harness-ui-tasks-test-with
+    (let* ((sessions nil)
+           (harness-ui-open-session-function
+            (lambda (id)
+              (or (cdr (assoc id sessions))
+                  (let ((buf (get-buffer-create (format " *fake session %s*" id))))
+                    (push (cons id buf) sessions)
+                    buf))))
+           (main (get-buffer-window board)))
+      (unwind-protect
+          (progn
+            (with-current-buffer board
+              (goto-char (point-min))
+              (should (eq 'harness-fullscreen (key-binding (kbd "F"))))
+              (should (eq 'harness-ui-quit-view (key-binding (kbd "q"))))
+              (goto-char harness-compose-end)
+              (should (eq 'self-insert-command (key-binding (kbd "q"))))
+              (should (eq 'harness-ui-bury (key-binding (kbd "C-c C-z")))))
+            (harness-ui-tasks-test--type-and-submit board "First task")
+            (harness-ui-tasks-test--wait-text board "Completed  1")
+            (harness-ui-tasks-test--type-and-submit board "Second task")
+            (harness-ui-tasks-test--wait-text board "Completed  2")
+            (let* ((tasks (buffer-local-value 'harness-ui-tasks--tasks board))
+                   (first (plist-get (cl-find "First task" tasks :key (lambda (task) (plist-get task :prompt))
+                                              :test #'equal)
+                                     :session)))
+              ;; Beside the board: the session of the task at point.
+              (with-selected-window main
+                (goto-char (point-min))
+                (search-forward "First task")
+                (should (equal first (harness-ui-tasks--overview-session)))
+                (harness-fullscreen))
+              (let ((overview (get-buffer-window board)))
+                (should (harness-ui--overview-window-p overview))
+                (should (eq 'left (window-parameter overview 'window-side)))
+                (should (eq (cdr (assoc first sessions)) (window-buffer main)))
+                ;; q on the board ends the layout and buries the board.
+                (with-selected-window overview
+                  (goto-char (point-min))
+                  (call-interactively (key-binding (kbd "q"))))
+                (should-not (harness-ui--fullscreen-layout))
+                (should-not (get-buffer-window board))
+                (should (eq 'full (buffer-local-value 'harness-ui-position board))))))
+        (mapc (lambda (entry) (kill-buffer (cdr entry))) sessions)))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

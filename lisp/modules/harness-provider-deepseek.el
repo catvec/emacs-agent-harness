@@ -23,6 +23,17 @@
 ;; pricing applies, the session is told once per peak window, as a hint,
 ;; so a user can choose to wait; nothing is blocked.
 ;;
+;; The models are what DeepSeek's /models lists: their names, context
+;; windows, output limits, input modalities and effort levels.  What the
+;; listing does not say comes from `harness-deepseek-model-specs': the
+;; price tier of each, and a label.  The specs are also what is listed
+;; before /models answered, or when it cannot be reached, so the
+;; catalogue never waits on the network: it answers at once, asks
+;; /models in the background once its listing is older than
+;; `harness-deepseek--listing-ttl', and lists again when the answer
+;; changed something.  A model DeepSeek adds is listed without a code
+;; change, priced by the tier its name says (flash or pro).
+;;
 ;; The legacy model names deepseek-v4-flash and
 ;; deepseek-v4-flash-vision-exp are still accepted and are served by
 ;; DeepSeek-V4.1-Flash at the Flash price, so they are listed too.
@@ -61,6 +72,14 @@ leaves the harness."
 nil (the default) registers it only once a key is found, so the model
 picker does not offer models that cannot be called."
   :type 'boolean :set #'harness-deepseek--custom-set :group 'harness)
+
+(defcustom harness-deepseek-list-models t
+  "Whether the catalogue asks DeepSeek's /models for its models.
+DeepSeek lists every model it serves with its context window, output
+limit, input modalities and effort levels; `harness-deepseek-model-specs'
+then only adds what the listing does not say.  nil lists the specs
+alone."
+  :type 'boolean :group 'harness)
 
 (defcustom harness-deepseek-warn-on-peak t
   "Whether to hint in a session when DeepSeek peak pricing applies.
@@ -109,12 +128,15 @@ per year and must be extended when a new holiday calendar is published."
            :tier flash :vision t :thinking-levels ,harness-openai--deepseek-efforts)
     (:name "deepseek-v4-pro" :label "DeepSeek-V4-Pro" :tier pro
            :thinking-levels ,harness-openai--deepseek-efforts))
-  "DeepSeek models the provider lists, in order.
+  "DeepSeek models known before /models lists any, in order.
 Each entry: (:name NAME :label LABEL :tier flash|pro :vision BOOL
 :thinking-levels LEVELS), with the shared context window and output
 limit filled in.  LEVELS defaults to `harness-openai--deepseek-efforts',
 the low/high/max ladder DeepSeek's `reasoning_effort' acts on, weakest
-first.  The tier names the rates in `harness-deepseek-pricing'."
+first.  The tier names the rates in `harness-deepseek-pricing'.
+What /models says of a model (its window, output limit, modalities and
+levels) wins over its entry here; the tier and the label stay.  The
+entries /models does not list are listed after its models."
   :type '(repeat (plist :key-type symbol :value-type sexp))
   :set #'harness-deepseek--custom-set :group 'harness)
 
@@ -129,16 +151,35 @@ The auto-mode judge, for one, runs on the `cheap' one."
   "Host of the DeepSeek API; also the auth-source host of the key.")
 
 (defconst harness-deepseek-context-window 1048576
-  "Context window of every current DeepSeek model (1M tokens).")
+  "Context window of every current DeepSeek model (1M tokens).
+A model of `harness-deepseek-model-specs' has it until /models says
+otherwise.")
 
 (defconst harness-deepseek-max-output 393216
-  "Maximum output tokens of every current DeepSeek model (384K).")
+  "Maximum output tokens of every current DeepSeek model (384K).
+A model of `harness-deepseek-model-specs' has it until /models says
+otherwise.")
+
+(defconst harness-deepseek--listing-ttl 3600
+  "Seconds DeepSeek's model listing stays fresh.")
 
 (defvar harness-deepseek--registered nil
   "Non-nil once this module registered the deepseek provider.")
 
 (defvar harness-deepseek--warned (make-hash-table :test 'equal)
   "\"SESSION/WINDOW\" keys whose peak-pricing hint was already added.")
+
+(defvar harness-deepseek--listing nil
+  "The models /models last listed, as model plists, or nil.")
+
+(defvar harness-deepseek--listed-at nil
+  "When /models last answered, as a float time.")
+
+(defvar harness-deepseek--asked-at nil
+  "When /models was last asked, as a float time.")
+
+(defvar harness-deepseek--fetch nil
+  "The promise of the /models listing in flight, or nil.")
 
 ;;;; The API key
 
@@ -225,8 +266,92 @@ from `:peak-pricing' apply.  This is the model's `:pricing-fn', which
      (when caps (list :capabilities caps)))))
 
 (defun harness-deepseek--models ()
-  "Return the model plists the provider lists."
+  "Return the model plists `harness-deepseek-model-specs' describes."
   (mapcar #'harness-deepseek--model harness-deepseek-model-specs))
+
+(defun harness-deepseek--name-tier (name)
+  "Return the price tier model NAME says, `flash' or `pro', or nil."
+  (cond ((string-match-p "\\(?:\\`\\|-\\)flash\\(?:-\\|\\'\\)" name) 'flash)
+        ((string-match-p "\\(?:\\`\\|-\\)pro\\(?:-\\|\\'\\)" name) 'pro)))
+
+(defun harness-deepseek--with-spec (model spec)
+  "Return MODEL, as /models lists it, with what SPEC adds.
+SPEC is the model `harness-deepseek-model-specs' describes by that
+name, or nil.  The listing's window, output limit, modalities and
+levels win; SPEC gives the rates and the label.  A model no spec
+describes is priced by the tier its name says, if any."
+  (if spec
+      (let* ((caps (harness-plist-merge (plist-get spec :capabilities) (plist-get model :capabilities)))
+             (m (harness-plist-merge spec (harness-plist-remove model :label :capabilities))))
+        (if caps (plist-put m :capabilities caps) m))
+    (let ((rates (harness-deepseek--rates (harness-deepseek--name-tier (plist-get model :name)))))
+      (if rates
+          (append model (list :pricing (plist-get rates :off-peak)
+                              :peak-pricing (plist-get rates :peak)
+                              :pricing-fn 'harness-deepseek-rates-at))
+        model))))
+
+(defun harness-deepseek--catalogue ()
+  "Return the DeepSeek models: those /models listed, then the specs' others.
+Each listed model takes what its spec adds (see
+`harness-deepseek--with-spec'); before /models answered, the specs are
+the catalogue."
+  (let ((specs (harness-deepseek--models))
+        (listed harness-deepseek--listing)
+        (name (lambda (m) (plist-get m :name))))
+    (append (mapcar (lambda (m)
+                      (harness-deepseek--with-spec m (cl-find (funcall name m) specs :key name :test #'equal)))
+                    listed)
+            (cl-remove-if (lambda (s) (cl-find (funcall name s) listed :key name :test #'equal))
+                          specs))))
+
+(defun harness-deepseek--ask-listing (refresh)
+  "Ask /models for the models when due; return a promise, or nil when not.
+Due is REFRESH, or a listing older than `harness-deepseek--listing-ttl'
+not asked for within it; never without `harness-deepseek-list-models'.
+The promise resolves once the listing came, or failed, which is logged
+and leaves the models listed before.  A listing that changed the
+catalogue has it listed again."
+  (cond
+   ((not harness-deepseek-list-models) nil)
+   (harness-deepseek--fetch harness-deepseek--fetch)
+   ((and (not refresh)
+         (cl-some (lambda (at) (and at (< (- (float-time) at) harness-deepseek--listing-ttl)))
+                  (list harness-deepseek--listed-at harness-deepseek--asked-at)))
+    nil)
+   (t
+    (setq harness-deepseek--asked-at (float-time))
+    (let ((fetch (condition-case err
+                     (harness-openai--fetch-models (harness-deepseek--endpoint))
+                   (error (harness-rejected err)))))
+      (setq harness-deepseek--fetch
+            (harness-then fetch
+                          (lambda (models)
+                            (setq harness-deepseek--fetch nil)
+                            (when models
+                              (let ((changed (not (equal models harness-deepseek--listing))))
+                                (setq harness-deepseek--listing models
+                                      harness-deepseek--listed-at (float-time))
+                                (when changed
+                                  (harness-run-soon #'harness-provider-relist 'deepseek))))
+                            t)
+                          (lambda (err)
+                            (setq harness-deepseek--fetch nil)
+                            (harness-log 'warn "deepseek: listing the models failed: %s"
+                                         (harness-error-message err))
+                            nil)))))))
+
+(defun harness-deepseek--list-models (&optional refresh)
+  "Return a promise of the DeepSeek models (`harness-deepseek--catalogue').
+What is known answers at once, and /models is asked in the background
+when its listing is stale.  REFRESH asks /models first, and the
+promise resolves once it answered or failed."
+  (let ((asked (harness-deepseek--ask-listing refresh)))
+    (if (and refresh asked)
+        (harness-then asked
+                      (lambda (_) (harness-deepseek--catalogue))
+                      (lambda (_) (harness-deepseek--catalogue)))
+      (harness-resolved (harness-deepseek--catalogue)))))
 
 (defun harness-deepseek--endpoint ()
   "Return the endpoint plist the DeepSeek provider is registered from."
@@ -235,7 +360,7 @@ from `:peak-pricing' apply.  This is the model's `:pricing-fn', which
         :base-url harness-deepseek-base-url
         :api-key-env "DEEPSEEK_API_KEY"
         :flavor 'deepseek
-        :models (harness-deepseek--models)
+        :models-fn #'harness-deepseek--list-models
         :tiers harness-deepseek-tiers
         :capabilities '(:thinking t)))
 
@@ -248,6 +373,8 @@ registered; without one it is removed, so the model picker never offers
 models that cannot be called.  Return the provider id when registered,
 nil otherwise."
   (interactive)
+  ;; Another key or host may list what the last could not: ask again.
+  (setq harness-deepseek--asked-at nil)
   (if (or harness-deepseek-always-register (harness-deepseek-api-key))
       (progn
         (harness-openai-register-endpoint (harness-deepseek--endpoint))

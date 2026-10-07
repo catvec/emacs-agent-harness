@@ -31,11 +31,14 @@
 ;; feedback that sends a task back from review (R, or m: any message to
 ;; a task in review sends it back); C-g leaves such a box for a new task
 ;; again, the question still waiting.
-;; RET or a click on a task opens its session in full.  b or [BTW] asks
-;; about the tasks in a BTW side conversation over the board, whose agent
-;; answers with the task and session tools (`task/btw').  / or [Search]
-;; finds tasks, or acts on them, from a line in words that a cheap model
-;; reads with the board; the board then shows only the tasks it is about
+;; RET or a click on a task opens its session in full.  F gives the board
+;; the fullscreen layout: the board stays on the left of the frame and
+;; the sessions it opens show beside it, until q on the board ends it
+;; (`harness-fullscreen').  b or [BTW] asks about the tasks in a BTW side
+;; conversation over the board, whose agent answers with the task and
+;; session tools (`task/btw').  / or [Search] finds tasks, or acts on
+;; them, from a line in words that a cheap model reads with the board;
+;; the board then shows only the tasks it is about
 ;; (harness-ui-tasks-search.el, through `harness-ui-tasks-filter').
 ;;
 ;; Review can be turned off (V, or the [Review: on] switch in the header
@@ -1983,7 +1986,8 @@ turn's end and the budget events also change what its budgets show.")
   (define-key map (kbd "b") #'harness-ui-tasks-btw)
   (define-key map (kbd "/") #'harness-ui-tasks-search)
   (define-key map (kbd "g") #'harness-ui-tasks-refresh)
-  (define-key map (kbd "q") #'quit-window)
+  (define-key map (kbd "F") #'harness-fullscreen)
+  (define-key map (kbd "q") #'harness-ui-quit-view)
   (define-key map (kbd "?") #'harness-menu))
 
 (defvar harness-ui-tasks-mode-map
@@ -2001,7 +2005,9 @@ turn's end and the budget events also change what its budgets show.")
   ;; C-g, and with no box to leave it falls back to the global one.
   (define-key map [remap keyboard-quit] #'harness-ui-tasks-compose-quit)
   (define-key map (kbd "C-c C-n") #'harness-ui-tasks-next)
-  (define-key map (kbd "C-c C-p") #'harness-ui-tasks-previous))
+  (define-key map (kbd "C-c C-p") #'harness-ui-tasks-previous)
+  ;; q's job from the compose box too, where q is typing.
+  (define-key map (kbd "C-c C-z") #'harness-ui-bury))
 
 (define-derived-mode harness-ui-tasks-mode special-mode "Tasks"
   "Major mode of the task board: a kanban of tasks above a compose box.
@@ -2018,6 +2024,8 @@ turn's end and the budget events also change what its budgets show.")
               (lambda ()
                 (and (harness-ui-tasks--board-p (current-buffer))
                      (plist-get (harness-ui-tasks--task t) :session))))
+  ;; An overview: the board can take the fullscreen layout (F).
+  (setq-local harness-ui-overview-function #'harness-ui-tasks--overview-session)
   ;; A BTW over the board (b, [BTW], or the usual BTW command) asks about its tasks.
   (setq-local harness-ui-btw-start-function #'harness-ui-tasks--start-btw
               harness-ui-btw-about "the tasks")
@@ -2058,7 +2066,9 @@ turn's end and the budget events also change what its budgets show.")
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
         (". V" "Review on or off" harness-ui-tasks-toggle-review)
         (". B" "Bulk edit current tasks" harness-ui-tasks-toggle-bulk)
-        (". g" "Refresh" harness-ui-tasks-refresh)]
+        (". F" "Fullscreen layout" harness-fullscreen)
+        (". g" "Refresh" harness-ui-tasks-refresh)
+        ("C-c C-z" "Bury (q)" harness-ui-bury)]
        ["Compose box"
         ("C-c C-c" "Submit" harness-ui-tasks-submit)
         ("C-c C-t" "Submit or Refine" harness-ui-tasks-toggle-refine)
@@ -2074,6 +2084,20 @@ turn's end and the budget events also change what its budgets show.")
 From a task's worktree it is the main checkout, so the board opened
 there is the project's."
   (harness-files-main-root dir))
+
+(defun harness-ui-tasks--overview-session ()
+  "Return the session to show beside the board in the fullscreen layout.
+That is the session of the task at point, else the most recently
+updated session of the board's tasks, archived ones aside."
+  (or (and (harness-ui-tasks--board-p (current-buffer))
+           (plist-get (harness-ui-tasks--task t) :session))
+      (let (best newest)
+        (dolist (task harness-ui-tasks--tasks best)
+          (when-let* ((sid (plist-get task :session))
+                      ((not (harness-ui-tasks--archived-p task))))
+            (let ((updated (or (plist-get (harness-ui-session sid) :updated) 0)))
+              (when (or (null best) (> updated newest))
+                (setq best sid newest updated))))))))
 
 (defun harness-ui-tasks--board-of-session (session-id)
   "Return the open board listing the task SESSION-ID works on, or nil."
@@ -2099,7 +2123,9 @@ The board takes a position like a session does (`harness-ui-positions')
 and replaces whatever is shown there; opening a task's session from it
 puts the session in the same position.  POSITION defaults to the one the
 board had last, then to `harness-ui-default-position'; with a prefix
-argument it is read."
+argument it is read.  In the `fullscreen' position the board stays on
+the left of the frame and the sessions open beside it (see
+`harness-fullscreen'): F on the board starts or ends that layout."
   (interactive (list nil (and current-prefix-arg (harness-ui-read-position))))
   (let* ((own (and (null directory) (harness-ui-tasks--board-of-session harness-ui-session-id)))
          (root (unless own
@@ -2283,7 +2309,9 @@ and attachments go along, as in a chat."
                (target harness-ui-tasks--target)
                (refine harness-ui-tasks--refine)
                (buffer (current-buffer)))
-    (when (and (eq (car target) 'answer) atts)
+    ;; The box's own attachments, not the files its @ references name:
+    ;; an answer mentioning a file goes as the text it is.
+    (when (and (eq (car target) 'answer) harness-compose-attachments)
       (user-error "Answers cannot carry attachments"))
     (setq harness-ui-tasks--error nil
           harness-compose-attachments nil)

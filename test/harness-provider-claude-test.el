@@ -22,6 +22,11 @@
 (defvar harness-provider-claude--asked)
 (defvar harness-provider-claude--probe)
 (defvar harness-provider-claude--blocks)
+(defvar harness-provider-claude-api-key)
+(defvar harness-provider-claude--api-base)
+(defvar harness-provider-claude--listing)
+(declare-function harness-provider-claude--forget-listing "harness-provider-claude")
+(declare-function harness-provider--forget "harness-provider")
 (declare-function harness-provider-claude-close "harness-provider-claude")
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 (declare-function harness-provider-claude--command "harness-provider-claude")
@@ -58,7 +63,12 @@ Processes, the usage report and the quota probe of earlier tests go."
   (clrhash harness-provider-claude--sessions)
   (setq harness-provider-claude--status nil
         harness-provider-claude--asked nil
-        harness-provider-claude--probe nil))
+        harness-provider-claude--probe nil
+        harness-provider-claude-api-key 'none
+        harness-provider-claude--api-base nil)
+  ;; What earlier tests taught the catalogue goes, and it lists again.
+  (harness-provider-claude--forget-listing)
+  (harness-provider--forget 'claude))
 
 (defun harness-provider-claude-test--near (a b)
   "Non-nil when numbers A and B are equal within rounding."
@@ -162,6 +172,192 @@ and the sessions created meanwhile kept that window."
     (should (= 1000000 (plist-get opus :context-window))))
   (should (= 200000 (plist-get (harness-call 'provider/model "claude:claude-haiku-4-5-20251001")
                                :context-window))))
+
+(defconst harness-provider-claude-test--cli-models
+  '((:value "default" :displayName "Default (recommended)"
+     :description "Use the default model (currently Opus 5.5) · $4/$20 per Mtok"
+     :supportsEffort t :supportedEffortLevels ("low" "medium" "high" "xhigh" "max"))
+    (:value "opus" :displayName "Opus" :description "Opus 5.6 · Most capable for complex work"
+     :resolvedModel "claude-opus-5-6" :supportsEffort t
+     :supportedEffortLevels ("low" "medium" "high" "xhigh" "max"))
+    (:value "sonnet" :displayName "Sonnet" :description "Sonnet 5 · Best for everyday tasks"
+     :resolvedModel "claude-sonnet-5")
+    (:value "sonnet[1m]" :displayName "Sonnet (1M context)" :description "Sonnet 5 for long sessions"
+     :resolvedModel "claude-sonnet-5")
+    (:value "haiku" :displayName "Haiku" :description "Haiku 4.5 · Fastest · $1/$5 per Mtok"
+     :resolvedModel "claude-haiku-4-5-20251001" :supportsEffort :false))
+  "What the CLI's `initialize' answer lists, as Claude Code 2.1 lists it.")
+
+(defun harness-provider-claude-test--model (models name)
+  "Return the model of MODELS whose id is claude:NAME."
+  (cl-find (concat "claude:" name) models :key (lambda (m) (plist-get m :id)) :test #'equal))
+
+(ert-deftest harness-provider-claude-lists-what-the-cli-lists ()
+  "The catalogue is what the CLI's `initialize' answer lists, over what is known.
+Aliases come first, with the window and the prices of the model each
+stands for; a model it stands for that nothing else names is listed
+too, with an estimated window; the models known before stay."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment
+          (cons (concat "HARNESS_FAKE_CLAUDE_MODELS="
+                        (harness-json-encode-text harness-provider-claude-test--cli-models))
+                process-environment))
+         (models (harness-test-await (harness-call 'provider/models t) 15))
+         (get (lambda (name) (harness-provider-claude-test--model models name))))
+    ;; In the CLI's order, before the rest.
+    (should (equal '("claude:default" "claude:opus" "claude:sonnet" "claude:sonnet[1m]" "claude:haiku")
+                   (seq-take (delq nil (mapcar (lambda (m) (and (eq 'claude (plist-get m :provider))
+                                                                (plist-get m :id)))
+                                               models))
+                             5)))
+    ;; An alias without its model said: the model its description names.
+    (let ((default (funcall get "default")))
+      (should (equal "Default (recommended)" (plist-get default :label)))
+      (should (equal "claude-opus-5-5" (plist-get default :resolves-to)))
+      (should (= 1000000 (plist-get default :context-window)))
+      (should-not (plist-get default :context-window-estimated))
+      (should (equal '(:input 4.0 :output 20.0 :cache-read 0.2 :cache-write 5.0) (plist-get default :pricing))))
+    ;; A model newer than any known: listed, its window estimated from its family.
+    (let ((opus (funcall get "opus"))
+          (new (funcall get "claude-opus-5-6")))
+      (should (equal "claude-opus-5-6" (plist-get opus :resolves-to)))
+      (should new)
+      (should (equal "Claude Opus 5.6" (plist-get new :label)))
+      (dolist (m (list opus new))
+        (should (= 1000000 (plist-get m :context-window)))
+        (should (plist-get m :context-window-estimated)))
+      (should (equal '("low" "medium" "high" "xhigh" "max") (plist-get opus :thinking-levels))))
+    (should (= 1000000 (plist-get (funcall get "sonnet[1m]") :context-window)))
+    (should-not (plist-get (funcall get "sonnet[1m]") :context-window-estimated))
+    (let ((haiku (funcall get "haiku")))
+      (should (= 200000 (plist-get haiku :context-window)))
+      (should-not (plist-get haiku :thinking-levels))
+      (should (equal 1.0 (plist-get (plist-get haiku :pricing) :input))))
+    ;; What was known before stays.
+    (should (funcall get "claude-fable-5-1"))
+    (should (funcall get "claude-haiku-4-5-20251001"))
+    ;; The tiers name the CLI's aliases, the newest of each family.
+    (should (equal "claude:haiku" (harness-call 'provider/tier-model "claude" :cheap)))
+    (should (equal "claude:sonnet" (harness-call 'provider/tier-model "claude" :balanced)))
+    (should (equal "claude:opus" (harness-call 'provider/tier-model "claude" :frontier)))
+    ;; The listing is kept, for the next start.
+    (should (file-exists-p (expand-file-name "claude-models.json" harness-state-directory)))
+    (setq harness-provider-claude--listing 'unread)
+    (harness-test-load-module 'provider-claude)
+    (should (equal "claude-opus-5-6" (plist-get (harness-call 'provider/model "claude:opus") :resolves-to)))))
+
+(ert-deftest harness-provider-claude-learns-the-window-a-model-runs-with ()
+  "A result's `modelUsage' says the window the CLI ran its model with.
+The name the session asked for and the model the CLI ran both learn
+it, the catalogue lists it, and it outlives a restart."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment
+          (append (list "HARNESS_FAKE_CLAUDE_RESOLVE={\"opus\": \"claude-opus-5-6\"}"
+                        "HARNESS_FAKE_CLAUDE_WINDOWS={\"claude-opus-5-6\": 400000}")
+                  process-environment))
+         (announced nil))
+    ;; Before any turn: the alias stands for the newest Opus known, an estimate.
+    (let ((opus (harness-call 'provider/model "claude:opus")))
+      (should (equal "Opus" (plist-get opus :label)))
+      (should (= 1000000 (plist-get opus :context-window)))
+      (should (plist-get opus :context-window-estimated))
+      (should (equal "claude:claude-opus-5-5" (plist-get opus :context-window-basis)))
+      (should (equal "claude-opus-5-5" (plist-get opus :resolves-to)))
+      (should (plist-get opus :pricing)))
+    (harness-on 'provider/models-updated (lambda (_) (setq announced t)))
+    (harness-provider-claude-test--run
+     (harness-provider-claude-test--request "learn1" "hello" :model "claude:opus"))
+    (harness-test-wait (lambda () (eql 400000 (plist-get (harness-call 'provider/model "claude:opus")
+                                                         :context-window)))
+                       5 "the window learned")
+    (let ((opus (harness-call 'provider/model "claude:opus")))
+      (should (= 64000 (plist-get opus :max-output)))
+      (should-not (plist-get opus :context-window-estimated))
+      (should (equal "claude-opus-5-6" (plist-get opus :resolves-to))))
+    ;; The catalogue was listed again, and lists the model the CLI ran.
+    (should announced)
+    (let ((new (harness-provider-claude-test--model (harness-test-await (harness-call 'provider/models))
+                                                   "claude-opus-5-6")))
+      (should new)
+      (should (equal "Claude Opus 5.6" (plist-get new :label)))
+      (should (= 400000 (plist-get new :context-window)))
+      (should-not (plist-get new :context-window-estimated)))
+    (harness-provider-claude-close "learn1")
+    ;; Read back after a restart.
+    (setq harness-provider-claude--listing 'unread)
+    (harness-provider--forget 'claude)
+    (should (= 400000 (plist-get (harness-call 'provider/model "claude:opus") :context-window)))))
+
+(ert-deftest harness-provider-claude-resolves-names-it-does-not-list ()
+  "A name the CLI takes but nothing lists gets what is known of its model.
+\"[1m]\" after a name is a million tokens; an alias is its family's
+newest model; a full name nobody knows is estimated, and logged."
+  (harness-provider-claude-test--setup)
+  (let ((sonnet (harness-call 'provider/model "claude:claude-sonnet-5[1m]"))
+        (opus (harness-call 'provider/model "claude:opus[1m]"))
+        (haiku (harness-call 'provider/model "claude:haiku"))
+        (unknown (harness-call 'provider/model "claude:claude-opus-4-5-20251101")))
+    (should (= 1000000 (plist-get sonnet :context-window)))
+    (should (equal "Claude Sonnet 5 (1M context)" (plist-get sonnet :label)))
+    (should (equal 2.0 (plist-get (plist-get sonnet :pricing) :input)))
+    (should (= 1000000 (plist-get opus :context-window)))
+    (should (equal "claude-opus-5-5" (plist-get opus :resolves-to)))
+    ;; An alias stands for its family's newest model, which may be newer
+    ;; than any known: the window is that model's, as an estimate.
+    (should (= 200000 (plist-get haiku :context-window)))
+    (should (plist-get haiku :context-window-estimated))
+    (should (equal "claude:claude-haiku-4-5-20251001" (plist-get haiku :context-window-basis)))
+    (should (equal "claude-haiku-4-5-20251001" (plist-get haiku :resolves-to)))
+    ;; Nothing knows it: an estimate, never a silent small window.
+    (should (plist-get unknown :context-window-estimated))
+    (should (>= (plist-get unknown :context-window) 200000))
+    (should (equal "Claude Opus 4.5" (plist-get unknown :label)))))
+
+(ert-deftest harness-provider-claude-autocompact-only-from-a-known-window ()
+  "A session's cap becomes a percentage of its model's window only when that is known.
+A percentage of an estimate could have the CLI compact far too early."
+  (harness-provider-claude-test--setup)
+  (let ((request (harness-provider-claude-test--request "s-est" "hello" :model "claude:claude-mystery-7")))
+    (setq request (plist-put request :session (plist-put (copy-sequence (plist-get request :session))
+                                                         :context-window 256000)))
+    (should (plist-get (harness-call 'provider/model "claude:claude-mystery-7") :context-window-estimated))
+    (should-not (harness-provider-claude--autocompact-pct request))))
+
+(ert-deftest harness-provider-claude-lists-the-apis-models ()
+  "With an API key, the API's model list adds its models and their windows.
+The prices stay those known; the request names the key and the API version."
+  (harness-provider-claude-test--setup)
+  (let* ((body (harness-json-encode
+                '(:data ((:id "claude-opus-5-6" :type "model" :display_name "Claude Opus 5.6"
+                          :max_input_tokens 1000000 :max_tokens 128000
+                          :capabilities (:image_input (:supported t)
+                                         :effort (:low (:supported t) :medium (:supported t)
+                                                  :high (:supported t) :xhigh (:supported t)
+                                                  :max (:supported t))))
+                         (:id "claude-haiku-4-5-20251001" :type "model" :display_name "Claude Haiku 4.5"
+                          :max_input_tokens 200000 :max_tokens 64000
+                          :capabilities (:image_input (:supported t) :thinking (:supported t))))
+                  :has_more :false :last_id "claude-haiku-4-5-20251001")))
+         (server (harness-test-http-serve
+                  (list (list "/v1/models?limit=1000" 200 '(("Content-Type" . "application/json")) body)))))
+    (unwind-protect
+        (let* ((harness-provider-claude-api-key "test-key")
+               (harness-provider-claude--api-base (harness-test-http-url server ""))
+               (models (harness-test-await (harness-call 'provider/models t) 15))
+               (opus (harness-provider-claude-test--model models "claude-opus-5-6"))
+               (haiku (harness-provider-claude-test--model models "claude-haiku-4-5-20251001")))
+          (should (equal "Claude Opus 5.6" (plist-get opus :label)))
+          (should (= 1000000 (plist-get opus :context-window)))
+          (should-not (plist-get opus :context-window-estimated))
+          (should (= 128000 (plist-get opus :max-output)))
+          (should (equal '("low" "medium" "high" "xhigh" "max") (plist-get opus :thinking-levels)))
+          ;; Known models keep their prices; the API gives none.
+          (should (equal 1.0 (plist-get (plist-get haiku :pricing) :input)))
+          (should (equal '("low" "medium" "high") (plist-get haiku :thinking-levels)))
+          ;; The API's models come before those only known.
+          (should (< (cl-position opus models) (cl-position (harness-provider-claude-test--model models "claude-fable-5-1")
+                                                            models))))
+      (delete-process server))))
 
 (ert-deftest harness-provider-claude-command-line ()
   (harness-provider-claude-test--setup)

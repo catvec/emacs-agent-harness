@@ -60,7 +60,7 @@ does best.  A PROVIDER:NAME forces that model, and nil uses the task
 model itself."
   :type '(choice (const :tag "The task provider's cheap model" auto)
                  (const :tag "The task model" nil)
-                 (string :tag "Model"))
+                 (string :tag "Model" :names model))
   :group 'harness)
 
 (defcustom harness-tasks-search-thinking nil

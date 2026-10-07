@@ -181,7 +181,7 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
          :billing api|subscription|extra-usage :plan "max")    ; billing and plan of the latest call
  :context-window N                  ; in effect: the override, else the model's
  :context-window-override nil|N     ; a window set for the session
- :budget nil|(:amount F :hard BOOL)
+ :budget nil|(:amount F :hard BOOL)    ; given to the session; the Budget setting is not copied
  :head "node-id"
  :queue ((:id "q1" :text "…" :attachments (ATTACHMENT…)) …)
  :pending ((:id "p1" :kind permission|question :payload PLIST :created FLOAT) …)
@@ -205,8 +205,8 @@ record".
 `:context-window` is looked up in the model catalogue (`provider/model`)
 each time the session is described, so it follows the catalogue; only
 `:context-window-override` is stored.  A copy of the catalogue's window
-would go stale when the catalogue changes, or keep the 128000 stand-in
-given for a model whose provider has not answered yet.  When the
+would go stale when the catalogue changes, or keep the estimate given
+for a model whose provider has not answered yet.  When the
 catalogue changes, the sessions whose window moved get `session/changed`.
 
 ### Node (conversation DAG)
@@ -321,8 +321,9 @@ project-root `.dir-locals.el` → customize default.  Variables are
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
 (the level BTWs start at, default "low"; nil for the session's),
-`harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
-`harness-non-interactive`.
+`harness-allowed-directories`, `harness-sandbox-policy`,
+`harness-non-interactive`.  `harness-budget` has a global value only:
+it is one budget for all sessions together (see usage).
 
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
@@ -559,21 +560,27 @@ gone.
 ```elisp
 (harness-define-provider 'ID
   :label "Claude Code" :doc "…"
-  :models FN            ; () → promise of MODEL plists
+  :models FN            ; (&optional REFRESH) → promise of MODEL plists
   :complete FN          ; (REQUEST) → HANDLE plist (:cancel FN)
   :fork FN              ; (MODEL PROVIDER-STATE &optional CHECKPOINT) → promise of new state [optional]
   :quota FN             ; (&optional REFRESH) → promise of QUOTA (below)     [optional]
   :warm FN              ; (REQUEST) → BOOL: get ready for a request like it  [optional]
   :close FN             ; (SESSION-ID) → BOOL: free what it keeps for one   [optional]
+  :resolve FN           ; (NAME &optional MODELS) → MODEL plist or nil: a name
+                        ; its listing lacks (an alias, a variant)          [optional]
   :capabilities PLIST   ; static defaults, merged with per-model ones
   :tiers PLIST)         ; a model per tier, see below
 ```
 
 MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
-:context-window N :max-output N :input-modalities ("text" "image")
+:context-window N :context-window-estimated BOOL :context-window-basis "…"
+:max-output N :input-modalities ("text" "image")
 :thinking-levels (…) :pricing (:input F :output F :cache-read F :cache-write F)
-:pricing-fn SYMBOL :capabilities (…))`.  Pricing is USD per million
-tokens.  A model whose rates change with the clock carries `:pricing-fn`,
+:pricing-fn SYMBOL :resolves-to "NAME" :capabilities (…))`.  Pricing is
+USD per million tokens.  `:context-window-estimated` marks a window
+nobody gave for this model, and `:context-window-basis` says what it
+was drawn from (see below); `:resolves-to` is the model an alias stands
+for.  A model whose rates change with the clock carries `:pricing-fn`,
 a symbol called as `(MODEL USAGE AT)` that returns the pricing plist in
 effect at AT; `usage/price` uses its answer instead of `:pricing`.  This
 is how the DeepSeek provider follows its peak and off-peak tiers, and it
@@ -603,12 +610,45 @@ The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
 other's.  A provider whose models are not cached is asked by the first
 `provider/model` that needs one: a static catalogue answers at once and
-is cached before the call returns.  Until a slower provider answers,
-and for a model its provider does not list, a stand-in MODEL with a
-128000-token window is returned.  A failed listing is cached as empty
+is cached before the call returns.  A failed listing is cached as empty
 (or keeps the models listed before), so lookups do not ask again before
-a refresh (`provider/models t`).  `provider/models-updated` follows
-every listing that is cached.
+a refresh (`provider/models t`), which a models function that takes an
+argument is told of, so it asks its source rather than its cache.
+`provider/models-updated` follows every listing that is cached.  A
+provider that learns something its listing should show (a new list
+from its source, the window a model really ran with) calls
+`harness-provider-relist ID` to have it listed and announced again.
+
+The model lists are not hard-coded.  Each provider lists what its
+source lists, with the windows the source gives: the Claude CLI's
+`initialize` answer and results, the Anthropic, OpenAI-compatible,
+DeepSeek and Copilot model listings, Bedrock's (sections below).  What
+a provider ships is a seed for before its source answered, and for
+prices.  So a new model works without a code change.
+
+Every MODEL has a context window, and an unknown slug never silently
+gets a small one.  A model its provider lists without a window, one
+its provider flags as its own guess (Bedrock's family defaults), and a
+name no listing holds (an alias, a model a slower provider has not
+listed yet, a model of a provider that is gone) get an estimate,
+flagged `:context-window-estimated t`, drawn in this order from:
+1. the same model where a provider sizes it, its own provider first:
+   `harness-provider-model-key` drops vendor and region prefixes, dates
+   and Bedrock versions, so `us.anthropic.claude-opus-4-5-20251101-v1:0`,
+   `anthropic/claude-opus-4.5` and `claude-opus-4-5` are one model;
+2. the model of its own provider that shares the most leading name
+   words with it, two at least (`claude-opus-5-6` takes after
+   `claude-opus-5-5`, not after `claude-haiku-4-5`);
+3. the window most of its provider's models have;
+4. `harness-provider-fallback-context-window` (200000).
+A provider's own guess gives way to the first two only.  Estimates are
+drawn from windows providers gave, never from another estimate, and
+made again whenever a listing changes.  A name no listing holds goes to
+its provider's `:resolve` first (Claude Code's aliases, Copilot's
+`default`, a Bedrock profile ARN), whose answer is estimated only where
+it gives no window; the log says once per model when a listed
+provider's model got an estimate.  The model picker shows an estimated
+window as `~200k`.
 
 Capabilities: `:hosted-loop` (provider runs the tool loop and keeps the
 history; the agent only sends new user content, so switching to it
@@ -806,6 +846,24 @@ asked for again after a turn once `harness-provider-claude--quota-ttl`
 (60 s) has passed.  With no CLI process running, a short-lived probe
 process answers instead, sending no message.
 
+The Claude provider's models are what the CLI says they are.  Every
+`initialize` answer (each new process's, the quota probe's, and a
+probe's started when a refresh asks) lists what its /model picker
+offers: aliases such as `opus` and `sonnet[1m]`, their labels and effort
+levels and, from Claude Code 2.1.197 on, the model each resolves to.
+Every result's `modelUsage` gives the context window the CLI ran each
+model with, and the name a process was started with takes the window
+of the model it ran.  With an Anthropic API key
+(`harness-provider-claude-api-key`, else ANTHROPIC_API_KEY or
+auth-source), `GET /v1/models` adds every model the API serves, with
+its window, output limit and effort levels.  What was learned is kept
+in `claude-models.json` in the state directory;
+`harness-provider-claude-models` only seeds the catalogue and gives
+prices.  An alias or a name nothing lists is resolved
+(`harness-provider-claude--resolve`): a learned window, a `[1m]`
+variant's million tokens, the window of the model it resolves to, else
+the window of its family's newest listed model, flagged as an estimate.
+
 Each result's `total_cost_usd` is a running total for the process,
 seeded on `--resume` with the session's restored spend.  A turn
 therefore costs the difference to the previous total, starting from the
@@ -909,14 +967,56 @@ Converse API: one ConverseStream request per call, its binary event
 stream decoded into `text`, `thinking`, `usage` and `tool-call` events.
 Each entry of `harness-bedrock-endpoints` is a provider (default
 `bedrock`); model ids are `ID:MODEL-ID`.  Its catalogue comes from
-ListFoundationModels and ListInferenceProfiles; context windows and
-prices, which Bedrock does not report, come from
-`harness-bedrock--model-defaults`.  Usage events carry tokens and
+ListFoundationModels and ListInferenceProfiles, cached an hour per
+endpoint; a refresh lists again, and a listing that fails keeps the
+models listed before.  Context windows and prices, which Bedrock does
+not report, come from `harness-bedrock--model-defaults`; a family's
+catch-all window there is flagged as a guess, which the same model's
+window at another provider replaces, or else that of the endpoint's
+closest model by name that the defaults size.  A model no default knows gets
+the endpoint's `:default-context`, else an estimate, and a name the
+listing lacks (an application inference profile ARN) is described from
+the defaults by its `:resolve`.  Usage events carry tokens and
 `:billing api` but no cost, so `session/usage-add` prices them from the
 catalogue.  Claude and Nova requests carry prompt cache points; Claude
 reasoning returned with tool calls is kept and sent back with them while
 the tool loop lasts.  `harness-http-request` takes `:binary t` for such
 framings: the response then reaches `:on-chunk` as unibyte strings.
+
+An endpoint can point at a gateway in front of Bedrock instead.  Its
+`:endpoint-url` holds the prefix that Bedrock's paths go under, and a
+query that every request keeps (`harness-bedrock--url`).  Listing
+follows a runtime URL whose host is not AWS's
+(`harness-bedrock--control-url`), so a gateway's keys and headers never
+go to AWS.  Requests are authenticated in one of three ways:
+
+- An API key in the header the endpoint names.  It comes from a
+  variable, auth-source, or `:bearer-token-command`, whose output is
+  kept until the key expires.  The command runs again once when the
+  gateway refuses the key, for a chat request or a listing.
+- SigV4 for the gateway's own URL.
+- SigV4 for Bedrock's own URL, with `:sign-for-aws`, for a gateway that
+  passes requests on unchanged.  The AWS host is signed but not sent.
+
+`${NAME}` in `:headers` is read from the environment and kept out of
+every message.  Saving the setting re-registers the providers.  It also
+forgets the cached models, quirks and kept keys of each endpoint whose
+entry changed (`harness-bedrock--forget-endpoint`), so an edit shows
+at once, and a listing that fails after it does not bring back the
+models of the old setup.  The tests run a stub gateway from harness-bedrock-mock.el
+(`:prefix` and `:checks`), and nothing else is reachable while they
+run.
+
+The OpenAI-compatible provider (`provider-openai`) makes a provider of
+each entry of `harness-openai-endpoints`.  Its models are what the
+server lists at /models, asked again after an hour or when a refresh
+asks; a listing that fails keeps the models listed before.  The window
+comes from whichever field the server names it with (`context_length`
+and `top_provider.context_length` of OpenRouter and others,
+`context_window` of Groq, `max_context_length` of Mistral and LM
+Studio, `max_model_len` of vLLM, `max_input_tokens` of LiteLLM), else
+the endpoint's `:default-context`, else the catalogue's estimate:
+plain OpenAI lists ids alone.
 
 The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
 OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
@@ -940,7 +1040,13 @@ still gets it (even when it names `:flavor openai'), so its tool loops
 do not 400, and the cache fields it reports are split so cached input is
 billed at the cache-hit rate, while OpenAI and OpenRouter hosts still
 drop thinking.
-`harness-deepseek-*` adds registration and prices.
+`harness-deepseek-*` adds registration and prices.  Its models are
+what DeepSeek's /models lists (names, windows, output limits,
+modalities, effort levels), asked in the background once the listing
+is an hour old, so the catalogue never waits on the network;
+`harness-deepseek-model-specs` adds prices and labels, and is what is
+listed before /models answered or when it cannot be reached.  A model
+DeepSeek adds is priced by the tier its name says (flash or pro).
 The provider is created only while a key is found
 (`harness-deepseek-api-key`, DEEPSEEK_API_KEY, or auth-source), so
 nothing uncallable is listed; see `harness-deepseek-always-register`.
@@ -1016,7 +1122,9 @@ additional usage is on.  Quota comes from `account.getQuota`
 comes from `models.list` (context window, image input, reasoning
 efforts, token prices as `:pricing`), or before `copilot login` from
 `models.getBuiltInCatalog`, asked of a short-lived probe process when
-no session process runs.
+no session process runs.  `copilot:default` resolves to
+`harness-provider-copilot-default-model`, with that model's window,
+levels and prices.
 
 ### tools
 
@@ -1132,6 +1240,26 @@ non-interactive session it stays a denial.
   everything below the directories it matches.  A grant of `DIR/**` is
   kept as the directory DIR/, so default grants read as before; a grant
   narrowed to one file keeps its name.
+- What a shell command reaches: the bash tool's `:paths` is where it
+  runs, which is all the jail checks (the sandbox confines the command,
+  and the mode and the judge read it whole).  For an `exec` call with a
+  `:command`, `harness-perms--command-paths` reads the paths the
+  command line names: a best-effort word scan (quotes, backslashes,
+  comments, `;` `&` `|` `(` `$(` and backquotes, redirections) that
+  keeps words that are absolute, start with `~` or `$HOME`, or with
+  `./` or `../`, and the values of `--option=…` and `NAME=…` words;
+  not the programs it runs (the first word of a command, after
+  assignments, keywords and prefixes such as `sudo` or `xargs`), not
+  `/dev/null` and the like, and on this machine not an absolute word
+  whose first directory does not exist, so a `/api/v1` in a grep is no
+  path (on a remote host nothing is looked up, and `~` words are left
+  out).  The call is about its subject paths
+  (`harness-perms--subject-paths`): the ones it names outside the
+  session's directories, or, when it names none there, where it runs,
+  as before.  The tool prompt shows and builds its pattern from them,
+  so `ls -la ~/.claude/projects/x` run in the project is answered for
+  `~/.claude/projects/x/**` and not for every command run in the
+  project, and the rules weigh them (below).
 - The jail asks instead of denying when a path lies outside the roots
   and someone can answer: a pending `permission` request whose payload
   carries `:dir`, `:pattern` and the options allow-once (this call may
@@ -1185,8 +1313,12 @@ non-interactive session it stays a denial.
   `harness-perms-rules`.  A rule with a `:path` (absolute, or relative to
   the session's cwd) applies to calls with paths only: an allow rule when
   the pattern holds every path of the call, a deny rule when it holds
-  any.  The mode stage checks them first, before the auto-allow list and
-  the mode.  A tool prompt for a call with paths offers its `:pattern`,
+  any.  For a shell command an allow rule needs every subject path (the
+  ones it names outside the session's directories, else where it runs),
+  so a rule for the project no longer lets `rm -rf ~` run in it; a deny
+  rule holds when any path it names, inside or out, or where it runs
+  lies in the pattern.  The mode stage checks them first, before the
+  auto-allow list and the mode.  A tool prompt for a call with paths offers its `:pattern`,
   and its allow-session / allow-always / deny-always answers record
   `(:tool NAME :path PATTERN :behavior B)` rather than a rule for the
   tool everywhere; a call without paths records `(:tool NAME :behavior B)`
@@ -1194,7 +1326,9 @@ non-interactive session it stays a denial.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
   `:pattern` for a call with paths and `:dir` and `:reason` for a
-  directory prompt; UIs offer only the listed `:options`),
+  directory prompt; a tool prompt's `:paths` are its subject paths, and
+  a shell command's prompt has `:cwd`, where it runs; UIs offer only
+  the listed `:options`),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
@@ -1487,6 +1621,15 @@ non-interactive session it stays a denial.
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
   count billed cost, so calls a subscription covers spend none; a
   baseline counts toward both.
+- The Budget setting (`harness-budget`, `(:amount F :hard BOOL)`) is
+  one implicit budget, id "settings", for all sessions together: it
+  counts every recorded call and applies to every session, after the
+  explicit ones in `usage/session-budgets` and `usage/project-budgets`
+  (so the task board's header shows it too).  `usage/budget-status
+  "settings"` gives its status while it is set; `usage/budgets` lists
+  only the explicit ones.  Sessions no longer copy it into their own
+  `:budget`; the session module drops the copies saved before, once
+  (marker `session-budget-copies-dropped.json`).
 - Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
 
 ### fallback
@@ -1730,12 +1873,21 @@ so switching to either loses nothing.
   refuses, changing nothing, when it would overwrite uncommitted or
   untracked work there or a merge is already in progress (the merge
   fails; a HEAD that moved meanwhile is merged again).  On conflict the
-  parent is untouched and the lock passes on at once: the child session
-  receives a steering message (from `harness-sender-system "merge
-  queue"`) naming the files and the parent's commit to `git merge` into
-  its own branch, in its own worktree.  A merged child's worktree loses
+  parent is untouched and the lock passes on at once, and the parent's
+  commit is to be `git merge`d into the child's branch, in its own
+  worktree.  By default (`harness-merge-conflict-resolver` `fresh`) the
+  harness starts a fresh `subagent` session for it -- a child of the
+  child session, in its worktree, with its settings and
+  `harness-merge-resolver-model` or its model -- prompted (from
+  `harness-sender-system "merge queue"`) with only the files, both
+  sides' commits and what to do: a child that waited long in the queue
+  would pay for its whole history on a cold prompt cache.  Its turn
+  ending without `merge_done` fails the merge (event `merge/resolver
+  CHILD PARENT RESOLVER`; `merge/queue` items carry `:resolver`).  With
+  `child`, the child session itself gets that as a steering message.  A merged child's worktree loses
   the harness's lock (`worktree/unlock`; see worktree).
-- `merge/status CHILD-SID`; the `merge_done` tool checks the child's
+- `merge/status CHILD-SID`; the `merge_done` tool (called by the child
+  or its resolver) checks the child's
   worktree contains the parent's commit, merged and committed, and
   queues the branch again.
 - Events `merge/queued CHILD PARENT POSITION`, `merge/started`,
@@ -2046,6 +2198,81 @@ on them, answered by a cheap model that returns JSON only.
   the demo provider answers search requests heuristically (word match
   plus action verbs), so the dev daemon, the tests and the screenshots
   work offline.
+
+### pet
+
+A companion pet, after the ones Claude Code hatched for April Fools'
+Day 2026 (`/buddy`): an egg hatches into a creature with random bones,
+a cheap model names it and gives it a personality, and later, now and
+then, lends it a line about the user's work.  One pet per harness.
+
+- Bones are rolled, never stored: Mulberry32 seeded with the 32-bit
+  FNV-1a of the seed and `harness-pet--salt` draws, in order, the rarity
+  (`harness-pet-rarities`: common 60, uncommon 25, rare 10, epic 4,
+  legendary 1 in 100, with 1 to 5 stars), the species (18 in
+  `harness-pet-species`), the eyes, a hat (none for a common one), shiny
+  (1 in 100), then the stats DEBUGGING, PATIENCE, CHAOS, WISDOM and
+  SNARK (`harness-pet-stats`): from the rarity's floor, one peak stat
+  (floor+50 to floor+79, at most 100), one dump stat (floor−10 to
+  floor+4, at least 1), the rest floor to floor+39.  A last draw seeds
+  the inspiration words the model names it after.  `harness-pet-roll
+  SEED` → `(:rarity :species :eye :hat :shiny :stats :inspiration)`.
+- The record, `pet.json` under the state directory: `(:seed :name
+  :personality :hatched :xp :pets :muted :said)`, SAID its last
+  `harness-pet--memory` sayings.  A change it makes while growing is
+  saved `harness-pet--save-delay` seconds later (`harness-pet-flush` at
+  shutdown and on `kill-emacs-hook`); other changes at once.
+- `pet/get` → the VIEW: `(:hatched :hatching :reactions :watching
+  :model)`, and once hatched also `:seed :name :personality :hatched-at
+  :rarity :stars :species :eye :hat :shiny :stats :level :xp :level-xp
+  :next-xp :pets :muted :thinking :said`.  Booleans are t or `:false`;
+  `:thinking` is t while it waits for a line; LEVEL is
+  `max(1, floor((1 + sqrt(1 + 0.8·xp)) / 2))`, a level L starting at
+  `5L(L−1)` xp.
+- `pet/hatch` → promise of the VIEW once it hatched (the one hatching is
+  shared; one that hatched already is returned).  A new seed is rolled
+  and the model asked for `{"name":…,"personality":…}`
+  (`harness-pet--hatch-system`); with no model, a failed or late call,
+  or an answer without them, it hatches all the same with a name from
+  `harness-pet--fallback-names` and a plain personality.  Its first
+  words follow, as for a petting.
+- `pet/pet` (counts, +1 xp at most once a minute, and it answers),
+  `pet/rename NAME` (one line, at most `harness-pet--max-name`
+  characters), `pet/set-muted BOOL`, `pet/release` (forgets it; the next
+  egg brings a new seed) → the VIEW.  `pet/watch CLIENT ON` → the VIEW:
+  CLIENT, an id the UI makes up, shows the pet now or not.
+- It speaks only while some client watches it, it is not muted and
+  `harness-pet-reactions` is on; never two lines within
+  `harness-pet--min-gap` seconds, never two at once.  Asked -- a message
+  of the user's that names it, a petting, hatching, a level gained --
+  it answers every time.  Unasked, at most once every
+  `harness-pet-cooldown` seconds (60): on a message the user writes, by
+  chance (`harness-pet-chance`, 0.3), and at the end of a turn of the
+  user's that failed tests (a command's output, `test-fail`), failed
+  otherwise (`error`) or changed more than `harness-pet--large-diff`
+  lines (`large-diff`), see `harness-pet-turn-reason`.  It reads the
+  session's name, its project and the last nodes of the transcript (at
+  most about 3000 characters).  The line is one line, without a leading
+  "NAME:" or quotes, at most `harness-pet--max-saying` characters
+  (`harness-pet-sanitise`); "..." is silence.
+- Every call is `provider/complete` with `:ephemeral t` and `:no-thinking
+  t`, a session id of its own (closed with `provider/close` when it
+  ends) and `pet/` under the state directory as its directory, so no
+  project instructions, memory or history reach it; a call taking
+  longer than `harness-pet--timeout` is cancelled.  Its cost is recorded
+  with `usage/record` with `:session nil`, under the project of the
+  session it spoke about.
+- Model: `harness-pet-model`, `auto` (the default) the cheap tier
+  (`provider/tier-model`) of the session's model, or of `harness-model`
+  for a hatching or a petting; nil that model itself; a string forces
+  one.
+- Growing: +2 xp for every message the user writes, +1 for every turn
+  of theirs that ends well.  Event `pet/changed VIEW` after any change
+  (growing only while watched or when it gains a level), `pet/said
+  SAYING` with `(:text :ts :reason :session :session-name)`.  Both are
+  forwarded to clients; the methods are `_harness/pet/...` over ACP.
+- The demo provider names pets and speaks their lines from a script,
+  so the dev daemon and the tests run offline.
 
 ### notifications
 
@@ -2360,8 +2587,9 @@ change), `_harness/node` (a finalised or updated node), `_harness/hint`,
 `_harness/activity` (`activity`: what the running turn does, as
 `agent/activity` returns it; null once the turn ends).
 Requests agent → client: `session/request_permission {sessionId, toolCall,
-options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, dir,
-pattern, reason}}` → `{outcome:{outcome:"selected",optionId}}`, plus
+options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
+pattern, reason}}` (`cwd`: where a shell command runs; `paths`: what
+the call is about, see perms) → `{outcome:{outcome:"selected",optionId}}`, plus
 `_harness:{pattern}` when the client answers a request about paths for
 another glob pattern than its `_harness.pattern` (see perms),
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
@@ -2516,7 +2744,8 @@ fetched once per connection and again after `harness/reloaded`;
 `harness-ui-fetch-tools`), through which views name every tool by its
 label (`harness-ui-tool-label`, `harness-ui-tool-title`), window
 positions (`harness-ui-display-session SID &optional POSITION`; presets
-`right`, `bottom`, `full`, `other`; one session per position, replacing),
+`right`, `left`, `bottom`, `full`, `other`, `fullscreen`; one session
+per position, replacing),
 the global keymap and the transient menu `harness-menu` (with a group for
 the commands of the buffer it is opened from, which each mode lists in
 its `harness-menu-group` property; opened from a side window it gets a
@@ -2551,7 +2780,12 @@ the chat) to change it in the minibuffer, more or less specific;
 `M-n` offers patterns around the request's own, and the answer carries
 the edited pattern (see perms).  For a call with paths the line also
 says which answers remember the pattern ("s, a, N remember the answer
-for it").
+for it").  The facts above it say what the pattern is made of
+(`harness-ui-pending--permission-facts`): `kind: write   paths:
+~/proj/lisp/a.el` on one line for most calls; for a shell command
+`kind: exec   runs in: ~/proj`, where it runs, and below it `paths:
+~/.claude/projects/x`, what it is about: the paths it names outside
+the session's directories (left out when that is just where it runs).
 
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting
@@ -2581,7 +2815,19 @@ Thinking between two calls of a run does not break it but folds in
 with them, since a model that thinks before every call would never
 have a run otherwise; thinking before a run's first call or after its
 last stays out.  Only the newest block joins a run as the transcript
-grows, and a loaded transcript is grouped as a whole.
+grows, and a loaded transcript is grouped as a whole.  Two calls of a
+coalescable tool stay out of runs: one whose result shows a picture or
+a video, which a group would hide, and one the session waits on, whose
+permission prompt is open (the pending record names the call), until
+the user answers it.  Such a call leaving its run, or coming back to it
+once answered, has the transcript grouped anew, as a load groups it:
+other calls of its step may have come after it meanwhile.  A group
+with a call of a group the user had opened is open too, and no other.
+A page of history can start with the result of a
+call on the page before it: the result shows alone, as the result of
+an earlier tool call, until that page loads, then joins its call
+(`harness-chat--adopt-orphans`), so the run folds as it would in a
+single load.
 A tool call's header says how it went, marked the way a Japanese table
 marks it (`harness-ui-level-icon`), each ending on a background of
 its own: a green circle when it ran (`harness-tool-face`), a yellow
@@ -2611,7 +2857,12 @@ file ×3, Search files, Find files", then " · thinking ×2" for the
 thinking folded in with them), and so do the permission panel,
 the activity line and the mode line.  A title recorded before tools had
 labels starts with the tool's name ("read_file x.el"), which the label
-replaces, so old transcripts read the same.
+replaces, so old transcripts read the same.  Under a folded call's
+header one dim line sums up the input its title leaves out
+(`harness-ui-tool-input-summary`): a list reads as its labels,
+comma-separated, and a list of other objects, such as the items of a
+todo list, as how many there are, never as a Lisp form; a todo_write,
+whose title already counts its items, has no such line.
 Auto-scroll follows unless the user scrolled up.  While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a
@@ -2697,10 +2948,52 @@ so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
 when the buffer changed since the last key, and a host changes all the
 time (a chat streams, a board follows its tasks): once the token stops
-changing, the box asks them again (`harness-compose--popup`).  `C-c C-a`
-reads a project file by part of its name over the same list, never
-listing while you wait; `C-u C-c C-a`, or a directory that is no
-project, reads any file.
+changing, the box asks them again (`harness-compose--popup`).  @ and
+`C-c C-a` find files through one table (`harness-compose--file-table`):
+part of a name matches the project's files, never listing while you
+wait, and a path -- starting with `/`, `~`, `./` or `../`, the relative
+ones against the box's project root -- completes over the file system
+directory by directory in the `file` category, with file name handlers
+off so that a remote name never opens a connection.  A completed path
+attaches only a regular file; a directory stays in the box for its
+files to complete.  `C-c C-a` ignores a leading @, and a directory
+chosen there reads again from inside it; `C-u C-c C-a`, or a directory
+that is no project, browses with `read-file-name`.  An @
+reference typed out in full, or pasted, names its file all the same:
+`harness-compose-take` attaches the regular files the references in the
+text name (`@skill:` ones and missing files aside, trailing punctuation
+tolerated) and leaves the references in the text.  An answer to a
+question, on the board or in a popout, carries no attachment: there a
+file the text names goes as its reference
+(`harness-compose-without-references`).
+
+Dragging images out (`harness-ui-drag`): the images the UI shows -- the
+transcript's (`harness-chat--image-string`, `harness-ui-image-string`),
+a compose chip's thumbnail and name, a report's and the image popout's
+-- drag into another application as a file.  `harness-ui-drag-source`
+(a string), `harness-ui-drag-region` (buffer text) and
+`harness-ui-drag-props` (a plist of text properties about to be put on
+text, the image strings' click properties, so that an image drawn in
+pieces, line-high strips say, drags from each) set the
+`harness-ui-drag` property, the file or t for the image displayed
+there, lay `harness-ui-drag-map` (down-mouse-1) over the keymap the
+text already has, and add a word to its `help-echo`.
+`harness-ui-drag-start` follows the mouse with `track-mouse` while the
+button is down: a release before it moved `harness-ui-drag-threshold`
+pixels goes back to `unread-command-events` as a mouse-1 click, so
+links, buttons and `follow-link` work as before; further, it is
+`dnd-begin-file-drag`, whose drop on the source frame itself is
+ignored, so letting go over Emacs cancels.  An image held only as
+`:data` is written to the session's own temporary directory
+(`session/tmp-dir`) as `image-SHA.EXT`, SHA the start of its bytes'
+SHA-1, so a second drag writes nothing; the directory is asked for when
+such an image is drawn and again on the press, and never waited for:
+until it is known, and for a buffer of no session, the file goes to a
+private directory of this Emacs (mode 700), deleted when Emacs exits.
+Nothing is made draggable where `x-begin-drag` is missing (only X,
+macOS and Haiku start drags), nor is a remote file, which the drag
+would copy here while the UI waits; on a text terminal's frame a press
+is a plain press.
 
 Views share positions with sessions: the task board, session list,
 usage dashboard, worktree list, conversation tree and log open through
@@ -2708,6 +3001,22 @@ usage dashboard, worktree list, conversation tree and log open through
 returning to the position they had last); a session opened from a view
 (`harness-ui-session-opener`) replaces the view.  Menus, help and the
 BTW overlay keep their own windows.
+
+Fullscreen layout (`harness-fullscreen`, `F` on an overview, `C-c h F`):
+an overview -- a view that sets `harness-ui-overview-function`, the
+task board and the session list -- takes the left of the frame in a
+side window (`harness-ui-fullscreen-width`), and every other window but
+one, the slot, makes way for it.  The slot shows the session in sight,
+else the one the overview function names (at point, else the most
+recent).  While the layout lasts the `fullscreen` position is the
+default: sessions and views shown without a position take the slot, and
+an overview takes the left.  The layout is kept per frame in a weak
+table (`harness-ui--fullscreen-layouts`), with the window configuration
+from before it.  `harness-ui-bury` (`C-c C-z` in a chat, where plain
+keys type) puts the slot's buffer away and brings back the last buffer
+of the user's the slot showed, keeping the layout; `q` on the overview
+(`harness-ui-quit-view`) ends it, restoring the configuration, but for
+a buffer of the user's left in the slot, which stays in sight.
 
 Settings page (`harness-ui-config`, `C-c h S`, `harness-settings`):
 every harness option on one page, like a customize buffer, about the
@@ -2719,8 +3028,8 @@ project).  Session defaults, the layered settings, come first in both
 scopes; the other options are listed by module in the Global scope and
 folded into one line in the Project scope.  Each setting is a
 `wid-edit` widget built from its customize type, with its doc and
-where its value in effect comes from; toggles and menus save at once,
-text saves with RET (C-x C-s saves every edit).  A type whose plist
+where its value in effect comes from; toggles, menus and models save
+at once, text saves with RET (C-x C-s saves every edit).  A type whose plist
 names its keys (`:options`) is drawn as a form: one line per key,
 `[X] Base URL: …` with the key's help under it, the key's name width
 aligned, and a key the value does not set greyed out with the value it
@@ -2729,8 +3038,16 @@ values it accepts do not change).  In a list, each record folds into a
 line summing it up, `[Edit]` opens it into the form and `[Hide]` folds
 it again; `[INS]` adds a record, open, from the type's starting value.
 [More] unfolds a long documentation, whose first line shows with the
-keys' help doing the rest.  A string key of a `*-model` setting
-completes model ids, menus included.  [Remove override]
+keys' help doing the rest.  A string whose customize type says what it
+names, with `:names` (`model` for PROVIDER:MODEL, `provider` for a
+provider id, and `:provider ID` for the names provider ID gives its own
+models; see `harness-model`), is a dropdown, `harness-ui-config-model`,
+alone or with the constants of its menu, in a list too: a button naming
+the model, then its id and context window.  The button opens a picker
+(`completing-read`) of the UI's catalogue of `provider/models`, grouped
+by provider and annotated with context window and price.  Text that
+matches no candidate is taken as typed, and a model no provider lists
+gets a warning line.  [Remove override]
 deletes a project value, [Reset to default] a customized global one.
 Secrets show as set or not and are set through `read-passwd`; long
 texts open in `string-edit`.  The page reloads on `config/changed`,
@@ -2900,6 +3217,32 @@ it too (the prompt names what an empty line would do).  The header's
 `_harness/task/search-warm` so its process is started before the line is
 typed; the model's name shows while it answers.  The best match gets
 point once the board shows it (`harness-ui-tasks--focus`).
+
+Companion pet (`harness-ui-pet`, `C-c h z`, `harness-pet`, menu `z`):
+the buffer `*harness pet*`, the only place the pet shows.  Before it
+hatches: the egg, [Hatch it] (`h`) and what hatching does.  After: a
+card with its stars, rarity and species, the creature in its rarity's
+colour (`harness-ui-pet-art SPECIES EYE HAT FRAME`, five lines, three
+frames per species, the hat centred on the head) beside its five stats
+as meters, below it in a window too narrow for both, its name (gold
+when shiny) and personality, its level with an experience meter, and
+what it said last on a band of its own (`harness-pet-speech-face`,
+the action between asterisks in `harness-pet-action-face`), then the
+two before it and a footer saying whether and through which model it
+speaks.  Prose is filled to the window and drawn again when its width
+changes.  The header line has [Pet] (`p`, `SPC`), [Rename] (`r`),
+[Mute]/[Unmute] (`m`) and [Release] (`R`, asks first), or [Hatch], and
+`g`, `q`.  The buffer tells the harness whether it is on screen
+(`_harness/pet/watch`, client `HOST:PID`) from
+`window-buffer-change-functions` while it lives, as it is killed and
+after every connect, so the pet only speaks while someone can see it.
+It follows `pet/changed` and `pet/said`, and `config/changed` of a
+`harness-pet-` option.  Animations -- the egg wobbling then cracking
+and sparkles as it hatches, hearts as it is petted, a fidget as it
+speaks (after the sparkles, when its first words come while it
+hatches) -- are a few frames each on one timer that stops with the
+last frame or as soon as the buffer is off screen, so nothing runs
+while nothing happens; `harness-ui-pet-animations` nil keeps it still.
 
 Cost display: whatever shows what a session cost goes through
 `harness-ui-format-spend`.  That is a price when calls are billed per
