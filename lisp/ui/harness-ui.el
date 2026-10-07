@@ -225,18 +225,50 @@ DOC is its documentation."
                         "A warning, or work in progress: a circle, yellow.")
 (harness-ui-define-icon harness-icon-failure "failure" "▲" "!" "A failure: a triangle, red.")
 
+(defvar harness-ui--icons (make-hash-table :test 'equal)
+  "Icon strings made by `harness-ui-icon', by (NAME GRAPHIC IMAGES FONT).
+Each value is (STAMP . STRING), STAMP saying what the string was made
+from (`harness-ui--icon-stamp').")
+
+(defun harness-ui--icon-stamp (name)
+  "Return what the string of icon NAME is made from, as of now.
+Its definition, its spec in the custom theme and `icon-preference': a
+reload redefines the icon, and a theme or the user may change the rest.
+A theme changes its spec in place, so the stamp holds copies."
+  (list (get name 'icon--properties) (copy-tree (get name 'theme-icon))
+        (copy-sequence icon-preference)))
+
+(defun harness-ui--icon-stamp-current-p (stamp name)
+  "Non-nil when STAMP is what icon NAME is made from now."
+  (and (eq (nth 0 stamp) (get name 'icon--properties))
+       (equal (nth 1 stamp) (get name 'theme-icon))
+       (equal (nth 2 stamp) icon-preference)))
+
 (defun harness-ui-icon (name)
   "Return the string for icon NAME (a symbol such as `harness-icon-idle').
 An image icon carries no `:background', so its transparent parts show
 the face behind it (a tool block's colour, say).  Some packages, such as
-solaire-mode, bake the buffer's base colour into every image."
-  (condition-case nil
-      (let* ((s (icon-string name))
-             (spec (and (> (length s) 0) (get-text-property 0 'display s))))
-        (if (and (eq (car-safe spec) 'image) (plist-member (cdr spec) :background))
-            (propertize s 'display (cons 'image (harness-ui--plist-without (cdr spec) :background)))
-          s))
-    (error "")))
+solaire-mode, bake the buffer's base colour into every image.
+
+Header and mode lines are drawn again on every key typed in their
+window, and making an icon reads its file and asks the fonts, so each
+icon is made once for each kind of display and frame font, and reused
+while it is defined the same way (`harness-ui--icon-stamp').  The
+string is a copy: a caller may add properties to it."
+  (let* ((key (list name (display-graphic-p) (display-images-p) (frame-parameter nil 'font)))
+         (made (gethash key harness-ui--icons)))
+    (if (and made (harness-ui--icon-stamp-current-p (car made) name))
+        (copy-sequence (cdr made))
+      (condition-case nil
+          (let* ((stamp (harness-ui--icon-stamp name))
+                 (s (icon-string name))
+                 (spec (and (> (length s) 0) (get-text-property 0 'display s)))
+                 (s (if (and (eq (car-safe spec) 'image) (plist-member (cdr spec) :background))
+                        (propertize s 'display (cons 'image (harness-ui--plist-without (cdr spec) :background)))
+                      s)))
+            (puthash key (cons stamp s) harness-ui--icons)
+            (copy-sequence s))
+        (error "")))))
 
 (defun harness-ui--plist-without (plist key)
   "Return a copy of PLIST without KEY."

@@ -1311,9 +1311,6 @@ without a position, as it does on a click."
           (should (= 1 ran)))
       (kill-buffer buffer))))
 
-(provide 'harness-ui-test)
-;;; harness-ui-test.el ends here
-
 (ert-deftest harness-ui-fit-header-drops-the-least-important-first ()
   "A header too wide for its window keeps what matters and loses the rest.
 Segments are given in display order; the lowest priority goes first,
@@ -1352,3 +1349,31 @@ always stays."
   ;; showing the buffer, which this buffer need not be shown in.
   (should (= (harness-ui-header-width (selected-window))
              (- (window-pixel-width) (or (window-scroll-bar-width) 0)))))
+
+(ert-deftest harness-ui-icons-are-made-once ()
+  "An icon is made once, then reused while it is defined the same way.
+Header and mode lines are drawn on every key typed, and making an icon
+reads its file and asks the fonts."
+  (let ((made 0)
+        (harness-ui--icons (make-hash-table :test 'equal)))
+    (cl-letf* ((make (symbol-function 'icon-string))
+               ((symbol-function 'icon-string) (lambda (name) (cl-incf made) (funcall make name))))
+      (let ((a (harness-ui-icon 'harness-icon-idle))
+            (b (harness-ui-icon 'harness-icon-idle)))
+        (should (= made 1))
+        (should (equal-including-properties a b))
+        ;; Each is a copy: what one caller puts on it, the next one does not get.
+        (put-text-property 0 (length a) 'face 'bold a)
+        (should-not (get-text-property 0 'face (harness-ui-icon 'harness-icon-idle)))
+        (should (= made 1))
+        ;; Defined again, by a reload say, it is made again.
+        (harness-ui-define-icon harness-icon-idle "idle" "●" "idle" "Idle session.")
+        (harness-ui-icon 'harness-icon-idle)
+        (should (= made 2))
+        ;; So it is for a user who prefers another kind of icon.
+        (let ((icon-preference '(text)))
+          (should (equal "idle" (substring-no-properties (harness-ui-icon 'harness-icon-idle))))
+          (should (= made 3)))))))
+
+(provide 'harness-ui-test)
+;;; harness-ui-test.el ends here

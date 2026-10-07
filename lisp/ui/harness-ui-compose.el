@@ -68,6 +68,14 @@
 (defvar-local harness-compose--skills nil "Skill names for / completion.")
 (defvar-local harness-compose--pads nil "Window -> overlay padding the buffer so the box sits at the bottom.")
 (defvar-local harness-compose--pad-at nil "Function returning where the padding goes, or nil for the top.")
+(defvar-local harness-compose--outside 0
+  "Counts the changes to the buffer outside the box, which may move it.
+See `harness-compose--outside-tick'.")
+(defvar-local harness-compose--typed 0 "Counts the changes confined to the box.")
+(defvar-local harness-compose--jumps 0 "Counts the keys that sent typing from outside the box into it.")
+(defvar-local harness-compose--seen-tick nil
+  "`buffer-chars-modified-tick' after the last change the change hooks saw.")
+(defvar-local harness-compose--box-change nil "Non-nil while a change confined to the box is under way.")
 (defvar-local harness-compose--files-at nil "Start of the @ token whose completion last refreshed the files.")
 (defvar-local harness-compose--last-token nil "The @file or /skill token at point after the last command.")
 (defvar-local harness-compose--popup-timer nil "Timer asking the completion UI to show the token's completions.")
@@ -125,7 +133,9 @@ buffers, not regions, so the host's own lines wrap too: it fits to the
 window the ones that must stay on one line."
   (when bottom
     (setq harness-compose--pad-at (and (functionp bottom) bottom))
-    (add-hook 'pre-redisplay-functions #'harness-compose-pad-window nil t))
+    (add-hook 'pre-redisplay-functions #'harness-compose-pad-window nil t)
+    (add-hook 'before-change-functions #'harness-compose--before-change nil t)
+    (add-hook 'after-change-functions #'harness-compose--after-change nil t))
   (when project (setq harness-compose-project-function project))
   (when placeholder (setq harness-compose-placeholder-function placeholder))
   (when redraw (setq harness-compose-redraw-function redraw))
@@ -270,14 +280,64 @@ would hide the region too.  Never nil: `global-hl-line-mode' needs a range."
   (when (and (memq this-command '(self-insert-command yank harness-compose-yank))
              (harness-compose-live-p)
              (not (harness-compose-in-p)))
+    ;; The box may be out of sight: its windows follow it again.
+    (cl-incf harness-compose--jumps)
     (goto-char harness-compose-end)))
+
+(defun harness-compose--before-change (beg end)
+  "Note whether the change from BEG to END stays in the box.
+Runs from `before-change-functions'."
+  ;; First count a change made unseen since the last one.
+  (harness-compose--outside-tick)
+  (setq harness-compose--box-change (and (harness-compose-in-p beg) (harness-compose-in-p end))))
+
+(defun harness-compose--after-change (_beg _end _len)
+  "Count the change just made, in the box or outside it.
+Runs from `after-change-functions'."
+  (if harness-compose--box-change
+      (cl-incf harness-compose--typed)
+    (cl-incf harness-compose--outside))
+  (setq harness-compose--box-change nil
+        harness-compose--seen-tick (buffer-chars-modified-tick)))
+
+(defun harness-compose--outside-tick ()
+  "Return a number that changes whenever the buffer changed outside the box.
+Changes the change hooks saw are counted as they happen; text changed
+with them inhibited (a rendering redrawn in place, say) counts too,
+wherever it was.  Text properties changed that way, as `jit-lock' does
+all the time, do not."
+  (unless (eql harness-compose--seen-tick (buffer-chars-modified-tick))
+    (cl-incf harness-compose--outside)
+    (setq harness-compose--seen-tick (buffer-chars-modified-tick)))
+  harness-compose--outside)
+
+(defconst harness-compose--measure-whole 8000
+  "The longest box, in characters, whose height is measured whole.")
+
+(defun harness-compose--box-height (window limit)
+  "Return what the height of the box's lines in WINDOW stands at.
+Only the box is laid out, however long the buffer: one of up to
+`harness-compose--measure-whole' characters whole, which is quick, and
+its height in pixels is the answer.  A longer box is laid out up to
+LIMIT pixels; one taller than that answers its height so far with the
+count of changes to it (`harness-compose--typed'), as that is all that
+says it may have grown."
+  (if (<= (- harness-compose-end harness-compose-start) harness-compose--measure-whole)
+      (cdr (window-text-pixel-size window harness-compose-start harness-compose-end))
+    (let ((height (harness-ui-text-height window harness-compose-start harness-compose-end limit)))
+      (if (> height limit) (list height harness-compose--typed) height))))
 
 (defun harness-compose-pad-window (window)
   "Keep the box at the bottom of WINDOW.
 A buffer shorter than WINDOW is padded so it ends at its bottom, each
 window with its own overlay; a taller one scrolls to keep the box there
 while the window's point is in it (`harness-compose--follow').  Runs
-from `pre-redisplay-functions'."
+from `pre-redisplay-functions', before every redisplay, so after every
+key: measuring the window lays out a window's worth of text, which
+typing would wait on.  The window is measured again only once the
+buffer changed outside the box (`harness-compose--outside-tick'), the
+box changed height or the window changed; a key typed in the box costs
+the box's lines alone (`harness-compose--box-height')."
   (when (and (window-live-p window) (eq (window-buffer window) (current-buffer))
              (harness-compose-live-p))
     ;; A dropped overlay is deleted too: kept, it would pad its window
@@ -287,30 +347,43 @@ from `pre-redisplay-functions'."
                                                  (eq (window-buffer (car p)) (current-buffer)))
                                             (progn (delete-overlay (cdr p)) nil)))
                             harness-compose--pads))
-    (harness-compose--follow window)
-    (let* ((ov (or (alist-get window harness-compose--pads)
-                   (let ((o (make-overlay (point-min) (point-min) nil t)))
-                     (overlay-put o 'window window)
-                     (push (cons window o) harness-compose--pads)
-                     o)))
-           (at (if harness-compose--pad-at (funcall harness-compose--pad-at) (point-min)))
-           (body (window-body-height window t))
-           (key (list (buffer-modified-tick) body (window-body-width window t) (window-start window) at)))
-      (unless (equal key (overlay-get ov 'harness-compose-key))
-        (overlay-put ov 'harness-compose-key key)
-        (move-overlay ov at at)
-        (overlay-put ov 'before-string nil)
-        ;; Padding at the top leaves a line for the empty one after the
-        ;; box, where a host following the end (chat) puts the bottom of
-        ;; the window; padding inside the buffer puts the box on the last line.
-        (let* ((line (frame-char-height (window-frame window)))
-               ;; More than BODY for a buffer taller than the window: no padding.
-               (used (harness-ui-text-height window (point-min) harness-compose-end body))
-               (lines (/ (- body used (if harness-compose--pad-at 0 line)) line)))
-          (when (and (= (window-start window) (point-min)) (> lines 0))
-            ;; An explicit face: bare newlines would take the height of the
-            ;; text they precede (a smaller label face) and fall short.
-            (overlay-put ov 'before-string (propertize (make-string lines ?\n) 'face 'default))))))))
+    (let* ((body (window-body-height window t))
+           (outside (harness-compose--outside-tick))
+           (measured (list outside (harness-compose--box-height window body))))
+      (harness-compose--follow window measured)
+      (let* ((ov (or (alist-get window harness-compose--pads)
+                     (let ((o (make-overlay (point-min) (point-min) nil t)))
+                       (overlay-put o 'window window)
+                       (push (cons window o) harness-compose--pads)
+                       o)))
+             (at (if harness-compose--pad-at (funcall harness-compose--pad-at) (point-min)))
+             (start (window-start window))
+             (key (list measured body (window-body-width window t) start at)))
+        (unless (equal key (overlay-get ov 'harness-compose-key))
+          (overlay-put ov 'harness-compose-key key)
+          (unless (eql (overlay-start ov) at) (move-overlay ov at at))
+          ;; A window showing the buffer from further down has no padding,
+          ;; and nothing to measure.
+          (let ((pad nil))
+            (when (= start (point-min))
+              ;; Measured without the padding.
+              (when (overlay-get ov 'before-string) (overlay-put ov 'before-string nil))
+              ;; Padding at the top leaves a line for the empty one after
+              ;; the box, where a host following the end (chat) puts the
+              ;; bottom of the window; padding inside the buffer puts the
+              ;; box on the last line.
+              (let* ((line (frame-char-height (window-frame window)))
+                     ;; More than BODY for a buffer taller than the window: no padding.
+                     (used (harness-ui-text-height window (point-min) harness-compose-end body))
+                     (lines (/ (- body used (if harness-compose--pad-at 0 line)) line)))
+                (when (> lines 0)
+                  ;; An explicit face: bare newlines would take the height of the
+                  ;; text they precede (a smaller label face) and fall short.
+                  (setq pad (propertize (make-string lines ?\n) 'face 'default)))))
+            ;; Left alone when it stays the same: a changed overlay makes
+            ;; redisplay draw the whole window again.
+            (unless (equal pad (overlay-get ov 'before-string))
+              (overlay-put ov 'before-string pad))))))))
 
 (defun harness-compose-repad (window)
   "Drop WINDOW's padding so the next redisplay sizes it again.
@@ -331,7 +404,7 @@ again by hand is left to `auto-hscroll-mode'."
              (not truncate-lines) (/= (window-hscroll window) 0))
     (set-window-hscroll window 0)))
 
-(defun harness-compose--follow (window)
+(defun harness-compose--follow (window measured)
   "Keep the box on WINDOW's last line while the window's point is in it.
 The box's lines wrap, so it grows and shrinks as it is typed in, and
 the host redraws around it.  Emacs would recenter once the box falls
@@ -342,14 +415,32 @@ grows upwards.  A buffer that fits shows from its start, for the
 padding.  Only after the text or the window's size changed: scrolling
 is left to the user.
 
+What it checks depends on the buffer outside the box, the box's height,
+the window's size and the window's start.  MEASURED, from
+`harness-compose-pad-window', stands for the first two: it changes once
+the buffer changed outside the box or the box changed height (see
+`harness-compose--box-height').  So it checks again once one of them
+changed or typing jumped into the box (`harness-compose--jumps'); and
+for the first change to the box after the window scrolled, as typing
+brings the box back, but not for every key typed in the box: each check
+lays out a window's worth of text.
+
 The window's start is never forced: were point's line to fall outside
 the window from there, redisplay would move point, out of the box, to
 the window's last whole line or its middle, where a host's keys may be
 commands, rather than scroll."
-  (let ((key (list (current-buffer) (buffer-chars-modified-tick)
-                   (window-body-width window t) (window-body-height window t))))
-    (unless (equal key (window-parameter window 'harness-compose-follow))
-      (set-window-parameter window 'harness-compose-follow key)
+  (let ((key (list (current-buffer) measured harness-compose--jumps
+                   (window-body-width window t) (window-body-height window t)))
+        ;; (KEY START TYPED): the window's start after the last check, and
+        ;; the box's changes then.
+        (last (window-parameter window 'harness-compose-follow)))
+    (unless (and (equal key (car-safe last))
+                 (or (eql (window-start window) (nth 1 last))
+                     (eql harness-compose--typed (nth 2 last))))
+      ;; Noted first, so a check that fails is not made again on every
+      ;; redisplay; the start it scrolls to is filled in after.
+      (setq last (list key (window-start window) harness-compose--typed))
+      (set-window-parameter window 'harness-compose-follow last)
       (when (harness-compose-in-p (window-point window))
         ;; Measured without the padding, which is sized again after this.
         (harness-compose-repad window)
@@ -377,7 +468,8 @@ commands, rather than scroll."
                       pt)))
            ;; Shrunk, leaving a gap under the box.
            ((and (> start (point-min)) (<= line (- room (funcall height start))))
-            (harness-compose--bottom-at window anchor))))))))
+            (harness-compose--bottom-at window anchor))))
+        (setcar (cdr last) (window-start window))))))
 
 (defun harness-compose--bottom-at (window pos)
   "Scroll WINDOW so the screen line of POS is its last."
@@ -1595,11 +1687,15 @@ Runs from `post-command-hook'."
         (setq harness-compose--last-token token))
     (error (harness-log 'warn "compose: following the token failed: %S" err))))
 
-;; Boxes set up before a reload follow their tokens too.
+;; Boxes set up before a reload follow their tokens too, and those kept
+;; at the bottom count their changes.
 (dolist (buf (buffer-list))
   (with-current-buffer buf
     (when (memq #'harness-compose-completion-at-point completion-at-point-functions)
-      (add-hook 'post-command-hook #'harness-compose--after-command nil t))))
+      (add-hook 'post-command-hook #'harness-compose--after-command nil t))
+    (when (memq #'harness-compose-pad-window pre-redisplay-functions)
+      (add-hook 'before-change-functions #'harness-compose--before-change nil t)
+      (add-hook 'after-change-functions #'harness-compose--after-change nil t))))
 
 (add-to-list 'completion-category-defaults '(harness-compose-file (styles flex)))
 (add-to-list 'completion-category-defaults '(harness-compose-skill (styles basic flex)))
