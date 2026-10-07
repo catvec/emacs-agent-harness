@@ -2549,6 +2549,7 @@ leaves the buffer's commands out, never the whole menu."
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
+    ("z" "Companion pet" harness-pet :if (lambda () (harness-ui--command-available-p 'harness-pet)))
     ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
     ("P" "Remote control" harness-remote-control
      :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
