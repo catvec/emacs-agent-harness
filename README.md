@@ -281,7 +281,10 @@ the menu's Version entry says so.
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |
 
-The menu (`C-c h ?`) also renames the session (`r`).
+The menu (`C-c h ?`) also renames the session (`r`). A session you
+have not named gets a short title from a cheap model as soon as you
+send its first message, while the agent works on it (see
+`harness-naming-auto` and `harness-naming-model`).
 
 With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
@@ -644,7 +647,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   with that session beside it (see
   [Fullscreen overviews](#fullscreen-overviews)).
 - A task's session shows in the session list (`C-c h l`) under the
-  task's title, of kind task, until the model names it.
+  task's title, of kind task. A cheap model titles it like a ticket as
+  soon as the task starts, so the board shows that title, not the raw
+  prompt, while the task works.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.

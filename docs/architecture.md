@@ -777,8 +777,9 @@ provider is dropped from the session at that step, since that
 provider's turns are ones the state's conversation never saw.  So a
 session switched away and straight back resumes its conversation,
 while one that ran a step elsewhere starts a new one there, which
-`handoff/check` calls lossy.  Naming, compaction and forks work on a
-fork of a state their model can continue, never on another provider's.
+`handoff/check` calls lossy.  Naming a whole conversation, compaction
+and forks work on a fork of a state their model can continue, never on
+another provider's.
 
 Checkpoints: a hosted loop says where its conversation stands as
 content lands in it, so that a fork or a checkout at a node can cut the
@@ -960,11 +961,13 @@ new CLI session opened for a transcript that has messages before the
 new one gets them the same way.
 
 A request whose provider state is not the one its session has recorded
-(naming sends a fork of it) runs in a CLI process of its own, closed
-when it is done.  It never restarts the session's process with its own
-settings or writes into the session's CLI session.
+(naming the whole conversation sends a fork of it) runs in a CLI
+process of its own, closed when it is done.  It never restarts the
+session's process with its own settings or writes into the session's
+CLI session.
 
-A one-off request (`:ephemeral t', the permission judge's) gets a CLI
+A one-off request (`:ephemeral t', the permission judge's, or naming a
+session from its first message) gets a CLI
 process of its own whatever its state, under a key of its own
 (SESSION-ID~N), never resumed and stopped once it is done (its input is
 closed, and it is killed if it still runs a few seconds later).  It
@@ -1115,11 +1118,13 @@ version 3 or newer.  Per harness session one CLI process:
   Copilot session.  The first message to a session created for a
   transcript with messages carries them (see "Replay").
 - Side requests are one-off questions: naming, compaction and the
-  permission judge.  A request is one when it sets `:ephemeral` or
+  permission judge.  A request is one when it sets `:ephemeral` (the
+  judge's, and naming a session from its first message) or
   `:max-tokens` (a turn
   of the conversation never caps its answer), when its provider state
-  is not the one its session has recorded (naming brings a fork of it),
-  or when its session record has no state at all (the judge's).  Any
+  is not the one its session has recorded (naming the whole
+  conversation brings a fork of it), or when its session record has no
+  state at all (the judge's and naming's).  Any
   number of them run at once, beside the conversation's turn and beside
   each other, each in a throwaway session: a fork of the conversation
   its own state names, else of the one its session has recorded (so a
@@ -1866,12 +1871,26 @@ so switching to either loses nothing.
 
 ### naming
 
-- `naming/name SESSION-ID` → promise of name.  Auto after the first
-  turn ends when the session has no name: forks provider state when
-  possible so the cached prefix is reused; hints "naming…" then the result.
-  The hosted providers run that request beside the session's
-  conversation (a CLI process of its own for Claude Code, a throwaway
-  session for Copilot), so the question never lands in it.
+- `naming/name SESSION-ID &optional OPTS` → promise of name.  A session
+  with no name is named as soon as its first message is sent: on
+  `agent/turn-started`, not when the turn ends, since a task's first
+  turn lasts until the task is done.  That request (OPTS `(:opening t)`)
+  runs beside the turn and holds only the opening message (and the
+  latest one when the conversation has moved on since, as a fork's has),
+  each cut to 3000 characters, and the question.  It goes to
+  `harness-naming-model` (`auto`, the default: the session provider's
+  `:cheap` tier, `provider/tier-model`) with `:ephemeral t`,
+  `:no-thinking t`, a 40-token budget and no provider state, so the
+  hosted providers answer it apart from the session's conversation (a
+  CLI process of its own for Claude Code, a throwaway session for
+  Copilot) and the question never lands in it.  A session still nameless
+  when a later turn starts (its naming failed) is named then; btw and
+  subagent sessions never are.  Without `:opening` the whole
+  conversation is titled on the session's model, on a fork of its
+  provider state when possible so the cached prefix is reused.  Hints
+  "Naming session…" then the result; a session renamed while the model
+  was asked keeps its new name.  Events `naming/done SID NAME`,
+  `naming/failed SID MESSAGE`.
 - Sync filter `naming/system-prompt` (value string, args session) lets
   modules add to `harness-naming--base-system-prompt` per session (tasks ask
   for ticket titles).
@@ -2089,7 +2108,8 @@ verdict.
   locks it again (see worktree).
 - The session's name is the task's title: `naming/system-prompt` adds
   `harness-tasks--naming-instructions` (nil for none) so the model titles task
-  sessions like tickets.
+  sessions like tickets, as soon as the task's first turn starts (see
+  naming), so the board shows the ticket title while the task works.
 - With nothing to review (below), a turn ending `end-turn` queues
   `merge/enqueue SID TARGET`, TARGET being the project's root session
   named `harness-tasks--merge-session-name`
