@@ -39,6 +39,16 @@ included, without rebuilding the package."
   (let ((source (expand-file-name "harness.el" (file-name-directory file))))
     (file-name-directory (file-truename (if (file-exists-p source) source file)))))
 
+(defun harness--stale-compiled-p (file)
+  "Non-nil when FILE is a compiled harness.el older than the source it links to.
+A package manager's build keeps the copy it compiled while the clone
+moves on (`harness-update', a git pull): loading only the copy would
+run the old harness.el with every other file new."
+  (and file
+       (string-suffix-p ".elc" file)
+       (file-newer-than-file-p (expand-file-name "harness.el" (harness--source-directory file))
+                               file)))
+
 (defconst harness-directory
   (harness--source-directory (or load-file-name buffer-file-name
                                  (locate-library "harness") default-directory))
@@ -632,6 +642,11 @@ commits that came in."
   (condition-case err
       (harness--load-file (harness--path "lisp/modules/harness-tools.el"))
     (error (harness-log 'error "reloading the tool registry first failed: %S" err))))
+
+;; Loaded from a compiled copy older than the source: the source is
+;; what is installed, so it loads over the copy, as a reload would.
+(when (harness--stale-compiled-p load-file-name)
+  (load harness--self-file nil t t))
 
 (provide 'harness)
 ;;; harness.el ends here

@@ -86,6 +86,71 @@ Then a pull reaches every file, new ones included, with no rebuild."
           (should (equal expected (harness--source-directory (expand-file-name "harness.el" repo)))))
       (delete-directory base t))))
 
+(ert-deftest harness-update-stale-compiled-copy ()
+  "A build's compiled harness.el counts as stale once its source moves on."
+  (let* ((base (harness-test-temp-dir))
+         (repo (file-name-as-directory (expand-file-name "repo" base)))
+         (build (file-name-as-directory (expand-file-name "build" base)))
+         (source (expand-file-name "harness.el" repo))
+         (compiled (expand-file-name "harness.elc" build)))
+    (unwind-protect
+        (progn
+          (make-directory repo t)
+          (make-directory build t)
+          (with-temp-file source (insert ";; harness\n"))
+          (make-symbolic-link source (expand-file-name "harness.el" build))
+          (with-temp-file compiled (insert ";; compiled\n"))
+          (set-file-times source (time-subtract nil 60))
+          (should-not (harness--stale-compiled-p compiled))
+          (set-file-times source (time-add nil 60))
+          (should (harness--stale-compiled-p compiled))
+          ;; Source is never stale, and neither is nothing.
+          (should-not (harness--stale-compiled-p (expand-file-name "harness.el" build)))
+          (should-not (harness--stale-compiled-p nil)))
+      (delete-directory base t))))
+
+(ert-deftest harness-update-stale-compiled-copy-loads-the-source ()
+  "Emacs starting on a build's stale harness.elc ends up running the new source.
+The build is straight's kind, links into a clone; the clone moved on."
+  (let* ((base (harness-test-temp-dir))
+         (clone (file-name-as-directory (expand-file-name "clone" base)))
+         (build (file-name-as-directory (expand-file-name "build" base)))
+         (emacs (expand-file-name invocation-name invocation-directory))
+         (run (lambda (&rest args)
+                (with-temp-buffer
+                  (let ((status (apply #'call-process emacs nil t nil "--batch" "-Q" args)))
+                    (list status (buffer-string)))))))
+    (unwind-protect
+        (progn
+          (make-directory clone t)
+          (make-directory build t)
+          (copy-file (expand-file-name "harness.el" harness-test-root) (expand-file-name "harness.el" clone))
+          (make-symbolic-link (expand-file-name "lisp" harness-test-root) (expand-file-name "lisp" clone))
+          (make-symbolic-link (expand-file-name "harness.el" clone) (expand-file-name "harness.el" build))
+          ;; The build compiles harness.el, as a package manager does.
+          (should (eql 0 (car (funcall run "-L" (expand-file-name "lisp" clone)
+                                       "-f" "batch-byte-compile" (expand-file-name "harness.el" build)))))
+          (should (file-exists-p (expand-file-name "harness.elc" build)))
+          ;; An update moves the clone on.
+          (with-temp-buffer
+            (insert-file-contents (expand-file-name "harness.el" clone))
+            (goto-char (point-max))
+            (insert "\n(defun harness--update-test-new () \"New in the update.\" 'new)\n")
+            (write-region nil nil (expand-file-name "harness.el" clone)))
+          (set-file-times (expand-file-name "harness.el" clone) (time-add nil 60))
+          (pcase-let ((`(,status ,output)
+                       (funcall run "-L" build "--eval"
+                                (prin1-to-string
+                                 '(progn (require 'harness)
+                                         (princ (format "%S %s" (and (fboundp 'harness--update-test-new)
+                                                                     (harness--update-test-new))
+                                                        harness-directory)))))))
+            (should (eql 0 status))
+            (should (string-match-p (format "\\`new %s\\'"
+                                            (regexp-quote (file-name-as-directory (file-truename clone))))
+                                    (string-trim (car (last (split-string output "\n" t))))))))
+      (delete-directory base t))))
+
 ;;;; Updating the checkout
 
 (ert-deftest harness-update-fast-forwards-to-the-upstream ()
