@@ -1250,11 +1250,12 @@ non-interactive session it stays a denial.
   `(:behavior allow|deny :scope once|session|always :reason :pattern)`,
   or an option id string such as "allow-session" (what ACP clients send
   back), also as `(:option ID :pattern P)`.
-- Patterns: a prompt about paths is answered for a glob pattern, not
-  for one file.  Its payload's `:pattern` is everything in the
-  directory of the call's paths (`DIR/**`, `harness-perms--paths-dir`:
-  the directory holding a file, a directory itself, the deepest common
-  one of several), with symbolic links resolved.  ANSWER's `:pattern`,
+- Patterns: a prompt about a path outside the roots (the jail's, or an
+  agent's `request_directory_access`) is answered for a glob pattern,
+  not for one file.  Its payload's `:pattern` is everything in the
+  directory it asks for (`DIR/**`: the directory holding a file, or a
+  directory itself), with symbolic links resolved.  No other prompt
+  carries one (see the tool prompt below).  ANSWER's `:pattern`,
   absolute or relative to the session's cwd, replaces it: more specific
   (`DIR/sub/**`, `DIR/*.el`, one file) or less (a parent).  Roots and
   rule paths alike are directories, holding themselves and all below,
@@ -1284,10 +1285,10 @@ non-interactive session it stays a denial.
   out).  The call is about its subject paths
   (`harness-perms--subject-paths`): the ones it names outside the
   session's directories, or, when it names none there, where it runs,
-  as before.  The tool prompt shows and builds its pattern from them,
-  so `ls -la ~/.claude/projects/x` run in the project is answered for
-  `~/.claude/projects/x/**` and not for every command run in the
-  project, and the rules weigh them (below).
+  as before.  The tool prompt shows them, so `ls -la
+  ~/.claude/projects/x` run in the project names `~/.claude/projects/x`
+  and not the project (being about the call, it offers no pattern, see
+  below), and the rules weigh them (below).
 - The jail asks instead of denying when a path lies outside the roots
   and someone can answer: a pending `permission` request whose payload
   carries `:dir`, `:pattern` and the options allow-once (this call may
@@ -1369,17 +1370,17 @@ non-interactive session it stays a denial.
   so a rule for the project no longer lets `rm -rf ~` run in it; a deny
   rule holds when any path it names, inside or out, or where it runs
   lies in the pattern.  The mode stage checks them first, before the
-  auto-allow list and the mode.  A tool prompt for a call with paths offers its `:pattern`,
-  and its allow-session / allow-always / deny-always answers record
-  `(:tool NAME :path PATTERN :behavior B)` rather than a rule for the
-  tool everywhere; a call without paths records `(:tool NAME :behavior B)`
-  as before.
+  auto-allow list and the mode.  A tool prompt (the mode asking, or the
+  auto judge objecting) is about the call itself, whose paths the jail
+  already let through: it offers no pattern, and its allow-session /
+  allow-always / deny-always answers record `(:tool NAME :behavior B)`,
+  for every call of the tool, a `:pattern` in the answer notwithstanding.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
-  `:pattern` for a call with paths and `:dir` and `:reason` for a
-  directory prompt; a tool prompt's `:paths` are its subject paths, and
-  a shell command's prompt has `:cwd`, where it runs; UIs offer only
-  the listed `:options`),
+  `:dir`, `:pattern` and `:reason` for a directory prompt; a tool
+  prompt's `:paths` are its subject paths, and a shell command's prompt
+  has `:cwd`, where it runs; UIs offer only the listed `:options`, and
+  show a pattern only when there is one),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
@@ -2703,8 +2704,9 @@ Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
 pattern, reason}}` (`cwd`: where a shell command runs; `paths`: what
 the call is about, see perms) → `{outcome:{outcome:"selected",optionId}}`, plus
-`_harness:{pattern}` when the client answers a request about paths for
-another glob pattern than its `_harness.pattern` (see perms),
+`_harness:{pattern}` when the client answers a request about a path
+outside the allowed directories for another glob pattern than its
+`_harness.pattern` (only such a request has one, see perms),
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
 Its `options` are the answers' labels; `diagrams`, present when the
 options have them, holds one per option, `{type: "ascii", text}` or
@@ -2942,19 +2944,21 @@ board, SPC, through `harness-ui-popout-at-point-functions`).  Opening a
 popout brings the session's cached pending list into the store first
 (`harness-ui-pending-sync-session`), which is how a request a view
 already shows becomes answerable there when no chat has synced it.
-A permission prompt about paths shows the glob pattern its answers
+A permission prompt about a path outside the session's directories
+(one with a `:pattern`, see perms) shows the glob pattern its answers
 hold for on a line of its own (`pattern: ~/notes/**  [Edit] e`), with
 `[Edit]`/`e` (`harness-ui-pending-edit-pattern`, also `C-c C-p` in
 the chat) to change it in the minibuffer, more or less specific;
 `M-n` offers patterns around the request's own, and the answer carries
-the edited pattern (see perms).  For a call with paths the line also
-says which answers remember the pattern ("s, a, N remember the answer
-for it").  The facts above it say what the pattern is made of
-(`harness-ui-pending--permission-facts`): `kind: write   paths:
-~/proj/lisp/a.el` on one line for most calls; for a shell command
-`kind: exec   runs in: ~/proj`, where it runs, and below it `paths:
-~/.claude/projects/x`, what it is about: the paths it names outside
-the session's directories (left out when that is just where it runs).
+the edited pattern.  Any other prompt is about the call alone and
+shows no pattern; `C-c C-p`, or `e` on such a panel, edits the newest
+request that has one.  The facts under a panel's title
+(`harness-ui-pending--permission-facts`) say what the call reaches:
+`kind: write   paths: ~/proj/lisp/a.el` on one line for most calls;
+for a shell command `kind: exec   runs in: ~/proj`, where it runs, and
+below it `paths: ~/.claude/projects/x`, what it is about: the paths it
+names outside the session's directories (left out when that is just
+where it runs).
 
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting

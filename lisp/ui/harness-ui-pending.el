@@ -238,7 +238,7 @@ non-nil when the store changed."
 (defun harness-ui-pending--message-for (option dir shown)
   "Return the echo-area message for permission OPTION.
 DIR is the prompt's directory when it has one, SHOWN the pattern the
-answer holds for (nil for a call without paths)."
+answer holds for (nil for a prompt about the call itself, which has none)."
   (pcase option
     ("allow-once" "Allowed")
     ("allow-session" (cond (shown (format "Allowed %s for this session" shown))
@@ -299,13 +299,14 @@ all."
 
 ;;;; Patterns a prompt about paths is answered for
 ;;
-;; A permission request about paths (the jail's, an agent's own request
-;; for a directory, a tool call that touches files) is answered for a
-;; glob pattern rather than for one file: its `:pattern', by default
-;; everything in the directory of its paths.  The user edits it, more
-;; or less specific, with `harness-ui-pending-edit-pattern' (`e' on the
-;; panel, C-c C-p in the chat); the answer then carries the edited
-;; pattern, and for a call the panel says which answers hold for it.
+;; A permission request about a path outside the allowed directories
+;; (the jail's, or an agent's own request for a directory) is answered
+;; for a glob pattern rather than for one file: its `:pattern', by
+;; default everything in the directory of its paths.  The user edits
+;; it, more or less specific, with `harness-ui-pending-edit-pattern'
+;; (`e' on the panel, C-c C-p in the chat); the answer then carries the
+;; edited pattern.  Any other request is about the call alone and comes
+;; without a pattern, so its panel shows none.
 
 (defun harness-ui-pending--permission-pattern (r)
   "Return the glob pattern permission record R is answered for, as shown, or nil.
@@ -353,24 +354,26 @@ pattern line when this buffer shows it."
 
 (defun harness-ui-pending-edit-pattern (&optional pid)
   "Edit the glob pattern the permission request PID is answered for.
-PID defaults to the request at point, or else the newest one.  A
-request about paths is answered for everything in the directory they
-lie in; edit the pattern to be more specific (a subdirectory,
-src/*.el, one file) or less (a parent directory).  `*' matches within a
-name, `**' across directories; a relative pattern is relative to the
-session's working directory.
+PID defaults to the request at point, or else the newest one with a
+pattern.  Only a request about a path outside the allowed directories
+has one: everything in the directory the path lies in.  Edit it to be
+more specific (a subdirectory, src/*.el, one file) or less (a parent
+directory).  `*' matches within a name, `**' across directories; a
+relative pattern is relative to the session's working directory.
 \\<minibuffer-local-map>\\[next-history-element] offers patterns around
 the request's own; an empty answer goes back to it."
   (interactive)
   (let* ((session-id (harness-ui-pending--session))
          (pid (or pid (harness-ui-pending-at-point)))
          (r (and pid (harness-ui-pending-record session-id pid))))
-    (unless (and r (equal (plist-get r :kind) "permission"))
-      (setq r (cl-find-if (lambda (x) (equal (plist-get x :kind) "permission"))
+    ;; A newer request about the call alone has no pattern: it must not
+    ;; hide the one of a request about a path outside.
+    (unless (plist-get r :pattern)
+      (setq r (cl-find-if (lambda (x) (plist-get x :pattern))
                           (reverse (harness-ui-pending-items session-id)))
             pid (plist-get r :id)))
-    (unless (plist-get r :pattern)
-      (user-error "No permission request about paths is waiting"))
+    (unless r
+      (user-error "No request about a path outside the allowed directories is waiting"))
     (let* ((own (abbreviate-file-name (plist-get r :pattern)))
            (typed (string-trim (read-string "Pattern (* within a name, ** across directories): "
                                             (harness-ui-pending--permission-pattern r) nil
@@ -556,14 +559,10 @@ shown, so an agent's own directory request has no \"Allow once\"."
     (or (and offered (cl-remove-if-not (lambda (o) (member (nth 2 o) offered)) all))
         all)))
 
-(defun harness-ui-pending--insert-pattern-line (r buttons)
+(defun harness-ui-pending--insert-pattern-line (r)
   "Insert the line of the pattern permission record R is answered for.
-BUTTONS are the panel's; for a tool call, the line says which of them
-the pattern is for: those that remember the answer."
+Only a request about a path outside the allowed directories has one."
   (let ((pid (plist-get r :id))
-        (remembering (and (not (plist-get r :dir))
-                          (cl-remove-if-not (lambda (b) (member (nth 2 b) '("allow-session" "allow-always" "deny-always")))
-                                            buttons)))
         (start (point)))
     (insert (propertize "   pattern: " 'face 'harness-dim-face)
             (propertize (harness-ui-pending--permission-pattern r) 'face 'harness-tool-subject-face)
@@ -572,11 +571,6 @@ the pattern is for: those that remember the answer."
             (harness-ui-action-button "[Edit]" (lambda () (harness-ui-pending-edit-pattern pid))
                                       :help "Edit the pattern, to make it more or less specific (e)")
             " " (harness-ui-kbd "e")
-            (if remembering
-                (propertize (format "   %s remember the answer for it"
-                                    (mapconcat (lambda (b) (nth 1 b)) remembering ", "))
-                            'face 'harness-dim-face)
-              "")
             "\n")
     (put-text-property start (point) 'harness-ui-pending-pattern pid)))
 
@@ -585,8 +579,8 @@ the pattern is for: those that remember the answer."
 The first says its kind and, for a shell command, where it runs (`runs
 in:').  The paths the call is about (`paths:') follow on that line, or
 for a shell command on a line of their own: there they are the paths
-the command names outside the session's directories, which the pattern
-is made of, and they are left out when they are just where it runs."
+the command names outside the session's directories, and they are left
+out when they are just where it runs."
   (let* ((cwd (plist-get r :cwd))
          (paths (mapcar (lambda (p) (format "%s" p)) (append (plist-get r :paths) nil)))
          (only-cwd (and cwd paths (null (cdr paths))
@@ -621,7 +615,7 @@ is made of, and they are left out when they are just where it runs."
     (when-let* ((reason (plist-get r :reason)))
       (insert (propertize (format "   %s\n" reason) 'face 'harness-hint-face)))
     (when (plist-get r :pattern)
-      (harness-ui-pending--insert-pattern-line r buttons))
+      (harness-ui-pending--insert-pattern-line r))
     (insert "   ")
     (dolist (o buttons)
       (let ((option (nth 2 o)))

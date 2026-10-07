@@ -314,7 +314,7 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
-| `C-c C-p` | Edit the pattern the newest permission request about paths is answered for |
+| `C-c C-p` | Edit the pattern the newest request about a path outside the session's directories is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
 | `TAB` | Complete in the compose box; on a permission request cut short, show its whole input; elsewhere, fold or unfold the block at point |
@@ -393,28 +393,32 @@ command. The directory is made with the session, made again if it went
 missing, and deleted with the session. `C-c h d` lists all of these
 directories. Remote sessions have no temporary directory.
 
-A permission request about paths is answered for a glob pattern, not
-for a single file. By default the pattern covers everything in the
-directory: the directory that holds the file, or the directory itself,
-such as `~/notes/**`. The panel shows the pattern on its own line.
-Press `e` on the panel, `C-c C-p`, or click `[Edit]` to change it in
-the minibuffer, either more specific (`~/notes/*.org`, a subdirectory,
-one file) or less (`~/**`). `*` matches within a name and `**` across
-directories, and `M-n` offers patterns around the request's own.
-Access outside the session's directories grants or denies the
+A permission request about a path outside the session's directories
+(a tool call reaching there, or the agent asking for a directory) is
+answered for a glob pattern, not for a single file. By default the
+pattern covers everything in the directory: the directory that holds
+the file, or the directory itself, such as `~/notes/**`. The panel
+shows the pattern on its own line. Press `e` on the panel, `C-c C-p`,
+or click `[Edit]` to change it in the minibuffer, either more specific
+(`~/notes/*.org`, a subdirectory, one file) or less (`~/**`). `*`
+matches within a name and `**` across directories, and `M-n` offers
+patterns around the request's own. The answer grants or denies the
 pattern: once, for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
-*Always deny*). For a tool call such as a file edit or a command, *Allow
-for session*, *Always allow* and *Always deny* hold for that tool on the
-pattern only, not for every call of the tool.
+*Always deny*). Any other request, such as the permission mode asking
+about a file edit or a command, or the auto-mode judge objecting to
+one, is about the call itself and shows no pattern: *Allow for
+session*, *Always allow* and *Always deny* hold for every call of that
+tool, and a call outside the session's directories still asks for the
+directory first.
 
 A shell command is about what its command line names, not only the
 directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
 run in the project, says `runs in: ~/proj` and, below it, `paths:
-~/.claude/projects/x`, and offers `~/.claude/projects/x/**`, so the
-answer you remember is about that directory and not about every command
-run in the project. A command that names nothing outside the session's
-directories is about where it runs, as before. Paths are read from the
+~/.claude/projects/x`, so it shows what the command reaches and not
+only where it runs; like any prompt about a call, it has no pattern.
+A command that names nothing outside the session's directories is
+about where it runs, as before. Paths are read from the
 command line on a best-effort basis: absolute paths, `~` and `$HOME`
 paths, and `./` or `../` paths, but not the program being run or
 `/dev/null`. An allowing rule must cover every path the command names

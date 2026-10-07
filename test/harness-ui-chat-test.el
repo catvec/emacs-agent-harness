@@ -1062,7 +1062,7 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
         (goto-char (harness-ui-chat-test-find buf "Permission"))
         (call-interactively (lookup-key harness-chat-panel-map (kbd "N")))
         (should (equal '(:outcome (:outcome "selected" :optionId "deny-always")) (car answers)))
-        ;; Without a request about paths there is nothing to edit.
+        ;; Without a request about a path outside there is nothing to edit.
         (harness-chat--on-permission (list :sessionId sid :toolCall '(:toolCallId "c3" :title "Bash: ls" :kind "execute")
                                            :options harness-acp--permission-options
                                            :_harness '(:pendingId "p3" :tool "bash"))
@@ -1078,68 +1078,99 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
         (should (equal "e" (harness-compose-text)))
         (should harness-chat--pending)))))
 
-(ert-deftest harness-ui-chat-tool-permission-pattern ()
-  "A tool call's prompt says which answers its pattern is remembered for."
+(ert-deftest harness-ui-chat-tool-permission-has-no-pattern ()
+  "A prompt about a call, not about a path outside, shows no pattern.
+Its answers carry none, and C-c C-p edits the pattern of the request
+about a path outside, though the prompt about the call is newer."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
-           (recorded nil))
+           (recorded nil)
+           (panel-start (lambda (pid)
+                          (let ((pos (point-min)))
+                            (while (and pos (not (equal pid (get-text-property pos 'harness-ui-pending))))
+                              (setq pos (next-single-property-change pos 'harness-ui-pending)))
+                            (or pos (error "No panel for %s" pid)))))
+           (panel (lambda (pid)
+                    (let ((start (funcall panel-start pid)))
+                      (buffer-substring-no-properties
+                       start (or (next-single-property-change start 'harness-ui-pending) (point-max)))))))
       (harness-register-method 'permission/answer
                                (lambda (session-id pending-id answer)
                                  (push (list session-id pending-id answer) recorded)
                                  (harness-call 'session/pending-resolve session-id pending-id answer)
                                  answer))
       (harness-call 'session/pending-add sid
+                    (list :id "d1" :kind 'permission
+                          :payload (list :tool "read_file" :kind 'read :title "Access ~/notes/"
+                                         :input '(:path "~/notes/todo.org")
+                                         :paths (list (expand-file-name "~/notes/todo.org"))
+                                         :dir (expand-file-name "~/notes/")
+                                         :pattern (expand-file-name "~/notes/**")
+                                         :reason "Read file wants ~/notes/todo.org, which is outside the allowed directories"
+                                         :options '(allow-once allow-session allow-always deny-once deny-always))))
+      (harness-call 'session/pending-add sid
                     (list :id "w1" :kind 'permission
                           :payload (list :tool "write_file" :kind 'write :title "Write file: lisp/a.el"
                                          :input '(:path "lisp/a.el")
                                          :paths (list (expand-file-name "~/proj/lisp/a.el"))
-                                         :pattern (expand-file-name "~/proj/lisp/**")
                                          :options '(allow-once allow-session allow-always deny-once deny-always))))
       (let ((buf (harness-ui-chat-test-open sid)))
-        (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
+        (harness-test-wait (lambda () (with-current-buffer buf (= 2 (length harness-chat--pending))))
+                           5 "pending rendered")
         (with-current-buffer buf
-          (should (harness-ui-chat-test-find buf "pattern: ~/proj/lisp/**  [Edit] e   s, a, N remember the answer for it"))
-          (should (harness-ui-chat-test-find buf "[Allow] y  [Allow for session] s"))
-          ;; C-c C-p edits it from the compose box.
+          (should (string-match-p "pattern: ~/notes/\\*\\*  \\[Edit\\] e\n" (funcall panel "d1")))
+          (should-not (string-match-p "pattern:\\|\\[Edit\\]\\|remember" (funcall panel "w1")))
+          (should (string-match-p "\\[Allow\\] y  \\[Allow for session\\] s" (funcall panel "w1")))
+          ;; C-c C-p from the compose box edits the directory prompt's.
           (goto-char harness-compose-end)
-          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "~/proj/**")))
+          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "~/notes/*.org")))
             (call-interactively (lookup-key harness-chat-mode-map (kbd "C-c C-p"))))
-          (should (harness-ui-chat-test-find buf "pattern: ~/proj/** (edited)"))
-          (goto-char (1- (harness-ui-chat-test-find buf "[Always allow]")))
+          (should (string-match-p "pattern: ~/notes/\\*\\.org (edited)" (funcall panel "d1")))
+          (should-not (string-match-p "pattern:" (funcall panel "w1")))
+          ;; The write's answer is the plain option.
+          (goto-char (1- (harness-ui-chat-test-find buf "[Always allow]" (funcall panel-start "w1"))))
+          (should (equal "w1" (get-text-property (point) 'harness-ui-pending)))
           (harness-chat-push))
         (harness-test-wait (lambda () recorded) 5 "answered through the method")
-        (should (equal (list sid "w1" '(:option "allow-always" :pattern "~/proj/**")) (car recorded)))))))
+        (should (equal (list sid "w1" "allow-always") (car recorded)))
+        ;; The directory prompt's carries the edited pattern.
+        (with-current-buffer buf
+          (goto-char (1- (harness-ui-chat-test-find buf "[Always allow]")))
+          (should (equal "d1" (get-text-property (point) 'harness-ui-pending)))
+          (harness-chat-push))
+        (harness-test-wait (lambda () (cdr recorded)) 5 "answered through the method")
+        (should (equal (list sid "d1" '(:option "allow-always" :pattern "~/notes/*.org")) (car recorded)))))))
 
 (ert-deftest harness-ui-chat-command-permission-says-where-it-runs ()
-  "A shell command's prompt says where it runs and what it reaches, which the pattern is for."
+  "A shell command's prompt says where it runs and what it reaches.
+Being about the call itself, it shows no pattern."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
            (proj (expand-file-name "~/proj/"))
-           (params (lambda (pid command paths pattern)
+           (params (lambda (pid command paths)
                      (list :sessionId sid
                            :toolCall (list :toolCallId pid :title (concat "Bash: " command) :kind "execute"
                                            :rawInput (list :command command))
                            :options harness-acp--permission-options
-                           :_harness (list :pendingId pid :tool "bash" :cwd proj :paths paths :pattern pattern
+                           :_harness (list :pendingId pid :tool "bash" :cwd proj :paths paths
                                            :reason "The permission judge would deny this call: it reads other projects")))))
-      ;; The command names a path outside: that is the pattern's.
+      ;; The command names a path outside: the prompt names it too.
       (should (harness-chat--on-permission
-               (funcall params "p1" "ls -la ~/.claude/projects/x" (vector (expand-file-name "~/.claude/projects/x/"))
-                        (expand-file-name "~/.claude/projects/x/**"))
+               (funcall params "p1" "ls -la ~/.claude/projects/x" (vector (expand-file-name "~/.claude/projects/x/")))
                #'ignore))
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "kind: execute   runs in: ~/proj/\n   paths: ~/.claude/projects/x/\n"))
-        (should (harness-ui-chat-test-find buf "pattern: ~/.claude/projects/x/**  [Edit] e"))
+        (should-not (harness-ui-chat-test-find buf "pattern:"))
         (harness-chat-deny-newest))
       ;; It names none: it is about where it runs, said once.
       (should (harness-chat--on-permission
-               (funcall params "p2" "git status" (list (directory-file-name proj)) (concat proj "**"))
+               (funcall params "p2" "git status" (list (directory-file-name proj)))
                #'ignore))
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "kind: execute   runs in: ~/proj/\n"))
         (should-not (harness-ui-chat-test-find buf "paths:"))
-        (should (harness-ui-chat-test-find buf "pattern: ~/proj/**  [Edit] e"))
+        (should-not (harness-ui-chat-test-find buf "pattern:"))
         (harness-chat-deny-newest))
       ;; Any other call's paths stay on the line of its kind.
       (should (harness-chat--on-permission
@@ -1147,8 +1178,7 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
                      :toolCall (list :toolCallId "w1" :title "Write file: lisp/a.el" :kind "edit"
                                      :rawInput '(:path "lisp/a.el"))
                      :options harness-acp--permission-options
-                     :_harness (list :pendingId "w1" :tool "write_file" :paths (list (concat proj "lisp/a.el"))
-                                     :pattern (concat proj "lisp/**")))
+                     :_harness (list :pendingId "w1" :tool "write_file" :paths (list (concat proj "lisp/a.el"))))
                #'ignore))
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "kind: edit   paths: ~/proj/lisp/a.el\n"))

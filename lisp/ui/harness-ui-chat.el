@@ -1575,7 +1575,8 @@ continues, not the branch left behind."
 
 (defun harness-chat-edit-permission-pattern (&optional pid)
   "Edit the glob pattern the permission request PID is answered for.
-PID defaults to the request at point, or else the newest one.  The
+PID defaults to the request at point, or else the newest one with a
+pattern: one about a path outside the allowed directories.  The
 pattern, and editing it, belong to the pending module, so a popout
 edits the same request the same way."
   (interactive)
