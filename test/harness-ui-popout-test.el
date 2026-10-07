@@ -179,6 +179,25 @@
       (harness-ui-popout-refresh '(test box))
       (with-current-buffer buffer (should (harness-compose-live-p))))))
 
+(ert-deftest harness-ui-popout-typing-on-the-content-goes-into-the-box ()
+  "Typing on the content of a popout with a box goes into the box.
+q and g stay the content's keys."
+  (harness-ui-popout-test-with
+    (let ((buffer (harness-ui-popout-show
+                   '(test typing) "Typing"
+                   (lambda () (insert "Question?\n"))
+                   :compose (lambda () #'ignore)
+                   :placeholder "Your answer...")))
+      (with-selected-window (get-buffer-window buffer)
+        (goto-char (point-min))
+        (execute-kbd-macro "yes")
+        (should (equal "yes" (harness-compose-text)))
+        (should (= (point) harness-compose-end))
+        (should (equal "Question?\n" (buffer-substring-no-properties (point-min) (+ (point-min) 10))))
+        (goto-char (point-min))
+        (should (eq 'harness-ui-popout-quit (key-binding "q")))
+        (should (eq 'harness-ui-popout-redraw (key-binding "g")))))))
+
 (ert-deftest harness-ui-popout-close-keeps-the-draft ()
   "Closed by the user, a popout keeps the box's text for next time; its owner hears of it."
   (harness-ui-popout-test-with

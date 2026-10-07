@@ -1039,7 +1039,11 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
                      (should (equal "~/notes/**" initial))
                      (should (equal '("~/notes/todo.org" "~/notes/*.org" "~/notes/**" "~/**") defaults))
                      " ~/notes/*.org ")))
-          (call-interactively (lookup-key harness-chat-panel-map (kbd "e"))))
+          ;; Typed, as the command loop reads it: a key of the panel's.
+          (save-window-excursion
+            (set-window-buffer nil buf)
+            (execute-kbd-macro "e")))
+        (should (equal "" (harness-compose-text)))
         (should (harness-ui-chat-test-find buf "pattern: ~/notes/*.org (edited)"))
         ;; Point stays on the panel, so its keys still answer it.
         (should (equal "d1" (get-text-property (point) 'harness-ui-pending)))
@@ -1064,7 +1068,15 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
                                            :_harness '(:pendingId "p3" :tool "bash"))
                                      respond)
         (should-not (harness-ui-chat-test-find buf "pattern:"))
-        (should-error (harness-chat-edit-permission-pattern) :type 'user-error)))))
+        (should-error (harness-chat-edit-permission-pattern) :type 'user-error)
+        ;; So its `e' types instead, into the box, and the request still waits.
+        (goto-char (harness-ui-chat-test-find buf "Permission"))
+        (should (equal "p3" (get-text-property (point) 'harness-ui-pending)))
+        (save-window-excursion
+          (set-window-buffer nil buf)
+          (execute-kbd-macro "e"))
+        (should (equal "e" (harness-compose-text)))
+        (should harness-chat--pending)))))
 
 (ert-deftest harness-ui-chat-tool-permission-pattern ()
   "A tool call's prompt says which answers its pattern is remembered for."
@@ -1162,7 +1174,17 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
                                          :options '("circle" "square"))
                                    respond)
         (goto-char (harness-ui-chat-test-find buf "Which shape?"))
-        (call-interactively (lookup-key (get-text-property (point) 'keymap) "2"))
+        (save-window-excursion
+          ;; Keys reach the buffer of the selected window.
+          (set-window-buffer nil buf)
+          ;; A digit beyond the options has none to answer with: it types,
+          ;; into the box, and the question still waits.
+          (execute-kbd-macro "3")
+          (should (equal "3" (harness-compose-text)))
+          (should harness-chat--pending)
+          (harness-compose-set "")
+          (goto-char (harness-ui-chat-test-find buf "Which shape?"))
+          (execute-kbd-macro "2"))
         (should (equal '(:answer "square") (car answers)))
         (should (null harness-chat--pending))
         ;; Free text goes through the compose box.

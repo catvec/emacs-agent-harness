@@ -8,7 +8,9 @@
 ;; dropped text land in the box, images and videos show thumbnails, and
 ;; yanking takes images and copied files off the clipboard into the
 ;; media ring, and C-c C-v is no longer the box's, so a chat's [Verify]
-;; keeps it.  The clipboard and the display are stubbed; downloads go
+;; keeps it.  Typing outside the box goes into it (the keys go through
+;; the real command loop), except the keys that are commands where they
+;; are typed.  The clipboard and the display are stubbed; downloads go
 ;; to a web server in this Emacs.
 
 ;;; Code:
@@ -910,6 +912,125 @@ returned once none was."
       (harness-compose-set "@~/doc.txt")
       (should (equal (list "@~/doc.txt" (expand-file-name "doc.txt" home))
                      (pcase (harness-compose-take) (`(,sent ,att) (list sent (plist-get att :path)))))))))
+
+;;;; Typing outside the box
+
+(defun harness-ui-compose-test--transcript ()
+  "The host's read-only line, as it stands."
+  (save-excursion
+    (goto-char (point-min))
+    (buffer-substring-no-properties (point) (line-beginning-position 2))))
+
+(ert-deftest harness-ui-compose-typing-outside-goes-into-the-box ()
+  "A printable character typed outside the box goes to the end of the box.
+From the read-only text above it and from after its last line, and
+with a region in the read-only text, which `delete-selection-mode'
+would try to delete: the region is dropped instead.  The keys are read
+by the command loop, as typed."
+  (harness-ui-compose-test-with
+    (let ((was (bound-and-true-p delete-selection-mode)))
+      (unwind-protect
+          (progn
+            (goto-char (point-min))
+            (execute-kbd-macro "hi")
+            (should (equal "hi" (harness-compose-text)))
+            (should (= (point) harness-compose-end))
+            ;; After the box's final newline, the last place in the buffer.
+            (goto-char (point-max))
+            (execute-kbd-macro " there")
+            (should (equal "hi there" (harness-compose-text)))
+            ;; Quoting a character types it too.
+            (goto-char (point-min))
+            (execute-kbd-macro (kbd "C-q #"))
+            (should (equal "hi there#" (harness-compose-text)))
+            ;; A region in the read-only text is dropped, not deleted.
+            (delete-selection-mode 1)
+            (setq-local transient-mark-mode t)
+            (goto-char (+ (point-min) 4))
+            (push-mark (point-min) t t)
+            (should (use-region-p))
+            (let ((messages (harness-ui-compose-test-messages (execute-kbd-macro "!"))))
+              (should-not (cl-find-if (lambda (m) (string-match-p "read-only" m)) messages)))
+            (should (equal "hi there#!" (harness-compose-text)))
+            (should-not (region-active-p))
+            ;; In the box too, when the region reaches out of it.
+            (push-mark (+ (point-min) 4) t t)
+            (should (use-region-p))
+            (execute-kbd-macro "?")
+            (should (equal "hi there#!?" (harness-compose-text)))
+            (should-not (region-active-p))
+            ;; A region in the box is replaced, as typing replaces one.
+            (push-mark harness-compose-start t t)
+            (execute-kbd-macro "x")
+            (should (equal "x" (harness-compose-text)))
+            ;; RET outside the box jumps into it, dropping the region too.
+            (goto-char (+ (point-min) 4))
+            (push-mark (point-min) t t)
+            (execute-kbd-macro (kbd "RET"))
+            (should (= (point) harness-compose-end))
+            (should-not (region-active-p))
+            (should (equal "x" (harness-compose-text)))
+            (should (equal "The transcript.\n" (harness-ui-compose-test--transcript))))
+        (delete-selection-mode (if was 1 -1))))))
+
+(defvar harness-ui-compose-test--ran nil "The test commands that ran, newest first.")
+
+(defun harness-ui-compose-test-act ()
+  "Act on the thing at point, for the tests: say so."
+  (interactive)
+  (push 'act harness-ui-compose-test--ran))
+
+(put 'harness-ui-compose-test-act 'harness-compose-acts-p
+     (lambda () (get-text-property (point) 'harness-ui-compose-test-thing)))
+
+(ert-deftest harness-ui-compose-keys-outside-the-box-stay-commands ()
+  "A key bound to a command outside the box runs it there.
+A command with a `harness-compose-acts-p' property runs where that says
+it has something to act on, and elsewhere its key types into the box.
+A key that does nothing where it is typed -- `undefined', as a keymap
+suppressing typing has it -- types too."
+  (harness-ui-compose-test-with
+    (let* ((harness-ui-compose-test--ran nil)
+           (map (make-sparse-keymap))
+           (suppressed (make-sparse-keymap))
+           (inhibit-read-only t))
+      (define-key map "q" (lambda () (interactive) (push 'quit harness-ui-compose-test--ran)))
+      (define-key map "u" #'undefined)
+      (define-key map "k" #'harness-ui-compose-test-act)
+      (suppress-keymap suppressed t)
+      ;; "The " is a thing `k' acts on, "transcript" suppresses typing,
+      ;; and the rest of the line has neither.
+      (put-text-property (point-min) (+ (point-min) (length "The transcript.\n")) 'keymap map)
+      (put-text-property (point-min) (+ (point-min) 4) 'harness-ui-compose-test-thing t)
+      (put-text-property (+ (point-min) 4) (+ (point-min) 14) 'keymap suppressed)
+      (goto-char (+ (point-min) 2))
+      (execute-kbd-macro "q")
+      (should (equal '(quit) harness-ui-compose-test--ran))
+      (execute-kbd-macro "k")
+      (should (equal '(act quit) harness-ui-compose-test--ran))
+      (should (= (point) (+ (point-min) 2)))
+      (should (equal "" (harness-compose-text)))
+      ;; Off the thing, `k' has nothing to act on: it types.  Its
+      ;; binding stays, for help to show.
+      (goto-char (+ (point-min) 14))
+      (should (eq 'harness-ui-compose-test-act (key-binding "k")))
+      (execute-kbd-macro "k")
+      (should (equal "k" (harness-compose-text)))
+      (should (equal '(act quit) harness-ui-compose-test--ran))
+      ;; A key that is `undefined', or a letter a keymap suppresses, types.
+      (goto-char (+ (point-min) 14))
+      (should (eq 'undefined (key-binding "u")))
+      (execute-kbd-macro "u")
+      (goto-char (+ (point-min) 6))
+      (should (eq 'undefined (key-binding "z")))
+      (execute-kbd-macro "z")
+      (should (equal "kuz" (harness-compose-text)))
+      ;; Called otherwise than by its printable key, it runs as usual.
+      (goto-char (+ (point-min) 14))
+      (execute-kbd-macro (kbd "M-x harness-ui-compose-test-act RET"))
+      (should (equal '(act act quit) harness-ui-compose-test--ran))
+      (should (equal "kuz" (harness-compose-text)))
+      (should (equal "The transcript.\n" (harness-ui-compose-test--transcript))))))
 
 (provide 'harness-ui-compose-test)
 ;;; harness-ui-compose-test.el ends here

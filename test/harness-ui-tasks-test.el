@@ -231,6 +231,45 @@ as a one-column symbol, already in line, so they keep the old layout."
         (should (eq 'self-insert-command (key-binding (kbd "s"))))
         (should (eq 'harness-ui-tasks-submit (key-binding (kbd "C-c C-c"))))))))
 
+(ert-deftest harness-ui-tasks-typing-goes-to-the-box ()
+  "Typing on the board goes into the compose box, but for the board's keys.
+A letter the board does not bind types into the box from anywhere on
+the board, and so does a key for the task at point typed off a card,
+which has no task to act on.  On a card that key acts on its task, and
+the board's own keys stay its own off the cards."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "Waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  1")
+      (with-current-buffer board
+        ;; Keys reach the buffer of the selected window.
+        (should (eq board (window-buffer (selected-window))))
+        (cl-flet ((off-card ()
+                    (goto-char (point-min))
+                    (search-forward "nothing working")
+                    (should-not (get-text-property (point) 'harness-task-id))))
+          ;; Start, edit, message, verify, what it needs; and no key at all.
+          (dolist (key '("s" "e" "m" "v" "SPC" "h"))
+            (off-card)
+            (execute-kbd-macro (kbd key))
+            (should (= (point) harness-compose-end)))
+          (should (equal "semv h" (harness-compose-text)))
+          (off-card)
+          (should (eq 'harness-ui-tasks-refresh (key-binding "g")))
+          (should (eq 'harness-ui-quit-view (key-binding "q")))
+          (should (eq 'harness-ui-tasks-compose (key-binding "a")))
+          ;; Help still lists the task's keys, wherever point is.
+          (goto-char harness-compose-end)
+          (should (string-match-p "harness-ui-tasks-verify"
+                                  (substitute-command-keys "\\{harness-ui-tasks-board-map}")))
+          ;; On the card, `e' edits its task's prompt in the box.
+          (harness-compose-set "")
+          (goto-char (point-min))
+          (search-forward "Waiting task")
+          (should (get-text-property (point) 'harness-task-id))
+          (execute-kbd-macro "e")
+          (should (equal "Waiting task" (harness-compose-text))))))))
+
 (defvar harness-ui-open-session-function)
 (declare-function harness-ui-display-buffer "harness-ui")
 (declare-function harness-ui-tasks-open "harness-ui-tasks")

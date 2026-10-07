@@ -409,6 +409,17 @@ the request's own; an empty answer goes back to it."
 (define-key harness-ui-pending-permission-map (kbd "N") (harness-ui-pending--permission-command "deny-always"))
 (define-key harness-ui-pending-permission-map (kbd "e") #'harness-ui-pending-edit-pattern)
 
+(defun harness-ui-pending--pattern-here-p ()
+  "Nil when point is on the panel of a permission request with no pattern.
+Its `e' has no pattern to edit there, so it types, into the compose box
+\(`harness-compose-acts-p')."
+  (let* ((pid (get-text-property (point) 'harness-ui-pending))
+         (r (and pid (harness-ui-pending-record (harness-ui-pending--session) pid))))
+    (or (not (equal (plist-get r :kind) "permission"))
+        (plist-get r :pattern))))
+
+(put 'harness-ui-pending-edit-pattern 'harness-compose-acts-p #'harness-ui-pending--pattern-here-p)
+
 (defun harness-ui-pending--question-command (n)
   "Return a command answering the question at point with its Nth option."
   (lambda ()
@@ -421,18 +432,34 @@ the request's own; an empty answer goes back to it."
           (harness-ui-pending-answer-question session-id pid option)
         (user-error "No such option")))))
 
+(defun harness-ui-pending--option-here-p (n)
+  "Nil when point is on the panel of a question with no option N (from 0).
+The option's digit has nothing to act on there, so it types, into the
+compose box (`harness-compose-acts-p')."
+  (let* ((pid (get-text-property (point) 'harness-ui-pending))
+         (r (and pid (harness-ui-pending-record (harness-ui-pending--session) pid))))
+    (or (not (equal (plist-get r :kind) "question"))
+        (nth n (plist-get r :options)))))
+
 (defvar harness-ui-pending-question-map (make-sparse-keymap)
   "Keys active while point is on a question panel.
-A digit answers with that option.")
+A digit answers with that option; one beyond the options types, into
+the compose box.")
 
 (defvar harness-ui-pending-diagram-map (make-sparse-keymap)
   "Keys active while point is on the panel of a question with diagrams.
 The question's digits, and n and p to switch whose diagram shows.")
 
-;; Filled at top level, not in the `defvar's, so a reload updates them.
+;; Defined and filled at top level, not in the `defvar's, so a reload
+;; updates them.  A digit runs `harness-ui-pending-answer-N'.
 (dotimes (i 9)
-  (define-key harness-ui-pending-question-map (kbd (number-to-string (1+ i)))
-    (harness-ui-pending--question-command i)))
+  (let ((command (intern (format "harness-ui-pending-answer-%d" (1+ i)))))
+    (defalias command (harness-ui-pending--question-command i)
+      (format "Answer the question at point with its option %d.
+On the panel of a question with fewer options the key types instead,
+into the compose box." (1+ i)))
+    (put command 'harness-compose-acts-p (lambda () (harness-ui-pending--option-here-p i)))
+    (define-key harness-ui-pending-question-map (kbd (number-to-string (1+ i))) command)))
 (set-keymap-parent harness-ui-pending-diagram-map harness-ui-pending-question-map)
 (define-key harness-ui-pending-diagram-map (kbd "n") #'harness-ui-pending-next-diagram)
 (define-key harness-ui-pending-diagram-map (kbd "p") #'harness-ui-pending-previous-diagram)

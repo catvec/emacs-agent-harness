@@ -7,8 +7,14 @@
 ;; major mode, then `harness-compose-insert' wherever it draws the box
 ;; (after making everything before it read-only).  The box gives:
 ;;
-;;   - multi-line editing: RET and C-j insert a newline, typing outside
-;;     the box jumps into it, a placeholder shows while it is empty;
+;;   - multi-line editing: RET and C-j insert a newline, a placeholder
+;;     shows while the box is empty;
+;;   - typing anywhere in the buffer goes into the box: a printable
+;;     character (or a yank) with point outside it moves point to the
+;;     end of the box and types there, unless the key is a command where
+;;     it is typed -- a button's, a panel's, the task board's.  A command
+;;     that acts on what is at point says where that is with a
+;;     `harness-compose-acts-p' property; elsewhere its key types too;
 ;;   - a prompt that is a field of its own: C-a stops after it, as in
 ;;     the minibuffer, so C-a C-k clears the box's first line;
 ;;   - @file completion over the project's files, or over the file
@@ -387,12 +393,70 @@ would hide the region too.  Never nil: `global-hl-line-mode' needs a range."
       (cons (point) (point))
     (cons (line-beginning-position) (line-beginning-position 2))))
 
+(defconst harness-compose--typing-commands
+  '(self-insert-command quoted-insert insert-char
+    yank yank-pop clipboard-yank harness-compose-yank harness-compose-yank-pop)
+  "Commands that type into the buffer: outside the box they type into it.")
+
+;; A command bound to a printable key outside the box that acts on what
+;; is at point -- a card of the task board, an option of a question --
+;; says where it has something to act on with a `harness-compose-acts-p'
+;; property: a function of no arguments, called in the buffer with point
+;; where the key is typed.  Where it returns nil the key types, into the
+;; box, instead of signalling that there is nothing there.  The keymaps
+;; stay as they are, so help still lists the key under the command.
+
+(defun harness-compose--idle-p (command)
+  "Non-nil when COMMAND says it has nothing to act on at point.
+That is its `harness-compose-acts-p' property returning nil.  An error
+in the property counts as something to act on: the command then says
+what is wrong."
+  (when-let* ((acts (and (symbolp command) (get command 'harness-compose-acts-p))))
+    (not (condition-case nil (funcall acts) (error t)))))
+
+(defun harness-compose--typing-command ()
+  "Return the command the key about to run types into the box with, or nil.
+That is the key's command when it is one of
+`harness-compose--typing-commands', as bound or before a remapping (a
+minor mode's own `self-insert-command', say).  A printable character
+that does nothing where it is typed -- unbound, `undefined' as in a
+keymap that suppresses typing, or bound to a command with nothing to act
+on at point outside the box (see `harness-compose--idle-p') -- types
+too when it does in the box: its command is then the one it has there.
+Any other key is a command where it is typed, not typing: nil."
+  (cond
+   ((or (memq this-command '(nil undefined))
+        (and (not (harness-compose-in-p)) (harness-compose--idle-p this-command)))
+    (and (characterp last-command-event)
+         (aref printable-chars last-command-event)
+         (equal (this-command-keys-vector) (vector last-command-event))
+         (let ((command (key-binding (this-command-keys-vector) t nil harness-compose-end)))
+           (and command (not (eq command 'undefined)) command))))
+   ((or (memq this-command harness-compose--typing-commands)
+        (memq this-original-command harness-compose--typing-commands))
+    this-command)))
+
 (defun harness-compose--pre-command ()
-  "Send typing that lands outside the box into it."
-  (when (and (memq this-command '(self-insert-command yank harness-compose-yank))
-             (harness-compose-live-p)
-             (not (harness-compose-in-p)))
-    (goto-char harness-compose-end)))
+  "Send typing that lands outside the box into it.
+Typing (see `harness-compose--typing-command') with point outside the
+box moves point to the end of the box first, so a printable character
+typed anywhere in the buffer goes into the box instead of signalling
+that the text is read-only or doing nothing.  A key bound to a command
+where point is -- a button's RET, a panel's digits, the task board's
+letters -- is not typing, and runs as usual, unless the command has
+nothing to act on there.
+
+A region reaching outside the box goes before the typing: with
+`delete-selection-mode' the typing would delete it, read-only text and
+all, and fail."
+  (when-let* ((command (and (harness-compose-live-p) (harness-compose--typing-command))))
+    (when (and (region-active-p)
+               (not (and (harness-compose-in-p (region-beginning))
+                         (harness-compose-in-p (region-end)))))
+      (deactivate-mark))
+    (unless (harness-compose-in-p)
+      (goto-char harness-compose-end))
+    (setq this-command command)))
 
 (defun harness-compose-pad-window (window)
   "Keep the box at the bottom of WINDOW.
@@ -540,10 +604,12 @@ message waits for it."
                                           (harness-compose--references text))))))
 
 (defun harness-compose-newline ()
-  "Insert a newline in the box, or jump there from elsewhere."
+  "Insert a newline in the box, or jump there from elsewhere.
+Jumping drops the region, which would reach outside the box."
   (interactive)
   (if (harness-compose-in-p)
       (insert "\n")
+    (deactivate-mark)
     (goto-char harness-compose-end)))
 
 (defun harness-compose-skill-reference-p (text)
