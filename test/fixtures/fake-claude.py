@@ -82,6 +82,16 @@ The environment picks the account:
   HARNESS_FAKE_CLAUDE_OVERAGE=1          rate limit events say the
       account is drawing on extra usage
 
+The environment also picks the models:
+  HARNESS_FAKE_CLAUDE_MODELS=JSON        the `models' of the initialize
+      answer, a JSON array of ModelInfo objects (none by default)
+  HARNESS_FAKE_CLAUDE_RESOLVE=JSON       an object mapping a --model
+      name to the model the system/init banner names, as the CLI
+      resolves an alias (by default the banner names --model itself)
+  HARNESS_FAKE_CLAUDE_WINDOWS=JSON       an object mapping a model to
+      its context window: a result then reports, in modelUsage, the
+      banner's model with that window (and no modelUsage without one)
+
 The MCP handshake only runs when --mcp-config is given, so the
 provider's quota probe (initialize and get_usage, then end of input)
 works too.  If HARNESS_FAKE_CLAUDE_ARGV names a file, a JSON object
@@ -104,6 +114,9 @@ STORE = os.environ.get("HARNESS_FAKE_CLAUDE_STORE")
 OVERAGE = bool(os.environ.get("HARNESS_FAKE_CLAUDE_OVERAGE"))
 GATE = os.environ.get("HARNESS_FAKE_CLAUDE_GATE")
 PAUSE = float(os.environ.get("HARNESS_FAKE_CLAUDE_PAUSE", "1.5"))
+MODELS = json.loads(os.environ.get("HARNESS_FAKE_CLAUDE_MODELS") or "[]")
+RESOLVE = json.loads(os.environ.get("HARNESS_FAKE_CLAUDE_RESOLVE") or "{}")
+WINDOWS = json.loads(os.environ.get("HARNESS_FAKE_CLAUDE_WINDOWS") or "{}")
 GATE_TIMEOUT = 60
 TURN_COST = 0.01
 RESTORED_COST = 0.05
@@ -274,7 +287,8 @@ class Fake:
         else:
             self.session_id = "fake-" + uuid.uuid4().hex[:8]
         self.save()
-        self.model = arg_value(argv, "--model") or "fake-model"
+        asked = arg_value(argv, "--model") or "fake-model"
+        self.model = RESOLVE.get(asked, asked)
         self.total = RESTORED_COST if resume else 0.0
         self.needs_handshake = "--mcp-config" in argv
         self.permission_mode = arg_value(argv, "--permission-mode") or "default"
@@ -382,7 +396,7 @@ class Fake:
         rid = msg.get("request_id")
         sub = msg.get("request", {}).get("subtype")
         if sub == "initialize":
-            response = {"commands": [], "models": []}
+            response = {"commands": [], "models": MODELS}
             if account():
                 response["account"] = account()
             self.answer(rid, response)
@@ -432,6 +446,14 @@ class Fake:
                "permission_denials": self.denials}
         if api_error_status is not None:
             obj["api_error_status"] = api_error_status
+        if self.model in WINDOWS:
+            usage = self.usage()
+            obj["modelUsage"] = {self.model: {
+                "inputTokens": usage["input_tokens"], "outputTokens": usage["output_tokens"],
+                "cacheReadInputTokens": usage["cache_read_input_tokens"],
+                "cacheCreationInputTokens": usage["cache_creation_input_tokens"],
+                "webSearchRequests": 0, "costUSD": TURN_COST,
+                "contextWindow": WINDOWS[self.model], "maxOutputTokens": 64000}}
         emit(obj)
 
     def turn_failure(self, error, text, api_status=None):

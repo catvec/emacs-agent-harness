@@ -31,6 +31,15 @@
 ;; harness only needs to work (prompts, timeouts, polling intervals,
 ;; limits of the tools) is no option at all: those are constants of the
 ;; modules.  See docs/configuration-audit.md.
+;;
+;; A string that names a model says so in its customize type, with a
+;; `:names' property, which customize and the widget library ignore:
+;; `model' for a model id, PROVIDER:MODEL; (provider model) for a
+;; provider id or a model id; `model' with `:provider ID' for the name
+;; provider ID knows one of its models by, without the provider part.
+;; A settings page offers the models the providers list for such a
+;; string, in a picker, rather than a field to type an id in, whose typo
+;; would go unnoticed (`harness-model' is (string :names model)).
 
 ;;; Code:
 
@@ -48,7 +57,7 @@
 
 (defcustom harness-model "claude:claude-fable-5-1"
   "Default model as PROVIDER:MODEL."
-  :type 'string :safe #'stringp :group 'harness)
+  :type '(string :names model) :safe #'stringp :group 'harness)
 
 (defcustom harness-permission-mode 'ask
   "Default permission mode for new sessions."
@@ -89,7 +98,12 @@ directories."
   :group 'harness)
 
 (defcustom harness-budget nil
-  "Default per-session budget plist (:amount USD :hard BOOL), or nil."
+  "One budget for all sessions together, as (:amount USD :hard BOOL), or nil.
+It counts everything the harness recorded, every session of every
+project, and applies to every session: a hard one stops the next turn
+of each once it is spent, a soft one only warns.  It has a global
+value only.  Budgets for one project, one session or a calendar period
+are made in the usage dashboard (`harness-usage')."
   :type '(choice (const :tag "No budget" nil)
                  (plist :tag "Budget" :key-type symbol :value-type sexp
                         :options ((:amount (number :tag "Amount (USD)"))
@@ -121,7 +135,7 @@ non-interactive anyway."
 
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
-    harness-allowed-directories harness-budget harness-sandbox-policy harness-non-interactive)
+    harness-allowed-directories harness-sandbox-policy harness-non-interactive)
   "Settings that take part in layering.")
 
 (defconst harness-config-sections
@@ -129,7 +143,11 @@ non-interactive anyway."
      :title "New sessions"
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
      :keys (harness-model harness-thinking harness-btw-thinking harness-permission-mode
-            harness-non-interactive harness-budget))
+            harness-non-interactive))
+    (spending
+     :title "Spending"
+     :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."
+     :keys (harness-budget))
     (safety
      :title "Files and safety"
      :doc "What sessions may reach, and what may run without asking you."
@@ -141,7 +159,8 @@ non-interactive anyway."
      :keys (harness-tasks-model harness-tasks-thinking harness-tasks-permission-mode
             harness-tasks-non-interactive harness-tasks-context-limit
             harness-tasks-require-verification
-            harness-tasks-max-running harness-tasks-worktrees))
+            harness-tasks-max-running harness-tasks-worktrees
+            harness-merge-conflict-resolver harness-merge-resolver-model))
     (notifications
      :title "Notifications"
      :doc "When the harness tells you it needs you, and where."

@@ -8,6 +8,8 @@
 (defvar harness-merge--locks)
 (defvar harness-merge--holds)
 (defvar harness-merge--hold-timeout)
+(defvar harness-merge-conflict-resolver)
+(defvar harness-provider-demo-script-override)
 
 (defun harness-merge-test--git (dir &rest args)
   "Run git ARGS synchronously in DIR; signal on failure, return stdout."
@@ -150,6 +152,7 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
 (ert-deftest harness-merge-conflict-resolved-with-merge-done ()
   "A conflict never touches the parent: the child merges the parent in its worktree."
   (harness-merge-test-with
+   (let ((harness-merge-conflict-resolver 'child))
     ;; Both sides change the same line.
     (harness-merge-test--write wt "README" "child version\n")
     (harness-merge-test--commit wt "child edit" "README")
@@ -205,7 +208,76 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
       (should (null (gethash parent harness-merge--locks)))
       (should (equal "resolved version\n"
                      (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
-      (should (= 2 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t)))))))
+      (should (= 2 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))))))
+
+(defun harness-merge-test--conflict-setup (wt root)
+  "Make the child's branch in WT and ROOT's main change README's one line."
+  (harness-merge-test--write wt "README" "child version\n")
+  (harness-merge-test--commit wt "child edit" "README")
+  (harness-merge-test--write root "README" "parent version\n")
+  (harness-merge-test--commit root "parent edit" "README"))
+
+(ert-deftest harness-merge-conflict-goes-to-a-fresh-session ()
+  "By default a fresh session resolves the conflict, and the child is left alone."
+  (harness-merge-test-with
+    (harness-merge-test--conflict-setup wt root)
+    (let* ((finished nil) (resolvers nil) (requests nil)
+           (parent-head (string-trim (harness-merge-test--git root "rev-parse" "HEAD")))
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (let ((sid (plist-get (plist-get request :session) :id)))
+                (push (cons sid (harness-provider-demo--last-user-text request)) requests)
+                (if (harness-provider-demo--has-tool-results-p request)
+                    '((:type text :delta "Resolved.") (:type done :stop-reason end-turn))
+                  ;; The model's work: merge, resolve and commit in the worktree.
+                  (ignore-errors (harness-merge-test--git wt "merge" "-q" parent-head))
+                  (harness-merge-test--write wt "README" "resolved version\n")
+                  (harness-merge-test--git wt "add" "README")
+                  (harness-merge-test--git wt "commit" "-q" "--no-edit")
+                  '((:type tool-call :id "md-1" :name "merge_done" :input nil)))))))
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (harness-on 'merge/resolver (lambda (c p r) (push (list c p r) resolvers)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 15 "merged")
+      (should (equal (list child parent 'merged) (car finished)))
+      (should (= 1 (length resolvers)))
+      (let* ((rid (nth 2 (car resolvers)))
+             (resolver (harness-call 'session/get rid)))
+        ;; A new session, a sub-agent of the child, in the child's worktree.
+        (should-not (member rid (list child parent)))
+        (should (eq 'subagent (plist-get resolver :kind)))
+        (should (equal child (plist-get resolver :parent-id)))
+        (should (equal (file-name-as-directory wt) (plist-get resolver :cwd)))
+        (should (equal "Merge child" (plist-get resolver :name)))
+        ;; Only the resolver was prompted, by the merge queue.
+        (should (equal (list rid) (delete-dups (mapcar #'car requests))))
+        (let ((user (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes rid))))
+          (should (string-match-p "- README" (plist-get user :content)))
+          (should (string-match-p (regexp-quote (concat "git merge " (substring parent-head 0 12))) (plist-get user :content)))
+          (should (equal (harness-sender-system "merge queue") (harness-node-sender user)))))
+      ;; The child got a hint, never a prompt.
+      (should-not (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes child)))
+      (should (cl-some (lambda (h) (string-match-p "session Merge child resolves them" h)) (harness-merge-test--hints child)))
+      (should (equal "resolved version\n"
+                     (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
+      (should (null (harness-call 'merge/queue parent))))))
+
+(ert-deftest harness-merge-fresh-resolver-that-gives-up-fails-the-merge ()
+  "A resolver whose turn ends without merge_done fails the merge; the parent is untouched."
+  (harness-merge-test-with
+    (harness-merge-test--conflict-setup wt root)
+    (let ((finished nil)
+          (harness-provider-demo-script-override
+           '((:type text :delta "I cannot resolve this.") (:type done :stop-reason end-turn))))
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 15 "failed")
+      (should (equal (list child parent 'failed) (car finished)))
+      (should (cl-some (lambda (h) (string-match-p "stopped (end-turn) without merge_done" h)) (harness-merge-test--hints parent)))
+      (should (equal "parent version\n"
+                     (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
+      (should (null (harness-call 'merge/queue parent)))
+      (should (null (gethash parent harness-merge--locks))))))
 
 (ert-deftest harness-merge-keeps-local-work-in-the-parent ()
   "Uncommitted work in the parent's checkout in the merge's way is never touched."
@@ -327,7 +399,7 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
     (harness-merge-test--commit wt "child edit" "README")
     (harness-merge-test--write root "README" "parent version\n")
     (harness-merge-test--commit root "parent edit" "README")
-    (let ((harness-merge--hold-timeout 0.2) (finished nil))
+    (let ((harness-merge--hold-timeout 0.2) (harness-merge-conflict-resolver 'child) (finished nil))
       (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
       (harness-call 'merge/enqueue child parent)
       (harness-test-wait (lambda () finished) 10 "aborted")
