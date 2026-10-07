@@ -832,7 +832,9 @@ the provider reports none:
 ```
 
 Event `provider/quota-updated PROVIDER-ID QUOTA` fires whenever a
-provider learns something new; the UI caches QUOTA from it.
+provider learns something new; the UI caches QUOTA from it, and the
+usage module counts `:extra :used` in month budgets over everything
+(see usage).
 
 The Claude provider learns the billing from the `account` of each CLI
 process's initialize answer:
@@ -889,6 +891,19 @@ auto-compacts at the shorter budget the harness gave the session rather
 than at its own default.  The percentage is part of the settings a
 process was started with, so changing the cap restarts the CLI with
 `--resume`, like the model and system prompt.
+
+The CLI loads the CLAUDE.md files as `claude` does, but not Claude
+Code's auto memory: every process it starts gets
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` unless
+`harness-provider-claude-auto-memory` is on.  The memory's index,
+MEMORY.md, lists notes kept under `~/.claude/projects/PROJECT/memory/`,
+which Claude Code reads and writes with its own file tools, following
+instructions in its own system prompt.  A harness session has neither,
+so the model opened the notes with the harness's file tools, outside
+the allowed directories, and every session asked the user for that
+directory (or, unattended, was refused it).  Whether a process loads
+the memory is part of the settings it was started with, so changing the
+option restarts the CLI with `--resume`.
 
 The one exception is WebSearch, which stands in for web_search
 (`harness-provider-claude-builtin-tools`; capability `:builtin-tools`).
@@ -1145,7 +1160,8 @@ its `:label`, a short name in sentence case for people ("Read file",
 "Bash", "Web search").  The label is required (`harness-define-tool`
 signals without one) and every UI shows it wherever it names a tool;
 the identifier stays for the model, for configuration (permission
-rules, `harness-perms--auto-allow-tools`) and in the text agents read
+rules, `harness-perms--auto-allow-tools`,
+`harness-perms--inspection-tools`) and in the text agents read
 about other sessions (`session_read`).  `harness-tools-label NAME`
 returns the label, or NAME for a tool nobody registered.
 `harness-tool-title NAME INPUT` titles a call: the label, then a colon
@@ -1184,13 +1200,16 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   or deny; a denial carries `:message`, the text `tools/execute` would
   have returned.
 - Corporate mode (`harness-corporate-mode`) turns off the tools of kind
-  `net`.  No session gets them, so `tools/builtin` never picks a
-  provider's own web search either; the list without a session still
-  has them.  `tools/execute` and `tools/authorize` deny a call to one
-  before the `permission/decide` chain, whatever the mode and the
-  standing rules: reason "corporate mode: network tools are off", a
-  hint to work with the project and the tools the session has,
+  `net` other than web search (`harness-tools--corporate-net-tools`:
+  web_search).  No session gets them; the list without a session still
+  has them.  `tools/execute` and `tools/authorize` deny a call of kind
+  `net` to any other tool (one the harness lacks included) before the
+  `permission/decide` chain, whatever the mode and the standing rules:
+  reason "corporate mode: network tools other than web search are
+  off", a hint to work with the project and the tools the session has,
   `:denied t`, and `permission/decided` as for any decision.
+  web_search stays, and so does a provider's own search standing in
+  for it (`tools/builtin`); their calls go to the chain as in any mode.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.
@@ -1299,12 +1318,35 @@ non-interactive session it stays a denial.
   `harness-allowed-directories`, its grants and the tool output
   directory.  The temporary directory needs no grant and cannot be
   revoked.
+- Inspecting the harness itself is one of the things that make it
+  powerful, so no mode, judge or jail stands in its way.  The harness
+  is no root, but a call of kind `read` may read it, in every mode,
+  with the user there or away: `harness-perms-inspection-dirs` lists
+  `harness-directory`, the checkout its harness.el links into when it
+  is a symbolic link (a straight.el build directory links every source
+  into the package's repository), and `harness-state-directory` (the
+  sessions with their transcripts, the task boards, usage).  The jail
+  lets such a read through (`harness-perms--inspectable-p`) and the
+  mode stage allows it with no judge asked ("reading the harness itself
+  never needs approval"); a standing rule still decides first.
+  Writes, commands, sub-agents and directory grants there are jailed as
+  anywhere outside the roots, and their denial says reading needs no
+  grant.  The credentials in the state directory
+  (`harness-perms--private-files`: `acp-token`, and `server-config.el`
+  with the API keys forwarded to the harness process) are left out,
+  since what a tool reads goes to the model's provider; so is a search
+  below a directory that holds them, which the tools that only list
+  names (`harness-perms--listing-tools`: list_dir, glob, file_info) may
+  still look at.  Symbolic links are resolved first, out of the harness
+  as much as into it.
 - `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
   grants every session), `permission/revoke-dir SESSION-ID DIR`,
   `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|outputs
   :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
   (the full effective root list), `permission/rules SESSION-ID`
-  (`(:mode :non-interactive :auto-allow :session :always :roots)`),
+  (`(:mode :non-interactive :auto-allow :session :always :roots :inspect)`:
+  `:auto-allow` holds the inspection tools too, and `:inspect` the
+  directories of the harness itself),
   `permission/pending SESSION-ID`.
 - Session directory grants are stored on the session record
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
@@ -1342,11 +1384,16 @@ non-interactive session it stays a denial.
   the session's own, overrides it.  `yolo` allows everything; the jail
   still applies.  Tools in
   `harness-perms--auto-allow-tools` are allowed in every mode: the meta
-  tools, skill and Emacs lookups, `web_search`, which only sends its
+  tools, skill lookups, `web_search`, which only sends its
   query to the configured search provider, so task sessions can search,
   `notify`, which only reaches the user through the notification
   providers they set up, so unattended sessions can say they need them,
   and `hand_in`, which only records a task's report and ends the turn.
+  So are the tools in `harness-perms--inspection-tools`, which only
+  inspect the harness or the user's live Emacs: `emacs_buffers`,
+  `emacs_buffer`, `emacs_windows`, `emacs_describe`, `emacs_messages`,
+  `session_info`, `session_list`, `session_read`, `session_search`,
+  `session_wait`, `task_list`, `task_wait` and `notification_providers`.
   The model provider's own search, standing in for `web_search` (see
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
@@ -1363,12 +1410,18 @@ non-interactive session it stays a denial.
   data outside the roots, force pushes, system changes, sending secrets
   away, or widening its own permissions.  It leans to allowing:
   reads anywhere, edits, builds, tests, local git and scratch files
-  anywhere (temporary directories included) are ordinary work.  It
+  anywhere (temporary directories included) are ordinary work, and so
+  is inspecting the harness itself wherever it lives, with any tool,
+  Emacs Lisp included, its credentials (`acp-token`,
+  `server-config.el`) excepted: the judge sees only the inspection the
+  rules above do not already allow.  It
   never rules on the task, its scope, its review or the project's
   workflow, and it is given nothing to rule on them with.  The user
   message (`harness-perms--judge-text`) holds the call alone: the tool,
   the first sentence of its description, the input, the working
-  directory and the allowed roots.  The request is `:ephemeral`, so the
+  directory, the allowed roots and where the harness lives
+  (`harness-perms--judge-harness`: its code and state directories and
+  its credential files).  The request is `:ephemeral`, so the
   provider brings no earlier verdicts and no project instructions
   (CLAUDE.md).  A judge's denial carries `harness-perms-judge-deny-hint`.
   A long input is cut (`harness-perms--judge-input-chars') and the block
@@ -1392,7 +1445,10 @@ non-interactive session it stays a denial.
   allowed roots and how to widen them.  A path elsewhere in the
   system's temporary directory (and the agent's own request for one)
   also sends the agent to the session's own temporary directory, where
-  scratch files go without stopping the session.
+  scratch files go without stopping the session.  A path in the harness
+  itself (and the agent's own request for one) adds that reading it
+  needs no grant, and a read refused for reaching the credentials names
+  them (`harness-perms--inspection-hint`).
 - Non-interactive (the user is away) is no permission policy of its
   own and refuses nothing for being unattended: the auto judge
   (stage 30, `harness-perms--judge-p`) decides what would ask the user,
@@ -1589,35 +1645,65 @@ non-interactive session it stays a denial.
   `usage/budget-status ID &rest (:now)` (ID may be "session:SID" for a
   session's implicit budget) → `(:budget :spent :amount :remaining
   :fraction :hard :per-day :days-left :period-start :period-end
-  :baseline)`;
+  :baseline :reported :sources)`;
   `usage/session-budgets SID`, `usage/plan-budget AMOUNT PERIOD DAYS`,
   `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`.
   BUDGET = `(:id :scope session|project|period :target ID-OR-ROOT
   :amount F :hard BOOL :period day|week|month :days business|all
   :baseline F :baseline-period-start "YYYY-MM-DD")`.
-- A baseline is what was spent that the harness never recorded (other
-  tools, the console, days before it kept usage), set by hand so a
-  budget made mid-month does not start at $0.  `:spent` is the recorded cost plus
-  the baseline that counts: a period budget's only while the current
-  period starts on `:baseline-period-start` (set-budget fills in the
-  period containing now, and moves any date or float time to its
+- `:spent` is the recorded cost, plus `:reported`, plus `:baseline`.
+- A budget over everything (scope period, no target, a day, week or
+  month: `harness-usage-backfills-p`) backfills from what providers
+  report they billed in its period.  `:reported` is the sum of each
+  source's `:outside`, and `:sources` lists them as `(:source ID :label
+  NAME :kind extra-usage|cost-report :amount :recorded :outside :at
+  :detail TEXT)`, plus `:since :until` for a cost report.  `:amount` is
+  what the source reported as of `:at`, `:recorded` what the harness
+  recorded before then that the source counts too, and `:outside` the
+  rest, never below 0.  Two sources:
+  - Extra usage: a `provider/quota-updated` QUOTA whose `:extra :used`
+    is in US dollars covers the calendar month of its `:updated` time.
+    That is Claude Code's usage credits (the CLI's `get_usage`) or
+    Copilot's overage.  It counts in month budgets, less that
+    provider's rows billed `extra-usage`.  A QUOTA without `:extra`
+    (per-token billing) drops the provider's report.
+  - Anthropic's cost report (below), for the UTC days of the period's
+    local dates, less the Claude rows billed per token.  It is fetched
+    in the background, from the command loop, when a status is computed
+    without `:now` and the last try for that period is older than
+    `harness-usage-cost-report-interval` (600 s).  A failure, or a
+    missing key, is remembered for as long and keeps the amount fetched
+    before.
+  Reports live in memory, and `usage/reported-changed REPORT` fires when
+  one changes (forwarded to clients, and the dashboard reloads).
+  Project, session and per-project budgets do not backfill: a provider
+  cannot say what one project spent, and a session spends only through
+  the harness.
+- A baseline is what was spent that the harness never recorded and no
+  provider reports (other tools, the console, days before it kept
+  usage), set by hand so a budget made mid-month does not start at $0.
+  It counts besides `:reported`: a period budget's only while the
+  current period starts on `:baseline-period-start` (set-budget fills
+  in the period containing now, and moves any date or float time to its
   period's start), one without a period always.  The status's
   `:baseline` is that part, 0 otherwise.  nil or 0 clears it.
-- `usage/fetch-api-cost &rest (:now)` gives a promise of this month's
-  cost from Anthropic's Admin API (`GET /v1/organizations/cost_report`,
-  UTC days, amounts in cents): `(:available t :amount :recorded
-  :outside :period-start :since :until)`.  `:recorded` is what the
-  harness recorded in that time for Claude calls billed per token,
-  which the report counts too, and `:outside` the rest, offered as a
-  month budget's baseline.  It needs an Admin API key
+- `usage/fetch-api-cost &rest (:period :now)` gives a promise of what
+  Anthropic billed in the calendar `:period` (day, week or month, the
+  default) containing `:now`, from its Admin API (`GET
+  /v1/organizations/cost_report`, UTC days, amounts in cents):
+  `(:available t :amount :recorded :outside :period :period-start
+  :since :until)`.  `:recorded` is what the harness recorded in that
+  time for Claude calls billed per token, which the report counts too,
+  and `:outside` the rest.  The answer also updates what budgets over
+  everything count, at once.  It needs an Admin API key
   (`harness-anthropic-admin-api-key`, ANTHROPIC_ADMIN_KEY, or
   auth-source host api.anthropic.com user admin); without one nothing
   is fetched and it gives `(:available nil :reason)`.  Pro and Max
   subscriptions have no cost report.
 - Hard budgets block via `agent/before-turn`; soft ones emit
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
-  count billed cost, so calls a subscription covers spend none; a
-  baseline counts toward both.
+  count billed cost, so calls a subscription covers spend none; what
+  providers report and a baseline count toward both.
 - The Budget setting (`harness-budget`, `(:amount F :hard BOOL)`) is
   one implicit budget, id "settings", for all sessions together: it
   counts every recorded call and applies to every session, after the
@@ -2378,38 +2464,43 @@ TRAMP prefixes come from the session host):
 | `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
 | `bash` | Bash | command, timeout, cwd | exec |
 | `elisp` | Emacs Lisp | code, timeout | exec |
-| `emacs_buffers` | List buffers | filter, all | read |
-| `emacs_windows` | List windows | — | read |
-| `emacs_buffer` | Read buffer | name, offset, limit | read |
+| `emacs_buffers` | List buffers | filter, all | read (needs no approval: `harness-perms--inspection-tools`) |
+| `emacs_windows` | List windows | — | read (needs no approval: `harness-perms--inspection-tools`) |
+| `emacs_buffer` | Read buffer | name, offset, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_open` | Open buffer | name (buffer or path), line | read |
 | `emacs_insert` | Insert text | name, text, position (point/start/end) | write |
 | `emacs_save_buffer` | Save buffer | name | write |
-| `emacs_describe` | Describe symbol | symbol | read |
+| `emacs_describe` | Describe symbol | symbol | read (needs no approval: `harness-perms--inspection-tools`) |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
-| `emacs_messages` | Emacs messages | count | read |
+| `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
 | `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
-| `session_info` | Session info | — | read |
+| `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
 | `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name | read |
-| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
-| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read |
-| `session_read` | Read session | session_id, limit, before, kinds, max_chars | read |
+| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
-| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read |
+| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
+| `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
-| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read |
+| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus | exec (tools-dev; offered in a checkout of the harness only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
-| `notification_providers` | Notification providers | (none) | read |
+| `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
+
+The tools of kind read that take a path (`read_file`, `list_dir`,
+`glob`, `grep`, `file_info`, `emacs_open`) may read the harness itself
+as well as the session's roots: its code and its state directory, its
+credentials aside (see perms).
 
 `hand_in` (tools-handin) is how a task's session finishes: the tool
 records the summary and evidence on the task (`task/hand-in'`) and asks
@@ -2466,6 +2557,8 @@ has WebSearch, Copilot its web_search).  tools-web's filter on
 search provider cannot search, so searching works before anything is
 set up; `always`; or `never`.  The session then has no `web_search` of
 the harness's, and the provider's searches show as `web_search` calls.
+Corporate mode leaves both searches on and turns `web_fetch` off (see
+tools).
 
 The session and task tools (`tools-sessions`) let an agent coordinate the
 rest of the harness.  Sessions are named by id, a unique id prefix or a
@@ -2842,9 +2935,18 @@ at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
 it (all of it in `harness-ui-pending`).  Switching redraws the options
 and that area alone, in place, so point, the windows and the compose box
-stay put.  A module hosted by a chat buffer can put a read-only panel of
-its own above the box with `harness-chat-panel-functions` and take the
-box's message with `harness-chat-send-function`.
+stay put.  A permission panel whose one line of input leaves something
+out (a value past its width, a further line of one, a line too long)
+ends that line in `[Show all]`, `[Show all N lines]` when values have
+lines it hides, and binds TAB on the panel
+(`harness-ui-pending-toggle-input`); whole, each value takes a line of
+its own and a cut one a verbatim block under its key, until `[Show
+less]`.  Which requests show whole is the request's state, like the
+diagram shown, so the chat and the popout agree, and point stays on
+the toggle through the redraw.  A module hosted by a chat buffer can
+put a read-only panel of its own above the box with
+`harness-chat-panel-functions` and take the box's message with
+`harness-chat-send-function`.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
@@ -2911,6 +3013,21 @@ host whose box does something else than compose -- the task board's,
 which sends to a session -- marks it; `harness-compose-bar` draws that
 same bar on the host's own lines around the box.  Without either
 argument the box is the plain one.
+A host draws the attachments above the box with
+`harness-compose-insert-attachments`, one a line: the paperclip leads
+the first, the names under it line up with its name, and a prefix the
+host passes starts every line (the board's message box passes its bar).
+Each line is fitted to the narrowest window showing the buffer -- the
+daemon's initial frame, which never shows, aside -- in pixels of the
+frame drawing it (`string-pixel-width`, so icons, thumbnails and text
+scaling count): a name too long is shortened in the middle
+(`harness-compose--shorten`), keeping its start and, room permitting,
+a path's whole file name, while the tooltip tells the whole path; a
+thumbnail takes a third of the room at most, and a download keeps room
+for its progress at its widest, so its line never grows as it ticks.
+When a window showing the box changes size, the box has its host draw
+the lines again (a buffer-local `window-size-change-functions`,
+debounced, and only once the room really changed).
 An attachment chip leads with a thumbnail (`harness-compose-thumbnail-lines`)
 when it is an image, or a video whose thumbnail the media module makes
 with ffmpeg in the background (a chip asks for it through

@@ -944,6 +944,49 @@ for a request without a session record."
       (should (eq 'deny (plist-get d :behavior)))
       (should (string-match-p "\\`Denied: denied by a standing rule for web_search" (plist-get d :message))))))
 
+(ert-deftest harness-perms-corporate-mode-searches-the-web ()
+  ;; Corporate mode leaves web search on: an unattended task session
+  ;; searches with web_search or its provider's own search, as the rules
+  ;; for web_search decide, standing rules included.  web_fetch is
+  ;; refused before the chain, so not even the judge is asked about it.
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-test-load-module 'tools-web)
+  (let ((probe (harness-perms-test--judge-provider
+                '((:type text :delta "{\"decision\":\"allow\",\"reason\":\"fine\"}")
+                  (:type done :stop-reason end-turn))))
+        (harness-perms-auto-model "judge:small")
+        (harness-corporate-mode t)
+        (harness-websearch-providers nil)
+        (harness-websearch-provider 'fake))
+    (harness-register-method 'agent/prompt (lambda (&rest _) (harness-resolved nil)))
+    (harness-websearch-register-provider
+     'fake (lambda (query _count) (list (list :title (concat "About " query) :url "https://example.org/"))))
+    (cl-letf (((symbol-function 'harness-http-request)
+               (lambda (&rest _) (error "Nothing may reach the web"))))
+      (let ((r (harness-test-await (harness-call 'tools/execute "s1"
+                                                 '(:id "c1" :name "web_search" :input (:query "emacs"))))))
+        (should-not (plist-get r :is-error))
+        (should (string-match-p "About emacs" (plist-get r :content))))
+      (should (eq 'allow (plist-get (harness-test-await
+                                     (harness-call 'tools/authorize "s1"
+                                                   '(:id "c2" :name "web_search" :input (:query "emacs"))))
+                                    :behavior)))
+      (let ((r (harness-test-await (harness-call 'tools/execute "s1"
+                                                 '(:id "c3" :name "web_fetch" :input (:url "https://example.org/"))))))
+        (should (plist-get r :denied))
+        (should (string-match-p "\\`Denied: corporate mode: network tools other than web search are off"
+                                (plist-get r :content))))
+      (should (null (funcall probe 'requests)))
+      (let ((harness-perms-rules '((:tool "web_search" :behavior deny))))
+        (should (plist-get (harness-test-await
+                            (harness-call 'tools/execute "s1"
+                                          '(:id "c4" :name "web_search" :input (:query "emacs"))))
+                           :denied))
+        (should (eq 'deny (plist-get (harness-test-await
+                                      (harness-call 'tools/authorize "s1"
+                                                    '(:id "c5" :name "web_search" :input (:query "emacs"))))
+                                     :behavior)))))))
+
 ;;;; Asking the user
 
 (ert-deftest harness-perms-ask-path-pending-and-answer ()
@@ -1783,6 +1826,316 @@ to its own temporary directory, so it carries on rather than stops."
   (should (harness-module-ready-p 'perms))
   (should (rassq #'harness-perms--dir-request (gethash 'permission/decide harness--filters)))
   (should (= 7 (length (gethash 'permission/decide harness--filters)))))
+
+;;;; Inspecting the harness itself
+
+(defun harness-perms-test--call-with-harness (fn)
+  "Call FN with (REPO BUILD STATE): a harness installed as straight.el does.
+BUILD, which `harness-directory' names, holds a compiled file of its
+own and links into the checkout REPO for the sources.  STATE, which
+`harness-state-directory' names, holds a session, a task board and the
+credentials: the ACP token and the settings forwarded to the harness
+process."
+  (let* ((repo (harness-test-temp-dir))
+         (build (harness-test-temp-dir))
+         (harness-directory build))
+    (harness-test-with-temp-state
+      (let ((state harness-state-directory))
+        (dolist (dir (list repo build))
+          (make-directory (expand-file-name "lisp/modules" dir) t))
+        (dolist (file '("harness.el" "lisp/modules/harness-perms.el"))
+          (with-temp-file (expand-file-name file repo) (insert ";; " file "\n"))
+          (make-symbolic-link (expand-file-name file repo) (expand-file-name file build)))
+        (with-temp-file (expand-file-name "harness.elc" build) (insert ";ELC\n"))
+        (make-directory (expand-file-name "sessions" state) t)
+        (with-temp-file (expand-file-name "sessions/s1.json" state) (insert "{\"id\":\"s1\"}\n"))
+        (with-temp-file (expand-file-name "tasks.json" state) (insert "[]\n"))
+        (with-temp-file (expand-file-name "acp-token" state) (insert "s3cret-token\n"))
+        (with-temp-file (expand-file-name "server-config.el" state)
+          (insert "(customize-set-variable 'harness-brave-api-key '\"s3cret-key\")\n"))
+        (funcall fn repo build state)))))
+
+(defun harness-perms-test--denying-judge ()
+  "Register provider `judge' that denies every call; return its probe."
+  (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"not the project's\"}")
+                                        (:type done :stop-reason end-turn))))
+
+(defun harness-perms-test--each-mode (fn)
+  "Call FN in every permission mode, with the user there and away.
+The fake session is switched before each call; FN gets the mode and
+whether the session is non-interactive."
+  (dolist (mode '(ask accept-edits auto yolo))
+    (dolist (away '(nil t))
+      (setq harness-perms-test--session
+            (plist-put (plist-put harness-perms-test--session :permission-mode mode) :non-interactive away))
+      (funcall fn mode away))))
+
+(ert-deftest harness-perms-inspection-tools-need-no-approval ()
+  "The tools that inspect the harness or the user's Emacs are allowed in
+every mode, with the user there or away, and no judge is asked: a
+judge denying them cannot stop the agent looking at its own harness."
+  (harness-perms-test--setup)
+  (harness-perms-test--install-pending)
+  (dolist (tool '("emacs_buffers" "emacs_buffer" "emacs_describe" "emacs_messages" "emacs_windows"
+                  "session_list" "session_read" "session_search" "task_list"))
+    (should (member tool harness-perms--inspection-tools)))
+  (let ((probe (harness-perms-test--denying-judge))
+        (harness-perms-auto-model "judge:x"))
+    (harness-perms-test--each-mode
+     (lambda (mode away)
+       (dolist (tool harness-perms--inspection-tools)
+         (ert-info ((format "%s in %s mode%s" tool mode (if away ", user away" "")))
+           (let ((d (harness-perms-test--decide (harness-perms-test--request tool 'read))))
+             (should (eq 'allow (plist-get d :behavior)))
+             (should (string-match-p "only inspects the harness" (plist-get d :reason))))))))
+    (should (null (funcall probe 'requests)))
+    (should (null harness-perms-test--pending)))
+  ;; Shown with the other tools that never need approval.
+  (let ((auto-allow (plist-get (harness-call 'permission/rules "s1") :auto-allow)))
+    (dolist (tool (append harness-perms--auto-allow-tools harness-perms--inspection-tools))
+      (should (member tool auto-allow)))))
+
+(ert-deftest harness-perms-inspection-tools-only-read ()
+  "What needs no approval for inspecting the harness reads and nothing
+else: each such tool is of kind read and takes no path for the jail."
+  (harness-perms-test--setup)
+  (let ((harness-tools (make-hash-table :test 'equal)))
+    (dolist (library '("harness-tools-emacs" "harness-tools-agent" "harness-tools-sessions" "harness-tools-notify"))
+      (load library nil t))
+    (dolist (name harness-perms--inspection-tools)
+      (ert-info (name)
+        (let ((tool (harness-tool-get name)))
+          (should tool)
+          (should (eq 'read (harness-tool-kind tool)))
+          (should-not (harness-tool-paths-fn tool)))))
+    ;; The tools into the user's Emacs that change or open something are
+    ;; not on the list.
+    (dolist (name '("emacs_insert" "emacs_save_buffer" "emacs_open" "session_send" "session_control"
+                    "task_submit" "task_control"))
+      (should (harness-tool-get name))
+      (should-not (member name harness-perms--inspection-tools)))))
+
+(ert-deftest harness-perms-reading-the-harness-needs-no-approval ()
+  "Every session may read the harness's code and state, in every mode,
+with the user there or away: no prompt, no judge, no denial.  An
+unattended task used to be refused a read of the harness's own
+sessions or sources as outside the allowed directories."
+  (harness-perms-test--call-with-harness
+   (lambda (repo build state)
+     (harness-perms-test--setup)
+     (harness-perms-test--install-pending)
+     (let ((probe (harness-perms-test--denying-judge))
+           (harness-perms-auto-model "judge:x")
+           (calls `(;; The build directory: a link into the checkout, and a
+                    ;; file of its own.
+                    ("read_file" ,(expand-file-name "harness.el" build))
+                    ("read_file" ,(expand-file-name "harness.elc" build))
+                    ("list_dir" ,build)
+                    ;; The checkout the links lead to.
+                    ("read_file" ,(expand-file-name "lisp/modules/harness-perms.el" repo))
+                    ("grep" ,repo)
+                    ;; The state directory.
+                    ("read_file" ,(expand-file-name "sessions/s1.json" state))
+                    ("grep" ,(expand-file-name "sessions" state))
+                    ("list_dir" ,state)
+                    ("glob" ,state)
+                    ("file_info" ,(expand-file-name "tasks.json" state))
+                    ("emacs_open" ,(expand-file-name "tasks.json" state)))))
+       (harness-perms-test--each-mode
+        (lambda (mode away)
+          (pcase-dolist (`(,tool ,path) calls)
+            (ert-info ((format "%s %s in %s mode%s" tool path mode (if away ", user away" "")))
+              (let ((d (harness-perms-test--decide (harness-perms-test--request tool 'read path))))
+                (should (eq 'allow (plist-get d :behavior)))
+                (should (equal "reading the harness itself never needs approval" (plist-get d :reason))))))))
+       (should (null (funcall probe 'requests)))
+       (should (null harness-perms-test--pending))
+       ;; A read of the project and the harness together is fine too.
+       (should (eq 'allow (plist-get (harness-perms-test--decide
+                                      (list :session harness-perms-test--session :tool "t_diff" :kind 'read
+                                            :paths (list (expand-file-name "a.el" (plist-get harness-perms-test--session :cwd))
+                                                         (expand-file-name "harness.el" build))))
+                                     :behavior)))
+       ;; The harness is shown for what it is: its code and its state.
+       (should (equal (list (list :dir build :source 'harness)
+                            (list :dir (harness-perms-test--real repo) :source 'harness)
+                            (list :dir state :source 'state))
+                      (harness-perms-inspection-dirs)))
+       (should (equal (list build (harness-perms-test--real repo) state)
+                      (plist-get (harness-call 'permission/rules "s1") :inspect)))
+       ;; They are no roots of the session.
+       (should-not (cl-intersection (list build repo state) (harness-perms-roots harness-perms-test--session)
+                                    :test #'equal))))))
+
+(ert-deftest harness-perms-harness-checkout-without-links ()
+  "A harness run from a plain checkout is one directory of code."
+  (let ((harness-directory (harness-test-temp-dir)))
+    (with-temp-file (expand-file-name "harness.el" harness-directory) (insert ";; harness\n"))
+    (should (equal (list harness-directory) (harness-perms--harness-code-dirs)))))
+
+(ert-deftest harness-perms-the-harness-stays-read-only ()
+  "Reading the harness opens nothing else: a write there, a command run
+there or a sub-agent started there is jailed as before, and the agent
+is told it may still read it."
+  (harness-perms-test--call-with-harness
+   (lambda (repo build state)
+     (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)
+     (let ((probe (harness-perms-test--allowing-judge))
+           (harness-perms-auto-model "judge:x"))
+       (pcase-dolist (`(,tool ,kind ,path)
+                      `(("write_file" write ,(expand-file-name "harness.el" build))
+                        ("edit_file" write ,(expand-file-name "lisp/modules/harness-perms.el" repo))
+                        ("write_file" write ,(expand-file-name "tasks.json" state))
+                        ("bash" exec ,state)
+                        ("spawn_agent" meta ,state)
+                        ;; A call of no known kind is no read either.
+                        ("t_mystery" nil ,(expand-file-name "tasks.json" state))))
+         (ert-info ((format "%s %s" tool path))
+           (let ((d (harness-perms-test--decide (harness-perms-test--request tool kind path))))
+             (should (eq 'deny (plist-get d :behavior)))
+             (should (plist-get d :final))
+             (should (string-match-p "outside the allowed directories" (plist-get d :reason)))
+             (should (string-match-p "part of the harness itself" (plist-get d :hint))))))
+       (should (null (funcall probe 'requests))))
+     ;; Nothing is granted on the way: asking for the state directory
+     ;; still waits for the user, who is away, and the agent hears it
+     ;; may read it anyway.
+     (let ((d (harness-perms-test--decide (harness-perms-test--dir-request state "read the sessions"))))
+       (should (eq 'deny (plist-get d :behavior)))
+       (should (string-match-p "part of the harness itself" (plist-get d :hint))))
+     ;; With the user there, a write asks for the directory, as anywhere
+     ;; outside the roots.
+     (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive nil))
+     (harness-perms-test--install-pending)
+     (let ((started (harness-perms-test--start "write_file" 'write (expand-file-name "tasks.json" state))))
+       (should (equal (harness-perms-test--real state) (plist-get (plist-get (cdr started) :payload) :dir)))
+       (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+       (should (eq 'deny (plist-get (harness-test-await (car started)) :behavior)))))))
+
+(ert-deftest harness-perms-the-harness-credentials-stay-jailed ()
+  "Inspecting the harness never reads its credentials, since what a tool
+reads goes to the model's provider: the ACP token and the forwarded
+settings with their API keys are jailed like anything outside the
+allowed directories, and so is a search below a directory holding
+them.  Their names are no secret: that directory may be listed."
+  (harness-perms-test--call-with-harness
+   (lambda (_repo _build state)
+     (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+     (let* ((probe (harness-perms-test--allowing-judge))
+            (harness-perms-auto-model "judge:x")
+            (token (expand-file-name "acp-token" state))
+            (config (expand-file-name "server-config.el" state))
+            (clips (expand-file-name "clips/" state))
+            (outside (harness-test-temp-dir)))
+       (make-directory clips)
+       (make-symbolic-link token (expand-file-name "token" clips))
+       (make-symbolic-link (directory-file-name outside) (expand-file-name "elsewhere" clips))
+       (pcase-dolist (`(,tool ,path ,credentials)
+                      `(("read_file" ,token t) ("read_file" ,config t) ("file_info" ,token t)
+                        ("emacs_open" ,config t) ("list_dir" ,token t)
+                        ;; A search reads every file below its path.
+                        ("grep" ,state t) ("grep" ,(directory-file-name state) t)
+                        ;; Links lead where they point, out of the harness too.
+                        ("read_file" ,(expand-file-name "token" clips) t)
+                        ("read_file" ,(expand-file-name "elsewhere/x.txt" clips) nil)))
+         (ert-info ((format "%s %s" tool path))
+           (let ((d (harness-perms-test--decide (harness-perms-test--request tool 'read path))))
+             (should (eq 'deny (plist-get d :behavior)))
+             (should (string-match-p "outside the allowed directories" (plist-get d :reason)))
+             ;; The agent learns why, and what it may read instead.
+             (should (eq credentials (and (string-search "No tool may read the harness's credentials"
+                                                         (plist-get d :hint))
+                                          t)))
+             (should-not (string-search "part of the harness itself" (plist-get d :hint))))))
+       (should (eq 'allow (harness-perms-test--behavior "list_dir" 'read state)))
+       (should (eq 'allow (harness-perms-test--behavior "glob" 'read state)))
+       (should (eq 'allow (harness-perms-test--behavior "file_info" 'read state)))
+       (should (eq 'allow (harness-perms-test--behavior "grep" 'read clips)))
+       (should (null (funcall probe 'requests)))))))
+
+(ert-deftest harness-perms-rules-beat-the-inspection-allowance ()
+  "A standing rule still decides first: a user who denied a tool or a
+part of the harness keeps it denied."
+  (harness-perms-test--call-with-harness
+   (lambda (_repo _build state)
+     (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+     (let ((harness-perms-rules `((:tool "session_read" :behavior deny)
+                                  (:path ,(concat state "sessions/**") :behavior deny))))
+       (let ((d (harness-perms-test--decide (harness-perms-test--request "session_read" 'read))))
+         (should (eq 'deny (plist-get d :behavior)))
+         (should (string-match-p "standing rule" (plist-get d :reason))))
+       (should (eq 'allow (harness-perms-test--behavior "session_list" 'read)))
+       (let ((d (harness-perms-test--decide
+                 (harness-perms-test--request "read_file" 'read (expand-file-name "sessions/s1.json" state)))))
+         (should (eq 'deny (plist-get d :behavior)))
+         (should (string-match-p "standing rule" (plist-get d :reason))))
+       (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "tasks.json" state))))))))
+
+(ert-deftest harness-perms-judge-is-told-inspecting-the-harness-is-ordinary ()
+  "The judge sees inspection of the harness done by other means, such
+as Emacs Lisp reading the state directory.  It is told that is ordinary
+work wherever the harness lives, where it lives, and that its
+credentials are the one exception."
+  (harness-perms-test--call-with-harness
+   (lambda (repo build state)
+     (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+     (dolist (phrase '("inspecting the harness itself wherever it lives" "inside the allowed roots or not"
+                       "Emacs Lisp included" "acp-token and server-config.el"))
+       (should (string-search phrase harness-perms--judge-system)))
+     (let* ((requests (harness-perms-test--scripted-judge
+                       '(((:type text :delta "{\"decision\":\"allow\",\"reason\":\"inspection\"}")
+                          (:type done :stop-reason end-turn)))))
+            (harness-perms-auto-model "judge:x")
+            (d (harness-perms-test--decide
+                (list :session harness-perms-test--session :tool "elisp" :kind 'exec
+                      :input (list :code (format "(with-temp-buffer (insert-file-contents %S) (buffer-string))"
+                                                 (expand-file-name "sessions/s1.json" state)))
+                      :call-id (harness-short-id))))
+            (text (plist-get (car (plist-get (car (plist-get (car (funcall requests)) :messages)) :content)) :text)))
+       (should (eq 'allow (plist-get d :behavior)))
+       (should (string-search "\nThe harness itself (inspecting it is ordinary work" text))
+       (should (string-search (format "- %s (its code)" build) text))
+       (should (string-search (format "- %s (its code)" (harness-perms-test--real repo)) text))
+       (should (string-search (format "- %s (its state: " state) text))
+       (should (string-search (expand-file-name "acp-token" state) text))
+       ;; The question still ends the message.
+       (should (string-match-p "\n\nIs this one call safe\\?" text))))))
+
+(ert-deftest harness-perms-unattended-session-reads-the-harness-end-to-end ()
+  "An unattended auto-mode session reads the harness with the real file
+tools, whatever a judge would say, and still cannot read its
+credentials."
+  (harness-perms-test--call-with-harness
+   (lambda (_repo build state)
+     (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+     (harness-test-load-module 'tools-fs)
+     (let* ((probe (harness-perms-test--denying-judge))
+            (harness-perms-auto-model "judge:x")
+            (run (lambda (name input)
+                   (harness-test-await (harness-call 'tools/execute "s1"
+                                                     (list :id (harness-short-id) :name name :input input))))))
+       (let ((r (funcall run "read_file" (list :path (expand-file-name "sessions/s1.json" state)))))
+         (should-not (plist-get r :is-error))
+         (should (string-search "{\"id\":\"s1\"}" (plist-get r :content))))
+       (let ((r (funcall run "read_file" (list :path (expand-file-name "lisp/modules/harness-perms.el" build)))))
+         (should-not (plist-get r :is-error))
+         (should (string-search ";; lisp/modules/harness-perms.el" (plist-get r :content))))
+       (let ((r (funcall run "list_dir" (list :path state))))
+         (should-not (plist-get r :is-error))
+         (should (string-search "acp-token" (plist-get r :content))))
+       (let ((r (funcall run "grep" (list :pattern "s3cret" :path (expand-file-name "sessions" state)))))
+         (should-not (plist-get r :is-error))
+         (should (string-search "No matches" (plist-get r :content))))
+       (dolist (input (list (list :path (expand-file-name "acp-token" state))
+                            (list :path (expand-file-name "server-config.el" state))))
+         (let ((r (funcall run "read_file" input)))
+           (should (plist-get r :is-error))
+           (should (plist-get r :denied))
+           (should-not (string-search "s3cret" (plist-get r :content)))))
+       (let ((r (funcall run "grep" (list :pattern "s3cret" :path state))))
+         (should (plist-get r :denied))
+         (should-not (string-search "s3cret-" (plist-get r :content))))
+       (should (null (funcall probe 'requests)))))))
 
 ;;;; Commands the sandbox makes destructive
 

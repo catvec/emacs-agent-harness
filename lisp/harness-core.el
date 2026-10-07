@@ -100,9 +100,10 @@ module stops serving other devices.")
         (error (harness-log 'error "corporate mode: a change hook failed: %S" err))))))
 
 (defcustom harness-corporate-mode nil
-  "Non-nil turns off every harness feature that could carry data off this machine.
+  "Non-nil turns off harness features that could carry data off this machine.
 It is meant for work machines whose policy allows code and data to go
-to the model provider in use and nowhere else.  With it on:
+to the model provider in use, and search queries to a search engine,
+and nowhere else.  With it on:
 
 - The harness serves ACP on this machine only: `harness-acp-allow-remote'
   is ignored, the listener for phones and other devices, with its
@@ -110,9 +111,15 @@ to the model provider in use and nowhere else.  With it on:
   client on another device.
 - This Emacs's UI connects to its own harness only, never to a harness
   elsewhere (`harness-connect-remote').
-- Network tools (web_fetch, web_search, and the web search model
-  providers run themselves) are not offered to sessions, and calls to
-  them are denied.
+- Network tools other than web search (web_fetch, which reaches any
+  URL) are not offered to sessions, and calls to them are denied.
+
+Web search stays on: web_search sends its queries to the search
+provider (`harness-websearch-provider'), and model providers that
+search the web themselves run their searches on their side (see
+`harness-websearch-builtin').  Either way the search is a call of
+web_search, which the permission rules decide as usual; a standing
+rule that denies web_search (`harness-perms-rules') refuses it.
 
 Model providers still receive what sessions send them, and shell
 commands stay governed by the permission mode and the sandbox

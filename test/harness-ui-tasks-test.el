@@ -1084,6 +1084,44 @@ tests that check a card's detail line show it first."
         (delete-window side)
         (set-window-buffer window board)))))
 
+(ert-deftest harness-ui-tasks-message-bar-runs-down-the-attachments ()
+  "In a message box every attachment has a line, the bar and band on it.
+Each line fits the narrow window the board is in, and one wrapping all
+the same would carry the bar on."
+  (harness-ui-tasks-test-with
+    (let* ((window (get-buffer-window board))
+           (side (split-window window 40 'right))
+           (files (mapcar (lambda (name)
+                            (let ((file (expand-file-name name dir)))
+                              (with-temp-file file (insert "x"))
+                              file))
+                          '("notes.txt" "a-file-whose-name-is-far-too-long-for-a-window-forty-columns-wide.txt"))))
+      (unwind-protect
+          (with-current-buffer board
+            (set-window-buffer side board)
+            (set-window-buffer window (get-buffer-create "*scratch*"))
+            (harness-ui-tasks--set-compose "" (cons 'reply "t1"))
+            (dolist (file files) (harness-compose-add-attachment file))
+            (harness-ui-tasks--refit-tail)
+            (let ((lines (save-excursion
+                           (goto-char harness-ui-tasks--list-end)
+                           (cl-loop while (< (point) (overlay-start harness-compose-overlay))
+                                    when (eq 'attachments (get-text-property (point) 'harness-task-tail))
+                                    collect (cons (point) (line-end-position))
+                                    do (forward-line 1)))))
+              (should (= 2 (length lines)))
+              (pcase-dolist (`(,start . ,end) lines)
+                (should (equal "▌ " (buffer-substring-no-properties start (+ start 2))))
+                (should (memq 'harness-compose-message-accent-face (ensure-list (get-text-property start 'face))))
+                (should (memq 'harness-compose-message-face (ensure-list (get-text-property end 'face))))
+                (should (string-prefix-p "▌ " (get-text-property start 'wrap-prefix)))
+                (should (< (car (window-text-pixel-size side start end)) (window-body-width side))))
+              (should (string-match-p "notes\\.txt" (buffer-substring (car (nth 0 lines)) (cdr (nth 0 lines)))))
+              (should (string-match-p "\\`▌ .*a-file-whose.*….*-wide\\.txt (1 B) ×\\'"
+                                      (buffer-substring-no-properties (car (nth 1 lines)) (cdr (nth 1 lines)))))))
+        (delete-window side)
+        (set-window-buffer window board)))))
+
 ;;;; Review: finished work waits for you
 
 (declare-function harness-ui-tasks-reject "harness-ui-tasks")
