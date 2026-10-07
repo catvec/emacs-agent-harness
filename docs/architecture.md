@@ -1145,7 +1145,8 @@ its `:label`, a short name in sentence case for people ("Read file",
 "Bash", "Web search").  The label is required (`harness-define-tool`
 signals without one) and every UI shows it wherever it names a tool;
 the identifier stays for the model, for configuration (permission
-rules, `harness-perms--auto-allow-tools`) and in the text agents read
+rules, `harness-perms--auto-allow-tools`,
+`harness-perms--inspection-tools`) and in the text agents read
 about other sessions (`session_read`).  `harness-tools-label NAME`
 returns the label, or NAME for a tool nobody registered.
 `harness-tool-title NAME INPUT` titles a call: the label, then a colon
@@ -1302,12 +1303,35 @@ non-interactive session it stays a denial.
   `harness-allowed-directories`, its grants and the tool output
   directory.  The temporary directory needs no grant and cannot be
   revoked.
+- Inspecting the harness itself is one of the things that make it
+  powerful, so no mode, judge or jail stands in its way.  The harness
+  is no root, but a call of kind `read` may read it, in every mode,
+  with the user there or away: `harness-perms-inspection-dirs` lists
+  `harness-directory`, the checkout its harness.el links into when it
+  is a symbolic link (a straight.el build directory links every source
+  into the package's repository), and `harness-state-directory` (the
+  sessions with their transcripts, the task boards, usage).  The jail
+  lets such a read through (`harness-perms--inspectable-p`) and the
+  mode stage allows it with no judge asked ("reading the harness itself
+  never needs approval"); a standing rule still decides first.
+  Writes, commands, sub-agents and directory grants there are jailed as
+  anywhere outside the roots, and their denial says reading needs no
+  grant.  The credentials in the state directory
+  (`harness-perms--private-files`: `acp-token`, and `server-config.el`
+  with the API keys forwarded to the harness process) are left out,
+  since what a tool reads goes to the model's provider; so is a search
+  below a directory that holds them, which the tools that only list
+  names (`harness-perms--listing-tools`: list_dir, glob, file_info) may
+  still look at.  Symbolic links are resolved first, out of the harness
+  as much as into it.
 - `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
   grants every session), `permission/revoke-dir SESSION-ID DIR`,
   `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|outputs
   :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
   (the full effective root list), `permission/rules SESSION-ID`
-  (`(:mode :non-interactive :auto-allow :session :always :roots)`),
+  (`(:mode :non-interactive :auto-allow :session :always :roots :inspect)`:
+  `:auto-allow` holds the inspection tools too, and `:inspect` the
+  directories of the harness itself),
   `permission/pending SESSION-ID`.
 - Session directory grants are stored on the session record
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
@@ -1345,11 +1369,16 @@ non-interactive session it stays a denial.
   the session's own, overrides it.  `yolo` allows everything; the jail
   still applies.  Tools in
   `harness-perms--auto-allow-tools` are allowed in every mode: the meta
-  tools, skill and Emacs lookups, `web_search`, which only sends its
+  tools, skill lookups, `web_search`, which only sends its
   query to the configured search provider, so task sessions can search,
   `notify`, which only reaches the user through the notification
   providers they set up, so unattended sessions can say they need them,
   and `hand_in`, which only records a task's report and ends the turn.
+  So are the tools in `harness-perms--inspection-tools`, which only
+  inspect the harness or the user's live Emacs: `emacs_buffers`,
+  `emacs_buffer`, `emacs_windows`, `emacs_describe`, `emacs_messages`,
+  `session_info`, `session_list`, `session_read`, `session_search`,
+  `session_wait`, `task_list`, `task_wait` and `notification_providers`.
   The model provider's own search, standing in for `web_search` (see
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
@@ -1366,12 +1395,18 @@ non-interactive session it stays a denial.
   data outside the roots, force pushes, system changes, sending secrets
   away, or widening its own permissions.  It leans to allowing:
   reads anywhere, edits, builds, tests, local git and scratch files
-  anywhere (temporary directories included) are ordinary work.  It
+  anywhere (temporary directories included) are ordinary work, and so
+  is inspecting the harness itself wherever it lives, with any tool,
+  Emacs Lisp included, its credentials (`acp-token`,
+  `server-config.el`) excepted: the judge sees only the inspection the
+  rules above do not already allow.  It
   never rules on the task, its scope, its review or the project's
   workflow, and it is given nothing to rule on them with.  The user
   message (`harness-perms--judge-text`) holds the call alone: the tool,
   the first sentence of its description, the input, the working
-  directory and the allowed roots.  The request is `:ephemeral`, so the
+  directory, the allowed roots and where the harness lives
+  (`harness-perms--judge-harness`: its code and state directories and
+  its credential files).  The request is `:ephemeral`, so the
   provider brings no earlier verdicts and no project instructions
   (CLAUDE.md).  A judge's denial carries `harness-perms-judge-deny-hint`.
   A long input is cut (`harness-perms--judge-input-chars') and the block
@@ -1395,7 +1430,10 @@ non-interactive session it stays a denial.
   allowed roots and how to widen them.  A path elsewhere in the
   system's temporary directory (and the agent's own request for one)
   also sends the agent to the session's own temporary directory, where
-  scratch files go without stopping the session.
+  scratch files go without stopping the session.  A path in the harness
+  itself (and the agent's own request for one) adds that reading it
+  needs no grant, and a read refused for reaching the credentials names
+  them (`harness-perms--inspection-hint`).
 - Non-interactive (the user is away) is no permission policy of its
   own and refuses nothing for being unattended: the auto judge
   (stage 30, `harness-perms--judge-p`) decides what would ask the user,
@@ -2381,38 +2419,43 @@ TRAMP prefixes come from the session host):
 | `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
 | `bash` | Bash | command, timeout, cwd | exec |
 | `elisp` | Emacs Lisp | code, timeout | exec |
-| `emacs_buffers` | List buffers | filter, all | read |
-| `emacs_windows` | List windows | — | read |
-| `emacs_buffer` | Read buffer | name, offset, limit | read |
+| `emacs_buffers` | List buffers | filter, all | read (needs no approval: `harness-perms--inspection-tools`) |
+| `emacs_windows` | List windows | — | read (needs no approval: `harness-perms--inspection-tools`) |
+| `emacs_buffer` | Read buffer | name, offset, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_open` | Open buffer | name (buffer or path), line | read |
 | `emacs_insert` | Insert text | name, text, position (point/start/end) | write |
 | `emacs_save_buffer` | Save buffer | name | write |
-| `emacs_describe` | Describe symbol | symbol | read |
+| `emacs_describe` | Describe symbol | symbol | read (needs no approval: `harness-perms--inspection-tools`) |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
-| `emacs_messages` | Emacs messages | count | read |
+| `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
 | `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
-| `session_info` | Session info | — | read |
+| `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
 | `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name | read |
-| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
-| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read |
-| `session_read` | Read session | session_id, limit, before, kinds, max_chars | read |
+| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
-| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read |
+| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
+| `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
-| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read |
+| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus | exec (tools-dev; offered in a checkout of the harness only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
-| `notification_providers` | Notification providers | (none) | read |
+| `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
+
+The tools of kind read that take a path (`read_file`, `list_dir`,
+`glob`, `grep`, `file_info`, `emacs_open`) may read the harness itself
+as well as the session's roots: its code and its state directory, its
+credentials aside (see perms).
 
 `hand_in` (tools-handin) is how a task's session finishes: the tool
 records the summary and evidence on the task (`task/hand-in'`) and asks
