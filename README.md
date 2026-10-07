@@ -90,6 +90,11 @@ Optional dependencies:
 
 ## Installation
 
+The repository is on sourcehut and mirrored on
+[GitHub](https://github.com/catvec/emacs-agent-harness). Where sourcehut
+cannot be reached, use `:host github` in the recipes below, or clone
+`https://github.com/catvec/emacs-agent-harness`.
+
 ### Doom Emacs
 
 In `packages.el`:
@@ -207,6 +212,36 @@ named by `harness-server-init-file`.
   settings.
 - `M-x harness-show-log` (`C-c h L`) shows its log.
 
+### Running the latest version
+
+`C-c h v` (`M-x harness-version`) shows the commit the harness runs and
+compares it with the places newer commits come from:
+
+- the checkout it was loaded from, as that checkout is now: what a pull
+  or a merge brought there runs only after a reload (`C-c h R`) or a
+  restart;
+- the repository that checkout pulls from, which is the remote its
+  branch tracks. straight.el sets it to the recipe's repository, so an
+  install from GitHub is compared with GitHub and one from sourcehut
+  with sourcehut. Nothing needs configuring where one of them cannot be
+  reached;
+- the local checkouts of the harness that your sessions work in, such
+  as a development checkout;
+- `harness-version-origins`: any others you list, such as a mirror the
+  install does not pull from. It is empty by default.
+
+Each origin says whether it has commits the harness lacks, and lists
+them. Nothing is fetched, so the commits are counted only when a local
+repository has them, such as a development checkout. Otherwise the
+page says that the origin has commits the harness lacks, without
+counting them. The page then says what to do: reload, pull into the
+checkout the harness runs from (`M-x straight-pull-package` for a
+straight.el install), or push first. The harness checks by itself, in
+its own process, shortly after it starts or reloads and then every half
+hour. Git never prompts there. The page shows the last result at once,
+and `g` checks again. After a check finds that the harness is behind,
+the menu's Version entry says so.
+
 ## Usage
 
 ### Key bindings
@@ -235,17 +270,22 @@ named by `harness-server-init-file`.
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
+| `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h z` | `harness-pet` | Show your companion pet, or the egg it hatches from |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
 | `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
+| `C-c h v` | `harness-version` | Show whether the harness runs the latest commit |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |
 
-The menu (`C-c h ?`) also renames the session (`r`).
+The menu (`C-c h ?`) also renames the session (`r`). A session you
+have not named gets a short title from a cheap model as soon as you
+send its first message, while the agent works on it (see
+`harness-naming-auto` and `harness-naming-model`).
 
 With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
@@ -257,7 +297,11 @@ where to show it: `right` (the default, see
 Each session is shown in a chat buffer: a read-only transcript with an
 editable compose box at the bottom. Typing anywhere in the buffer goes
 to the compose box, including `?`, so open the menu with `C-c h ?` or
-the `[menu]` button in the header line.
+the `[menu]` button in the header line. A region selected in the
+transcript is dropped on the way, not deleted. On a request's panel the
+panel's own keys answer it instead: a question's digits, up to its
+number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
+`e` when it has a pattern to edit.
 
 | Key | Action |
 |---|---|
@@ -270,10 +314,10 @@ the `[menu]` button in the header line.
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
-| `C-c C-p` | Edit the pattern the newest permission request about paths is answered for |
+| `C-c C-p` | Edit the pattern the newest request about a path outside the session's directories is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
-| `TAB` | Complete in the compose box; elsewhere, fold or unfold the block at point |
+| `TAB` | Complete in the compose box; on a permission request cut short, show its whole input; elsewhere, fold or unfold the block at point |
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
@@ -289,7 +333,9 @@ name when it arrives, and sending waits for it. A link to a web page is
 not downloaded: its address goes into the message as text, which is
 usually what you wanted. Images and videos show a thumbnail in the
 attachment chip (`harness-compose-thumbnail-lines`; videos need
-`ffmpeg`), so you can see what you are about to send.
+`ffmpeg`), so you can see what you are about to send. Each attachment
+has a line of its own above the box, fitted to the window: a long name
+is shortened in the middle, and hovering over it shows the whole path.
 
 Images drag *out* too: press on an image in the transcript, on an
 attachment chip's thumbnail or name, or on an image of a report or its
@@ -320,6 +366,17 @@ the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list, or the waiting session itself when only one needs you.
 
+A permission request shows the call's input on one line, cut short to
+fit. When that line leaves something out, such as the rest of a long
+command or a second line of it, it ends in `[Show all]`
+(`[Show all 2 lines]` when a value has lines the first one hides).
+Click it or press `TAB` on the request to see the whole input in place,
+each value on a line of its own and a long one verbatim under its name;
+`[Show less]` or `TAB` again puts it back on one line. This works the
+same in the chat and in the popout the session list and the task board
+open with `SPC`, and a request shown whole in one shows whole in the
+other.
+
 While the agent works through a todo list (`todo_write`), the list stays
 in view: the header line names the progress and the item in hand, and a
 panel above the compose box lists every item with its state. `C-c C-t`,
@@ -336,34 +393,43 @@ command. The directory is made with the session, made again if it went
 missing, and deleted with the session. `C-c h d` lists all of these
 directories. Remote sessions have no temporary directory.
 
-A permission request about paths is answered for a glob pattern, not
-for a single file. By default the pattern covers everything in the
-directory: the directory that holds the file, or the directory itself,
-such as `~/notes/**`. The panel shows the pattern on its own line.
-Press `e` on the panel, `C-c C-p`, or click `[Edit]` to change it in
-the minibuffer, either more specific (`~/notes/*.org`, a subdirectory,
-one file) or less (`~/**`). `*` matches within a name and `**` across
-directories, and `M-n` offers patterns around the request's own.
-Access outside the session's directories grants or denies the
+A permission request about a path outside the session's directories
+(a tool call reaching there, or the agent asking for a directory) is
+answered for a glob pattern, not for a single file. By default the
+pattern covers everything in the directory: the directory that holds
+the file, or the directory itself, such as `~/notes/**`. The panel
+shows the pattern on its own line. Press `e` on the panel, `C-c C-p`,
+or click `[Edit]` to change it in the minibuffer, either more specific
+(`~/notes/*.org`, a subdirectory, one file) or less (`~/**`). `*`
+matches within a name and `**` across directories, and `M-n` offers
+patterns around the request's own. The answer grants or denies the
 pattern: once, for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
-*Always deny*). For a tool call such as a file edit or a command, *Allow
-for session*, *Always allow* and *Always deny* hold for that tool on the
-pattern only, not for every call of the tool.
+*Always deny*). Any other request, such as the permission mode asking
+about a file edit or a command, or the auto-mode judge objecting to
+one, is about the call itself and shows no pattern: *Allow for
+session*, *Always allow* and *Always deny* hold for every call of that
+tool, and a call outside the session's directories still asks for the
+directory first.
 
 A shell command is about what its command line names, not only the
 directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
 run in the project, says `runs in: ~/proj` and, below it, `paths:
-~/.claude/projects/x`, and offers `~/.claude/projects/x/**`, so the
-answer you remember is about that directory and not about every command
-run in the project. A command that names nothing outside the session's
-directories is about where it runs, as before. Paths are read from the
+~/.claude/projects/x`, so it shows what the command reaches and not
+only where it runs; like any prompt about a call, it has no pattern.
+A command that names nothing outside the session's directories is
+about where it runs, as before. Paths are read from the
 command line on a best-effort basis: absolute paths, `~` and `$HOME`
 paths, and `./` or `../` paths, but not the program being run or
 `/dev/null`. An allowing rule must cover every path the command names
 outside the session's directories, so allowing commands in the project
 does not let one that reaches elsewhere through. A denying rule stops
 a command that names any path it covers.
+
+A link in the agent's reply opens with a click or `RET`, and the
+transcript stays as it was: a web address goes to `browse-url`, a file
+opens in another window. A relative file name is taken in the session's
+directory, and a `#L12` or `:12` after it goes to that line.
 
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
@@ -599,8 +665,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   `C-c h a` leads back to the board. `F` lays the board out fullscreen,
   with that session beside it (see
   [Fullscreen overviews](#fullscreen-overviews)).
+- Typing on the board goes to the compose box, like in a chat: any
+  letter that is not one of the board's keys, and a key for the task at
+  point (`s`, `e`, `m`, `v`, ...) typed off a card, which has no task to
+  act on.
 - A task's session shows in the session list (`C-c h l`) under the
-  task's title, of kind task, until the model names it.
+  task's title, of kind task. A cheap model titles it like a ticket as
+  soon as the task starts, so the board shows that title, not the raw
+  prompt, while the task works.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
@@ -760,6 +832,16 @@ billed depends on how it is logged in:
   token. Sessions show the plan and its quota instead, for example `Max`
   with the 5-hour and weekly windows in the chat header, and so does the
   task board for its tasks.
+
+Sessions get your CLAUDE.md files, as `claude` loads them, but not
+Claude Code's auto memory, the notes Claude Code keeps on each
+repository in `~/.claude/projects/`. Harness sessions cannot use those
+notes as Claude Code does: the model would read them from outside the
+session's allowed directories, so every session would ask you for
+access. To give sessions that memory anyway, turn on
+`harness-provider-claude-auto-memory` (Claude Code, under Advanced on
+the settings page). Reading a note then asks for its directory: answer
+Always allow and no session asks again.
 
 ### GitHub Copilot
 
@@ -969,19 +1051,34 @@ worktrees it holds. `TAB`, `RET` or a click on a project shows its main
 checkout's usage and each worktree's, and hides them again; `w` (or
 `[show worktrees]`) does it for every project at once.
 
-Budgets count billed cost only. A budget created partway through a
-month can start from what was already spent outside the harness: press
-`s` on its line in the dashboard (or use the add-budget wizard) to set
-that baseline, which counts until the period rolls over. Organisations
-billed per token can fetch the baseline instead: with an Anthropic Admin
-API key (`harness-anthropic-admin-api-key`), `I` on a monthly budget
-offers the month's API cost minus what the harness recorded.
+Budgets count billed cost only. A budget over everything (a day, week
+or month budget for no one project) also counts what providers report
+they billed in its period beyond what the harness recorded, so one
+created partway through a month does not start at $0: a plan's extra
+usage this month (Claude Code's usage credits, Copilot's additional
+requests) and, with an Anthropic Admin API key
+(`harness-anthropic-admin-api-key`), what Anthropic billed per token,
+fetched again every ten minutes (`I` fetches it now). The budget's line
+says how much, as "incl. $5.00 reported by Claude Code". What was spent
+outside the harness that no provider reports, such as a project
+budget's spending, which no provider can single out, is a baseline:
+press `s` on the budget's line in the dashboard (or use the add-budget
+wizard) to set it; it counts until the period rolls over.
+
+To delete a budget, click `[delete]` beside its name in the dashboard or
+press `d` on its line; from anywhere, `C-c h B` (Delete budget in the
+harness menu) asks for it by name. A session's own budget (a `session`
+line) is deleted from that session alone. The budget for all sessions
+together, the `all sessions (setting)` line, is the Budget setting
+(`harness-budget`, under Spending in the settings) and is removed
+there: choose No budget.
 
 ## Corporate mode
 
 Corporate mode turns off the harness features that could carry data off
-your machine. It is meant for work machines whose policy lets code and
-data go to the model provider in use and nowhere else.
+your machine, except web search. It is meant for work machines whose
+policy lets code and data go to the model provider in use, and search
+queries to a search engine, and nowhere else.
 
 Turn it on in `config.el` (Doom) or your init file, before
 `(harness-start)`:
@@ -996,14 +1093,21 @@ It turns off:
   ignores `harness-acp-allow-remote`. Pairing phones and other devices
   is refused, and the UI cannot connect to a harness elsewhere
   (`harness-connect-remote`).
-- Network tools. Sessions do not get `web_fetch`, `web_search` or the
-  web search that Claude Code and Copilot run themselves. When a model
-  calls one anyway, the call is denied and the model is told why.
+- Network tools other than web search. Sessions do not get
+  `web_fetch`, which reaches any URL. When a model calls it anyway, the
+  call is denied and the model is told why.
 
 It leaves alone:
 
 - The model provider. The provider you choose still receives what
   sessions send it.
+- Web search. `web_search` sends its queries to the search provider
+  (`harness-websearch-provider`, Brave by default), and Claude Code and
+  Copilot run their own web search on their side (see
+  `harness-websearch-builtin`). Both are `web_search` calls, which the
+  permission rules decide as usual: if your policy rules out web search
+  too, add `(:tool "web_search" :behavior deny)` to
+  `harness-perms-rules`.
 - Shell commands. They follow the permission mode and the sandbox, as
   always, so a command can still reach the network. Use a permission
   mode that asks before commands run (Ask or Accept edits), and set

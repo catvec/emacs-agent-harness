@@ -441,6 +441,118 @@ class AuthenticateTest(unittest.TestCase):
   (dolist (other '("~/src/acme-web/" "~/src/infra/"))
     (make-directory (expand-file-name other) t)))
 
+;;;; The harness's own repositories
+
+;; The version picture compares the harness with the places its newer
+;; commits come from, as on a machine that installed it with straight.el
+;; from GitHub: straight's clone, which the harness was loaded from, the
+;; repository on GitHub that clone pulls from, and a development
+;; checkout.  The three are made here, with a history of their own.
+;; GitHub is a bare repository in the scratch HOME: the scratch
+;; ~/.gitconfig sends its URL there, and git may use no protocol but
+;; file, so neither the clone nor a check reaches the network.
+
+(defvar harness-version-origins)
+
+(defconst harness-media--github "https://github.com/catvec/emacs-agent-harness"
+  "The URL of the harness's repository on GitHub, which straight cloned.")
+
+(defconst harness-media--harness-history
+  '(("Run the harness in an Emacs process of its own" . 12)
+    ("Restore the harness's tools under Claude Code 2.1.289" . 3.2)
+    ("Hand conversations over when switching to a hosted-loop provider" . 2.9)
+    ("Fallback: carry on with another provider when one runs out of quota or money" . 2.6)
+    ("Auto-accept pending permission prompts when a session switches to yolo" . 2.3)
+    ("Providers say why a call failed, so the fallback can act on it" . 2.1)
+    ("Paste images with C-y, leaving C-c C-v to Verify" . 1.8)
+    ("The usage dashboard shows and edits the fallback list" . 1.5)
+    ("Search the task board in words, and act on it" . 1.2)
+    ("Lay the handoff prompt out as a table view" . 0.9)
+    ("Show the fallback entries' tiers in the usage dashboard" . 0.6)
+    ("Ask how to hand over in a chat banner, not a wall of text" . 0.3))
+  "The harness's history in the version picture, oldest first.
+Each commit is (SUBJECT . DAYS-AGO).  The first
+`harness-media--harness-installed' are what straight.el cloned and the
+harness runs; the development checkout and GitHub have them all.")
+
+(defconst harness-media--harness-installed 2
+  "How many commits of `harness-media--harness-history' the harness runs.")
+
+(defun harness-media--harness-paths ()
+  "Return the harness's repositories in the scratch HOME, as a plist.
+:dev the development checkout, :bare the stand-in for GitHub,
+:clone straight's clone and :build straight's build directory, which
+links to the clone's files."
+  (list :dev (expand-file-name "~/src/emacs-agent-harness/")
+        :bare (expand-file-name "~/srv/emacs-agent-harness.git/")
+        :clone (expand-file-name "~/.emacs.d/straight/repos/emacs-agent-harness/")
+        :build (expand-file-name "~/.emacs.d/straight/build/harness/")))
+
+(defun harness-media--git-in (dir &rest args)
+  "Run git with ARGS in DIR; return its output or signal."
+  (let ((harness-media-project (file-name-as-directory (expand-file-name dir))))
+    (apply #'harness-media--git args)))
+
+(defun harness-media--harness-origins ()
+  "Send GitHub's URL to the scratch HOME; configure the development checkout.
+The URL leads to the bare repository there from the start, before
+straight's clone is made or any check runs, as a file:// URL, which a
+shallow clone needs; git may use no other protocol.  The version module
+finds GitHub by itself, as the repository straight's clone pulls from;
+the development checkout, which no session works in, is configured."
+  (let ((paths (harness-media--harness-paths)))
+    (harness-media--git-in "~" "config" "--global"
+                           (format "url.file://%s.insteadOf" (directory-file-name (plist-get paths :bare)))
+                           harness-media--github)
+    (setenv "GIT_ALLOW_PROTOCOL" "file")
+    (setq harness-version-origins
+          (list (list :name "local" :location (abbreviate-file-name (plist-get paths :dev)) :branch "main")))))
+
+(defun harness-media--harness-commit (subject days-ago)
+  "Commit SUBJECT in the development checkout, dated DAYS-AGO days back."
+  (let* ((dev (plist-get (harness-media--harness-paths) :dev))
+         (date (format-time-string "%Y-%m-%dT%H:%M:%S" (- (float-time) (* days-ago 86400))))
+         (process-environment (append (list (concat "GIT_AUTHOR_DATE=" date)
+                                            (concat "GIT_COMMITTER_DATE=" date))
+                                      process-environment)))
+    (with-temp-buffer
+      (insert "- " subject "\n")
+      (write-region nil nil (expand-file-name "NEWS.md" dev) t 'silent))
+    (harness-media--git-in dev "add" "-A")
+    (harness-media--git-in dev "-c" "commit.gpgsign=false" "commit" "-q" "--no-gpg-sign" "-m" subject)))
+
+(defun harness-media--make-harness-repos ()
+  "Make the development checkout, GitHub and straight's clone of the harness.
+Straight cloned GitHub's URL shallowly, back when GitHub had the commits
+the harness runs; the development checkout has made the rest since and
+pushed them."
+  (let* ((paths (harness-media--harness-paths))
+         (dev (plist-get paths :dev))
+         (bare (plist-get paths :bare))
+         (clone (plist-get paths :clone))
+         (build (plist-get paths :build)))
+    (dolist (dir (list dev bare clone build))
+      (when (file-exists-p dir) (delete-directory dir t))
+      (make-directory dir t))
+    (harness-media--git-in dev "init" "-q")
+    (harness-media--git-in dev "symbolic-ref" "HEAD" "refs/heads/main")
+    (dolist (file '("harness.el" "lisp/harness-core.el"))
+      (make-directory (file-name-directory (expand-file-name file dev)) t)
+      (write-region (format ";;; %s --- the harness\n" (file-name-nondirectory file)) nil
+                    (expand-file-name file dev) nil 'silent))
+    (harness-media--git-in bare "init" "-q" "--bare")
+    (harness-media--git-in bare "symbolic-ref" "HEAD" "refs/heads/main")
+    (cl-loop for (subject . days) in harness-media--harness-history
+             for n from 1
+             do (harness-media--harness-commit subject days)
+             when (= n harness-media--harness-installed)
+             do (harness-media--git-in dev "push" "-q" bare "main")
+             (harness-media--git-in "~" "clone" "-q" "--depth" "1" harness-media--github clone))
+    (harness-media--git-in dev "push" "-q" bare "main")
+    (dolist (file '("harness.el" "lisp/harness-core.el"))
+      (make-directory (file-name-directory (expand-file-name file build)) t)
+      (make-symbolic-link (expand-file-name file clone) (expand-file-name file build)))))
+
 ;;;; Files the scripted agents write
 
 (defconst harness-media--ratelimit "\"\"\"Per-key rate limiting with token buckets.\"\"\"
@@ -1114,13 +1226,18 @@ a toast and an [Undo]."
 (defun harness-media--complete (request)
   "Answer REQUEST with its script, one event at a time.
 A tool call ends the request, as with a real model: the agent runs the
-tool and asks again, and the script goes on from there."
+tool and asks again, and the script goes on from there.  A request made
+beside a session's turn (`:ephemeral', as naming the session is) leaves
+the turn's script alone."
   (let* ((on-event (plist-get request :on-event))
          (sid (or (plist-get (plist-get request :session) :id) "none"))
-         (rest (if (harness-media--continuing-p request) (gethash sid harness-media--rest 'none) 'none))
+         (side (plist-get request :ephemeral))
+         (rest (if (and (not side) (harness-media--continuing-p request))
+                   (gethash sid harness-media--rest 'none)
+                 'none))
          (script (if (eq rest 'none) (harness-media--script request) rest))
          (written 0) (reported nil) (cancelled nil) (timer nil))
-    (remhash sid harness-media--rest)
+    (unless side (remhash sid harness-media--rest))
     (cl-labels ((emit (event) (funcall on-event event))
                 (finish (reason)
                   (unless reported (emit (harness-media--usage request written)))
@@ -1148,9 +1265,9 @@ tool and asks again, and the script goes on from there."
                     (setq cancelled t)
                     (when timer (cancel-timer timer))
                     ;; A turn a tool ended (hand_in cancels it) takes no
-                    ;; more of its script: the next request -- naming the
-                    ;; session, say -- must not get the rest.
-                    (remhash sid harness-media--rest)
+                    ;; more of its script: the next request -- a task sent
+                    ;; back, say -- must not get the rest.
+                    (unless side (remhash sid harness-media--rest))
                     (funcall on-event '(:type done :stop-reason cancelled))))))
 
 (defun harness-media--claude-models ()
@@ -1413,7 +1530,9 @@ recaps: the lines the model would have written by now."
          (spent (lambda (b) (plist-get (harness-call 'usage/budget-status (plist-get b :id)) :spent))))
     ;; Spent this month outside the harness, set by hand.
     (harness-call 'usage/set-budget (append (list :baseline (max 0.0 (- 24.6 (funcall spent month)))) month))
-    (harness-call 'usage/set-budget (append (list :amount (max 1.0 (fceiling (/ (funcall spent week) 0.42)))) week))
+    ;; A hard budget stops turns: it leaves room for the world's own,
+    ;; early in the week too, when the seeded spend is still small.
+    (harness-call 'usage/set-budget (append (list :amount (max 5.0 (fceiling (/ (funcall spent week) 0.42)))) week))
     ;; In half dollars: past 80%, where its meter turns to a warning.
     (harness-call 'usage/set-budget (append (list :amount (max 1.0 (/ (fceiling (* 2 (/ (funcall spent web) 0.86))) 2)))
                                             web))))
@@ -1488,6 +1607,7 @@ recaps: the lines the model would have written by now."
   "Make everything the pictures show."
   (harness-media--log "building the demo project")
   (harness-media--make-project)
+  (harness-media--make-harness-repos)
   (harness-media--seed-usage)
   (harness-media--seed-budgets)
   (harness-media--log "running the tasks")
@@ -2048,6 +2168,35 @@ progress."
     (harness-media--to-bottom buffer)
     (harness-media--capture "attachments")))
 
+(defvar harness-directory)
+(defvar harness-ui-version--report)
+(defvar harness-ui-version--checking)
+(declare-function harness-version "harness-ui-version")
+(declare-function harness-revision-note-loaded "harness-revision")
+(declare-function harness-promise-settled-p "harness-core")
+(declare-function harness-promise-value "harness-core")
+
+(defun harness-media-shot-version ()
+  "The version page of a harness installed with straight.el, two days behind.
+For the picture the harness was loaded two days ago from straight's
+clone of GitHub (see `harness-media--make-harness-repos'), so the page
+sees the development checkout and GitHub ten commits ahead and says to
+pull with straight.  The harness counts as loaded from its checkout again
+afterwards."
+  (let ((harness-directory (plist-get (harness-media--harness-paths) :build)))
+    (let ((loaded (harness-revision-note-loaded)))
+      (harness-media--wait (lambda () (harness-promise-settled-p loaded)) 20 "the revision loaded")
+      (plist-put (harness-promise-value loaded) :loaded (harness-media--ago (* 49 60))))
+    (setq harness-ui-version--report nil)
+    (harness-media--view #'harness-version
+                         (lambda ()
+                           (harness-media--wait (lambda () (and harness-ui-version--report
+                                                                (not harness-ui-version--checking)))
+                                                30 "the version check")
+                           (harness-media--settle 0.5)))
+    (harness-media--capture "version"))
+  (harness-revision-note-loaded))
+
 (defconst harness-media-shots
   '(("chat" . harness-media-shot-chat)
     ("chat-permission" . harness-media-shot-chat-permission)
@@ -2070,7 +2219,8 @@ progress."
     ("settings" . harness-media-shot-settings)
     ("btw" . harness-media-shot-btw)
     ("menu" . harness-media-shot-menu)
-    ("remote" . harness-media-shot-remote))
+    ("remote" . harness-media-shot-remote)
+    ("version" . harness-media-shot-version))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point
@@ -2108,6 +2258,7 @@ progress."
         ;; instead (`harness-media--seed-recaps').
         harness-disabled-modules '(provider-claude provider-copilot provider-openai provider-bedrock provider-demo
                                                    recap))
+  (harness-media--harness-origins)
   (require 'harness)
   (unless (harness-start) (error "The harness did not start cleanly"))
   ;; Chats take half the frame: the code beside them keeps 80 columns.

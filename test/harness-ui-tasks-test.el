@@ -29,6 +29,8 @@
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
+(defvar harness-anthropic-admin-api-key)
+(defvar auth-sources)
 (defvar harness-ui--sessions)
 (defvar harness-ui-tasks--loading)
 (defvar harness-ui-tasks--tasks)
@@ -75,6 +77,12 @@ Finished tasks are completed at once, without review, unless BODY turns
            ;; Full width: the content checks below are not about narrow windows.
            (harness-ui-default-position (quote full))
            (harness-acp-token nil)
+           ;; A budget over everything fetches Anthropic's cost report in
+           ;; the background, and the header's budgets show one: no key
+           ;; may reach a real one.
+           (harness-anthropic-admin-api-key nil)
+           (auth-sources nil)
+           (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment))
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
@@ -174,6 +182,29 @@ Finished tasks are completed at once, without review, unless BODY turns
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 
+(ert-deftest harness-ui-tasks-card-shows-the-output-rate ()
+  "A card says how fast its session writes, once the harness measured it.
+The figure comes with the harness's `usage/rate-updated' event, which
+redraws the board by itself."
+  (harness-ui-tasks-test-with
+    ;; A turn that never ends keeps the task in progress.
+    (let ((harness-provider-demo-script-override '((:type text :delta "Working on it."))))
+      (unwind-protect
+          (progn
+            (harness-ui-tasks-test--type-and-submit board "Write quickly")
+            (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Write quickly")
+            (should-not (string-match-p "tok/s" (harness-ui-tasks-test--board-text board)))
+            (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
+              (should sid)
+              (harness-emit 'usage/rate-updated sid
+                            (list :rate 42.0 :output 420 :seconds 10.0 :calls 1
+                                  :at (float-time) :model "demo:scripted"))
+              (harness-test-wait (lambda () (string-match-p "Write quickly\\(.\\|\n\\)*42 tok/s"
+                                                            (harness-ui-tasks-test--board-text board)))
+                                 5 "the rate on the card")))
+        (dolist (task (harness-call 'task/list default-directory))
+          (harness-call 'task/cancel (plist-get task :id)))))))
+
 (ert-deftest harness-ui-tasks-stopped-task-needs-input ()
   (harness-ui-tasks-test-with
     (let ((harness-provider-demo-script-override
@@ -230,6 +261,45 @@ as a one-column symbol, already in line, so they keep the old layout."
         (goto-char harness-compose-end)
         (should (eq 'self-insert-command (key-binding (kbd "s"))))
         (should (eq 'harness-ui-tasks-submit (key-binding (kbd "C-c C-c"))))))))
+
+(ert-deftest harness-ui-tasks-typing-goes-to-the-box ()
+  "Typing on the board goes into the compose box, but for the board's keys.
+A letter the board does not bind types into the box from anywhere on
+the board, and so does a key for the task at point typed off a card,
+which has no task to act on.  On a card that key acts on its task, and
+the board's own keys stay its own off the cards."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--type-and-submit board "Waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  1")
+      (with-current-buffer board
+        ;; Keys reach the buffer of the selected window.
+        (should (eq board (window-buffer (selected-window))))
+        (cl-flet ((off-card ()
+                    (goto-char (point-min))
+                    (search-forward "nothing working")
+                    (should-not (get-text-property (point) 'harness-task-id))))
+          ;; Start, edit, message, verify, what it needs; and no key at all.
+          (dolist (key '("s" "e" "m" "v" "SPC" "h"))
+            (off-card)
+            (execute-kbd-macro (kbd key))
+            (should (= (point) harness-compose-end)))
+          (should (equal "semv h" (harness-compose-text)))
+          (off-card)
+          (should (eq 'harness-ui-tasks-refresh (key-binding "g")))
+          (should (eq 'harness-ui-quit-view (key-binding "q")))
+          (should (eq 'harness-ui-tasks-compose (key-binding "a")))
+          ;; Help still lists the task's keys, wherever point is.
+          (goto-char harness-compose-end)
+          (should (string-match-p "harness-ui-tasks-verify"
+                                  (substitute-command-keys "\\{harness-ui-tasks-board-map}")))
+          ;; On the card, `e' edits its task's prompt in the box.
+          (harness-compose-set "")
+          (goto-char (point-min))
+          (search-forward "Waiting task")
+          (should (get-text-property (point) 'harness-task-id))
+          (execute-kbd-macro "e")
+          (should (equal "Waiting task" (harness-compose-text))))))))
 
 (defvar harness-ui-open-session-function)
 (declare-function harness-ui-display-buffer "harness-ui")
@@ -1081,6 +1151,44 @@ tests that check a card's detail line show it first."
                 (should (< (string-width (buffer-substring (point) (line-end-position)))
                            (window-body-width side)))
                 (forward-line 1))))
+        (delete-window side)
+        (set-window-buffer window board)))))
+
+(ert-deftest harness-ui-tasks-message-bar-runs-down-the-attachments ()
+  "In a message box every attachment has a line, the bar and band on it.
+Each line fits the narrow window the board is in, and one wrapping all
+the same would carry the bar on."
+  (harness-ui-tasks-test-with
+    (let* ((window (get-buffer-window board))
+           (side (split-window window 40 'right))
+           (files (mapcar (lambda (name)
+                            (let ((file (expand-file-name name dir)))
+                              (with-temp-file file (insert "x"))
+                              file))
+                          '("notes.txt" "a-file-whose-name-is-far-too-long-for-a-window-forty-columns-wide.txt"))))
+      (unwind-protect
+          (with-current-buffer board
+            (set-window-buffer side board)
+            (set-window-buffer window (get-buffer-create "*scratch*"))
+            (harness-ui-tasks--set-compose "" (cons 'reply "t1"))
+            (dolist (file files) (harness-compose-add-attachment file))
+            (harness-ui-tasks--refit-tail)
+            (let ((lines (save-excursion
+                           (goto-char harness-ui-tasks--list-end)
+                           (cl-loop while (< (point) (overlay-start harness-compose-overlay))
+                                    when (eq 'attachments (get-text-property (point) 'harness-task-tail))
+                                    collect (cons (point) (line-end-position))
+                                    do (forward-line 1)))))
+              (should (= 2 (length lines)))
+              (pcase-dolist (`(,start . ,end) lines)
+                (should (equal "▌ " (buffer-substring-no-properties start (+ start 2))))
+                (should (memq 'harness-compose-message-accent-face (ensure-list (get-text-property start 'face))))
+                (should (memq 'harness-compose-message-face (ensure-list (get-text-property end 'face))))
+                (should (string-prefix-p "▌ " (get-text-property start 'wrap-prefix)))
+                (should (< (car (window-text-pixel-size side start end)) (window-body-width side))))
+              (should (string-match-p "notes\\.txt" (buffer-substring (car (nth 0 lines)) (cdr (nth 0 lines)))))
+              (should (string-match-p "\\`▌ .*a-file-whose.*….*-wide\\.txt (1 B) ×\\'"
+                                      (buffer-substring-no-properties (car (nth 1 lines)) (cdr (nth 1 lines)))))))
         (delete-window side)
         (set-window-buffer window board)))))
 

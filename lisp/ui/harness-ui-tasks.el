@@ -556,6 +556,9 @@ card's title, so the prompt shows here."
                         ('done (let ((completed (harness-ui-tasks--completed task)))
                                  (and (> completed 0) (format "done %s" (harness-relative-time completed)))))
                         (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))
+                      ;; How fast the session writes, while it is open.
+                      (and session (not (equal (plist-get session :status) "inactive"))
+                           (harness-ui-format-rate session))
                       (and session (> (harness-usage-list-cost usage) 0)
                            (harness-ui-format-spend session))))))
     (propertize (string-join parts " · ") 'face 'harness-dim-face)))
@@ -1251,15 +1254,16 @@ board, so what was skipped is only skipped while both are unchanged."
 
 (defun harness-ui-tasks--board-key ()
   "Return what the board region's drawing depends on.
-The tasks and their sessions (their status, todos and cost feed the
-cards), the clock, the caps the window allows, and the state a card
-cannot show: which column is folded, which is expanded, which tasks
-are submitting, which cards you folded their recap on, and whether
-finished work waits for your review."
+The tasks and their sessions (their status, todos, cost and output
+rate feed the cards), the clock, the caps the window allows, and the
+state a card cannot show: which column is folded, which is expanded,
+which tasks are submitting, which cards you folded their recap on, and
+whether finished work waits for your review."
   (list harness-ui-tasks--tasks
         (mapcar (lambda (session)
                   (list (plist-get session :id) (plist-get session :name) (plist-get session :status)
-                        (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)))
+                        (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)
+                        (harness-ui-session-rate (plist-get session :id))))
                 (harness-ui-sessions))
         (truncate (float-time) 5)
         (harness-ui-tasks--window)
@@ -1531,9 +1535,8 @@ before a key is pressed."
         (unless (string-empty-p line)
           (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
     (let ((start (point)))
-      ;; The bar only when there is a line to carry it.
-      (when (and messaging harness-compose-attachments) (insert bar))
-      (harness-compose-insert-attachments)
+      ;; The bar down every attachment's line.
+      (harness-compose-insert-attachments (and messaging bar))
       (put-text-property start (point) 'harness-task-tail 'attachments)
       (when band (add-face-text-property start (point) band t)))))
 
@@ -1934,6 +1937,14 @@ turn's end and the budget events also change what its budgets show.")
     (when (buffer-local-value 'harness-ui-tasks--tasks b)
       (harness-ui-tasks--schedule-render b))))
 
+(defun harness-ui-tasks--on-rate (id _rate)
+  "Redraw the boards with a card of session ID, which shows its output rate.
+ID nil, after every rate was fetched again, redraws every board."
+  (dolist (b (harness-ui-tasks--buffers))
+    (when (cl-some (lambda (task) (or (null id) (equal (plist-get task :session) id)))
+                   (buffer-local-value 'harness-ui-tasks--tasks b))
+      (harness-ui-tasks--schedule-render b))))
+
 (defun harness-ui-tasks--on-redraw ()
   "Reload every board after a reload or reconnect."
   (mapc #'harness-ui-tasks--fetch (harness-ui-tasks--buffers)))
@@ -1953,7 +1964,25 @@ turn's end and the budget events also change what its budgets show.")
 ;;;; Mode
 
 (defvar harness-ui-tasks-board-map (make-sparse-keymap)
-  "Keys on the board (outside the compose box).")
+  "Keys on the board (outside the compose box).
+The keys that act on the task at point act on the card point is on:
+off a card they type, into the compose box, as every letter the board
+does not bind does (`harness-ui-tasks--on-card-p').")
+
+(defun harness-ui-tasks--on-card-p ()
+  "Nil when point is on a task board but not on a card.
+The board's keys for the task at point have nothing to act on there,
+so they type, into the compose box (`harness-compose-acts-p')."
+  (or (not (harness-ui-tasks--board-p (current-buffer)))
+      (get-text-property (point) 'harness-task-id)))
+
+;; Typing off a card, the board's keys for the task at point (see above).
+(dolist (command '(harness-ui-tasks-open-other harness-ui-tasks-start harness-ui-tasks-edit
+                   harness-ui-tasks-reply harness-ui-tasks-requests harness-ui-tasks-refine
+                   harness-ui-tasks-allow harness-ui-tasks-deny harness-ui-tasks-cancel
+                   harness-ui-tasks-complete harness-ui-tasks-verify harness-ui-tasks-reject
+                   harness-ui-tasks-merge harness-ui-tasks-archive harness-ui-tasks-delete))
+  (put command 'harness-compose-acts-p #'harness-ui-tasks--on-card-p))
 
 ;; Filled at top level, not in the `defvar', so a reload updates the map.
 (let ((map harness-ui-tasks-board-map))
@@ -2011,6 +2040,10 @@ turn's end and the budget events also change what its budgets show.")
 
 (define-derived-mode harness-ui-tasks-mode special-mode "Tasks"
   "Major mode of the task board: a kanban of tasks above a compose box.
+On the board the keys below act on the board, or on the task whose card
+point is on.  Any other letter goes into the compose box, and so does a
+task's key typed off a card.
+
 \\{harness-ui-tasks-board-map}"
   (setq buffer-read-only nil)
   ;; Lines wrap, for the compose box (`harness-compose-setup'): the board
@@ -2723,6 +2756,7 @@ BTW over the board; a failure shows on the board too."
 (defun harness-ui-tasks--init ()
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
+  (add-hook 'harness-ui-rate-functions #'harness-ui-tasks--on-rate)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
   (add-hook 'harness-ui-quota-functions #'harness-ui-tasks--on-quota)
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))

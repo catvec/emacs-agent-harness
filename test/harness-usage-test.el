@@ -14,7 +14,15 @@
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-usage--warned)
+     (clrhash harness-usage--meters)
+     (clrhash harness-usage--calls)
+     (clrhash harness-usage--rates)
      (let ((harness-provider-demo--delay 0.005)
+           ;; A budget over everything fetches Anthropic's cost report in
+           ;; the background: no key may reach a real one.
+           (harness-anthropic-admin-api-key nil)
+           (auth-sources nil)
+           (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment))
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
@@ -380,7 +388,9 @@ also once the worktree is gone; other groupings have no `:main'."
       (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello")) :stop-reason)))
       (let ((r (harness-await (harness-call 'agent/prompt id "again"))))
         (should (eq 'blocked (plist-get r :stop-reason)))
-        (should (string-match-p "Budget session exhausted" (plist-get r :error))))
+        (should (string-match-p "Budget session exhausted" (plist-get r :error)))
+        ;; It says where the budget is deleted.
+        (should (string-match-p "delete it in the usage dashboard" (plist-get r :error))))
       (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
       (should (cl-some (lambda (h) (string-match-p "Turn not started: Budget session exhausted: spent \\$0.0008 of \\$0.0005" h))
                        (harness-usage-test-hints id)))
@@ -422,7 +432,9 @@ once spent, stops them all; no session has a budget of its own."
       (dolist (sid (list a b))
         (let ((r (harness-await (harness-call 'agent/prompt sid "again"))))
           (should (eq 'blocked (plist-get r :stop-reason)))
-          (should (string-match-p "Budget all sessions (setting) exhausted" (plist-get r :error)))))
+          (should (string-match-p "Budget all sessions (setting) exhausted" (plist-get r :error)))
+          ;; It says where the setting is changed, not deleted.
+          (should (string-match-p "change it with M-x harness-settings to go on" (plist-get r :error)))))
       ;; It is no explicit budget, and without the setting there is none.
       (should-not (harness-call 'usage/budgets))
       (let ((harness-budget nil))
@@ -650,6 +662,233 @@ everything or of it; another project's and a session's are not."
              (err (should-error (harness-await (harness-call 'usage/fetch-api-cost)) :type 'harness-error)))
         (should (string-match-p "(HTTP 401): invalid x-api-key; it takes an Admin API key" (cadr err)))))))
 
+;;;; Spending providers report
+
+(defun harness-usage-test-source (status kind)
+  "Return the source of KIND (a symbol) in budget STATUS, or nil."
+  (cl-find kind (plist-get status :sources) :key (lambda (s) (plist-get s :kind))))
+
+(ert-deftest harness-usage-budgets-over-everything-count-extra-usage-reported ()
+  "A plan's extra usage this month counts in month budgets over everything,
+less the calls the harness recorded as drawing on it before the report."
+  (harness-usage-test-with
+    (let* ((events nil)
+           (month (harness-call 'usage/set-budget '(:scope period :period month :amount 20 :label "month")))
+           (week (harness-call 'usage/set-budget '(:scope period :period week :amount 20)))
+           (project (harness-call 'usage/set-budget '(:scope project :target "/p/" :amount 20)))
+           (mine (harness-call 'usage/set-budget '(:scope period :target "/p/" :period month :amount 20)))
+           (status (lambda (budget &optional now)
+                     (harness-call 'usage/budget-status (plist-get budget :id)
+                                   :now (or now (harness-usage-test-ts 2026 9 20)))))
+           (quota (lambda (used &optional updated currency)
+                    (list :billing 'subscription :plan "max"
+                          :extra (list :enabled t :used used :limit 50.0 :currency (or currency "USD"))
+                          :updated (or updated (harness-usage-test-ts 2026 9 16))))))
+      (harness-on 'usage/reported-changed (lambda (report) (push report events)))
+      (dolist (row (list
+                    ;; Drew on Claude's extra usage before the report: in it already.
+                    (list :ts (harness-usage-test-ts 2026 9 10) :model "claude:claude-opus-5-5" :cost 1.0 :billing 'extra-usage)
+                    ;; After the report: not in it yet.
+                    (list :ts (harness-usage-test-ts 2026 9 18) :model "claude:claude-opus-5-5" :cost 0.5 :billing 'extra-usage)
+                    ;; Another provider's extra usage, and calls the plan covered.
+                    (list :ts (harness-usage-test-ts 2026 9 12) :model "copilot:gpt-5" :cost 2.0 :billing 'extra-usage)
+                    (list :ts (harness-usage-test-ts 2026 9 11) :model "claude:claude-opus-5-5" :cost 0.0
+                          :list-cost 3.0 :billing 'subscription)))
+        (harness-call 'usage/record (append (list :session "s" :project "/p/") row)))
+      ;; Before any report, only what was recorded counts.
+      (let ((st (funcall status month)))
+        (should (harness-usage-test-near 3.5 (plist-get st :spent)))
+        (should (= 0.0 (plist-get st :reported)))
+        (should-not (plist-get st :sources)))
+      ;; Claude Code reports $8.00 of extra usage this month.
+      (harness-emit 'provider/quota-updated 'claude (funcall quota 8.0))
+      (should (= 1 (length events)))
+      (should (equal '(:source claude :amount 8.0 :month "2026-09-01") (car events)))
+      (let* ((st (funcall status month))
+             (source (harness-usage-test-source st 'extra-usage)))
+        (should (harness-usage-test-near 7.0 (plist-get st :reported)))
+        (should (harness-usage-test-near 10.5 (plist-get st :spent)))
+        (should (harness-usage-test-near 9.5 (plist-get st :remaining)))
+        (should (= 1 (length (plist-get st :sources))))
+        (should (eq 'claude (plist-get source :source)))
+        (should (equal "Claude" (plist-get source :label)))
+        (should (= 8.0 (plist-get source :amount)))
+        (should (harness-usage-test-near 1.0 (plist-get source :recorded)))
+        (should (harness-usage-test-near 7.0 (plist-get source :outside)))
+        (should (= (harness-usage-test-ts 2026 9 16) (plist-get source :at)))
+        (should (string-match-p "\\`Claude reports \\$8\\.00 billed beyond the plan this month, as of Sep 16 12:00; \\$1\\.00 of it was recorded here, so \\$7\\.00 more counts\\'"
+                                (plist-get source :detail)))
+        (should (equal "incl. $7.00 reported by Claude" (harness-budget-outside-text st))))
+      ;; The report covers the calendar month only: not a week, nor one
+      ;; project, nor another month.
+      (should-not (plist-get (funcall status week) :sources))
+      (should-not (plist-get (funcall status project) :sources))
+      (should-not (plist-get (funcall status mine) :sources))
+      (should-not (plist-get (funcall status month (harness-usage-test-ts 2026 10 3)) :sources))
+      ;; The same report again changes nothing; a report less than what was
+      ;; recorded counts nothing.
+      (harness-emit 'provider/quota-updated 'claude (funcall quota 8.0))
+      (should (= 1 (length events)))
+      (harness-emit 'provider/quota-updated 'claude (funcall quota 0.5))
+      (should (= 2 (length events)))
+      (let ((st (funcall status month)))
+        (should (= 0.0 (plist-get st :reported)))
+        (should (harness-usage-test-near 3.5 (plist-get st :spent)))
+        (should (equal "incl. $0 reported by Claude" (harness-budget-outside-text st t)))
+        (should-not (harness-budget-outside-text st)))
+      ;; Next month's report replaces this one.
+      (harness-emit 'provider/quota-updated 'claude (funcall quota 1.25 (harness-usage-test-ts 2026 10 2)))
+      (should (equal "2026-10-01" (plist-get (car events) :month)))
+      (should-not (plist-get (funcall status month) :sources))
+      (should (harness-usage-test-near 1.25 (plist-get (funcall status month (harness-usage-test-ts 2026 10 3)) :reported)))
+      ;; Money in another currency, and billing per token, report nothing.
+      (harness-emit 'provider/quota-updated 'claude (funcall quota 9.0 nil "EUR"))
+      (should-not harness-usage--extra-spend)
+      (harness-emit 'provider/quota-updated 'claude (funcall quota 8.0))
+      (harness-emit 'provider/quota-updated 'claude '(:billing api :auth "ANTHROPIC_API_KEY"))
+      (should-not harness-usage--extra-spend)
+      (should (null (plist-get (car events) :amount)))
+      (should-not (plist-get (funcall status month) :sources))
+      ;; Two providers' reports add up.
+      (harness-emit 'provider/quota-updated 'claude (funcall quota 8.0))
+      (harness-emit 'provider/quota-updated 'copilot (funcall quota 5.0))
+      (let ((st (funcall status month)))
+        (should (= 2 (length (plist-get st :sources))))
+        (should (harness-usage-test-near 10.0 (plist-get st :reported)))
+        (should (equal "incl. $10.00 reported by Claude and Copilot" (harness-budget-outside-text st)))))))
+
+(ert-deftest harness-usage-budgets-over-everything-count-the-anthropic-cost-report ()
+  "With an Admin API key, Anthropic's cost report counts in day, week and
+month budgets over everything, fetched in the background when due."
+  (harness-usage-test-with
+    (let* ((requests nil)
+           (cents "1234")
+           (fail nil)
+           (events 0)
+           (harness-anthropic-admin-api-key "sk-ant-admin01-test")
+           (month (harness-call 'usage/set-budget '(:scope period :period month :amount 100)))
+           (week (harness-call 'usage/set-budget '(:scope period :period week :amount 100)))
+           (project (harness-call 'usage/set-budget '(:scope project :target "/p/" :amount 100)))
+           (status (lambda (budget &rest opts)
+                     (apply #'harness-call 'usage/budget-status (plist-get budget :id) opts))))
+      (harness-on 'usage/reported-changed (lambda (_) (cl-incf events)))
+      (cl-letf (((symbol-function 'harness-http-request-json)
+                 (lambda (url &rest _)
+                   (push url requests)
+                   (if fail
+                       (harness-rejected (list 'http-error 500 "{\"error\":{\"message\":\"overloaded\"}}"))
+                     (harness-resolved (list :data (list (list :results (list (list :amount cents :currency "USD"))))
+                                             :has_more :false))))))
+        ;; A week's report covers the UTC days of its local dates.
+        (let ((r (harness-await (harness-call 'usage/fetch-api-cost :period "week"
+                                              :now (harness-usage-test-ts 2026 9 16)))))
+          (should (harness-usage-test-near 12.34 (plist-get r :amount)))
+          (should (eq 'week (plist-get r :period)))
+          (should (equal "2026-09-14" (plist-get r :period-start))))
+        (should (string-match-p "starting_at=2026-09-14T00:00:00Z&ending_at=2026-09-21T00:00:00Z" (car requests)))
+        (should (= 1 events))
+        ;; ...and from then on the week budget counts it, the project budget not.
+        (let ((st (funcall status week :now (harness-usage-test-ts 2026 9 16)))
+              (other (funcall status week :now (harness-usage-test-ts 2026 9 23))))
+          (should (harness-usage-test-near 12.34 (plist-get st :reported)))
+          (should (eq 'anthropic (plist-get (harness-usage-test-source st 'cost-report) :source)))
+          (should (equal "Anthropic" (plist-get (harness-usage-test-source st 'cost-report) :label)))
+          (should-not (plist-get other :sources)))
+        (should-not (plist-get (funcall status project :now (harness-usage-test-ts 2026 9 16)) :sources))
+        ;; A day's.
+        (harness-await (harness-call 'usage/fetch-api-cost :period 'day :now (harness-usage-test-ts 2026 9 16)))
+        (should (string-match-p "starting_at=2026-09-16T00:00:00Z&ending_at=2026-09-17T00:00:00Z" (car requests)))
+        (setq requests nil)
+        ;; Looking at the current month fetches its report in the background,
+        ;; once: Claude calls billed per token before it are in it already
+        ;; (a call made in the hours before the first UTC day, too early for
+        ;; the report, is not).
+        (let* ((window (harness-usage--utc-window (harness-usage-period-bounds 'month)))
+               (entry (lambda () (gethash window harness-usage--cost-reports)))
+               (ts (- (float-time) 1))
+               (in-report (if (>= ts (car window)) 2.0 0.0)))
+          (harness-call 'usage/record (list :ts ts :session "s" :project "/p/"
+                                            :model "claude:claude-opus-5-5" :cost 2.0 :billing 'api))
+          (let ((st (funcall status month)))
+            (should (harness-usage-test-near 2.0 (plist-get st :spent)))
+            (should-not (plist-get st :sources)))
+          (funcall status month)
+          (harness-test-wait (lambda () (= 3 events)) 5 "the month's report")
+          (should (= 1 (length requests)))
+          (let* ((st (funcall status month))
+                 (source (harness-usage-test-source st 'cost-report)))
+            (should (harness-usage-test-near 12.34 (plist-get source :amount)))
+            (should (harness-usage-test-near in-report (plist-get source :recorded)))
+            (should (harness-usage-test-near (- 12.34 in-report) (plist-get st :reported)))
+            (should (harness-usage-test-near (- 14.34 in-report) (plist-get st :spent))))
+          (should (= 1 (length requests)))
+          ;; A failure says why and keeps what was reported before.
+          (let ((harness-usage-cost-report-interval -1))
+            (setq fail t)
+            (funcall status month)
+            (harness-test-wait (lambda () (plist-get (funcall entry) :error)) 5 "a failed fetch")
+            (should (= 2 (length requests)))
+            (should (string-match-p "HTTP 500" (plist-get (funcall entry) :error)))
+            (should (harness-usage-test-near (- 12.34 in-report)
+                                             (plist-get (funcall status month :now (float-time)) :reported))))
+          ;; Without a key nothing is asked for.
+          (let ((harness-anthropic-admin-api-key nil)
+                (harness-usage-cost-report-interval -1))
+            (clrhash harness-usage--cost-reports)
+            (setq requests nil)
+            (funcall status month)
+            (harness-test-wait (lambda () (plist-get (funcall entry) :error)) 5 "no key")
+            (should (string-match-p "No Anthropic Admin API key" (plist-get (funcall entry) :error)))
+            (should-not requests)
+            (should-not (plist-get (funcall status month :now (float-time)) :sources))))))))
+
+(ert-deftest harness-usage-cost-report-fetches-share-one-request ()
+  "Asking for a period's cost report while a request for it is out shares that request."
+  (harness-usage-test-with
+    (let* ((harness-anthropic-admin-api-key "sk-ant-admin01-test")
+           (pending (harness-make-promise))
+           (requests 0)
+           (window (harness-usage--utc-window (harness-usage-period-bounds 'day))))
+      (cl-letf (((symbol-function 'harness-http-request-json)
+                 (lambda (&rest _) (cl-incf requests) pending)))
+        (let ((first (harness-usage--fetch-cost-report window))
+              (second (harness-usage--fetch-cost-report window)))
+          (should (eq first second))
+          (should (= 1 requests))
+          (harness-resolve pending '(:data ((:results ((:amount "250" :currency "USD")))) :has_more :false))
+          (should (harness-usage-test-near 2.5 (harness-await first)))
+          (should-not (gethash window harness-usage--cost-report-fetches))
+          (should (harness-usage-test-near 2.5 (plist-get (gethash window harness-usage--cost-reports) :amount)))
+          ;; The next one asks again.
+          (harness-usage--fetch-cost-report window)
+          (should (= 2 requests))))
+      ;; A request that cannot even start is noted like one that failed.
+      (cl-letf (((symbol-function 'harness-http-request-json) (lambda (&rest _) (error "No network"))))
+        (let ((window (harness-usage--utc-window (harness-usage-period-bounds 'week))))
+          (should-error (harness-await (harness-usage--fetch-cost-report window)) :type 'harness-error)
+          (should (string-match-p "failed: No network" (plist-get (gethash window harness-usage--cost-reports) :error)))
+          (should-not (gethash window harness-usage--cost-report-fetches)))))))
+
+(ert-deftest harness-usage-reported-spending-and-baseline-stop-a-hard-budget ()
+  "What providers report counts toward a hard budget over everything, besides its baseline."
+  (harness-usage-test-with
+    (let* ((now (float-time))
+           (id (harness-usage-test-session))
+           (budget (harness-call 'usage/set-budget
+                                 '(:scope period :period month :amount 10 :hard t :label "monthly cap"))))
+      (should-not (harness-usage--check (harness-call 'session/get id) now))
+      (harness-emit 'provider/quota-updated 'claude
+                    (list :billing 'subscription :extra (list :enabled t :used 6.0 :currency "USD") :updated now))
+      (should-not (harness-usage--check (harness-call 'session/get id) now))
+      (harness-call 'usage/set-budget (append (list :baseline 4.0) budget))
+      (let ((st (harness-call 'usage/budget-status (plist-get budget :id) :now now)))
+        (should (= 10.0 (plist-get st :spent)))
+        (should (= 6.0 (plist-get st :reported)))
+        (should (= 4.0 (plist-get st :baseline))))
+      (should (string-match-p
+               "\\`Budget monthly cap exhausted: spent \\$10\\.00 (incl\\. \\$6\\.00 reported by Claude, \\$4\\.00 baseline) of \\$10\\.00; delete it in the usage dashboard to go on\\'"
+               (harness-usage--check (harness-call 'session/get id) now))))))
+
 ;;;; JSONL fallback
 
 (ert-deftest harness-usage-jsonl-fallback-matches-sqlite ()
@@ -679,6 +918,220 @@ everything or of it; another project's and a session's are not."
           (harness-call 'session/usage-add id '(:input 1000 :output 0))
           (should (harness-usage-test-near 0.001 (plist-get (harness-call 'usage/totals :session id) :cost)))
           (should (= 4 (length (harness-call 'store/read-all "usage/records.jsonl")))))))))
+
+;;;; Output rate
+
+(defvar harness-usage-test--now 1000.0
+  "What `float-time' answers inside `harness-usage-test-clock'.")
+
+(defmacro harness-usage-test-clock (&rest body)
+  "Run BODY with `float-time' answering `harness-usage-test--now', from 1000."
+  (declare (indent 0))
+  `(let ((harness-usage-test--now 1000.0))
+     (cl-letf (((symbol-function 'float-time) (lambda (&optional _) harness-usage-test--now)))
+       ,@body)))
+
+(defun harness-usage-test-at (seconds)
+  "Set the clock of `harness-usage-test-clock' SECONDS after it started."
+  (setq harness-usage-test--now (+ 1000.0 seconds)))
+
+(defun harness-usage-test-phase (id phase)
+  "Announce that session ID's turn is in activity PHASE; nil once it ended."
+  (harness-emit 'agent/activity-changed id (and phase (list :phase phase))))
+
+(ert-deftest harness-usage-rate-counts-streaming-time-only ()
+  "Output over the seconds the model streamed, not waited or ran tools."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)) (announced nil))
+        (harness-on 'usage/rate-updated (lambda (sid rate) (push (cons sid rate) announced)))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'waiting)
+        (harness-usage-test-at 2)         ; the first token after 2 s
+        (harness-usage-test-phase id 'thinking)
+        (harness-usage-test-at 3)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 4)
+        (harness-usage-test-phase id 'tool)
+        (harness-usage-test-at 9)         ; 5 s of tools
+        (harness-usage-test-phase id 'tool-input)
+        (harness-usage-test-at 10)
+        (harness-call 'session/usage-add id '(:input 10 :output 300))
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 100.0 (plist-get rate :rate)))
+          (should (= 300 (plist-get rate :output)))
+          (should (harness-usage-test-near 3.0 (plist-get rate :seconds)))
+          (should (= 1 (plist-get rate :calls)))
+          (should (equal "demo:scripted" (plist-get rate :model)))
+          (should (harness-usage-test-near 1010.0 (plist-get rate :at)))
+          (should (equal (list (cons id rate)) announced)))
+        ;; The stream still open counts on for the next call, from now.
+        (harness-usage-test-at 12)
+        (harness-call 'session/usage-add id '(:input 10 :output 100))
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 80.0 (plist-get rate :rate)))
+          (should (= 400 (plist-get rate :output)))
+          (should (= 2 (plist-get rate :calls))))
+        ;; The rows are the accounting's as ever.
+        (should (= 2 (plist-get (harness-call 'usage/totals :session id) :calls)))))))
+
+(ert-deftest harness-usage-rate-leaves-out-unmeasurable-calls ()
+  "Output that came at once, no output, and usage outside a turn give no rate."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)) (announced 0))
+        (harness-on 'usage/rate-updated (lambda (&rest _) (cl-incf announced)))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 0.1)
+        (harness-call 'session/usage-add id '(:input 10 :output 500))
+        (should-not (harness-call 'usage/rate id))
+        (harness-usage-test-at 2)
+        (harness-call 'session/usage-add id '(:input 10 :output 0))
+        (should-not (harness-call 'usage/rate id))
+        (harness-usage-test-phase id nil)
+        (harness-emit 'agent/turn-ended id 'end-turn)
+        ;; Compaction records usage between turns.
+        (harness-usage-test-at 30)
+        (harness-call 'session/usage-add id '(:input 1000 :output 200))
+        (should-not (harness-call 'usage/rate id))
+        (should-not (harness-call 'usage/rates))
+        (should (= 0 announced))))))
+
+(ert-deftest harness-usage-rate-follows-hosted-calls ()
+  "A hosted loop's calls are measured one by one; its turn's total is not measured again."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)) (announced 0))
+        (harness-on 'usage/rate-updated (lambda (&rest _) (cl-incf announced)))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'waiting)
+        (harness-usage-test-at 1)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 3)
+        (harness-emit 'agent/call-usage id '(:output 100))
+        (should (harness-usage-test-near 50.0 (plist-get (harness-call 'usage/rate id) :rate)))
+        (harness-usage-test-phase id 'tool)
+        (harness-usage-test-at 20)
+        (harness-usage-test-phase id 'thinking)
+        (harness-usage-test-at 21)
+        (harness-emit 'agent/call-usage id '(:output 80))
+        ;; The turn's total, which may count sub-agents too, at its end.
+        (harness-usage-test-at 22)
+        (harness-call 'session/usage-add id '(:input 900 :output 9000))
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 60.0 (plist-get rate :rate)))
+          (should (= 180 (plist-get rate :output)))
+          (should (harness-usage-test-near 3.0 (plist-get rate :seconds)))
+          (should (= 2 (plist-get rate :calls))))
+        (should (= 2 announced))
+        (should (= 9000 (plist-get (harness-call 'usage/totals :session id) :output)))
+        ;; The next turn's calls are measured afresh.
+        (harness-usage-test-phase id nil)
+        (harness-emit 'agent/turn-ended id 'end-turn)
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 24)
+        (harness-emit 'agent/call-usage id '(:output 120))
+        (should (= 3 (plist-get (harness-call 'usage/rate id) :calls)))
+        (should (harness-usage-test-near 60.0 (plist-get (harness-call 'usage/rate id) :rate)))))))
+
+(ert-deftest harness-usage-rate-averages-the-latest-calls ()
+  "The rate is over the newest calls that fill the window, on the current model."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session))
+            (harness-usage-rate-window 5))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        ;; Calls of 4 s each, at 10, 20 and 30 tokens per second.
+        (cl-loop for output in '(40 80 120) for at from 4 by 4
+                 do (harness-usage-test-at at)
+                    (harness-call 'session/usage-add id (list :input 1 :output output)))
+        ;; The newest two fill the 5 s window: (120 + 80) / 8.
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 25.0 (plist-get rate :rate)))
+          (should (= 2 (plist-get rate :calls)))
+          (should (harness-usage-test-near 8.0 (plist-get rate :seconds))))
+        ;; Calls on another model than the session's are dropped.
+        (puthash id (list (list 1000 1.0 "demo:other")) harness-usage--calls)
+        (harness-usage-test-at 14)
+        (harness-call 'session/usage-add id '(:input 1 :output 20))
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 10.0 (plist-get rate :rate)))
+          (should (= 1 (plist-get rate :calls))))))))
+
+(ert-deftest harness-usage-rate-outlives-the-turn ()
+  "An idle session keeps its last rate; a deleted one loses it."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((a (harness-usage-test-session)) (b (harness-usage-test-session)))
+        (dolist (id (list a b))
+          (harness-emit 'agent/turn-started id)
+          (harness-usage-test-phase id 'writing))
+        (harness-usage-test-at 2)
+        (harness-call 'session/usage-add a '(:input 1 :output 100))
+        (harness-usage-test-at 4)
+        (harness-call 'session/usage-add b '(:input 1 :output 100))
+        (dolist (id (list a b))
+          (harness-usage-test-phase id nil)
+          (harness-emit 'agent/turn-ended id 'end-turn))
+        (should-not (gethash a harness-usage--meters))
+        (harness-usage-test-at 600)
+        (should (harness-usage-test-near 50.0 (plist-get (harness-call 'usage/rate a) :rate)))
+        (should (harness-usage-test-near 25.0 (plist-get (harness-call 'usage/rate b) :rate)))
+        (let ((rates (harness-call 'usage/rates)))
+          (should (equal (list b a) (mapcar (lambda (r) (plist-get r :session)) rates)))
+          (should (equal (harness-call 'usage/rate b) (harness-plist-remove (car rates) :session))))
+        (harness-call 'session/delete a)
+        (should-not (harness-call 'usage/rate a))
+        (should (equal (list b) (mapcar (lambda (r) (plist-get r :session)) (harness-call 'usage/rates))))))))
+
+(ert-deftest harness-usage-rate-of-a-streamed-turn ()
+  "A turn the demo provider streams gets its rate from the turn's usage."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session))
+           (harness-provider-demo--delay 0.05)
+           (harness-provider-demo-script-override
+            (append (make-list 8 '(:type text :delta "word "))
+                    '((:type usage :input 100 :output 40 :cost 0.0001 :context 100)
+                      (:type done :stop-reason end-turn)))))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello")) :stop-reason)))
+      (let ((rate (harness-call 'usage/rate id)))
+        (should rate)
+        (should (= 40 (plist-get rate :output)))
+        (should (= 1 (plist-get rate :calls)))
+        ;; Eight deltas 0.05 s apart, then the usage: about 0.4 s.
+        (should (< 0.3 (plist-get rate :seconds) 5.0))
+        (should (harness-usage-test-near (plist-get rate :rate) (/ 40 (plist-get rate :seconds)))))
+      ;; The turn is over: the meter is gone, the rate stays.
+      (should-not (gethash id harness-usage--meters))
+      (should (harness-call 'usage/rate id)))))
+
+(ert-deftest harness-usage-rate-of-a-hosted-turn ()
+  "A provider's `call-usage' events give the rate; the turn's usage the accounting."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session))
+           (calls nil)
+           (words (make-list 8 '(:type text :delta "word ")))
+           (harness-provider-demo--delay 0.05)
+           (harness-provider-demo-script-override
+            (append words '((:type call-usage :output 24))
+                    words '((:type call-usage :output 16))
+                    ;; The turn's total, with a sub-agent's output in it.
+                    '((:type usage :input 100 :output 9000 :cost 0.0001 :context 100)
+                      (:type done :stop-reason end-turn)))))
+      (harness-on 'agent/call-usage (lambda (sid usage) (push (cons sid usage) calls)))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello")) :stop-reason)))
+      (should (equal (list (cons id '(:output 24)) (cons id '(:output 16))) (reverse calls)))
+      (let ((rate (harness-call 'usage/rate id)))
+        (should (= 40 (plist-get rate :output)))
+        (should (= 2 (plist-get rate :calls)))
+        (should (< 0.6 (plist-get rate :seconds) 10.0)))
+      ;; The calls were announced, not recorded: the turn is one row.
+      (let ((totals (harness-call 'usage/totals :session id)))
+        (should (= 1 (plist-get totals :calls)))
+        (should (= 9000 (plist-get totals :output)))))))
 
 (provide 'harness-usage-test)
 ;;; harness-usage-test.el ends here

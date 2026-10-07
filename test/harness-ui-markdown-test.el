@@ -74,5 +74,113 @@
     (should (string-prefix-p "see the docs" (substring-no-properties s)))
     (should (equal "https://x.org/a_(b" (get-text-property 5 'harness-url s)))))
 
+;;;; Following links
+
+(defconst harness-md-test-primary "Open private configuration C-c f P"
+  "The primary selection while a test clicks.
+The text the bug report saw a click on a link paste into a response.")
+
+(defmacro harness-md-test-with-links (markdown &rest body)
+  "Run BODY with MARKDOWN rendered in BUFFER, shown in the selected window.
+The text is read-only and rear-nonsticky, as a chat transcript block
+is, so an insertion inside it gets through.  BUFFER's directory, DIR,
+holds notes.md, five lines long.  OPENED lists the URLs `browse-url'
+was given, newest first, and no browser starts.  The primary selection
+holds `harness-md-test-primary'."
+  (declare (indent 1))
+  `(let ((dir (harness-test-temp-dir))
+         (buffer (generate-new-buffer "*harness-md-links*"))
+         (opened nil))
+     (with-temp-file (expand-file-name "notes.md" dir) (insert "one\ntwo\nthree\nfour\nfive\n"))
+     (unwind-protect
+         (save-window-excursion
+           (switch-to-buffer buffer)
+           (delete-other-windows)
+           (setq default-directory dir)
+           (let ((inhibit-read-only t))
+             (insert (propertize (harness-ui-markdown-render ,markdown) 'read-only t 'rear-nonsticky t)))
+           (set-buffer-modified-p nil)
+           (goto-char (point-min))
+           (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened)))
+                     ((symbol-function 'gui-get-primary-selection) (lambda () harness-md-test-primary)))
+             ,@body))
+       (kill-buffer buffer)
+       (dolist (b (buffer-list))
+         (when (and (buffer-file-name b) (file-in-directory-p (buffer-file-name b) dir))
+           (kill-buffer b)))
+       (delete-directory dir t))))
+
+(ert-deftest harness-md-link-click-opens-it-and-nothing-else ()
+  "A click on a link opens it and leaves the buffer as it was.
+The `follow-link' property makes a quick `mouse-1' on a link `mouse-2',
+which the link did not bind: the global `mouse-yank-primary' pasted the
+primary selection where the click landed, and nothing opened."
+  (harness-md-test-with-links
+      "Read [the manual](https://www.gnu.org/software/emacs/manual/) and [the notes](notes.md#L3)."
+    (let ((text (buffer-string))
+          (url (+ (point-min) (string-search "manual" (buffer-string))))
+          (file (+ (point-min) (string-search "notes" (buffer-string)))))
+      ;; A quick click arrives as `mouse-2'; a slow one stays `mouse-1'.
+      (harness-test-click url)
+      (should (equal '("https://www.gnu.org/software/emacs/manual/") opened))
+      (let ((mouse-1-click-follows-link nil))
+        (harness-test-click url))
+      ;; The middle button, and RET.
+      (harness-test-click url 2)
+      (with-current-buffer buffer
+        (goto-char url)
+        (execute-kbd-macro (kbd "RET")))
+      (should (equal (make-list 4 "https://www.gnu.org/software/emacs/manual/") opened))
+      ;; A double or a triple click opens it once, also where only a
+      ;; double click follows a link.
+      (dolist (follows '(450 double))
+        (let ((mouse-1-click-follows-link follows))
+          (pcase-dolist (`(,button ,count) '((1 2) (1 3) (2 2)))
+            (setq opened nil)
+            (harness-test-click url button count)
+            (should (equal (list follows button count 1) (list follows button count (length opened)))))))
+      ;; A file opens in another window, at the line the link names.
+      (harness-test-click file)
+      (let ((notes (window-buffer (selected-window))))
+        (should (equal (expand-file-name "notes.md" dir) (buffer-file-name notes)))
+        (should (= 3 (with-current-buffer notes (line-number-at-pos)))))
+      (should (eq buffer (window-buffer (next-window))))
+      (with-current-buffer buffer
+        (should (equal text (buffer-string)))
+        (should-not (buffer-modified-p))))))
+
+(ert-deftest harness-md-link-targets ()
+  "A URL goes to `browse-url'; any other target is a file, opened at its line.
+A file name is taken in `default-directory'; a file: URL is a file too."
+  (harness-md-test-with-links ""
+    (with-temp-file (expand-file-name "my notes.md" dir) (insert "a\nb\n"))
+    (let ((visited nil))
+      (cl-letf (((symbol-function 'find-file-other-window)
+                 (lambda (file &rest _) (push file visited) (set-buffer (find-file-noselect file)))))
+        (dolist (url '("https://x.org/a?b=c#d" "http://x.org" "mailto:me@x.org"))
+          (harness-ui-markdown-open-link url))
+        (should (equal '("mailto:me@x.org" "http://x.org" "https://x.org/a?b=c#d") opened))
+        (pcase-dolist (`(,target ,file ,line)
+                       `(("notes.md" "notes.md" nil)
+                         ("./notes.md#L4" "notes.md" 4)
+                         ("notes.md#L2-L3" "notes.md" 2)
+                         ("notes.md:5" "notes.md" 5)
+                         ("notes.md:3:7" "notes.md" 3)
+                         ("notes.md#usage" "notes.md" nil)
+                         (,(expand-file-name "notes.md" dir) "notes.md" nil)
+                         (,(concat "file://" dir "my%20notes.md#L2") "my notes.md" 2)))
+          (with-current-buffer buffer
+            (harness-ui-markdown-open-link target)
+            (should (equal (expand-file-name file dir) (car visited)))
+            (when line (should (= line (line-number-at-pos))))))
+        ;; None of the files went to the browser.
+        (should (= 3 (length opened)))
+        (with-current-buffer buffer
+          (should-error (harness-ui-markdown-open-link "missing.md") :type 'user-error)
+          (should-error (harness-ui-markdown-open-link "#usage") :type 'user-error)
+          ;; Not on a link.
+          (should-error (harness-ui-markdown-follow-link) :type 'user-error))
+        (should (= 8 (length visited)))))))
+
 (provide 'harness-ui-markdown-test)
 ;;; harness-ui-markdown-test.el ends here

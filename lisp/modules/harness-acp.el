@@ -91,7 +91,7 @@ is never used for any other failure.")
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "harness/api" "harness/version" "harness/reload" "harness-dev/" "question/" "project/" "task/"
-    "notification/" "acp/remote-" "pet/")
+    "notification/" "acp/remote-" "pet/" "version/")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
 (defconst harness-acp--enum-keys
@@ -127,11 +127,12 @@ another pattern; the names speak of the directory, the default.")
   '(session/created session/deleted session/queue-changed session/pending-changed
     session/status agent/turn-started agent/turn-ended agent/quota
     provider/models-updated provider/quota-updated provider/pricing-warning usage/budget-warning usage/budgets-changed
+    usage/reported-changed usage/rate-updated
     fallback/changed fallback/switched
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
     question/answered task/changed task/deleted task/review task/done permission/dir-allowed permission/dir-revoked
-    config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said)
+    config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 
 (defvar harness-acp-authorize-functions nil
@@ -960,11 +961,11 @@ an agent's own directory request has no \"Allow once\"."
 
 (defun harness-acp--on-permission-requested (sid pending)
   "Ask the connected clients to decide PENDING permission request of SID.
-A request about paths carries the glob pattern it is answered for in
-`_harness.pattern'; a client may answer for another one with
-`_harness.pattern' in its result, next to the outcome.  A shell
-command's request carries where it runs in `_harness.cwd', and in
-`_harness.paths' what it is about."
+A request about a path outside the allowed directories carries the glob
+pattern it is answered for in `_harness.pattern'; a client may answer
+for another one with `_harness.pattern' in its result, next to the
+outcome.  A shell command's request carries where it runs in
+`_harness.cwd', and in `_harness.paths' what it is about."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients

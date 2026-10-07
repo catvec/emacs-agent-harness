@@ -134,7 +134,8 @@ They sit under the keymaps the content brings, which win.")
 
 (define-derived-mode harness-ui-popout-mode special-mode "Popout"
   "Major mode of a popout: one item of a session or task, and maybe a box.
-\\<harness-ui-popout-content-map>On the content \\[harness-ui-popout-quit] closes it and \\[harness-ui-popout-redraw] draws it again.
+\\<harness-ui-popout-content-map>On the content \\[harness-ui-popout-quit] closes it and \\[harness-ui-popout-redraw] draws it again; with a
+box, other typing there goes into the box.
 \\<harness-ui-popout-mode-map>In the box \\[harness-ui-popout-submit] sends what it holds.
 
 \\{harness-ui-popout-mode-map}"
