@@ -16,8 +16,9 @@
 ;;   (read_file);
 ;; - a cache of each provider's billing and plan quota kept fresh from
 ;;   `provider/quota-updated' events, and the helpers that show what a
-;;   session cost: a price when it is billed per token, the plan's name
-;;   and quota when a subscription pays for it;
+;;   session, or a group of them such as a board's tasks, cost: a price
+;;   when it is billed per token, the plan's name and quota when a
+;;   subscription pays for it; and those that show budgets;
 ;; - faces and icons;
 ;; - window positions: one session per preset position, replacing, and
 ;;   the fullscreen layout, an overview such as the task board on the
@@ -225,18 +226,50 @@ DOC is its documentation."
                         "A warning, or work in progress: a circle, yellow.")
 (harness-ui-define-icon harness-icon-failure "failure" "▲" "!" "A failure: a triangle, red.")
 
+(defvar harness-ui--icons (make-hash-table :test 'equal)
+  "Icon strings made by `harness-ui-icon', by (NAME GRAPHIC IMAGES FONT).
+Each value is (STAMP . STRING), STAMP saying what the string was made
+from (`harness-ui--icon-stamp').")
+
+(defun harness-ui--icon-stamp (name)
+  "Return what the string of icon NAME is made from, as of now.
+Its definition, its spec in the custom theme and `icon-preference': a
+reload redefines the icon, and a theme or the user may change the rest.
+A theme changes its spec in place, so the stamp holds copies."
+  (list (get name 'icon--properties) (copy-tree (get name 'theme-icon))
+        (copy-sequence icon-preference)))
+
+(defun harness-ui--icon-stamp-current-p (stamp name)
+  "Non-nil when STAMP is what icon NAME is made from now."
+  (and (eq (nth 0 stamp) (get name 'icon--properties))
+       (equal (nth 1 stamp) (get name 'theme-icon))
+       (equal (nth 2 stamp) icon-preference)))
+
 (defun harness-ui-icon (name)
   "Return the string for icon NAME (a symbol such as `harness-icon-idle').
 An image icon carries no `:background', so its transparent parts show
 the face behind it (a tool block's colour, say).  Some packages, such as
-solaire-mode, bake the buffer's base colour into every image."
-  (condition-case nil
-      (let* ((s (icon-string name))
-             (spec (and (> (length s) 0) (get-text-property 0 'display s))))
-        (if (and (eq (car-safe spec) 'image) (plist-member (cdr spec) :background))
-            (propertize s 'display (cons 'image (harness-ui--plist-without (cdr spec) :background)))
-          s))
-    (error "")))
+solaire-mode, bake the buffer's base colour into every image.
+
+Header and mode lines are drawn again on every key typed in their
+window, and making an icon reads its file and asks the fonts, so each
+icon is made once for each kind of display and frame font, and reused
+while it is defined the same way (`harness-ui--icon-stamp').  The
+string is a copy: a caller may add properties to it."
+  (let* ((key (list name (display-graphic-p) (display-images-p) (frame-parameter nil 'font)))
+         (made (gethash key harness-ui--icons)))
+    (if (and made (harness-ui--icon-stamp-current-p (car made) name))
+        (copy-sequence (cdr made))
+      (condition-case nil
+          (let* ((stamp (harness-ui--icon-stamp name))
+                 (s (icon-string name))
+                 (spec (and (> (length s) 0) (get-text-property 0 'display s)))
+                 (s (if (and (eq (car-safe spec) 'image) (plist-member (cdr spec) :background))
+                        (propertize s 'display (cons 'image (harness-ui--plist-without (cdr spec) :background)))
+                      s)))
+            (puthash key (cons stamp s) harness-ui--icons)
+            (copy-sequence s))
+        (error "")))))
 
 (defun harness-ui--plist-without (plist key)
   "Return a copy of PLIST without KEY."
@@ -397,6 +430,7 @@ initialize: one it let go of for another closes on purpose."
                     (harness-ui-refresh-sessions)
                     (harness-ui-refresh-models)
                     (harness-ui-refresh-quotas)
+                    (harness-ui-refresh-rates)
                     (run-hooks 'harness-ui-connected-hook))
                   (lambda (e)
                     (when (eq conn harness-ui-connection)
@@ -599,6 +633,8 @@ answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
          (harness-ui-refresh-models))
        (when (equal event "provider/quota-updated")
          (harness-ui--store-quota (car args) (cadr args)))
+       (when (equal event "usage/rate-updated")
+         (harness-ui--store-rate (car args) (cadr args)))
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
@@ -753,6 +789,7 @@ yet: it starts after the init file, with the value set there."
 
 (defun harness-ui--forget-session (id)
   (remhash id harness-ui--sessions)
+  (harness-ui--store-rate id nil)
   (run-hooks 'harness-ui-sessions-changed-hook))
 
 (defun harness-ui-session (id)
@@ -977,6 +1014,44 @@ REFRESH non-nil asks each for fresh data."
   (when-let* ((provider (harness-ui-session-provider session)))
     (harness-ui-quota provider)))
 
+;;;; Output rate cache
+
+;; The harness measures how fast each session's model writes (see
+;; `usage/rate' in harness-usage.el); the UI keeps the latest figure of
+;; each session, fetched on connect and then updated from
+;; `usage/rate-updated' events.
+
+(defvar harness-ui--rates (make-hash-table :test 'equal)
+  "Session id -> its output rate, the plist `usage/rate' returns.")
+
+(defvar harness-ui-rate-functions nil
+  "Functions called with (SESSION-ID RATE) after a cached output rate changes.
+SESSION-ID is nil after the whole cache was fetched again.")
+
+(defun harness-ui-session-rate (id)
+  "Return the cached output rate of session ID, or nil if it was never measured.
+The plist is (:rate F :output N :seconds F :calls N :at FLOAT :model ID),
+as `usage/rate' returns it."
+  (gethash id harness-ui--rates))
+
+(defun harness-ui--store-rate (id rate)
+  "Cache RATE as session ID's output rate; run `harness-ui-rate-functions'."
+  (when (stringp id)
+    (if rate (puthash id rate harness-ui--rates) (remhash id harness-ui--rates))
+    (run-hook-with-args 'harness-ui-rate-functions id rate)))
+
+(defun harness-ui-refresh-rates (&optional callback)
+  "Fetch the output rate of every session into the cache, then call CALLBACK."
+  (harness-ui-call "_harness/usage/rates" nil
+                   (lambda (rates)
+                     (clrhash harness-ui--rates)
+                     (dolist (rate rates)
+                       (when-let* ((id (plist-get rate :session)))
+                         (puthash id (harness-plist-remove rate :session) harness-ui--rates)))
+                     (run-hook-with-args 'harness-ui-rate-functions nil nil)
+                     (when callback (funcall callback rates)))
+                   #'ignore))
+
 (defun harness-ui-session-billing (session)
   "Return how SESSION's calls are paid, a symbol or nil.
 The symbol is `api', `subscription' or `extra-usage'.  Its last
@@ -1047,10 +1122,12 @@ and any other that is at least 70% used."
         (and name (format "the %s plan" name)))
       "the subscription"))
 
-(defun harness-ui-spend-help (session)
+(defun harness-ui-spend-help (session &optional subject)
   "Return the tooltip that explains what SESSION cost and who pays for it.
-One line, so showing it in the echo area moves nothing."
-  (let* ((usage (plist-get session :usage))
+SUBJECT names what cost it, \"This session\" by default.  One line, so
+showing it in the echo area moves nothing."
+  (let* ((subject (or subject "This session"))
+         (usage (plist-get session :usage))
          (quota (harness-ui-session-quota session))
          (billing (harness-ui-session-billing session))
          (cost (float (or (plist-get usage :cost) 0)))
@@ -1062,28 +1139,31 @@ One line, so showing it in the echo area moves nothing."
             (append
              (list
               (cond ((and (> covered 0) (> cost 0))
-                     (format "%s billed as extra usage; %s more at API prices covered by %s."
-                             (harness-format-cost cost) (harness-format-cost covered) payer))
+                     (format "%s billed%s; %s more at API prices covered by %s."
+                             (harness-format-cost cost) (if (eq billing 'extra-usage) " as extra usage" "")
+                             (harness-format-cost covered) payer))
                     ((or (> covered 0) (memq billing '(subscription extra-usage)))
-                     (format "Covered by %s, not billed per token. This session at API prices: %s."
-                             payer (harness-format-cost covered)))
+                     (format "Covered by %s, not billed per token. %s at API prices: %s."
+                             payer subject (harness-format-cost covered)))
                     ((eq billing 'api)
-                     (format "Session cost: %s, billed per token%s."
-                             (harness-format-cost cost)
+                     (format "%s cost %s, billed per token%s."
+                             subject (harness-format-cost cost)
                              (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) "")))
-                    (t (format "Session cost: %s." (harness-format-cost cost)))))
+                    (t (format "%s cost %s." subject (harness-format-cost cost)))))
              (when (memq billing '(subscription extra-usage))
                (append (mapcar #'harness-ui-describe-window (plist-get quota :windows))
                        (list (harness-ui-describe-extra (plist-get quota :extra)))))
              (list "mouse-1: usage and plan quota")))
       "\n"))))
 
-(defun harness-ui-format-spend (session &optional with-quota)
+(defun harness-ui-format-spend (session &optional with-quota subject)
   "Return what SESSION cost, saying when a subscription pays for it.
 Per-token billing shows the cost (\"$1.20\").  When a plan pays, its
 name shows instead (\"Max\"), after any cost billed as extra usage
 \(\"$0.40+Max\").  WITH-QUOTA appends the plan's headline quota windows
-\(\"Max · 5h 9% · 7d 57%\").  The tooltip has the details."
+\(\"Max · 5h 9% · 7d 57%\").  The tooltip has the details, where
+SUBJECT names what cost it (see `harness-ui-spend-help').  SESSION may
+stand for several (`harness-ui-sessions-total')."
   (let* ((usage (plist-get session :usage))
          (billing (harness-ui-session-billing session))
          (cost (float (or (plist-get usage :cost) 0)))
@@ -1096,7 +1176,117 @@ name shows instead (\"Max\"), after any cost billed as extra usage
                      (t name)))
          (windows (and with-quota planned (harness-ui-quota-headline-windows quota))))
     (propertize (concat text (mapconcat (lambda (w) (concat " · " (harness-ui-format-window w))) windows ""))
-                'help-echo (harness-ui-spend-help session))))
+                'help-echo (harness-ui-spend-help session subject))))
+
+(defun harness-ui-sessions-total (sessions &optional model)
+  "Return SESSIONS taken together, as a session for the spend helpers.
+Its `:usage' sums theirs, and has the `:billing' and `:plan' of the one
+updated last that recorded a billing, as a session's are those of its
+last call.  Its `:model' is MODEL, else the first session's: that
+provider's billing and quota stand for them all."
+  (let ((usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0 :list-cost 0.0))
+        (latest nil))
+    (dolist (s sessions)
+      (let ((u (plist-get s :usage)))
+        (dolist (k '(:input :output :cache-read :cache-write :cost))
+          (setq usage (plist-put usage k (+ (plist-get usage k) (or (plist-get u k) 0)))))
+        (setq usage (plist-put usage :list-cost (+ (plist-get usage :list-cost) (harness-usage-list-cost u))))
+        (when (and (harness-billing-of u)
+                   (or (null latest) (> (or (plist-get s :updated) 0) (or (plist-get latest :updated) 0))))
+          (setq latest s))))
+    (when latest
+      (let ((u (plist-get latest :usage)))
+        (setq usage (append usage (list :billing (plist-get u :billing) :plan (plist-get u :plan))))))
+    (list :model (or model (plist-get (car sessions) :model)) :usage usage)))
+
+(declare-function harness-usage "harness-ui-usage")
+
+(defun harness-ui-show-usage ()
+  "Show the usage dashboard: costs, the plan's quota and the budgets."
+  (interactive)
+  (if (fboundp 'harness-usage)
+      (harness-usage)
+    (user-error "The usage dashboard (module ui-usage) is not loaded")))
+
+(defvar harness-ui--usage-keymap nil
+  "Keymap of the segments that open the usage dashboard, made once.")
+
+(defun harness-ui-spend-segment (text)
+  "Return TEXT, from `harness-ui-format-spend', as a header-line segment.
+A click on it opens the usage dashboard.  Its percentages are escaped,
+or the line would take the \"9% \" of a quota window for a %-construct."
+  (let ((text (harness-ui-mode-line-escape text)))
+    (add-text-properties 0 (length text)
+                         (list 'mouse-face 'mode-line-highlight
+                               'local-map (or harness-ui--usage-keymap
+                                              (setq harness-ui--usage-keymap
+                                                    (harness-ui-mouse-keymap #'harness-ui-show-usage))))
+                         text)
+    text))
+
+;;;; Budgets
+
+(defun harness-ui-budget-label (budget)
+  "Return a label for BUDGET: its own, else how often and what it covers."
+  (or (plist-get budget :label)
+      (let* ((scope (format "%s" (plist-get budget :scope)))
+             (target (plist-get budget :target))
+             (subject (cond ((equal scope "session")
+                             (let ((s (harness-ui-session target)))
+                               (or (and s (plist-get s :name))
+                                   (format "session %s" (substring (or target "?") 0 (min 8 (length (or target "?"))))))))
+                            (target (file-name-nondirectory (directory-file-name target)))
+                            (t "everything"))))
+        (string-trim (format "%s %s" (pcase (format "%s" (plist-get budget :period))
+                                       ("day" "daily") ("week" "weekly") ("month" "monthly") (_ ""))
+                             subject)))))
+
+(defun harness-ui-budgets-by-use (statuses)
+  "Return budget STATUSES sorted by how much of each is spent, fullest first."
+  (sort (copy-sequence statuses)
+        (lambda (a b) (> (or (plist-get a :fraction) 0) (or (plist-get b :fraction) 0)))))
+
+(defun harness-ui-budget-spent (status &optional all)
+  "Return \"$25.00 of $100.00 spent\" for budget STATUS, and what it includes.
+What it includes is what the harness did not record, which
+`harness-budget-outside-text' says, given ALL: \"$25.00 of $100.00
+spent, incl. $5.00 reported by Claude, $20.00 baseline\"."
+  (let ((outside (harness-budget-outside-text status all)))
+    (concat (format "%s of %s spent" (harness-format-cost (plist-get status :spent))
+                    (harness-format-cost (plist-get status :amount)))
+            (if outside (concat ", " outside) ""))))
+
+(defun harness-ui-budget-pace (status)
+  "Return what budget STATUS allows per day for the days it has left.
+That reads \"$3.75/day · 20 days left\"; nil for a budget without a period."
+  (when (plist-get status :per-day)
+    (let ((days (plist-get status :days-left)))
+      (format "%s/day · %s day%s left" (harness-format-cost (plist-get status :per-day))
+              (or days "?") (if (eql days 1) "" "s")))))
+
+(defun harness-ui-describe-budget (status)
+  "Return a sentence about budget STATUS: what it covers, what is spent and left."
+  (let ((pace (harness-ui-budget-pace status)))
+    (format "%s: %s; %s left%s%s."
+            (harness-ui-budget-label (plist-get status :budget))
+            (harness-ui-budget-spent status)
+            (harness-format-cost (max 0 (or (plist-get status :remaining) 0)))
+            (if pace (concat ", " pace) "")
+            (if (harness-json-true-p (plist-get status :hard)) " (hard)" ""))))
+
+(defun harness-ui-format-budgets (statuses)
+  "Return \"budget 62%\" for the fullest of budget STATUSES, nil for none.
+It is coloured as a quota window is; its tooltip describes each budget,
+on one line (see `harness-ui-one-line')."
+  (when statuses
+    (let* ((sorted (harness-ui-budgets-by-use statuses))
+           (used (float (or (plist-get (car sorted) :fraction) 0))))
+      (propertize (format "budget %d%%" (round (* 100 used)))
+                  'face (harness-ui-quota-face used)
+                  'help-echo (harness-ui-one-line
+                              (string-join (append (mapcar #'harness-ui-describe-budget sorted)
+                                                   (list "mouse-1: usage and budgets"))
+                                           "\n"))))))
 
 ;;;; Buffer-local session context
 
@@ -1174,6 +1364,41 @@ A window the catalogue estimated, as its provider does not give it,
 reads \"~200k\"."
   (concat (if (eq t (plist-get model :context-window-estimated)) "~" "")
           (harness-format-tokens (plist-get model :context-window))))
+
+(defun harness-ui-format-rate-number (rate)
+  "Return RATE, in tokens per second, as a short number: 4.8, 48 or 1.2k."
+  (cond ((< rate 9.95) (format "%.1f" rate))
+        ((< rate 999.5) (format "%d" (round rate)))
+        (t (format "%.1fk" (/ rate 1000.0)))))
+
+(defun harness-ui-rate-help (rate &optional live)
+  "Return the one-line tooltip of output RATE, a plist as `usage/rate' gives.
+LIVE non-nil says that the session is running, so RATE is its current one."
+  (let* ((calls (or (plist-get rate :calls) 1))
+         (at (plist-get rate :at))
+         (today (and at (equal (format-time-string "%F" at) (format-time-string "%F")))))
+    (harness-ui-one-line
+     (format "%s %s tokens per second, %s output tokens in %s of streaming over %s on %s%s. Waiting for the first token and running tools do not count."
+             (if live "Output rate:" "Last output rate:")
+             (harness-ui-format-rate-number (or (plist-get rate :rate) 0))
+             (harness-format-tokens (plist-get rate :output))
+             (harness-format-duration (or (plist-get rate :seconds) 0))
+             (if (= calls 1) "the latest model call" (format "the %d latest model calls" calls))
+             (harness-ui-model-label (plist-get rate :model))
+             (if at (format-time-string (if today ", measured at %H:%M" ", measured on %F %H:%M") at) "")))))
+
+(defun harness-ui-format-rate (session &optional bare)
+  "Return how fast SESSION's model writes, as \"48 tok/s\", or nil if unmeasured.
+BARE leaves out the unit.  While SESSION runs this is its current rate;
+otherwise it is the last one measured, dimmed.  The tooltip gives the
+details."
+  (when-let* ((id (plist-get session :id))
+              (rate (harness-ui-session-rate id))
+              (value (plist-get rate :rate)))
+    (let ((live (equal (plist-get session :status) "running")))
+      (propertize (concat (harness-ui-format-rate-number value) (if bare "" " tok/s"))
+                  'face (and (not live) 'harness-dim-face)
+                  'help-echo (harness-ui-rate-help rate live)))))
 
 (defun harness-ui--prettify-model-name (name)
   "Return a readable form of model slug NAME, or nil when it has no known shape.
@@ -2890,6 +3115,7 @@ leaves the buffer's commands out, never the whole menu."
     ("r" "Rename" harness-rename-session)]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
+    ("B" "Delete budget" harness-delete-budget :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
     ("z" "Companion pet" harness-pet :if (lambda () (harness-ui--command-available-p 'harness-pet)))
@@ -2898,6 +3124,8 @@ leaves the buffer's commands out, never the whole menu."
      :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
      :inapt-if harness-corporate-p)
     ("N" "Test notifications" harness-test-notifications)
+    ("v" (lambda () (if (fboundp 'harness-ui-version-menu-label) (harness-ui-version-menu-label) "Version"))
+     harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
     ("R" "Reload harness" harness-reload)
     ("U" "Update harness" harness-update)
     ("L" "Log" harness-show-log)]]

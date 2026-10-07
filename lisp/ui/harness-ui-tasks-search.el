@@ -523,9 +523,16 @@ An answer still on its way is dropped too."
                  " [Search]")
        "[Search]")
      #'harness-ui-tasks-search
-     (harness-ui-one-line
-      (substitute-command-keys
-       "Find tasks, or act on them, by saying so in words (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-search])")))))
+     #'harness-ui-tasks-search--help)))
+
+(defun harness-ui-tasks-search--help (window _object _pos)
+  "The tooltip of the [Search] segment in WINDOW's header line.
+A `help-echo' function, so the keymaps are searched on hover, not every
+time the header line is drawn, which is on every key typed."
+  (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
+    (harness-ui-one-line
+     (substitute-command-keys
+      "Find tasks, or act on them, by saying so in words (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-search])"))))
 
 ;;;; Module
 

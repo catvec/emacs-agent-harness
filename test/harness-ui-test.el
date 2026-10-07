@@ -177,6 +177,7 @@ top, whole, and leaves them as they were."
 (require 'harness-ui-btw)
 (require 'harness-ui-media)
 (require 'harness-ui-review)
+(require 'harness-ui-version)
 
 (defvar harness-ui-test-ran nil "Commands the menu ran, newest first: (COMMAND BUFFER POINT).")
 
@@ -255,6 +256,16 @@ KEYS default to C-g, which closes the menu."
       (pcase-dolist (`(,_mode ,title . ,_columns) (harness-ui-test-menu-groups))
         (should-not (string-match-p (concat "^" (regexp-quote title) "$") text))))
     (should-not transient--prefix)))
+
+(ert-deftest harness-ui-menu-offers-deleting-a-budget ()
+  "Deleting a budget is in the menu from any buffer, not only the dashboard,
+whose own group says d deletes the budget at point."
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (should (string-match-p "B +Delete budget" (harness-ui-test-menu))))
+  (harness-ui-test-with-menu-buffer #'harness-ui-usage-mode
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "B +Delete budget" text))
+      (should (string-match-p "\\. d +Delete budget (or fallback) at point" text)))))
 
 (ert-deftest harness-ui-menu-shows-the-chat-commands-in-a-chat ()
   (harness-ui-test-with-menu-buffer #'harness-chat-mode
@@ -1295,6 +1306,71 @@ shrinks every window and moves the button under the mouse."
   (should (equal "path mouse-1: open" (harness-ui-one-line " path\nmouse-1: open ")))
   (should (equal "" (harness-ui-one-line nil))))
 
+;;;; Output rate
+
+(ert-deftest harness-ui-rate-reads-short-and-dims-once-idle ()
+  "A session's output rate reads as tokens per second, its details on hover.
+A running session's figure is its current one; an idle one's is its
+last, dimmed.  A session never measured shows nothing."
+  (let ((harness-ui--rates (make-hash-table :test 'equal))
+        (rate (list :rate 48.2 :output 1234 :seconds 25.6 :calls 3
+                    :at (float-time) :model "demo:scripted")))
+    ;; One decimal below ten, whole numbers up to a thousand, then k.
+    (should (equal "4.8" (harness-ui-format-rate-number 4.83)))
+    (should (equal "10" (harness-ui-format-rate-number 9.96)))
+    (should (equal "48" (harness-ui-format-rate-number 48.2)))
+    (should (equal "1.2k" (harness-ui-format-rate-number 1234.0)))
+    (should-not (harness-ui-format-rate '(:id "s1" :status "running")))
+    (puthash "s1" rate harness-ui--rates)
+    (let ((live (harness-ui-format-rate '(:id "s1" :status "running")))
+          (idle (harness-ui-format-rate '(:id "s1" :status "idle"))))
+      (should (equal "48 tok/s" (substring-no-properties live)))
+      (should (equal "48" (substring-no-properties (harness-ui-format-rate '(:id "s1") t))))
+      (should-not (get-text-property 0 'face live))
+      (should (eq 'harness-dim-face (get-text-property 0 'face idle)))
+      (let ((help (get-text-property 0 'help-echo live)))
+        (should (string-prefix-p
+                 (concat "Output rate: 48 tokens per second, 1.2k output tokens in 25.6s of streaming"
+                         " over the 3 latest model calls on " (harness-ui-model-label "demo:scripted")
+                         ", measured at ")
+                 help))
+        (should (string-suffix-p "Waiting for the first token and running tools do not count." help))
+        (should-not (string-match-p "\n" help)))
+      (should (string-prefix-p "Last output rate: 48 " (get-text-property 0 'help-echo idle))))
+    ;; One call, measured on another day.
+    (puthash "s1" (append (list :calls 1 :at (- (float-time) (* 3 86400))) rate) harness-ui--rates)
+    (let ((help (get-text-property 0 'help-echo (harness-ui-format-rate '(:id "s1" :status "idle")))))
+      (should (string-match-p " over the latest model call on " help))
+      (should (string-match-p ", measured on [0-9]+-[0-9]+-[0-9]+ [0-9]+:[0-9]+\\. " help)))))
+
+(ert-deftest harness-ui-rate-cache-follows-the-harness ()
+  "The UI's rates come from `usage/rate-updated' events and tell the views.
+A fetch replaces the whole cache; a deleted session's rate goes."
+  (let ((harness-ui--rates (make-hash-table :test 'equal))
+        (harness-ui--sessions (make-hash-table :test 'equal))
+        (harness-ui-rate-functions nil)
+        (harness-ui-event-functions nil)
+        (harness-ui-sessions-changed-hook nil)
+        (heard nil)
+        (rate '(:rate 20.0 :output 100 :seconds 5.0 :calls 1 :at 1000.0 :model "demo:scripted")))
+    (add-hook 'harness-ui-rate-functions (lambda (id rate) (push (list id rate) heard)))
+    (harness-ui--dispatch-ui "_harness/event" (list :event "usage/rate-updated" :args (list "s1" rate)) nil)
+    (should (equal rate (harness-ui-session-rate "s1")))
+    (should (equal (list (list "s1" rate)) heard))
+    ;; The fetch on connecting replaces the cache, then tells the views at once.
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method _params callback &rest _)
+                 (should (equal "_harness/usage/rates" method))
+                 (funcall callback (list (append '(:session "s2") rate))))))
+      (harness-ui-refresh-rates))
+    (should-not (harness-ui-session-rate "s1"))
+    (should (equal rate (harness-ui-session-rate "s2")))
+    (should (equal '(nil nil) (car heard)))
+    ;; A deleted session's rate goes with it.
+    (harness-ui--forget-session "s2")
+    (should-not (harness-ui-session-rate "s2"))
+    (should (equal '("s2" nil) (car heard)))))
+
 ;;;; Mouse targets
 
 (ert-deftest harness-ui-mouse-keymap-runs-on-ret-too ()
@@ -1310,9 +1386,6 @@ without a position, as it does on a click."
           (execute-kbd-macro (kbd "RET"))
           (should (= 1 ran)))
       (kill-buffer buffer))))
-
-(provide 'harness-ui-test)
-;;; harness-ui-test.el ends here
 
 (ert-deftest harness-ui-fit-header-drops-the-least-important-first ()
   "A header too wide for its window keeps what matters and loses the rest.
@@ -1352,3 +1425,31 @@ always stays."
   ;; showing the buffer, which this buffer need not be shown in.
   (should (= (harness-ui-header-width (selected-window))
              (- (window-pixel-width) (or (window-scroll-bar-width) 0)))))
+
+(ert-deftest harness-ui-icons-are-made-once ()
+  "An icon is made once, then reused while it is defined the same way.
+Header and mode lines are drawn on every key typed, and making an icon
+reads its file and asks the fonts."
+  (let ((made 0)
+        (harness-ui--icons (make-hash-table :test 'equal)))
+    (cl-letf* ((make (symbol-function 'icon-string))
+               ((symbol-function 'icon-string) (lambda (name) (cl-incf made) (funcall make name))))
+      (let ((a (harness-ui-icon 'harness-icon-idle))
+            (b (harness-ui-icon 'harness-icon-idle)))
+        (should (= made 1))
+        (should (equal-including-properties a b))
+        ;; Each is a copy: what one caller puts on it, the next one does not get.
+        (put-text-property 0 (length a) 'face 'bold a)
+        (should-not (get-text-property 0 'face (harness-ui-icon 'harness-icon-idle)))
+        (should (= made 1))
+        ;; Defined again, by a reload say, it is made again.
+        (harness-ui-define-icon harness-icon-idle "idle" "●" "idle" "Idle session.")
+        (harness-ui-icon 'harness-icon-idle)
+        (should (= made 2))
+        ;; So it is for a user who prefers another kind of icon.
+        (let ((icon-preference '(text)))
+          (should (equal "idle" (substring-no-properties (harness-ui-icon 'harness-icon-idle))))
+          (should (= made 3)))))))
+
+(provide 'harness-ui-test)
+;;; harness-ui-test.el ends here

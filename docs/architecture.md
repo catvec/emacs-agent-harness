@@ -98,6 +98,10 @@ default) the layers above are split across two Emacs processes:
 - Project roots and file lists (lisp/harness-files.el) are computed on
   both sides with the same code; the UI lists files itself so `@`
   completion uses the user's projectile cache.
+- Each side notes the commit it loaded the harness from
+  (lisp/harness-revision.el, see version): the two load their files
+  separately, so a restart of the process alone can leave them on
+  different commits.
 
 The harness process cannot prompt: TRAMP connections it opens need
 non-interactive authentication (ssh agent), and auth-source secrets
@@ -144,7 +148,7 @@ subscribers with named functions, and make `:init` idempotent.
 `harness-reload` compiles every file first and refuses to load anything
 if one fails.  It loads harness.el, the core files, the libraries of
 lisp/ (`harness--library-files`: files, the Emacs endpoint, desktop
-notifications, server) and the modules, so a module never runs against
+notifications, server, revision) and the modules, so a module never runs against
 a library as it was before an update; a file added to lisp/ that both
 sides load belongs in one of those lists.  Records made before a reload
 keep their layout: a slot added to a struct goes last and is read in a
@@ -700,6 +704,7 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type checkpoint :checkpoint PLIST :call-id "…")  ; hosted loops: where the conversation stands
 (:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N
        :list-cost F-OR-NIL :billing api|subscription|extra-usage|nil :plan ID)  ; see Usage record
+(:type call-usage :output N)            ; hosted loops: one model call's output, counted by the turn's usage
 (:type provider-state :state PLIST)     ; persist on the session
 (:type activity :phase PHASE :tool NAME :chars N)  ; what the model is busy with, see below
 (:type quota :windows (…))
@@ -756,6 +761,19 @@ thinks or writes a large input.  The OpenAI provider sends `tool-input`.
 Text deltas that are only whitespace are still text (a `"\n\n"` delta
 separates paragraphs); the agent keeps them from opening a message.
 
+`call-usage` reports the output tokens of one model call of a hosted
+loop's turn as soon as the call ends. A hosted loop sends a single
+`usage` event, for the whole turn, at its end, and that event is the one
+that counts: `call-usage` is not recorded anywhere. The agent passes it
+on as `agent/call-usage`, so the usage module can measure the output
+rate during a long turn.
+- Claude Code sends the output that each `message_delta` adds to its
+  message.
+- Copilot sends each main-conversation `assistant.usage`. Sub-agent
+  calls do not count, because their deltas do not stream into the
+  conversation either.
+- Native loops send none: their `usage` event is already per call.
+
 Forking: `provider/fork` returns a new provider state that may be marked
 pending (for the CLI: `(:cli-session-id PARENT :fork-pending t)`); the
 first completion consumes it and emits a `provider-state` event that the
@@ -774,8 +792,9 @@ provider is dropped from the session at that step, since that
 provider's turns are ones the state's conversation never saw.  So a
 session switched away and straight back resumes its conversation,
 while one that ran a step elsewhere starts a new one there, which
-`handoff/check` calls lossy.  Naming, compaction and forks work on a
-fork of a state their model can continue, never on another provider's.
+`handoff/check` calls lossy.  Naming a whole conversation, compaction
+and forks work on a fork of a state their model can continue, never on
+another provider's.
 
 Checkpoints: a hosted loop says where its conversation stands as
 content lands in it, so that a fork or a checkout at a node can cut the
@@ -833,7 +852,9 @@ the provider reports none:
 ```
 
 Event `provider/quota-updated PROVIDER-ID QUOTA` fires whenever a
-provider learns something new; the UI caches QUOTA from it.
+provider learns something new; the UI caches QUOTA from it, and the
+usage module counts `:extra :used` in month budgets over everything
+(see usage).
 
 The Claude provider learns the billing from the `account` of each CLI
 process's initialize answer:
@@ -891,6 +912,19 @@ than at its own default.  The percentage is part of the settings a
 process was started with, so changing the cap restarts the CLI with
 `--resume`, like the model and system prompt.
 
+The CLI loads the CLAUDE.md files as `claude` does, but not Claude
+Code's auto memory: every process it starts gets
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` unless
+`harness-provider-claude-auto-memory` is on.  The memory's index,
+MEMORY.md, lists notes kept under `~/.claude/projects/PROJECT/memory/`,
+which Claude Code reads and writes with its own file tools, following
+instructions in its own system prompt.  A harness session has neither,
+so the model opened the notes with the harness's file tools, outside
+the allowed directories, and every session asked the user for that
+directory (or, unattended, was refused it).  Whether a process loads
+the memory is part of the settings it was started with, so changing the
+option restarts the CLI with `--resume`.
+
 The one exception is WebSearch, which stands in for web_search
 (`harness-provider-claude-builtin-tools`; capability `:builtin-tools`).
 A request whose `:builtin-tools` names web_search starts the CLI with
@@ -942,11 +976,13 @@ new CLI session opened for a transcript that has messages before the
 new one gets them the same way.
 
 A request whose provider state is not the one its session has recorded
-(naming sends a fork of it) runs in a CLI process of its own, closed
-when it is done.  It never restarts the session's process with its own
-settings or writes into the session's CLI session.
+(naming the whole conversation sends a fork of it) runs in a CLI
+process of its own, closed when it is done.  It never restarts the
+session's process with its own settings or writes into the session's
+CLI session.
 
-A one-off request (`:ephemeral t', the permission judge's) gets a CLI
+A one-off request (`:ephemeral t', the permission judge's, or naming a
+session from its first message) gets a CLI
 process of its own whatever its state, under a key of its own
 (SESSION-ID~N), never resumed and stopped once it is done (its input is
 closed, and it is killed if it still runs a few seconds later).  It
@@ -1097,11 +1133,13 @@ version 3 or newer.  Per harness session one CLI process:
   Copilot session.  The first message to a session created for a
   transcript with messages carries them (see "Replay").
 - Side requests are one-off questions: naming, compaction and the
-  permission judge.  A request is one when it sets `:ephemeral` or
+  permission judge.  A request is one when it sets `:ephemeral` (the
+  judge's, and naming a session from its first message) or
   `:max-tokens` (a turn
   of the conversation never caps its answer), when its provider state
-  is not the one its session has recorded (naming brings a fork of it),
-  or when its session record has no state at all (the judge's).  Any
+  is not the one its session has recorded (naming the whole
+  conversation brings a fork of it), or when its session record has no
+  state at all (the judge's and naming's).  Any
   number of them run at once, beside the conversation's turn and beside
   each other, each in a throwaway session: a fork of the conversation
   its own state names, else of the one its session has recorded (so a
@@ -1146,7 +1184,8 @@ its `:label`, a short name in sentence case for people ("Read file",
 "Bash", "Web search").  The label is required (`harness-define-tool`
 signals without one) and every UI shows it wherever it names a tool;
 the identifier stays for the model, for configuration (permission
-rules, `harness-perms--auto-allow-tools`) and in the text agents read
+rules, `harness-perms--auto-allow-tools`,
+`harness-perms--inspection-tools`) and in the text agents read
 about other sessions (`session_read`).  `harness-tools-label NAME`
 returns the label, or NAME for a tool nobody registered.
 `harness-tool-title NAME INPUT` titles a call: the label, then a colon
@@ -1226,11 +1265,12 @@ non-interactive session it stays a denial.
   `(:behavior allow|deny :scope once|session|always :reason :pattern)`,
   or an option id string such as "allow-session" (what ACP clients send
   back), also as `(:option ID :pattern P)`.
-- Patterns: a prompt about paths is answered for a glob pattern, not
-  for one file.  Its payload's `:pattern` is everything in the
-  directory of the call's paths (`DIR/**`, `harness-perms--paths-dir`:
-  the directory holding a file, a directory itself, the deepest common
-  one of several), with symbolic links resolved.  ANSWER's `:pattern`,
+- Patterns: a prompt about a path outside the roots (the jail's, or an
+  agent's `request_directory_access`) is answered for a glob pattern,
+  not for one file.  Its payload's `:pattern` is everything in the
+  directory it asks for (`DIR/**`: the directory holding a file, or a
+  directory itself), with symbolic links resolved.  No other prompt
+  carries one (see the tool prompt below).  ANSWER's `:pattern`,
   absolute or relative to the session's cwd, replaces it: more specific
   (`DIR/sub/**`, `DIR/*.el`, one file) or less (a parent).  Roots and
   rule paths alike are directories, holding themselves and all below,
@@ -1260,10 +1300,10 @@ non-interactive session it stays a denial.
   out).  The call is about its subject paths
   (`harness-perms--subject-paths`): the ones it names outside the
   session's directories, or, when it names none there, where it runs,
-  as before.  The tool prompt shows and builds its pattern from them,
-  so `ls -la ~/.claude/projects/x` run in the project is answered for
-  `~/.claude/projects/x/**` and not for every command run in the
-  project, and the rules weigh them (below).
+  as before.  The tool prompt shows them, so `ls -la
+  ~/.claude/projects/x` run in the project names `~/.claude/projects/x`
+  and not the project (being about the call, it offers no pattern, see
+  below), and the rules weigh them (below).
 - The jail asks instead of denying when a path lies outside the roots
   and someone can answer: a pending `permission` request whose payload
   carries `:dir`, `:pattern` and the options allow-once (this call may
@@ -1303,12 +1343,35 @@ non-interactive session it stays a denial.
   `harness-allowed-directories`, its grants and the tool output
   directory.  The temporary directory needs no grant and cannot be
   revoked.
+- Inspecting the harness itself is one of the things that make it
+  powerful, so no mode, judge or jail stands in its way.  The harness
+  is no root, but a call of kind `read` may read it, in every mode,
+  with the user there or away: `harness-perms-inspection-dirs` lists
+  `harness-directory`, the checkout its harness.el links into when it
+  is a symbolic link (a straight.el build directory links every source
+  into the package's repository), and `harness-state-directory` (the
+  sessions with their transcripts, the task boards, usage).  The jail
+  lets such a read through (`harness-perms--inspectable-p`) and the
+  mode stage allows it with no judge asked ("reading the harness itself
+  never needs approval"); a standing rule still decides first.
+  Writes, commands, sub-agents and directory grants there are jailed as
+  anywhere outside the roots, and their denial says reading needs no
+  grant.  The credentials in the state directory
+  (`harness-perms--private-files`: `acp-token`, and `server-config.el`
+  with the API keys forwarded to the harness process) are left out,
+  since what a tool reads goes to the model's provider; so is a search
+  below a directory that holds them, which the tools that only list
+  names (`harness-perms--listing-tools`: list_dir, glob, file_info) may
+  still look at.  Symbolic links are resolved first, out of the harness
+  as much as into it.
 - `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
   grants every session), `permission/revoke-dir SESSION-ID DIR`,
   `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|outputs
   :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
   (the full effective root list), `permission/rules SESSION-ID`
-  (`(:mode :non-interactive :auto-allow :session :always :roots)`),
+  (`(:mode :non-interactive :auto-allow :session :always :roots :inspect)`:
+  `:auto-allow` holds the inspection tools too, and `:inspect` the
+  directories of the harness itself),
   `permission/pending SESSION-ID`.
 - Session directory grants are stored on the session record
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
@@ -1322,17 +1385,17 @@ non-interactive session it stays a denial.
   so a rule for the project no longer lets `rm -rf ~` run in it; a deny
   rule holds when any path it names, inside or out, or where it runs
   lies in the pattern.  The mode stage checks them first, before the
-  auto-allow list and the mode.  A tool prompt for a call with paths offers its `:pattern`,
-  and its allow-session / allow-always / deny-always answers record
-  `(:tool NAME :path PATTERN :behavior B)` rather than a rule for the
-  tool everywhere; a call without paths records `(:tool NAME :behavior B)`
-  as before.
+  auto-allow list and the mode.  A tool prompt (the mode asking, or the
+  auto judge objecting) is about the call itself, whose paths the jail
+  already let through: it offers no pattern, and its allow-session /
+  allow-always / deny-always answers record `(:tool NAME :behavior B)`,
+  for every call of the tool, a `:pattern` in the answer notwithstanding.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
-  `:pattern` for a call with paths and `:dir` and `:reason` for a
-  directory prompt; a tool prompt's `:paths` are its subject paths, and
-  a shell command's prompt has `:cwd`, where it runs; UIs offer only
-  the listed `:options`),
+  `:dir`, `:pattern` and `:reason` for a directory prompt; a tool
+  prompt's `:paths` are its subject paths, and a shell command's prompt
+  has `:cwd`, where it runs; UIs offer only the listed `:options`, and
+  show a pattern only when there is one),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
@@ -1346,11 +1409,17 @@ non-interactive session it stays a denial.
   the session's own, overrides it.  `yolo` allows everything; the jail
   still applies.  Tools in
   `harness-perms--auto-allow-tools` are allowed in every mode: the meta
-  tools, skill and Emacs lookups, `web_search`, which only sends its
+  tools, skill lookups, `web_search`, which only sends its
   query to the configured search provider, so task sessions can search,
   `notify`, which only reaches the user through the notification
   providers they set up, so unattended sessions can say they need them,
   and `hand_in`, which only records a task's report and ends the turn.
+  So are the tools in `harness-perms--inspection-tools`, which only
+  inspect the harness or the user's live Emacs: `emacs_buffers`,
+  `emacs_buffer`, `emacs_windows`, `emacs_describe`,
+  `emacs_find_definition`, `emacs_messages`, `session_info`,
+  `session_list`, `session_read`, `session_search`, `session_wait`,
+  `task_list`, `task_wait` and `notification_providers`.
   The model provider's own search, standing in for `web_search` (see
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
@@ -1367,12 +1436,18 @@ non-interactive session it stays a denial.
   data outside the roots, force pushes, system changes, sending secrets
   away, or widening its own permissions.  It leans to allowing:
   reads anywhere, edits, builds, tests, local git and scratch files
-  anywhere (temporary directories included) are ordinary work.  It
+  anywhere (temporary directories included) are ordinary work, and so
+  is inspecting the harness itself wherever it lives, with any tool,
+  Emacs Lisp included, its credentials (`acp-token`,
+  `server-config.el`) excepted: the judge sees only the inspection the
+  rules above do not already allow.  It
   never rules on the task, its scope, its review or the project's
   workflow, and it is given nothing to rule on them with.  The user
   message (`harness-perms--judge-text`) holds the call alone: the tool,
   the first sentence of its description, the input, the working
-  directory and the allowed roots.  The request is `:ephemeral`, so the
+  directory, the allowed roots and where the harness lives
+  (`harness-perms--judge-harness`: its code and state directories and
+  its credential files).  The request is `:ephemeral`, so the
   provider brings no earlier verdicts and no project instructions
   (CLAUDE.md).  A judge's denial carries `harness-perms-judge-deny-hint`.
   A long input is cut (`harness-perms--judge-input-chars') and the block
@@ -1396,7 +1471,10 @@ non-interactive session it stays a denial.
   allowed roots and how to widen them.  A path elsewhere in the
   system's temporary directory (and the agent's own request for one)
   also sends the agent to the session's own temporary directory, where
-  scratch files go without stopping the session.
+  scratch files go without stopping the session.  A path in the harness
+  itself (and the agent's own request for one) adds that reading it
+  needs no grant, and a read refused for reaching the credentials names
+  them (`harness-perms--inspection-hint`).
 - Non-interactive (the user is away) is no permission policy of its
   own and refuses nothing for being unattended: the auto judge
   (stage 30, `harness-perms--judge-p`) decides what would ask the user,
@@ -1593,44 +1671,100 @@ non-interactive session it stays a denial.
   `usage/budget-status ID &rest (:now)` (ID may be "session:SID" for a
   session's implicit budget) → `(:budget :spent :amount :remaining
   :fraction :hard :per-day :days-left :period-start :period-end
-  :baseline)`;
-  `usage/session-budgets SID`, `usage/plan-budget AMOUNT PERIOD DAYS`,
+  :baseline :reported :sources)`;
+  `usage/session-budgets SID` (every budget that applies to the
+  session), `usage/project-budgets ROOT` (the project budgets of ROOT
+  and the period budgets of everything or of ROOT, as statuses; what
+  the task board shows), `usage/plan-budget AMOUNT PERIOD DAYS`,
   `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`.
   BUDGET = `(:id :scope session|project|period :target ID-OR-ROOT
   :amount F :hard BOOL :period day|week|month :days business|all
   :baseline F :baseline-period-start "YYYY-MM-DD")`.
-- A baseline is what was spent that the harness never recorded (other
-  tools, the console, days before it kept usage), set by hand so a
-  budget made mid-month does not start at $0.  `:spent` is the recorded cost plus
-  the baseline that counts: a period budget's only while the current
-  period starts on `:baseline-period-start` (set-budget fills in the
-  period containing now, and moves any date or float time to its
+- `:spent` is the recorded cost, plus `:reported`, plus `:baseline`.
+- A budget over everything (scope period, no target, a day, week or
+  month: `harness-usage-backfills-p`) backfills from what providers
+  report they billed in its period.  `:reported` is the sum of each
+  source's `:outside`, and `:sources` lists them as `(:source ID :label
+  NAME :kind extra-usage|cost-report :amount :recorded :outside :at
+  :detail TEXT)`, plus `:since :until` for a cost report.  `:amount` is
+  what the source reported as of `:at`, `:recorded` what the harness
+  recorded before then that the source counts too, and `:outside` the
+  rest, never below 0.  Two sources:
+  - Extra usage: a `provider/quota-updated` QUOTA whose `:extra :used`
+    is in US dollars covers the calendar month of its `:updated` time.
+    That is Claude Code's usage credits (the CLI's `get_usage`) or
+    Copilot's overage.  It counts in month budgets, less that
+    provider's rows billed `extra-usage`.  A QUOTA without `:extra`
+    (per-token billing) drops the provider's report.
+  - Anthropic's cost report (below), for the UTC days of the period's
+    local dates, less the Claude rows billed per token.  It is fetched
+    in the background, from the command loop, when a status is computed
+    without `:now` and the last try for that period is older than
+    `harness-usage-cost-report-interval` (600 s).  A failure, or a
+    missing key, is remembered for as long and keeps the amount fetched
+    before.
+  Reports live in memory, and `usage/reported-changed REPORT` fires when
+  one changes (forwarded to clients, and the dashboard reloads).
+  Project, session and per-project budgets do not backfill: a provider
+  cannot say what one project spent, and a session spends only through
+  the harness.
+- A baseline is what was spent that the harness never recorded and no
+  provider reports (other tools, the console, days before it kept
+  usage), set by hand so a budget made mid-month does not start at $0.
+  It counts besides `:reported`: a period budget's only while the
+  current period starts on `:baseline-period-start` (set-budget fills
+  in the period containing now, and moves any date or float time to its
   period's start), one without a period always.  The status's
   `:baseline` is that part, 0 otherwise.  nil or 0 clears it.
-- `usage/fetch-api-cost &rest (:now)` gives a promise of this month's
-  cost from Anthropic's Admin API (`GET /v1/organizations/cost_report`,
-  UTC days, amounts in cents): `(:available t :amount :recorded
-  :outside :period-start :since :until)`.  `:recorded` is what the
-  harness recorded in that time for Claude calls billed per token,
-  which the report counts too, and `:outside` the rest, offered as a
-  month budget's baseline.  It needs an Admin API key
+- `usage/fetch-api-cost &rest (:period :now)` gives a promise of what
+  Anthropic billed in the calendar `:period` (day, week or month, the
+  default) containing `:now`, from its Admin API (`GET
+  /v1/organizations/cost_report`, UTC days, amounts in cents):
+  `(:available t :amount :recorded :outside :period :period-start
+  :since :until)`.  `:recorded` is what the harness recorded in that
+  time for Claude calls billed per token, which the report counts too,
+  and `:outside` the rest.  The answer also updates what budgets over
+  everything count, at once.  It needs an Admin API key
   (`harness-anthropic-admin-api-key`, ANTHROPIC_ADMIN_KEY, or
   auth-source host api.anthropic.com user admin); without one nothing
   is fetched and it gives `(:available nil :reason)`.  Pro and Max
   subscriptions have no cost report.
 - Hard budgets block via `agent/before-turn`; soft ones emit
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
-  count billed cost, so calls a subscription covers spend none; a
-  baseline counts toward both.
+  count billed cost, so calls a subscription covers spend none; what
+  providers report and a baseline count toward both.
 - The Budget setting (`harness-budget`, `(:amount F :hard BOOL)`) is
   one implicit budget, id "settings", for all sessions together: it
   counts every recorded call and applies to every session, after the
-  explicit ones in `usage/session-budgets`.  `usage/budget-status
+  explicit ones in `usage/session-budgets` and `usage/project-budgets`
+  (so the task board's header shows it too).  `usage/budget-status
   "settings"` gives its status while it is set; `usage/budgets` lists
   only the explicit ones.  Sessions no longer copy it into their own
   `:budget`; the session module drops the copies saved before, once
   (marker `session-budget-copies-dropped.json`).
 - Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
+- Output rate: how fast each session's model writes, measured here in
+  the harness process, never in the UI.
+  - Tokens: the accounting's own counts, never a second count of the
+    stream. Each `session/usage` record supplies them, and on a hosted
+    loop so does each model call's `agent/call-usage` (see provider
+    `call-usage`). A hosted loop's record of the turn's total is not
+    measured again once its calls were.
+  - Seconds: the streaming time, meaning the time the agent's activity
+    (`agent/activity-changed`) is in `thinking`, `writing` or
+    `tool-input`. The wait for the first token, the tools' runs and
+    compaction do not count.
+  - Calls: a call with no output, or with less than 0.25 s of streaming
+    (output that arrived all at once), is left out.
+  - The rate: Σoutput / Σseconds over the session's newest calls on its
+    current model, counting back until they cover
+    `harness-usage-rate-window` seconds of streaming (30). It is kept in
+    memory after the turn, so an idle session keeps its last rate, and
+    is dropped when the session is deleted.
+  - Interface: `usage/rate SID` returns `(:rate F :output N :seconds F
+    :calls N :at FLOAT :model ID)` or nil. `usage/rates` returns every
+    measured session's rate, each with `:session`. Each new rate
+    triggers `usage/rate-updated SID RATE`, which ACP forwards.
 
 ### fallback
 
@@ -1780,12 +1914,26 @@ so switching to either loses nothing.
 
 ### naming
 
-- `naming/name SESSION-ID` → promise of name.  Auto after the first
-  turn ends when the session has no name: forks provider state when
-  possible so the cached prefix is reused; hints "naming…" then the result.
-  The hosted providers run that request beside the session's
-  conversation (a CLI process of its own for Claude Code, a throwaway
-  session for Copilot), so the question never lands in it.
+- `naming/name SESSION-ID &optional OPTS` → promise of name.  A session
+  with no name is named as soon as its first message is sent: on
+  `agent/turn-started`, not when the turn ends, since a task's first
+  turn lasts until the task is done.  That request (OPTS `(:opening t)`)
+  runs beside the turn and holds only the opening message (and the
+  latest one when the conversation has moved on since, as a fork's has),
+  each cut to 3000 characters, and the question.  It goes to
+  `harness-naming-model` (`auto`, the default: the session provider's
+  `:cheap` tier, `provider/tier-model`) with `:ephemeral t`,
+  `:no-thinking t`, a 40-token budget and no provider state, so the
+  hosted providers answer it apart from the session's conversation (a
+  CLI process of its own for Claude Code, a throwaway session for
+  Copilot) and the question never lands in it.  A session still nameless
+  when a later turn starts (its naming failed) is named then; btw and
+  subagent sessions never are.  Without `:opening` the whole
+  conversation is titled on the session's model, on a fork of its
+  provider state when possible so the cached prefix is reused.  Hints
+  "Naming session…" then the result; a session renamed while the model
+  was asked keeps its new name.  Events `naming/done SID NAME`,
+  `naming/failed SID MESSAGE`.
 - Sync filter `naming/system-prompt` (value string, args session) lets
   modules add to `harness-naming--base-system-prompt` per session (tasks ask
   for ticket titles).
@@ -2003,7 +2151,8 @@ verdict.
   locks it again (see worktree).
 - The session's name is the task's title: `naming/system-prompt` adds
   `harness-tasks--naming-instructions` (nil for none) so the model titles task
-  sessions like tickets.
+  sessions like tickets, as soon as the task's first turn starts (see
+  naming), so the board shows the ticket title while the task works.
 - With nothing to review (below), a turn ending `end-turn` queues
   `merge/enqueue SID TARGET`, TARGET being the project's root session
   named `harness-tasks--merge-session-name`
@@ -2382,40 +2531,45 @@ TRAMP prefixes come from the session host):
 | `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
 | `bash` | Bash | command, timeout, cwd | exec |
 | `elisp` | Emacs Lisp | code, timeout | exec |
-| `emacs_buffers` | List buffers | filter, all | read |
-| `emacs_windows` | List windows | — | read |
-| `emacs_buffer` | Read buffer | name, offset, limit | read |
+| `emacs_buffers` | List buffers | filter, all | read (needs no approval: `harness-perms--inspection-tools`) |
+| `emacs_windows` | List windows | — | read (needs no approval: `harness-perms--inspection-tools`) |
+| `emacs_buffer` | Read buffer | name, offset, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_open` | Open buffer | name (buffer or path), line | read |
 | `emacs_insert` | Insert text | name, text, position (point/start/end) | write |
 | `emacs_save_buffer` | Save buffer | name | write |
-| `emacs_describe` | Describe symbol | symbol, buffer | read |
-| `emacs_find_definition` | Find definition | symbol, type (function/variable/face) | read |
+| `emacs_describe` | Describe symbol | symbol, buffer | read (needs no approval: `harness-perms--inspection-tools`) |
+| `emacs_find_definition` | Find definition | symbol, type (function/variable/face) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_trace` | Trace symbol | action (start/stop/list), symbol, type (function/variable), callers, limit | write |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
-| `emacs_messages` | Emacs messages | count | read |
+| `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
 | `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
-| `session_info` | Session info | — | read |
+| `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
 | `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name | read |
-| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read |
-| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read |
-| `session_read` | Read session | session_id, limit, before, kinds, max_chars | read |
+| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
-| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read |
-| `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read |
+| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
+| `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
-| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read |
+| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus | exec (tools-dev; offered in a checkout of the harness only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
-| `notification_providers` | Notification providers | (none) | read |
+| `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
+
+The tools of kind read that take a path (`read_file`, `list_dir`,
+`glob`, `grep`, `file_info`, `emacs_open`) may read the harness itself
+as well as the session's roots: its code and its state directory, its
+credentials aside (see perms).
 
 `hand_in` (tools-handin) is how a task's session finishes: the tool
 records the summary and evidence on the task (`task/hand-in'`) and asks
@@ -2606,8 +2760,9 @@ Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
 pattern, reason}}` (`cwd`: where a shell command runs; `paths`: what
 the call is about, see perms) → `{outcome:{outcome:"selected",optionId}}`, plus
-`_harness:{pattern}` when the client answers a request about paths for
-another glob pattern than its `_harness.pattern` (see perms),
+`_harness:{pattern}` when the client answers a request about a path
+outside the allowed directories for another glob pattern than its
+`_harness.pattern` (only such a request has one, see perms),
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
 Its `options` are the answers' labels; `diagrams`, present when the
 options have them, holds one per option, `{type: "ascii", text}` or
@@ -2750,6 +2905,62 @@ started|stopped|connected|disconnected|paired|revoked|address|corporate
 closes connections as they are accepted, and its change hook stops the
 listener.
 
+### version
+
+Whether the running harness is the latest.  What runs is noted by
+lisp/harness-revision.el, on both sides: `harness-start-hook` and
+`harness-reload-hook` run `harness-revision-note-loaded`, which reads
+the checkout `harness.el` comes from, links followed (straight.el's
+build directory leads into its clone), and `harness-revision-loaded`
+keeps the promise of `(:directory :loaded :version :commit :branch
+:dirty)` until the next load; `:error` instead of a commit when that is
+not the top of a git working tree (a package archive, or a harness
+inside another repository).
+
+Origins, in this order and each once: the loaded checkout as it is now
+(kind `loaded`); local checkouts (kind `local`): the directories of
+`harness-version-origins`, then the main checkouts of the harness that
+sessions' projects belong to (`session/list`,
+`harness-files-owning-checkout`); repositories by URL (kind `remote`,
+read with `git ls-remote`).  The repository the loaded checkout pulls
+from (`:upstream t`) comes first of its kind: the remote its branch
+tracks and the branch it tracks there (`for-each-ref
+%(upstream:remotename)`, the remote's URL from `git config`), or
+`origin` and the branch its HEAD names on a detached HEAD.  straight.el
+and other package managers set that remote to the recipe's repository,
+so an install from GitHub is compared with GitHub and one from sourcehut
+with sourcehut.  It is named after its host (github, sourcehut, gitlab,
+codeberg, bitbucket, else the host, else upstream) and left out when
+`harness-version-origins` names its URL on its branch or on none.  It is
+read in the harness process, which has no straight.el, and from any
+package manager's clone.  Nothing is fetched: the relation (`rev-list
+--left-right --count`) and the newest eight commits each side lacks
+(`log --no-merges`) are worked out in the first local repository
+holding both commits, local checkouts first and the loaded one last,
+as package managers clone shallowly.  When none holds both and the
+loaded checkout lacks the origin's commit (`cat-file -e`), the harness
+lacks it too: the origin is ahead, uncounted.
+
+`version/check (&optional max-age)` → promise of the report `(:checked
+:version :running :origins :verdict)`, each origin `(:name :kind
+:location :branch :upstream :commit :subject :date :dirty :status
+:missing :extra :missing-commits :extra-commits :error)`, `:status`
+same, newer, older, diverged, ahead (a commit the harness lacks, no
+local repository holding both), unknown (the running commit is in none)
+or error, and `:verdict` behind (an origin is newer, diverged or
+ahead), unknown (one cannot be placed, or none could be read) or
+latest.  The last report answers
+while it is about the revision running now and at most MAX-AGE seconds
+old; otherwise a check runs, or the one running is joined (replaced
+after five minutes).  Checks also run 30 s after the start, 3 s after
+`harness/reloaded` and every half hour; each report is announced as
+`version/checked REPORT`, forwarded to UIs.  Git always runs
+asynchronously, without optional locks, with a timeout and never
+prompting (`harness-revision-git-environment`: no terminal, an empty
+GIT_ASKPASS, ssh in BatchMode, no credential helper for ls-remote).  A
+failing command rejects its promise without signalling in a handler, so
+an origin out of reach is an `error` origin, not an error in the log.
+
 ## Presentation contracts
 
 `harness-ui` owns the connection (`harness-ui-connection`, local by
@@ -2796,19 +3007,21 @@ board, SPC, through `harness-ui-popout-at-point-functions`).  Opening a
 popout brings the session's cached pending list into the store first
 (`harness-ui-pending-sync-session`), which is how a request a view
 already shows becomes answerable there when no chat has synced it.
-A permission prompt about paths shows the glob pattern its answers
+A permission prompt about a path outside the session's directories
+(one with a `:pattern`, see perms) shows the glob pattern its answers
 hold for on a line of its own (`pattern: ~/notes/**  [Edit] e`), with
 `[Edit]`/`e` (`harness-ui-pending-edit-pattern`, also `C-c C-p` in
 the chat) to change it in the minibuffer, more or less specific;
 `M-n` offers patterns around the request's own, and the answer carries
-the edited pattern (see perms).  For a call with paths the line also
-says which answers remember the pattern ("s, a, N remember the answer
-for it").  The facts above it say what the pattern is made of
-(`harness-ui-pending--permission-facts`): `kind: write   paths:
-~/proj/lisp/a.el` on one line for most calls; for a shell command
-`kind: exec   runs in: ~/proj`, where it runs, and below it `paths:
-~/.claude/projects/x`, what it is about: the paths it names outside
-the session's directories (left out when that is just where it runs).
+the edited pattern.  Any other prompt is about the call alone and
+shows no pattern; `C-c C-p`, or `e` on such a panel, edits the newest
+request that has one.  The facts under a panel's title
+(`harness-ui-pending--permission-facts`) say what the call reaches:
+`kind: write   paths: ~/proj/lisp/a.el` on one line for most calls;
+for a shell command `kind: exec   runs in: ~/proj`, where it runs, and
+below it `paths: ~/.claude/projects/x`, what it is about: the paths it
+names outside the session's directories (left out when that is just
+where it runs).
 
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting
@@ -2832,7 +3045,17 @@ stays snappy.  A checkout (`session/head-moved`) makes the transcript
 another path, so the buffer loads it again rather than leave the
 branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
-the language's major mode, lists, quotes, links).  Tool and thinking
+the language's major mode, lists, quotes, links).  A click or `RET` on
+a link opens it (`harness-ui-markdown-open-link`): a URL with
+`browse-url`, anything else as a file in `default-directory` -- the
+session's directory, in a chat -- in another window, at the line a
+`#L12` or `:12` suffix names.  The link's keymap binds `mouse-2` as well
+as `mouse-1`: its `follow-link` property makes a quick `mouse-1` a
+`mouse-2`, and an unbound one reached the global `mouse-yank-primary`,
+which pasted the primary selection into the transcript (read-only, but
+rear-nonsticky, so an insertion inside it gets through).  Its double and
+triple clicks are bound to `ignore`: unbound, they ran as single clicks
+and opened the link again after the first click had.  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
 Thinking between two calls of a run does not break it but folds in
 with them, since a model that thinks before every call would never
@@ -2869,9 +3092,18 @@ at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
 it (all of it in `harness-ui-pending`).  Switching redraws the options
 and that area alone, in place, so point, the windows and the compose box
-stay put.  A module hosted by a chat buffer can put a read-only panel of
-its own above the box with `harness-chat-panel-functions` and take the
-box's message with `harness-chat-send-function`.
+stay put.  A permission panel whose one line of input leaves something
+out (a value past its width, a further line of one, a line too long)
+ends that line in `[Show all]`, `[Show all N lines]` when values have
+lines it hides, and binds TAB on the panel
+(`harness-ui-pending-toggle-input`); whole, each value takes a line of
+its own and a cut one a verbatim block under its key, until `[Show
+less]`.  Which requests show whole is the request's state, like the
+diagram shown, so the chat and the popout agree, and point stays on
+the toggle through the redraw.  A module hosted by a chat buffer can
+put a read-only panel of its own above the box with
+`harness-chat-panel-functions` and take the box's message with
+`harness-chat-send-function`.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
@@ -2907,8 +3139,17 @@ a notice and the compose box, and the first message sent from it resumes
 it (through `agent/prompt`).  The header line shows the session's
 status, name, model, permission mode, whether it is non-interactive
 ("non-interactive" in `harness-non-interactive-face`, else a dim
-"interactive"), thinking level, context, cost and [menu]; clicking a
-setting changes it, and the non-interactive one toggles.  Other UI
+"interactive"), thinking level, context, output rate, cost and [menu]; clicking a
+setting changes it, and the non-interactive one toggles.  The output
+rate ("48 tok/s", `harness-ui-format-rate`) is the session's rate as the
+usage module measured it. It is dimmed when the session is not running,
+because it is then the last rate measured. The session has no rate
+until it has been measured, and a narrow window drops the rate first.
+The UI keeps the rates in a cache (`harness-ui-session-rate`). It is
+filled with `_harness/usage/rates` on connect and kept current by
+`usage/rate-updated`. Every change runs `harness-ui-rate-functions`,
+which redraws the chat headers, the session list and the task board.
+Other UI
 modules hook into a chat buffer without owning it:
 `harness-chat-send-functions` sees each message sent
 or queued from its box (the text as typed, and the attachments),
@@ -2938,6 +3179,21 @@ host whose box does something else than compose -- the task board's,
 which sends to a session -- marks it; `harness-compose-bar` draws that
 same bar on the host's own lines around the box.  Without either
 argument the box is the plain one.
+A host draws the attachments above the box with
+`harness-compose-insert-attachments`, one a line: the paperclip leads
+the first, the names under it line up with its name, and a prefix the
+host passes starts every line (the board's message box passes its bar).
+Each line is fitted to the narrowest window showing the buffer -- the
+daemon's initial frame, which never shows, aside -- in pixels of the
+frame drawing it (`string-pixel-width`, so icons, thumbnails and text
+scaling count): a name too long is shortened in the middle
+(`harness-compose--shorten`), keeping its start and, room permitting,
+a path's whole file name, while the tooltip tells the whole path; a
+thumbnail takes a third of the room at most, and a download keeps room
+for its progress at its widest, so its line never grows as it ticks.
+When a window showing the box changes size, the box has its host draw
+the lines again (a buffer-local `window-size-change-functions`,
+debounced, and only once the room really changed).
 An attachment chip leads with a thumbnail (`harness-compose-thumbnail-lines`)
 when it is an image, or a video whose thumbnail the media module makes
 with ffmpeg in the background (a chip asks for it through
@@ -3131,10 +3387,26 @@ code expires, and when hidden, which drops the code
 one SVG path, black on white; `harness-qr-insert`, half blocks without
 images).  In corporate mode the page shows a notice only.
 
+Version page (`harness-ui-version`, `C-c h v`, `harness-version`): the
+verdict, the commit running (with, when the harness runs in its own
+process, the commit this Emacs loaded the UI from, and a reload button
+when the two differ), each origin with its commit and status (the
+repository the loaded checkout pulls from says so), the commits the
+harness lacks (an origin at the same commit with the same status as one
+listed above says so instead of listing them again; an ahead one has
+none to list), and what to do: reload when the loaded checkout moved
+on, pull into the loaded checkout (`straight-pull-package` under
+straight.el) when a remote has newer commits, push when only a local
+checkout has them.
+Opening it shows the last report at once and asks `version/check` with
+a max-age of a minute; `g` asks with 0; `version/checked` redraws it,
+and the menu's Version entry says "not the latest" after a report that
+found the harness behind.
+
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in six
 sections -- requires your input, ready for review, merging, in progress,
 pending, completed -- with each card's current todo, progress, elapsed
-time, cost and merge state, one-click answers to a blocked task's
+time, output rate (while its session is open), cost and merge state, one-click answers to a blocked task's
 question or
 permission, and a compose box that submits a task, edits a pending one,
 messages a task's session, answers its question or takes the feedback
@@ -3158,12 +3430,15 @@ message to a task in review sends it back.  A verified task waits in
 merging -- queued for the queue's turn, merging, or its session
 resolving the conflicts -- saying so on its card until the branch is in
 and it moves to completed.  A card of a task that handed a report in
-also shows [Report], popping the report out; it is one of the items
+also shows [Review], popping the report out; it is one of the items
 `harness-ui-popout-at-point-functions' offers.  While the task waits
 for review, the report ends with the banner of its session, [Verify]
 and [Send back], and a box for the feedback.  The header counts the
 tasks to review, and `task/review` says in the echo area that one is
-ready (`harness-ui-tasks--notify-review`).  The header's Review switch
+ready (`harness-ui-tasks--notify-review`).  The header also says, as a
+chat's does for its session, what the board's tasks cost and who pays
+(see Cost display below), then the fullest budget that applies to the
+project.  The header's Review switch
 ([Review: on], `V`) turns review off and on again for every project
 (`harness-tasks-require-verification`, saved through `config/set`):
 off, finished tasks merge and complete by themselves, and Ready for
@@ -3208,7 +3483,7 @@ question its session waits on, a task's report -- through the shared
 registered for it.  The board reads what a session waits on through
 `harness-ui-pending`, its shared notion of it.
 Boards reload after any
-task, merge, turn, status, worktree or reload event.  New tasks show at
+task, merge, turn, status, worktree, budget or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
 finished first and completed the latest completed (verified, else
 finished) first; merging is the queue's own order, from when each
@@ -3274,7 +3549,22 @@ and opens the usage dashboard.  The dashboard's Plan section shows
 every quota window with its reset time and the plan's extra usage,
 and its chart stacks what a plan covered on top of the billed cost.
 The UI keeps each provider's QUOTA from `provider/quota` and
-`provider/quota-updated` (`harness-ui-quota`).  Under the Plan section
+`provider/quota-updated` (`harness-ui-quota`).  The task board's header
+shows its tasks the same way: `harness-ui-sessions-total` takes their
+sessions as one (their usage summed, the billing and plan of the one
+updated last, the provider of the new-task model), which
+`harness-ui-format-spend` formats with the plan's windows, saying
+"These tasks" in its tooltip; `harness-ui-spend-segment` makes the
+chat's and the board's text a header segment, its `%` escaped, that
+opens the dashboard.  The board adds the fullest budget of the
+project from `usage/project-budgets`: `harness-ui-format-budgets`
+reads `budget 62%`, coloured as a quota window, and describes each
+budget in its one-line tooltip (`harness-ui-describe-budget`).  In a
+narrow window the board's segment (`harness-ui-tasks--spend-segment`)
+outlasts the counts and most buttons, its budget making room first.
+The dashboard's budget lines are made from the same pieces
+(`harness-ui-budget-label`, `harness-ui-budget-spent`,
+`harness-ui-budget-pace`).  Under the Plan section
 the dashboard's Fallback section edits `harness-fallback-models` (from
 `fallback/status`, saved with `config/set`, global): the entries in
 order, each with whether it is available, out of quota until when, out
@@ -3284,8 +3574,23 @@ similar ability") and each model.  `M-<up>`/`M-<down>` move the entry
 at point, `d` removes it (or the budget at point), `c` clears its mark.
 It follows `fallback/changed` and `config/changed`.
 
+The Budgets section lists the harness's budgets, the Budget setting's
+and the sessions' own (`usage/budget-status` on "settings" and
+"session:SID").  A budget's line has [delete]
+[baseline] [plan] right after its name, padded to one width so the
+meters line up: the dashboard does not wrap lines, and buttons at the
+end of a budget's long line were out of sight.  [delete] or `d` deletes
+the budget with `usage/remove-budget`, or a session's own one with
+`session/update :budget nil`, and says the Budget setting's is changed
+with `M-x harness-settings`; `harness-delete-budget` (`C-c h B`,
+"Delete budget" in the harness menu) does it from anywhere, the budget
+read by name (on a budget's line, that one is the default).  A hard
+budget's refusal says it is deleted there, or the setting's, where it
+is changed.
+
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
-children, filter/sort by any column; SPC on a session pops out what it
+children, filter/sort by any column; a Tok/s column shows each session's
+output rate, dimmed while it is not running; SPC on a session pops out what it
 waits on (a session that waits on nothing leaves SPC scrolling), its
 status cell's tooltip says so (`harness-ui-sessions-requests`);
 scoped to the current project, its
@@ -3310,7 +3615,7 @@ with it or with other BTWs (`session/btw`), or, over a view that sets
 in the session's own chat buffer with point in its compose box, so the
 question is written and sent like any message; nothing is read in the
 minibuffer.  The buffer is the full chat: its header line (model,
-permission mode, non-interactive, thinking, context, cost, [menu]),
+permission mode, non-interactive, thinking, context, output rate, cost, [menu]),
 keys and menu are a session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
 front of the header through `harness-chat-header-functions` (what it
 is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep
@@ -3351,7 +3656,7 @@ at most, with Emacs's image keys and [Open externally]), the review of
 a task (`harness-ui-review`: one banner, the board's Ready for
 review -- its heading, the handed-in report in full and always
 expanded, then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`) and
-[Report] -- shown above the compose box of the task's session, a chat
+[Review] -- shown above the compose box of the task's session, a chat
 panel (`harness-chat-panel-functions`), and at the end of its report
 popout (`harness-ui-report-panel-functions`); the session's box sends
 as always and the harness takes any message to the task's session for
@@ -3375,7 +3680,7 @@ growing to `harness-ui-report-max-height` for them, a click or RET
 showing one larger in an image popout whose [back] returns to the
 report; videos and files through ui-media, code as a block, notes, and
 a referenced tool call drawn as the call it links to, with [Open in
-the session]; opened from the board's [Report] button and from the
+the session]; opened from the board's [Review] button and from the
 banner, in a popout of its own, to which other modules add panels and a
 box, which follows `task/changed` and closes once the review is decided
 -- the task turns verified, or is sent back with a new round of

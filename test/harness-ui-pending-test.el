@@ -445,5 +445,105 @@ The list says so in the status cell's tooltip, and answers from there."
       (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer from the board's popout")
       (should (equal (list 'question sid "q1" "green") (car harness-ui-pending-test-answers))))))
 
+;;;; A long input, whole
+
+(ert-deftest harness-ui-pending-long-input-is-what-the-line-cuts ()
+  "A permission's input is long when its one line leaves something out.
+That is a value past its width, a further line of one, or a line too
+long for the panel; whitespace around a value is not.  The toggle
+counts the lines of the values with several, which would go unseen."
+  (harness-ui-pending-test-with
+    (cl-flet ((long (input &optional kind)
+                (harness-ui-pending--input-long-p (list :kind (or kind "permission") :input input)))
+              (label (input)
+                (harness-ui-pending--show-all-label (harness-ui-pending--input-entries input))))
+      (should-not (long '(:command "ls -la" :timeout 600)))
+      (should-not (long '(:command "  ls -la  \n")))
+      (should-not (long nil))
+      (should-not (long "not a plist"))
+      (should-not (long '(:command "ls\nrm -rf ~") "question"))
+      (should-not (harness-ui-pending--input-long-p nil))
+      ;; A further line, however short, is something left out.
+      (should (long '(:command "ls\nrm -rf ~")))
+      (should (equal "[Show all 2 lines]" (label '(:command "ls\nrm -rf ~"))))
+      ;; A value past the width.
+      (should-not (long (list :command (make-string 60 ?x))))
+      (should (long (list :command (make-string 61 ?x))))
+      (should (equal "[Show all]" (label (list :command (make-string 61 ?x)))))
+      ;; Short values, but too many for the line.
+      (let ((many (cl-loop for i below 12 append (list (intern (format ":k%d" i)) "value"))))
+        (should (long many))
+        (should (equal "[Show all]" (label many))))
+      ;; The lines of every value with several, counted together.
+      (should (equal "[Show all 5 lines]" (label '(:path "a.el" :old_string "a\nb" :new_string "c\nd\ne")))))))
+
+(ert-deftest harness-ui-pending-popout-shows-a-long-command-whole ()
+  "The popout the session list and the task board open shows a long command whole.
+Its [Show all] button and TAB show it in place and put it back on one
+line.  The state is the request's: the popout opened again, from the
+other view, shows the command as it was left."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Long command"))
+           (key (list 'pending sid))
+           (command (concat "cd ~/src/acme-api && python3 -m pip install 'httpx>=0.28'"
+                            " && python3 -m pytest tests/test_webhooks.py -x -q\nrm -rf build/ dist/"))
+           (pid (harness-call 'session/pending-add sid
+                              (list :kind 'permission
+                                    :payload (list :tool "bash" :kind 'exec
+                                                   :title (concat "Bash: " (harness-first-line command 70))
+                                                   :input (list :command command :timeout 600)
+                                                   :options '(allow-once allow-session deny-once)))))
+           (board nil))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-cache sid)
+      ;; SPC on the session list pops it out, cut short.
+      (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
+                 (lambda (&optional callback) (when callback (funcall callback nil)))))
+        (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (goto-char (point-min))
+        (should (equal sid (tabulated-list-get-id)))
+        (call-interactively (key-binding (kbd "SPC"))))
+      (with-current-buffer (harness-ui-popout-buffer key)
+        (should (string-match-p "  timeout: 600  \\[Show all 2 lines\\] TAB\n" (buffer-string)))
+        (should-not (string-match-p "rm -rf build/" (buffer-string)))
+        ;; Its button shows the command whole, in place.
+        (goto-char (point-min))
+        (search-forward "[Show all")
+        (harness-chat-push)
+        (should (string-match-p (regexp-quote (concat "   command:  [Show less] TAB\n" command "\n   timeout: 600\n"))
+                                (buffer-string)))
+        (should (equal pid (get-text-property (point) 'harness-ui-pending-input-toggle))))
+      (should (harness-ui-pending-input-whole-p sid pid))
+      (harness-ui-popout-close key)
+      ;; SPC on the task board pops out the same request, still whole.
+      (cl-letf (((symbol-function 'harness-ui-tasks--fetch) (lambda (&rest _) nil)))
+        (setq board (harness-tasks dir)))
+      (with-current-buffer board
+        (setq harness-ui-tasks--tasks
+              (list (list :id "t-1" :session sid :state "active" :column "needs-input"
+                          :project dir :cwd dir :prompt "Clean the build"))
+              harness-ui-tasks--loading nil)
+        (harness-ui-tasks--render)
+        (goto-char (point-min))
+        (search-forward "Long command")
+        (call-interactively (key-binding (kbd "SPC"))))
+      (with-current-buffer (harness-ui-popout-buffer key)
+        (should (string-match-p "\nrm -rf build/ dist/\n" (buffer-string)))
+        ;; TAB on the panel puts it back on one line, point on the toggle.
+        (goto-char (point-min))
+        (search-forward "Permission")
+        (should (eq 'harness-ui-pending-toggle-input (key-binding (kbd "TAB"))))
+        (call-interactively (key-binding (kbd "TAB")))
+        (should-not (string-match-p "rm -rf build/" (buffer-string)))
+        (should (equal pid (get-text-property (point) 'harness-ui-pending-input-toggle)))
+        ;; The panel answers as ever.
+        (goto-char (point-min))
+        (search-forward "[Allow]")
+        (harness-chat-push))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer from the board's popout")
+      (should (equal (list 'permission sid pid "allow-once") (car harness-ui-pending-test-answers)))
+      (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the popout to close"))))
+
 (provide 'harness-ui-pending-test)
 ;;; harness-ui-pending-test.el ends here

@@ -71,20 +71,85 @@
     (add-face-text-property 0 (length s) face t s)
     s))
 
+;;;; Links
+
+(defvar harness-ui-markdown-link-map (make-sparse-keymap)
+  "Keymap of the links in rendered Markdown.")
+
+;; Filled at top level, not in the `defvar', so a reload updates the map.
+(let ((map harness-ui-markdown-link-map))
+  ;; A click on a link only opens it.  The `follow-link' property, under
+  ;; `mouse-1-click-follows-link', turns a quick `mouse-1' into `mouse-2',
+  ;; so `mouse-2' has to open it too: left unbound, it fell through to the
+  ;; global `mouse-yank-primary', which pasted the primary selection --
+  ;; whatever text was selected last, anywhere -- into the response.
+  (define-key map [mouse-1] #'harness-ui-markdown-follow-link)
+  (define-key map [mouse-2] #'harness-ui-markdown-follow-link)
+  (define-key map (kbd "RET") #'harness-ui-markdown-follow-link)
+  ;; The first click of a double or triple click opened it; unbound, the
+  ;; next ones would run as single clicks and open it again.
+  (dolist (key '([double-mouse-1] [triple-mouse-1] [double-mouse-2] [triple-mouse-2]))
+    (define-key map key #'ignore)))
+
 (defun harness-ui-markdown--link (text url)
+  "Return TEXT as a link to URL."
   (propertize text 'face 'link 'mouse-face 'highlight
               'help-echo url 'harness-url url
               'follow-link t
-              'keymap (let ((m (make-sparse-keymap)))
-                        (define-key m [mouse-1] #'harness-ui-markdown-follow-link)
-                        (define-key m (kbd "RET") #'harness-ui-markdown-follow-link)
-                        m)))
+              'keymap harness-ui-markdown-link-map))
 
-(defun harness-ui-markdown-follow-link ()
-  "Open the link at point."
-  (interactive)
-  (when-let* ((url (get-text-property (point) 'harness-url)))
-    (if (string-match-p "\\`[a-z]+://" url) (browse-url url) (find-file-other-window url))))
+(defun harness-ui-markdown-follow-link (&optional event)
+  "Open the link at point, or the one mouse EVENT clicked on.
+The buffer the link is in stays as it is; `harness-ui-markdown-open-link'
+says what opening does."
+  (interactive (list last-nonmenu-event))
+  (let ((posn (and (mouse-event-p event) (event-start event))))
+    ;; From the window clicked in, so a file opens beside it, not over it.
+    (when (and posn (window-live-p (posn-window posn)))
+      (select-window (posn-window posn)))
+    (let ((url (get-text-property (or (and posn (posn-point posn)) (point)) 'harness-url)))
+      (unless url (user-error "No link here"))
+      (harness-ui-markdown-open-link url))))
+
+(defun harness-ui-markdown--url-p (target)
+  "Non-nil when link TARGET is a URL to browse, not a file to visit."
+  (and (string-match "\\`\\([a-zA-Z][a-zA-Z0-9+.-]+\\):" target)
+       (not (equal (downcase (match-string 1 target)) "file"))
+       ;; Not "notes.md:12", a file name and a line.
+       (not (string-match-p "\\`[^:/]+:[0-9]+\\(?::[0-9]+\\)?\\'" target))))
+
+(defun harness-ui-markdown--link-file (target)
+  "Return (FILE . LINE) for link TARGET, a file name or a file: URL.
+FILE is expanded in `default-directory', or nil when TARGET names none,
+as a bare \"#fragment\" does.  LINE is the line a \"#L12\" or \":12\"
+suffix names, else nil; any other fragment is dropped."
+  (let ((name target) (line nil))
+    (cond ((or (string-match "#L\\([0-9]+\\)[^#]*\\'" name)
+               (string-match ":\\([0-9]+\\)\\(?::[0-9]+\\)?\\'" name))
+           (setq line (string-to-number (match-string 1 name))
+                 name (substring name 0 (match-beginning 0))))
+          ((string-match "#.*\\'" name)
+           (setq name (substring name 0 (match-beginning 0)))))
+    ;; The fragment is off first: a "#" a file: URL's path holds is %23.
+    (when (string-match "\\`file:\\(?://[^/]*\\)?" name)
+      (setq name (decode-coding-string (url-unhex-string (substring name (match-end 0))) 'utf-8)))
+    (cons (and (not (string-empty-p name)) (expand-file-name name)) line)))
+
+(defun harness-ui-markdown-open-link (target)
+  "Open link TARGET, leaving the buffer the link is in alone.
+A URL -- https:, mailto: and the like -- goes to `browse-url'.  Anything
+else is a file: a file: URL, or a file name, absolute or relative to
+`default-directory'.  It opens in another window, at the line a \"#L12\"
+or \":12\" suffix names."
+  (if (harness-ui-markdown--url-p target)
+      (browse-url target)
+    (pcase-let ((`(,file . ,line) (harness-ui-markdown--link-file target)))
+      (unless (and file (file-exists-p file))
+        (user-error "No such file: %s" (or file target)))
+      (find-file-other-window file)
+      (when line
+        (goto-char (point-min))
+        (forward-line (1- line))))))
 
 (defconst harness-ui-markdown--inline-regexp
   (rx (or (group-n 1 "`" (+? (not "`")) "`")                          ; code

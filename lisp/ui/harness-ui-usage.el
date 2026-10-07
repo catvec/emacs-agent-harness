@@ -29,11 +29,14 @@
 ;;                 module), saved through `config/set' at the global
 ;;                 scope
 ;;   budgets       every budget with a meter coloured by how much of it
-;;                 is spent, including any baseline (what was spent
-;;                 outside the harness, set by hand), plus [Add budget]
-;;                 [Baseline] [Remove] [Plan]; with an Anthropic Admin
-;;                 API key, I offers the month's API cost as a month
-;;                 budget's baseline
+;;                 is spent, including what providers report they billed
+;;                 beyond what the harness recorded (budgets over
+;;                 everything) and any baseline (what was spent outside
+;;                 the harness that no provider reports, set by hand);
+;;                 [delete] [baseline] [plan] follow each budget's name,
+;;                 where a narrow window still shows them, and the
+;;                 heading has [add budget] [plan]; with an Anthropic
+;;                 Admin API key, I fetches Anthropic's cost report now
 ;;
 ;; Cost always means money billed.  A call a subscription pays for costs
 ;; nothing; its value at API prices shows as covered by the plan.
@@ -145,9 +148,6 @@ ROLE is `accent', `plan' (a light accent for what a plan covered),
 (defvar-local harness-ui-usage--loading nil "Non-nil while requests are in flight.")
 (defvar-local harness-ui-usage--error nil "Last error message.")
 (defvar-local harness-ui-usage--generation 0 "Counter to drop stale responses.")
-(defvar-local harness-ui-usage--api-cost nil
-  "This month's API cost fetched for a budget, offered as its baseline.
-The answer of `_harness/usage/fetch-api-cost' plus :budget-id, or nil.")
 (defvar-local harness-ui-usage--unfolded nil
   "Main checkouts whose git worktrees the table by project shows.
 Every other project's worktrees are folded into its one line.")
@@ -821,84 +821,64 @@ absent."
                           'face 'harness-dim-face)))
     (insert "\n")))
 
+(defconst harness-ui-usage--budget-buttons-width 28
+  "Columns the buttons of a budget's line take, their padding included.")
 
-(defun harness-ui-usage--budget-label (budget)
-  "Return a label for BUDGET."
-  (or (plist-get budget :label)
-      (let* ((scope (format "%s" (plist-get budget :scope)))
-             (period (plist-get budget :period))
-             (target (plist-get budget :target))
-             (subject (pcase scope
-                        ("session" (let ((s (harness-ui-session target)))
-                                     (or (and s (plist-get s :name)) (format "session %s" (substring (or target "?") 0 (min 8 (length (or target "?"))))))))
-                        ("project" (file-name-nondirectory (directory-file-name (or target "?"))))
-                        (_ "everything"))))
-        (string-trim (format "%s %s" (pcase (format "%s" period)
-                                       ("day" "daily") ("week" "weekly") ("month" "monthly") (_ ""))
-                             subject)))))
+(defun harness-ui-usage--insert-budget-buttons (budget)
+  "Insert the buttons of BUDGET's line: [delete], [baseline] and [plan].
+They follow the budget's name, so a window too narrow for the whole line,
+which is long and not wrapped, still shows them; they are padded to the
+same width on every line so the meters after them line up.  A session's
+own budget has no baseline: a session spends only through the harness."
+  (let ((start (point)))
+    (harness-ui-button "[delete]" (lambda () (harness-delete-budget budget))
+                       :help "Delete this budget (d)")
+    (insert " ")
+    (unless (plist-get budget :implicit)
+      (harness-ui-button "[baseline]" #'harness-ui-usage-set-baseline
+                         :help "Set what was already spent outside the harness (s)")
+      (insert " "))
+    (harness-ui-button "[plan]" #'harness-ui-usage-plan :help "Split this budget over its period per day (P)")
+    (insert (make-string (max 2 (- harness-ui-usage--budget-buttons-width (- (point) start))) ?\s))))
 
 (defun harness-ui-usage--insert-budget (status)
-  "Insert one budget line for STATUS."
+  "Insert one budget line for STATUS: its name, buttons, meter and figures."
   (let* ((budget (plist-get status :budget))
          (fraction (float (or (plist-get status :fraction) 0)))
          (color (harness-ui-usage--color (cond ((>= fraction 1) 'danger) ((>= fraction 0.8) 'warning) (t 'accent))))
          (hard (harness-json-true-p (plist-get status :hard)))
-         (baseline (float (or (plist-get status :baseline) 0)))
-         (baseline-text (and (> baseline 0) (format "incl. %s baseline" (harness-format-cost baseline))))
+         (outside (harness-budget-outside-text status t))
+         (pace (harness-ui-budget-pace status))
          (start (point)))
-    (insert (format "  %-28s " (harness-truncate-end (harness-ui-usage--budget-label budget) 28))
-            (harness-ui-usage--meter-string fraction color 120 15
-                                            (concat (format "%s of %s spent" (harness-format-cost (plist-get status :spent))
-                                                            (harness-format-cost (plist-get status :amount)))
-                                                    (if baseline-text (concat ", " baseline-text) "")))
+    (insert (format "  %-28s " (harness-truncate-end (harness-ui-budget-label budget) 28)))
+    (harness-ui-usage--insert-budget-buttons budget)
+    (insert (harness-ui-usage--meter-string fraction color 120 15 (harness-ui-budget-spent status t))
             (propertize (format " %3.0f%%" (* 100 fraction)) 'face (if (>= fraction 0.8) 'warning 'default))
             (propertize (format "  %s / %s" (harness-format-cost (plist-get status :spent))
                                 (harness-format-cost (plist-get status :amount)))
                         'face 'default)
-            (if baseline-text
-                (propertize (concat "  " baseline-text) 'face 'harness-dim-face
-                            'help-echo "Spent outside the harness, set by hand (s)")
+            (if outside
+                (propertize (concat "  " outside) 'face 'harness-dim-face
+                            'help-echo (harness-ui-usage--outside-help status))
               "")
             (propertize (format "  %s left" (harness-format-cost (max 0 (or (plist-get status :remaining) 0)))) 'face 'harness-dim-face)
-            (if (plist-get status :per-day)
-                (propertize (format "  %s/day · %s day%s left" (harness-format-cost (plist-get status :per-day))
-                                    (or (plist-get status :days-left) "?")
-                                    (if (eql (plist-get status :days-left) 1) "" "s"))
-                            'face 'harness-dim-face)
-              "")
+            (if pace (propertize (concat "  " pace) 'face 'harness-dim-face) "")
             (propertize (if hard "  hard" "  soft") 'face (if hard 'warning 'harness-dim-face)
                         'help-echo (if hard "Turns are blocked once this budget is spent"
                                      "Warnings only at 80% and 100%"))
-            "  ")
-    (unless (plist-get budget :implicit)
-      (harness-ui-button "[baseline]" #'harness-ui-usage-set-baseline
-                         :help "Set what was already spent outside the harness (s)")
-      (insert " ")
-      (harness-ui-button "[remove]" #'harness-ui-usage-remove-budget :help "Remove this budget (d)"))
-    (insert " ")
-    (harness-ui-button "[plan]" #'harness-ui-usage-plan :help "Split this budget over its period per day (P)")
-    (insert "\n")
-    (harness-ui-usage--insert-api-cost-offer budget)
+            "\n")
     (add-text-properties start (point) (list 'harness-ui-usage-budget status))))
 
-(defun harness-ui-usage--insert-api-cost-offer (budget)
-  "Insert the API cost fetched for BUDGET with buttons to use it, if any."
-  (let ((offer harness-ui-usage--api-cost))
-    (when (and offer (equal (plist-get offer :budget-id) (plist-get budget :id)))
-      (insert "    "
-              (propertize (concat (format "Anthropic billed %s this month" (harness-format-cost (plist-get offer :amount)))
-                                  (if (> (or (plist-get offer :recorded) 0) 0)
-                                      (format ", %s of it for calls recorded here"
-                                              (harness-format-cost (plist-get offer :recorded)))
-                                    ""))
-                          'face 'harness-dim-face)
-              "  ")
-      (harness-ui-button (format "[use %s as baseline]" (harness-format-cost (plist-get offer :outside)))
-                         #'harness-ui-usage-use-api-cost
-                         :help "Count what Anthropic billed outside the harness this month in this budget")
-      (insert " ")
-      (harness-ui-button "[dismiss]" #'harness-ui-usage-dismiss-api-cost :help "Forget the fetched cost")
-      (insert "\n"))))
+(defun harness-ui-usage--outside-help (status)
+  "Return the tooltip on what budget STATUS counts beyond the harness's rows."
+  (let ((baseline (or (plist-get status :baseline) 0)))
+    (string-join
+     (append (mapcar (lambda (source) (concat (plist-get source :detail) "."))
+                     (plist-get status :sources))
+             (and (> baseline 0)
+                  (list (format "%s spent outside the harness that no provider reports, set by hand (s)."
+                                (harness-format-cost baseline)))))
+     "\n")))
 
 (defun harness-ui-usage--insert-budgets (statuses)
   "Insert the budgets section for STATUSES."
@@ -912,9 +892,7 @@ absent."
     (insert (propertize "  budgets count billed cost; calls a plan covers do not spend them\n"
                         'face 'harness-dim-face)))
   (if statuses
-      (dolist (st (sort (copy-sequence statuses)
-                        (lambda (a b) (> (or (plist-get a :fraction) 0) (or (plist-get b :fraction) 0)))))
-        (harness-ui-usage--insert-budget st))
+      (mapc #'harness-ui-usage--insert-budget (harness-ui-budgets-by-use statuses))
     (insert (propertize "  no budgets yet — a budget warns at 80% and 100%, a hard one stops the next turn\n"
                         'face 'harness-dim-face)))
   (insert "\n"))
@@ -1005,7 +983,7 @@ so neither a refresh nor a fold scrolls it."
         (". a" "Add budget" harness-ui-usage-add-budget)
         (". s" "Already spent (baseline)" harness-ui-usage-set-baseline)
         (". I" "Import API cost (Anthropic)" harness-ui-usage-import-api-cost)
-        (". d" "Remove fallback entry or budget" harness-ui-usage-remove)
+        (". d" "Delete budget (or fallback) at point" harness-ui-usage-remove)
         (". P" "Plan a budget" harness-ui-usage-plan)
         (". r" "Refresh plan quota" harness-ui-usage-refresh-plan)]
        ["Fallback"
@@ -1266,28 +1244,43 @@ the quota cache and the model catalogue; models from the catalogue."
                                      (format "%s removed from the fallback list" key))))
 
 (defun harness-ui-usage-remove ()
-  "Remove the fallback entry or the budget on the current line."
+  "Remove the fallback entry or delete the budget on the current line."
   (interactive)
   (cond
    ((harness-ui-usage--fallback-at-point)
     (harness-ui-usage--fallback-remove-entry (harness-ui-usage--fallback-at-point)))
-   ((harness-ui-usage--budget-at-point) (harness-ui-usage-remove-budget))
-   (t (user-error "No fallback entry or budget on this line"))))
+   ((harness-ui-usage--budget-at-point)
+    (harness-delete-budget (plist-get (harness-ui-usage--budget-at-point) :budget)))
+   (t (user-error (substitute-command-keys
+                   "No fallback entry or budget on this line; \\[harness-delete-budget] picks a budget to delete")))))
 
 (defun harness-ui-usage--budget-at-point ()
   "Return the budget status plist on the current line, or nil."
   (get-text-property (point) 'harness-ui-usage-budget))
 
-(defun harness-ui-usage--baseline-prompt (period)
-  "Return the prompt asking what a budget with PERIOD already spent."
-  (format "Already spent %s outside the harness (USD, 0 for none): "
-          (pcase (and period (format "%s" period))
-            ("day" "today") ("week" "this week") ("month" "this month") (_ "so far"))))
+(defun harness-ui-usage--backfills-p (budget)
+  "Non-nil when BUDGET counts what providers report they billed.
+That is a day, week or month budget over everything, as the usage
+module's `harness-usage-backfills-p' says."
+  (and (equal (format "%s" (plist-get budget :scope)) "period")
+       (null (plist-get budget :target))
+       (member (format "%s" (plist-get budget :period)) '("day" "week" "month"))
+       t))
 
-(defun harness-ui-usage--read-baseline (period &optional default)
+(defun harness-ui-usage--baseline-prompt (period &optional backfills)
+  "Return the prompt asking what a budget with PERIOD already spent.
+BACKFILLS non-nil leaves out what providers report, which the budget
+counts already."
+  (format "Already spent %s outside the harness%s (USD, 0 for none): "
+          (pcase (and period (format "%s" period))
+            ("day" "today") ("week" "this week") ("month" "this month") (_ "so far"))
+          (if backfills " that no provider reports" "")))
+
+(defun harness-ui-usage--read-baseline (period &optional default backfills)
   "Read what a budget with PERIOD already spent outside the harness.
-DEFAULT is offered (0 when nil); a negative amount is refused."
-  (let ((amount (read-number (harness-ui-usage--baseline-prompt period) (or default 0))))
+DEFAULT is offered (0 when nil); a negative amount is refused.
+BACKFILLS non-nil asks only for what no provider reports."
+  (let ((amount (read-number (harness-ui-usage--baseline-prompt period backfills) (or default 0))))
     (when (< amount 0) (user-error "An amount spent cannot be negative"))
     amount))
 
@@ -1309,7 +1302,8 @@ DEFAULT is offered (0 when nil); a negative amount is refused."
                      (unless (equal p "none") p))))
          (days (when period (if (y-or-n-p "Plan over business days only? ") "business" "all")))
          ;; A session spends only through the harness, which records it all.
-         (baseline (unless (equal scope "session") (harness-ui-usage--read-baseline period)))
+         (baseline (unless (equal scope "session")
+                     (harness-ui-usage--read-baseline period nil (equal scope "period"))))
          (hard (y-or-n-p "Hard budget (block the next turn once it is spent)? "))
          (label (read-string "Label (optional): ")))
     (append (list :scope scope :amount amount :hard (if hard t :false))
@@ -1329,17 +1323,124 @@ DEFAULT is offered (0 when nil); a negative amount is refused."
                        (message "Budget %s created" (or (plist-get b :label) (plist-get b :id)))
                        (when (buffer-live-p buf) (harness-ui-usage--load buf))))))
 
-(defun harness-ui-usage-remove-budget ()
-  "Remove the budget on the current line."
+;;;;; Deleting a budget
+;;
+;; A budget is deleted from its line on the dashboard ([delete] or d)
+;; or, from anywhere, with `harness-delete-budget' (C-c h B, "Delete
+;; budget" in the harness menu), which offers every budget by name.
+;; The harness keeps the budgets made here; a session's own budget is a
+;; setting of that session, so deleting one clears it there.  The Budget
+;; setting's, for all sessions together, is changed in the settings
+;; instead, which deleting it says.
+
+(defun harness-ui-usage--budget-name (budget)
+  "Return the name of BUDGET as prompts and messages say it.
+A session's own budget goes by its session, \"session NAME\", which its
+line on the dashboard does not show."
+  (if (and (plist-get budget :implicit) (not (equal (plist-get budget :id) "settings")))
+      (let* ((sid (format "%s" (or (plist-get budget :target) "?")))
+             (name (plist-get (harness-ui-session sid) :name)))
+        (format "session %s" (if (and (stringp name) (not (string-empty-p name)))
+                                 name
+                               (substring sid 0 (min 8 (length sid))))))
+    (harness-ui-budget-label budget)))
+
+(defun harness-ui-usage--delete-budget (budget)
+  "Delete BUDGET once the user says yes, then reload the dashboard.
+The harness removes one of its budgets; a session's own budget is
+cleared on its session, which notes it.  The Budget setting's is
+refused, saying where to change it."
+  (when (equal (plist-get budget :id) "settings")
+    (user-error "%s" (harness-ui-usage--implicit-where budget)))
+  (let* ((own (plist-get budget :implicit))
+         (what (format (if own "the budget of %s" "budget %s") (harness-ui-usage--budget-name budget))))
+    (when (yes-or-no-p (format "Delete %s? " what))
+      (harness-ui-call (if own "_harness/session/update" "_harness/usage/remove-budget")
+                       (if own
+                           (list :id (plist-get budget :target) :budget nil)
+                         (list :id (plist-get budget :id)))
+                       (lambda (_)
+                         (message "Deleted %s" what)
+                         (when-let* ((buf (get-buffer harness-ui-usage--buffer-name)))
+                           (harness-ui-usage--load buf)))))))
+
+(defun harness-ui-usage--budget-statuses ()
+  "Return a promise of the status of every budget the dashboard lists.
+Those are the harness's budgets and the sessions' own; a budget whose
+status fails is left out."
+  (harness-then
+   (harness-ui-request "_harness/usage/budgets" nil)
+   (lambda (budgets)
+     (harness-then
+      (harness-all (mapcar (lambda (id)
+                             (harness-catch (harness-ui-request "_harness/usage/budget-status" (list :id id))
+                                            (lambda (_) nil)))
+                           (append (mapcar (lambda (b) (plist-get b :id)) budgets)
+                                   (harness-ui-usage--implicit-budget-ids))))
+      (lambda (statuses) (delq nil statuses))))))
+
+(defun harness-ui-usage--budget-choices (statuses)
+  "Return completion candidates (LABEL . BUDGET) for budget STATUSES.
+A label is the budget's name, what it spent of its amount and whether
+it is hard; two that read alike are told apart by the budget's id."
+  (let* ((labels (mapcar (lambda (st)
+                           (format "%s  %s / %s, %s"
+                                   (harness-ui-usage--budget-name (plist-get st :budget))
+                                   (harness-format-cost (plist-get st :spent))
+                                   (harness-format-cost (plist-get st :amount))
+                                   (if (harness-json-true-p (plist-get st :hard)) "hard" "soft")))
+                         statuses)))
+    (cl-mapcar (lambda (label st)
+                 (cons (if (> (cl-count label labels :test #'equal) 1)
+                           (format "%s (%s)" label (plist-get (plist-get st :budget) :id))
+                         label)
+                       (plist-get st :budget)))
+               labels statuses)))
+
+(defun harness-ui-usage--choose-budget (prompt callback &optional default-id)
+  "Read a budget with PROMPT among every budget, then call CALLBACK with it.
+The budget whose id is DEFAULT-ID is the default.  The budgets are
+fetched first; the prompt then runs from the command loop, out of the
+process filter the answer arrives in."
+  (harness-then
+   (harness-ui-usage--budget-statuses)
+   (lambda (statuses)
+     (harness-run-soon
+      (lambda ()
+        (if (null statuses)
+            (message "No budgets to delete")
+          (let* ((table (harness-ui-usage--budget-choices statuses))
+                 (default (car (cl-find default-id table :key (lambda (c) (plist-get (cdr c) :id)) :test #'equal)))
+                 (choice (completing-read (format-prompt prompt default) table nil t nil nil default)))
+            (when-let* ((budget (cdr (assoc choice table))))
+              ;; A timer runs this, and would report a refusal (the
+              ;; Budget setting's) as its own error: say it as a
+              ;; command would.
+              (condition-case err
+                  (funcall callback budget)
+                (user-error (message "%s" (error-message-string err)))))))))
+     nil)
+   (lambda (e) (message "Could not list the budgets: %s" (harness-error-message e)) nil)))
+
+;;;###autoload
+(defun harness-delete-budget (&optional budget)
+  "Delete BUDGET, after asking.
+Interactively, read the budget by name among every budget, those made
+on the usage dashboard and the sessions' own; on a budget's line of the
+dashboard, that budget is the default.  Deleting a session's own budget
+clears it on that session alone.  The Budget setting's, for all
+sessions together, is changed with `harness-settings' instead, which
+this says.  BUDGET is a budget plist as the harness gives it
+\(`usage/budgets', or a status's `:budget')."
   (interactive)
-  (let* ((status (or (harness-ui-usage--budget-at-point) (user-error "No budget on this line")))
-         (budget (plist-get status :budget))
-         (buf (current-buffer)))
-    (when (plist-get budget :implicit)
-      (user-error "%s" (harness-ui-usage--implicit-where budget)))
-    (when (yes-or-no-p (format "Remove budget %s? " (harness-ui-usage--budget-label budget)))
-      (harness-ui-call "_harness/usage/remove-budget" (list :id (plist-get budget :id))
-                       (lambda (_) (message "Budget removed") (when (buffer-live-p buf) (harness-ui-usage--load buf)))))))
+  (if budget
+      (harness-ui-usage--delete-budget budget)
+    (harness-ui-usage--choose-budget
+     "Delete budget" #'harness-ui-usage--delete-budget
+     (and (derived-mode-p 'harness-ui-usage-mode)
+          (plist-get (plist-get (harness-ui-usage--budget-at-point) :budget) :id)))))
+
+(define-obsolete-function-alias 'harness-ui-usage-remove-budget #'harness-delete-budget "3.1")
 
 (defun harness-ui-usage--save-baseline (budget amount buffer &optional period-start)
   "Make AMOUNT the baseline of BUDGET, then reload BUFFER.
@@ -1368,58 +1469,38 @@ over.  0 clears it."
       (user-error "%s" (harness-ui-usage--implicit-where budget)))
     (harness-ui-usage--save-baseline
      budget
-     (harness-ui-usage--read-baseline (plist-get budget :period) (plist-get status :baseline))
+     (harness-ui-usage--read-baseline (plist-get budget :period) (plist-get status :baseline)
+                                      (harness-ui-usage--backfills-p budget))
      (current-buffer))))
 
 (defun harness-ui-usage-import-api-cost ()
-  "Fetch this month's Anthropic API cost for the month budget at point.
+  "Fetch now what Anthropic billed per token, for the budget at point.
 Anthropic's Admin API reports what the organisation was billed per
-token this month.  Once it arrives it shows under the budget, less what
-the harness recorded itself for Claude calls billed per token, with a
-button that makes it the budget's baseline.  The harness needs an Admin
-API key: `harness-anthropic-admin-api-key', the ANTHROPIC_ADMIN_KEY
-environment variable or an auth-source entry for api.anthropic.com
-with user admin.  Without one nothing is fetched; subscriptions such as
-Pro or Max have no cost report."
+token.  A day, week or month budget over everything counts it, less
+what the harness recorded itself for Claude calls billed per token, as
+\"incl. $X reported by Anthropic\"; the harness fetches it in the
+background every `harness-usage-cost-report-interval' seconds, and this
+fetches it now for the period of the budget at point (this month
+elsewhere).  The harness needs an Admin API key:
+`harness-anthropic-admin-api-key', the ANTHROPIC_ADMIN_KEY environment
+variable or an auth-source entry for api.anthropic.com with user admin.
+Without one nothing is fetched; subscriptions such as Pro or Max have
+no cost report."
   (interactive)
-  (let* ((status (or (harness-ui-usage--budget-at-point) (user-error "No budget on this line")))
-         (budget (plist-get status :budget))
-         (id (plist-get budget :id))
+  (let* ((budget (plist-get (harness-ui-usage--budget-at-point) :budget))
+         (period (if budget (format "%s" (plist-get budget :period)) "month"))
          (buf (current-buffer)))
-    (when (plist-get budget :implicit)
-      (user-error "%s" (harness-ui-usage--implicit-where budget)))
-    (unless (equal (format "%s" (plist-get budget :period)) "month")
-      (user-error "Anthropic reports the cost of a calendar month: pick a month budget"))
-    (message "Asking Anthropic for this month's API cost...")
-    (harness-ui-call "_harness/usage/fetch-api-cost" nil
+    (when (and budget (not (harness-ui-usage--backfills-p budget)))
+      (user-error "Only a day, week or month budget over everything counts what providers report; use s for this one"))
+    (message "Asking Anthropic what it billed this %s..." period)
+    (harness-ui-call "_harness/usage/fetch-api-cost" (list :period period)
                      (lambda (result)
-                       (cond
-                        ((not (harness-json-true-p (plist-get result :available)))
-                         (message "%s" (plist-get result :reason)))
-                        ((buffer-live-p buf)
-                         (with-current-buffer buf
-                           (setq harness-ui-usage--api-cost (append (list :budget-id id) result))
-                           (harness-ui-usage--render))
-                         (message "Anthropic billed %s this month" (harness-format-cost (plist-get result :amount)))))))))
-
-(defun harness-ui-usage-use-api-cost ()
-  "Make the fetched API cost its budget's baseline.
-The baseline is what Anthropic billed this month less what the harness
-recorded itself for Claude calls billed per token."
-  (interactive)
-  (let* ((offer (or harness-ui-usage--api-cost (user-error "Nothing fetched: press I on a month budget")))
-         (status (cl-find (plist-get offer :budget-id) (plist-get harness-ui-usage--data :statuses)
-                          :key (lambda (s) (plist-get (plist-get s :budget) :id)) :test #'equal)))
-    (unless status (user-error "That budget is gone"))
-    (setq harness-ui-usage--api-cost nil)
-    (harness-ui-usage--save-baseline (plist-get status :budget) (float (or (plist-get offer :outside) 0))
-                                     (current-buffer) (plist-get offer :period-start))))
-
-(defun harness-ui-usage-dismiss-api-cost ()
-  "Forget the fetched API cost."
-  (interactive)
-  (setq harness-ui-usage--api-cost nil)
-  (harness-ui-usage--render))
+                       (if (not (harness-json-true-p (plist-get result :available)))
+                           (message "%s" (plist-get result :reason))
+                         (message "Anthropic billed %s this %s; %s of it counts beyond what the harness recorded"
+                                  (harness-format-cost (plist-get result :amount)) period
+                                  (harness-format-cost (plist-get result :outside)))
+                         (when (buffer-live-p buf) (harness-ui-usage--load buf)))))))
 
 (defun harness-ui-usage-plan ()
   "Show how an amount splits over a period, day by day.
@@ -1470,7 +1551,7 @@ Defaults come from the budget on the current line when there is one."
   "Refresh after EVENT changed spending, budgets or the fallback list."
   (cond
    ((member event '("usage/budget-warning" "agent/turn-ended" "usage/budgets-changed" "usage/recorded"
-                    "fallback/changed" "fallback/switched"))
+                    "usage/reported-changed" "fallback/changed" "fallback/switched"))
     (harness-ui-usage--refresh-soon))
    ((and (equal event "config/changed")
          (member (format "%s" (car args)) '("harness-fallback-models" "harness-budget")))
@@ -1499,7 +1580,8 @@ Defaults come from the budget on the current line when there is one."
   (add-hook 'harness-ui-event-functions #'harness-ui-usage--on-event)
   (add-hook 'harness-ui-quota-functions #'harness-ui-usage--on-quota)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-usage--redraw)
-  (define-key harness-ui-map (kbd "u") #'harness-usage))
+  (define-key harness-ui-map (kbd "u") #'harness-usage)
+  (define-key harness-ui-map (kbd "B") #'harness-delete-budget))
 
 (harness-define-module 'ui-usage
   :doc "Usage and cost dashboard with charts, plan quota and budgets."

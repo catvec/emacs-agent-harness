@@ -265,7 +265,8 @@ its card needs the recap then, whatever the thresholds say."
   "Start checking the time threshold every `harness-tasks-recap-interval'."
   (when (timerp harness-recap--timer) (cancel-timer harness-recap--timer))
   (setq harness-recap--timer
-        (and (numberp harness-tasks-recap-interval) (> harness-tasks-recap-interval 0)
+        (and (boundp 'harness-tasks-recap-interval)
+             (numberp harness-tasks-recap-interval) (> harness-tasks-recap-interval 0)
              (run-with-timer harness-tasks-recap-interval harness-tasks-recap-interval
                              #'harness-recap--check-running))))
 
@@ -283,7 +284,13 @@ the task itself goes straight to done."
   (harness-on 'agent/tool-result #'harness-recap--on-tool-result)
   (harness-recap--start-timer))
 
-(harness-recap--init)
+;; A reload does not initialise a running module again: subscribe and
+;; restart the timer now.  On a fresh start `:init' does it, once the
+;; tasks module (which defines `harness-tasks-recap-interval') is loaded;
+;; calling it here then would signal void-variable, as modules load in
+;; alphabetical order and recap comes before tasks.
+(when (harness-module-ready-p 'recap)
+  (harness-recap--init))
 
 (harness-declare-event 'recap/done "(SESSION-ID RECAP) after a task card's recap was stored.")
 (harness-declare-event 'recap/failed "(SESSION-ID MESSAGE) when a recap could not be made.")

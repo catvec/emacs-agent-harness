@@ -23,11 +23,17 @@
 ;; one project, or a calendar period across everything), an amount and
 ;; a hardness.  Period budgets know how much of the period is left and
 ;; split the remainder across the remaining days, business days or all.
+;; A budget over everything (a period budget for no one project)
+;; backfills from what providers report they billed in its period
+;; beyond what the harness recorded: a plan's extra usage (Claude
+;; Code's usage credits, Copilot's additional requests) for a month,
+;; and, with an Admin API key, Anthropic's cost report for a day, week
+;; or month (see "Spending providers report" below).
 ;; A budget may carry a baseline: what was already spent that the
-;; harness never recorded (in other tools, or before it kept usage),
-;; set by hand so a budget made mid-period does not start at $0.  A
-;; period budget's baseline counts only in the period it was set for;
-;; one without a period always counts it.
+;; harness never recorded and no provider reports (in other tools, or
+;; before it kept usage), set by hand so a budget made mid-period does
+;; not start at $0.  A period budget's baseline counts only in the
+;; period it was set for; one without a period always counts it.
 ;; A session's own `:budget' plist is an implicit hard-or-soft budget
 ;; with scope session, and the Budget setting (`harness-budget') one
 ;; implicit budget, "settings", for all sessions together: it counts
@@ -38,6 +44,12 @@
 ;; Storage is one code path: rows are loaded from whichever backend is
 ;; in use into plists and aggregated in Lisp.  SQLite only narrows the
 ;; rows it returns; the Lisp filter and aggregation are the reference.
+;;
+;; Output rates say how fast each session's model writes: the output
+;; tokens of its latest model calls, as the usage records count them,
+;; over the seconds the agent's activity spent streaming them (see
+;; "Output rate" below).  They are measured here, in the harness, and
+;; kept in memory; `usage/rate-updated' announces each new one.
 
 ;;; Code:
 
@@ -65,6 +77,14 @@ report.  When nil, the ANTHROPIC_ADMIN_KEY environment variable and
 then auth-source (host api.anthropic.com, user admin) are tried.  Its
 value never leaves the harness."
   :type '(choice (const :tag "None" nil) (string :tag "Key")) :group 'harness)
+
+(defcustom harness-usage-cost-report-interval 600
+  "Seconds before Anthropic's cost report is fetched again for budgets.
+With an Admin API key, a budget over everything counts what Anthropic
+billed per token in its period beyond what the harness recorded.  The
+report is fetched in the background when such a budget is looked at and
+the last fetch for its period is older than this."
+  :type 'integer :group 'harness)
 
 (defconst harness-usage-jsonl-name "usage/records.jsonl"
   "JSONL log of usage rows, used when SQLite is unavailable.")
@@ -459,6 +479,160 @@ cost when a subscription paid.  Budgets are checked after."
                           :turn (plist-get totals :turns)))
       (harness-usage--check session))))
 
+;;;; Output rate
+
+;; How fast a session's model writes: output tokens per second of
+;; streaming.  The tokens are the ones the accounting counts.  Each
+;; `session/usage' record supplies them, and so does each model call of
+;; a hosted loop's turn (`agent/call-usage'), which the provider reports
+;; without counting it: the turn records its total once, at its end.
+;; The seconds are the ones the agent's activity spends streaming:
+;; thinking, writing, or writing a tool call's input.  Waiting for the
+;; first token and running tools do not count.  A session's rate is the
+;; average of its latest calls on its current model, over up to
+;; `harness-usage-rate-window' seconds of streaming.  It is kept after
+;; the turn, so an idle session still shows how fast it wrote last.
+
+(defcustom harness-usage-rate-window 30
+  "Seconds of streaming that a session's output rate averages over.
+The rate is the output of the session's newest model calls divided by
+the time they streamed, counting back until that time reaches this
+many seconds."
+  :type 'number :group 'harness)
+
+(defconst harness-usage--rate-min-seconds 0.25
+  "Least streaming time over which a model call's output is measured.
+A call whose output arrived all at once, or nearly so, says nothing
+about how fast the model writes, and is left out of the rate.")
+
+(defconst harness-usage--streaming-phases '(thinking writing tool-input)
+  "Agent activity phases during which the model streams its output.")
+
+(defvar harness-usage--meters (make-hash-table :test 'equal)
+  "Session id -> how long its turn has streamed since its last measured call.
+A plist (:since FLOAT-OR-NIL :seconds F :reported BOOL).  `:since' is
+when the stream now open began, and `:seconds' is the streaming already
+closed.  `:reported' says that the turn's calls reported their own
+usage, so the record of the turn's total is not measured again.")
+
+(defvar harness-usage--calls (make-hash-table :test 'equal)
+  "Session id -> its latest measured model calls, newest first.
+Each is (OUTPUT SECONDS MODEL).  Together they cover up to
+`harness-usage-rate-window' seconds of streaming.")
+
+(defvar harness-usage--rates (make-hash-table :test 'equal)
+  "Session id -> its output rate, as `usage/rate' returns it.")
+
+(defun harness-usage--meter (sid)
+  "Return the streaming meter of session SID, starting one if needed."
+  (or (gethash sid harness-usage--meters)
+      (puthash sid (list :since nil :seconds 0.0 :reported nil) harness-usage--meters)))
+
+(defun harness-usage--on-activity (sid activity)
+  "Open or close SID's streaming interval as its ACTIVITY changes.
+`agent/activity-changed' handler: ACTIVITY is nil once the turn ends."
+  (let* ((meter (harness-usage--meter sid))
+         (streaming (memq (plist-get activity :phase) harness-usage--streaming-phases))
+         (since (plist-get meter :since)))
+    (cond ((and streaming (not since))
+           (setf (plist-get meter :since) (float-time)))
+          ((and since (not streaming))
+           (setf (plist-get meter :seconds) (+ (plist-get meter :seconds) (- (float-time) since))
+                 (plist-get meter :since) nil)))))
+
+(defun harness-usage--reset-meter (sid &rest _)
+  "Start SID's streaming meter afresh: its turn starts or has ended."
+  (remhash sid harness-usage--meters))
+
+(defun harness-usage--take-seconds (sid)
+  "Return how long SID streamed since its last measured call; restart the count.
+A stream that is still open goes on counting from now."
+  (if-let* ((meter (gethash sid harness-usage--meters)))
+      (let* ((now (float-time))
+             (since (plist-get meter :since))
+             (seconds (+ (plist-get meter :seconds) (if since (- now since) 0))))
+        (setf (plist-get meter :seconds) 0.0
+              (plist-get meter :since) (and since now))
+        seconds)
+    0.0))
+
+(defun harness-usage--measure (sid output seconds)
+  "Add a model call in which session SID wrote OUTPUT tokens in SECONDS.
+A call without output, or one too short to measure, is left out.
+Calls made on another model than the session's current one are
+dropped.  The new rate is announced as `usage/rate-updated' and returned."
+  (when (and (numberp output) (> output 0)
+             (>= seconds harness-usage--rate-min-seconds)
+             (harness-call 'session/exists-p sid))
+    (let* ((model (plist-get (harness-call 'session/get sid) :model))
+           (calls (cons (list (harness-usage--int output) (float seconds) model)
+                        (cl-remove-if-not (lambda (call) (equal (nth 2 call) model))
+                                          (gethash sid harness-usage--calls))))
+           (kept nil) (tokens 0) (streamed 0.0))
+      (while (and calls (< streamed harness-usage-rate-window))
+        (let ((call (pop calls)))
+          (push call kept)
+          (cl-incf tokens (nth 0 call))
+          (cl-incf streamed (nth 1 call))))
+      (setq kept (nreverse kept))
+      (puthash sid kept harness-usage--calls)
+      (let ((rate (list :rate (/ tokens streamed) :output tokens :seconds streamed
+                        :calls (length kept) :at (float-time) :model model)))
+        (puthash sid rate harness-usage--rates)
+        (harness-emit 'usage/rate-updated sid rate)
+        rate))))
+
+(defun harness-usage--on-usage-rate (id _totals record)
+  "Measure the model call that usage RECORD of session ID stands for.
+`session/usage' handler.  The record that totals a hosted loop's turn
+is not measured if the turn's calls already reported their own usage."
+  (when (numberp (plist-get record :output))
+    (let ((seconds (harness-usage--take-seconds id))
+          (meter (gethash id harness-usage--meters)))
+      (if (plist-get meter :reported)
+          (setf (plist-get meter :reported) nil)
+        (harness-usage--measure id (plist-get record :output) seconds)))))
+
+(defun harness-usage--on-call-usage (sid usage)
+  "Measure a model call of SID's hosted turn: USAGE says what it wrote.
+`agent/call-usage' handler.  USAGE is a plist with `:output'."
+  (let ((seconds (harness-usage--take-seconds sid))
+        (meter (harness-usage--meter sid)))
+    (setf (plist-get meter :reported) t)
+    (harness-usage--measure sid (plist-get usage :output) seconds)))
+
+(defun harness-usage--forget-rate (sid &rest _)
+  "Forget the meter and the output rate of SID, a session that was deleted."
+  (remhash sid harness-usage--meters)
+  (remhash sid harness-usage--calls)
+  (remhash sid harness-usage--rates))
+
+(harness-defmethod usage/rate (session-id)
+  "Return how fast SESSION-ID's model writes, or nil if it was never measured.
+The value is (:rate F :output N :seconds F :calls N :at FLOAT :model
+ID).  The session's latest N calls on MODEL wrote OUTPUT tokens in
+SECONDS of streaming, which is F tokens per second.  The newest call was
+measured at AT.  The rate stays after the turn ends.  See
+`harness-usage-rate-window'."
+  (gethash session-id harness-usage--rates))
+
+(harness-defmethod usage/rates ()
+  "Return the output rate of every measured session, newest first.
+Each is what `usage/rate' returns for the session, with `:session' added."
+  (let (out)
+    (maphash (lambda (sid rate) (push (append (list :session sid) rate) out))
+             harness-usage--rates)
+    (sort out (lambda (a b) (> (plist-get a :at) (plist-get b :at))))))
+
+(defun harness-usage--watch-rates ()
+  "Measure output rates from streaming and usage (idempotent)."
+  (harness-on 'agent/activity-changed #'harness-usage--on-activity)
+  (harness-on 'agent/turn-started #'harness-usage--reset-meter)
+  (harness-on 'agent/turn-ended #'harness-usage--reset-meter)
+  (harness-on 'agent/call-usage #'harness-usage--on-call-usage)
+  (harness-on 'session/usage #'harness-usage--on-usage-rate)
+  (harness-on 'session/deleted #'harness-usage--forget-rate))
+
 ;;;; Queries
 
 (defun harness-usage--with-main (rows)
@@ -660,9 +834,12 @@ counts only in the period starting on its `:baseline-period-start'."
 
 (defun harness-usage--budget-status (budget &optional now)
   "Compute the status plist of BUDGET as of NOW (default: current time).
-What was spent is the cost of the rows the budget selects plus the
-baseline that counts in the current period."
-  (let* ((now (or now (float-time)))
+What was spent is the cost of the rows the budget selects, plus what
+providers report was billed in the period beyond those rows for a
+budget over everything, plus the baseline that counts in the current
+period.  Without NOW, a report that is due is fetched in the background."
+  (let* ((current (null now))
+         (now (or now (float-time)))
          (period (plist-get budget :period))
          (bounds (and period (harness-usage-period-bounds period now)))
          (start (and bounds (harness-usage--day-start (car bounds))))
@@ -670,8 +847,11 @@ baseline that counts in the current period."
          (rows (apply #'harness-usage--rows
                       (append (harness-usage--budget-filter budget)
                               (and bounds (list :since start :until end)))))
+         (sources (and bounds (harness-usage-backfills-p budget)
+                       (harness-usage--reported-sources period bounds rows current)))
+         (reported (apply #'+ 0.0 (mapcar (lambda (s) (plist-get s :outside)) sources)))
          (baseline (harness-usage--applied-baseline budget bounds))
-         (spent (+ baseline
+         (spent (+ baseline reported
                    (plist-get (or (car (harness-usage--aggregate rows nil))
                                   (harness-usage--empty-aggregate nil))
                               :cost)))
@@ -685,7 +865,7 @@ baseline that counts in the current period."
           :hard (harness-json-true-p (plist-get budget :hard))
           :per-day (and days-left (if (> days-left 0) (/ remaining days-left) 0.0))
           :days-left days-left :period-start start :period-end end
-          :baseline baseline)))
+          :baseline baseline :reported reported :sources sources)))
 
 (harness-defmethod usage/budgets ()
   "Return every explicit budget plist."
@@ -731,15 +911,20 @@ always counts.  Event `usage/budgets-changed' BUDGETS."
   "Return the status of budget ID (or of a BUDGET plist passed as ID).
 \"session:SID\" names the implicit budget of session SID, \"settings\"
 the Budget setting's, for all sessions together.  OPTS `:now'
-fixes the reference time.  Result: (:budget B :spent F :amount F
+fixes the reference time; without it a provider report that is due is
+fetched in the background.  Result: (:budget B :spent F :amount F
 :remaining F :fraction F :hard BOOL :per-day F :days-left N
-:period-start FLOAT :period-end FLOAT :baseline F); the period fields
-are nil for budgets without a `:period'.  Period budgets count spending
-inside the current calendar day, week (from Monday) or month and split
-the remainder over the remaining days (Monday to Friday when `:days' is
-`business').  `:spent' includes `:baseline', the part of the budget's
-baseline that counts now: all of it in the period it was set for, or
-always for a budget without a period; 0 otherwise."
+:period-start FLOAT :period-end FLOAT :baseline F :reported F :sources
+LIST); the period fields are nil for budgets without a `:period'.
+Period budgets count spending inside the current calendar day, week
+\(from Monday) or month and split the remainder over the remaining days
+\(Monday to Friday when `:days' is `business').  `:spent' includes
+`:reported', what providers report was billed in the period beyond what
+the harness recorded (budgets over everything only; SOURCES says who
+reported what, see `harness-usage--reported-sources'), and `:baseline',
+the part of the budget's baseline that counts now: all of it in the
+period it was set for, or always for a budget without a period; 0
+otherwise."
   (let ((budget (harness-usage--find-budget id)))
     (unless budget (error "No budget %s" id))
     (harness-usage--budget-status budget (plist-get opts :now))))
@@ -759,15 +944,17 @@ period; when DAYS is `business' weekends get an allowance of 0."
                     :allowance (if (harness-usage--counted-day-p d period days) each 0.0)))
             dates)))
 
-;;;; This month's API cost, from Anthropic's Admin API
+;;;; The API cost, from Anthropic's Admin API
 
 ;; Anthropic's Admin API reports what an organisation was billed, per
 ;; UTC day (GET /v1/organizations/cost_report).  It needs an Admin API
 ;; key and covers billing per token only: a Pro or Max subscription has
-;; no cost report.  The cost is fetched when asked for, never polled,
-;; and offered as the baseline of a month budget, less what the harness
-;; recorded itself for Claude calls billed per token, which the report
-;; counts too.
+;; no cost report.  A budget over everything counts what the report
+;; says was billed in its period, less what the harness recorded itself
+;; for Claude calls billed per token, which the report counts too (see
+;; "Spending providers report" below).  The report is fetched in the
+;; background when such a budget is looked at and the last one is older
+;; than `harness-usage-cost-report-interval', and when asked for.
 
 (defconst harness-usage-anthropic-api-host "api.anthropic.com"
   "Host of the Anthropic API; also the auth-source host of the admin key.")
@@ -789,6 +976,12 @@ ANTHROPIC_ADMIN_KEY environment variable, then auth-source."
                    (secret (plist-get found :secret)))
               (funcall usable (if (functionp secret) (funcall secret) secret)))
           (error nil)))))
+
+(defconst harness-usage--no-admin-key-reason
+  (concat "No Anthropic Admin API key: set harness-anthropic-admin-api-key or "
+          "ANTHROPIC_ADMIN_KEY, or add an auth-source entry for "
+          harness-usage-anthropic-api-host " with user admin")
+  "Why no cost report is fetched without an Admin API key.")
 
 (defun harness-usage--cost-report-url (since until page)
   "Return the URL of the cost report from SINCE until UNTIL (RFC 3339) at PAGE."
@@ -848,74 +1041,332 @@ token, adding to the TOTAL of the PAGES fetched before."
         (t (harness-log 'warn "usage: cost report cut short after %d pages" pages)
            total))))))
 
+(defun harness-usage--recorded-cost (rows pred &optional before)
+  "Return the cost of the ROWS that satisfy PRED, recorded before BEFORE.
+BEFORE is a float time; nil counts every row."
+  (let ((total 0.0))
+    (dolist (row rows total)
+      (when (and (or (null before) (< (plist-get row :ts) before))
+                 (funcall pred row))
+        (setq total (+ total (or (plist-get row :cost) 0)))))))
+
+(defun harness-usage--claude-per-token-p (row)
+  "Non-nil when ROW is a Claude call billed per token.
+Anthropic's cost report counts such calls too."
+  (and (string-prefix-p "claude:" (or (plist-get row :model) ""))
+       (memq (harness-billing-of row) '(nil api))))
+
 (defun harness-usage--recorded-api-cost (since until)
   "Return the cost recorded from SINCE until UNTIL for Claude billed per token.
 SINCE and UNTIL are float times.  Anthropic's cost report counts these
 calls too, so they are what the harness knows of it already."
-  (let ((total 0.0))
-    (dolist (row (harness-usage--rows :since since :until until) total)
-      (when (and (string-prefix-p "claude:" (or (plist-get row :model) ""))
-                 (memq (harness-billing-of row) '(nil api)))
-        (setq total (+ total (or (plist-get row :cost) 0)))))))
+  (harness-usage--recorded-cost (harness-usage--rows :since since :until until)
+                                #'harness-usage--claude-per-token-p))
+
+(defun harness-usage--utc-window (bounds)
+  "Return (SINCE . UNTIL), the UTC days of the dates of period BOUNDS.
+BOUNDS is (START-DATE . END-DATE), END exclusive, as
+`harness-usage-period-bounds' gives it; SINCE and UNTIL are the float
+times of UTC midnight on those dates, as Anthropic bills by UTC day."
+  (let ((utc (lambda (date)
+               (float-time (encode-time (list 0 0 0 (nth 2 date) (nth 1 date) (nth 0 date) nil nil t))))))
+    (cons (funcall utc (car bounds)) (funcall utc (cdr bounds)))))
 
 (harness-defmethod usage/fetch-api-cost (&rest opts)
-  "Fetch what Anthropic billed the organisation this month, without blocking.
+  "Fetch what Anthropic billed the organisation this period, without blocking.
 The key is `harness-anthropic-admin-api-key', the ANTHROPIC_ADMIN_KEY
 environment variable or auth-source (host api.anthropic.com, user
 admin).  Return a promise of (:available t :amount USD :recorded USD
-:outside USD :period-start \"YYYY-MM-DD\" :since FLOAT :until FLOAT).
-AMOUNT is the cost report's total over the calendar month containing
-OPTS `:now' (default: now), in UTC days as Anthropic bills them;
-RECORDED is what the harness recorded in that time for Claude models
-billed per token, which the report includes; OUTSIDE is the rest, the
-baseline to offer a month budget whose period starts on PERIOD-START.
-Without a key nothing is fetched and the promise gives (:available nil
-:reason TEXT)."
-  (let ((key (harness-usage--admin-key)))
+:outside USD :period PERIOD :period-start \"YYYY-MM-DD\" :since FLOAT
+:until FLOAT).  AMOUNT is the cost report's total over the calendar
+OPTS `:period' (day, week or month, the default) containing OPTS
+`:now' (default: now), in UTC days as Anthropic bills them; RECORDED
+is what the harness recorded in that time for Claude models billed per
+token, which the report includes; OUTSIDE is the rest, which budgets
+over everything count in the period starting on PERIOD-START.  The
+answer also updates what those budgets count at once.  Without a key
+nothing is fetched and the promise gives (:available nil :reason TEXT)."
+  (let* ((period (or (harness-usage--sym (plist-get opts :period)) 'month))
+         (bounds (harness-usage-period-bounds period (or (plist-get opts :now) (float-time))))
+         (window (harness-usage--utc-window bounds))
+         (key (harness-usage--admin-key)))
     (if (null key)
-        (harness-resolved
-         (list :available nil
-               :reason (concat "No Anthropic Admin API key: set harness-anthropic-admin-api-key or "
-                               "ANTHROPIC_ADMIN_KEY, or add an auth-source entry for "
-                               harness-usage-anthropic-api-host " with user admin")))
-      (let* ((start (car (harness-usage-period-bounds 'month (or (plist-get opts :now) (float-time)))))
-             (next (harness-usage--date (harness-usage--encode (list (nth 0 start) (1+ (nth 1 start)) 1) 12)))
-             (utc (lambda (date) (float-time (encode-time (list 0 0 0 1 (nth 1 date) (nth 0 date) nil nil t)))))
-             (since (funcall utc start))
-             (until (funcall utc next)))
-        (harness-then (harness-usage--cost-report key (harness-iso-time since) (harness-iso-time until))
-                      (lambda (amount)
-                        (let ((recorded (harness-usage--recorded-api-cost since until)))
-                          (list :available t :amount amount :recorded recorded
-                                :outside (max 0.0 (- amount recorded))
-                                :period-start (harness-usage--date-key start)
-                                :since since :until until))))))))
+        (harness-resolved (list :available nil :reason harness-usage--no-admin-key-reason))
+      (harness-then (harness-usage--fetch-cost-report window key)
+                    (lambda (amount)
+                      (let ((recorded (harness-usage--recorded-api-cost (car window) (cdr window))))
+                        (list :available t :amount amount :recorded recorded
+                              :outside (max 0.0 (- amount recorded))
+                              :period period
+                              :period-start (harness-usage--date-key (car bounds))
+                              :since (car window) :until (cdr window))))))))
+
+;;;; Spending providers report
+
+;; The harness sees only the calls it makes.  A budget over everything
+;; (`harness-usage-backfills-p') also counts what providers report they
+;; billed in its period that the harness did not record: calls made in
+;; other tools or on other machines, or before the harness kept usage.
+;; Each report is compared with the rows the harness recorded that the
+;; report counts too, up to the time of the report, and the rest (never
+;; below 0) is added to what the budget spent:
+;;
+;; - Extra usage.  A provider whose quota (`provider/quota-updated')
+;;   carries `:extra' with an amount `:used' in US dollars reports what
+;;   its plan billed beyond the subscription this calendar month: Claude
+;;   Code's usage credits (the CLI's get_usage report, the data behind
+;;   its /usage) and Copilot's additional premium requests.  It counts
+;;   in month budgets, for the month the report was made in, less that
+;;   provider's calls the harness recorded as billed `extra-usage'.
+;; - Anthropic's cost report, with an Admin API key (see above): what
+;;   the organisation was billed per token over the UTC days of a day,
+;;   week or month budget's period, less the Claude calls billed per
+;;   token the harness recorded.
+;;
+;; The baseline set by hand counts besides: it is what was spent that
+;; no provider reports, so where none reports it is all there is.
+;; Project, session and per-project budgets do not backfill: a provider
+;; cannot say what was spent in one project, and a session spends only
+;; through the harness.  Reports are kept in memory: extra usage comes
+;; whenever a provider reports its quota, and a cost report is fetched
+;; again when it is due.
+
+(defvar harness-usage--extra-spend nil
+  "Extra usage the providers reported, as an alist PROVIDER -> REPORT.
+REPORT: (:provider SYMBOL :label STRING :amount USD :at FLOAT :month
+\"YYYY-MM-DD\"): the plan billed AMOUNT beyond the subscription in the
+calendar month starting on MONTH, as of AT.")
+
+(defvar harness-usage--cost-reports (make-hash-table :test 'equal)
+  "Anthropic cost reports fetched for budgets, keyed by (SINCE . UNTIL).
+SINCE and UNTIL bound UTC days (see `harness-usage--utc-window').  A
+value is (:amount USD :at FLOAT :tried FLOAT :error TEXT): the AMOUNT
+billed as of AT, when it was last asked for, and why that failed, if
+it did.  A failure keeps the amount fetched before.")
+
+(defvar harness-usage--cost-report-fetches (make-hash-table :test 'equal)
+  "(SINCE . UNTIL) -> promise of the cost report fetch in flight.")
+
+(defvar harness-usage--cost-report-timers nil
+  "Timers of the cost report fetches scheduled but not started yet.")
+
+(defun harness-usage--forget-reports ()
+  "Forget what providers reported, and cancel the fetches scheduled."
+  (mapc #'cancel-timer harness-usage--cost-report-timers)
+  (setq harness-usage--cost-report-timers nil
+        harness-usage--extra-spend nil)
+  (clrhash harness-usage--cost-reports)
+  (clrhash harness-usage--cost-report-fetches))
+
+(defun harness-usage-backfills-p (budget)
+  "Non-nil when BUDGET counts what providers report they billed.
+That is a day, week or month budget over everything; a budget for one
+project or session, or for all time, cannot be compared with what an
+account was billed."
+  (and (eq (harness-usage--sym (plist-get budget :scope)) 'period)
+       (null (plist-get budget :target))
+       (memq (harness-usage--sym (plist-get budget :period)) '(day week month))
+       t))
+
+(defun harness-usage--fetch-cost-report (window &optional key)
+  "Fetch Anthropic's cost report over WINDOW, without blocking.
+WINDOW is (SINCE . UNTIL) as `harness-usage--utc-window' gives it and
+KEY the Admin API key, looked up when nil.  The answer goes into
+`harness-usage--cost-reports', and so does a missing key or a failure,
+so the report is not asked for again before
+`harness-usage-cost-report-interval' has passed.  Event
+`usage/reported-changed' when the amount changed.  Return a promise of
+the amount, or of nil without a key; a failed request rejects.  A fetch
+of WINDOW already in flight is shared."
+  (or (gethash window harness-usage--cost-report-fetches)
+      (let ((key (or key (harness-usage--admin-key)))
+            (note (lambda (fields)
+                    (puthash window (harness-plist-merge (gethash window harness-usage--cost-reports) fields)
+                             harness-usage--cost-reports))))
+        (if (null key)
+            (progn (funcall note (list :tried (float-time) :error harness-usage--no-admin-key-reason))
+                   (harness-resolved nil))
+          (let ((promise
+                 (harness-then
+                  ;; A request that cannot even start fails like one that did.
+                  (condition-case err
+                      (harness-usage--cost-report key (harness-iso-time (car window)) (harness-iso-time (cdr window)))
+                    (error (harness-rejected (harness-usage--cost-report-error err))))
+                  (lambda (amount)
+                    (remhash window harness-usage--cost-report-fetches)
+                    (let ((old (plist-get (gethash window harness-usage--cost-reports) :amount))
+                          (now (float-time)))
+                      (funcall note (list :amount amount :at now :tried now :error nil))
+                      (harness-usage--forget-old-cost-reports)
+                      (unless (equal old amount)
+                        (harness-emit 'usage/reported-changed
+                                      (list :source 'anthropic :amount amount
+                                            :since (car window) :until (cdr window)))))
+                    amount)
+                  (lambda (err)
+                    (remhash window harness-usage--cost-report-fetches)
+                    (let ((text (harness-error-message err)))
+                      (harness-log 'warn "usage: %s" text)
+                      (funcall note (list :tried (float-time) :error text)))
+                    (harness-rejected err)))))
+            ;; An answer at hand settles the chain at once, handlers included.
+            (unless (harness-promise-settled-p promise)
+              (puthash window promise harness-usage--cost-report-fetches))
+            promise)))))
+
+(defun harness-usage--forget-old-cost-reports ()
+  "Drop the cost reports of periods that ended more than 40 days ago."
+  (let ((limit (- (float-time) (* 40 86400))))
+    (maphash (lambda (window _) (when (< (cdr window) limit) (remhash window harness-usage--cost-reports)))
+             harness-usage--cost-reports)))
+
+(defun harness-usage--cost-report-due-p (entry)
+  "Non-nil when the cost report ENTRY is missing or old enough to ask again."
+  (let ((interval (if (numberp harness-usage-cost-report-interval) harness-usage-cost-report-interval 600)))
+    (or (null entry) (> (- (float-time) (or (plist-get entry :tried) 0)) interval))))
+
+(defun harness-usage--cost-report-source (bounds &optional fetch)
+  "Return the source Anthropic's cost report makes of the period BOUNDS, or nil.
+FETCH non-nil fetches the report soon, in the background, when it is
+due; the source comes from the report fetched before, if any."
+  (let* ((window (harness-usage--utc-window bounds))
+         (entry (gethash window harness-usage--cost-reports)))
+    (when (and fetch (harness-usage--cost-report-due-p entry)
+               (not (gethash window harness-usage--cost-report-fetches)))
+      ;; Asked for now so that the statuses of the next moments do not ask
+      ;; again; the key is looked up from the command loop, not from here.
+      (puthash window (plist-put (copy-sequence entry) :tried (float-time)) harness-usage--cost-reports)
+      (let (timer)
+        (setq timer (harness-run-soon
+                     (lambda ()
+                       (setq harness-usage--cost-report-timers (delq timer harness-usage--cost-report-timers))
+                       (harness-catch (harness-usage--fetch-cost-report window) #'ignore))))
+        (push timer harness-usage--cost-report-timers)))
+    (when (numberp (plist-get entry :amount))
+      (let* ((at (plist-get entry :at))
+             (amount (plist-get entry :amount))
+             (recorded (harness-usage--recorded-api-cost (car window) (min (cdr window) at))))
+        (list :source 'anthropic :label "Anthropic" :kind 'cost-report
+              :amount amount :recorded recorded :outside (max 0.0 (- amount recorded))
+              :at at :since (car window) :until (cdr window))))))
+
+(defun harness-usage--provider-label (provider)
+  "Return the display name of PROVIDER, a symbol."
+  (or (and (harness-method-exists-p 'provider/list)
+           (plist-get (cl-find provider (ignore-errors (harness-call 'provider/list))
+                               :key (lambda (p) (harness-usage--sym (plist-get p :id))))
+                      :label))
+      (capitalize (symbol-name provider))))
+
+(defun harness-usage--on-quota-updated (provider quota)
+  "Note what PROVIDER's QUOTA says its plan billed beyond the subscription.
+QUOTA has the shape `provider/quota' returns.  An `:extra' with an
+amount `:used' in US dollars covers the calendar month so far, as of
+QUOTA's `:updated' time; a QUOTA without one, such as per-token
+billing's, drops what PROVIDER reported before.  Event
+`usage/reported-changed' when the amount or its month changed."
+  (let* ((provider (harness-usage--sym provider))
+         (extra (plist-get quota :extra))
+         (used (and (consp extra) (plist-get extra :used)))
+         (currency (and (consp extra) (plist-get extra :currency)))
+         (updated (plist-get quota :updated))
+         (at (if (numberp updated) (float updated) (float-time)))
+         (old (alist-get provider harness-usage--extra-spend))
+         (new (and (numberp used) (member (or currency "USD") '("USD" "usd"))
+                   (list :provider provider
+                         :label (or (plist-get old :label) (harness-usage--provider-label provider))
+                         :amount (float used) :at at
+                         :month (harness-usage--period-start-key at 'month)))))
+    (setf (alist-get provider harness-usage--extra-spend nil t) new)
+    (unless (and (equal (plist-get old :amount) (plist-get new :amount))
+                 (equal (plist-get old :month) (plist-get new :month)))
+      (harness-emit 'usage/reported-changed
+                    (list :source provider :amount (plist-get new :amount) :month (plist-get new :month))))))
+
+(defun harness-usage--extra-sources (bounds rows)
+  "Return the sources the extra usage reported makes of the month BOUNDS.
+ROWS are the rows the harness recorded in that month."
+  (let ((month (harness-usage--date-key (car bounds))))
+    (cl-loop for (provider . report) in (sort (copy-sequence harness-usage--extra-spend)
+                                              (lambda (a b) (string< (car a) (car b))))
+             when (equal (plist-get report :month) month)
+             collect (let* ((prefix (format "%s:" provider))
+                            (amount (plist-get report :amount))
+                            (at (plist-get report :at))
+                            (recorded (harness-usage--recorded-cost
+                                       rows
+                                       (lambda (row)
+                                         (and (string-prefix-p prefix (or (plist-get row :model) ""))
+                                              (eq (harness-billing-of row) 'extra-usage)))
+                                       at)))
+                       (list :source provider :label (plist-get report :label) :kind 'extra-usage
+                             :amount amount :recorded recorded :outside (max 0.0 (- amount recorded))
+                             :at at)))))
+
+(defun harness-usage--source-detail (source period)
+  "Return a sentence saying what SOURCE reported for a budget of PERIOD."
+  (format "%s reports %s billed %s this %s, as of %s; %s of it was recorded here, so %s more counts"
+          (plist-get source :label) (harness-format-cost (plist-get source :amount))
+          (if (eq (plist-get source :kind) 'extra-usage) "beyond the plan" "per token (UTC days)")
+          period (format-time-string "%b %-d %H:%M" (plist-get source :at))
+          (harness-format-cost (plist-get source :recorded))
+          (harness-format-cost (plist-get source :outside))))
+
+(defun harness-usage--reported-sources (period bounds rows &optional fetch)
+  "Return what providers report was billed in the calendar PERIOD BOUNDS.
+This is for a budget over everything (see `harness-usage-backfills-p').
+PERIOD is day, week or month, BOUNDS its (START-DATE . END-DATE) and
+ROWS the rows the harness recorded in it; FETCH non-nil fetches a cost
+report that is due in the background.  Each source is (:source ID
+:label NAME :kind extra-usage|cost-report :amount USD :recorded USD
+:outside USD :at FLOAT :detail TEXT), plus :since and :until for a cost
+report: ID reported AMOUNT billed as of AT, RECORDED of which the
+harness recorded itself; OUTSIDE, the rest, is what the budget counts."
+  (let ((period (harness-usage--sym period)))
+    (mapcar (lambda (source)
+              (append source (list :detail (harness-usage--source-detail source period))))
+            (delq nil (append (and (eq period 'month) (harness-usage--extra-sources bounds rows))
+                              (list (harness-usage--cost-report-source bounds fetch)))))))
 
 ;;;; Enforcement
+
+(defun harness-usage--applies-p (budget project &optional session-id)
+  "Non-nil when explicit BUDGET counts spending in PROJECT, a root.
+SESSION-ID names the session that spends, when there is one.  A session
+budget counts its session's spending, a project budget its project's,
+and a period budget everything's or its project's."
+  (let ((target (plist-get budget :target)))
+    (pcase (plist-get budget :scope)
+      ('session (and session-id (equal target session-id)))
+      ('project (equal target project))
+      ('period (or (null target) (equal target project))))))
 
 (defun harness-usage--session-budgets (session)
   "Return every budget that applies to SESSION.
 The explicit ones come first, then the Budget setting's, which applies
 to every session, and last the session's own."
-  (let ((sid (plist-get session :id))
-        (project (plist-get session :project))
-        out)
-    (dolist (b harness-usage-budgets)
-      (let ((target (plist-get b :target)))
-        (when (pcase (plist-get b :scope)
-                ('session (equal target sid))
-                ('project (equal target project))
-                ('period (or (null target) (equal target project))))
-          (push b out))))
-    (dolist (implicit (list (harness-usage--settings-budget) (harness-usage--implicit-budget session)))
-      (when implicit (push implicit out)))
-    (nreverse out)))
+  (append (cl-remove-if-not (lambda (b) (harness-usage--applies-p b (plist-get session :project)
+                                                                  (plist-get session :id)))
+                            harness-usage-budgets)
+          (delq nil (list (harness-usage--settings-budget) (harness-usage--implicit-budget session)))))
 
 (harness-defmethod usage/session-budgets (session-id &rest opts)
   "Return the status of every budget applying to SESSION-ID.
 OPTS `:now' fixes the reference time."
   (mapcar (lambda (b) (harness-usage--budget-status b (plist-get opts :now)))
           (harness-usage--session-budgets (harness-call 'session/get session-id))))
+
+(harness-defmethod usage/project-budgets (project &rest opts)
+  "Return the status of every budget applying to PROJECT, a root.
+Those are its project budgets and the period budgets of everything or
+of PROJECT, then the Budget setting's, which applies to every session;
+a session's own budgets are left out.  OPTS `:now' fixes the reference
+time."
+  (let ((root (harness-usage--root project))
+        (setting (harness-usage--settings-budget)))
+    (mapcar (lambda (b) (harness-usage--budget-status b (plist-get opts :now)))
+            (append (cl-remove-if-not (lambda (b) (harness-usage--applies-p b root)) harness-usage-budgets)
+                    (and setting (list setting))))))
 
 (defun harness-usage--warn (sid budget status threshold text)
   "Warn once per period about BUDGET reaching THRESHOLD for session SID.
@@ -938,15 +1389,18 @@ Return the reason a hard budget blocks the next turn, or nil."
       (let* ((st (harness-usage--budget-status b now))
              (fraction (plist-get st :fraction))
              (label (harness-usage-budget-label b))
+             (outside (harness-budget-outside-text st))
              (spent (concat (harness-format-cost (plist-get st :spent))
-                            (if (> (plist-get st :baseline) 0)
-                                (format " (incl. %s baseline)" (harness-format-cost (plist-get st :baseline)))
-                              "")))
+                            (if outside (format " (%s)" outside) "")))
              (amount (harness-format-cost (plist-get st :amount))))
         (cond
          ((and (plist-get st :hard) (>= fraction 1.0))
           (unless reason
-            (setq reason (format "Budget %s exhausted: spent %s of %s" label spent amount))))
+            (setq reason (format "Budget %s exhausted: spent %s of %s; %s to go on"
+                                 label spent amount
+                                 (if (equal (plist-get b :id) harness-usage-settings-budget-id)
+                                     "change it with M-x harness-settings"
+                                   "delete it in the usage dashboard")))))
          ((>= fraction 1.0)
           (harness-usage--warn sid b st 1.0 (format "Budget %s exceeded: spent %s of %s" label spent amount)))
          ((>= fraction harness-usage-warn-fraction)
@@ -970,17 +1424,30 @@ VALUE is the gate so far, NEXT continues the chain, SESSION is the plist."
   "Create the schema, load budgets and hook into the bus."
   (harness-usage--db)
   (harness-usage--load-budgets)
+  (harness-usage--forget-reports)
   (harness-on 'session/usage #'harness-usage--on-session-usage)
+  (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
+  (harness-usage--watch-rates)
   (harness-add-filter 'agent/before-turn #'harness-usage--before-turn 30))
 
 (harness-declare-event 'usage/recorded "(ROW) after a usage row is stored.")
 (harness-declare-event 'usage/budget-warning "(SESSION-ID BUDGET STATUS) when a budget crosses 80% or 100%.")
 (harness-declare-event 'usage/budgets-changed "(BUDGETS) after a budget is added, replaced or removed.")
+(harness-declare-event 'usage/reported-changed
+                       "(REPORT) when a provider reports a new amount billed, which budgets over everything count.")
+(harness-declare-event 'usage/rate-updated "(SESSION-ID RATE) after a model call of the session was measured; RATE as `usage/rate' returns it.")
 
 (harness-define-module 'usage
-  :doc "Cost accounting, usage summaries and budgets."
+  :doc "Cost accounting, usage summaries, budgets and output rates."
   :requires '(store session provider)
-  :init #'harness-usage--init)
+  :init #'harness-usage--init
+  :shutdown #'harness-usage--forget-reports)
+
+;; A reload does not initialise the module again: subscribe what this
+;; version added (`harness-on' adds a handler once).
+(when (harness-module-ready-p 'usage)
+  (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
+  (harness-usage--watch-rates))
 
 (provide 'harness-usage)
 ;;; harness-usage.el ends here

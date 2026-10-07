@@ -67,6 +67,11 @@ the tool call that waits on it.")
 The state belongs to the request, not to the buffer drawing it, so a
 chat and a popout showing the same question show the same diagram.")
 
+(defvar harness-ui-pending--expanded (make-hash-table :test 'equal)
+  "Session id -> the ids of its permission requests whose input shows whole.
+Like a question's diagram, this belongs to the request, so a chat and a
+popout showing the same request show it the same.")
+
 (defvar harness-ui-pending--answered (make-hash-table :test 'equal)
   "Session id -> (PID . TIME) of requests answered here.
 The session's own pending list lags an answer by a round trip; this
@@ -92,9 +97,11 @@ popout sets it to the session its item belongs to.")
       (and (boundp 'harness-ui-session-id) harness-ui-session-id)))
 
 (defun harness-ui-pending--forget-all ()
-  "Forget every request, its diagrams and the answers just given."
+  "Forget every request, its diagrams and the answers just given.
+Which requests show their input whole is forgotten too."
   (clrhash harness-ui-pending--requests)
   (clrhash harness-ui-pending--diagrams)
+  (clrhash harness-ui-pending--expanded)
   (clrhash harness-ui-pending--answered))
 
 (defun harness-ui-pending-items (session-id)
@@ -231,7 +238,7 @@ non-nil when the store changed."
 (defun harness-ui-pending--message-for (option dir shown)
   "Return the echo-area message for permission OPTION.
 DIR is the prompt's directory when it has one, SHOWN the pattern the
-answer holds for (nil for a call without paths)."
+answer holds for (nil for a prompt about the call itself, which has none)."
   (pcase option
     ("allow-once" "Allowed")
     ("allow-session" (cond (shown (format "Allowed %s for this session" shown))
@@ -292,13 +299,14 @@ all."
 
 ;;;; Patterns a prompt about paths is answered for
 ;;
-;; A permission request about paths (the jail's, an agent's own request
-;; for a directory, a tool call that touches files) is answered for a
-;; glob pattern rather than for one file: its `:pattern', by default
-;; everything in the directory of its paths.  The user edits it, more
-;; or less specific, with `harness-ui-pending-edit-pattern' (`e' on the
-;; panel, C-c C-p in the chat); the answer then carries the edited
-;; pattern, and for a call the panel says which answers hold for it.
+;; A permission request about a path outside the allowed directories
+;; (the jail's, or an agent's own request for a directory) is answered
+;; for a glob pattern rather than for one file: its `:pattern', by
+;; default everything in the directory of its paths.  The user edits
+;; it, more or less specific, with `harness-ui-pending-edit-pattern'
+;; (`e' on the panel, C-c C-p in the chat); the answer then carries the
+;; edited pattern.  Any other request is about the call alone and comes
+;; without a pattern, so its panel shows none.
 
 (defun harness-ui-pending--permission-pattern (r)
   "Return the glob pattern permission record R is answered for, as shown, or nil.
@@ -346,24 +354,26 @@ pattern line when this buffer shows it."
 
 (defun harness-ui-pending-edit-pattern (&optional pid)
   "Edit the glob pattern the permission request PID is answered for.
-PID defaults to the request at point, or else the newest one.  A
-request about paths is answered for everything in the directory they
-lie in; edit the pattern to be more specific (a subdirectory,
-src/*.el, one file) or less (a parent directory).  `*' matches within a
-name, `**' across directories; a relative pattern is relative to the
-session's working directory.
+PID defaults to the request at point, or else the newest one with a
+pattern.  Only a request about a path outside the allowed directories
+has one: everything in the directory the path lies in.  Edit it to be
+more specific (a subdirectory, src/*.el, one file) or less (a parent
+directory).  `*' matches within a name, `**' across directories; a
+relative pattern is relative to the session's working directory.
 \\<minibuffer-local-map>\\[next-history-element] offers patterns around
 the request's own; an empty answer goes back to it."
   (interactive)
   (let* ((session-id (harness-ui-pending--session))
          (pid (or pid (harness-ui-pending-at-point)))
          (r (and pid (harness-ui-pending-record session-id pid))))
-    (unless (and r (equal (plist-get r :kind) "permission"))
-      (setq r (cl-find-if (lambda (x) (equal (plist-get x :kind) "permission"))
+    ;; A newer request about the call alone has no pattern: it must not
+    ;; hide the one of a request about a path outside.
+    (unless (plist-get r :pattern)
+      (setq r (cl-find-if (lambda (x) (plist-get x :pattern))
                           (reverse (harness-ui-pending-items session-id)))
             pid (plist-get r :id)))
-    (unless (plist-get r :pattern)
-      (user-error "No permission request about paths is waiting"))
+    (unless r
+      (user-error "No request about a path outside the allowed directories is waiting"))
     (let* ((own (abbreviate-file-name (plist-get r :pattern)))
            (typed (string-trim (read-string "Pattern (* within a name, ** across directories): "
                                             (harness-ui-pending--permission-pattern r) nil
@@ -402,6 +412,17 @@ the request's own; an empty answer goes back to it."
 (define-key harness-ui-pending-permission-map (kbd "N") (harness-ui-pending--permission-command "deny-always"))
 (define-key harness-ui-pending-permission-map (kbd "e") #'harness-ui-pending-edit-pattern)
 
+(defun harness-ui-pending--pattern-here-p ()
+  "Nil when point is on the panel of a permission request with no pattern.
+Its `e' has no pattern to edit there, so it types, into the compose box
+\(`harness-compose-acts-p')."
+  (let* ((pid (get-text-property (point) 'harness-ui-pending))
+         (r (and pid (harness-ui-pending-record (harness-ui-pending--session) pid))))
+    (or (not (equal (plist-get r :kind) "permission"))
+        (plist-get r :pattern))))
+
+(put 'harness-ui-pending-edit-pattern 'harness-compose-acts-p #'harness-ui-pending--pattern-here-p)
+
 (defun harness-ui-pending--question-command (n)
   "Return a command answering the question at point with its Nth option."
   (lambda ()
@@ -414,21 +435,47 @@ the request's own; an empty answer goes back to it."
           (harness-ui-pending-answer-question session-id pid option)
         (user-error "No such option")))))
 
+(defun harness-ui-pending--option-here-p (n)
+  "Nil when point is on the panel of a question with no option N (from 0).
+The option's digit has nothing to act on there, so it types, into the
+compose box (`harness-compose-acts-p')."
+  (let* ((pid (get-text-property (point) 'harness-ui-pending))
+         (r (and pid (harness-ui-pending-record (harness-ui-pending--session) pid))))
+    (or (not (equal (plist-get r :kind) "question"))
+        (nth n (plist-get r :options)))))
+
 (defvar harness-ui-pending-question-map (make-sparse-keymap)
   "Keys active while point is on a question panel.
-A digit answers with that option.")
+A digit answers with that option; one beyond the options types, into
+the compose box.")
 
 (defvar harness-ui-pending-diagram-map (make-sparse-keymap)
   "Keys active while point is on the panel of a question with diagrams.
 The question's digits, and n and p to switch whose diagram shows.")
 
-;; Filled at top level, not in the `defvar's, so a reload updates them.
+;; Defined and filled at top level, not in the `defvar's, so a reload
+;; updates them.  A digit runs `harness-ui-pending-answer-N'.
 (dotimes (i 9)
-  (define-key harness-ui-pending-question-map (kbd (number-to-string (1+ i)))
-    (harness-ui-pending--question-command i)))
+  (let ((command (intern (format "harness-ui-pending-answer-%d" (1+ i)))))
+    (defalias command (harness-ui-pending--question-command i)
+      (format "Answer the question at point with its option %d.
+On the panel of a question with fewer options the key types instead,
+into the compose box." (1+ i)))
+    (put command 'harness-compose-acts-p (lambda () (harness-ui-pending--option-here-p i)))
+    (define-key harness-ui-pending-question-map (kbd (number-to-string (1+ i))) command)))
 (set-keymap-parent harness-ui-pending-diagram-map harness-ui-pending-question-map)
 (define-key harness-ui-pending-diagram-map (kbd "n") #'harness-ui-pending-next-diagram)
 (define-key harness-ui-pending-diagram-map (kbd "p") #'harness-ui-pending-previous-diagram)
+
+(defvar harness-ui-pending-long-input-map (make-sparse-keymap)
+  "Keys active while point is on a permission panel whose input is cut short.
+The permission's keys, and TAB to show the input whole or put it back
+on one line (`harness-ui-pending-toggle-input').")
+
+;; Filled at top level, not in the `defvar', so a reload updates it.
+(set-keymap-parent harness-ui-pending-long-input-map harness-ui-pending-permission-map)
+(define-key harness-ui-pending-long-input-map (kbd "TAB") #'harness-ui-pending-toggle-input)
+(define-key harness-ui-pending-long-input-map (kbd "<tab>") #'harness-ui-pending-toggle-input)
 
 (defun harness-ui-pending--diagram-question ()
   "Return the question whose diagrams the diagram commands switch.
@@ -512,14 +559,10 @@ shown, so an agent's own directory request has no \"Allow once\"."
     (or (and offered (cl-remove-if-not (lambda (o) (member (nth 2 o) offered)) all))
         all)))
 
-(defun harness-ui-pending--insert-pattern-line (r buttons)
+(defun harness-ui-pending--insert-pattern-line (r)
   "Insert the line of the pattern permission record R is answered for.
-BUTTONS are the panel's; for a tool call, the line says which of them
-the pattern is for: those that remember the answer."
+Only a request about a path outside the allowed directories has one."
   (let ((pid (plist-get r :id))
-        (remembering (and (not (plist-get r :dir))
-                          (cl-remove-if-not (lambda (b) (member (nth 2 b) '("allow-session" "allow-always" "deny-always")))
-                                            buttons)))
         (start (point)))
     (insert (propertize "   pattern: " 'face 'harness-dim-face)
             (propertize (harness-ui-pending--permission-pattern r) 'face 'harness-tool-subject-face)
@@ -528,11 +571,6 @@ the pattern is for: those that remember the answer."
             (harness-ui-action-button "[Edit]" (lambda () (harness-ui-pending-edit-pattern pid))
                                       :help "Edit the pattern, to make it more or less specific (e)")
             " " (harness-ui-kbd "e")
-            (if remembering
-                (propertize (format "   %s remember the answer for it"
-                                    (mapconcat (lambda (b) (nth 1 b)) remembering ", "))
-                            'face 'harness-dim-face)
-              "")
             "\n")
     (put-text-property start (point) 'harness-ui-pending-pattern pid)))
 
@@ -541,8 +579,8 @@ the pattern is for: those that remember the answer."
 The first says its kind and, for a shell command, where it runs (`runs
 in:').  The paths the call is about (`paths:') follow on that line, or
 for a shell command on a line of their own: there they are the paths
-the command names outside the session's directories, which the pattern
-is made of, and they are left out when they are just where it runs."
+the command names outside the session's directories, and they are left
+out when they are just where it runs."
   (let* ((cwd (plist-get r :cwd))
          (paths (mapcar (lambda (p) (format "%s" p)) (append (plist-get r :paths) nil)))
          (only-cwd (and cwd paths (null (cdr paths))
@@ -572,12 +610,12 @@ is made of, and they are left out when they are just where it runs."
             "\n")
     (dolist (line (harness-ui-pending--permission-facts r))
       (insert (propertize (concat "   " line "\n") 'face 'harness-dim-face)))
-    (when-let* ((input (plist-get r :input)))
-      (insert (propertize (concat "   " (harness-ui-tool-input-summary input) "\n") 'face 'harness-dim-face)))
+    (when (plist-get r :input)
+      (harness-ui-pending--insert-input r))
     (when-let* ((reason (plist-get r :reason)))
       (insert (propertize (format "   %s\n" reason) 'face 'harness-hint-face)))
     (when (plist-get r :pattern)
-      (harness-ui-pending--insert-pattern-line r buttons))
+      (harness-ui-pending--insert-pattern-line r))
     (insert "   ")
     (dolist (o buttons)
       (let ((option (nth 2 o)))
@@ -586,7 +624,147 @@ is made of, and they are left out when they are just where it runs."
                                           :help (format "Answer %s (%s)" (nth 0 o) (nth 1 o)))
                 " " (harness-ui-kbd (nth 1 o)) "  ")))
     (insert "\n")
-    (harness-ui-pending--decorate start (point) pid harness-ui-pending-permission-map)))
+    (harness-ui-pending--decorate start (point) pid (harness-ui-pending--permission-map r))))
+
+;;;;; A long input, whole
+;;
+;; A permission panel words the call's input on one line, each value cut
+;; to its first line and the line to a width (see
+;; `harness-ui-tool-input-summary'): a long command is cut short, and
+;; the further lines of one are not shown at all.  When the line leaves
+;; something out it ends in a toggle, [Show all] (with the number of
+;; lines, when a value has several), which TAB anywhere on the panel
+;; pushes too.  The panel then shows the input whole in place: each
+;; value on a line of its own, and one the line cut short verbatim, in a
+;; block of fixed-width lines under its key; [Show less] puts it back.
+;; Which requests show their input whole belongs to the request, as the
+;; diagram a question shows does, so a chat and a popout of it agree
+;; (`harness-ui-pending--expanded').
+
+(defun harness-ui-pending--value-text (value)
+  "Return VALUE, a value of a tool input, whole, worded as on the panel.
+That is how `harness-ui-summary-value' words it, before cutting it."
+  (if (and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
+      (mapconcat #'harness-ui-option-label value ", ")
+    (harness-ui-format-value value)))
+
+(defun harness-ui-pending--input-entries (input)
+  "Return tool INPUT, a plist, as (KEY VALUE TEXT) entries.
+KEY is the name the panel shows, VALUE the value and TEXT it whole."
+  (cl-loop for (k v) on input by #'cddr
+           collect (list (substring (symbol-name k) 1) v (harness-ui-pending--value-text v))))
+
+(defun harness-ui-pending--value-cut-p (value text)
+  "Non-nil when the panel's one line cuts VALUE short; TEXT is it whole."
+  (not (equal (harness-ui-summary-value value) (string-trim text))))
+
+(defun harness-ui-pending--input-long-p (r)
+  "Non-nil when the one line of permission record R's input leaves some out.
+A value cut short or with further lines does, and so does a line too
+long for the panel."
+  (when-let* ((input (and (equal (plist-get r :kind) "permission") (plist-get r :input))))
+    (not (equal (or (harness-ui-tool-input-summary input) "")
+                (mapconcat (lambda (e) (format "%s: %s" (nth 0 e) (string-trim (nth 2 e))))
+                           (harness-ui-pending--input-entries input) "  ")))))
+
+(defun harness-ui-pending-input-whole-p (session-id pid)
+  "Non-nil when permission request PID of SESSION-ID shows its input whole."
+  (and (member pid (gethash session-id harness-ui-pending--expanded)) t))
+
+(defun harness-ui-pending--permission-map (r)
+  "Return the keymap of the panel of permission record R.
+A panel whose input the one line cuts short takes TAB, which shows it
+whole; on the others TAB keeps the meaning it has in the buffer."
+  (if (harness-ui-pending--input-long-p r)
+      harness-ui-pending-long-input-map
+    harness-ui-pending-permission-map))
+
+(defun harness-ui-pending--block-string (text)
+  "Return TEXT, a value of a tool input, as a block of lines under its key.
+It is verbatim, in fixed-width lines, which wrap under their indentation."
+  (let ((indent (propertize "     " 'face 'harness-ui-panel-face)))
+    (propertize (harness-ui-ensure-newline text)
+                'face 'harness-ui-output-face 'line-prefix indent 'wrap-prefix indent)))
+
+(defun harness-ui-pending--show-all-label (entries)
+  "Return the label of the toggle that shows input ENTRIES whole.
+When a value the line cuts short has further lines, it counts the
+lines of those values, so that lines past the first never go unseen."
+  (let* ((cut (cl-remove-if-not (lambda (e) (harness-ui-pending--value-cut-p (nth 1 e) (nth 2 e))) entries))
+         (lines (mapcar (lambda (e) (cl-count ?\n (harness-ui-ensure-newline (nth 2 e)))) cut)))
+    (if (cl-some (lambda (n) (> n 1)) lines)
+        (format "[Show all %d lines]" (apply #'+ lines))
+      "[Show all]")))
+
+(defun harness-ui-pending--input-toggle (session-id r whole)
+  "Return the toggle of permission record R of SESSION-ID.
+That is [Show all], or [Show less] when WHOLE: the input shows whole now."
+  (let ((pid (plist-get r :id)))
+    (propertize
+     (concat (harness-ui-action-button
+              (if whole "[Show less]" (harness-ui-pending--show-all-label
+                                       (harness-ui-pending--input-entries (plist-get r :input))))
+              (lambda () (harness-ui-pending-show-input session-id pid (not whole)))
+              :help (if whole "Put the input back on one line (TAB)" "Show the whole input, every line of it (TAB)"))
+             " " (harness-ui-kbd "TAB"))
+     'harness-ui-pending-input-toggle pid)))
+
+(defun harness-ui-pending--insert-input (r)
+  "Insert the lines of permission record R's input.
+That is one line (`harness-ui-tool-input-summary'), with a toggle when
+it leaves something out, or, once the toggle was pushed, the input
+whole: every value on a line of its own, and one the line cut short
+in a block under its key, the toggle on the first line."
+  (let* ((session-id (harness-ui-pending--session))
+         (input (plist-get r :input))
+         (long (harness-ui-pending--input-long-p r)))
+    (if (not (and long (harness-ui-pending-input-whole-p session-id (plist-get r :id))))
+        (insert (propertize (concat "   " (harness-ui-tool-input-summary input)) 'face 'harness-dim-face)
+                (if long (concat "  " (harness-ui-pending--input-toggle session-id r nil)) "")
+                "\n")
+      (let ((toggle (concat "  " (harness-ui-pending--input-toggle session-id r t))))
+        (pcase-dolist (`(,key ,value ,text) (harness-ui-pending--input-entries input))
+          (let ((cut (harness-ui-pending--value-cut-p value text)))
+            (insert (propertize (concat "   " key ":" (if cut "" (concat " " (string-trim text))))
+                                'face 'harness-dim-face 'wrap-prefix "     ")
+                    toggle "\n")
+            (setq toggle "")
+            (when cut (insert (harness-ui-pending--block-string text)))))))))
+
+(defun harness-ui-pending-show-input (session-id pid whole)
+  "Show the input of permission request PID of SESSION-ID whole, or on one line.
+WHOLE non-nil shows it whole.  The hosts drawing the request are
+redrawn; point goes to the request's toggle when this buffer draws it,
+so that TAB there puts it back."
+  (let ((pids (cl-remove-if (lambda (p) (or (equal p pid) (not (harness-ui-pending-record session-id p))))
+                            (gethash session-id harness-ui-pending--expanded))))
+    (if (or whole pids)
+        (puthash session-id (if whole (cons pid pids) pids) harness-ui-pending--expanded)
+      (remhash session-id harness-ui-pending--expanded)))
+  (harness-ui-pending--changed session-id)
+  ;; The text property is compared with `equal', so the loop walks the changes.
+  (let ((pos (point-min)))
+    (while (and pos (not (equal (get-text-property pos 'harness-ui-pending-input-toggle) pid)))
+      (setq pos (next-single-property-change pos 'harness-ui-pending-input-toggle)))
+    (when pos (goto-char pos))))
+
+(defun harness-ui-pending-toggle-input (&optional pid)
+  "Show the whole input of a permission request, or put it back on one line.
+PID defaults to the request at point, or else the newest whose one
+line leaves something out: a long command, or one of several lines.
+The panel shows it in place, every value whole, in the chat and in a
+popout of the request alike.  TAB on such a panel, and its [Show all]
+and [Show less] buttons, run this."
+  (interactive)
+  (let* ((session-id (harness-ui-pending--session))
+         (pid (or pid (harness-ui-pending-at-point)))
+         (r (and pid (harness-ui-pending-record session-id pid))))
+    (unless (harness-ui-pending--input-long-p r)
+      (setq r (cl-find-if #'harness-ui-pending--input-long-p
+                          (reverse (harness-ui-pending-items session-id)))))
+    (unless r (user-error "No permission request has more of its input to show"))
+    (harness-ui-pending-show-input session-id (plist-get r :id)
+                                   (not (harness-ui-pending-input-whole-p session-id (plist-get r :id))))))
 
 ;;;;; Diagrams of a question's options
 ;;
