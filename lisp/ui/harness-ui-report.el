@@ -163,7 +163,7 @@ feedback to `:feedback'."
                          (and (stringp m) (not (string= m "application/octet-stream")) m))
                      (error nil))
                    "application/octet-stream"))
-         (size (nth 1 (file-attributes path))))
+         (size (file-attribute-size (file-attributes path))))
     (list :path path :mime mime :size size :name (file-name-nondirectory path))))
 
 (defun harness-ui-report--insert-media (path)

@@ -19,7 +19,9 @@
 ;;   session cost: a price when it is billed per token, the plan's name
 ;;   and quota when a subscription pays for it;
 ;; - faces and icons;
-;; - window positions: one session per preset position, replacing;
+;; - window positions: one session per preset position, replacing, and
+;;   the fullscreen layout, an overview such as the task board on the
+;;   left of the frame and the session it inspects beside it;
 ;; - the prefix keymap, the global minor mode and the transient menu,
 ;;   which also lists the commands of the buffer it is opened from, as
 ;;   that buffer's modes list them in their `harness-menu-group'.
@@ -41,6 +43,8 @@
 (defvar harness-directory)
 
 (declare-function harness-reload "harness")
+(declare-function harness-tasks "harness-ui-tasks")
+(declare-function harness-sessions "harness-ui-sessions")
 
 (defgroup harness-ui nil
   "Presentation layer of the Emacs agent harness."
@@ -1620,10 +1624,14 @@ overflows the window reads as text that fits."
     (left . ((side . left) (slot . 0) (window-width . 0.45)))
     (bottom . ((side . bottom) (slot . 0) (window-height . 0.45)))
     (full . nil)
-    (other . nil))
+    (other . nil)
+    (fullscreen . nil))
   "Named positions a session can be displayed in.
 Side-window positions carry `display-buffer-in-side-window' parameters;
-`full' takes over the selected window; `other' pops up anywhere."
+`full' takes over the selected window; `other' pops up anywhere;
+`fullscreen' is the fullscreen layout of an overview such as the task
+board (see `harness-fullscreen'): the overview on the left of the frame,
+everything else beside it."
   :type '(alist :key-type symbol :value-type sexp) :group 'harness-ui)
 
 (defcustom harness-ui-default-position 'right
@@ -1637,26 +1645,33 @@ Side-window positions carry `display-buffer-in-side-window' parameters;
   "Function returning the buffer that shows session ID: (ID) → buffer.
 Set by the chat module.")
 
+(defvar-local harness-ui-position nil "Position this buffer was displayed in.")
+
 (defun harness-ui-display-buffer (buffer &optional position)
-  "Show BUFFER in POSITION, replacing whatever session occupied it."
-  (let* ((position (or position harness-ui-default-position))
-         (params (alist-get position harness-ui-positions))
-         (previous (gethash position harness-ui--position-buffers))
-         (window (and previous (buffer-live-p previous) (get-buffer-window previous))))
-    (puthash position buffer harness-ui--position-buffers)
-    (cond
-     ((and window (window-live-p window) (not (eq previous buffer)))
-      (set-window-buffer window buffer)
-      (select-window window))
-     ((eq position 'full) (switch-to-buffer buffer))
-     ((eq position 'other) (pop-to-buffer buffer))
-     (params
-      (select-window (display-buffer-in-side-window buffer params)))
-     (t (pop-to-buffer buffer)))
+  "Show BUFFER in POSITION, replacing whatever session occupied it.
+In a frame with the fullscreen layout POSITION defaults to `fullscreen',
+and a position elsewhere leaves the layout's windows alone."
+  (let ((position (or position
+                      (and (harness-ui--fullscreen-layout) 'fullscreen)
+                      harness-ui-default-position)))
+    (if (eq position 'fullscreen)
+        (harness-ui--display-fullscreen buffer)
+      (let* ((params (alist-get position harness-ui-positions))
+             (previous (gethash position harness-ui--position-buffers))
+             (window (and previous (buffer-live-p previous) (get-buffer-window previous))))
+        (puthash position buffer harness-ui--position-buffers)
+        (cond
+         ((and window (window-live-p window) (not (eq previous buffer))
+               (not (harness-ui--fullscreen-window-p window)))
+          (set-window-buffer window buffer)
+          (select-window window))
+         ((eq position 'full) (switch-to-buffer buffer))
+         ((eq position 'other) (pop-to-buffer buffer))
+         (params
+          (select-window (display-buffer-in-side-window buffer params)))
+         (t (pop-to-buffer buffer)))))
     (with-current-buffer buffer (setq-local harness-ui-position position))
     buffer))
-
-(defvar-local harness-ui-position nil "Position this buffer was displayed in.")
 
 (defun harness-ui-display-session (id &optional position)
   "Display session ID in POSITION using `harness-ui-open-session-function'."
@@ -1669,9 +1684,11 @@ Set by the chat module.")
 Views share positions with sessions: a view replaces the session shown
 in its position and a session opened there replaces the view.  Without
 POSITION the view returns to the position it had last, else
-`harness-ui-default-position'.  Small transient windows (menus, help,
-the BTW overlay) do not go through here."
+`harness-ui-default-position'; in a frame with the fullscreen layout it
+shows beside the overview, or as the overview when it is one.  Small
+transient windows (menus, help, the BTW overlay) do not go through here."
   (harness-ui-display-buffer buffer (or position
+                                        (and (harness-ui--fullscreen-layout) 'fullscreen)
                                         (buffer-local-value 'harness-ui-position buffer)
                                         harness-ui-default-position)))
 
@@ -1679,9 +1696,13 @@ the BTW overlay) do not go through here."
   "Return a function of a session id that shows it where this view is.
 Call this when the command runs and the returned function later, from
 an asynchronous callback: the session takes POSITION, by default the
-current buffer's position (replacing the view), and opens from the
+current buffer's position (replacing the view) -- in a frame with the
+fullscreen layout, the window beside the overview -- and opens from the
 window selected now even when another frame is selected by then."
-  (let ((position (or position harness-ui-position harness-ui-default-position))
+  (let ((position (or position
+                      (and (harness-ui--fullscreen-layout) 'fullscreen)
+                      harness-ui-position
+                      harness-ui-default-position))
         (window (selected-window)))
     (lambda (id)
       (when (window-live-p window) (select-window window))
@@ -1690,6 +1711,302 @@ window selected now even when another frame is selected by then."
 (defun harness-ui-read-position ()
   "Read a position name with completion."
   (intern (completing-read "Position: " (mapcar (lambda (p) (symbol-name (car p))) harness-ui-positions) nil t)))
+
+;;;; Fullscreen layout
+;;
+;; An overview -- the task board, the session list -- can take the whole
+;; frame: it stays on the left, in a side window, and the session it
+;; inspects shows beside it, in a window of the frame's own (the slot).
+;; Sessions opened from the overview take the slot, and so does anything
+;; else shown without a position while the layout lasts.  Burying the
+;; buffer in the slot (`harness-ui-bury') brings back what the slot showed
+;; before -- the file the session took the place of -- and the layout
+;; stays: the next session opened from the overview takes the slot again.
+;; Burying the overview ends the layout, and the windows come back as
+;; they were, but for a buffer of the user's left in the slot, which
+;; stays in sight.
+;;
+;; The layout is kept per frame, in a weak table rather than a frame
+;; parameter, which `frameset' would try to save.  It lasts as long as
+;; its overview's window, however that window goes.
+
+(defcustom harness-ui-fullscreen-width 0.5
+  "Width of the overview in the fullscreen layout.
+A fraction of the frame's width, or a number of columns."
+  :type 'number :group 'harness-ui)
+
+(defvar-local harness-ui-overview-function nil
+  "Function returning the session to show beside this overview, or nil.
+A view that sets it buffer-locally is an overview, which can take the
+fullscreen layout (`harness-fullscreen').  When the layout starts with
+no session in sight, the session whose id it returns shows beside the
+overview: the one at point, say, else the most recent the view lists.
+It is called in the overview's buffer.")
+
+(cl-defstruct (harness-ui--fullscreen (:constructor harness-ui--fullscreen-create)
+                                      (:copier nil))
+  "The fullscreen layout of a frame."
+  (overview nil :documentation "The side window of the overview.")
+  (slot nil :documentation "The window beside it, where sessions show.")
+  (home nil :documentation "The slot as the layout started.")
+  (saved nil :documentation "The window configuration of the frame from before.")
+  (positions nil :documentation "Alist of the overviews shown and their positions from before."))
+
+(defvar harness-ui--fullscreen-layouts (make-hash-table :test 'eq :weakness 'key)
+  "Frame -> its fullscreen layout, a `harness-ui--fullscreen'.")
+
+(defun harness-ui--fullscreen-layout (&optional frame)
+  "Return the fullscreen layout of FRAME, by default the selected one, or nil.
+There is none once the overview's window is gone."
+  (let ((layout (gethash (or frame (selected-frame)) harness-ui--fullscreen-layouts)))
+    (and layout (window-live-p (harness-ui--fullscreen-overview layout)) layout)))
+
+(defun harness-ui-overview-p (buffer)
+  "Non-nil when BUFFER is an overview (see `harness-ui-overview-function')."
+  (and (buffer-live-p buffer) (buffer-local-value 'harness-ui-overview-function buffer) t))
+
+(defun harness-ui--overview-window-p (window)
+  "Non-nil when WINDOW is the overview's in the fullscreen layout of its frame."
+  (let ((layout (harness-ui--fullscreen-layout (window-frame window))))
+    (and layout (eq window (harness-ui--fullscreen-overview layout)))))
+
+(defun harness-ui--fullscreen-window-p (window)
+  "Non-nil when WINDOW is the overview's or the slot of a fullscreen layout."
+  (let ((layout (harness-ui--fullscreen-layout (window-frame window))))
+    (and layout (memq window (list (harness-ui--fullscreen-overview layout)
+                                   (harness-ui--fullscreen-slot layout)))
+         t)))
+
+(defun harness-ui--harness-buffer-p (buffer)
+  "Non-nil when BUFFER is the harness's, a session or a view, not the user's."
+  (with-current-buffer buffer
+    (or harness-ui-session-id harness-ui-position
+        (string-prefix-p "harness-" (symbol-name major-mode)))))
+
+(defun harness-ui--main-window (&optional frame)
+  "Return the most recently used window of FRAME that is not a side window."
+  (let (best)
+    (dolist (window (window-list frame 'nomini) best)
+      (unless (or (window-parameter window 'window-side)
+                  (and best (<= (window-use-time window) (window-use-time best))))
+        (setq best window)))))
+
+(defun harness-ui--fullscreen-window (layout)
+  "Return the window beside LAYOUT's overview, where sessions show.
+Once that window is gone, the frame's most recently used window that is
+not a side window takes its place."
+  (let ((slot (harness-ui--fullscreen-slot layout)))
+    (unless (and (window-live-p slot) (not (window-parameter slot 'window-side)))
+      (setf slot (harness-ui--main-window (window-frame (harness-ui--fullscreen-overview layout)))
+            (harness-ui--fullscreen-slot layout) slot))
+    slot))
+
+(defun harness-ui--session-window-p (window)
+  "Non-nil when WINDOW shows a session's chat, a BTW's aside."
+  (with-current-buffer (window-buffer window)
+    (and harness-ui-session-id
+         (derived-mode-p 'harness-chat-mode)
+         (not (bound-and-true-p harness-ui-btw-minor-mode)))))
+
+(defun harness-ui--fullscreen-session (overview frame)
+  "Return the buffer to show beside OVERVIEW as FRAME takes its layout, or nil.
+That is the session in sight in FRAME, the most recently used window's,
+else the one OVERVIEW's `harness-ui-overview-function' names."
+  (let (shown)
+    (dolist (window (window-list frame 'nomini))
+      (when (and (harness-ui--session-window-p window)
+                 (or (null shown) (> (window-use-time window) (window-use-time shown))))
+        (setq shown window)))
+    (if shown
+        (window-buffer shown)
+      (when-let* ((function (buffer-local-value 'harness-ui-overview-function overview))
+                  (id (with-current-buffer overview (funcall function)))
+                  ((functionp harness-ui-open-session-function)))
+        (funcall harness-ui-open-session-function id)))))
+
+(defun harness-ui--previous-buffer (window buffer)
+  "Return what WINDOW is to show instead of BUFFER, as (BUFFER START POINT).
+That is the last buffer WINDOW showed before that is the user's, not the
+harness's, else the user's most recent buffer out of sight, else any
+other buffer.  START and POINT may be missing."
+  (let* ((frame (window-frame window))
+         (usable (lambda (b)
+                   (and (buffer-live-p b) (not (eq b buffer))
+                        (not (string-prefix-p " " (buffer-name b)))
+                        (not (harness-ui--harness-buffer-p b))))))
+    (or (cl-find-if (lambda (entry) (funcall usable (car entry))) (window-prev-buffers window))
+        (list (or (cl-find-if (lambda (b) (and (funcall usable b) (not (get-buffer-window b frame))))
+                              (buffer-list frame))
+                  (other-buffer buffer t frame))))))
+
+(defun harness-ui--show-previous (window buffer)
+  "Show in WINDOW what it showed before BUFFER (`harness-ui--previous-buffer')."
+  (apply #'set-window-buffer-start-and-point window (harness-ui--previous-buffer window buffer)))
+
+(defun harness-ui--show-in-slot (window buffer)
+  "Show BUFFER in WINDOW, the slot of a fullscreen layout."
+  (unless (eq (window-buffer window) buffer)
+    (set-window-buffer window buffer))
+  (with-current-buffer buffer (setq-local harness-ui-position 'fullscreen)))
+
+(defun harness-ui--fullscreen-params ()
+  "Return the side-window parameters of the overview in the fullscreen layout."
+  `((side . left) (slot . -1) (window-width . ,harness-ui-fullscreen-width)
+    (preserve-size . (t . nil))
+    ;; C-x 1 in the slot keeps the overview.
+    (window-parameters . ((no-delete-other-windows . t)))))
+
+(defun harness-ui--note-overview (layout buffer)
+  "Remember in LAYOUT the position the overview BUFFER had before it."
+  (unless (assq buffer (harness-ui--fullscreen-positions layout))
+    (push (cons buffer (let ((position (buffer-local-value 'harness-ui-position buffer)))
+                         (and (not (eq position 'fullscreen)) position)))
+          (harness-ui--fullscreen-positions layout))))
+
+(defun harness-ui--fullscreen-enter (overview)
+  "Give the selected frame the fullscreen layout of the buffer OVERVIEW.
+Every window of the frame makes way for the overview but one, the slot,
+which shows the session in sight or the one OVERVIEW names, else what
+it showed.  Return the overview's window."
+  (let* ((frame (selected-frame))
+         (session (harness-ui--fullscreen-session overview frame))
+         (shown (and session (get-buffer-window session frame)))
+         (slot (if (and shown (not (window-parameter shown 'window-side)))
+                   shown
+                 (harness-ui--main-window frame)))
+         (saved (current-window-configuration frame))
+         window)
+    ;; The side windows go too: a BTW, a popout, the overview's own.
+    (let ((ignore-window-parameters t))
+      (delete-other-windows slot))
+    (set-window-dedicated-p slot nil)
+    (setq window (display-buffer-in-side-window overview (harness-ui--fullscreen-params)))
+    (unless window
+      (set-window-configuration saved)
+      (user-error "This frame has no room for the overview"))
+    (let ((layout (harness-ui--fullscreen-create :overview window :slot slot :home slot :saved saved)))
+      (harness-ui--note-overview layout overview)
+      (puthash frame layout harness-ui--fullscreen-layouts))
+    (cond (session (harness-ui--show-in-slot slot session))
+          ((eq (window-buffer slot) overview) (harness-ui--show-previous slot overview)))
+    window))
+
+(defun harness-ui--display-fullscreen (buffer)
+  "Show BUFFER in the fullscreen layout of the selected frame, and select it.
+An overview takes the left of the frame, starting the layout when the
+frame has none; anything else takes the slot beside the overview, or
+without the layout the selected window, as in the `full' position."
+  (let ((layout (harness-ui--fullscreen-layout)))
+    (cond
+     ((and layout (harness-ui-overview-p buffer))
+      (let ((window (harness-ui--fullscreen-overview layout))
+            (slot (harness-ui--fullscreen-window layout)))
+        (unless (eq (window-buffer window) buffer)
+          (harness-ui--note-overview layout buffer)
+          (set-window-buffer window buffer)
+          ;; A new buffer drops the side window's dedication.
+          (set-window-dedicated-p window 'side))
+        (when (eq (window-buffer slot) buffer)
+          (harness-ui--show-previous slot buffer))
+        (select-window window)))
+     ((harness-ui-overview-p buffer)
+      (select-window (harness-ui--fullscreen-enter buffer)))
+     (layout
+      (let ((slot (harness-ui--fullscreen-window layout)))
+        (harness-ui--show-in-slot slot buffer)
+        (select-window slot)))
+     (t (switch-to-buffer buffer)))))
+
+(defun harness-ui--fullscreen-leave (&optional frame bury)
+  "End the fullscreen layout of FRAME, by default the selected one.
+The windows come back as they were before it, but for a buffer of the
+user's in the slot, such as a file visited there, which stays in sight
+in the window the layout kept.  The overviews it showed get back their
+positions.  With BURY the overview goes out of sight too."
+  (when-let* ((frame (or frame (selected-frame)))
+              (layout (harness-ui--fullscreen-layout frame)))
+    (let* ((overview (window-buffer (harness-ui--fullscreen-overview layout)))
+           (slot (harness-ui--fullscreen-window layout))
+           (home (harness-ui--fullscreen-home layout))
+           (kept (unless (harness-ui--harness-buffer-p (window-buffer slot))
+                   (list (window-buffer slot) (window-start slot) (window-point slot)))))
+      (remhash frame harness-ui--fullscreen-layouts)
+      (pcase-dolist (`(,buffer . ,position) (harness-ui--fullscreen-positions layout))
+        (when (and (buffer-live-p buffer) (eq (buffer-local-value 'harness-ui-position buffer) 'fullscreen))
+          (with-current-buffer buffer (setq-local harness-ui-position position))))
+      (set-window-configuration (harness-ui--fullscreen-saved layout))
+      (when (and kept (buffer-live-p (car kept)) (window-live-p home)
+                 (not (eq (window-buffer home) (car kept))))
+        (apply #'set-window-buffer-start-and-point home kept))
+      (when bury
+        (dolist (window (get-buffer-window-list overview 'nomini frame))
+          (if (window-parameter window 'window-side)
+              (delete-window window)
+            (harness-ui--show-previous window overview)))
+        (bury-buffer-internal overview)))))
+
+;;;###autoload
+(defun harness-fullscreen ()
+  "Start or end the fullscreen layout of an overview in the selected frame.
+The overview -- the task board, the session list -- takes the left of
+the frame, and the session you inspect shows beside it: the one in
+sight, else the overview's choice, the session at point or the most
+recent.  The sessions you open from the overview take its place, and
+so does anything else shown without a position while the layout lasts.
+
+\\<harness-chat-mode-map>Burying the buffer beside the overview
+\(`harness-ui-bury', \\[harness-ui-bury] in a session) brings back what was there
+before and keeps the layout; burying the overview (q on it) ends the
+layout, and the windows come back as they were.  This command ends it
+too, run in the overview or in a buffer that is not one.  Run in
+another overview, that one takes the left instead.
+
+Without the layout, the overview is this buffer when it is one, else
+the one shown last, else the task board of this project, else the
+session list."
+  (interactive)
+  (let ((layout (harness-ui--fullscreen-layout))
+        (here (current-buffer)))
+    (cond
+     ((and layout (harness-ui-overview-p here) (not (harness-ui--overview-window-p (selected-window))))
+      (harness-ui-display-buffer here 'fullscreen))
+     (layout (harness-ui--fullscreen-leave))
+     ((harness-ui-overview-p here) (harness-ui-display-buffer here 'fullscreen))
+     ((cl-find-if #'harness-ui-overview-p (buffer-list (selected-frame)))
+      (harness-ui-display-buffer (cl-find-if #'harness-ui-overview-p (buffer-list (selected-frame)))
+                                 'fullscreen))
+     ((fboundp 'harness-tasks) (harness-tasks nil 'fullscreen))
+     ((fboundp 'harness-sessions) (harness-sessions nil 'fullscreen))
+     (t (user-error "No overview to show")))))
+
+(defun harness-ui-quit-view ()
+  "Quit the window of this view, as `quit-window' does.
+On the overview of the fullscreen layout, this buries the overview and
+ends the layout: the windows come back as they were."
+  (interactive)
+  (if (harness-ui--overview-window-p (selected-window))
+      (harness-ui--fullscreen-leave nil t)
+    (quit-window)))
+
+(defun harness-ui-bury ()
+  "Put this buffer out of sight, bringing back what its window showed before.
+In a window of the frame's own -- the one beside the overview of the
+fullscreen layout, say -- that is the last buffer the window showed
+that is not the harness's: the file a session took the place of.  The
+layout stays, and the next session opened from the overview takes the
+window back.  A side window, such as a session's in the `right'
+position, quits as `quit-window' would.  On the overview of the
+fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
+  (interactive)
+  (let* ((window (selected-window))
+         (buffer (window-buffer window)))
+    (cond
+     ((harness-ui--overview-window-p window) (harness-ui--fullscreen-leave nil t))
+     ((or (window-parameter window 'window-side) (eq (window-dedicated-p window) t))
+      (quit-window nil window))
+     (t (harness-ui--show-previous window buffer)
+        (unrecord-window-buffer window buffer)
+        (bury-buffer-internal buffer)))))
 
 ;;;; Commands
 
@@ -2272,9 +2589,10 @@ either the command asks for a session, so the label has no state."
     map)
   "Prefix keymap of the harness UI.  Other UI modules add their commands.")
 
-;; At top level, not in the `defvar', so a reload binds it in a running
+;; At top level, not in the `defvar', so a reload binds them in a running
 ;; Emacs too.
 (define-key harness-ui-map (kbd "i") #'harness-toggle-non-interactive)
+(define-key harness-ui-map (kbd "F") #'harness-fullscreen)
 
 (defvar harness-global-mode-map (make-sparse-keymap)
   "Keymap of `harness-global-mode': `harness-ui-map' under `harness-ui-prefix-key'.")
@@ -2551,6 +2869,8 @@ leaves the buffer's commands out, never the whole menu."
     ("a" "Task mode" harness-tasks :if (lambda () (harness-ui--command-available-p 'harness-tasks)))
     ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
     ("b" "BTW side conversation" harness-btw :if (lambda () (harness-ui--command-available-p 'harness-btw)))
+    ("F" (lambda () (if (harness-ui--fullscreen-layout) "End fullscreen" "Fullscreen overview"))
+     harness-fullscreen)
     ("f" "Fork session" harness-fork-session)
     ("k" "Cancel turn" harness-cancel-turn)
     ("D" "Delete session" harness-delete-session)]

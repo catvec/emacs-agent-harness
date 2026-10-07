@@ -725,5 +725,19 @@ in a line, the message being right above, with no [Report]."
             (should-not (string-search "Not handed in" tail))
             (should (string-search "[Verify]" tail))))))))
 
+;;;; Evidence files
+
+(declare-function harness-ui-report--file-attachment "harness-ui-report")
+
+(ert-deftest harness-ui-review-evidence-file-has-its-size ()
+  "An evidence file's chip says how big the file is, not how many links it has."
+  (require 'harness-ui-report)
+  (let ((file (make-temp-file "harness-evidence-" nil ".txt" "twelve bytes")))
+    (unwind-protect
+        (let ((attachment (harness-ui-report--file-attachment file)))
+          (should (= 12 (plist-get attachment :size)))
+          (should (equal (file-name-nondirectory file) (plist-get attachment :name))))
+      (delete-file file))))
+
 (provide 'harness-ui-review-test)
 ;;; harness-ui-review-test.el ends here
