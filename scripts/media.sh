@@ -27,6 +27,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=${HARNESS_MEDIA_WORK:-$ROOT/scripts/.dev/media}
 export HARNESS_MEDIA_OUT=${HARNESS_MEDIA_OUT:-$ROOT/docs/media}
 export HARNESS_MEDIA_SHOTS="$*"
+# Room for the widest frame: the first picture's, the task board and a
+# session side by side in 180 columns (about 1820 pixels at 12 pt Hack).
 WIDTH=1920 HEIGHT=1200
 
 command -v emacs >/dev/null || { echo "media: emacs is not on PATH" >&2; exit 1; }

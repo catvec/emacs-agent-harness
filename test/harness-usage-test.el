@@ -397,6 +397,43 @@ also once the worktree is gone; other groupings have no `:main'."
         (should (eq 'blocked (plist-get (harness-await (harness-call 'agent/prompt other "hello")) :stop-reason)))
         (should (= 0 (plist-get (harness-call 'usage/totals :session other) :calls)))))))
 
+(defvar harness-budget)
+
+(ert-deftest harness-usage-budget-setting-is-one-budget-for-all-sessions ()
+  "The Budget setting is one budget that every session spends from.
+Sessions in two projects count toward it together, and a hard one,
+once spent, stops them all; no session has a budget of its own."
+  (harness-usage-test-with
+    (let* ((harness-budget '(:amount 0.001 :hard t))
+           (a (harness-usage-test-session))
+           (b (harness-usage-test-session))
+           (ids (lambda (sid) (mapcar (lambda (st) (plist-get (plist-get st :budget) :id))
+                                      (harness-call 'usage/session-budgets sid)))))
+      (should-not (equal (plist-get (harness-call 'session/get a) :project)
+                         (plist-get (harness-call 'session/get b) :project)))
+      (should (equal '("settings") (funcall ids a)))
+      (should (equal '("settings") (funcall ids b)))
+      ;; $0.0008 a turn: one each fits, and together they spend it.
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt a "hello")) :stop-reason)))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt b "hello")) :stop-reason)))
+      (let ((st (harness-call 'usage/budget-status "settings")))
+        (should (harness-usage-test-near 0.0016 (plist-get st :spent)))
+        (should (= 0.001 (plist-get st :amount)))
+        (should (plist-get st :hard))
+        (should (plist-get (plist-get st :budget) :implicit)))
+      (dolist (sid (list a b))
+        (let ((r (harness-await (harness-call 'agent/prompt sid "again"))))
+          (should (eq 'blocked (plist-get r :stop-reason)))
+          (should (string-match-p "Budget all sessions (setting) exhausted" (plist-get r :error)))
+          ;; It says where the setting is changed, not deleted.
+          (should (string-match-p "change it with M-x harness-settings to go on" (plist-get r :error)))))
+      ;; It is no explicit budget, and without the setting there is none.
+      (should-not (harness-call 'usage/budgets))
+      (let ((harness-budget nil))
+        (should-error (harness-call 'usage/budget-status "settings"))
+        (should-not (funcall ids a))
+        (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt a "again")) :stop-reason)))))))
+
 (ert-deftest harness-usage-baseline-counts-toward-hard-budgets ()
   "What was spent before the harness counted can exhaust a hard budget."
   (harness-usage-test-with

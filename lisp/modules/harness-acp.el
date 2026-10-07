@@ -91,7 +91,7 @@ is never used for any other failure.")
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "harness/api" "harness/version" "harness/reload" "harness-dev/" "question/" "project/" "task/"
-    "notification/" "acp/remote-")
+    "notification/" "acp/remote-" "pet/")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
 (defconst harness-acp--enum-keys
@@ -131,7 +131,7 @@ another pattern; the names speak of the directory, the default.")
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
     question/answered task/changed task/deleted task/review task/done permission/dir-allowed permission/dir-revoked
-    config/changed harness/reloaded tools/file-written acp/remote-changed)
+    config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 
 (defvar harness-acp-authorize-functions nil
@@ -962,7 +962,9 @@ an agent's own directory request has no \"Allow once\"."
   "Ask the connected clients to decide PENDING permission request of SID.
 A request about paths carries the glob pattern it is answered for in
 `_harness.pattern'; a client may answer for another one with
-`_harness.pattern' in its result, next to the outcome."
+`_harness.pattern' in its result, next to the outcome.  A shell
+command's request carries where it runs in `_harness.cwd', and in
+`_harness.paths' what it is about."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -976,6 +978,7 @@ A request about paths carries the glob pattern it is answered for in
            :_harness (list :pendingId pid
                            :tool (plist-get payload :tool)
                            :paths (plist-get payload :paths)
+                           :cwd (plist-get payload :cwd)
                            :dir (plist-get payload :dir)
                            :pattern (plist-get payload :pattern)
                            :reason (plist-get payload :reason)))

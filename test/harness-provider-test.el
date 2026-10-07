@@ -4,8 +4,11 @@
 (require 'harness-test-helpers)
 
 (defvar harness-providers)
+(defvar harness-provider-fallback-context-window)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider--forget "harness-provider")
+(declare-function harness-provider-relist "harness-provider")
+(declare-function harness-provider-model-key "harness-provider")
 
 (defmacro harness-provider-test-with (providers &rest body)
   "Load the provider module into a fresh bus, run BODY, then drop PROVIDERS.
@@ -48,8 +51,11 @@ The harness once answered the 128000 stand-in until a client asked
         (should (equal "test-static:big" (plist-get m :id)))
         (should (= 1000000 (plist-get m :context-window))))
       ;; Asked once: what it listed is cached, and a model it does not
-      ;; list gets the stand-in without asking it again.
-      (should (= 128000 (harness-provider-test-window "test-static:other")))
+      ;; list gets an estimate without asking it again: the window its
+      ;; models have, flagged as an estimate.
+      (let ((other (harness-call 'provider/model "test-static:other")))
+        (should (= 1000000 (plist-get other :context-window)))
+        (should (plist-get other :context-window-estimated)))
       (should (= 1000000 (harness-provider-test-window "test-static:big")))
       (should (= 1 (car calls)))
       ;; The new models are announced, from the command loop.
@@ -78,8 +84,8 @@ Its new models are used from the next lookup on."
     (let ((calls 0) (answer (harness-make-promise)))
       (harness-define-provider 'test-remote :complete #'ignore
                                :models (lambda () (cl-incf calls) answer))
-      (should (= 128000 (harness-provider-test-window "test-remote:m")))
-      (should (= 128000 (harness-provider-test-window "test-remote:m")))
+      (should (= harness-provider-fallback-context-window (harness-provider-test-window "test-remote:m")))
+      (should (= harness-provider-fallback-context-window (harness-provider-test-window "test-remote:m")))
       (should (= 1 calls))
       (harness-resolve answer '((:name "m" :context-window 262144)))
       (should (= 262144 (harness-provider-test-window "test-remote:m")))
@@ -92,8 +98,8 @@ A failed refresh keeps what it listed before."
     (let ((calls 0) (answer (harness-rejected '(error "offline"))))
       (harness-define-provider 'test-flaky :complete #'ignore
                                :models (lambda () (cl-incf calls) answer))
-      (should (= 128000 (harness-provider-test-window "test-flaky:m")))
-      (should (= 128000 (harness-provider-test-window "test-flaky:m")))
+      (should (= harness-provider-fallback-context-window (harness-provider-test-window "test-flaky:m")))
+      (should (= harness-provider-fallback-context-window (harness-provider-test-window "test-flaky:m")))
       (should (= 1 calls))
       (setq answer (harness-resolved '((:name "m" :context-window 300000))))
       (harness-test-await (harness-call 'provider/models t))
@@ -109,11 +115,205 @@ A failed refresh keeps what it listed before."
   (harness-provider-test-with (test-swap)
     (let ((old (harness-make-promise)))
       (harness-define-provider 'test-swap :complete #'ignore :models (lambda () old))
-      (should (= 128000 (harness-provider-test-window "test-swap:m")))
+      (should (= harness-provider-fallback-context-window (harness-provider-test-window "test-swap:m")))
       (harness-provider-test-static 'test-swap '(("m" . 500000)))
       (should (= 500000 (harness-provider-test-window "test-swap:m")))
       (harness-resolve old '((:name "m" :context-window 1000)))
       (should (= 500000 (harness-provider-test-window "test-swap:m"))))))
+
+(ert-deftest harness-provider-model-key-names-a-model-wherever-it-is-served ()
+  "Vendor and region prefixes, release dates, versions and dots make no key of their own."
+  (dolist (case '(("us.anthropic.claude-haiku-4-5-20251001-v1:0" . "claude-haiku-4-5")
+                  ("global.anthropic.claude-sonnet-4-5-20250929-v1:0" . "claude-sonnet-4-5")
+                  ("anthropic/claude-opus-4.5" . "claude-opus-4-5")
+                  ("claude-opus-4-5@20251101" . "claude-opus-4-5")
+                  ("claude-haiku-4-5-20251001" . "claude-haiku-4-5")
+                  ("Claude-Opus-4-5" . "claude-opus-4-5")
+                  ("gpt-4.1" . "gpt-4-1")
+                  ("gpt-5-latest" . "gpt-5")
+                  ("o3" . "o3")
+                  ("meta.llama3-1-70b-instruct-v1:0" . "llama3-1-70b-instruct")
+                  ;; A variant is another window: its suffix stays.
+                  ("claude-opus-4-5[1m]" . "claude-opus-4-5[1m]")))
+    (should (equal (cdr case) (harness-provider-model-key (car case))))))
+
+(ert-deftest harness-provider-unsized-model-takes-the-window-of-the-same-model ()
+  "A model a provider lists without a window gets the one another provider gives it.
+It is flagged as an estimate, with what it was drawn from."
+  (harness-provider-test-with (test-sized test-bare)
+    (harness-provider-test-static 'test-sized '(("claude-opus-4-5-20251101" . 200000) ("gpt-5" . 400000)))
+    (harness-define-provider 'test-bare
+      :complete #'ignore
+      :models (lambda () (harness-resolved '((:name "anthropic/claude-opus-4.5") (:name "openai/gpt-5")
+                                             (:name "mystery") (:name "sized" :context-window 64000)))))
+    (let* ((models (harness-test-await (harness-call 'provider/models)))
+           (by-id (lambda (id) (cl-find id models :key (lambda (m) (plist-get m :id)) :test #'equal))))
+      ;; Every model has a window.
+      (should (cl-every (lambda (m) (integerp (plist-get m :context-window))) models))
+      (let ((opus (funcall by-id "test-bare:anthropic/claude-opus-4.5")))
+        (should (= 200000 (plist-get opus :context-window)))
+        (should (plist-get opus :context-window-estimated))
+        (should (equal "test-sized:claude-opus-4-5-20251101" (plist-get opus :context-window-basis))))
+      (should (= 400000 (plist-get (funcall by-id "test-bare:openai/gpt-5") :context-window)))
+      ;; Nothing like it anywhere: the provider's own sized models decide.
+      (let ((mystery (funcall by-id "test-bare:mystery")))
+        (should (= 64000 (plist-get mystery :context-window)))
+        (should (equal "test-bare's models" (plist-get mystery :context-window-basis))))
+      ;; What the provider sizes is no estimate.
+      (let ((sized (funcall by-id "test-bare:sized")))
+        (should (= 64000 (plist-get sized :context-window)))
+        (should-not (plist-get sized :context-window-estimated)))
+      ;; The window a provider gives wins over one drawn from elsewhere.
+      (should-not (plist-get (funcall by-id "test-sized:gpt-5") :context-window-estimated)))))
+
+(ert-deftest harness-provider-unlisted-model-takes-after-its-family ()
+  "A model its provider does not list takes after the listed one closest in name.
+Failing that it gets the window most of the provider's models have, and
+a model of no provider the fallback; all flagged, none of them silently
+small."
+  (harness-provider-test-with (test-family)
+    (harness-provider-test-static 'test-family '(("claude-opus-5-5" . 1000000) ("claude-haiku-4-5" . 200000)
+                                                  ("claude-sonnet-5" . 1000000)))
+    (let ((opus (harness-call 'provider/model "test-family:claude-opus-5-6"))
+          (haiku (harness-call 'provider/model "test-family:claude-haiku-5"))
+          (other (harness-call 'provider/model "test-family:gemini-3"))
+          (nobody (harness-call 'provider/model "nobody:m")))
+      (should (= 1000000 (plist-get opus :context-window)))
+      (should (equal "test-family:claude-opus-5-5" (plist-get opus :context-window-basis)))
+      (should (= 200000 (plist-get haiku :context-window)))
+      (should (equal "test-family:claude-haiku-4-5" (plist-get haiku :context-window-basis)))
+      (should (= 1000000 (plist-get other :context-window)))
+      (should (equal "test-family's models" (plist-get other :context-window-basis)))
+      (should (= harness-provider-fallback-context-window (plist-get nobody :context-window)))
+      (should (equal "default" (plist-get nobody :context-window-basis)))
+      (dolist (m (list opus haiku other nobody))
+        (should (plist-get m :context-window-estimated)))
+      ;; The provider, its label and its capabilities are those of the model's own.
+      (should (eq 'test-family (plist-get opus :provider)))
+      (should (equal "claude-opus-5-6" (plist-get opus :name))))))
+
+(ert-deftest harness-provider-estimate-is-logged-once ()
+  "An estimate for a model its listed provider lacks is logged, once per model."
+  (harness-provider-test-with (test-logged)
+    (let* ((warnings nil)
+           (harness-log-hook (list (lambda (level msg) (when (eq level 'warn) (push msg warnings))))))
+      (harness-provider-test-static 'test-logged '(("a" . 300000)))
+      (harness-call 'provider/model "test-logged:b")
+      (harness-call 'provider/model "test-logged:b")
+      (should (= 1 (length (cl-remove-if-not (lambda (w) (string-match-p "test-logged:b" w)) warnings))))
+      (should (string-match-p "300000" (car warnings))))))
+
+(ert-deftest harness-provider-resolve-sizes-a-model-the-listing-lacks ()
+  "A provider's `:resolve' turns a name its listing lacks into a model.
+It gets the listed models when it takes them; what it says nothing of,
+or fails on, is estimated."
+  (harness-provider-test-with (test-alias test-alias1)
+    (let ((warnings nil))
+      (harness-define-provider 'test-alias
+        :complete #'ignore
+        :models (lambda () (harness-resolved '((:name "model-a" :context-window 300000 :label "Model A"))))
+        :resolve (lambda (name models)
+                   (pcase name
+                     ("best" (let ((a (car models)))
+                               (list :label "Best" :context-window (plist-get a :context-window)
+                                     :resolved-name (plist-get a :name))))
+                     ("broken" (error "Cannot resolve"))
+                     (_ nil))))
+      (harness-define-provider 'test-alias1
+        :complete #'ignore
+        :models (lambda () (harness-resolved nil))
+        :resolve (lambda (name) (when (string-suffix-p "[1m]" name) (list :context-window 1000000))))
+      (let ((best (harness-call 'provider/model "test-alias:best")))
+        (should (equal "test-alias:best" (plist-get best :id)))
+        (should (equal "best" (plist-get best :name)))
+        (should (equal "Best" (plist-get best :label)))
+        (should (eq 'test-alias (plist-get best :provider)))
+        (should (= 300000 (plist-get best :context-window)))
+        (should-not (plist-get best :context-window-estimated))
+        (should (equal "model-a" (plist-get best :resolved-name))))
+      (let ((harness-log-hook (list (lambda (level msg) (when (eq level 'warn) (push msg warnings))))))
+        (let ((broken (harness-call 'provider/model "test-alias:broken")))
+          (should (plist-get broken :context-window-estimated))
+          (should (cl-some (lambda (w) (string-match-p "Cannot resolve" w)) warnings))))
+      (should (= 1000000 (harness-provider-test-window "test-alias1:x[1m]")))
+      (should (plist-get (harness-call 'provider/model "test-alias1:x") :context-window-estimated)))))
+
+(ert-deftest harness-provider-guessed-window-gives-way-to-a-sized-one ()
+  "A window a provider flags as its own guess yields to the same model sized elsewhere.
+Or to the provider's model closest by name that it sizes.  It stays
+flagged, now drawn from that model; with nothing so close to go by,
+the provider's guess stands."
+  (harness-provider-test-with (test-sizer test-guesser)
+    (harness-provider-test-static 'test-sizer '(("claude-opus-9" . 2000000)))
+    (harness-define-provider 'test-guesser
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          '((:name "us.anthropic.claude-opus-9-v1:0" :context-window 200000
+                             :context-window-estimated t :context-window-basis "family")
+                            (:name "anthropic.claude-zeta-1-v1:0" :context-window 200000
+                             :context-window-estimated t :context-window-basis "family")
+                            (:name "mistral.mistral-large-2407-v1:0" :context-window 128000)
+                            (:name "mistral.mistral-large-3-675b-instruct" :context-window 32000
+                             :context-window-estimated t :context-window-basis "family")
+                            (:name "mistral.mistral-7b-instruct-v0:2" :context-window 32000
+                             :context-window-estimated t :context-window-basis "family"))))
+      :resolve (lambda (_name) (list :context-window 200000 :context-window-estimated t
+                                     :context-window-basis "family")))
+    (let* ((models (harness-test-await (harness-call 'provider/models)))
+           (by-id (lambda (id) (cl-find id models :key (lambda (m) (plist-get m :id)) :test #'equal))))
+      (let ((opus (funcall by-id "test-guesser:us.anthropic.claude-opus-9-v1:0")))
+        (should (= 2000000 (plist-get opus :context-window)))
+        (should (plist-get opus :context-window-estimated))
+        (should (equal "test-sizer:claude-opus-9" (plist-get opus :context-window-basis))))
+      (let ((zeta (funcall by-id "test-guesser:anthropic.claude-zeta-1-v1:0")))
+        (should (= 200000 (plist-get zeta :context-window)))
+        (should (equal "family" (plist-get zeta :context-window-basis))))
+      ;; Nor elsewhere, but the provider sizes one of its kind: that one.
+      (let ((large (funcall by-id "test-guesser:mistral.mistral-large-3-675b-instruct")))
+        (should (= 128000 (plist-get large :context-window)))
+        (should (plist-get large :context-window-estimated))
+        (should (equal "test-guesser:mistral.mistral-large-2407-v1:0" (plist-get large :context-window-basis))))
+      ;; Only one word in common: the provider's guess stands, not the
+      ;; window most of its models have.
+      (let ((small (funcall by-id "test-guesser:mistral.mistral-7b-instruct-v0:2")))
+        (should (= 32000 (plist-get small :context-window)))
+        (should (equal "family" (plist-get small :context-window-basis))))
+      ;; What `:resolve' guesses for a name the listing lacks, likewise.
+      (let ((global (harness-call 'provider/model "test-guesser:global.anthropic.claude-opus-9-v1:0"))
+            (other (harness-call 'provider/model "test-guesser:anthropic.claude-omega-2-v1:0")))
+        (should (= 2000000 (plist-get global :context-window)))
+        (should (equal "test-sizer:claude-opus-9" (plist-get global :context-window-basis)))
+        (should (= 200000 (plist-get other :context-window)))
+        (should (equal "family" (plist-get other :context-window-basis))))
+      ;; A guess is no source for another estimate.
+      (should (= harness-provider-fallback-context-window
+                 (harness-provider-test-window "nobody:claude-zeta-1"))))))
+
+(ert-deftest harness-provider-relist-picks-up-what-a-provider-learned ()
+  "`harness-provider-relist' caches and announces a provider's new listing.
+A models function that takes an argument is told when a refresh asks."
+  (harness-provider-test-with (test-learns)
+    (let ((window 200000) (refreshes nil) (announced 0))
+      (harness-on 'provider/models-updated (lambda (_) (cl-incf announced)))
+      (harness-define-provider 'test-learns
+        :complete #'ignore
+        :models (lambda (&optional refresh)
+                  (push refresh refreshes)
+                  (harness-resolved (list (list :name "m" :context-window window)))))
+      (should (= 200000 (harness-provider-test-window "test-learns:m")))
+      (should (equal '(nil) refreshes))
+      ;; The provider learned the model's real window.
+      (setq window 1000000)
+      (should (= 200000 (harness-provider-test-window "test-learns:m")))
+      (harness-test-await (harness-provider-relist 'test-learns))
+      (should (= 1000000 (harness-provider-test-window "test-learns:m")))
+      (should (equal '(nil nil) refreshes))
+      (harness-test-wait (lambda () (>= announced 2)) 2 "provider/models-updated")
+      ;; A refresh asks the source again.
+      (harness-test-await (harness-call 'provider/models t))
+      (should (equal '(t nil nil) refreshes))
+      ;; Nothing to relist for a provider that is not there.
+      (should-not (harness-provider-relist 'test-nobody)))))
 
 (ert-deftest harness-provider-tier-model-prefers-declared-tiers ()
   "A provider's `:tiers' names the model each tier uses, over its price."

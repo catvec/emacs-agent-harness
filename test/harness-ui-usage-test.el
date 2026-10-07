@@ -395,6 +395,35 @@ dashboard, that budget is the default."
         ;; Answering no deletes nothing.
         (should (= 1 (length (harness-call 'usage/budgets))))))))
 
+(defvar harness-budget)
+
+(ert-deftest harness-ui-usage-budget-setting-is-one-line ()
+  "The Budget setting shows as one budget for all sessions, however many
+there are, and d on it says where to change it."
+  (harness-ui-usage-test-with
+    (let ((harness-budget '(:amount 10 :hard t)))
+      (dotimes (_ 3)
+        (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"))
+      (harness-test-wait (let (done) (harness-ui-refresh-sessions (lambda (_) (setq done t))) (lambda () done))
+                         5 "sessions cached")
+      (should (= 3 (length (harness-ui-sessions))))
+      (harness-ui-usage-test-record (float-time) (file-name-as-directory dir) "demo:scripted" 2.5)
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage--buffer-name
+        (let ((lines (split-string (harness-ui-usage-test-text) "\n")))
+          (should (= 1 (cl-count-if (lambda (l) (string-match-p "all sessions (setting)" l)) lines)))
+          (should (cl-some (lambda (l) (string-match-p "all sessions (setting) .* 25%  \\$2\\.50 / \\$10\\.00" l))
+                           lines))
+          (should-not (cl-some (lambda (l) (string-match-p "\\`  session " l)) lines)))
+        (harness-ui-usage-test-goto "all sessions (setting)")
+        (should (string-match-p "M-x harness-settings"
+                                (cadr (should-error (harness-ui-usage-remove) :type 'user-error))))))
+    ;; Unset, it is gone.
+    (with-current-buffer harness-ui-usage--buffer-name
+      (harness-ui-usage-refresh)
+      (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
+      (should-not (string-match-p "all sessions" (harness-ui-usage-test-text))))))
+
 (ert-deftest harness-ui-usage-add-budget-wizard-and-plan ()
   (harness-ui-usage-test-with
     (harness-ui-usage-test-open)

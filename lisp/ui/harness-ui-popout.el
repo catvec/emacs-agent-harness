@@ -46,6 +46,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-ui-drag)
 (require 'harness-ui-compose)
 
 (declare-function harness-ui-media-open "harness-ui-media" (path))
@@ -531,6 +532,8 @@ scaled down, a smaller one up, by `harness-ui-popout-image-max-scale'
 at most.  Emacs's image keys work on it: i + and i - (or C-wheel) zoom
 it and i r turns it; g fits it again.  Under it, its name, its size and
 how large it shows, and [Open externally] for the desktop's viewer.
+Dragging the image drops FILE into another application
+\(`harness-ui-drag-region').
 
 PROPS:
   :title TITLE  the header's title, by default the file's name.
@@ -573,8 +576,11 @@ A remote file is never read, which would block: it can be opened."
          (bytes (and readable (harness-file-size file))))
     (cond
      (image
-      ;; `insert-image' gives it Emacs's image keys (`image-map').
-      (insert-image image (format "[image %s]" (abbreviate-file-name file)))
+      ;; `insert-image' gives it Emacs's image keys (`image-map'), and
+      ;; it drags into another application as the file it shows.
+      (let ((start (point)))
+        (insert-image image (format "[image %s]" (abbreviate-file-name file)))
+        (harness-ui-drag-region start (point) file))
       (insert "\n"))
      ((not local)
       (insert (propertize "A remote image is not read here: open it to see it.\n" 'face 'harness-dim-face)))
@@ -596,7 +602,10 @@ A remote file is never read, which would block: it can be opened."
                        :help "Open it in the desktop's image viewer")
     (insert "\n")
     (when image
-      (insert (propertize " i + and i - zoom (or C-wheel), g fits it again" 'face 'harness-hint-face) "\n"))))
+      (insert (propertize (concat " i + and i - zoom (or C-wheel), g fits it again"
+                                  (if (harness-ui-drag-available-p) ", drag it into another application" ""))
+                          'face 'harness-hint-face)
+              "\n"))))
 
 ;;;; The item at point
 

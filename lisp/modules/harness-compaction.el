@@ -43,6 +43,8 @@
 (require 'harness-core)
 (require 'harness-util)
 
+(defvar harness-provider-fallback-context-window)
+
 (defconst harness-compaction--system-prompt
   "You are writing a handoff summary so that a fresh agent can continue this work without access to the conversation above.
 
@@ -92,11 +94,14 @@ The latest exchange is what a summary of a long session needs most.")
   harness-compaction--context-reserve)
 
 (defun harness-compaction--window (session)
-  "Return the context window of SESSION's model."
+  "Return the context window of SESSION's model.
+The catalogue gives every model one (see `provider/model'); without a
+catalogue it is `harness-provider-fallback-context-window'."
   (or (plist-get session :context-window)
       (and (harness-method-exists-p 'provider/model)
            (plist-get (harness-call 'provider/model (plist-get session :model)) :context-window))
-      128000))
+      (bound-and-true-p harness-provider-fallback-context-window)
+      200000))
 
 (defun harness-compaction--usable (window reserve)
   "Return the tokens usable before compaction given WINDOW and RESERVE.

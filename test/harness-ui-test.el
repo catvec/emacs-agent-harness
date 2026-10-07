@@ -484,6 +484,191 @@ bottom side window and leaves the other windows alone."
         (should (eq window (selected-window)))
         (should-not (get-buffer-window view))))))
 
+;;;; The fullscreen layout of an overview
+
+(defmacro harness-ui-test-with-fullscreen (&rest body)
+  "Run BODY with the user's buffer `file' alone in the frame, an overview
+`view' that names session \"one\", and the buffers of sessions \"one\"
+and \"two\", `one' and `two'."
+  (declare (indent 0))
+  `(let* ((file (get-buffer-create "fullscreen test file"))
+          (view (get-buffer-create "*harness fullscreen test view*"))
+          (one (get-buffer-create "*harness: fullscreen one*"))
+          (two (get-buffer-create "*harness: fullscreen two*"))
+          (harness-ui-default-position 'right)
+          (harness-ui-open-session-function
+           (lambda (id) (pcase id ("one" one) ("two" two)))))
+     (unwind-protect
+         (progn
+           (clrhash harness-ui--position-buffers)
+           (clrhash harness-ui--fullscreen-layouts)
+           (delete-other-windows)
+           (switch-to-buffer file)
+           (with-current-buffer view
+             (setq-local harness-ui-overview-function (lambda () "one")))
+           ,@body)
+       (clrhash harness-ui--fullscreen-layouts)
+       (clrhash harness-ui--position-buffers)
+       (let ((ignore-window-parameters t))
+         (ignore-errors (delete-other-windows (harness-ui--main-window))))
+       (mapc #'kill-buffer (list file view one two)))))
+
+(ert-deftest harness-ui-fullscreen-shows-the-overview-left-and-a-session-beside ()
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'right)
+      (should (eq 'right (window-parameter (get-buffer-window view) 'window-side)))
+      ;; F in the overview.
+      (harness-fullscreen)
+      (let ((overview (get-buffer-window view)))
+        (should (harness-ui--fullscreen-layout))
+        (should (eq 'left (window-parameter overview 'window-side)))
+        (should (window-parameter overview 'no-delete-other-windows))
+        (should (eq overview (selected-window)))
+        ;; The session the overview names takes the window the frame kept;
+        ;; the side window the overview was in made way.
+        (should (eq one (window-buffer main)))
+        (should (= 2 (length (window-list))))
+        (should (eq 'fullscreen (buffer-local-value 'harness-ui-position view)))
+        (should (eq 'fullscreen (buffer-local-value 'harness-ui-position one)))))))
+
+(ert-deftest harness-ui-fullscreen-starts-with-the-overview-shown-last ()
+  "Run from a buffer that is not an overview, the command picks one."
+  (harness-ui-test-with-fullscreen
+    (harness-ui-display-view view 'right)
+    (quit-window nil (get-buffer-window view))
+    (should-not (get-buffer-window view))
+    (with-current-buffer file (harness-fullscreen))
+    (should (harness-ui--overview-window-p (get-buffer-window view)))))
+
+(ert-deftest harness-ui-fullscreen-sessions-take-the-slot ()
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'fullscreen)
+      (let ((overview (get-buffer-window view))
+            (open (with-current-buffer view (harness-ui-session-opener))))
+        (should (eq one (window-buffer main)))
+        ;; A session opened from the overview takes the slot, and is selected.
+        (funcall open "two")
+        (should (eq two (window-buffer main)))
+        (should (eq main (selected-window)))
+        (should (eq view (window-buffer overview)))
+        ;; So does anything shown without a position, views that are no
+        ;; overview included, whatever position they had.
+        (harness-ui-display-buffer one)
+        (should (eq one (window-buffer main)))
+        (let ((log (get-buffer-create "*harness fullscreen test log*")))
+          (unwind-protect
+              (progn
+                (with-current-buffer log (setq-local harness-ui-position 'bottom))
+                (harness-ui-display-view log)
+                (should (eq log (window-buffer main))))
+            (kill-buffer log)))
+        ;; A position of its own leaves the layout's windows alone.
+        (harness-ui-display-buffer two 'bottom)
+        (should (eq 'bottom (window-parameter (get-buffer-window two) 'window-side)))
+        (should (eq view (window-buffer overview)))
+        ;; C-x 1 beside the overview keeps it.
+        (select-window main)
+        (delete-other-windows)
+        (should (window-live-p overview))
+        (should (harness-ui--fullscreen-layout))))))
+
+(ert-deftest harness-ui-fullscreen-bury-brings-back-the-users-buffer ()
+  "Burying the session beside the overview keeps the layout."
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'fullscreen)
+      (funcall (with-current-buffer view (harness-ui-session-opener)) "two")
+      (should (eq two (window-buffer main)))
+      ;; C-c C-z: back to the file, past the sessions shown since.
+      (harness-ui-bury)
+      (should (eq file (window-buffer main)))
+      (should (harness-ui--fullscreen-layout))
+      (should (harness-ui--overview-window-p (get-buffer-window view)))
+      ;; The next session opened from the overview takes the window back.
+      (select-window (get-buffer-window view))
+      (funcall (with-current-buffer view (harness-ui-session-opener)) "one")
+      (should (eq one (window-buffer main))))))
+
+(ert-deftest harness-ui-fullscreen-quitting-the-overview-ends-it ()
+  "q on the overview buries it and puts the windows back."
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'right)
+      (harness-fullscreen)
+      (should (eq one (window-buffer main)))
+      (harness-ui-quit-view)
+      (should-not (harness-ui--fullscreen-layout))
+      (should (equal (list main) (window-list)))
+      (should (eq file (window-buffer main)))
+      (should-not (get-buffer-window view))
+      ;; Opened again, it goes where it was before the layout.
+      (should (eq 'right (buffer-local-value 'harness-ui-position view))))))
+
+(ert-deftest harness-ui-fullscreen-ends-keeping-a-file-visited-beside ()
+  "Ended, the layout puts the windows back but the user's buffer stays in sight."
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window))
+          (other-file (get-buffer-create "fullscreen test other file")))
+      (unwind-protect
+          (progn
+            (harness-ui-display-view view 'right)
+            (harness-fullscreen)
+            (select-window main)
+            (switch-to-buffer other-file)
+            ;; From a buffer that is not an overview, the command ends the layout.
+            (harness-fullscreen)
+            (should-not (harness-ui--fullscreen-layout))
+            (should (eq 'right (window-parameter (get-buffer-window view) 'window-side)))
+            (should (eq other-file (window-buffer main))))
+        (kill-buffer other-file)))))
+
+(ert-deftest harness-ui-fullscreen-another-overview-takes-the-left ()
+  (harness-ui-test-with-fullscreen
+    (let ((list (get-buffer-create "*harness fullscreen test list*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer list (setq-local harness-ui-overview-function #'ignore))
+            (harness-ui-display-view view 'fullscreen)
+            (let ((overview (get-buffer-window view)))
+              (harness-ui-display-view list)
+              (should (eq list (window-buffer overview)))
+              (should (eq 'side (window-dedicated-p overview)))
+              (should (harness-ui--overview-window-p overview))
+              (should (eq overview (selected-window)))
+              (harness-ui-quit-view)
+              (should-not (harness-ui--fullscreen-layout))
+              ;; Both had no position before the layout, and have none after.
+              (should-not (buffer-local-value 'harness-ui-position list))
+              (should-not (buffer-local-value 'harness-ui-position view))))
+        (kill-buffer list)))))
+
+(ert-deftest harness-ui-fullscreen-ends-with-the-overviews-window ()
+  (harness-ui-test-with-fullscreen
+    (harness-ui-display-view view 'fullscreen)
+    (delete-window (get-buffer-window view))
+    (should-not (harness-ui--fullscreen-layout))
+    (harness-ui-display-buffer two)
+    (should (eq 'right (window-parameter (get-buffer-window two) 'window-side)))))
+
+(ert-deftest harness-ui-bury-outside-the-fullscreen-layout ()
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      ;; In a window of the frame's own, back to the user's buffer.
+      (harness-ui-display-buffer one 'full)
+      (harness-ui-display-buffer two 'full)
+      (should (eq two (window-buffer main)))
+      (harness-ui-bury)
+      (should (eq file (window-buffer main)))
+      ;; A side window quits.
+      (harness-ui-display-buffer one 'right)
+      (let ((side (selected-window)))
+        (should (window-parameter side 'window-side))
+        (harness-ui-bury)
+        (should-not (window-live-p side))
+        (should (eq file (window-buffer main)))))))
+
 (ert-deftest harness-ui-unowned-requests-stay-pending-without-prompting ()
   "A question or permission no buffer owns is declined, never prompted for."
   (let (responses (harness-ui-question-functions nil) (harness-ui-permission-functions nil))
@@ -515,6 +700,16 @@ bottom side window and leaves the other windows alone."
     (should (equal '("Ask" "Accept Edits" "Auto" "YOLO") (car offered)))
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
+
+(ert-deftest harness-ui-model-window-says-when-it-is-estimated ()
+  "The model picker marks a window the catalogue estimated with a tilde."
+  (should (equal "1.00M" (harness-ui-format-model-window '(:context-window 1000000))))
+  (should (equal "~200k" (harness-ui-format-model-window '(:context-window 200000 :context-window-estimated t))))
+  ;; JSON's false is no estimate.
+  (should (equal "200k" (harness-ui-format-model-window '(:context-window 200000 :context-window-estimated :false))))
+  ;; Unknown windows still get a face, against the harness's fallback window.
+  (should (eq 'harness-context-ok-face (harness-ui-context-face 100000 nil)))
+  (should (eq 'harness-context-critical-face (harness-ui-context-face 175000 nil))))
 
 (ert-deftest harness-ui-thinking-menu-follows-the-model ()
   "The thinking menu offers a model's own levels, weakest first, so a

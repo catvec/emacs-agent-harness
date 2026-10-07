@@ -179,10 +179,20 @@ Every other project's worktrees are folded into its one line.")
 ;;;; Data
 
 (defun harness-ui-usage--implicit-budget-ids ()
-  "Return \"session:SID\" ids of cached sessions that carry a budget."
-  (mapcar (lambda (s) (concat "session:" (plist-get s :id)))
-          (harness-ui-sessions (lambda (s) (let ((b (plist-get s :budget)))
-                                             (and (listp b) (numberp (plist-get b :amount))))))))
+  "Return the ids of the budgets the harness makes itself.
+\"settings\", the Budget setting's for all sessions together, which the
+harness refuses when it is not set, and the \"session:SID\" ids of
+cached sessions that carry a budget of their own."
+  (cons "settings"
+        (mapcar (lambda (s) (concat "session:" (plist-get s :id)))
+                (harness-ui-sessions (lambda (s) (let ((b (plist-get s :budget)))
+                                                   (and (listp b) (numberp (plist-get b :amount)))))))))
+
+(defun harness-ui-usage--implicit-where (budget)
+  "Say where BUDGET, one the harness makes itself, is changed instead."
+  (if (equal (plist-get budget :id) "settings")
+      "This is the Budget setting, for all sessions together; change it with M-x harness-settings"
+    "This is the session's own budget; change it on the session"))
 
 (defun harness-ui-usage--load (buffer)
   "Request everything the dashboard shows and render BUFFER when it arrives."
@@ -1342,13 +1352,15 @@ DEFAULT is offered (0 when nil); a negative amount is refused."
 ;; or, from anywhere, with `harness-delete-budget' (C-c h B, "Delete
 ;; budget" in the harness menu), which offers every budget by name.
 ;; The harness keeps the budgets made here; a session's own budget is a
-;; setting of that session, so deleting one clears it there.
+;; setting of that session, so deleting one clears it there.  The Budget
+;; setting's, for all sessions together, is changed in the settings
+;; instead, which deleting it says.
 
 (defun harness-ui-usage--budget-name (budget)
   "Return the name of BUDGET as prompts and messages say it.
 A session's own budget goes by its session, \"session NAME\", which its
 line on the dashboard does not show."
-  (if (plist-get budget :implicit)
+  (if (and (plist-get budget :implicit) (not (equal (plist-get budget :id) "settings")))
       (let* ((sid (format "%s" (or (plist-get budget :target) "?")))
              (name (plist-get (harness-ui-session sid) :name)))
         (format "session %s" (if (and (stringp name) (not (string-empty-p name)))
@@ -1359,7 +1371,10 @@ line on the dashboard does not show."
 (defun harness-ui-usage--delete-budget (budget)
   "Delete BUDGET once the user says yes, then reload the dashboard.
 The harness removes one of its budgets; a session's own budget is
-cleared on its session, which notes it."
+cleared on its session, which notes it.  The Budget setting's is
+refused, saying where to change it."
+  (when (equal (plist-get budget :id) "settings")
+    (user-error "%s" (harness-ui-usage--implicit-where budget)))
   (let* ((own (plist-get budget :implicit))
          (what (format (if own "the budget of %s" "budget %s") (harness-ui-usage--budget-name budget))))
     (when (yes-or-no-p (format "Delete %s? " what))
@@ -1421,7 +1436,12 @@ process filter the answer arrives in."
                  (default (car (cl-find default-id table :key (lambda (c) (plist-get (cdr c) :id)) :test #'equal)))
                  (choice (completing-read (format-prompt prompt default) table nil t nil nil default)))
             (when-let* ((budget (cdr (assoc choice table))))
-              (funcall callback budget))))))
+              ;; A timer runs this, and would report a refusal (the
+              ;; Budget setting's) as its own error: say it as a
+              ;; command would.
+              (condition-case err
+                  (funcall callback budget)
+                (user-error (message "%s" (error-message-string err)))))))))
      nil)
    (lambda (e) (message "Could not list the budgets: %s" (harness-error-message e)) nil)))
 
@@ -1431,8 +1451,10 @@ process filter the answer arrives in."
 Interactively, read the budget by name among every budget, those made
 on the usage dashboard and the sessions' own; on a budget's line of the
 dashboard, that budget is the default.  Deleting a session's own budget
-clears it on that session alone.  BUDGET is a budget plist as the
-harness gives it (`usage/budgets', or a status's `:budget')."
+clears it on that session alone.  The Budget setting's, for all
+sessions together, is changed with `harness-settings' instead, which
+this says.  BUDGET is a budget plist as the harness gives it
+\(`usage/budgets', or a status's `:budget')."
   (interactive)
   (if budget
       (harness-ui-usage--delete-budget budget)
@@ -1467,7 +1489,7 @@ over.  0 clears it."
   (let* ((status (or (harness-ui-usage--budget-at-point) (user-error "No budget on this line")))
          (budget (plist-get status :budget)))
     (when (plist-get budget :implicit)
-      (user-error "This is the session's own budget; change it on the session"))
+      (user-error "%s" (harness-ui-usage--implicit-where budget)))
     (harness-ui-usage--save-baseline
      budget
      (harness-ui-usage--read-baseline (plist-get budget :period) (plist-get status :baseline))
@@ -1489,7 +1511,7 @@ Pro or Max have no cost report."
          (id (plist-get budget :id))
          (buf (current-buffer)))
     (when (plist-get budget :implicit)
-      (user-error "This is the session's own budget; change it on the session"))
+      (user-error "%s" (harness-ui-usage--implicit-where budget)))
     (unless (equal (format "%s" (plist-get budget :period)) "month")
       (user-error "Anthropic reports the cost of a calendar month: pick a month budget"))
     (message "Asking Anthropic for this month's API cost...")
@@ -1575,7 +1597,7 @@ Defaults come from the budget on the current line when there is one."
                     "fallback/changed" "fallback/switched"))
     (harness-ui-usage--refresh-soon))
    ((and (equal event "config/changed")
-         (equal (format "%s" (car args)) "harness-fallback-models"))
+         (member (format "%s" (car args)) '("harness-fallback-models" "harness-budget")))
     (harness-ui-usage--refresh-soon))))
 
 (defun harness-ui-usage--on-quota (_provider _quota)
