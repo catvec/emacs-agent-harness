@@ -7,7 +7,8 @@
 ;; chip with their progress, web pages go in as text, data: links and
 ;; dropped text land in the box, images and videos show thumbnails, and
 ;; yanking takes images and copied files off the clipboard into the
-;; media ring.  The clipboard and the display are stubbed; downloads go
+;; media ring, and C-c C-v is no longer the box's, so a chat's [Verify]
+;; keeps it.  The clipboard and the display are stubbed; downloads go
 ;; to a web server in this Emacs.
 
 ;;; Code:
@@ -514,7 +515,7 @@ Point starts after the box, where a command loop's hooks move it from."
       (should (string-suffix-p ".html" (plist-get att :path)))
       (should (equal "<b>bold</b>" (harness-ui-compose-test--bytes (plist-get att :path)))))
     (should (= 2 (length (harness-media-ring-entries))))
-    ;; C-u C-c C-v attaches an earlier capture.
+    ;; C-u M-x harness-compose-attach-clipboard attaches an earlier capture.
     (setq harness-compose-attachments nil)
     (let ((png (cl-find "image/png" (harness-media-ring-entries) :key (lambda (e) (plist-get e :mime)) :test #'equal)))
       (cl-letf (((symbol-function 'completing-read)
@@ -526,6 +527,226 @@ Point starts after the box, where a command loop's hooks move it from."
     (setq harness-compose-attachments nil)
     (harness-compose--yank-media-image 'image/png harness-test-png)
     (should (equal "image/png" (plist-get (car harness-compose-attachments) :mime)))))
+
+(ert-deftest harness-ui-compose-c-c-c-v-is-not-the-boxes ()
+  "C-c C-v is not the box's key: pasting is C-y, and Verify keeps C-c C-v.
+The box leaves C-c C-v unbound, so in a chat the review banner's
+[Verify] owns it and nothing shadows it."
+  (harness-ui-compose-test-with
+    (should-not (lookup-key harness-compose-map (kbd "C-c C-v")))
+    (should-not (key-binding (kbd "C-c C-v")))
+    ;; Every key that yanks pastes into the box.
+    (should (eq 'harness-compose-yank (key-binding (kbd "C-y"))))
+    (should (eq 'harness-compose-yank-pop (key-binding (kbd "M-y"))))))
+
+;;;; Finding files
+
+(defmacro harness-ui-compose-test--files (&rest body)
+  "Run BODY in a project with files, a directory next to it and a home.
+`proj' is the box's project, listing notes.txt and lisp/notes-util.el;
+`other' is the directory next to it, with notes.md and deep/x.txt;
+`home' is $HOME, with doc.txt.  All three are directory names."
+  (declare (indent 0))
+  `(let* ((proj (file-name-as-directory (expand-file-name "proj" dir)))
+          (other (file-name-as-directory (expand-file-name "other" dir)))
+          (home (file-name-as-directory (expand-file-name "home" dir)))
+          (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment)))
+     (dolist (file (list (expand-file-name "notes.txt" proj) (expand-file-name "lisp/notes-util.el" proj)
+                         (expand-file-name "notes.md" other) (expand-file-name "deep/x.txt" other)
+                         (expand-file-name "doc.txt" home)))
+       (make-directory (file-name-directory file) t)
+       (with-temp-file file (insert "x")))
+     (setq harness-compose-project-function (lambda () proj)
+           harness-compose--files '("notes.txt" "lisp/notes-util.el"))
+     (cl-letf (((symbol-function 'harness-files-list-limited)
+                (lambda (&rest _) (harness-resolved '("notes.txt" "lisp/notes-util.el")))))
+       ,@body)))
+
+(defmacro harness-ui-compose-test--never-remote (&rest body)
+  "Run BODY, failing if it hands a remote file name to a file name handler.
+A handler for /ssh: names records each operation; BODY's value is
+returned once none was."
+  (declare (indent 0))
+  `(let* ((asked nil)
+          (file-name-handler-alist
+           (cons (cons "\\`/ssh:" (lambda (operation &rest _) (push operation asked) (error "Remote file reached")))
+                 file-name-handler-alist)))
+     (prog1 (progn ,@body)
+       (should-not asked))))
+
+(defun harness-ui-compose-test--matches (input table)
+  "Return the candidates of TABLE that INPUT completes to, sorted, without properties."
+  (let ((all (completion-all-completions input table nil (length input))))
+    (when (consp all) (setcdr (last all) nil))
+    (sort (mapcar #'substring-no-properties all) #'string<)))
+
+(defun harness-ui-compose-test--category (input table)
+  "Return the completion category TABLE gives INPUT."
+  (completion-metadata-get (completion-metadata input table nil) 'category))
+
+(defun harness-ui-compose-test--paths ()
+  "Return the paths of the box's attachments."
+  (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments))
+
+(defun harness-ui-compose-test--complete (capf string status)
+  "Complete the token of CAPF to STRING, as a completion UI does, and exit with STATUS."
+  (delete-region (nth 0 capf) (nth 1 capf))
+  (goto-char (nth 0 capf))
+  (insert string)
+  (funcall (plist-get (nthcdr 3 capf) :exit-function) string status))
+
+(ert-deftest harness-ui-compose-finds-files-by-name-or-by-path ()
+  ;; Part of a name finds a project file; a path finds any file:
+  ;; absolute, under ~, or relative to the project with ./ or ../,
+  ;; reaching out of it.  Paths complete a directory at a time, in the
+  ;; file category.  A remote name completes to nothing, without its
+  ;; handler (TRAMP's) ever being asked.
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (dolist (name '("notes" ".gitignore" "lisp/notes-util.el" "skill:review" ".x"))
+        (should-not (harness-compose--path-p name)))
+      (dolist (path '("/etc/hosts" "~" "~/doc.txt" "./notes.txt" "../other/" ".."))
+        (should (harness-compose--path-p path)))
+      (let ((table (harness-compose--file-table)))
+        (should (eq 'harness-compose-file (harness-ui-compose-test--category "" table)))
+        (should (equal '("lisp/notes-util.el" "notes.txt") (harness-ui-compose-test--matches "nots" table)))
+        (dolist (path '("../" "~/" "/" "./"))
+          (should (eq 'file (harness-ui-compose-test--category path table))))
+        (should (equal '("other/") (harness-ui-compose-test--matches "../oth" table)))
+        (should (equal '("deep/" "notes.md") (harness-ui-compose-test--matches "../other/" table)))
+        (should (equal '(9 . 0) (completion-boundaries "../other/n" table nil "")))
+        (should (equal '("doc.txt") (harness-ui-compose-test--matches "~/do" table)))
+        (should (equal '("notes.md") (harness-ui-compose-test--matches (concat other "no") table)))
+        (should (equal '("notes.txt") (harness-ui-compose-test--matches "./notes" table)))
+        (should (member "../" (all-completions ".." table)))
+        (should (test-completion "../other/notes.md" table))
+        (should-not (test-completion "../other/nope.md" table))
+        (harness-ui-compose-test--never-remote
+          (should-not (all-completions "/ssh:nohost:/" table))
+          (should-not (try-completion "/ssh:nohost:/et" table))
+          (should-not (test-completion "/ssh:nohost:/etc/hosts" table)))))))
+
+(ert-deftest harness-ui-compose-at-completes-paths-out-of-the-project ()
+  ;; @ completes a path as well as part of a project file's name, and
+  ;; the file chosen becomes an attachment as a project file does.  A
+  ;; directory stays in the box, for its files to complete next, and so
+  ;; does a completion that may go on.
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (goto-char harness-compose-end)
+      (insert "compare @../other/")
+      (let ((capf (harness-compose-completion-at-point)))
+        (should (equal "../other/" (buffer-substring (nth 0 capf) (nth 1 capf))))
+        (should (equal '("deep/" "notes.md") (harness-ui-compose-test--matches "../other/" (nth 2 capf))))
+        (should (eq 'folder (funcall (plist-get (nthcdr 3 capf) :company-kind) "deep/")))
+        (should (eq 'file (funcall (plist-get (nthcdr 3 capf) :company-kind) "notes.md")))
+        (harness-ui-compose-test--complete capf "../other/deep/" 'finished))
+      (should (equal "compare @../other/deep/" (harness-compose-text)))
+      (should-not harness-compose-attachments)
+      (let ((capf (harness-compose-completion-at-point)))
+        (should (equal '("x.txt") (harness-ui-compose-test--matches "../other/deep/" (nth 2 capf))))
+        (harness-ui-compose-test--complete capf "../other/deep/x.txt" 'finished))
+      (should (equal "compare " (harness-compose-text)))
+      (should (equal (list (expand-file-name "deep/x.txt" other)) (harness-ui-compose-test--paths)))
+      ;; Under ~: exact, it could go on, so it waits; sole, it attaches.
+      (insert "with @~/do")
+      (let ((capf (harness-compose-completion-at-point)))
+        (should (equal '("doc.txt") (harness-ui-compose-test--matches "~/do" (nth 2 capf))))
+        (harness-ui-compose-test--complete capf "~/doc.txt" 'exact))
+      (should (equal "compare with @~/doc.txt" (harness-compose-text)))
+      (funcall (plist-get (nthcdr 3 (harness-compose-completion-at-point)) :exit-function) "~/doc.txt" 'sole)
+      (should (equal "compare with " (harness-compose-text)))
+      ;; Absolute, and a project file as before.
+      (insert (concat "@" other "no"))
+      (harness-ui-compose-test--complete (harness-compose-completion-at-point) (concat other "notes.md") 'finished)
+      (insert "@nots")
+      (let ((capf (harness-compose-completion-at-point)))
+        (should (equal '("lisp/notes-util.el" "notes.txt") (harness-ui-compose-test--matches "nots" (nth 2 capf))))
+        (harness-ui-compose-test--complete capf "notes.txt" 'finished))
+      (should (equal "compare with " (harness-compose-text)))
+      (should (equal (list (expand-file-name "deep/x.txt" other) (expand-file-name "doc.txt" home)
+                           (expand-file-name "notes.md" other) (expand-file-name "notes.txt" proj))
+                     (harness-ui-compose-test--paths))))))
+
+(ert-deftest harness-ui-compose-attach-command-takes-paths ()
+  ;; C-c C-a reads a path as well as part of a project file's name,
+  ;; with no C-u: out of the project, under ~ or absolute.  A leading @,
+  ;; typed out of the box's habit, is ignored.
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (let ((table nil) (answer nil))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt collection &rest _) (setq table collection) answer))
+                  ((symbol-function 'read-file-name) (lambda (&rest _) (error "Browsed"))))
+          (pcase-dolist (`(,typed . ,file)
+                         `(("../other/notes.md" . ,(expand-file-name "notes.md" other))
+                           ("~/doc.txt" . ,(expand-file-name "doc.txt" home))
+                           (,(expand-file-name "deep/x.txt" other) . ,(expand-file-name "deep/x.txt" other))
+                           ("lisp/notes-util.el" . ,(expand-file-name "lisp/notes-util.el" proj))
+                           ("@notes.txt" . ,(expand-file-name "notes.txt" proj))
+                           ("@../other/notes.md" . ,(expand-file-name "notes.md" other))))
+            (setq harness-compose-attachments nil answer typed)
+            (harness-ui-compose-test--command 'harness-compose-add-attachment)
+            (should (equal (list file) (harness-ui-compose-test--paths)))))
+        ;; The prompt's table: past a leading @, names and paths complete as in the box.
+        (should (eq 'harness-compose-file (harness-ui-compose-test--category "@" table)))
+        (should (eq 'file (harness-ui-compose-test--category "@../" table)))
+        (should (equal '("lisp/notes-util.el" "notes.txt") (harness-ui-compose-test--matches "@nots" table)))
+        (should (equal '("other/") (harness-ui-compose-test--matches "@../oth" table)))
+        (should (equal '(4 . 0) (completion-boundaries "@../oth" table nil "")))
+        (should (equal '(1 . 0) (completion-boundaries "@nots" table nil "")))
+        (should (equal "@../other/notes.md" (try-completion "@../other/no" table)))
+        (should (test-completion "@../other/notes.md" table))
+        (should (test-completion "@notes.txt" table))
+        (should-not (test-completion "@nope.txt" table))))))
+
+(ert-deftest harness-ui-compose-attach-command-opens-directories ()
+  ;; A directory is no file to attach, and neither is nothing: the
+  ;; prompt comes back, from inside the directory chosen.
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (let ((answers '("" "@../other/" "../other/deep" "../other/deep/x.txt"))
+            (initials nil))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt _collection _pred _require initial &rest _)
+                     (push initial initials)
+                     (pop answers))))
+          (harness-ui-compose-test--command 'harness-compose-add-attachment))
+        (should (equal '(nil nil "../other/" "../other/deep/") (nreverse initials)))
+        (should (equal (list (expand-file-name "deep/x.txt" other)) (harness-ui-compose-test--paths)))))))
+
+(ert-deftest harness-ui-compose-typed-references-attach-when-taken ()
+  ;; An @ reference typed out in full, or pasted, attaches its file when
+  ;; the message is taken, as one completed does, and stays in the text:
+  ;; a project file, a path out of the project, under ~ or absolute.
+  ;; Punctuation after it is no part of it.  @skill: references, a
+  ;; missing file, a directory, an @ inside a word and a remote name
+  ;; attach nothing, and a file is attached once.
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (harness-compose-add-attachment (expand-file-name "notes.txt" proj))
+      (let ((text (format "compare @notes.txt with @../other/notes.md, @~/doc.txt and (see @%s).
+@skill:review @missing.txt @../other/deep/ @/ssh:nohost:/etc/hosts mail@example.com
+@lisp/notes-util.el @../other/notes.md"
+                          (expand-file-name "deep/x.txt" other))))
+        (harness-compose-set text)
+        (pcase-let ((`(,sent . ,atts) (harness-ui-compose-test--never-remote (harness-compose-take))))
+          (should (equal text sent))
+          (should (equal (list (expand-file-name "notes.txt" proj) (expand-file-name "notes.md" other)
+                               (expand-file-name "doc.txt" home) (expand-file-name "deep/x.txt" other)
+                               (expand-file-name "lisp/notes-util.el" proj))
+                         (mapcar (lambda (a) (plist-get a :path)) atts)))
+          (should (equal '("notes.txt" "notes.md" "doc.txt" "x.txt" "notes-util.el")
+                         (mapcar (lambda (a) (plist-get a :name)) atts)))
+          (should (equal "text/plain" (plist-get (nth 2 atts) :mime))))
+        ;; The box is left as it was: its host clears it once sent.
+        (should (equal (list (expand-file-name "notes.txt" proj)) (harness-ui-compose-test--paths)))
+        (should (equal text (harness-compose-text))))
+      ;; References alone are a message.
+      (harness-compose-clear)
+      (harness-compose-set "@~/doc.txt")
+      (should (equal (list "@~/doc.txt" (expand-file-name "doc.txt" home))
+                     (pcase (harness-compose-take) (`(,sent ,att) (list sent (plist-get att :path)))))))))
 
 (provide 'harness-ui-compose-test)
 ;;; harness-ui-compose-test.el ends here

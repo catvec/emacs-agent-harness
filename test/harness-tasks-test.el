@@ -199,6 +199,73 @@ leaves it whole too."
         (should (eq 'error (plist-get (harness-tasks-test-task id) :outcome)))
         (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))))))
 
+(defvar harness-tasks--retry-prompt)
+(declare-function harness-tasks--set "harness-tasks")
+
+(ert-deftest harness-tasks-retry-carries-on-a-stopped-task ()
+  "task/retry has the session of a task whose turn failed carry on, told
+so by the harness, and the task works again."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+      (let* ((id (harness-tasks-test-submit "will fail once"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :outcome)) 5 "an outcome")
+        (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+        (let ((harness-provider-demo-script-override harness-tasks-test-script))
+          ;; It is at work again at once, before its turn starts.
+          (should (eq 'active (plist-get (harness-call 'task/retry id) :column)))
+          (should-error (harness-call 'task/retry id))
+          (harness-tasks-test-wait-state id 'done))
+        (should (equal sid (plist-get (harness-tasks-test-task id) :session)))
+        (let ((retry (car (last (harness-tasks-test-user-nodes sid)))))
+          (should (string-match-p "stopped before the task was finished: it failed with an error\\. Check where"
+                                  (plist-get retry :content)))
+          (should (equal (harness-sender-system "tasks") (harness-node-sender retry))))
+        ;; Done: nothing to retry.
+        (should-error (harness-call 'task/retry id))))))
+
+(ert-deftest harness-tasks-retry-follows-where-the-task-stopped ()
+  "A pending task starts, a write-up that stopped is written again, a
+failed merge is merged again, and a task at work or in review is not
+retried."
+  (harness-tasks-test-with
+    ;; Pending: it starts, whatever the limit says.
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "waits for a slot")))
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (harness-call 'task/retry id)
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-tasks-test-wait-state id 'done)))
+    ;; A write-up that failed is written again.
+    (let ((id (let ((harness-provider-demo-script-override
+                     '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+                (prog1 (harness-tasks-test-refine "a flaky idea")))))
+      (harness-test-wait (lambda () (eq 'error (plist-get (harness-tasks-test-task id) :outcome))) 5 "the error")
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Make the flaky idea solid") (:type done :stop-reason end-turn))))
+        (harness-call 'task/retry id)
+        (harness-tasks-test-wait-state id 'pending)
+        (should (equal "Make the flaky idea solid" (plist-get (harness-tasks-test-task id) :prompt)))))
+    ;; A failed merge goes back to the merge queue: here, with no
+    ;; worktree, `task/merge' says why it cannot.
+    (let ((id (harness-tasks-test-submit "merged badly")))
+      (harness-tasks-test-wait-state id 'done)
+      (harness-tasks--set id :state 'active :outcome 'merge-failed :error "merge conflict")
+      (should (string-match-p "no worktree to merge"
+                              (cadr (should-error (harness-call 'task/retry id))))))
+    ;; At work.
+    (let* ((harness-provider-demo--delay 5)
+           (id (harness-tasks-test-submit "busy")))
+      (harness-test-wait (lambda () (eq 'active (plist-get (harness-tasks-test-task id) :column))) 5 "at work")
+      (should (string-match-p "working already" (cadr (should-error (harness-call 'task/retry id)))))
+      (harness-call 'task/cancel id))
+    ;; In review.
+    (let* ((harness-tasks-require-verification t)
+           (id (harness-tasks-test-submit "for review")))
+      (harness-tasks-test-wait-state id 'review)
+      (should (string-match-p "review" (cadr (should-error (harness-call 'task/retry id))))))))
+
 (ert-deftest harness-tasks-blocked-session-needs-input ()
   (harness-tasks-test-with
     (let ((harness-provider-demo--delay 0.3)
@@ -2111,7 +2178,9 @@ The tool alone ends the turn: the scripted provider never says done."
                (report (plist-get task :report)))
           (should (equal "# Done" (plist-get report :summary)))
           (should (numberp (plist-get report :at)))
-          (should (equal '((:kind "note" :text "looks good")) (plist-get report :evidence))))
+          (should (equal '((:kind "note" :text "looks good")) (plist-get report :evidence)))
+          ;; Handed in: the harness leaves the report as it came.
+          (should-not (plist-get report :missing)))
         ;; The transcript shows the call and what it said.
         (let ((result (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
                                                    (equal (plist-get n :call-id) "h1")))
@@ -2184,6 +2253,105 @@ The refusal says what to fix, and the task keeps working."
       (should-not (member "hand_in" (funcall names plain)))
       (should (member "hand_in" (funcall names sid)))
       (should (member "hand_in" (funcall names nil))))))
+
+;; A round whose turn ends without hand_in -- the model replied instead,
+;; or could not call the tool (Claude Code offering it none of the
+;; harness's tools had it write its calls as text) -- must not leave its
+;; review with nothing to read, nor with the report of an earlier round.
+
+(defun harness-tasks-test--report (id)
+  "Return the report task ID holds."
+  (plist-get (harness-tasks-test-task id) :report))
+
+(defun harness-tasks-test--missing-p (id)
+  "Non-nil when task ID's report says its round handed none in."
+  (harness-json-true-p (plist-get (harness-tasks-test--report id) :missing)))
+
+(ert-deftest harness-tasks-turn-without-hand-in-reports-it-missing ()
+  "A round that ends without hand_in gets a report saying so.
+It holds no evidence and, as its summary, the last message the session
+wrote, so the review has that to read and knows nothing was handed in.
+A task that completes without review gets one the same way."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "I fixed the parser; see the diff.\n")
+             (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (let ((report (harness-tasks-test--report id)))
+          (should (harness-tasks-test--missing-p id))
+          (should (equal "I fixed the parser; see the diff." (plist-get report :summary)))
+          (should-not (plist-get report :evidence))
+          (should (numberp (plist-get report :at))))
+        ;; Verifying it is still the user's call.
+        (harness-call 'task/verify id)
+        (harness-tasks-test-wait-state id 'done)))
+    ;; Review off: the task completes, with the report that says so.
+    (let ((id (harness-tasks-test-submit "tidy the readme")))
+      (harness-tasks-test-wait-state id 'done)
+      (should (harness-tasks-test--missing-p id))
+      (should (equal "Working on it." (plist-get (harness-tasks-test--report id) :summary))))))
+
+(ert-deftest harness-tasks-round-without-hand-in-replaces-a-stale-report ()
+  "A round that ends without hand_in never shows an earlier round's report.
+That report speaks for work the user sent back.  The round's own last
+message replaces it; a round that wrote none has no summary, never one
+from before.  A round that hands in again gets its report as handed in."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "First try.\n")
+             (:type tool-call :id "h1" :name "hand_in" :input (:summary "# Done" :evidence ("looks good"))))))
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal "# Done" (plist-get (harness-tasks-test--report id) :summary)))
+        (should-not (harness-tasks-test--missing-p id))
+        ;; Sent back, it replies without handing in.
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Fixed the nested case too.\n") (:type done :stop-reason end-turn)))
+        (harness-call 'task/reject id "nested quotes still break")
+        (harness-tasks-test-wait-state id 'review)
+        (should (harness-tasks-test--missing-p id))
+        (should (equal "Fixed the nested case too." (plist-get (harness-tasks-test--report id) :summary)))
+        ;; Sent back again, it writes nothing at all.
+        (setq harness-provider-demo-script-override '((:type done :stop-reason end-turn)))
+        (harness-call 'task/reject id "and the empty string")
+        (harness-tasks-test-wait-state id 'review)
+        (should (harness-tasks-test--missing-p id))
+        (should-not (plist-get (harness-tasks-test--report id) :summary))
+        ;; Handing in again, the report is the one handed in.
+        (setq harness-provider-demo-script-override
+              '((:type tool-call :id "h2" :name "hand_in" :input (:summary "# Fixed" :evidence ("all cases")))))
+        (harness-call 'task/reject id "one more go")
+        (harness-tasks-test-wait-state id 'review)
+        (should-not (harness-tasks-test--missing-p id))
+        (should (equal "# Fixed" (plist-get (harness-tasks-test--report id) :summary)))))))
+
+(ert-deftest harness-tasks-reopened-task-needs-a-report-of-its-own ()
+  "New work on a done task is a round of its own: its report is not the old one.
+A follow-up to a verified task reopens it; when that round ends without
+hand_in, the report says so instead of standing on the first round's."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type tool-call :id "h1" :name "hand_in" :input (:summary "# Done" :evidence ("looks good"))))))
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (harness-call 'task/verify id)
+        (harness-tasks-test-wait-state id 'done)
+        (should (equal "# Done" (plist-get (harness-tasks-test--report id) :summary)))
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Also handled tabs.\n") (:type done :stop-reason end-turn)))
+        (harness-call 'task/prompt id "handle tabs too")
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :reopened))
+                           10 "the follow-up to reopen the task")
+        (harness-tasks-test-wait-state id 'review)
+        (should (harness-tasks-test--missing-p id))
+        (should (equal "Also handled tabs." (plist-get (harness-tasks-test--report id) :summary)))))))
 
 (ert-deftest harness-tasks-recap-survives-a-restart ()
   "A recap, and the counters it was made at, are kept in the store."

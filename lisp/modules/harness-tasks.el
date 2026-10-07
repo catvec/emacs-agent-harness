@@ -48,7 +48,10 @@
 ;; the same way, with the message as the feedback, wherever it was
 ;; written: the session's own chat, `task/prompt', another client,
 ;; another session's agent, the queue (`harness-tasks--on-message').
-;; Only the harness's own messages do not count.
+;; Only the harness's own messages do not count.  What the user reviews
+;; is the report the session hands in (`hand_in', `:report'); a round
+;; that ends without one gets a report marked `:missing' that says so,
+;; holding the session's last message (`harness-tasks--missing-report').
 ;;
 ;; Backlog refinement (once called grooming): a task submitted with
 ;; `:refine' is jotted down for later, not started.  An agent writes it
@@ -190,7 +193,8 @@ own setting, from the board or `task/submit', wins over both."
 
 (defcustom harness-tasks-model nil
   "Model of task sessions, or nil for the configured default."
-  :type '(choice (const :tag "Configured default" nil) (string :tag "Model")) :group 'harness)
+  :type '(choice (const :tag "Configured default" nil) (string :tag "Model" :names model))
+  :group 'harness)
 
 (defcustom harness-tasks-thinking nil
   "Thinking level of task sessions, or nil for the configured default."
@@ -238,7 +242,8 @@ how to coordinate with their sessions.")
 
 (defcustom harness-tasks-refine-model nil
   "Model that writes backlog tasks up, or nil for the task's own model."
-  :type '(choice (const :tag "The task's model" nil) (string :tag "Model")) :group 'harness)
+  :type '(choice (const :tag "The task's model" nil) (string :tag "Model" :names model))
+  :group 'harness)
 
 (defcustom harness-tasks-refine-thinking "low"
   "Thinking level of refining a backlog task, or nil for the task's own.
@@ -288,7 +293,7 @@ Whichever comes first of this, `harness-tasks-recap-turns' and
 to the session's own model; nil uses the session's own model."
   :type '(choice (const :tag "Provider's cheap tier" auto)
                  (const :tag "The task's model" nil)
-                 (string :tag "Model"))
+                 (string :tag "Model" :names model))
   :group 'harness)
 
 (defcustom harness-tasks-recap-thinking nil
@@ -366,6 +371,11 @@ task's write-up: it is written again, or with nil waits for a retry."
 (defconst harness-tasks--resume-prompt
   "The harness restarted while you were working on this task, so your last turn was cut short: tool calls that were still running did not finish. Check where you left off, then carry on with the task."
   "Message that resumes a task's session after a restart interrupted it.")
+
+(defconst harness-tasks--retry-prompt
+  "Your last turn on this task stopped before the task was finished: %s. Check where you left off, then carry on with the task."
+  "Message that has a task's session work again after its turn stopped.
+`task/retry' sends it; %s says how the turn stopped.")
 
 (defcustom harness-tasks-store-in-repository t
   "When non-nil, a git project keeps its tasks inside its repository.
@@ -1464,12 +1474,14 @@ never received the task, cut short by a restart, gets the task itself."
 (defun harness-tasks--last-reply (session-id)
   "Return the text SESSION-ID's last turn ended on, or nil.
 That is its last assistant message after the last message the user
-sent; steering messages within the turn do not end the search."
+sent; steering messages within the turn, and a note handing the
+conversation over to another model after it, do not end the search."
   (catch 'found
     (dolist (node (reverse (harness-call 'session/nodes session-id)))
       (pcase (plist-get node :kind)
         ('assistant (throw 'found (plist-get node :content)))
-        ('user (unless (plist-get (plist-get node :meta) :steering) (throw 'found nil)))))
+        ('user (unless (or (plist-get (plist-get node :meta) :steering) (harness-node-handoff node))
+                 (throw 'found nil)))))
     nil))
 
 (defun harness-tasks--refusal (reply)
@@ -1527,6 +1539,70 @@ write-up that merely opens \"Duplicate of a task …\" is a write-up."
      (t (harness-tasks--set id :state 'pending :backlog t :prompt (string-trim reply)
                             :refined (float-time) :outcome nil :error nil :duplicate-of nil)))))
 
+;;;; Reports
+;;
+;; What a round of work hands in (`hand_in', `task/hand-in') is the
+;; task's `:report', which the user reviews.  A round whose turn ends
+;; without one -- the model replied instead, or could not call the tool:
+;; a provider that offers it no tools leaves it writing its calls as
+;; text -- would leave the review with nothing to read, or with the
+;; report of a round the user already sent back.  It gets a report
+;; marked `:missing' instead: no evidence, and as its `:summary' the
+;; last message the session wrote in the round.  The views say it was
+;; not handed in, so the user sees at once that the work was not
+;; reported, and what the session said.
+
+(defconst harness-tasks--missing-summary-limit 20000
+  "Characters of a session's last message a missing report keeps.")
+
+(defun harness-tasks--round-start (task)
+  "Return when TASK's current round of work began, a float time.
+A round starts with the task (`:started'), with each round of feedback
+that sends it back (`:feedback'), and with new work on a task that was
+in review or done (`:reopened'): it is the work a report speaks for."
+  (max (or (plist-get task :started) 0)
+       (or (plist-get (car (last (plist-get task :feedback))) :at) 0)
+       (or (plist-get task :reopened) 0)))
+
+(defun harness-tasks--report-missing-p (report)
+  "Non-nil when REPORT is one recorded for a round that handed none in."
+  (harness-json-true-p (plist-get report :missing)))
+
+(defun harness-tasks--handed-in-p (task)
+  "Non-nil when TASK's current round handed its report in."
+  (let ((report (plist-get task :report)))
+    (and report
+         (not (harness-tasks--report-missing-p report))
+         (>= (or (plist-get task :report-at) (plist-get report :at) 0)
+             (harness-tasks--round-start task)))))
+
+(defun harness-tasks--last-message (sid since)
+  "Return the last message session SID's model wrote at SINCE or later, or nil.
+SINCE is a float time.  A fork's messages from its parent do not count."
+  (when (and sid (harness-method-exists-p 'session/nodes))
+    (cl-loop for n in (reverse (ignore-errors (harness-call 'session/nodes sid)))
+             for text = (plist-get n :content)
+             when (and (eq (plist-get n :kind) 'assistant)
+                       (member (plist-get n :session) (list nil sid))
+                       (>= (or (plist-get n :ts) 0) since)
+                       (stringp text) (not (harness-string-blank-p text)))
+             return (harness-truncate-end (string-trim text) harness-tasks--missing-summary-limit))))
+
+(defun harness-tasks--missing-report (task)
+  "Return the fields recording that TASK's round handed no report in, or nil.
+Nil when the round handed one in (`harness-tasks--handed-in-p').
+Otherwise (:report REPORT), REPORT marked `:missing', with the session's
+last message of the round as its `:summary' when it wrote one.  It
+replaces the report of an earlier round, which speaks for work the user
+already sent back."
+  (unless (harness-tasks--handed-in-p task)
+    (let ((message (harness-tasks--last-message (plist-get task :session)
+                                                (harness-tasks--round-start task))))
+      (harness-log 'info "task %s: its turn ended without hand_in; no report to review"
+                   (plist-get task :id))
+      (list :report (append (and message (list :summary message))
+                            (list :at (float-time) :missing t))))))
+
 ;;;; Following the sessions
 
 (defun harness-tasks--on-turn-started (session-id)
@@ -1535,7 +1611,9 @@ A turn during a merge (resolving a conflict) keeps the task merging; a
 turn before the task started (a backlog task's) refines it.  A message
 sent to an archived task's session brings the task back too.  New work
 needs a new review, so a verification goes, unless the turn is part of
-a merge: the merge queue steering the agent to commit, say.  A merged
+a merge: the merge queue steering the agent to commit, say.  New work
+on a task that was in review or done starts a round that needs a report
+of its own (`:reopened', see `harness-tasks--round-start').  A merged
 task's worktree is locked again for the new work."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
@@ -1548,15 +1626,18 @@ task's worktree is locked again for the new work."
      (t (harness-tasks--relock-worktree task)
         (apply #'harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
                :merged nil :archived nil
-               (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil)))))))
+               (append
+                (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil))
+                (when (memq (plist-get task :state) '(review done)) (list :reopened (float-time)))))))))
 
 (defun harness-tasks--on-turn-ended (session-id reason)
   "Advance SESSION-ID's task when its turn ended with REASON.
 `end-turn' puts the work in review (`harness-tasks-require-verification')
 until the user verified it; after that, or without review, it completes
 the task outside git -- in the main tree too, which has nothing to
-merge -- and queues its merge inside.  A refinement turn puts its
-write-up in the backlog."
+merge -- and queues its merge inside.  A round that ends without a
+report handed in gets one saying so (`harness-tasks--missing-report').
+A refinement turn puts its write-up in the backlog."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (let ((id (plist-get task :id)))
@@ -1570,10 +1651,14 @@ write-up in the backlog."
        ;; Merged mid-turn: done, or in review when that merge needs one.
        ((and (memq (plist-get task :state) '(done review)) (harness-tasks--merged-p task)) nil)
        ((harness-tasks--needs-review-p task)
-        (harness-tasks--to-review id :outcome reason :error nil :finished (float-time)))
+        (apply #'harness-tasks--to-review id :outcome reason :error nil :finished (float-time)
+               (harness-tasks--missing-report task)))
        ((and (plist-get task :worktree) (not (plist-get task :worktree-removed)))
+        (when-let* ((missing (harness-tasks--missing-report task)))
+          (apply #'harness-tasks--set id missing))
         (harness-tasks--enqueue-merge id))
-       (t (harness-tasks--to-done id 'finished :outcome reason :finished (float-time))))
+       (t (apply #'harness-tasks--to-done id 'finished :outcome reason :finished (float-time)
+                 (harness-tasks--missing-report task))))
       (harness-run-soon #'harness-tasks--schedule))))
 
 (defun harness-tasks--on-pending-changed (session-id &rest _)
@@ -1953,6 +2038,73 @@ A task in review merges when the user verifies it (`task/verify')."
       (error "Task %s waits for your review; verifying it merges it" id))
     (harness-tasks--set id :merge-attempts 0)
     (harness-tasks--enqueue-merge id)
+    (harness-call 'task/get id)))
+
+(defun harness-tasks--stopped-how (task)
+  "Say how TASK's last turn stopped, for `harness-tasks--retry-prompt'."
+  (let ((err (plist-get task :error)))
+    (concat (pcase (plist-get task :outcome)
+              ('error "it failed with an error")
+              ('cancelled "it was cancelled")
+              ('interrupted "the harness stopped while it was running")
+              ('max-tokens "the model ran out of output tokens")
+              ('nil "it ended")
+              (outcome (format "it ended (%s)" outcome)))
+            (if (harness-string-blank-p err)
+                ""
+              (concat " -- " (harness-truncate-end (string-trim err) 300))))))
+
+(defun harness-tasks--retry-turn (task)
+  "Have the session of stopped TASK work on it again.
+A session that never got the work since the task started gets the task
+itself; otherwise `harness-tasks--retry-prompt' from the harness tells
+it to carry on.  The task holds its slot from now, as when it starts."
+  (let ((id (plist-get task :id))
+        (sid (plist-get task :session)))
+    (when (plist-get task :worktree-removed)
+      (error "Task %s was archived and its worktree removed; submit a new task" id))
+    (puthash id t harness-tasks--starting)
+    (harness-tasks--set id :merge-attempts 0)
+    (let ((begun (harness-tasks--work-begun-p task)))
+      (harness-catch (harness-call-async 'agent/prompt sid
+                                         (if begun
+                                             (list (list :type "text"
+                                                         :text (format harness-tasks--retry-prompt
+                                                                       (harness-tasks--stopped-how task))))
+                                           (harness-tasks--blocks task))
+                                         ;; Carrying on is the harness's doing;
+                                         ;; the task itself is the user's.
+                                         (and begun (harness-tasks--from-harness)))
+                     (lambda (e) (harness-tasks--fail id e))))))
+
+(harness-defmethod task/retry (id)
+  "Have task ID, which stopped part way, work on it again; return the task.
+What that means follows where it stopped: a failed merge is queued
+again (`task/merge'), a write-up that stopped is written again, or
+written up all the same after it refused the task as a duplicate
+\(`task/refine'), and a task that has not started starts (`task/start').
+A task whose turn stopped -- an error, cancelled, interrupted -- has its
+session carry on, told so by the harness (`harness-tasks--retry-prompt');
+one left without a session starts over.  A task at work, waiting for an
+answer, merging, in review or done has nothing to retry."
+  (let* ((task (harness-tasks--get id))
+         (state (plist-get task :state))
+         (session (harness-tasks--session task)))
+    (cond
+     ((plist-get session :pending)
+      (error "Task %s waits for your answer to its %s" id
+             (if (equal (format "%s" (plist-get (car (plist-get session :pending)) :kind)) "question")
+                 "question" "permission request")))
+     ((or (harness-tasks--turn-p task) (gethash id harness-tasks--starting))
+      (error "Task %s is working already" id))
+     ((eq state 'review) (error "Task %s waits for your review: verify it or send it back" id))
+     ((eq state 'done) (error "Task %s is done; send it a message to reopen it" id))
+     ((eq (plist-get task :outcome) 'merge-failed) (harness-call 'task/merge id))
+     ((eq state 'merging) (error "Task %s is merging" id))
+     ((eq state 'refining) (harness-call 'task/refine id))
+     ((eq state 'pending) (harness-call 'task/start id))
+     ((null session) (harness-tasks--start task))
+     (t (harness-tasks--retry-turn task)))
     (harness-call 'task/get id)))
 
 (harness-defmethod task/complete (id)

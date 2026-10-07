@@ -49,6 +49,10 @@
 (defconst harness-media-font "Hack" "Font family of the pictures, when it is installed.")
 (defconst harness-media-font-height 120 "Height of the default face, in 1/10 pt.")
 (defconst harness-media-columns 160 "Frame width in columns.")
+(defconst harness-media-hero-columns 180
+  "Frame width of the first picture, in columns.
+It shows the board and a session side by side, in the fullscreen
+layout: half the frame keeps the board's cards whole.")
 (defconst harness-media-lines 54 "Frame height in lines, unless a shot asks for another.")
 (defconst harness-media-delay 0.02 "Seconds between the events of a scripted turn.")
 
@@ -68,6 +72,7 @@
 (defvar harness-ui-positions)
 (defvar harness-ui-default-position)
 (defvar harness-ui--position-buffers)
+(defvar harness-ui--fullscreen-layouts)
 (defvar harness-ui-tasks--target)
 (defvar harness-chat--blocks)
 (defvar harness-chat--loading)
@@ -95,6 +100,7 @@
 (declare-function harness-compose-repad "harness-ui-compose")
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-requests "harness-ui-tasks")
+(declare-function harness-ui-tasks-open "harness-ui-tasks")
 (declare-function harness-ui-tasks-reply "harness-ui-tasks")
 (declare-function harness-ui-tasks--find "harness-ui-tasks")
 (declare-function harness-ui-report-popout "harness-ui-report")
@@ -851,8 +857,8 @@ Every request needs an API key: `Authorization: Bearer KEY`.
   "A bash call committing every change as MESSAGE."
   (harness-media--tool "bash" :command (format "git add -A && git commit -q -m '%s'" message)))
 
-(defun harness-media--hero-script (_request)
-  "The turn of the hero picture: rate limiting, from reading to tests."
+(defun harness-media--ratelimit-script (_request)
+  "The turn of the rate-limit session: rate limiting, from reading to tests."
   (list
    (harness-media--think "Requests are authenticated in acme/app.py before they reach a handler, so the limit belongs right after authentication, keyed by the API key. A token bucket per key gives the burst for free. I'll check how responses are built, put the limiter in a module of its own, wire it in and test it with a fake clock.")
    (harness-media--tool "list_dir" :path ".")
@@ -880,7 +886,7 @@ Every request needs an API key: `Authorization: Bearer KEY`.
 All 12 tests pass.")))
 
 (defun harness-media--fork-script (_request)
-  "The turn of the fork in the hero's tree."
+  "The turn of the fork in the rate-limit session's tree."
   (list
    (harness-media--think "A sliding-window log keeps each key's request times from the last minute and drops older ones. It is exact, at the cost of one timestamp per request.")
    (harness-media--say "A sliding-window log is exact: it keeps each key's request times from the last 60 seconds and refuses a request once there are 100 of them.
@@ -904,7 +910,7 @@ class SlidingWindow:
 It costs up to 100 timestamps per key. Shall I use it in `acme/app.py` instead of the buckets?")))
 
 (defun harness-media--btw-script (_request)
-  "The answer of the BTW over the hero."
+  "The answer of the BTW over the rate-limit session."
   (list
    (harness-media--say "A `429` that says how long to wait:
 
@@ -983,7 +989,9 @@ The orders endpoints only touch a list in memory, and authentication is a set lo
 TODOS are the item texts.  With HOLD the turn stops working half way
 and never ends, so the task stays in progress, and nothing is committed.
 With EVIDENCE, hand_in's evidence items, the turn hands its work in
-with SUMMARY rather than saying it."
+with SUMMARY rather than saying it.  Every finished round should hand
+in, as a task session is told to: one that ends without it puts [No
+report] on the task's card (`harness-tasks--missing-report')."
   (let* ((n (length todos))
          (at (lambda (done)
                (apply #'harness-media--todos
@@ -1009,7 +1017,9 @@ with SUMMARY rather than saying it."
    (list (harness-media--tool "read_file" :path "acme/auth.py")
          (harness-media--tool "write_file" :path "acme/auth.py" :content harness-media--auth-constant-time))
    "Compare API keys in constant time"
-   "`authenticate()` now compares the key with every known key through `hmac.compare_digest`."))
+   "`authenticate()` now compares the key with every known key through `hmac.compare_digest`."
+   nil
+   (list (list :file "acme/auth.py" :caption "The key check, through hmac.compare_digest"))))
 
 (defun harness-media--task-python (_request)
   "Task: require Python 3.12."
@@ -1020,7 +1030,9 @@ with SUMMARY rather than saying it."
                               :old_string "requires-python = \">=3.11\"\n"
                               :new_string "requires-python = \">=3.12\"\nclassifiers = [\n    \"Programming Language :: Python :: 3.12\",\n    \"Programming Language :: Python :: 3.13\",\n]\n"))
    "Require Python 3.12"
-   "pyproject.toml requires Python 3.12 and lists 3.12 and 3.13."))
+   "pyproject.toml requires Python 3.12 and lists 3.12 and 3.13."
+   nil
+   (list (list :file "pyproject.toml" :caption "requires-python and the supported versions"))))
 
 (defun harness-media--task-pagination (_request)
   "Task: paginate GET /orders, handed in with a chart and the test run."
@@ -1047,14 +1059,18 @@ with SUMMARY rather than saying it."
    (list (harness-media--tool "read_file" :path "acme/app.py")
          (harness-media--tool "write_file" :path "acme/timing.py" :content harness-media--timing))
    "Log slow requests"
-   "`acme.timing.timed()` wraps the app and logs every request slower than 500 ms."))
+   "`acme.timing.timed()` wraps the app and logs every request slower than 500 ms."
+   nil
+   (list (list :file "acme/timing.py" :caption "The timing middleware and its threshold"))))
 
 (defun harness-media--task-slow-again (_request)
-  "Task: log slow requests, after review."
+  "Task: log slow requests, after review: the round hands its work in again."
   (list (harness-media--tool "edit_file" :path "acme/timing.py"
                              :old_string "SLOW_SECONDS = 0.5" :new_string "SLOW_SECONDS = 0.5  # seconds")
         (harness-media--git-commit "Say the threshold is in seconds")
-        (harness-media--say "The threshold says it is in seconds now.")))
+        (harness-media--say "The threshold says it is in seconds now: handing it in again.")
+        (harness-media--tool "hand_in" :summary "`SLOW_SECONDS`, the threshold of `acme.timing`, says it is in seconds."
+                             :evidence (list (list :file "acme/timing.py" :caption "The threshold, in seconds")))))
 
 (defun harness-media--task-settings (_request)
   "Task in progress: typed settings."
@@ -1114,7 +1130,7 @@ with SUMMARY rather than saying it."
   "Titles the scripted naming gives, by a regexp of the first message.")
 
 (defconst harness-media--scripts
-  '(("Rate-limit the orders API" . harness-media--hero-script)
+  '(("Rate-limit the orders API" . harness-media--ratelimit-script)
     ("sliding-window" . harness-media--fork-script)
     ("hits the limit" . harness-media--btw-script)
     ("tell subscribers" . harness-media--webhooks-script)
@@ -1151,6 +1167,19 @@ with SUMMARY rather than saying it."
   (let ((last (car (last (plist-get request :messages)))))
     (and last (cl-some (lambda (b) (equal (plist-get b :type) "tool_result")) (plist-get last :content)))))
 
+(defun harness-media--search-answer (text)
+  "The scripted search model's answer to TEXT, the message carrying the query.
+TEXT is the board dump the search sends; a query about the slow-request
+warning gets that task shown and archived, so the picture has a filter,
+a toast and an [Undo]."
+  (let* ((tasks (plist-get harness-media--world :tasks))
+         (slow (plist-get tasks :slow)))
+    (cond
+     ((and slow (string-match-p "slow\\|warning\\|500 ms" text))
+      (format "{\"show\":[\"%s\"],\"do\":[{\"task\":\"%s\",\"action\":\"archive\"}]}"
+              slow slow))
+     (t "{\"show\":[],\"do\":[]}"))))
+
 (defun harness-media--script (request)
   "Return the events that answer REQUEST."
   (let* ((system (or (plist-get request :system) ""))
@@ -1164,6 +1193,9 @@ with SUMMARY rather than saying it."
       (list (harness-media--say (or (cdr (cl-find-if (lambda (e) (string-match-p (car e) first)) harness-media--titles))
                                     "Work on the API"))))
      ((string-match-p "^## Task refinement" system) (harness-media--write-up first))
+     ;; The task board's search: answer in JSON, as the prompt asks.
+     ((string-prefix-p "You are the search box" system)
+      (list (harness-media--say (harness-media--search-answer newest))))
      (t (let ((entry (cl-find-if (lambda (e) (string-match-p (car e) newest)) harness-media--scripts)))
           (if entry
               (funcall (cdr entry) request)
@@ -1211,7 +1243,12 @@ tool and asks again, and the script goes on from there."
                     (let ((event (pop script)))
                       (pcase (plist-get event :type)
                         ('nil (finish 'end-turn))
-                        ('tool-call (emit event) (puthash sid script harness-media--rest) (finish 'tool-use))
+                        ;; The rest is kept before the call goes out: a
+                        ;; tool that ends the turn (hand_in) can cancel it
+                        ;; while the call is emitted, and the cancel drops
+                        ;; it, or the round after -- a task sent back --
+                        ;; would replay an empty rest.
+                        ('tool-call (puthash sid script harness-media--rest) (emit event) (finish 'tool-use))
                         ('hold nil)
                         ('usage (setq reported t) (emit event) (later))
                         (_ (setq written (+ written (length (or (plist-get event :delta) ""))))
@@ -1402,26 +1439,26 @@ recaps: the lines the model would have written by now."
     (harness-media--prompt flaky "test_creates_an_order fails about one time in ten on CI. Why?")
     (dolist (id (list guide flaky)) (harness-call 'session/deactivate id))
     (setq harness-media--world (append (list :guide guide :flaky flaky) harness-media--world)))
-  (let ((hero (harness-media--new-session :name "Rate-limit the orders API" :model "claude:claude-fable-5-1"
-                                          :permission-mode 'auto :thinking "high")))
-    (harness-media--prompt hero "Rate-limit the orders API: 100 requests a minute per API key, with a small burst. Over the limit, answer 429 with a Retry-After header.")
+  (let ((ratelimit (harness-media--new-session :name "Rate-limit the orders API" :model "claude:claude-fable-5-1"
+                                               :permission-mode 'auto :thinking "high")))
+    (harness-media--prompt ratelimit "Rate-limit the orders API: 100 requests a minute per API key, with a small burst. Over the limit, answer 429 with a Retry-After header.")
     ;; A fork from where the agent had read the code, and a BTW.
-    (let* ((nodes (harness-call 'session/nodes hero))
-           (head (plist-get (harness-media--session hero) :head))
+    (let* ((nodes (harness-call 'session/nodes ratelimit))
+           (head (plist-get (harness-media--session ratelimit) :head))
            (branch (plist-get (cl-find-if (lambda (n) (and (equal (format "%s" (plist-get n :kind)) "assistant")
                                                            (string-prefix-p "`application()`" (or (plist-get n :content) ""))))
                                           nodes)
                               :id)))
-      (harness-call 'session/set-head hero branch)
+      (harness-call 'session/set-head ratelimit branch)
       (let ((fork (plist-get (harness-await (harness-as-promise
-                                             (harness-call 'session/fork hero :kind 'fork :name "Sliding-window limiter"))
+                                             (harness-call 'session/fork ratelimit :kind 'fork :name "Sliding-window limiter"))
                                             30)
                              :id)))
-        (harness-call 'session/set-head hero head)
+        (harness-call 'session/set-head ratelimit head)
         (harness-media--prompt fork "Try a sliding-window log instead, so a key can never make more than 100 requests in any 60 seconds.")
-        (let ((btw (plist-get (harness-call 'session/btw hero "What does a client see?") :id)))
+        (let ((btw (plist-get (harness-call 'session/btw ratelimit "What does a client see?") :id)))
           (harness-media--prompt btw "What does a client see when it hits the limit?")
-          (setq harness-media--world (append (list :hero hero :fork fork :btw btw) harness-media--world))))))
+          (setq harness-media--world (append (list :ratelimit ratelimit :fork fork :btw btw) harness-media--world))))))
   (let ((permission (harness-media--new-session :name "Pool the webhook connections" :model "claude:claude-sonnet-5"
                                                 :permission-mode 'ask))
         (question (harness-media--new-session :name "Cache the product catalogue" :model "claude:claude-opus-5-5"
@@ -1516,11 +1553,24 @@ recaps: the lines the model would have written by now."
     ;; The branch waiting in the merge queue joined it when its work finished,
     ;; so its card reads "queued 21m ago" rather than "just now".
     (harness-tasks--set (plist-get tasks :pagination) :merge-queued (harness-media--ago 21))
+    ;; The task in review was sent back an hour ago and handed its work in
+    ;; again when it finished, so its report says that time too.  The report
+    ;; must stay newer than the feedback, or it would speak for the round
+    ;; before (`harness-tasks--handed-in-p').
+    (let* ((id (plist-get tasks :slow))
+           (task (harness-media--task id))
+           (feedback (plist-get task :feedback)))
+      (harness-tasks--set id
+                          :feedback (append (butlast feedback)
+                                            (list (plist-put (copy-sequence (car (last feedback)))
+                                                             :at (harness-media--ago 60))))
+                          :report (plist-put (copy-sequence (plist-get task :report)) :at (harness-media--ago 41))
+                          :report-at (harness-media--ago 41)))
     (pcase-dolist (`(,key ,created ,updated)
-                   '((:guide 2900 2870) (:flaky 5800 5790) (:hero 7 0.2) (:fork 3 2) (:btw 1 0.5)
+                   '((:guide 2900 2870) (:flaky 5800 5790) (:ratelimit 7 0.2) (:fork 3 2) (:btw 1 0.5)
                      (:permission 9 8) (:question 15 14)))
       (harness-media--set-times (plist-get harness-media--world key) created updated))
-    (pcase-dolist (`(,key ,minutes) '((:hero 5) (:fork 2) (:btw 0.6)))
+    (pcase-dolist (`(,key ,minutes) '((:ratelimit 5) (:fork 2) (:btw 0.6)))
       (harness-media--age-nodes (plist-get harness-media--world key) minutes))
     ;; The session tasks merge into, made by the first merge.
     (maphash (lambda (id _session)
@@ -1572,6 +1622,8 @@ recaps: the lines the model would have written by now."
       (ignore-errors (delete-window w))))
   (delete-other-windows)
   (clrhash harness-ui--position-buffers)
+  ;; Its overview's window is gone: no fullscreen layout is left either.
+  (clrhash harness-ui--fullscreen-layouts)
   (switch-to-buffer (get-buffer-create "*scratch*"))
   (set-frame-size nil harness-media-columns harness-media-lines)
   (harness-media--settle 0.2))
@@ -1650,7 +1702,7 @@ Show it from its first line matching the regexp FROM, else from its start."
         (insert (harness-media--window-text w)))))
   (harness-media--log "wrote %s.png" name))
 
-(defun harness-media--hero-layout (id)
+(defun harness-media--code-layout (id)
   "Show acme/ratelimit.py on the left and the chat of session ID on the right."
   (harness-media--reset-layout)
   (harness-media--show-file "acme/ratelimit.py" "^class TokenBucket")
@@ -1659,9 +1711,51 @@ Show it from its first line matching the regexp FROM, else from its start."
     (harness-media--to-bottom buffer)
     buffer))
 
+(defun harness-media--fullscreen-layout (task)
+  "Show the board in the fullscreen layout, the session of TASK beside it.
+TASK is a key of the world's tasks.  As a user would, the board opens
+in the `fullscreen' position (C-u C-c h a, then fullscreen) and RET on
+the task's card opens its session beside the board.  The frame is
+`harness-media-hero-columns' wide, and as high as the session's last
+round needs: from the message that started it to the compose box.
+Return the session's chat buffer."
+  (harness-media--reset-layout)
+  (set-frame-size nil harness-media-hero-columns harness-media-lines)
+  (harness-media--settle 0.3)
+  (let ((default-directory harness-media-project)
+        (id (plist-get (plist-get harness-media--world :tasks) task)))
+    (harness-tasks harness-media-project 'fullscreen)
+    (harness-media--settle 1.5)
+    (let ((board (selected-window)))
+      (with-current-buffer (window-buffer board)
+        (harness-media--wait (lambda () (ignore-errors (harness-media--goto-task-card id) t))
+                             15 "the task's card")
+        (harness-ui-tasks-open))
+      (let* ((chat (selected-window))
+             (buffer (window-buffer chat)))
+        (when (eq chat board) (error "The session did not open beside the board"))
+        (harness-media--wait (lambda () (with-current-buffer buffer
+                                          (and (not harness-chat--loading) harness-chat--order)))
+                             20 "the chat to load")
+        (harness-media--settle 1)
+        ;; The last round starts at the last message the session was sent.
+        (harness-media--fit (with-current-buffer buffer
+                              (count-screen-lines (save-excursion
+                                                    (goto-char (point-max))
+                                                    (re-search-backward "^You$"))
+                                                  (point-max) nil chat)))
+        (harness-media--to-bottom buffer)
+        ;; The board from its top, point still on the card.
+        (set-window-start board (with-current-buffer (window-buffer board) (point-min)))
+        (harness-media--settle 0.5)
+        buffer))))
+
 (defun harness-media-shot-chat ()
-  "The hero: code on the left, a finished turn on the right."
-  (harness-media--hero-layout (plist-get harness-media--world :hero))
+  "The first picture: the board in the fullscreen layout, a task beside it.
+The task is in review after it was sent back once: its session shows
+the feedback, the work that answered it, the report handed in again
+and the review banner."
+  (harness-media--fullscreen-layout :slow)
   (harness-media--capture "chat"))
 
 (defun harness-media-shot-chat-permission ()
@@ -1687,8 +1781,8 @@ keeps a compose box at the bottom of a window does not count."
   "Make the frame LINES of text high, plus its header, mode and echo lines.
 A line to spare holds the empty line a chat keeps under its compose box.
 Keep it between LEAST (default 12) and MOST (default
-`harness-media-lines') lines."
-  (set-frame-size nil harness-media-columns
+`harness-media-lines') lines.  The frame keeps its width."
+  (set-frame-size nil (frame-width)
                   (min (or most harness-media-lines) (max (or least 12) (+ lines 5))))
   (harness-media--settle 0.5))
 
@@ -1850,6 +1944,26 @@ or send it back."
     (harness-media--settle 1)
     (harness-media--capture "report-image")))
 
+(defun harness-media-shot-tasks-search ()
+  "The task board after a search in words: filtered, an action done, [Undo].
+The scripted model answers a query about the slow-request warning: the
+board shows that task under the banner, archives it (the toast says so)
+and offers [Undo].  The task is put back after the picture, so the shots
+that follow see the board every other picture shows."
+  (harness-media--view
+   (lambda () (harness-tasks harness-media-project 'full))
+   (lambda ()
+     (cl-letf (((symbol-function 'read-string)
+                (lambda (&rest _) "get rid of the slow request warning")))
+       (call-interactively #'harness-ui-tasks-search))
+     (harness-media--wait (lambda () (plist-get harness-ui-tasks-search--state :results))
+                          20 "the search to act")
+     (harness-media--settle 0.6)))
+  (harness-media--capture "tasks-search")
+  ;; Leave the world as the other shots expect it.
+  (let ((id (plist-get (plist-get harness-media--world :tasks) :slow)))
+    (ignore-errors (harness-call 'task/archive id t))))
+
 (defun harness-media-shot-sessions ()
   "The session list."
   (harness-media--view #'harness-sessions)
@@ -1898,12 +2012,13 @@ popout both show; the popout is a side window and keeps its height."
   (harness-media--capture "popout-question"))
 
 (defun harness-media-shot-tree ()
-  "The conversation tree of the hero's session."
-  (harness-media--view (lambda () (harness-tree (plist-get harness-media--world :hero))))
+  "The conversation tree of the rate-limit session."
+  (harness-media--view (lambda () (harness-tree (plist-get harness-media--world :ratelimit))))
   (harness-media--capture "tree"))
 
 (defun harness-media-shot-usage ()
-  "The usage dashboard over 30 days, by model."
+  "The usage dashboard over 30 days, by model, with the fallback list."
+  (setq harness-fallback-models '("claude" "openrouter:openai/gpt-5"))
   (harness-media--view #'harness-usage
                        (lambda ()
                          (harness-ui-usage-set-period 'month)
@@ -1946,14 +2061,14 @@ Every project starts folded, whatever an earlier shot unfolded."
   (harness-media--capture "settings"))
 
 (defun harness-media-shot-btw ()
-  "A BTW side conversation under the hero's chat."
-  (harness-media--hero-layout (plist-get harness-media--world :hero))
+  "A BTW side conversation under the rate-limit session's chat."
+  (harness-media--code-layout (plist-get harness-media--world :ratelimit))
   (harness-media--to-bottom (harness-media--open-chat (plist-get harness-media--world :btw) 'bottom))
   (harness-media--capture "btw"))
 
 (defun harness-media-shot-menu ()
-  "The harness menu, opened from the hero's chat."
-  (let ((buffer (harness-media--hero-layout (plist-get harness-media--world :hero))))
+  "The harness menu, opened from the rate-limit session's chat."
+  (let ((buffer (harness-media--code-layout (plist-get harness-media--world :ratelimit))))
     (select-window (get-buffer-window buffer))
     (harness-menu)
     (harness-media--settle 1)
@@ -2036,7 +2151,7 @@ against the size the server said, which is what a real one shows."
   "The compose box of a chat: a picture and a video attached, both with
 their thumbnails in the chips, and a link still downloading with its
 progress."
-  (let* ((buffer (harness-media--open-chat (plist-get harness-media--world :hero) 'full))
+  (let* ((buffer (harness-media--open-chat (plist-get harness-media--world :ratelimit) 'full))
          (files (harness-media--attachments-make-media)))
     (harness-media--settle 1)
     (with-current-buffer buffer
@@ -2083,6 +2198,7 @@ afterwards."
     ("chat-question" . harness-media-shot-chat-question)
     ("attachments" . harness-media-shot-attachments)
     ("tasks" . harness-media-shot-tasks)
+    ("tasks-search" . harness-media-shot-tasks-search)
     ("tasks-long" . harness-media-shot-tasks-long)
     ("tasks-message" . harness-media-shot-tasks-message)
     ("report" . harness-media-shot-report)

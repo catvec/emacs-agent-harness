@@ -270,5 +270,28 @@ harness cannot say, as one without tasks, the list names no task."
       (harness-ui-sessions-filter "")
       (should (equal '("s-guide" "s-task") (harness-ui-sessions-test--shown))))))
 
+;;;; The fullscreen layout
+
+(ert-deftest harness-ui-sessions-is-an-overview ()
+  "The list can take the fullscreen layout: F starts it, q on it ends it.
+Beside it shows the session at point, else the newest it lists, a BTW
+aside."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "old" root :updated 100)
+    (harness-ui-sessions-test--add "new" root :updated 300)
+    (harness-ui-sessions-test--add "btw" root :updated 400 :kind "btw")
+    (let ((default-directory root)) (harness-sessions))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should (harness-ui-overview-p (current-buffer)))
+      (should (eq 'harness-fullscreen (key-binding (kbd "F"))))
+      (should (eq 'harness-ui-quit-view (key-binding (kbd "q"))))
+      (should (eq 'harness-ui-bury (key-binding (kbd "C-c C-z"))))
+      (goto-char (point-min))
+      (while (not (equal (tabulated-list-get-id) "old")) (forward-line 1))
+      (should (equal "old" (harness-ui-sessions--overview-session)))
+      (goto-char (point-max))
+      (should-not (tabulated-list-get-id))
+      (should (equal "new" (harness-ui-sessions--overview-session))))))
+
 (provide 'harness-ui-sessions-test)
 ;;; harness-ui-sessions-test.el ends here

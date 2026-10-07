@@ -80,11 +80,16 @@ trailing period, collapses whitespace and truncates to
       (append messages (list (list :role 'user :content (list ask)))))))
 
 (defun harness-naming--forked-state (session)
-  "Return a promise of a forked provider state for SESSION, or of nil."
+  "Return a promise of a forked provider state for SESSION, or of nil.
+Only a state the session's model can continue is forked (see
+`session/provider-state')."
   (let ((model (plist-get session :model)))
     (if (and (plist-get (harness-call 'provider/capabilities model) :fork)
              (harness-method-exists-p 'provider/fork))
-        (harness-catch (harness-call-async 'provider/fork model (plist-get session :provider-state))
+        (harness-catch (harness-call-async 'provider/fork model
+                                           (if (harness-method-exists-p 'session/provider-state)
+                                               (harness-call 'session/provider-state (plist-get session :id) model)
+                                             (plist-get session :provider-state)))
                        (lambda (e)
                          (harness-log 'warn "naming: provider fork failed, sending the transcript: %s"
                                       (harness-error-message e))

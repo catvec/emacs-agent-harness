@@ -310,6 +310,48 @@ The harness reads \"the harness (SOURCE)\", another session's agent
     ('nil "the user")
     (kind (format "the %s" kind))))
 
+;;;; Models and provider state
+;;
+;; A model id is "PROVIDER:NAME".  A session's provider state (the CLI
+;; session id Claude Code resumes, say) belongs to the provider that
+;; wrote it and says so as `:provider', a string as it travels through
+;; JSON anyway: another provider cannot continue it.  A state written
+;; before states named their provider has no `:provider'; see
+;; `session/provider-state' for how such a state is attributed.  A user
+;; message the harness wrote to hand a conversation over to a model of
+;; another provider says so in its `:meta' `:handoff'.
+
+(defun harness-model-provider (model-id)
+  "Return the provider of MODEL-ID, \"PROVIDER:NAME\", as a symbol, or nil."
+  (and (stringp model-id)
+       (string-match "\\`\\([a-z0-9_-]+\\):." model-id)
+       (intern (match-string 1 model-id))))
+
+(defun harness-provider-state-owner (state)
+  "Return the provider that provider STATE names as its own, a symbol, or nil.
+Nil for no state, and for a state written before states named their
+provider."
+  (let ((p (and (consp state) (plist-get state :provider))))
+    (cond ((and (stringp p) (not (string-empty-p p))) (intern p))
+          ((and p (symbolp p) (not (memq p '(t :false :null)))) p))))
+
+(defun harness-tag-provider-state (state model-id)
+  "Return provider STATE marked as belonging to the provider of MODEL-ID.
+A state of no provider, or MODEL-ID naming none, is returned as it is."
+  (let ((provider (harness-model-provider model-id)))
+    (if (and (consp state) provider)
+        (append (harness-plist-remove state :provider)
+                (list :provider (symbol-name provider)))
+      state)))
+
+(defun harness-node-handoff (node)
+  "Return the handoff NODE records, a plist, or nil.
+A user message the harness wrote to carry a conversation over to a
+model of another provider holds (:mode transcript|compact :file PATH
+:from MODEL :to MODEL) in its `:meta' `:handoff'."
+  (let ((h (plist-get (plist-get node :meta) :handoff)))
+    (and (consp h) h)))
+
 ;;;; Paths
 
 (defun harness-path-normalize (path)

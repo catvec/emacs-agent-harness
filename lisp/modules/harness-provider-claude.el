@@ -17,6 +17,9 @@
 ;;   JSON-RPC calls (initialize, tools/list, tools/call) inline.  A
 ;;   tools/call becomes a `tool-call' provider event whose `:respond'
 ;;   writes the result back, which is how the hosted loop continues.
+;;   tools/list answers with the tools of the last request, kept after
+;;   its turn: the CLI may list them between turns, and keeps the list
+;;   it got for as long as the process lives.
 ;; - The harness's permission system decides every tool call, so the
 ;;   CLI only has to let the harness's tools through, never bypass its
 ;;   checks: `harness-provider-claude-permission-args' fixes its
@@ -43,7 +46,15 @@
 ;;   shows the model is busy.
 ;; - `--resume ID' recreates a session after a restart and `--resume ID
 ;;   --fork-session' implements `:fork': the new session starts from
-;;   the parent's cached prefix.
+;;   the parent's cached prefix.  Which CLI session a harness session is
+;;   in is what its provider state says: one whose state was dropped,
+;;   because it went on with another provider, starts a new CLI session
+;;   rather than carry on a stale one (see
+;;   `harness-provider-claude--ensure-process').  Only the user messages
+;;   after the model's last reply are sent, so a new CLI session knows
+;;   nothing of what came before unless the harness hands it over (see
+;;   the handoff module); a new session with older history does get it
+;;   as text, below.
 ;; - Every assistant message and tool-result echo carries the uuid of
 ;;   its entry in the CLI session's chain.  They go out as checkpoints
 ;;   (`checkpoint' events, and `:checkpoint' on tool calls), which the
@@ -71,9 +82,18 @@
 ;;   than at its default one.
 ;; - Every new process is sent an `initialize' and a `get_usage' control
 ;;   request.  The initialize answer names the account the CLI is logged
-;;   in with, which decides how turns are billed; the usage report (the
-;;   data behind the CLI's /usage, fetched without a model call) gives
-;;   the plan's quota and the cost total the process starts from.
+;;   in with, which decides how turns are billed, and lists the models
+;;   its /model picker offers; the usage report (the data behind the
+;;   CLI's /usage, fetched without a model call) gives the plan's quota
+;;   and the cost total the process starts from.
+;;
+;; Models.  The catalogue is what the CLI lists, what its results say
+;; (the window each model ran with, the model an alias ran) and, with
+;; an Anthropic API key, what the API's /v1/models lists; it is kept in
+;; the state directory between starts.  `harness-provider-claude-models'
+;; only seeds it, so a model the CLI gains needs no change here; a name
+;; nothing lists is resolved (`harness-provider-claude--resolve') or
+;; estimated, never given a small window.  See "Model catalogue" below.
 ;;
 ;; One-off questions (a request with `:ephemeral', the permission
 ;; judge's) are the exception to one process per session: each gets a
@@ -110,8 +130,10 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'parse-time)
+(require 'url-util)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-http)
 (require 'harness-provider)
 
 (defvar harness-state-directory)
@@ -196,7 +218,11 @@ model call.  nil fetches it only when nothing is known yet.")
      :max-output 64000 :input-modalities ("text" "image")
      :thinking-levels ("low" "medium" "high")
      :pricing (:input 1.0 :output 5.0 :cache-read 0.1 :cache-write 1.25)))
-  "Static model catalogue for the Claude Code provider (no network).")
+  "Claude models known before the CLI or the API listed any.
+The catalogue is what the CLI lists (see the \"Model catalogue\" section
+below): these are the models it starts from, and the prices of the
+models the listings name, which give none.  A model missing here works
+all the same, from the CLI's listing or an estimate.")
 
 (defconst harness-provider-claude-builtin-tools
   '(("web_search" . "WebSearch"))
@@ -214,9 +240,12 @@ names the harness tools whose stand-ins to turn on.")
 `harness-provider-claude-builtin-tools'.")
 
 (defconst harness-provider-claude-tiers
-  '(:cheap "claude-haiku-4-5-20251001" :balanced "claude-sonnet-5" :frontier "claude-opus-5-5")
-  "Claude models named for the common tiers.
-The auto-mode judge, for one, runs on the `cheap' one.")
+  '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
+  "Claude models named for the common tiers, by family.
+Each names the CLI's alias of that name when the CLI lists it, which is
+the newest model of the family, else the first model of the catalogue
+whose name holds it (see `harness-provider-tier-model').  The
+auto-mode judge, for one, runs on the `cheap' one.")
 
 (defconst harness-provider-claude--api-token-sources '("ANTHROPIC_AUTH_TOKEN" "apiKeyHelper")
   "Token sources the CLI reports for credentials billed per token.")
@@ -256,7 +285,8 @@ The auto-mode judge, for one, runs on the `cheap' one.")
   cost-total         ; the CLI's running cost total so far; nil while unknown
   baseline-id        ; id of the usage request whose session total starts it
   seen-output        ; non-nil once the CLI produced a reply or a result
-  probe)             ; non-nil for a quota probe, which serves no session
+  probe              ; non-nil for a quota probe, which serves no session
+  tools)             ; the harness tools the last request served, kept between turns
 
 (defvar harness-provider-claude--sessions (make-hash-table :test 'equal)
   "Harness session id -> `harness-provider-claude-session'.")
@@ -286,6 +316,14 @@ file leaves the running CLI processes alone.")
 Each is a plist (:id TOOL-USE-ID :name HARNESS-NAME :input INPUT :asked
 BOOL), `:asked' once the CLI asked whether it may run.  Kept beside the
 session records, as `harness-provider-claude--blocks' is.")
+
+(defvar harness-provider-claude--turn-failure (make-hash-table :test 'equal)
+  "Harness session id -> what the CLI said about the current turn's failure.
+Each is a plist (:kind SYMBOL :resets FLOAT :text TEXT): the kind of
+failure the CLI reported (`quota', `billing', `rate-limit' or `auth'),
+when a used-up quota comes back, and what it said.  Kept beside the
+session records, as `harness-provider-claude--blocks' is, so reloading
+this file leaves the running CLI processes alone.")
 
 (defvar harness-provider-claude--call-checkpoints (make-hash-table :test 'equal)
   "Harness session id -> alist (TOOL-USE-ID . CHECKPOINT) of the current turn.
@@ -351,6 +389,7 @@ resumes the CLI session in a new one."
       (cancel-timer timer))
     (harness-provider-claude--end-block entry)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--builtin-calls)
+    (remhash (harness-provider-claude-session-id entry) harness-provider-claude--turn-failure)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-checkpoints)
     (let ((fn (harness-provider-claude-session-on-event entry)))
       (setf (harness-provider-claude-session-active entry) nil
@@ -393,10 +432,14 @@ ended at max_tokens with no verdict, or half of one."
   (if (plist-get request :no-thinking) 'off (plist-get request :thinking)))
 
 (defun harness-provider-claude--model-window (model-id)
-  "Return the context window the catalogue gives MODEL-ID, or nil."
+  "Return the context window the catalogue gives MODEL-ID, or nil.
+Nil too when that window is an estimate: a percentage of a window
+guessed wrong would have the CLI compact far from where it should."
   (and (harness-method-exists-p 'provider/model)
        (condition-case nil
-           (plist-get (harness-call 'provider/model model-id) :context-window)
+           (let ((model (harness-call 'provider/model model-id)))
+             (unless (plist-get model :context-window-estimated)
+               (plist-get model :context-window)))
          (error nil))))
 
 (defun harness-provider-claude--autocompact-pct (request)
@@ -404,7 +447,8 @@ ended at max_tokens with no verdict, or half of one."
 A session whose context window is smaller than its model's (the harness
 caps a task's, say) is told to auto-compact at that part of the window,
 so the CLI's own compaction matches the budget the harness gave the
-session.  nil leaves the CLI's default."
+session.  nil leaves the CLI's default, as it does while the model's
+window is only an estimate; the first turn teaches the real one."
   (let* ((session (plist-get request :session))
          (window (plist-get session :context-window))
          (model-window (harness-provider-claude--model-window (plist-get request :model))))
@@ -567,7 +611,10 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
           ;; A fresh CLI session starts from zero; a resumed or forked
           ;; one from the spend it restores, which the usage report says.
           (harness-provider-claude-session-cost-total entry) (if resume nil 0.0)
-          (harness-provider-claude-session-seen-output entry) nil)
+          (harness-provider-claude-session-seen-output entry) nil
+          ;; The CLI session the process is in, until its banner says:
+          ;; the one it resumes, and none yet for a new one or a fork.
+          (harness-provider-claude-session-cli-session-id entry) (and (not fork) resume))
     (harness-provider-claude--send
      entry '(:type "control_request" :request_id "init-1"
              :request (:subtype "initialize" :sdkMcpServers ("harness"))))
@@ -645,13 +692,18 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
 ;;;; MCP server
 
 (defun harness-provider-claude--tool-list (entry)
-  "Return the MCP tool descriptors for ENTRY's current request."
+  "Return the MCP tool descriptors of the tools ENTRY serves.
+They are those of the last request, which ENTRY keeps once its turn is
+over: the CLI may list the tools while no turn is in flight -- its
+handshake can come after a turn that ended at once -- and it keeps the
+list it got for the life of the process, so an empty one would leave
+every later turn without tools."
   (mapcar (lambda (spec)
             (list :name (plist-get spec :name)
                   :description (or (plist-get spec :description) "")
                   :inputSchema (or (plist-get spec :schema)
                                    '(:type "object" :properties :empty))))
-          (plist-get (harness-provider-claude-session-request entry) :tools)))
+          (harness-provider-claude-session-tools entry)))
 
 (defun harness-provider-claude--take-tool-id (entry name)
   "Return the pending tool_use id for NAME on ENTRY, or a generated one."
@@ -959,11 +1011,27 @@ is not in the session's chain, and a CLI that sends no uuid gives none."
 (defun harness-provider-claude--handle-assistant (entry message &optional checkpoint)
   "Remember tool_use ids from the authoritative assistant MESSAGE on ENTRY.
 A call of the CLI's own tools that stands in for a harness tool is
-reported to the turn here, where its input is complete.  CHECKPOINT is
+reported to the turn here, where its input is complete.  An assistant
+message that reports an `error' (a usage limit, a billing problem, a
+refused login) is remembered for the turn's `done' event.  CHECKPOINT is
 the message's (see `harness-provider-claude--checkpoint'): it goes out
 with the message's tool calls when it has any, which the turn records
 later, and else at once, for the text or thinking the turn has just
 recorded from it."
+  (when-let* ((error (plist-get message :error)))
+    (let* ((old (gethash (harness-provider-claude-session-id entry)
+                         harness-provider-claude--turn-failure))
+           (kind (harness-provider-claude--failure-kind error))
+           (text (harness-provider-claude--failure-text message)))
+      ;; A rejected usage window said `quota' already; a plain rate
+      ;; limit must not talk it down, and a billing error must win.
+      (harness-provider-claude--note-failure
+       entry
+       :kind (cond ((memq kind '(billing auth)) kind)
+                   ((and (eq kind 'rate-limit)
+                         (eq (plist-get old :kind) 'quota)) 'quota)
+                   (t kind))
+       :text text)))
   (let ((calls nil))
     (dolist (block (plist-get message :content))
       (when (equal (plist-get block :type) "tool_use")
@@ -1059,6 +1127,45 @@ own tools that the CLI's rules refuse."
   (cond ((numberp value) (float value))
         ((and (stringp value) (not (string-empty-p value)))
          (condition-case nil (float-time (parse-iso8601-time-string value)) (error nil)))))
+
+(defun harness-provider-claude--failure-kind (name)
+  "Return the failure kind of the CLI's assistant error NAME, or nil.
+`billing_error', `account_on_hold' and `credits_required' mean money is
+out; `authentication_failed' a refused login; `rate_limit' a short
+term limit, which a rejected usage window turns into a used-up quota."
+  (pcase (and name (downcase (format "%s" name)))
+    ((or "billing_error" "account_on_hold" "credits_required" "out_of_credits") 'billing)
+    ("authentication_failed" 'auth)
+    ((or "rate_limit" "rate_limit_error") 'rate-limit)
+    (_ nil)))
+
+(defun harness-provider-claude--event-reset (info)
+  "Return when the quota window INFO rejected comes back, or nil."
+  (or (harness-provider-claude--time (plist-get info :resetsAt))
+      (let (best)
+        (cl-loop for (_key win) on (plist-get info :unifiedWindows) by #'cddr
+                 for used = (plist-get win :utilization)
+                 for resets = (harness-provider-claude--time (plist-get win :resetsAt))
+                 when (and resets (numberp used) (>= used 0.999))
+                 do (setq best (if best (min best resets) resets)))
+        best)))
+
+(defun harness-provider-claude--note-failure (entry &rest fields)
+  "Note FIELDS (:kind, :resets, :text) of the current turn's failure on ENTRY.
+Later notes win; the note is what the turn's `done' event reports."
+  (let* ((id (harness-provider-claude-session-id entry))
+         (old (gethash id harness-provider-claude--turn-failure)))
+    (puthash id (harness-plist-merge old fields) harness-provider-claude--turn-failure)))
+
+(defun harness-provider-claude--failure-text (message)
+  "Return the text blocks of an assistant MESSAGE, joined, or nil."
+  (let ((text (string-join
+               (delq nil (mapcar (lambda (block)
+                                   (and (equal (plist-get block :type) "text")
+                                        (plist-get block :text)))
+                                 (plist-get message :content)))
+               "\n")))
+    (unless (string-empty-p (string-trim text)) text)))
 
 (defun harness-provider-claude--plan-id (label)
   "Return the plan id of subscription LABEL (\"Claude Max\" gives \"max\"), or nil."
@@ -1282,6 +1389,15 @@ at API prices, once a window is used up."
     (let ((total (harness-plist-get-in report '(:session :total_cost_usd))))
       (when (and (numberp total) (not (harness-provider-claude-session-seen-output entry)))
         (setf (harness-provider-claude-session-cost-total entry) (float total)))))
+  ;; The session's spend per model may say the windows the CLI ran
+  ;; them with, from turns before this process too.
+  (condition-case err
+      (harness-provider-claude--note-model-usage
+       entry (or (harness-plist-get-in report '(:session :model_usage))
+                 (harness-plist-get-in report '(:session :modelUsage)))
+       t)
+    (error (harness-log 'debug "provider-claude: cannot read the report's model usage: %s"
+                        (harness-error-message err))))
   (if error
       (harness-log 'debug "provider-claude: usage report failed: %s" error)
     (when-let* ((changes (harness-provider-claude--usage-changes report)))
@@ -1292,13 +1408,23 @@ at API prices, once a window is used up."
     (harness-provider-claude--end-probe entry)))
 
 (defun harness-provider-claude--handle-rate-limit (entry info)
-  "Fold the rate_limit_event INFO into the account status and ENTRY's turn."
+  "Fold the rate_limit_event INFO into the account status and ENTRY's turn.
+A rejected window is a used-up quota, and tells the turn when it comes
+back; the CLI's error code says when it is money that ran out."
   (let ((status (harness-provider-claude--publish
                  (list :windows (harness-provider-claude--merge-windows
                                  (plist-get harness-provider-claude--status :windows)
                                  (harness-provider-claude--windows info))
                        :limit-status (plist-get info :status)
                        :using-extra (harness-json-true-p (plist-get info :isUsingOverage))))))
+    (when (equal (plist-get info :status) "rejected")
+      (harness-provider-claude--note-failure
+       entry
+       :kind (let ((code (downcase (format "%s" (or (plist-get info :errorCode) "")))))
+               (if (member code '("credits_required" "out_of_credits" "billing_error"))
+                   'billing
+                 'quota))
+       :resets (harness-provider-claude--event-reset info)))
     (when-let* ((windows (plist-get status :windows)))
       (harness-provider-claude--emit entry (list :type 'quota :windows windows)))))
 
@@ -1310,8 +1436,7 @@ at API prices, once a window is used up."
          (payload (plist-get response :response)))
     (cond
      ((equal id "init-1")
-      (when-let* ((account (and ok (plist-get payload :account))))
-        (harness-provider-claude--handle-account entry account)))
+      (harness-provider-claude--handle-initialized entry ok payload))
      ((and (stringp id) (string-prefix-p "usage-" id))
       (harness-provider-claude--handle-usage entry id (and ok payload)
                                              (unless ok (or (plist-get response :error) "failed"))))
@@ -1435,7 +1560,10 @@ its usage report has arrived."
       entry)))
 
 (defun harness-provider-claude--end-probe (entry &optional kill)
-  "Let the probe ENTRY exit by closing its input, or KILL it."
+  "Let the probe ENTRY exit by closing its input, or KILL it.
+It is no longer the probe: whoever needs one next starts another."
+  (when (eq harness-provider-claude--probe entry)
+    (setq harness-provider-claude--probe nil))
   (let ((proc (harness-provider-claude-session-process entry)))
     (when (process-live-p proc)
       (if kill (delete-process proc) (process-send-eof proc)))))
@@ -1452,7 +1580,8 @@ its usage report has arrived."
       (when (buffer-live-p buf) (kill-buffer buf)))
     (when (eq harness-provider-claude--probe entry)
       (setq harness-provider-claude--probe nil))
-    (harness-provider-claude--settle-refresh)))
+    (harness-provider-claude--settle-refresh)
+    (harness-provider-claude--settle-listing-waiters)))
 
 (defun harness-provider-claude--handle-init (entry msg)
   "Handle the system/init banner MSG on ENTRY."
@@ -1510,6 +1639,12 @@ its usage report has arrived."
          entry (list :type 'provider-state
                      :state (list :cli-session-id id :model (harness-provider-claude-session-model entry))))))
     (setf (harness-provider-claude-session-seen-output entry) t)
+    ;; The windows the CLI ran its models with: the catalogue learns
+    ;; them, and the sessions' windows follow.
+    (condition-case err
+        (harness-provider-claude--note-model-usage entry (plist-get msg :modelUsage))
+      (error (harness-log 'warn "provider-claude: cannot read the result's model usage: %s"
+                          (harness-error-message err))))
     (harness-provider-claude--emit
      entry (append (list :type 'usage :input input
                          :output (or (plist-get usage :output_tokens) 0)
@@ -1525,11 +1660,25 @@ its usage report has arrived."
      (cond ((harness-provider-claude-session-cancelled entry)
             '(:type done :stop-reason cancelled))
            (is-error
-            (list :type 'done :stop-reason 'error
-                  :error (let ((text (plist-get msg :result)))
-                           (if (and (stringp text) (not (string-empty-p text)))
-                               text
-                             (format "Claude Code: %s" subtype)))))
+            (let* ((failure (gethash (harness-provider-claude-session-id entry)
+                                     harness-provider-claude--turn-failure))
+                   (api-status (plist-get msg :api_error_status))
+                   (kind (or (and (equal api-status 402) 'billing)
+                             (and (member api-status '(401 403)) 'auth)
+                             (and (equal api-status 429)
+                                  (if (memq (plist-get failure :kind) '(quota billing))
+                                      (plist-get failure :kind)
+                                    'rate-limit))
+                             (plist-get failure :kind))))
+              (append (list :type 'done :stop-reason 'error
+                            :error (let ((text (plist-get msg :result)))
+                                     (if (and (stringp text) (not (string-empty-p text)))
+                                         text
+                                       (or (plist-get failure :text)
+                                           (format "Claude Code: %s" subtype)))))
+                      (when kind (list :error-kind kind))
+                      (when-let* ((resets (plist-get failure :resets)))
+                        (list :resets resets)))))
            ((equal (plist-get msg :stop_reason) "max_tokens")
             '(:type done :stop-reason max-tokens))
            (t '(:type done :stop-reason end-turn))))))
@@ -1655,23 +1804,33 @@ Return `live' when the running process serves REQUEST, else how the
 one started for it opens its conversation: `fresh', `resume' or
 `fork'.  The running process serves REQUEST when it was started with
 the settings REQUEST needs (`harness-provider-claude--spawn-key') and
-holds the CLI session REQUEST's provider state names, or any when the
-state names none.  A state marked `:fork-pending' always gets a new
-process, which forks the CLI session it names, cut at its `:resume-at'
-when it has one; otherwise the state's CLI session is resumed, else
-the one the entry last held."
+is in the CLI session REQUEST asks for: the one its session's record
+names -- none, when that record's state was dropped, which starts a new
+CLI session -- or, for a request without a session record (the
+permission judge, tests), the one the entry last held.  A state marked
+`:fork-pending' always gets a new process, which forks the CLI session
+it names, cut at its `:resume-at' when it has one."
   (let* ((state (plist-get request :provider-state))
+         (session (plist-get request :session))
+         (recorded (plist-member session :provider-state))
          (key (harness-provider-claude--spawn-key request))
          (proc (harness-provider-claude-session-process entry))
          (live (process-live-p proc))
-         (want (plist-get state :cli-session-id))
          (have (harness-provider-claude-session-cli-session-id entry))
-         (fork (and want (harness-json-true-p (plist-get state :fork-pending)))))
+         ;; The CLI session the request asks for: the one its provider state
+         ;; names.  A request that brings its session's record stays there, and
+         ;; no other: one whose record's state was dropped, because the session
+         ;; went on with another provider, starts a new CLI session rather than
+         ;; carry on a stale one.  Without a session record (the permission
+         ;; judge, provider tests) the entry's own session serves.
+         (stated (plist-get state :cli-session-id))
+         (want (cond (stated stated) (recorded nil) (t have)))
+         (fork (and stated (harness-json-true-p (plist-get state :fork-pending)))))
     (if (and live (not fork)
              (equal key (harness-provider-claude-session-spawn-key entry))
-             (or (null want) (equal want have)))
+             (equal want have))
         'live
-      (let ((resume (or want have)))
+      (let ((resume want))
         (when live
           (harness-log 'info "provider-claude: %s for %s; restarting%s"
                        (if fork "forking" "settings or conversation changed")
@@ -1718,6 +1877,8 @@ new one gets them first, as text (`harness-provider-claude--with-history')."
     (when (harness-provider-claude-session-active entry)
       (harness-provider-claude--finish
        entry '(:type done :stop-reason error :error "superseded by a new request")))
+    ;; Kept after the turn, for a CLI that lists the tools between turns.
+    (setf (harness-provider-claude-session-tools entry) (plist-get request :tools))
     (setq mode (harness-provider-claude--ensure-process entry request))
     (setf (harness-provider-claude-session-request entry) request
           (harness-provider-claude-session-on-event entry) on-event
@@ -1739,6 +1900,22 @@ new one gets them first, as text (`harness-provider-claude--with-history')."
       (harness-provider-claude--send-user
        entry (if (eq mode 'fresh) (harness-provider-claude--with-history request blocks) blocks)))
     (list :cancel (lambda () (harness-provider-claude--cancel entry)))))
+
+(defun harness-provider-claude--warm (request)
+  "Start the CLI process that REQUEST's session will use; non-nil if started.
+Spawning the CLI is most of the wait of a short request, so a request
+expected soon (the next search of a task board, say) has its process
+started ahead, with the settings it will come with.  A session running
+a turn is left alone, and so is a live process with those settings."
+  (let* ((sid (or (plist-get (plist-get request :session) :id) "default"))
+         (entry (harness-provider-claude--entry sid))
+         (proc (harness-provider-claude-session-process entry)))
+    (unless (or (harness-provider-claude-session-active entry)
+                (and (process-live-p proc)
+                     (equal (harness-provider-claude--spawn-key request)
+                            (harness-provider-claude-session-spawn-key entry))))
+      (harness-provider-claude--ensure-process entry request)
+      t)))
 
 (defun harness-provider-claude--cancel (entry)
   "Interrupt the current turn on ENTRY, killing the process if it ignores us."
@@ -1789,9 +1966,665 @@ fetched first when REFRESH is non-nil or the last one is stale (see
       (harness-provider-claude--refresh)
     (harness-resolved harness-provider-claude--status)))
 
-(defun harness-provider-claude--models ()
-  "Return a promise of the static model catalogue."
-  (harness-resolved (mapcar #'copy-sequence harness-provider-claude-models)))
+;;;; Model catalogue
+;;
+;; The models are what the CLI says they are.  Every `initialize'
+;; answer -- each new process's, the quota probe's, and a probe's
+;; started when a refresh asks -- lists the models its /model picker
+;; offers: aliases such as "opus" and "sonnet[1m]", their labels and
+;; effort levels and, from Claude Code 2.1.197 on, the model each one
+;; resolves to.  Every result's `modelUsage' says the context window
+;; the CLI ran each model with, and the name the process was started
+;; with (an alias, say) takes the window of the model its banner names.
+;; With an Anthropic API key (`harness-provider-claude-api-key'), GET
+;; /v1/models adds every model the API serves, with its window, output
+;; limit and effort levels.  What was learned is kept in
+;; claude-models.json in the state directory, so the harness knows it
+;; from its next start on; `harness-provider-claude-models' is only
+;; what is known before anything was learned, and gives the prices.  A
+;; name nothing lists gets what `harness-provider-claude--resolve' makes
+;; of it, else the catalogue's estimate (see `provider/model').
+
+(defcustom harness-provider-claude-api-key nil
+  "Anthropic API key the Claude provider lists the API's models with.
+Nil takes the ANTHROPIC_API_KEY environment variable, else auth-source's
+entry for api.anthropic.com with user \"apikey\"; `none' lists nothing
+from the API.  With a key, GET /v1/models adds every model the API
+serves and the window of each to the catalogue; without one it comes
+from the CLI alone.  The key only lists models: the CLI signs in with
+its own credentials."
+  :type '(choice (const :tag "From ANTHROPIC_API_KEY or auth-source" nil)
+                 (const :tag "None: the CLI alone lists the models" none)
+                 (string :tag "Key"))
+  :group 'harness)
+
+(defvar harness-provider-claude--api-base nil
+  "Root URL of the Anthropic API the models are listed from.
+Nil is ANTHROPIC_BASE_URL when set, as the CLI uses it, else
+https://api.anthropic.com.")
+
+(defconst harness-provider-claude--api-models-ttl 3600
+  "Seconds the Anthropic API's model listing stays fresh.")
+
+(defconst harness-provider-claude--listed-lately 60
+  "Seconds within which a CLI's model listing counts as current.
+A refresh asks a probe for the listing only when no CLI process gave
+one this recently.")
+
+(defconst harness-provider-claude--one-million 1000000
+  "Context window of a model the CLI runs with \"[1m]\" after its name.")
+
+(defconst harness-provider-claude--efforts '("low" "medium" "high" "xhigh" "max")
+  "Effort levels of Claude models, lowest first.")
+
+(defvar harness-provider-claude--listing 'unread
+  "What the CLI and the API said about the Claude models, as a plist.
+`:cli-models' are the `models' of the CLI's last `initialize' answer,
+and `:cli-at' when they came; `:api-models' are the entries of the
+API's /v1/models, and `:api-at' when they came; `:windows' are the
+windows results reported, each (:name NAME :context-window N
+:max-output N); `:aliases' the models the CLI ran when started with a
+name, each (:name NAME :model MODEL).  The symbol `unread' until it is
+read from `harness-provider-claude--listing-file'.")
+
+(defvar harness-provider-claude--cli-answered nil
+  "When a CLI last answered `initialize', as a float time.")
+
+(defvar harness-provider-claude--probe-answered nil
+  "The quota probe whose `initialize' answer has arrived, or nil.")
+
+(defvar harness-provider-claude--listing-waiters nil
+  "Promises to resolve once a CLI next answers `initialize', or gives up.")
+
+(defvar harness-provider-claude--api-asked nil
+  "When the API's models were last asked for, as a float time.")
+
+(defvar harness-provider-claude--api-fetch nil
+  "The promise of the API listing in flight, or nil.")
+
+(defvar harness-provider-claude--relist-pending nil
+  "Non-nil while the catalogue is due to be listed again.")
+
+(defun harness-provider-claude--listing-file ()
+  "Return the file the learned model listing is kept in, or nil."
+  (and (boundp 'harness-state-directory) (stringp harness-state-directory)
+       (expand-file-name "claude-models.json" harness-state-directory)))
+
+(defun harness-provider-claude--listing ()
+  "Return the learned model listing, read from its file the first time."
+  (when (eq harness-provider-claude--listing 'unread)
+    (setq harness-provider-claude--listing
+          (let ((file (harness-provider-claude--listing-file)))
+            (and file (file-readable-p file)
+                 (condition-case err
+                     (let ((data (harness-json-parse (harness-read-file file))))
+                       (and (consp data) (keywordp (car data)) (eql 1 (plist-get data :version))
+                            data))
+                   (error (harness-log 'warn "provider-claude: cannot read %s: %s"
+                                       file (harness-error-message err))
+                          nil))))))
+  harness-provider-claude--listing)
+
+(defun harness-provider-claude--save-listing ()
+  "Write the learned model listing to its file; a failure is logged."
+  (when-let* ((file (harness-provider-claude--listing-file)))
+    (condition-case err
+        (harness-write-file-atomically file (harness-json-encode harness-provider-claude--listing))
+      (error (harness-log 'warn "provider-claude: cannot save %s: %s" file (harness-error-message err))))))
+
+(defun harness-provider-claude--forget-listing ()
+  "Forget what the CLI and the API listed, on disk too."
+  (setq harness-provider-claude--listing nil
+        harness-provider-claude--cli-answered nil
+        harness-provider-claude--probe-answered nil
+        harness-provider-claude--api-asked nil
+        harness-provider-claude--api-fetch nil)
+  (when-let* ((file (harness-provider-claude--listing-file)))
+    (when (file-exists-p file) (delete-file file))))
+
+(defun harness-provider-claude--learn (&rest changes)
+  "Merge CHANGES, a plist, into the learned listing.
+When a value changed the listing is saved and the catalogue listed
+again; return non-nil then.  A change of the times alone (`:cli-at',
+`:api-at') is saved but lists nothing again."
+  (let* ((old (harness-provider-claude--listing))
+         (changed (lambda (times)
+                    (cl-loop for (k v) on changes by #'cddr
+                             thereis (and (or times (not (memq k '(:cli-at :api-at))))
+                                          (not (equal v (plist-get old k))))))))
+    (when (funcall changed t)
+      (setq harness-provider-claude--listing (harness-plist-merge '(:version 1) old changes))
+      (harness-provider-claude--save-listing)
+      (when (funcall changed nil)
+        (harness-provider-claude--relist)
+        t))))
+
+(defun harness-provider-claude--relist ()
+  "Have the catalogue list the Claude models again, from the command loop.
+Changes that come together, a listing and a window, list them once."
+  (unless harness-provider-claude--relist-pending
+    (setq harness-provider-claude--relist-pending t)
+    (harness-run-soon
+     (lambda ()
+       (setq harness-provider-claude--relist-pending nil)
+       (when (fboundp 'harness-provider-relist)
+         (harness-provider-relist 'claude))))))
+
+;;;;; What the CLI says
+
+(defun harness-provider-claude--note-cli-models (models)
+  "Remember MODELS, the `models' of a CLI's `initialize' answer.
+Each is a ModelInfo: `value' the name the CLI takes, `displayName',
+`description', `supportedEffortLevels', `resolvedModel'.  An answer
+without any (an older CLI) leaves what was listed before."
+  (let ((kept (cl-remove-if-not (lambda (m) (and (consp m) (keywordp (car m))
+                                                 (stringp (plist-get m :value))
+                                                 (not (string-blank-p (plist-get m :value)))))
+                                (and (listp models) models))))
+    (when (and kept (not (equal kept (plist-get (harness-provider-claude--listing) :cli-models))))
+      (harness-provider-claude--learn :cli-models kept :cli-at (float-time)))))
+
+(defun harness-provider-claude--settle-listing-waiters ()
+  "Resolve the promises waiting for a CLI to list its models."
+  (let ((waiters harness-provider-claude--listing-waiters))
+    (setq harness-provider-claude--listing-waiters nil)
+    (dolist (p waiters) (harness-resolve p t))))
+
+(defun harness-provider-claude--handle-initialized (entry ok payload)
+  "Handle the CLI's answer PAYLOAD to ENTRY's `initialize'; OK says it succeeded.
+It names the account and lists the models.  A probe that was only to
+list them exits once they came, unless a usage report is due from it."
+  (when ok
+    (when-let* ((account (plist-get payload :account)))
+      (harness-provider-claude--handle-account entry account))
+    (condition-case err
+        (harness-provider-claude--note-cli-models (plist-get payload :models))
+      (error (harness-log 'warn "provider-claude: cannot read the CLI's models: %s"
+                          (harness-error-message err)))))
+  (setq harness-provider-claude--cli-answered (float-time))
+  (when (harness-provider-claude-session-probe entry)
+    (setq harness-provider-claude--probe-answered entry)
+    (unless harness-provider-claude--refresh
+      (harness-provider-claude--end-probe entry)))
+  (harness-provider-claude--settle-listing-waiters))
+
+(defun harness-provider-claude--model-usage-windows (usage)
+  "Return the windows USAGE, a `modelUsage' object, reports.
+Each is (NAME WINDOW MAX-OUTPUT): USAGE maps model names to what each
+used, with the context window and output limit the CLI ran it with
+\(`contextWindow' and `maxOutputTokens'; snake case is read too).
+MAX-OUTPUT is nil when not said."
+  (when (and (consp usage) (keywordp (car usage)))
+    (cl-loop for (k v) on usage by #'cddr
+             for window = (and (consp v) (or (plist-get v :contextWindow) (plist-get v :context_window)))
+             for out = (and (consp v) (or (plist-get v :maxOutputTokens) (plist-get v :max_output_tokens)))
+             when (and (keywordp k) (numberp window) (> window 0))
+             collect (list (substring (symbol-name k) 1) (round window)
+                           (and (numberp out) (> out 0) (round out))))))
+
+(defun harness-provider-claude--one-million-p (name)
+  "Non-nil when model NAME asks for the CLI's window of a million tokens."
+  (and (stringp name) (string-suffix-p "[1m]" name)))
+
+(defun harness-provider-claude--note-model-usage (entry usage &optional others-only)
+  "Learn the context windows USAGE, a `modelUsage' object, reports on ENTRY.
+Each model USAGE names keeps the window the CLI ran it with.  The name
+ENTRY's process was started with (an alias such as \"opus\", say) takes
+the window of the model its banner names, and is remembered to stand
+for that model; not with OTHERS-ONLY, for a report that may cover
+earlier processes.  A process started with \"[1m]\" after the name
+teaches nothing about the names without it, which run in a smaller
+window."
+  (let* ((reported (harness-provider-claude--model-usage-windows usage))
+         (asked (car (harness-provider-claude-session-spawn-key entry)))
+         (asked (and (stringp asked) (not (string-blank-p asked)) asked))
+         (ran (harness-provider-claude-session-model entry))
+         (ran (and (stringp ran) (not (string-blank-p ran)) ran))
+         (main (and asked (not others-only)
+                    (or (assoc ran reported) (assoc asked reported)
+                        (and (= 1 (length reported)) (car reported)))))
+         (listing (harness-provider-claude--listing))
+         (windows (plist-get listing :windows))
+         (aliases (plist-get listing :aliases))
+         (learn (lambda (name window out)
+                  (setq windows
+                        (cons (append (list :name name :context-window window)
+                                      (and out (list :max-output out)))
+                              (cl-remove name windows :key (lambda (w) (plist-get w :name))
+                                         :test #'equal))))))
+    (dolist (r reported)
+      (unless (and (harness-provider-claude--one-million-p asked)
+                   (not (harness-provider-claude--one-million-p (car r))))
+        (funcall learn (car r) (nth 1 r) (nth 2 r))))
+    (when main
+      (funcall learn asked (nth 1 main) (nth 2 main)))
+    (when (and asked ran (not others-only) (not (equal asked ran)))
+      (setq aliases (cons (list :name asked :model ran)
+                          (cl-remove asked aliases :key (lambda (a) (plist-get a :name)) :test #'equal))))
+    (let ((by-name (lambda (a b) (string< (plist-get a :name) (plist-get b :name)))))
+      ;; Sorted copies: the lists share cells with the listing they replace.
+      (harness-provider-claude--learn :windows (sort (copy-sequence windows) by-name)
+                                      :aliases (sort (copy-sequence aliases) by-name)))))
+
+(defun harness-provider-claude--learned-window (name)
+  "Return the window a result taught for model NAME, or nil.
+That is a plist (:name NAME :context-window N :max-output N)."
+  (cl-find name (plist-get (harness-provider-claude--listing) :windows)
+           :key (lambda (w) (plist-get w :name)) :test #'equal))
+
+(defun harness-provider-claude--alias-target (name)
+  "Return the model the CLI ran when started with NAME, or nil."
+  (plist-get (cl-find name (plist-get (harness-provider-claude--listing) :aliases)
+                      :key (lambda (a) (plist-get a :name)) :test #'equal)
+             :model))
+
+(defun harness-provider-claude--start-listing ()
+  "Have a CLI list its models; return a promise, or nil when one just did.
+The promise resolves once a CLI answered `initialize' or gave up
+\(after `harness-provider-claude--probe-timeout'): a probe is started
+for it, which makes no model call."
+  (unless (or (and harness-provider-claude--cli-answered
+                   (< (- (float-time) harness-provider-claude--cli-answered)
+                      harness-provider-claude--listed-lately))
+              (and harness-provider-claude--probe
+                   (eq harness-provider-claude--probe harness-provider-claude--probe-answered)
+                   (process-live-p (harness-provider-claude-session-process harness-provider-claude--probe))))
+    (let ((promise (harness-make-promise)))
+      (push promise harness-provider-claude--listing-waiters)
+      (condition-case err
+          (progn (harness-provider-claude--start-probe)
+                 (run-at-time harness-provider-claude--probe-timeout nil
+                              #'harness-provider-claude--settle-listing-waiters))
+        (error (harness-log 'warn "provider-claude: cannot ask the CLI for its models: %s"
+                            (harness-error-message err))
+               (harness-provider-claude--settle-listing-waiters)))
+      promise)))
+
+;;;;; What the API says
+
+(defun harness-provider-claude--api-key ()
+  "Return the Anthropic API key to list the models with, or nil.
+See `harness-provider-claude-api-key'.  A CLI that runs on Bedrock or
+Vertex has models of other names, so it gets none."
+  (let ((usable (lambda (s) (and (stringp s) (not (string-blank-p s)) (string-trim s)))))
+    (cond ((eq harness-provider-claude-api-key 'none) nil)
+          ((stringp harness-provider-claude-api-key) (funcall usable harness-provider-claude-api-key))
+          ((or (funcall usable (getenv "CLAUDE_CODE_USE_BEDROCK"))
+               (funcall usable (getenv "CLAUDE_CODE_USE_VERTEX")))
+           nil)
+          (t (or (funcall usable (getenv "ANTHROPIC_API_KEY"))
+                 (condition-case nil
+                     (progn
+                       (require 'auth-source)
+                       (let* ((found (car (auth-source-search :host "api.anthropic.com" :user "apikey"
+                                                              :max 1 :require '(:secret))))
+                              (secret (plist-get found :secret)))
+                         (funcall usable (if (functionp secret) (funcall secret) secret))))
+                   (error nil)))))))
+
+(defun harness-provider-claude--api-url (after)
+  "Return the URL of a page of the API's model list.
+It is the first page, or the one after the model id AFTER."
+  (concat (string-remove-suffix "/" (or harness-provider-claude--api-base
+                                        (let ((env (getenv "ANTHROPIC_BASE_URL")))
+                                          (and env (not (string-blank-p env)) env))
+                                        "https://api.anthropic.com"))
+          "/v1/models?limit=1000"
+          (if after (concat "&after_id=" (url-hexify-string after)) "")))
+
+(defun harness-provider-claude--api-error (err)
+  "Return a short description of ERR, a failed request for the models."
+  (pcase err
+    (`(http-error ,status ,body)
+     (format "HTTP %s%s" (or status "?")
+             (let ((msg (and (stringp body)
+                             (ignore-errors (harness-plist-get-in (harness-json-parse body)
+                                                                  '(:error :message))))))
+               (if (stringp msg) (concat ": " msg) ""))))
+    (`(json-error ,status ,_) (format "HTTP %s: not JSON" status))
+    (_ (harness-error-message err))))
+
+(defun harness-provider-claude--fetch-api-models (key &optional after acc page)
+  "Return a promise of every entry of the API's model list, asked with KEY.
+AFTER, ACC and PAGE carry the pages read so far; at most ten are read."
+  (harness-then (harness-http-request-json
+                 (harness-provider-claude--api-url after)
+                 :headers (list (cons "x-api-key" key) (cons "anthropic-version" "2023-06-01"))
+                 :timeout 30)
+                (lambda (json)
+                  (let ((acc (append acc (plist-get json :data)))
+                        (last-id (plist-get json :last_id)))
+                    (if (and (harness-json-true-p (plist-get json :has_more)) (stringp last-id)
+                             (< (or page 1) 10))
+                        (harness-provider-claude--fetch-api-models key last-id acc (1+ (or page 1)))
+                      acc)))))
+
+(defun harness-provider-claude--list-api (refresh)
+  "Ask the API for its models when due; return a promise, or nil when not.
+Due is REFRESH, or a listing older than
+`harness-provider-claude--api-models-ttl' not asked for within it.
+Nothing is asked without a key (see `harness-provider-claude--api-key').
+The promise resolves once the listing is learned or failed, which is
+logged; what was listed before stays."
+  (let ((at (plist-get (harness-provider-claude--listing) :api-at))
+        (ttl harness-provider-claude--api-models-ttl))
+    (cond
+     (harness-provider-claude--api-fetch harness-provider-claude--api-fetch)
+     ((and (not refresh)
+           (or (and (numberp at) (< (- (float-time) at) ttl))
+               (and harness-provider-claude--api-asked
+                    (< (- (float-time) harness-provider-claude--api-asked) ttl))))
+      nil)
+     (t
+      (setq harness-provider-claude--api-asked (float-time))
+      (when-let* ((key (harness-provider-claude--api-key)))
+        (let ((fetch (condition-case err
+                         (harness-provider-claude--fetch-api-models key)
+                       (error (harness-rejected err)))))
+          (setq harness-provider-claude--api-fetch
+                (harness-then fetch
+                              (lambda (entries)
+                                (setq harness-provider-claude--api-fetch nil)
+                                (let ((kept (cl-remove-if-not (lambda (e) (and (consp e) (stringp (plist-get e :id))))
+                                                              entries)))
+                                  (when kept
+                                    (harness-provider-claude--learn :api-models kept :api-at (float-time))))
+                                t)
+                              (lambda (err)
+                                (setq harness-provider-claude--api-fetch nil)
+                                (harness-log 'warn "provider-claude: listing the API's models failed: %s"
+                                             (harness-provider-claude--api-error err))
+                                nil)))))))))
+
+;;;;; The catalogue
+
+(defun harness-provider-claude--window-p (value)
+  "Non-nil when VALUE is a usable token count: a positive number."
+  (and (numberp value) (> value 0)))
+
+(defun harness-provider-claude--api-efforts (capabilities)
+  "Return the effort levels the API's CAPABILITIES of a model support, or nil.
+Without a word on effort, a model that thinks has the first three."
+  (let ((effort (plist-get capabilities :effort)))
+    (or (cl-remove-if-not (lambda (level)
+                            (harness-json-true-p (plist-get (plist-get effort (intern (concat ":" level)))
+                                                            :supported)))
+                          harness-provider-claude--efforts)
+        (and (harness-json-true-p (harness-plist-get-in capabilities '(:thinking :supported)))
+             (list "low" "medium" "high")))))
+
+(defun harness-provider-claude--api-model (entry)
+  "Return the model plist of ENTRY of the API's model list, or nil."
+  (let ((id (plist-get entry :id)))
+    (when (and (stringp id) (not (string-blank-p id)))
+      (let* ((caps (plist-get entry :capabilities))
+             (image (and (consp caps) (harness-plist-get-in caps '(:image_input :supported))))
+             (levels (and (consp caps) (harness-provider-claude--api-efforts caps)))
+             (window (plist-get entry :max_input_tokens))
+             (out (plist-get entry :max_tokens))
+             (label (plist-get entry :display_name)))
+        (append (list :name id :label (if (and (stringp label) (not (string-blank-p label))) label id))
+                (and (harness-provider-claude--window-p window) (list :context-window (round window)))
+                (and (harness-provider-claude--window-p out) (list :max-output (round out)))
+                (list :input-modalities (if (and (consp caps) (not (harness-json-true-p image)))
+                                            '("text")
+                                          '("text" "image")))
+                (and levels (list :thinking-levels levels)))))))
+
+(defun harness-provider-claude--name-label (name)
+  "Return a readable label for Claude model NAME: \"Claude Opus 5.6\", say."
+  (if (string-match "\\`claude-\\([a-z]+\\)-\\([0-9]+\\)\\(?:-\\([0-9]\\)\\)?\\(?:-[0-9]\\{8\\}\\)?\\'" name)
+      (format "Claude %s %s%s" (capitalize (match-string 1 name)) (match-string 2 name)
+              (if (match-string 3 name) (concat "." (match-string 3 name)) ""))
+    name))
+
+(defun harness-provider-claude--described-model (description models)
+  "Return the name of the model of MODELS that DESCRIPTION names, or nil.
+The CLI describes an alias by the model it stands for: \"Opus 5.5 ·
+Most capable for complex work\", or \"Use the default model (currently
+Sonnet 5)\"; the family and version read as a model key."
+  (when (stringp description)
+    (let ((case-fold-search nil))
+      (when (string-match "\\b\\([A-Z][a-z]+\\) \\([0-9]+\\)\\(?:\\.\\([0-9]+\\)\\)?\\b" description)
+        (let ((key (format "claude-%s-%s%s" (downcase (match-string 1 description))
+                           (match-string 2 description)
+                           (if (match-string 3 description) (concat "-" (match-string 3 description)) ""))))
+          (plist-get (cl-find key models :key (lambda (m) (harness-provider-model-key (plist-get m :name)))
+                              :test #'equal)
+                     :name))))))
+
+(defun harness-provider-claude--described-pricing (description)
+  "Return the prices DESCRIPTION gives, as `:pricing' takes them, or nil.
+The CLI describes a model to someone billed per token with its prices:
+\"· $5/$25 per Mtok\".  Cache reads cost a tenth of input and cache
+writes a quarter more, as Anthropic prices them."
+  (when (and (stringp description)
+             (string-match "\\$\\([0-9]+\\(?:\\.[0-9]+\\)?\\)/\\$\\([0-9]+\\(?:\\.[0-9]+\\)?\\) per Mtok"
+                           description))
+    (let ((in (string-to-number (match-string 1 description)))
+          (out (string-to-number (match-string 2 description))))
+      (list :input (float in) :output (float out) :cache-read (* 0.1 in) :cache-write (* 1.25 in)))))
+
+(defun harness-provider-claude--full-models (entries)
+  "Return the Claude models by their full names, the API's first.
+ENTRIES are the entries of the API's model list.  A model the API
+lists keeps the price `harness-provider-claude-models' gives it, or a
+model of the same key; the models only that list knows come after the
+API's."
+  (let* ((seeds (mapcar #'copy-sequence harness-provider-claude-models))
+         (listed (delq nil (mapcar #'harness-provider-claude--api-model entries)))
+         (name (lambda (m) (plist-get m :name))))
+    (append (mapcar (lambda (m)
+                      (let ((seed (or (cl-find (plist-get m :name) seeds :key name :test #'equal)
+                                      (cl-find (harness-provider-model-key (plist-get m :name)) seeds
+                                               :key (lambda (s) (harness-provider-model-key (plist-get s :name)))
+                                               :test #'equal))))
+                        (if seed
+                            (append m (harness-plist-remove seed :name :label :context-window :max-output
+                                                            :input-modalities :thinking-levels))
+                          m)))
+                    listed)
+            (cl-remove-if (lambda (s) (cl-find (plist-get s :name) listed :key name :test #'equal))
+                          seeds))))
+
+(defun harness-provider-claude--cli-model (info models)
+  "Return the model plist of INFO, a model the CLI lists, or nil.
+MODELS are the models by their full names, which give the model INFO
+stands for (its `resolvedModel', the model the CLI ran under that
+name, the one its description names) its prices and window.  A name
+with \"[1m]\" after it has a window of a million tokens; one that
+stands for a model MODELS lack has the window of the newest of its
+family, flagged as an estimate."
+  (let* ((name (plist-get info :value))
+         (base (string-remove-suffix "[1m]" name))
+         (resolved (plist-get info :resolvedModel))
+         (target (or (and (stringp resolved) (not (string-blank-p resolved)) resolved)
+                     (harness-provider-claude--alias-target name)
+                     (and (cl-find base models :key (lambda (m) (plist-get m :name)) :test #'equal) base)
+                     (harness-provider-claude--described-model (plist-get info :description) models)))
+         (target-base (and target (string-remove-suffix "[1m]" target)))
+         (known (and target-base (cl-find target-base models :key (lambda (m) (plist-get m :name))
+                                          :test #'equal)))
+         (one-million (or (harness-provider-claude--one-million-p name)
+                          (harness-provider-claude--one-million-p target)))
+         (levels (plist-get info :supportedEffortLevels))
+         (levels (cond ((and (consp levels) (cl-every #'stringp levels)) levels)
+                       ((eq (plist-get info :supportsEffort) :false) nil)
+                       (t (plist-get known :thinking-levels))))
+         (label (plist-get info :displayName))
+         (description (plist-get info :description))
+         (pricing (or (plist-get known :pricing) (harness-provider-claude--described-pricing description))))
+    (append (list :name name
+                  :label (if (and (stringp label) (not (string-blank-p label))) label name))
+            (cond (one-million (list :context-window harness-provider-claude--one-million))
+                  ((harness-provider-claude--window-p (plist-get known :context-window))
+                   (list :context-window (plist-get known :context-window)))
+                  (t (harness-provider-claude--family-window (or target-base base) models)))
+            (and (plist-get known :max-output) (list :max-output (plist-get known :max-output)))
+            (list :input-modalities (or (plist-get known :input-modalities) '("text" "image")))
+            (and levels (list :thinking-levels levels))
+            (and pricing (list :pricing pricing))
+            (and target (not (equal target name)) (list :resolves-to target))
+            (and (stringp description) (not (string-blank-p description)) (list :description description)))))
+
+(defun harness-provider-claude--with-learned (model)
+  "Return MODEL with the window a result taught for its name, when one did."
+  (if-let* ((learned (harness-provider-claude--learned-window (plist-get model :name))))
+      (append (list :context-window (plist-get learned :context-window))
+              (and (plist-get learned :max-output) (list :max-output (plist-get learned :max-output)))
+              (harness-plist-remove model :context-window :max-output))
+    model))
+
+(defun harness-provider-claude--catalogue ()
+  "Return the Claude models, from what the CLI and the API listed and learned.
+First the models the CLI lists (its picker's aliases), then the
+models they stand for and the models the CLI ran that nothing else
+names, then the models by their full names: the API's, then
+`harness-provider-claude-models'.  A window a result reported for a
+name wins over any listed for it; a model still without one is the
+catalogue's to estimate."
+  (let* ((listing (harness-provider-claude--listing))
+         (full (harness-provider-claude--full-models (plist-get listing :api-models)))
+         (cli (delq nil (mapcar (lambda (info)
+                                  (condition-case err
+                                      (harness-provider-claude--cli-model info full)
+                                    (error (harness-log 'warn "provider-claude: cannot read listed model %S: %s"
+                                                        (plist-get info :value) (harness-error-message err))
+                                           nil)))
+                                (plist-get listing :cli-models))))
+         (named (mapcar (lambda (m) (plist-get m :name)) (append cli full)))
+         (extra nil)
+         (unnamed (lambda (name)
+                    (not (or (member name named)
+                             (cl-find name extra :key (lambda (e) (plist-get e :name)) :test #'equal))))))
+    ;; The models the CLI's aliases stand for, with what the alias has.
+    (dolist (m cli)
+      (let ((target (plist-get m :resolves-to)))
+        (when target
+          (setq target (string-remove-suffix "[1m]" target))
+          (when (funcall unnamed target)
+            (push (append (list :name target :label (harness-provider-claude--name-label target))
+                          (unless (harness-provider-claude--one-million-p (plist-get m :name))
+                            (cl-loop for k in '(:context-window :context-window-estimated :context-window-basis)
+                                     when (plist-get m k) append (list k (plist-get m k))))
+                          (harness-plist-remove m :name :label :context-window :context-window-estimated
+                                                :context-window-basis :resolves-to :description))
+                  extra)))))
+    ;; The models the CLI ran, which a result named.
+    (dolist (w (plist-get listing :windows))
+      (let ((name (plist-get w :name)))
+        (when (and (stringp name) (string-match-p "\\`claude-[a-z]+-[0-9]" name)
+                   (not (harness-provider-claude--one-million-p name))
+                   (funcall unnamed name))
+          (push (list :name name :label (harness-provider-claude--name-label name)
+                      :input-modalities '("text" "image"))
+                extra))))
+    (mapcar #'harness-provider-claude--with-learned
+            (append cli
+                    (nreverse extra)
+                    (cl-remove-if (lambda (m) (cl-find (plist-get m :name) cli
+                                                       :key (lambda (c) (plist-get c :name)) :test #'equal))
+                                  full)))))
+
+(defun harness-provider-claude--models (&optional refresh)
+  "Return a promise of the Claude models.
+They are what `harness-provider-claude--catalogue' says.  What is
+known answers at once.  REFRESH asks first: a probe for the CLI's
+listing, unless a CLI listed the models moments ago, and the API for
+its own when there is a key; the promise resolves once they answered
+or gave up.  The API's listing is also asked for, in the background,
+when it is older than `harness-provider-claude--api-models-ttl'."
+  (let ((asks (delq nil (list (and refresh (harness-provider-claude--start-listing))
+                              (harness-provider-claude--list-api refresh)))))
+    (if (and refresh asks)
+        (harness-then (harness-all asks)
+                      (lambda (_) (harness-provider-claude--catalogue))
+                      (lambda (_) (harness-provider-claude--catalogue)))
+      (harness-resolved (harness-provider-claude--catalogue)))))
+
+(defun harness-provider-claude--family (name)
+  "Return the family of Claude model NAME, such as \"opus\", or nil.
+NAME is a full name (\"claude-opus-5-6\") or an alias the CLI takes
+for the newest model of a family (\"opus\", \"sonnet[1m]\")."
+  (let ((case-fold-search nil))
+    (cond ((string-match "\\`claude-\\([a-z]+\\)-" name) (match-string 1 name))
+          ((string-match "\\`\\([a-z]+\\)\\(?:\\[1m]\\)?\\'" name) (match-string 1 name)))))
+
+(defun harness-provider-claude--family-model (name models)
+  "Return the first model of MODELS by a full name of NAME's family, or nil.
+Listings put the newest of a family first.  NAME itself does not
+count, nor a model with \"[1m]\" after its name."
+  (when-let* ((family (harness-provider-claude--family name)))
+    (let ((prefix (concat "claude-" family "-")))
+      (cl-find-if (lambda (m)
+                    (let ((n (plist-get m :name)))
+                      (and (stringp n) (string-prefix-p prefix n) (not (equal n name))
+                           (not (harness-provider-claude--one-million-p n)))))
+                  models))))
+
+(defun harness-provider-claude--family-window (name models)
+  "Return the window NAME takes after its family in MODELS, as a plist, or nil.
+That is the window of the first model of MODELS of NAME's family that
+has one, flagged as an estimate: (:context-window N
+:context-window-estimated t :context-window-basis ID)."
+  (when-let* ((family (harness-provider-claude--family name))
+              (prefix (concat "claude-" family "-"))
+              (model (cl-find-if (lambda (m)
+                                   (let ((n (plist-get m :name)))
+                                     (and (stringp n) (string-prefix-p prefix n) (not (equal n name))
+                                          (not (harness-provider-claude--one-million-p n))
+                                          (harness-provider-claude--window-p (plist-get m :context-window)))))
+                                 models)))
+    (list :context-window (plist-get model :context-window)
+          :context-window-estimated t
+          :context-window-basis (or (plist-get model :context-window-basis)
+                                    (plist-get model :id)
+                                    (concat "claude:" (plist-get model :name))))))
+
+(defun harness-provider-claude--resolve (name models)
+  "Return what the provider knows of model NAME, which MODELS do not list.
+The CLI takes names it does not list: a model's full name, an alias
+such as \"opus\", either with \"[1m]\" after it.  A name a result
+reported has the window the CLI ran it with, and an alias the model
+the CLI ran under it (`:resolves-to'); \"[1m]\" after a name is the
+model before it with a window of a million tokens.  An alias nothing
+was learned of stands for the newest model of its family, its window
+flagged as the estimate it is.  A full name nothing knows gets a label
+and takes images, and the catalogue estimates its window."
+  (let* ((learned (harness-provider-claude--learned-window name))
+         (base (string-remove-suffix "[1m]" name))
+         (one-million (harness-provider-claude--one-million-p name))
+         (alias (not (string-prefix-p "claude-" base)))
+         (by-name (lambda (n) (and n (cl-find n models :key (lambda (m) (plist-get m :name)) :test #'equal))))
+         (target (or (harness-provider-claude--alias-target name)
+                     (harness-provider-claude--alias-target base)))
+         (target (and target (string-remove-suffix "[1m]" target)))
+         (known (or (funcall by-name target) (and one-million (funcall by-name base))))
+         (family (and (not known) alias (harness-provider-claude--family-model base models)))
+         (model (or known family))
+         (window (plist-get model :context-window))
+         (label (concat (if alias (capitalize base) (harness-provider-claude--name-label base))
+                        (if one-million " (1M context)" ""))))
+    (append (list :label label :input-modalities '("text" "image"))
+            (cond (learned
+                   (append (list :context-window (plist-get learned :context-window))
+                           (and (plist-get learned :max-output)
+                                (list :max-output (plist-get learned :max-output)))))
+                  (one-million (list :context-window harness-provider-claude--one-million))
+                  ((not (harness-provider-claude--window-p window)) nil)
+                  ((and known (not (plist-get model :context-window-estimated)))
+                   (list :context-window window))
+                  (t (list :context-window window :context-window-estimated t
+                           :context-window-basis (or (plist-get model :context-window-basis)
+                                                     (plist-get model :id)))))
+            (cond (target (list :resolves-to target))
+                  (model (list :resolves-to (plist-get model :name))))
+            (and model
+                 (apply #'harness-plist-remove model
+                        :id :name :label :provider :provider-label :context-window
+                        :context-window-estimated :context-window-basis :resolves-to :description
+                        :input-modalities
+                        (and (plist-get learned :max-output) '(:max-output)))))))
 
 ;;;; One-off requests
 
@@ -1947,7 +2780,10 @@ harness stopped.  Loading this file ends the idle ones."
   :fork #'harness-provider-claude--fork
   :quota #'harness-provider-claude--quota
   :capabilities harness-provider-claude-capabilities
-  :tiers harness-provider-claude-tiers)
+  :tiers harness-provider-claude-tiers
+  :warm #'harness-provider-claude--warm
+  :close #'harness-provider-claude-close
+  :resolve #'harness-provider-claude--resolve)
 
 (harness-define-module 'provider-claude
   :doc "Claude Code CLI as a hosted-loop completion provider."

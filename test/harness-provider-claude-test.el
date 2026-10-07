@@ -22,6 +22,11 @@
 (defvar harness-provider-claude--asked)
 (defvar harness-provider-claude--probe)
 (defvar harness-provider-claude--blocks)
+(defvar harness-provider-claude-api-key)
+(defvar harness-provider-claude--api-base)
+(defvar harness-provider-claude--listing)
+(declare-function harness-provider-claude--forget-listing "harness-provider-claude")
+(declare-function harness-provider--forget "harness-provider")
 (declare-function harness-provider-claude-close "harness-provider-claude")
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 (declare-function harness-provider-claude--command "harness-provider-claude")
@@ -37,6 +42,10 @@
 (declare-function harness-provider-claude--environment-for "harness-provider-claude")
 (declare-function harness-provider-claude--autocompact-pct "harness-provider-claude")
 (declare-function harness-provider-claude--spawn-key "harness-provider-claude")
+(declare-function harness-provider-claude-session-active "harness-provider-claude")
+(declare-function harness-provider-claude-session-baseline-id "harness-provider-claude")
+(declare-function harness-define-tool "harness-tools")
+(defvar harness-provider-demo-script-override)
 (defvar harness-brave-api-key)
 (defvar harness-websearch-provider)
 (defvar harness-websearch-builtin)
@@ -54,7 +63,12 @@ Processes, the usage report and the quota probe of earlier tests go."
   (clrhash harness-provider-claude--sessions)
   (setq harness-provider-claude--status nil
         harness-provider-claude--asked nil
-        harness-provider-claude--probe nil))
+        harness-provider-claude--probe nil
+        harness-provider-claude-api-key 'none
+        harness-provider-claude--api-base nil)
+  ;; What earlier tests taught the catalogue goes, and it lists again.
+  (harness-provider-claude--forget-listing)
+  (harness-provider--forget 'claude))
 
 (defun harness-provider-claude-test--near (a b)
   "Non-nil when numbers A and B are equal within rounding."
@@ -158,6 +172,192 @@ and the sessions created meanwhile kept that window."
     (should (= 1000000 (plist-get opus :context-window))))
   (should (= 200000 (plist-get (harness-call 'provider/model "claude:claude-haiku-4-5-20251001")
                                :context-window))))
+
+(defconst harness-provider-claude-test--cli-models
+  '((:value "default" :displayName "Default (recommended)"
+     :description "Use the default model (currently Opus 5.5) · $4/$20 per Mtok"
+     :supportsEffort t :supportedEffortLevels ("low" "medium" "high" "xhigh" "max"))
+    (:value "opus" :displayName "Opus" :description "Opus 5.6 · Most capable for complex work"
+     :resolvedModel "claude-opus-5-6" :supportsEffort t
+     :supportedEffortLevels ("low" "medium" "high" "xhigh" "max"))
+    (:value "sonnet" :displayName "Sonnet" :description "Sonnet 5 · Best for everyday tasks"
+     :resolvedModel "claude-sonnet-5")
+    (:value "sonnet[1m]" :displayName "Sonnet (1M context)" :description "Sonnet 5 for long sessions"
+     :resolvedModel "claude-sonnet-5")
+    (:value "haiku" :displayName "Haiku" :description "Haiku 4.5 · Fastest · $1/$5 per Mtok"
+     :resolvedModel "claude-haiku-4-5-20251001" :supportsEffort :false))
+  "What the CLI's `initialize' answer lists, as Claude Code 2.1 lists it.")
+
+(defun harness-provider-claude-test--model (models name)
+  "Return the model of MODELS whose id is claude:NAME."
+  (cl-find (concat "claude:" name) models :key (lambda (m) (plist-get m :id)) :test #'equal))
+
+(ert-deftest harness-provider-claude-lists-what-the-cli-lists ()
+  "The catalogue is what the CLI's `initialize' answer lists, over what is known.
+Aliases come first, with the window and the prices of the model each
+stands for; a model it stands for that nothing else names is listed
+too, with an estimated window; the models known before stay."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment
+          (cons (concat "HARNESS_FAKE_CLAUDE_MODELS="
+                        (harness-json-encode-text harness-provider-claude-test--cli-models))
+                process-environment))
+         (models (harness-test-await (harness-call 'provider/models t) 15))
+         (get (lambda (name) (harness-provider-claude-test--model models name))))
+    ;; In the CLI's order, before the rest.
+    (should (equal '("claude:default" "claude:opus" "claude:sonnet" "claude:sonnet[1m]" "claude:haiku")
+                   (seq-take (delq nil (mapcar (lambda (m) (and (eq 'claude (plist-get m :provider))
+                                                                (plist-get m :id)))
+                                               models))
+                             5)))
+    ;; An alias without its model said: the model its description names.
+    (let ((default (funcall get "default")))
+      (should (equal "Default (recommended)" (plist-get default :label)))
+      (should (equal "claude-opus-5-5" (plist-get default :resolves-to)))
+      (should (= 1000000 (plist-get default :context-window)))
+      (should-not (plist-get default :context-window-estimated))
+      (should (equal '(:input 4.0 :output 20.0 :cache-read 0.2 :cache-write 5.0) (plist-get default :pricing))))
+    ;; A model newer than any known: listed, its window estimated from its family.
+    (let ((opus (funcall get "opus"))
+          (new (funcall get "claude-opus-5-6")))
+      (should (equal "claude-opus-5-6" (plist-get opus :resolves-to)))
+      (should new)
+      (should (equal "Claude Opus 5.6" (plist-get new :label)))
+      (dolist (m (list opus new))
+        (should (= 1000000 (plist-get m :context-window)))
+        (should (plist-get m :context-window-estimated)))
+      (should (equal '("low" "medium" "high" "xhigh" "max") (plist-get opus :thinking-levels))))
+    (should (= 1000000 (plist-get (funcall get "sonnet[1m]") :context-window)))
+    (should-not (plist-get (funcall get "sonnet[1m]") :context-window-estimated))
+    (let ((haiku (funcall get "haiku")))
+      (should (= 200000 (plist-get haiku :context-window)))
+      (should-not (plist-get haiku :thinking-levels))
+      (should (equal 1.0 (plist-get (plist-get haiku :pricing) :input))))
+    ;; What was known before stays.
+    (should (funcall get "claude-fable-5-1"))
+    (should (funcall get "claude-haiku-4-5-20251001"))
+    ;; The tiers name the CLI's aliases, the newest of each family.
+    (should (equal "claude:haiku" (harness-call 'provider/tier-model "claude" :cheap)))
+    (should (equal "claude:sonnet" (harness-call 'provider/tier-model "claude" :balanced)))
+    (should (equal "claude:opus" (harness-call 'provider/tier-model "claude" :frontier)))
+    ;; The listing is kept, for the next start.
+    (should (file-exists-p (expand-file-name "claude-models.json" harness-state-directory)))
+    (setq harness-provider-claude--listing 'unread)
+    (harness-test-load-module 'provider-claude)
+    (should (equal "claude-opus-5-6" (plist-get (harness-call 'provider/model "claude:opus") :resolves-to)))))
+
+(ert-deftest harness-provider-claude-learns-the-window-a-model-runs-with ()
+  "A result's `modelUsage' says the window the CLI ran its model with.
+The name the session asked for and the model the CLI ran both learn
+it, the catalogue lists it, and it outlives a restart."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment
+          (append (list "HARNESS_FAKE_CLAUDE_RESOLVE={\"opus\": \"claude-opus-5-6\"}"
+                        "HARNESS_FAKE_CLAUDE_WINDOWS={\"claude-opus-5-6\": 400000}")
+                  process-environment))
+         (announced nil))
+    ;; Before any turn: the alias stands for the newest Opus known, an estimate.
+    (let ((opus (harness-call 'provider/model "claude:opus")))
+      (should (equal "Opus" (plist-get opus :label)))
+      (should (= 1000000 (plist-get opus :context-window)))
+      (should (plist-get opus :context-window-estimated))
+      (should (equal "claude:claude-opus-5-5" (plist-get opus :context-window-basis)))
+      (should (equal "claude-opus-5-5" (plist-get opus :resolves-to)))
+      (should (plist-get opus :pricing)))
+    (harness-on 'provider/models-updated (lambda (_) (setq announced t)))
+    (harness-provider-claude-test--run
+     (harness-provider-claude-test--request "learn1" "hello" :model "claude:opus"))
+    (harness-test-wait (lambda () (eql 400000 (plist-get (harness-call 'provider/model "claude:opus")
+                                                         :context-window)))
+                       5 "the window learned")
+    (let ((opus (harness-call 'provider/model "claude:opus")))
+      (should (= 64000 (plist-get opus :max-output)))
+      (should-not (plist-get opus :context-window-estimated))
+      (should (equal "claude-opus-5-6" (plist-get opus :resolves-to))))
+    ;; The catalogue was listed again, and lists the model the CLI ran.
+    (should announced)
+    (let ((new (harness-provider-claude-test--model (harness-test-await (harness-call 'provider/models))
+                                                   "claude-opus-5-6")))
+      (should new)
+      (should (equal "Claude Opus 5.6" (plist-get new :label)))
+      (should (= 400000 (plist-get new :context-window)))
+      (should-not (plist-get new :context-window-estimated)))
+    (harness-provider-claude-close "learn1")
+    ;; Read back after a restart.
+    (setq harness-provider-claude--listing 'unread)
+    (harness-provider--forget 'claude)
+    (should (= 400000 (plist-get (harness-call 'provider/model "claude:opus") :context-window)))))
+
+(ert-deftest harness-provider-claude-resolves-names-it-does-not-list ()
+  "A name the CLI takes but nothing lists gets what is known of its model.
+\"[1m]\" after a name is a million tokens; an alias is its family's
+newest model; a full name nobody knows is estimated, and logged."
+  (harness-provider-claude-test--setup)
+  (let ((sonnet (harness-call 'provider/model "claude:claude-sonnet-5[1m]"))
+        (opus (harness-call 'provider/model "claude:opus[1m]"))
+        (haiku (harness-call 'provider/model "claude:haiku"))
+        (unknown (harness-call 'provider/model "claude:claude-opus-4-5-20251101")))
+    (should (= 1000000 (plist-get sonnet :context-window)))
+    (should (equal "Claude Sonnet 5 (1M context)" (plist-get sonnet :label)))
+    (should (equal 2.0 (plist-get (plist-get sonnet :pricing) :input)))
+    (should (= 1000000 (plist-get opus :context-window)))
+    (should (equal "claude-opus-5-5" (plist-get opus :resolves-to)))
+    ;; An alias stands for its family's newest model, which may be newer
+    ;; than any known: the window is that model's, as an estimate.
+    (should (= 200000 (plist-get haiku :context-window)))
+    (should (plist-get haiku :context-window-estimated))
+    (should (equal "claude:claude-haiku-4-5-20251001" (plist-get haiku :context-window-basis)))
+    (should (equal "claude-haiku-4-5-20251001" (plist-get haiku :resolves-to)))
+    ;; Nothing knows it: an estimate, never a silent small window.
+    (should (plist-get unknown :context-window-estimated))
+    (should (>= (plist-get unknown :context-window) 200000))
+    (should (equal "Claude Opus 4.5" (plist-get unknown :label)))))
+
+(ert-deftest harness-provider-claude-autocompact-only-from-a-known-window ()
+  "A session's cap becomes a percentage of its model's window only when that is known.
+A percentage of an estimate could have the CLI compact far too early."
+  (harness-provider-claude-test--setup)
+  (let ((request (harness-provider-claude-test--request "s-est" "hello" :model "claude:claude-mystery-7")))
+    (setq request (plist-put request :session (plist-put (copy-sequence (plist-get request :session))
+                                                         :context-window 256000)))
+    (should (plist-get (harness-call 'provider/model "claude:claude-mystery-7") :context-window-estimated))
+    (should-not (harness-provider-claude--autocompact-pct request))))
+
+(ert-deftest harness-provider-claude-lists-the-apis-models ()
+  "With an API key, the API's model list adds its models and their windows.
+The prices stay those known; the request names the key and the API version."
+  (harness-provider-claude-test--setup)
+  (let* ((body (harness-json-encode
+                '(:data ((:id "claude-opus-5-6" :type "model" :display_name "Claude Opus 5.6"
+                          :max_input_tokens 1000000 :max_tokens 128000
+                          :capabilities (:image_input (:supported t)
+                                         :effort (:low (:supported t) :medium (:supported t)
+                                                  :high (:supported t) :xhigh (:supported t)
+                                                  :max (:supported t))))
+                         (:id "claude-haiku-4-5-20251001" :type "model" :display_name "Claude Haiku 4.5"
+                          :max_input_tokens 200000 :max_tokens 64000
+                          :capabilities (:image_input (:supported t) :thinking (:supported t))))
+                  :has_more :false :last_id "claude-haiku-4-5-20251001")))
+         (server (harness-test-http-serve
+                  (list (list "/v1/models?limit=1000" 200 '(("Content-Type" . "application/json")) body)))))
+    (unwind-protect
+        (let* ((harness-provider-claude-api-key "test-key")
+               (harness-provider-claude--api-base (harness-test-http-url server ""))
+               (models (harness-test-await (harness-call 'provider/models t) 15))
+               (opus (harness-provider-claude-test--model models "claude-opus-5-6"))
+               (haiku (harness-provider-claude-test--model models "claude-haiku-4-5-20251001")))
+          (should (equal "Claude Opus 5.6" (plist-get opus :label)))
+          (should (= 1000000 (plist-get opus :context-window)))
+          (should-not (plist-get opus :context-window-estimated))
+          (should (= 128000 (plist-get opus :max-output)))
+          (should (equal '("low" "medium" "high" "xhigh" "max") (plist-get opus :thinking-levels)))
+          ;; Known models keep their prices; the API gives none.
+          (should (equal 1.0 (plist-get (plist-get haiku :pricing) :input)))
+          (should (equal '("low" "medium" "high") (plist-get haiku :thinking-levels)))
+          ;; The API's models come before those only known.
+          (should (< (cl-position opus models) (cl-position (harness-provider-claude-test--model models "claude-fable-5-1")
+                                                            models))))
+      (delete-process server))))
 
 (ert-deftest harness-provider-claude-command-line ()
   (harness-provider-claude-test--setup)
@@ -689,7 +889,7 @@ CLI session and all three."
         (should (equal (car replies) (plist-get (harness-call 'session/get fork) :fork-node)))
         (should (equal (list :cli-session-id parent-cli
                              :resume-at (plist-get (plist-get first-reply :checkpoint) :uuid)
-                             :fork-pending t)
+                             :fork-pending t :provider "claude")
                        state))
         (let ((argv (harness-provider-claude-test--turn fork "recall")))
           (should (equal parent-cli (harness-provider-claude-test--flag argv "--resume")))
@@ -873,7 +1073,7 @@ running and its conversation never hears the question."
 (ert-deftest harness-provider-claude-fork-at-checkpoint-command-line ()
   "`provider/fork' with a checkpoint cuts the fork there; another provider's gives nil."
   (harness-provider-claude-test--setup)
-  (should (equal '(:cli-session-id "s-1" :resume-at "u-2" :fork-pending t)
+  (should (equal '(:cli-session-id "s-1" :resume-at "u-2" :fork-pending t :provider "claude")
                  (harness-test-await (harness-call 'provider/fork "claude:claude-fable-5-1"
                                                    '(:cli-session-id "s-9")
                                                    '(:cli-session-id "s-1" :uuid "u-2")))))
@@ -900,6 +1100,307 @@ running and its conversation never hears the question."
     (should (harness-provider-claude-close "s7"))
     (should-not (harness-provider-claude-close "s7"))))
 
+;;;; The CLI session a request continues
+
+(defun harness-provider-claude-test--after (flag argv)
+  "Return the argument after FLAG in ARGV, or nil."
+  (let ((pos (cl-position flag argv :test #'equal)))
+    (and pos (nth (1+ pos) argv))))
+
+(ert-deftest harness-provider-claude-tools-listed-while-idle ()
+  "A CLI that lists the tools while no turn is in flight still gets them.
+The incident of 2026-10-03: the first step after a switch to Claude Code
+had only a tool result to send, so it ended at once with \"No user
+message to send\"; the CLI's MCP handshake came after that, while no
+turn was in flight, and got an empty tool list; the next turn reused the
+process, and the model had no tools for the rest of its life."
+  (harness-provider-claude-test--setup)
+  (let* ((sid "tl1")
+         (first (car (harness-provider-claude-test--run
+                      (harness-provider-claude-test--request
+                       sid "unused"
+                       :messages '((:role user :content ((:type "text" :text "please call echo")))
+                                   (:role assistant :content ((:type "tool_use" :id "t1" :name "echo"
+                                                                     :input (:text "ping"))))
+                                   (:role user :content ((:type "tool_result" :tool_use_id "t1"
+                                                                :content "echo: ping"))))))))
+         (entry (gethash sid harness-provider-claude--sessions))
+         (proc (harness-provider-claude-session-process entry)))
+    (should (equal "No user message to send"
+                   (plist-get (harness-provider-claude-test--find first 'done) :error)))
+    (should (process-live-p proc))
+    ;; The CLI asks for the tools once the harness's initialize reaches it,
+    ;; which is after the turn ended; its usage report comes after that.
+    (harness-test-wait (lambda () (null (harness-provider-claude-session-baseline-id entry)))
+                       10 "the CLI's handshake")
+    (should-not (harness-provider-claude-session-active entry))
+    (let ((second (car (harness-provider-claude-test--run
+                        (harness-provider-claude-test--request sid "list your tools")))))
+      (should (eq proc (harness-provider-claude-session-process entry)))
+      (should (eq 'end-turn (plist-get (harness-provider-claude-test--find second 'done) :stop-reason)))
+      (should (equal "tools: echo" (harness-provider-claude-test--text second))))
+    (harness-provider-claude-close sid)))
+
+(ert-deftest harness-provider-claude-follows-the-session-record ()
+  "The CLI session a request continues is the one its session's state names.
+A fork of it forks, even while a process runs in it: naming once
+resumed the session's own CLI session there, and wrote its question
+into the conversation.  A session whose state is gone (dropped when it
+went on with another provider) starts a new CLI session rather than
+carry on the stale one its process is still in."
+  (harness-provider-claude-test--setup)
+  (let* ((argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+         (cwd (harness-test-temp-dir))
+         (record (lambda (state) (list :id "rec" :cwd cwd :provider-state state)))
+         (first (car (harness-provider-claude-test--run
+                      (harness-provider-claude-test--request "rec" "hi" :session (funcall record nil)))))
+         (id (plist-get (plist-get (harness-provider-claude-test--find first 'provider-state) :state)
+                        :cli-session-id))
+         (state (list :cli-session-id id :provider "claude"))
+         (process (lambda () (harness-provider-claude-session-process (gethash "rec" harness-provider-claude--sessions))))
+         (proc (funcall process)))
+    (should (string-prefix-p "fake-" id))
+    ;; The next turn, with the state recorded, keeps the process.
+    (harness-provider-claude-test--run
+     (harness-provider-claude-test--request "rec" "again" :session (funcall record state) :provider-state state))
+    (should (eq proc (funcall process)))
+    ;; A fork of the state, asked while that process lives, forks.
+    (let ((events (car (harness-provider-claude-test--run
+                        (harness-provider-claude-test--request
+                         "rec" "a side question" :session (funcall record state) :max-tokens 40
+                         :provider-state (list :cli-session-id id :fork-pending t :provider "claude")))))
+          (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+      (should (equal id (harness-provider-claude-test--after "--resume" argv)))
+      (should (member "--fork-session" argv))
+      (should (string-prefix-p "forked-" (plist-get (plist-get (harness-provider-claude-test--find events 'provider-state)
+                                                              :state)
+                                                    :cli-session-id))))
+    ;; The session's next turn is back in its own CLI session, not the fork:
+    ;; the fork ran in a process of its own, so nothing restarted the session's.
+    (harness-provider-claude-test--run
+     (harness-provider-claude-test--request "rec" "and on" :session (funcall record state) :provider-state state))
+    (should (eq proc (funcall process)))
+    (should (equal id (harness-provider-claude-session-cli-session-id
+                       (gethash "rec" harness-provider-claude--sessions))))
+    ;; With its state gone, the session starts over, though the process lives.
+    (setq proc (funcall process))
+    (should (process-live-p proc))
+    (let ((events (car (harness-provider-claude-test--run
+                        (harness-provider-claude-test--request "rec" "fresh start" :session (funcall record nil)))))
+          (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+      (should-not (eq proc (funcall process)))
+      (should-not (member "--resume" argv))
+      (should-not (equal id (plist-get (plist-get (harness-provider-claude-test--find events 'provider-state) :state)
+                                       :cli-session-id))))
+    (harness-provider-claude-close "rec")))
+
+;;;; Switching to Claude Code: what the new CLI session is told
+
+(defun harness-provider-claude-test--inputs (file)
+  "Return the user messages the fixture logged in FILE, oldest first."
+  (when (file-exists-p file)
+    (mapcar #'harness-json-parse (split-string (harness-read-file file) "\n" t))))
+
+(defmacro harness-provider-claude-test-with-handoff (&rest body)
+  "Run BODY with sessions, the handoff module and an input log of the fake CLI.
+BODY sees CWD, a directory for the sessions, and INPUTS, a function
+returning the user messages every CLI got so far."
+  (declare (indent 0))
+  `(harness-provider-claude-test-with-sessions
+     (harness-test-load-module 'compaction)
+     (harness-test-load-module 'handoff)
+     (let* ((input-file (make-temp-file "harness-claude-input-"))
+            (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_INPUT=" input-file) process-environment))
+            (inputs (lambda () (harness-provider-claude-test--inputs input-file))))
+       (ignore inputs)
+       ,@body)))
+
+(defun harness-provider-claude-test--demo-session (cwd)
+  "Return a session in CWD on the demo provider with one answered exchange."
+  (let ((sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id)))
+    (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid "fix the parser"))
+                                     :stop-reason)))
+    sid))
+
+(ert-deftest harness-provider-claude-handoff-summary-opens-the-new-cli-session ()
+  "Compact first: the summary made on the old model is the new CLI session's first message."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (harness-provider-claude-test--demo-session cwd))
+           (check (harness-call 'handoff/check sid "claude:claude-fable-5-1")))
+      (should (plist-get check :lossy))
+      (let ((result (let ((harness-provider-demo-script-override
+                           '((:type text :delta "SUMMARY: the parser needs fixing")
+                             (:type done :stop-reason end-turn))))
+                      (harness-test-await (harness-call 'handoff/switch sid "claude:claude-fable-5-1" 'compact)))))
+        (should (eq 'compact (plist-get result :mode)))
+        (should (equal "claude:claude-fable-5-1" (plist-get (harness-call 'session/get sid) :model))))
+      (let ((argv (harness-provider-claude-test--turn sid "carry on"))
+            (got (funcall inputs)))
+        (should argv)
+        (should-not (member "--resume" argv))
+        (should (= 1 (length got)))
+        (should-not (plist-get (car got) :resumed))
+        (let ((text (plist-get (car got) :text)))
+          (should (string-match-p "\\`Summary of the conversation so far:" text))
+          (should (string-match-p "SUMMARY: the parser needs fixing" text))
+          (should (string-match-p "carry on\\'" text))))
+      ;; The summary is the handoff's, and the session is on Claude Code now.
+      (let ((compaction (cl-find 'compaction (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
+        (should (equal "claude:claude-fable-5-1" (plist-get (harness-node-handoff compaction) :to))))
+      (should (equal "claude" (plist-get (plist-get (harness-call 'session/get sid) :provider-state) :provider))))))
+
+(ert-deftest harness-provider-claude-handoff-summary-by-the-new-model ()
+  "Compact-new: the new CLI session writes the summary, from a bounded context.
+The old provider cannot answer in the incident this guards (its plan ran
+out), so the new model makes the summary itself: the first and last
+messages of the session reach it inside one message, since a hosted loop
+with no state of the session is sent no ordinary transcript."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (harness-provider-claude-test--demo-session cwd))
+           (claude "claude:claude-fable-5-1")
+           (result (harness-test-await (harness-call 'handoff/switch sid claude 'compact-new))))
+      (should (eq 'compact-new (plist-get result :mode)))
+      (should (equal claude (plist-get result :summarizer)))
+      (should (eq 'sample (plist-get result :context)))
+      (should (equal claude (plist-get (harness-call 'session/get sid) :model)))
+      ;; The summarisation request: a new CLI session, one message of text.
+      (let ((got (funcall inputs)))
+        (should (= 1 (length got)))
+        (should-not (plist-get (car got) :resumed))
+        (let ((text (plist-get (car got) :text)))
+          (should (string-match-p "\\`### user" text))
+          (should (string-match-p "fix the parser" text))
+          (should (string-match-p "Summarize the conversation above" text))))
+      ;; Its summary opens the conversation, marked as a lossy handoff.
+      (harness-provider-claude-test--turn sid "carry on")
+      (let* ((got (funcall inputs))
+             (text (plist-get (cadr got) :text)))
+        (should (= 2 (length got)))
+        (should (string-match-p "\\`Summary of the conversation so far:\n\nhello" text))
+        (should (string-match-p "re-investigate" text))
+        (should (string-match-p "carry on\\'" text)))
+      (let ((compaction (cl-find 'compaction (harness-call 'session/nodes sid)
+                                 :key (lambda (n) (plist-get n :kind)))))
+        (should (equal "compact-new" (plist-get (harness-node-handoff compaction) :mode)))
+        (should (equal "sample" (plist-get (harness-node-handoff compaction) :context)))
+        (should (equal claude (plist-get (harness-node-handoff compaction) :summarizer)))))))
+
+(ert-deftest harness-provider-claude-handoff-transcript-reaches-the-new-cli-session ()
+  "Full transcript: the new CLI session is told to read a file holding the conversation."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (harness-provider-claude-test--demo-session cwd))
+           (result (harness-test-await (harness-call 'handoff/switch sid "claude:claude-fable-5-1" 'transcript)))
+           (file (plist-get result :file)))
+      (should (eq 'transcript (plist-get result :mode)))
+      ;; In the session's directory, which its tools may read, and out of git's way.
+      (should (file-in-directory-p file cwd))
+      (should (equal "*\n" (harness-read-file (expand-file-name ".gitignore" (file-name-directory file)))))
+      (let ((text (harness-read-file file)))
+        (should (string-match-p "^\\[user\\] fix the parser$" text))
+        (should (string-match-p "^\\[assistant\\] You said: \\*fix the parser\\*" text)))
+      ;; The note is the newest node: it opens the new conversation.
+      (let ((note (car (last (harness-call 'session/nodes sid)))))
+        (should (eq 'user (plist-get note :kind)))
+        (should (equal file (plist-get (harness-node-handoff note) :file)))
+        (should (eq 'system (harness-sender-kind (harness-node-sender note)))))
+      (harness-provider-claude-test--turn sid "carry on")
+      (let ((got (funcall inputs)))
+        (should (= 1 (length got)))
+        (should-not (plist-get (car got) :resumed))
+        (should (string-match-p (concat "read " (regexp-quote file) ": it is the whole conversation")
+                                (plist-get (car got) :text)))
+        (should (string-match-p "carry on\\'" (plist-get (car got) :text)))))))
+
+(ert-deftest harness-provider-claude-handoff-mid-turn-waits-for-the-next-step ()
+  "A switch while a turn runs hands over at the turn's next step.
+The incident: a session switched to Claude Code while a turn ran sent
+the new CLI session only a tool result; now the next step carries the
+handoff note, after the tool's result, and the model gets the tools."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))
+           (switched nil))
+      (harness-define-tool "look" :label "Look" :description "Look at something."
+                           :schema '(:type "object" :properties (:what (:type "string")))
+                           :handler (lambda (_input _ctx) "looked"))
+      (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next '(:behavior allow))) 10)
+      (harness-on 'agent/tool-call
+                  (lambda (id _node)
+                    (unless switched
+                      (setq switched (harness-call 'handoff/switch id "claude:claude-fable-5-1" 'transcript)))))
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Looking first.")
+               (:type tool-call :id "c1" :name "look" :input (:what "the parser")))))
+        (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid "fix the parser"))
+                                         :stop-reason))))
+      (should (plist-get (harness-test-await switched) :deferred))
+      (let* ((nodes (harness-call 'session/nodes sid))
+             (kinds (mapcar (lambda (n) (plist-get n :kind)) nodes))
+             (note (cl-find-if #'harness-node-handoff nodes))
+             (file (plist-get (harness-node-handoff note) :file)))
+        ;; The note came after the call's result, and Claude Code answered it.
+        (should note)
+        (should (< (cl-position 'tool-result kinds) (cl-position note nodes)
+                   (cl-position 'assistant kinds :from-end t)))
+        (should (string-match-p "^\\[tool look\\]" (harness-read-file file)))
+        (let ((got (funcall inputs)))
+          (should (= 1 (length got)))
+          (should (string-match-p (regexp-quote file) (plist-get (car got) :text)))))
+      (should (equal "claude" (plist-get (plist-get (harness-call 'session/get sid) :provider-state) :provider)))
+      ;; The model of that CLI session has the harness's tools.
+      (harness-provider-claude-test--turn sid "list your tools")
+      (should (string-match-p "\\`tools: .*look" (plist-get (car (last (harness-call 'session/nodes sid))) :content))))))
+
+(ert-deftest harness-provider-claude-switching-away-and-back ()
+  "Back on Claude Code before another provider ran a step, the conversation resumes.
+After a step elsewhere, Claude Code's state is gone: switching back is
+lossy, and the CLI session starts over rather than resume a
+conversation that never saw that step."
+  (harness-provider-claude-test-with-handoff
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (claude "claude:claude-fable-5-1")
+           (process (lambda () (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions)))))
+      (harness-provider-claude-test--turn sid "hi")
+      (let ((state (plist-get (harness-call 'session/get sid) :provider-state))
+            (cli (harness-provider-claude-test--cli-id sid))
+            (proc (funcall process)))
+        ;; The state says whose it is.
+        (should (equal "claude" (plist-get state :provider)))
+        ;; Away and straight back: nothing is lost, the conversation goes on.
+        (should-not (plist-get (harness-call 'handoff/check sid "demo:scripted") :lossy))
+        (harness-test-await (harness-call 'handoff/switch sid "demo:scripted"))
+        (should (equal state (plist-get (harness-call 'session/get sid) :provider-state)))
+        (let ((check (harness-call 'handoff/check sid claude)))
+          (should-not (plist-get check :lossy))
+          (should (string-match-p "still holds" (plist-get check :reason))))
+        (harness-test-await (harness-call 'handoff/switch sid claude))
+        (harness-provider-claude-test--turn sid "again")
+        (should (eq proc (funcall process)))
+        (should (equal cli (harness-provider-claude-test--cli-id sid)))
+        ;; Away for a step: Claude Code's state goes with it.
+        (harness-test-await (harness-call 'handoff/switch sid "demo:scripted"))
+        (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid "a demo step"))
+                                         :stop-reason)))
+        (should-not (plist-get (harness-call 'session/get sid) :provider-state))
+        (let ((check (harness-call 'handoff/check sid claude)))
+          (should (plist-get check :lossy))
+          (should (plist-get check :risks)))
+        ;; Back without a handoff: a new CLI session, not the stale one.
+        (harness-test-await (harness-call 'handoff/switch sid claude 'none))
+        (let ((argv (harness-provider-claude-test--turn sid "back on claude")))
+          (should argv)
+          (should-not (member "--resume" argv))
+          (should-not (eq proc (funcall process)))
+          (should-not (equal cli (harness-provider-claude-test--cli-id sid))))
+        (let ((last (car (last (funcall inputs)))))
+          (should-not (plist-get last :resumed))
+          ;; The new CLI session is caught up on the step it missed, as
+          ;; text, and then gets the new message.
+          (let ((text (plist-get last :text)))
+            (should (string-match-p "While you were unavailable" text))
+            (should (string-match-p "a demo step" text))
+            (should (string-match-p "back on claude\\'" text))))))))
+
 (ert-deftest harness-provider-claude-session-events-close-process ()
   (harness-provider-claude-test--setup)
   (harness-provider-claude-test--run (harness-provider-claude-test--request "s8" "hi"))
@@ -908,6 +1409,26 @@ running and its conversation never hears the question."
     (harness-emit 'session/deleted "s8")
     (should-not (process-live-p proc))
     (should-not (gethash "s8" harness-provider-claude--sessions))))
+
+(ert-deftest harness-provider-claude-warm-starts-the-process-close-ends-it ()
+  "`provider/warm' starts the CLI a request will use, so the request that
+comes with the same settings finds it running; warming again leaves it
+alone, and `provider/close' ends it."
+  (harness-provider-claude-test--setup)
+  (let* ((request (harness-provider-claude-test--request "w1" "hi" :tools nil))
+         (warm (harness-plist-remove request :messages)))
+    (should (harness-call 'provider/warm warm))
+    (let ((proc (harness-provider-claude-session-process (gethash "w1" harness-provider-claude--sessions))))
+      (should (process-live-p proc))
+      ;; Ready already: warming again does nothing.
+      (should-not (harness-call 'provider/warm warm))
+      (let ((events (car (harness-provider-claude-test--run request))))
+        (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason))))
+      (should (eq proc (harness-provider-claude-session-process (gethash "w1" harness-provider-claude--sessions))))
+      (should (harness-call 'provider/close (plist-get request :model) "w1"))
+      (should-not (process-live-p proc))
+      (should-not (gethash "w1" harness-provider-claude--sessions))
+      (should-not (harness-call 'provider/close (plist-get request :model) "w1")))))
 
 (ert-deftest harness-provider-claude-image-blocks-and-trailing-messages ()
   (harness-provider-claude-test--setup)
@@ -1513,6 +2034,53 @@ what a user would see."
       (should (equal "Context compacted by Claude Code"
                      (plist-get (harness-provider-claude-test--find evs 'hint) :text))))
     (harness-provider-claude-close "cmp")))
+
+(ert-deftest harness-provider-claude-reports-a-used-up-quota ()
+  "A rejected usage window ends the turn as a quota failure, with its reset."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment (cons "HARNESS_FAKE_CLAUDE_AUTH=subscription" process-environment))
+         (events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "quota1" "out of quota"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'error (plist-get done :stop-reason)))
+    (should (eq 'quota (plist-get done :error-kind)))
+    (should (equal 1800000000.0 (plist-get done :resets)))
+    (should (string-match-p "hit your limit" (plist-get done :error)))
+    (harness-provider-claude-close "quota1")))
+
+(ert-deftest harness-provider-claude-reports-out-of-money ()
+  "A billing error ends the turn as a billing failure."
+  (harness-provider-claude-test--setup)
+  (let* ((events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "money1" "out of credits"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'billing (plist-get done :error-kind)))
+    (should-not (plist-get done :resets))
+    (should (string-match-p "credit balance" (plist-get done :error)))
+    (harness-provider-claude-close "money1")))
+
+(ert-deftest harness-provider-claude-api-error-status-decides ()
+  "An API 402 is out of money; a plain 429 stays a rate limit."
+  (harness-provider-claude-test--setup)
+  (let* ((events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "status1" "api 402"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'billing (plist-get done :error-kind))))
+  (let* ((events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "status2" "api 429"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'rate-limit (plist-get done :error-kind))))
+  (harness-provider-claude-close "status1")
+  (harness-provider-claude-close "status2"))
+
+(ert-deftest harness-provider-claude-refused-login-is-not-out ()
+  "A refused login is an auth failure, which the fallback never acts on."
+  (harness-provider-claude-test--setup)
+  (let* ((events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request "auth1" "logged out"))))
+         (done (harness-provider-claude-test--find events 'done)))
+    (should (eq 'auth (plist-get done :error-kind)))
+    (harness-provider-claude-close "auth1")))
 
 ;;;; Integration
 

@@ -19,7 +19,9 @@
 ;;   session cost: a price when it is billed per token, the plan's name
 ;;   and quota when a subscription pays for it;
 ;; - faces and icons;
-;; - window positions: one session per preset position, replacing;
+;; - window positions: one session per preset position, replacing, and
+;;   the fullscreen layout, an overview such as the task board on the
+;;   left of the frame and the session it inspects beside it;
 ;; - the prefix keymap, the global minor mode and the transient menu,
 ;;   which also lists the commands of the buffer it is opened from, as
 ;;   that buffer's modes list them in their `harness-menu-group'.
@@ -37,10 +39,13 @@
 (require 'harness-emacs-endpoint)
 (require 'harness-files)
 (require 'harness-notifications-desktop)
+(require 'harness-ui-drag)
 
 (defvar harness-directory)
 
 (declare-function harness-reload "harness")
+(declare-function harness-tasks "harness-ui-tasks")
+(declare-function harness-sessions "harness-ui-sessions")
 
 (defgroup harness-ui nil
   "Presentation layer of the Emacs agent harness."
@@ -1123,10 +1128,16 @@ Signal unless NOERROR when none can be found."
   "Tokens the harness keeps free below a context window for compaction.
 The same as `harness-compaction--context-reserve' in the harness process.")
 
+(defconst harness-ui--fallback-context-window 200000
+  "Context window assumed while a session's is not known.
+The harness gives every session one, estimated where no provider sizes
+its model; this is the default of `harness-provider-fallback-context-window'
+there, which estimates fall back to.")
+
 (defun harness-ui-context-face (context window)
   "Return the warning face for CONTEXT tokens against WINDOW."
   (let* ((reserve harness-ui--context-reserve)
-         (limit (max 1 (- (or window 128000) reserve)))
+         (limit (max 1 (- (or window harness-ui--fallback-context-window) reserve)))
          (f (/ (float (or context 0)) limit)))
     (cond ((>= f 0.95) 'harness-context-critical-face)
           ((>= f 0.85) 'harness-context-urgent-face)
@@ -1156,6 +1167,13 @@ hard to click.  Build `help-echo' text from parts through this."
     (propertize (format "%s/%s" (harness-format-tokens context) (harness-format-tokens window))
                 'face (harness-ui-context-face context window)
                 'help-echo "Context tokens in use / context window")))
+
+(defun harness-ui-format-model-window (model)
+  "Return the context window of catalogue entry MODEL as text: \"200k\".
+A window the catalogue estimated, as its provider does not give it,
+reads \"~200k\"."
+  (concat (if (eq t (plist-get model :context-window-estimated)) "~" "")
+          (harness-format-tokens (plist-get model :context-window))))
 
 (defun harness-ui--prettify-model-name (name)
   "Return a readable form of model slug NAME, or nil when it has no known shape.
@@ -1405,9 +1423,10 @@ position just after the region moves to the end of TEXT."
 
 (defun harness-ui-image-string (source &optional mime)
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
-MIME is a hint for the image type.  Without image support, and for a
-path on a remote host, which reading here would block on, a button
-opening the file is returned instead."
+MIME is a hint for the image type.  The image can be dragged into
+another application (`harness-ui-drag-props').  Without image support,
+and for a path on a remote host, which reading here would block on, a
+button opening the file is returned instead."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
          (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
@@ -1424,9 +1443,12 @@ opening the file is returned instead."
                                          :max-width width :max-height harness-ui-image-max-height))
                        (error nil))))))
     (cond
-     (img (concat (propertize label 'display img 'pointer 'hand
-                              'help-echo (format "mouse-1 or RET: open %s" (or path mime "the image"))
-                              'keymap (and open (harness-ui-action-map open)))
+     (img (concat (apply #'propertize label 'display img
+                         (harness-ui-drag-props
+                          (list 'pointer 'hand
+                                'help-echo (if open (format "mouse-1 or RET: open %s" path) mime)
+                                'keymap (and open (harness-ui-action-map open)))
+                          path))
                   "\n"))
      (open (concat (harness-ui-action-button label open :help (format "Open %s" path)) "\n"))
      (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
@@ -1450,11 +1472,16 @@ An option is a string or an object (a plist) with a `:label'."
 (defun harness-ui-summary-value (value)
   "Return VALUE on one line for a tool input summary.
 A list of strings, or of objects with labels such as the options of an
-ask_user call, reads as a comma-separated list, not a Lisp form."
+ask_user call, reads as a comma-separated list, and a list of other
+objects, such as the items of a todo list, as how many there are: not
+as a Lisp form."
   (harness-first-line
-   (if (and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
-       (mapconcat #'harness-ui-option-label value ", ")
-     (harness-ui-format-value value))
+   (cond ((and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
+          (mapconcat #'harness-ui-option-label value ", "))
+         ((and (or (consp value) (vectorp value)) (not (keywordp (car (append value nil))))
+               (cl-every (lambda (v) (and (consp v) (keywordp (car v)))) value))
+          (let ((n (length value))) (format "%d item%s" n (if (= n 1) "" "s"))))
+         (t (harness-ui-format-value value)))
    60))
 
 (defun harness-ui-tool-input-summary (input &optional title)
@@ -1602,10 +1629,14 @@ overflows the window reads as text that fits."
     (left . ((side . left) (slot . 0) (window-width . 0.45)))
     (bottom . ((side . bottom) (slot . 0) (window-height . 0.45)))
     (full . nil)
-    (other . nil))
+    (other . nil)
+    (fullscreen . nil))
   "Named positions a session can be displayed in.
 Side-window positions carry `display-buffer-in-side-window' parameters;
-`full' takes over the selected window; `other' pops up anywhere."
+`full' takes over the selected window; `other' pops up anywhere;
+`fullscreen' is the fullscreen layout of an overview such as the task
+board (see `harness-fullscreen'): the overview on the left of the frame,
+everything else beside it."
   :type '(alist :key-type symbol :value-type sexp) :group 'harness-ui)
 
 (defcustom harness-ui-default-position 'right
@@ -1619,26 +1650,33 @@ Side-window positions carry `display-buffer-in-side-window' parameters;
   "Function returning the buffer that shows session ID: (ID) → buffer.
 Set by the chat module.")
 
+(defvar-local harness-ui-position nil "Position this buffer was displayed in.")
+
 (defun harness-ui-display-buffer (buffer &optional position)
-  "Show BUFFER in POSITION, replacing whatever session occupied it."
-  (let* ((position (or position harness-ui-default-position))
-         (params (alist-get position harness-ui-positions))
-         (previous (gethash position harness-ui--position-buffers))
-         (window (and previous (buffer-live-p previous) (get-buffer-window previous))))
-    (puthash position buffer harness-ui--position-buffers)
-    (cond
-     ((and window (window-live-p window) (not (eq previous buffer)))
-      (set-window-buffer window buffer)
-      (select-window window))
-     ((eq position 'full) (switch-to-buffer buffer))
-     ((eq position 'other) (pop-to-buffer buffer))
-     (params
-      (select-window (display-buffer-in-side-window buffer params)))
-     (t (pop-to-buffer buffer)))
+  "Show BUFFER in POSITION, replacing whatever session occupied it.
+In a frame with the fullscreen layout POSITION defaults to `fullscreen',
+and a position elsewhere leaves the layout's windows alone."
+  (let ((position (or position
+                      (and (harness-ui--fullscreen-layout) 'fullscreen)
+                      harness-ui-default-position)))
+    (if (eq position 'fullscreen)
+        (harness-ui--display-fullscreen buffer)
+      (let* ((params (alist-get position harness-ui-positions))
+             (previous (gethash position harness-ui--position-buffers))
+             (window (and previous (buffer-live-p previous) (get-buffer-window previous))))
+        (puthash position buffer harness-ui--position-buffers)
+        (cond
+         ((and window (window-live-p window) (not (eq previous buffer))
+               (not (harness-ui--fullscreen-window-p window)))
+          (set-window-buffer window buffer)
+          (select-window window))
+         ((eq position 'full) (switch-to-buffer buffer))
+         ((eq position 'other) (pop-to-buffer buffer))
+         (params
+          (select-window (display-buffer-in-side-window buffer params)))
+         (t (pop-to-buffer buffer)))))
     (with-current-buffer buffer (setq-local harness-ui-position position))
     buffer))
-
-(defvar-local harness-ui-position nil "Position this buffer was displayed in.")
 
 (defun harness-ui-display-session (id &optional position)
   "Display session ID in POSITION using `harness-ui-open-session-function'."
@@ -1651,9 +1689,11 @@ Set by the chat module.")
 Views share positions with sessions: a view replaces the session shown
 in its position and a session opened there replaces the view.  Without
 POSITION the view returns to the position it had last, else
-`harness-ui-default-position'.  Small transient windows (menus, help,
-the BTW overlay) do not go through here."
+`harness-ui-default-position'; in a frame with the fullscreen layout it
+shows beside the overview, or as the overview when it is one.  Small
+transient windows (menus, help, the BTW overlay) do not go through here."
   (harness-ui-display-buffer buffer (or position
+                                        (and (harness-ui--fullscreen-layout) 'fullscreen)
                                         (buffer-local-value 'harness-ui-position buffer)
                                         harness-ui-default-position)))
 
@@ -1661,9 +1701,13 @@ the BTW overlay) do not go through here."
   "Return a function of a session id that shows it where this view is.
 Call this when the command runs and the returned function later, from
 an asynchronous callback: the session takes POSITION, by default the
-current buffer's position (replacing the view), and opens from the
+current buffer's position (replacing the view) -- in a frame with the
+fullscreen layout, the window beside the overview -- and opens from the
 window selected now even when another frame is selected by then."
-  (let ((position (or position harness-ui-position harness-ui-default-position))
+  (let ((position (or position
+                      (and (harness-ui--fullscreen-layout) 'fullscreen)
+                      harness-ui-position
+                      harness-ui-default-position))
         (window (selected-window)))
     (lambda (id)
       (when (window-live-p window) (select-window window))
@@ -1672,6 +1716,302 @@ window selected now even when another frame is selected by then."
 (defun harness-ui-read-position ()
   "Read a position name with completion."
   (intern (completing-read "Position: " (mapcar (lambda (p) (symbol-name (car p))) harness-ui-positions) nil t)))
+
+;;;; Fullscreen layout
+;;
+;; An overview -- the task board, the session list -- can take the whole
+;; frame: it stays on the left, in a side window, and the session it
+;; inspects shows beside it, in a window of the frame's own (the slot).
+;; Sessions opened from the overview take the slot, and so does anything
+;; else shown without a position while the layout lasts.  Burying the
+;; buffer in the slot (`harness-ui-bury') brings back what the slot showed
+;; before -- the file the session took the place of -- and the layout
+;; stays: the next session opened from the overview takes the slot again.
+;; Burying the overview ends the layout, and the windows come back as
+;; they were, but for a buffer of the user's left in the slot, which
+;; stays in sight.
+;;
+;; The layout is kept per frame, in a weak table rather than a frame
+;; parameter, which `frameset' would try to save.  It lasts as long as
+;; its overview's window, however that window goes.
+
+(defcustom harness-ui-fullscreen-width 0.5
+  "Width of the overview in the fullscreen layout.
+A fraction of the frame's width, or a number of columns."
+  :type 'number :group 'harness-ui)
+
+(defvar-local harness-ui-overview-function nil
+  "Function returning the session to show beside this overview, or nil.
+A view that sets it buffer-locally is an overview, which can take the
+fullscreen layout (`harness-fullscreen').  When the layout starts with
+no session in sight, the session whose id it returns shows beside the
+overview: the one at point, say, else the most recent the view lists.
+It is called in the overview's buffer.")
+
+(cl-defstruct (harness-ui--fullscreen (:constructor harness-ui--fullscreen-create)
+                                      (:copier nil))
+  "The fullscreen layout of a frame."
+  (overview nil :documentation "The side window of the overview.")
+  (slot nil :documentation "The window beside it, where sessions show.")
+  (home nil :documentation "The slot as the layout started.")
+  (saved nil :documentation "The window configuration of the frame from before.")
+  (positions nil :documentation "Alist of the overviews shown and their positions from before."))
+
+(defvar harness-ui--fullscreen-layouts (make-hash-table :test 'eq :weakness 'key)
+  "Frame -> its fullscreen layout, a `harness-ui--fullscreen'.")
+
+(defun harness-ui--fullscreen-layout (&optional frame)
+  "Return the fullscreen layout of FRAME, by default the selected one, or nil.
+There is none once the overview's window is gone."
+  (let ((layout (gethash (or frame (selected-frame)) harness-ui--fullscreen-layouts)))
+    (and layout (window-live-p (harness-ui--fullscreen-overview layout)) layout)))
+
+(defun harness-ui-overview-p (buffer)
+  "Non-nil when BUFFER is an overview (see `harness-ui-overview-function')."
+  (and (buffer-live-p buffer) (buffer-local-value 'harness-ui-overview-function buffer) t))
+
+(defun harness-ui--overview-window-p (window)
+  "Non-nil when WINDOW is the overview's in the fullscreen layout of its frame."
+  (let ((layout (harness-ui--fullscreen-layout (window-frame window))))
+    (and layout (eq window (harness-ui--fullscreen-overview layout)))))
+
+(defun harness-ui--fullscreen-window-p (window)
+  "Non-nil when WINDOW is the overview's or the slot of a fullscreen layout."
+  (let ((layout (harness-ui--fullscreen-layout (window-frame window))))
+    (and layout (memq window (list (harness-ui--fullscreen-overview layout)
+                                   (harness-ui--fullscreen-slot layout)))
+         t)))
+
+(defun harness-ui--harness-buffer-p (buffer)
+  "Non-nil when BUFFER is the harness's, a session or a view, not the user's."
+  (with-current-buffer buffer
+    (or harness-ui-session-id harness-ui-position
+        (string-prefix-p "harness-" (symbol-name major-mode)))))
+
+(defun harness-ui--main-window (&optional frame)
+  "Return the most recently used window of FRAME that is not a side window."
+  (let (best)
+    (dolist (window (window-list frame 'nomini) best)
+      (unless (or (window-parameter window 'window-side)
+                  (and best (<= (window-use-time window) (window-use-time best))))
+        (setq best window)))))
+
+(defun harness-ui--fullscreen-window (layout)
+  "Return the window beside LAYOUT's overview, where sessions show.
+Once that window is gone, the frame's most recently used window that is
+not a side window takes its place."
+  (let ((slot (harness-ui--fullscreen-slot layout)))
+    (unless (and (window-live-p slot) (not (window-parameter slot 'window-side)))
+      (setf slot (harness-ui--main-window (window-frame (harness-ui--fullscreen-overview layout)))
+            (harness-ui--fullscreen-slot layout) slot))
+    slot))
+
+(defun harness-ui--session-window-p (window)
+  "Non-nil when WINDOW shows a session's chat, a BTW's aside."
+  (with-current-buffer (window-buffer window)
+    (and harness-ui-session-id
+         (derived-mode-p 'harness-chat-mode)
+         (not (bound-and-true-p harness-ui-btw-minor-mode)))))
+
+(defun harness-ui--fullscreen-session (overview frame)
+  "Return the buffer to show beside OVERVIEW as FRAME takes its layout, or nil.
+That is the session in sight in FRAME, the most recently used window's,
+else the one OVERVIEW's `harness-ui-overview-function' names."
+  (let (shown)
+    (dolist (window (window-list frame 'nomini))
+      (when (and (harness-ui--session-window-p window)
+                 (or (null shown) (> (window-use-time window) (window-use-time shown))))
+        (setq shown window)))
+    (if shown
+        (window-buffer shown)
+      (when-let* ((function (buffer-local-value 'harness-ui-overview-function overview))
+                  (id (with-current-buffer overview (funcall function)))
+                  ((functionp harness-ui-open-session-function)))
+        (funcall harness-ui-open-session-function id)))))
+
+(defun harness-ui--previous-buffer (window buffer)
+  "Return what WINDOW is to show instead of BUFFER, as (BUFFER START POINT).
+That is the last buffer WINDOW showed before that is the user's, not the
+harness's, else the user's most recent buffer out of sight, else any
+other buffer.  START and POINT may be missing."
+  (let* ((frame (window-frame window))
+         (usable (lambda (b)
+                   (and (buffer-live-p b) (not (eq b buffer))
+                        (not (string-prefix-p " " (buffer-name b)))
+                        (not (harness-ui--harness-buffer-p b))))))
+    (or (cl-find-if (lambda (entry) (funcall usable (car entry))) (window-prev-buffers window))
+        (list (or (cl-find-if (lambda (b) (and (funcall usable b) (not (get-buffer-window b frame))))
+                              (buffer-list frame))
+                  (other-buffer buffer t frame))))))
+
+(defun harness-ui--show-previous (window buffer)
+  "Show in WINDOW what it showed before BUFFER (`harness-ui--previous-buffer')."
+  (apply #'set-window-buffer-start-and-point window (harness-ui--previous-buffer window buffer)))
+
+(defun harness-ui--show-in-slot (window buffer)
+  "Show BUFFER in WINDOW, the slot of a fullscreen layout."
+  (unless (eq (window-buffer window) buffer)
+    (set-window-buffer window buffer))
+  (with-current-buffer buffer (setq-local harness-ui-position 'fullscreen)))
+
+(defun harness-ui--fullscreen-params ()
+  "Return the side-window parameters of the overview in the fullscreen layout."
+  `((side . left) (slot . -1) (window-width . ,harness-ui-fullscreen-width)
+    (preserve-size . (t . nil))
+    ;; C-x 1 in the slot keeps the overview.
+    (window-parameters . ((no-delete-other-windows . t)))))
+
+(defun harness-ui--note-overview (layout buffer)
+  "Remember in LAYOUT the position the overview BUFFER had before it."
+  (unless (assq buffer (harness-ui--fullscreen-positions layout))
+    (push (cons buffer (let ((position (buffer-local-value 'harness-ui-position buffer)))
+                         (and (not (eq position 'fullscreen)) position)))
+          (harness-ui--fullscreen-positions layout))))
+
+(defun harness-ui--fullscreen-enter (overview)
+  "Give the selected frame the fullscreen layout of the buffer OVERVIEW.
+Every window of the frame makes way for the overview but one, the slot,
+which shows the session in sight or the one OVERVIEW names, else what
+it showed.  Return the overview's window."
+  (let* ((frame (selected-frame))
+         (session (harness-ui--fullscreen-session overview frame))
+         (shown (and session (get-buffer-window session frame)))
+         (slot (if (and shown (not (window-parameter shown 'window-side)))
+                   shown
+                 (harness-ui--main-window frame)))
+         (saved (current-window-configuration frame))
+         window)
+    ;; The side windows go too: a BTW, a popout, the overview's own.
+    (let ((ignore-window-parameters t))
+      (delete-other-windows slot))
+    (set-window-dedicated-p slot nil)
+    (setq window (display-buffer-in-side-window overview (harness-ui--fullscreen-params)))
+    (unless window
+      (set-window-configuration saved)
+      (user-error "This frame has no room for the overview"))
+    (let ((layout (harness-ui--fullscreen-create :overview window :slot slot :home slot :saved saved)))
+      (harness-ui--note-overview layout overview)
+      (puthash frame layout harness-ui--fullscreen-layouts))
+    (cond (session (harness-ui--show-in-slot slot session))
+          ((eq (window-buffer slot) overview) (harness-ui--show-previous slot overview)))
+    window))
+
+(defun harness-ui--display-fullscreen (buffer)
+  "Show BUFFER in the fullscreen layout of the selected frame, and select it.
+An overview takes the left of the frame, starting the layout when the
+frame has none; anything else takes the slot beside the overview, or
+without the layout the selected window, as in the `full' position."
+  (let ((layout (harness-ui--fullscreen-layout)))
+    (cond
+     ((and layout (harness-ui-overview-p buffer))
+      (let ((window (harness-ui--fullscreen-overview layout))
+            (slot (harness-ui--fullscreen-window layout)))
+        (unless (eq (window-buffer window) buffer)
+          (harness-ui--note-overview layout buffer)
+          (set-window-buffer window buffer)
+          ;; A new buffer drops the side window's dedication.
+          (set-window-dedicated-p window 'side))
+        (when (eq (window-buffer slot) buffer)
+          (harness-ui--show-previous slot buffer))
+        (select-window window)))
+     ((harness-ui-overview-p buffer)
+      (select-window (harness-ui--fullscreen-enter buffer)))
+     (layout
+      (let ((slot (harness-ui--fullscreen-window layout)))
+        (harness-ui--show-in-slot slot buffer)
+        (select-window slot)))
+     (t (switch-to-buffer buffer)))))
+
+(defun harness-ui--fullscreen-leave (&optional frame bury)
+  "End the fullscreen layout of FRAME, by default the selected one.
+The windows come back as they were before it, but for a buffer of the
+user's in the slot, such as a file visited there, which stays in sight
+in the window the layout kept.  The overviews it showed get back their
+positions.  With BURY the overview goes out of sight too."
+  (when-let* ((frame (or frame (selected-frame)))
+              (layout (harness-ui--fullscreen-layout frame)))
+    (let* ((overview (window-buffer (harness-ui--fullscreen-overview layout)))
+           (slot (harness-ui--fullscreen-window layout))
+           (home (harness-ui--fullscreen-home layout))
+           (kept (unless (harness-ui--harness-buffer-p (window-buffer slot))
+                   (list (window-buffer slot) (window-start slot) (window-point slot)))))
+      (remhash frame harness-ui--fullscreen-layouts)
+      (pcase-dolist (`(,buffer . ,position) (harness-ui--fullscreen-positions layout))
+        (when (and (buffer-live-p buffer) (eq (buffer-local-value 'harness-ui-position buffer) 'fullscreen))
+          (with-current-buffer buffer (setq-local harness-ui-position position))))
+      (set-window-configuration (harness-ui--fullscreen-saved layout))
+      (when (and kept (buffer-live-p (car kept)) (window-live-p home)
+                 (not (eq (window-buffer home) (car kept))))
+        (apply #'set-window-buffer-start-and-point home kept))
+      (when bury
+        (dolist (window (get-buffer-window-list overview 'nomini frame))
+          (if (window-parameter window 'window-side)
+              (delete-window window)
+            (harness-ui--show-previous window overview)))
+        (bury-buffer-internal overview)))))
+
+;;;###autoload
+(defun harness-fullscreen ()
+  "Start or end the fullscreen layout of an overview in the selected frame.
+The overview -- the task board, the session list -- takes the left of
+the frame, and the session you inspect shows beside it: the one in
+sight, else the overview's choice, the session at point or the most
+recent.  The sessions you open from the overview take its place, and
+so does anything else shown without a position while the layout lasts.
+
+\\<harness-chat-mode-map>Burying the buffer beside the overview
+\(`harness-ui-bury', \\[harness-ui-bury] in a session) brings back what was there
+before and keeps the layout; burying the overview (q on it) ends the
+layout, and the windows come back as they were.  This command ends it
+too, run in the overview or in a buffer that is not one.  Run in
+another overview, that one takes the left instead.
+
+Without the layout, the overview is this buffer when it is one, else
+the one shown last, else the task board of this project, else the
+session list."
+  (interactive)
+  (let ((layout (harness-ui--fullscreen-layout))
+        (here (current-buffer)))
+    (cond
+     ((and layout (harness-ui-overview-p here) (not (harness-ui--overview-window-p (selected-window))))
+      (harness-ui-display-buffer here 'fullscreen))
+     (layout (harness-ui--fullscreen-leave))
+     ((harness-ui-overview-p here) (harness-ui-display-buffer here 'fullscreen))
+     ((cl-find-if #'harness-ui-overview-p (buffer-list (selected-frame)))
+      (harness-ui-display-buffer (cl-find-if #'harness-ui-overview-p (buffer-list (selected-frame)))
+                                 'fullscreen))
+     ((fboundp 'harness-tasks) (harness-tasks nil 'fullscreen))
+     ((fboundp 'harness-sessions) (harness-sessions nil 'fullscreen))
+     (t (user-error "No overview to show")))))
+
+(defun harness-ui-quit-view ()
+  "Quit the window of this view, as `quit-window' does.
+On the overview of the fullscreen layout, this buries the overview and
+ends the layout: the windows come back as they were."
+  (interactive)
+  (if (harness-ui--overview-window-p (selected-window))
+      (harness-ui--fullscreen-leave nil t)
+    (quit-window)))
+
+(defun harness-ui-bury ()
+  "Put this buffer out of sight, bringing back what its window showed before.
+In a window of the frame's own -- the one beside the overview of the
+fullscreen layout, say -- that is the last buffer the window showed
+that is not the harness's: the file a session took the place of.  The
+layout stays, and the next session opened from the overview takes the
+window back.  A side window, such as a session's in the `right'
+position, quits as `quit-window' would.  On the overview of the
+fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
+  (interactive)
+  (let* ((window (selected-window))
+         (buffer (window-buffer window)))
+    (cond
+     ((harness-ui--overview-window-p window) (harness-ui--fullscreen-leave nil t))
+     ((or (window-parameter window 'window-side) (eq (window-dedicated-p window) t))
+      (quit-window nil window))
+     (t (harness-ui--show-previous window buffer)
+        (unrecord-window-buffer window buffer)
+        (bury-buffer-internal buffer)))))
 
 ;;;; Commands
 
@@ -1758,21 +2098,280 @@ available is offered."
                      (let ((m (cdr (assoc choice table))))
                        (format "  %s · %s ctx%s"
                                (plist-get m :id)
-                               (harness-format-tokens (plist-get m :context-window))
+                               (harness-ui-format-model-window m)
                                (if-let* ((p (plist-get m :pricing)))
                                    (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
                                  ""))))))
             (choice (completing-read "Model: " table nil t)))
        (funcall callback (plist-get (cdr (assoc choice table)) :id) choice)))))
 
+;;;; Switching models, and handing conversations over
+
+(defconst harness-ui--handoff-choices
+  '((?c "current model summarises" compact
+        "warm cache; summary from the whole conversation")
+    (?n "new model summarises" compact-new
+        "only the first and last messages; small, but lossy")
+    (?t "full transcript" transcript
+        "whole conversation as a file the new model reads")
+    (?s "no handoff" none
+        "no context; the new model starts from your next message")
+    (?q "cancel" cancel "keep the current model"))
+  "What a model switch that loses the conversation offers.
+Each entry is (KEY NAME CHOICE DESCRIPTION); CHOICE is a mode of
+`handoff/switch', or `cancel'.  The names are short so the minibuffer
+prompt stays readable; the descriptions are one line each.")
+
+(defun harness-ui--handoff-choice-text ()
+  "Return the handoff choices as a short, aligned list, easy to scan."
+  (let* ((choices harness-ui--handoff-choices)
+         (width (apply #'max (mapcar (lambda (c) (string-width (nth 1 c))) choices)))
+         (fmt (format "  %%c  %%-%ds  %%s" width)))
+    (mapconcat (lambda (c)
+                 (format fmt (nth 0 c) (nth 1 c) (or (nth 3 c) "")))
+               choices "\n")))
+
+(defun harness-ui--check-session-label (check)
+  "Return the name to show for the session a `handoff/check' CHECK is about."
+  (let ((name (plist-get check :name))
+        (id (or (plist-get check :id) "?")))
+    (if (and (stringp name) (not (string-blank-p name)))
+        (format "“%s”" name)
+      (substring id 0 (min 8 (length id))))))
+
+(defun harness-ui--handoff-heading (text)
+  "Return TEXT as the heading of a section in the switch help."
+  (propertize text 'face 'bold))
+
+(defun harness-ui--handoff-wrap (text width)
+  "Return TEXT as lines no wider than WIDTH, broken at spaces."
+  (let ((words (split-string text " " t))
+        (lines nil) (line ""))
+    (dolist (w words)
+      (cond ((string-empty-p line) (setq line w))
+            ((<= (+ (length line) 1 (length w)) width) (setq line (concat line " " w)))
+            (t (push line lines) (setq line w))))
+    (when (not (string-empty-p line)) (push line lines))
+    (or (nreverse lines) '(""))))
+
+(defun harness-ui--handoff-table (header rows &optional wrap)
+  "Return a table of HEADER and ROWS for the switch help.
+HEADER and each row are lists of cell strings; the last cell may be
+empty.  Columns are padded to their widest cell, a rule of dashes
+separates HEADER from ROWS, and WRAP caps the last column, whose
+continuation lines line up under it.  A nil HEADER gives label and
+value columns with no rule."
+  (let* ((n (length (or header (car rows))))
+         (widths (cl-loop for i from 0 below n
+                          for w = (apply #'max 0
+                                         (mapcar (lambda (r) (string-width (or (nth i r) "")))
+                                                 (append (and header (list header)) rows)))
+                          collect (if (and wrap (= i (1- n))) (min w wrap) w)))
+         (head (lambda (row)
+                 (concat "  "
+                         (mapconcat (lambda (i)
+                                      (format (format "%%-%ds" (nth i widths)) (or (nth i row) "")))
+                                    (number-sequence 0 (- n 2)) "  ")
+                         (if (> n 1) "  " ""))))
+         (lines (lambda (row)
+                  (let* ((prefix (funcall head row))
+                         (last (or (nth (1- n) row) ""))
+                         (parts (if (and wrap (> (length last) wrap))
+                                    (harness-ui--handoff-wrap last wrap)
+                                  (list last)))
+                         (continuation (make-string (length prefix) ?\s)))
+                    (concat (string-trim-right (concat prefix (car parts)))
+                            (if (cdr parts) "\n" "")
+                            (mapconcat (lambda (l) (string-trim-right (concat continuation l)))
+                                       (cdr parts) "\n")))))
+         (rule (concat "  " (mapconcat (lambda (w) (make-string w ?-)) widths "  "))))
+    (concat (if header (concat (funcall lines header) "\n" rule "\n") "")
+            (mapconcat (lambda (r) (funcall lines r)) rows "\n"))))
+
+(defun harness-ui--handoff-risk-row (risk)
+  "Return RISK, a \"label: what it means\" sentence, as the cells of a table row."
+  (let ((colon (string-match ":" risk)))
+    (if colon
+        (list (substring risk 0 colon) (string-trim (substring risk (1+ colon))))
+      (list risk ""))))
+
+(defun harness-ui--handoff-text (checks label total)
+  "Return what to say before a switch to model LABEL loses conversations.
+CHECKS are the `handoff/check' answers of the sessions that would lose
+theirs, TOTAL how many sessions the switch changes in all.  The view is
+a few small tables -- the sessions that change, the risks, what to do --
+shown before the question, not prose."
+  (let* ((first (car checks))
+         (one (= 1 total))
+         (lossy (length checks))
+         (running (cl-some (lambda (c) (harness-json-true-p (plist-get c :running))) checks))
+         (info (if one
+                   (append
+                    (list (list "Session" (harness-ui--check-session-label first))
+                          (list "From" (harness-ui-model-label (plist-get first :from)))
+                          (list "Why" (plist-get first :reason)))
+                    (when (plist-get first :cache-cost)
+                      (list (list "Cache" (format "%s (list prices)" (plist-get first :cache-cost)))))
+                    (when running
+                      (list (list "Turn" "running; the switch takes effect at its next step"))))
+                 (list (list "Sessions" (if (= lossy total)
+                                            (format "all %d start a new conversation there" total)
+                                          (format "%d of %d start a new conversation there" lossy total)))
+                       (list "Why" (plist-get first :reason))))))
+    (concat
+     (harness-ui--handoff-heading (format "MODEL SWITCH → %s" label)) "\n\n"
+     (harness-ui--handoff-table nil info 72) "\n\n"
+     (if one
+         ""
+       (concat (harness-ui--handoff-table
+                (list "SESSION" "FROM" "TURN" "CACHE COST")
+                (mapcar (lambda (c)
+                          (list (harness-ui--check-session-label c)
+                                (harness-ui-model-label (plist-get c :from))
+                                (if (harness-json-true-p (plist-get c :running)) "running" "-")
+                                (or (plist-get c :cache-cost) "-")))
+                        checks)
+               60)
+               "\n\n"))
+     (harness-ui--handoff-heading "RISKS") "\n\n"
+     (harness-ui--handoff-table
+      (list "RISK" "WHAT IT MEANS")
+      (mapcar #'harness-ui--handoff-risk-row (plist-get first :risks))
+      72)
+     "\n\n"
+     (harness-ui--handoff-heading "HAND OVER") "\n"
+     "  lossy; the new model is told to re-investigate\n\n"
+     (harness-ui--handoff-choice-text)
+     (if one "" "\n\nThe choice applies to each session listed; the others just switch.")
+     "\n")))
+
+(defun harness-ui--read-handoff (checks label &optional total)
+  "Ask what to do about a switch to model LABEL that loses conversations.
+CHECKS are the `handoff/check' answers of the sessions that would lose
+theirs; TOTAL is how many sessions the switch changes in all (default
+their number).  The risks show before the question.  Return a mode of
+`handoff/switch' (`compact', `compact-new', `transcript', `none') or
+`cancel'."
+  (let* ((total (or total (length checks)))
+         (answer (read-multiple-choice
+                  (format "Switch to %s" label)
+                  (mapcar (lambda (c) (list (nth 0 c) (nth 1 c) (nth 3 c))) harness-ui--handoff-choices)
+                  (harness-ui--handoff-text checks label total)
+                  "*Harness model switch*")))
+    (nth 2 (assq (car answer) harness-ui--handoff-choices))))
+
+(defun harness-ui--handoff-outcome (label result)
+  "Say how a switch to model LABEL went, from `handoff/switch''s RESULT."
+  (let ((mode (format "%s" (or (plist-get result :mode) "none")))
+        (file (plist-get result :file)))
+    (cond
+     ((plist-get result :error)
+      (format "Model → %s, but the handoff failed: %s" label (plist-get result :error)))
+     ((harness-json-true-p (plist-get result :deferred))
+      (format "Model → %s from the running turn's next step, which takes the handoff" label))
+     ((equal mode "compact") (format "Model → %s, starting from a summary of the conversation" label))
+     ((equal mode "compact-new")
+      (format "Model → %s, starting from a summary that model wrote from the first and last messages" label))
+     ((and (equal mode "transcript") (stringp file))
+      (format "Model → %s, which reads the transcript in %s first%s" label (abbreviate-file-name file)
+              (if (plist-get result :fallback) " (no summary could be made)" "")))
+     (t (format "Model → %s" label)))))
+
+(defun harness-ui--ask-handoff (checks label total _session _host callback)
+  "Ask how to hand over a lossy switch in the minibuffer.
+See `harness-ui-switch-function'; CALLBACK gets the mode chosen."
+  (funcall callback (harness-ui--read-handoff checks label total)))
+
+(defvar harness-ui-switch-function #'harness-ui--ask-handoff
+  "Function asking how to hand a conversation over on a lossy model switch.
+Called with (CHECKS LABEL TOTAL SESSION HOST CALLBACK): CHECKS are the
+`handoff/check' answers of the sessions that would lose their
+conversation, LABEL the model being switched to, TOTAL how many sessions
+the switch changes in all, SESSION the session's id or nil for a switch
+of many, HOST the chat buffer the command ran in or nil, and CALLBACK a
+function taking the mode chosen (`compact', `compact-new', `transcript',
+`none' or `cancel'), run once the user decides.  The default asks in the
+minibuffer (`harness-ui--read-handoff'); the `ui-switch' module shows a
+banner in the session's chat instead.")
+
+(defun harness-ui--handoff-perform (session-id model label mode)
+  "Switch SESSION-ID to MODEL as MODE says, saying what happens with LABEL.
+MODE is a mode of `handoff/switch': the handoff runs at once, or at the
+running turn's next step, and its outcome is reported."
+  (when (memq mode '(compact compact-new transcript))
+    (message "Model → %s: %s…" label
+             (pcase mode
+               ('compact "summarising the conversation on the current model first")
+               ('compact-new "letting the new model summarise a limited context first")
+               (_ "handing the transcript over"))))
+  (harness-ui-call "_harness/handoff/switch"
+                   (list :sessionId session-id :model model :mode (symbol-name mode))
+                   (lambda (result) (message "%s" (harness-ui--handoff-outcome label result)))))
+
+(defun harness-ui-switch-model (session-id model label)
+  "Switch SESSION-ID to MODEL, shown as LABEL; ask first if that loses context.
+The harness checks the switch (`handoff/check').  A model of another
+provider that keeps its own conversation (Claude Code, Copilot) and
+cannot continue this session's starts a new one that knows nothing of
+it, so such a switch asks how to hand the conversation over -- a banner
+in the session's chat, or the minibuffer when it has none
+\(`harness-ui-switch-function'): summarise on the current model, have
+the new model summarise a limited context, hand the full transcript
+over, switch without handoff, or cancel.  Any other switch happens at
+once."
+  (let ((plain (lambda () (harness-ui--setting-set session-id :model model (format "Model → %s" label)))))
+    (harness-ui-call
+     "_harness/handoff/check" (list :sessionId session-id :model model)
+     (lambda (check)
+       (if (not (harness-json-true-p (plist-get check :lossy)))
+           (funcall plain)
+         (funcall harness-ui-switch-function
+                  (list check) label 1 session-id nil
+                  (lambda (mode)
+                    (if (eq mode 'cancel)
+                        (message "Model unchanged")
+                      (harness-ui--handoff-perform session-id model label mode))))))
+     ;; A harness that cannot check switches them as it always did.
+     (lambda (_err) (funcall plain) nil))))
+
 ;;;###autoload
 (defun harness-set-model (&optional session-id)
-  "Choose a model for SESSION-ID (default the current buffer's session)."
+  "Choose a model for SESSION-ID (default the current buffer's session).
+A switch that would lose the session's conversation asks first and
+offers to hand it over; see `harness-ui-switch-model'."
   (interactive)
   (let ((target (harness-ui--setting-target session-id)))
     (harness-ui-choose-model
      (lambda (id label)
-       (harness-ui--setting-set target :model id (format "Model → %s" label))))))
+       (if (stringp target)
+           (harness-ui-switch-model target id label)
+         (harness-ui--setting-set target :model id (format "Model → %s" label)))))))
+
+(defun harness-ui--switch-all (model label mode no-default)
+  "Switch every current session to MODEL, shown as LABEL.
+MODE is how the sessions that would lose their conversation hand it
+over (see `handoff/switch'); `none' just switches them all.  The model
+becomes the default for new sessions too, unless NO-DEFAULT."
+  (unless no-default
+    (harness-ui-call "_harness/config/set"
+                     (list :key "harness-model" :value model :scope "global")
+                     (lambda (_) nil)))
+  (let ((done (lambda (ids)
+                (message "Model → %s for %s session%s%s%s"
+                         label (length ids) (if (= 1 (length ids)) "" "s")
+                         (pcase mode
+                           ('compact ", summarising the conversations that need it first")
+                           ('compact-new ", letting the new model summarise a limited context where needed")
+                           ('transcript ", handing the transcripts over where needed")
+                           (_ ""))
+                         (if no-default "" ", and for new sessions")))))
+    (if (eq mode 'none)
+        (harness-ui-call "_harness/session/set-all"
+                         (list :settings (list :model model) :filter (list :active t))
+                         done)
+      (harness-ui-call "_harness/handoff/switch-all"
+                       (list :model model :filter (list :active t) :mode (symbol-name mode))
+                       done))))
 
 ;;;###autoload
 (defun harness-set-model-all (&optional no-default)
@@ -1782,21 +2381,31 @@ argument says otherwise.  Use this when a plan runs out, a provider
 fails, or a cheaper model should take over work already in flight.
 Idle, running and blocked sessions of every project change, each
 recording it as a hint; inactive ones are history and are left alone,
-and no running turn is cancelled.  A session's provider state is kept,
-so switching back can still resume it."
+and no running turn is cancelled: it takes the new model at its next
+step.  When the switch would lose sessions their conversation (see
+`harness-ui-switch-model'), it asks once for all of them, and the
+handoff chosen applies to each of them.  A session keeps its provider
+state until another provider runs a step in it, so switching back before
+then resumes its conversation."
   (interactive "P")
-  (harness-ui-choose-model
-   (lambda (id label)
-     (unless no-default
-       (harness-ui-call "_harness/config/set"
-                        (list :key "harness-model" :value id :scope "global")
-                        (lambda (_) nil)))
-     (harness-ui-call "_harness/session/set-all"
-                      (list :settings (list :model id) :filter (list :active t))
-                      (lambda (ids)
-                        (message "Model → %s for %s session%s%s"
-                                 label (length ids) (if (= 1 (length ids)) "" "s")
-                                 (if no-default "" ", and for new sessions")))))))
+  ;; The chat the command runs in, for the banner to show in.
+  (let ((host (and (derived-mode-p 'harness-chat-mode) (current-buffer))))
+    (harness-ui-choose-model
+     (lambda (id label)
+       (harness-ui-call
+        "_harness/handoff/check-all" (list :model id :filter (list :active t))
+        (lambda (checks)
+          (let ((lossy (cl-remove-if-not (lambda (c) (harness-json-true-p (plist-get c :lossy))) checks)))
+            (if (null lossy)
+                (harness-ui--switch-all id label 'none no-default)
+              (funcall harness-ui-switch-function
+                       lossy label (length checks) nil host
+                       (lambda (mode)
+                         (if (eq mode 'cancel)
+                             (message "Models unchanged")
+                           (harness-ui--switch-all id label mode no-default)))))))
+        ;; A harness that cannot check switches them as it always did.
+        (lambda (_err) (harness-ui--switch-all id label 'none no-default) nil))))))
 
 (defconst harness-ui--thinking-level-order
   '("none" "minimal" "low" "medium" "high" "xhigh" "max")
@@ -1985,9 +2594,10 @@ either the command asks for a session, so the label has no state."
     map)
   "Prefix keymap of the harness UI.  Other UI modules add their commands.")
 
-;; At top level, not in the `defvar', so a reload binds it in a running
+;; At top level, not in the `defvar', so a reload binds them in a running
 ;; Emacs too.
 (define-key harness-ui-map (kbd "i") #'harness-toggle-non-interactive)
+(define-key harness-ui-map (kbd "F") #'harness-fullscreen)
 
 (defvar harness-global-mode-map (make-sparse-keymap)
   "Keymap of `harness-global-mode': `harness-ui-map' under `harness-ui-prefix-key'.")
@@ -2264,6 +2874,8 @@ leaves the buffer's commands out, never the whole menu."
     ("a" "Task mode" harness-tasks :if (lambda () (harness-ui--command-available-p 'harness-tasks)))
     ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
     ("b" "BTW side conversation" harness-btw :if (lambda () (harness-ui--command-available-p 'harness-btw)))
+    ("F" (lambda () (if (harness-ui--fullscreen-layout) "End fullscreen" "Fullscreen overview"))
+     harness-fullscreen)
     ("f" "Fork session" harness-fork-session)
     ("k" "Cancel turn" harness-cancel-turn)
     ("D" "Delete session" harness-delete-session)]
@@ -2280,6 +2892,7 @@ leaves the buffer's commands out, never the whole menu."
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
+    ("z" "Companion pet" harness-pet :if (lambda () (harness-ui--command-available-p 'harness-pet)))
     ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
     ("P" "Remote control" harness-remote-control
      :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
@@ -2288,6 +2901,7 @@ leaves the buffer's commands out, never the whole menu."
     ("v" (lambda () (if (fboundp 'harness-ui-version-menu-label) (harness-ui-version-menu-label) "Version"))
      harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
     ("R" "Reload harness" harness-reload)
+    ("U" "Update harness" harness-update)
     ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes
   ;; list some in their `harness-menu-group'.

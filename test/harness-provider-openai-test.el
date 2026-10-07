@@ -542,6 +542,32 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (string-match-p "Invalid API key" (plist-get (cadr events) :error)))
       (should (string-match-p "401" (plist-get (cadr events) :error))))))
 
+(ert-deftest harness-provider-openai-http-errors-say-what-kind ()
+  "HTTP failures carry what kind they are, so the fallback can act on them."
+  (dolist (case '((402 "Insufficient Balance" billing)
+                  (429 "Rate limit exceeded" rate-limit)
+                  (401 "Invalid API key" auth)))
+    (pcase-let ((`(,status ,message ,kind) case))
+      (harness-openai-test-with-fake
+          `(("chat/completions" . (:status ,status
+                                    :body ,(format "{\"error\":{\"message\":%S}}" message))))
+        (let* ((events (car (harness-openai-test--complete
+                             harness-openai-test-endpoint
+                             '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "hi"))))))))
+               (done (car (last events))))
+          (should (eq 'error (plist-get done :stop-reason)))
+          (should (eq kind (plist-get done :error-kind)))))))
+  ;; A 429 whose body says the account's quota is used up is out of
+  ;; money, the way DeepSeek answers a spent prepaid balance.
+  (harness-openai-test-with-fake
+      '(("chat/completions" . (:status 429
+                               :body "{\"error\":{\"message\":\"Insufficient Balance\",\"type\":\"insufficient_quota\"}}")))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-deepseek-endpoint
+                        '(:model "testdeepseek:deepseek-flash"
+                          :messages ((:role user :content ((:type "text" :text "hi")))))))))
+      (should (eq 'billing (plist-get (car (last events)) :error-kind))))))
+
 (ert-deftest harness-provider-openai-missing-key-and-transport-error ()
   (with-environment-variables (("HARNESS_TEST_MISSING_KEY" nil))
     (harness-openai-test-with-fake nil
@@ -697,17 +723,53 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
     (let ((models (harness-test-await (harness-openai--models
                                        (append harness-openai-test-openai-endpoint '(:default-context 400000))))))
       (should (equal '(:name "gpt-x" :label "gpt-x" :context-window 400000) (car models)))))
-  ;; A failing endpoint resolves to an empty list with a warning, never rejects.
+  ;; A failing endpoint with nothing listed before rejects, saying why
+  ;; without its key; the catalogue logs it and keeps what it had.
   (harness-openai-test-with-fake '(("/models" . (:status 401 :body "{\"error\":{\"message\":\"nope\"}}")))
     (harness-openai-clear-models-cache)
-    (let ((warned nil))
-      (add-hook 'harness-log-hook (lambda (level msg) (when (and (eq level 'warn) (string-match-p "nope" msg)) (setq warned t))))
-      (unwind-protect
-          (should (null (harness-test-await (harness-openai--models harness-openai-test-endpoint))))
-        (setq harness-log-hook nil))
-      (should warned)
-      ;; failures are not cached
-      (should-not (gethash 'testrouter harness-openai--models-cache))))
+    (let ((err (should-error (harness-test-await (harness-openai--models harness-openai-test-endpoint)))))
+      (should (string-match-p "401.*nope" (harness-error-message err)))
+      (should-not (string-match-p "sk-test" (harness-error-message err))))
+    ;; failures are not cached
+    (should-not (gethash 'testrouter harness-openai--models-cache)))
+  (harness-openai-clear-models-cache))
+
+(ert-deftest harness-provider-openai-models-windows-of-other-servers ()
+  "The window and the output limit come from whichever field the server uses.
+A model no field sizes has none: the catalogue estimates it."
+  (harness-openai-test-with-fake
+      `(("/models"
+         . (:body ,(harness-json-encode
+                    '(:object "list"
+                      :data ((:id "vllm-model" :max_model_len 32768)
+                             (:id "groq-model" :context_window 131072 :max_completion_tokens 8192)
+                             (:id "mistral-model" :max_context_length 256000)
+                             (:id "litellm-model" :max_input_tokens 400000 :max_output_tokens 128000)
+                             (:id "bare-model")))))))
+    (harness-openai-clear-models-cache)
+    (let ((models (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint))))
+      (should (equal '(32768 131072 256000 400000 nil)
+                     (mapcar (lambda (m) (plist-get m :context-window)) models)))
+      (should (= 8192 (plist-get (nth 1 models) :max-output)))
+      (should (= 128000 (plist-get (nth 3 models) :max-output)))))
+  (harness-openai-clear-models-cache))
+
+(ert-deftest harness-provider-openai-models-refresh-and-failure ()
+  "A refresh asks the server again; a failed listing keeps the models listed before."
+  (harness-openai-test-with-fake
+      `(("/models" . (:body ,(harness-json-encode '(:object "list" :data ((:id "gpt-x")))))))
+    (harness-openai-clear-models-cache)
+    (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint))
+    (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint))
+    (should (= 1 (length harness-openai-test--requests)))
+    (setq harness-openai-test--responses
+          `(("/models" . (:body ,(harness-json-encode '(:object "list" :data ((:id "gpt-x") (:id "gpt-y"))))))))
+    (should (= 2 (length (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint t)))))
+    (should (= 2 (length harness-openai-test--requests)))
+    (setq harness-openai-test--responses '(("/models" . (:status 500 :body "{\"error\":{\"message\":\"down\"}}"))))
+    (should (equal '("gpt-x" "gpt-y")
+                   (mapcar (lambda (m) (plist-get m :name))
+                           (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint t))))))
   (harness-openai-clear-models-cache))
 
 ;;;; Integration

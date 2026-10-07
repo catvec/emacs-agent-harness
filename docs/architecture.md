@@ -12,9 +12,9 @@ module needs something more, add it here first.
                                  the harness process (see Processes).
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
- State          session, agent, config, project, store, usage, naming, compaction,
-                worktree, merge, tasks, tasks-notify, skills, perms, sandbox,
-                notifications
+ State          session, agent, config, project, store, usage, fallback, naming,
+                compaction, handoff, worktree, merge, tasks, tasks-notify, skills,
+                perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
@@ -185,15 +185,20 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
          :billing api|subscription|extra-usage :plan "max")    ; billing and plan of the latest call
  :context-window N                  ; in effect: the override, else the model's
  :context-window-override nil|N     ; a window set for the session
- :budget nil|(:amount F :hard BOOL)
+ :budget nil|(:amount F :hard BOOL)    ; given to the session; the Budget setting is not copied
  :head "node-id"
  :queue ((:id "q1" :text "…" :attachments (ATTACHMENT…)) …)
  :pending ((:id "p1" :kind permission|question :payload PLIST :created FLOAT) …)
  :todos ((:id :text :status pending|in-progress|done) …)
  :plan nil|"markdown"
- :provider-state PLIST                 ; opaque, owned by the provider (e.g. CLI session id)
+ :provider-state PLIST                 ; owned by the provider it names: (:cli-session-id … :provider "claude")
  :provider-node nil|"node-id")         ; the node that provider conversation reached
 ```
+
+`:provider-state` is opaque to everyone but the provider that wrote it,
+which it names as `:provider` (see "provider", Provider state): only
+that provider's models continue it, and `session/provider-state` says
+whether a given model can.
 
 `:usage :context` is the input size of the last request (prompt tokens
 incl. cache); the UI colours it against `:context-window`.  `:cost`
@@ -204,8 +209,8 @@ record".
 `:context-window` is looked up in the model catalogue (`provider/model`)
 each time the session is described, so it follows the catalogue; only
 `:context-window-override` is stored.  A copy of the catalogue's window
-would go stale when the catalogue changes, or keep the 128000 stand-in
-given for a model whose provider has not answered yet.  When the
+would go stale when the catalogue changes, or keep the estimate given
+for a model whose provider has not answered yet.  When the
 catalogue changes, the sessions whose window moved get `session/changed`.
 
 ### Node (conversation DAG)
@@ -232,6 +237,17 @@ then).  No `:from` means the user; read it with `harness-node-sender'
 and `harness-sender-kind' (harness-util, both sides of ACP), which
 tolerate a kind that travelled as a string.  The model still gets the
 message as a user message; UIs show the sender instead of "You".
+
+A node the harness wrote to hand the conversation over to a model of
+another provider (see "handoff") says so in its `:meta` `:handoff`,
+`(:mode "transcript"|"compact" :file PATH :from MODEL :to MODEL)`: the
+user message pointing the new model at a transcript file (sender
+`(:kind system :source "model handoff")`), or the compaction node of a
+summary made for it.  Read it with `harness-node-handoff`.  The chat
+shows the note as the harness's, with the two models and a button that
+opens the file.  An assistant or thinking node's `:meta` `:model` is
+the model of the step that wrote it, which a switch during that step
+does not change.
 
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
@@ -309,8 +325,9 @@ project-root `.dir-locals.el` → customize default.  Variables are
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
 (the level BTWs start at, default "low"; nil for the session's),
-`harness-allowed-directories`, `harness-budget`, `harness-sandbox-policy`,
-`harness-non-interactive`.
+`harness-allowed-directories`, `harness-sandbox-policy`,
+`harness-non-interactive`.  `harness-budget` has a global value only:
+it is one budget for all sessions together (see usage).
 
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
@@ -448,7 +465,17 @@ gone.
   returns the ids that changed, newest first.  A session already holding
   the value is skipped, and each one changed gets the same event and hint
   as `session/update`.  This is what `harness-set-model-all` uses to move
-  every session to another model or provider at once.
+  every session to another model or provider at once, when no session
+  would lose its conversation (else `handoff/switch-all`).
+- `session/provider-state ID &optional MODEL` → the provider state of
+  ID that MODEL (default the session's model) can continue, or nil.  A
+  state belongs to the provider it names (`:provider`); a model of
+  another provider gets nil, as if the session had none.  A state
+  written before states named their provider belongs to the provider
+  that answered last (the `:meta` `:model` of the newest assistant or
+  thinking node), else to the session's model's: another provider
+  having answered since means the state's own never saw those turns.
+  The record itself is not changed.
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
 - `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
   (closed: still listed and readable; the next message sent to it resumes it).
@@ -470,10 +497,12 @@ gone.
   supported: at the parent's head (when that is where its provider
   conversation is) the whole state, at an earlier node the state cut at
   the last checkpoint up to it, and none when no checkpoint precedes
-  the node.  Without a forked state the fork has none, never the
-  parent's own, which would carry on the parent's provider
-  conversation; the provider then starts a new one from the transcript.
-  The fork's `:provider-node` is the node.  → new session.
+  the node, or when the fork's model is of another provider, which
+  cannot continue the parent's state (`session/provider-state`).
+  Without a forked state the fork has none, never the parent's own,
+  which would carry on the parent's provider conversation; the provider
+  then starts a new one from the transcript.  The fork's
+  `:provider-node` is the node.  → new session.
 - `session/btw ID &optional NAME`: a BTW side conversation over ID, a
   new, empty `btw` session sharing nothing with ID or with any other
   BTW (no nodes, no fork node, no provider state, no directory grants).
@@ -535,19 +564,27 @@ gone.
 ```elisp
 (harness-define-provider 'ID
   :label "Claude Code" :doc "…"
-  :models FN            ; () → promise of MODEL plists
+  :models FN            ; (&optional REFRESH) → promise of MODEL plists
   :complete FN          ; (REQUEST) → HANDLE plist (:cancel FN)
   :fork FN              ; (MODEL PROVIDER-STATE &optional CHECKPOINT) → promise of new state [optional]
   :quota FN             ; (&optional REFRESH) → promise of QUOTA (below)     [optional]
+  :warm FN              ; (REQUEST) → BOOL: get ready for a request like it  [optional]
+  :close FN             ; (SESSION-ID) → BOOL: free what it keeps for one   [optional]
+  :resolve FN           ; (NAME &optional MODELS) → MODEL plist or nil: a name
+                        ; its listing lacks (an alias, a variant)          [optional]
   :capabilities PLIST   ; static defaults, merged with per-model ones
   :tiers PLIST)         ; a model per tier, see below
 ```
 
 MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
-:context-window N :max-output N :input-modalities ("text" "image")
+:context-window N :context-window-estimated BOOL :context-window-basis "…"
+:max-output N :input-modalities ("text" "image")
 :thinking-levels (…) :pricing (:input F :output F :cache-read F :cache-write F)
-:pricing-fn SYMBOL :capabilities (…))`.  Pricing is USD per million
-tokens.  A model whose rates change with the clock carries `:pricing-fn`,
+:pricing-fn SYMBOL :resolves-to "NAME" :capabilities (…))`.  Pricing is
+USD per million tokens.  `:context-window-estimated` marks a window
+nobody gave for this model, and `:context-window-basis` says what it
+was drawn from (see below); `:resolves-to` is the model an alias stands
+for.  A model whose rates change with the clock carries `:pricing-fn`,
 a symbol called as `(MODEL USAGE AT)` that returns the pricing plist in
 effect at AT; `usage/price` uses its answer instead of `:pricing`.  This
 is how the DeepSeek provider follows its peak and off-peak tiers, and it
@@ -560,23 +597,67 @@ without the user naming one.  A tier the provider does not name, and a
 provider that declares none, falls back to its own catalogue sorted by
 price: `provider/tier-model MODEL-ID &optional TIER' returns the `:cheap'
 one by default, or nil when the provider is unknown or lists nothing
-(the caller then uses what it has).  This is what ties the judge to the
+(the caller then uses what it has).  MODEL-ID may also be a provider id
+alone.  This is what ties the judge to the
 session's provider.  Claude, DeepSeek, Bedrock and Copilot name their
 tiers; the dynamic OpenAI-compatible catalogues fall back to price.
+The other way round, `provider/model-tier MODEL-ID` says which tier a
+model is in its provider: the one `:tiers' names it for (`:balanced'
+first, then `:frontier', then `:cheap', when several do), else its
+place in the catalogue by price (cheapest third `:cheap', dearest third
+`:frontier'), else `:balanced'.  So Claude's Fable 5.1, which no tier
+names and which costs the most, is `:frontier'.  The fallback module
+maps a model to "its model of similar ability" at another provider
+through the two.
 
 The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
 other's.  A provider whose models are not cached is asked by the first
 `provider/model` that needs one: a static catalogue answers at once and
-is cached before the call returns.  Until a slower provider answers,
-and for a model its provider does not list, a stand-in MODEL with a
-128000-token window is returned.  A failed listing is cached as empty
+is cached before the call returns.  A failed listing is cached as empty
 (or keeps the models listed before), so lookups do not ask again before
-a refresh (`provider/models t`).  `provider/models-updated` follows
-every listing that is cached.
+a refresh (`provider/models t`), which a models function that takes an
+argument is told of, so it asks its source rather than its cache.
+`provider/models-updated` follows every listing that is cached.  A
+provider that learns something its listing should show (a new list
+from its source, the window a model really ran with) calls
+`harness-provider-relist ID` to have it listed and announced again.
+
+The model lists are not hard-coded.  Each provider lists what its
+source lists, with the windows the source gives: the Claude CLI's
+`initialize` answer and results, the Anthropic, OpenAI-compatible,
+DeepSeek and Copilot model listings, Bedrock's (sections below).  What
+a provider ships is a seed for before its source answered, and for
+prices.  So a new model works without a code change.
+
+Every MODEL has a context window, and an unknown slug never silently
+gets a small one.  A model its provider lists without a window, one
+its provider flags as its own guess (Bedrock's family defaults), and a
+name no listing holds (an alias, a model a slower provider has not
+listed yet, a model of a provider that is gone) get an estimate,
+flagged `:context-window-estimated t`, drawn in this order from:
+1. the same model where a provider sizes it, its own provider first:
+   `harness-provider-model-key` drops vendor and region prefixes, dates
+   and Bedrock versions, so `us.anthropic.claude-opus-4-5-20251101-v1:0`,
+   `anthropic/claude-opus-4.5` and `claude-opus-4-5` are one model;
+2. the model of its own provider that shares the most leading name
+   words with it, two at least (`claude-opus-5-6` takes after
+   `claude-opus-5-5`, not after `claude-haiku-4-5`);
+3. the window most of its provider's models have;
+4. `harness-provider-fallback-context-window` (200000).
+A provider's own guess gives way to the first two only.  Estimates are
+drawn from windows providers gave, never from another estimate, and
+made again whenever a listing changes.  A name no listing holds goes to
+its provider's `:resolve` first (Claude Code's aliases, Copilot's
+`default`, a Bedrock profile ARN), whose answer is estimated only where
+it gives no window; the log says once per model when a listed
+provider's model got an estimate.  The model picker shows an estimated
+window as `~200k`.
 
 Capabilities: `:hosted-loop` (provider runs the tool loop and keeps the
-history; the agent only sends new user content), `:fork`, `:resume`,
+history; the agent only sends new user content, so switching to it
+from another provider starts a conversation without the history unless
+it is handed over: see "handoff"), `:fork`, `:resume`,
 `:vision`, `:audio-in`, `:thinking`, `:cache-status`, `:quota`,
 `:compaction hosted`, `:cost-reported` (usage events carry `:cost`),
 `:billing` (usage events say who paid: `:billing`, `:plan`,
@@ -589,7 +670,10 @@ REQUEST = `(:model "ID:NAME" :session SESSION :system "…" :messages (MSG…)
 :tools (TOOL-SPEC…) :thinking LEVEL :max-tokens N :provider-state PLIST
 :on-event FN)`.  MSG = `(:role user|assistant|tool :content (BLOCK…))`.
 TOOL-SPEC = `(:name :description :schema JSON-SCHEMA-PLIST)`.  For hosted
-loops only the trailing user message is sent.  A REQUEST may also carry
+loops only the trailing user message is sent: the user messages after
+the last assistant message, less tool results.  A turn's
+`:provider-state` is the session's state when the request's model can
+continue it (`session/provider-state`), else nil.  A REQUEST may also carry
 `:builtin-tools`, a list of harness tool names (from `tools/builtin`):
 the provider turns on its own tools in their place for this request,
 and `:tools` lacks them.  `:no-thinking t` asks for no extended
@@ -623,8 +707,25 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type activity :phase PHASE :tool NAME :chars N)  ; what the model is busy with, see below
 (:type quota :windows (…))
 (:type hint :text "…")                  ; provider-side notices (compaction, retries)
-(:type done :stop-reason end-turn|tool-use|max-tokens|cancelled|error :error "…")
+(:type done :stop-reason end-turn|tool-use|max-tokens|cancelled|error :error "…"
+       :error-kind quota|billing|rate-limit|auth|… :resets FLOAT)  ; the last two optional
 ```
+
+A `done` with `:stop-reason error` may say what kind of failure it was,
+when the provider knows: `:error-kind` `quota` (a plan's usage limit is
+used up: Claude Max's 5-hour or weekly window, Copilot's monthly
+allowance), `billing` (out of money: a prepaid balance or credit spent,
+an account on hold), `rate-limit` (a short-term limit; the provider
+works again in a moment), or another symbol for anything else (`auth`).
+`:resets` is when a quota comes back, as a float time, when the
+provider was told.  The Claude provider reads the CLI's assistant
+`error` field (`rate_limit` while a usage window is `rejected`,
+`billing_error`, `account_on_hold`) and the `resetsAt` of the
+`rate_limit_event` that rejected the call; the OpenAI-compatible one
+HTTP 402 (DeepSeek's "Insufficient Balance") and a 429 whose code is
+`insufficient_quota`; Copilot a `session.error` of type `quota` or
+status 402.  The fallback module (below) classifies failures that come
+without a kind from their text.
 
 A provider that runs one of its own tools in place of a harness tool
 (one the request's `:builtin-tools` names) reports its calls with three
@@ -665,6 +766,20 @@ agent persists, replacing the pending one.  When it returns nil or
 fails, the fork starts without provider state: copied as is, the
 parent's would make the fork resume the parent's own CLI session.
 
+Provider state: a state belongs to the provider that wrote it and says
+so as `:provider` (a string).  The agent tags each `provider-state`
+event with the provider of the model the step went to -- not the
+session's model, which a switch during the step changes -- and
+`provider/fork` tags what it returns (`harness-tag-provider-state`,
+`harness-provider-state-owner`).  Each step sends only a state its
+model can continue (`session/provider-state`); a state of another
+provider is dropped from the session at that step, since that
+provider's turns are ones the state's conversation never saw.  So a
+session switched away and straight back resumes its conversation,
+while one that ran a step elsewhere starts a new one there, which
+`handoff/check` calls lossy.  Naming, compaction and forks work on a
+fork of a state their model can continue, never on another provider's.
+
 Checkpoints: a hosted loop says where its conversation stands as
 content lands in it, so that a fork or a checkout at a node can cut the
 conversation there later.  A `checkpoint` event without `:call-id`
@@ -689,10 +804,19 @@ oldest messages but the first dropped past
 `harness-provider-history-limit`, thinking left out).
 
 Methods: `provider/list`, `provider/models &optional REFRESH` (cached union
-across providers), `provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
+across providers), `provider/cached-models PROVIDER-ID` (one provider's
+cached models, at once: a provider not listed yet is asked, and gives
+nil until it answers; no other provider holds it up),
+`provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
 `provider/complete REQUEST` → HANDLE, `provider/fork MODEL-ID STATE &optional
-CHECKPOINT` → promise, `provider/quota PROVIDER-ID &optional REFRESH`.  The
-model used when nothing more specific is configured is `harness-model`.
+CHECKPOINT` → promise, `provider/quota PROVIDER-ID &optional REFRESH`,
+`provider/warm REQUEST` (ask the provider to prepare what a request like
+REQUEST, which has no messages, will need -- the Claude CLI spawns its
+process now, so the answer comes sooner; a failure is only logged) and
+`provider/close MODEL-ID SESSION-ID` (free what the provider keeps for a
+session id of a request that is not a session of its own, such as a task
+board's search; the CLI kills its process).  The model used when nothing
+more specific is configured is `harness-model`.
 
 Billing and quota: `provider/quota` (PROVIDER-ID a symbol or its name;
 REFRESH asks for fresh data first) returns a promise of QUOTA, nil when
@@ -725,6 +849,24 @@ Quota comes from the CLI's `get_usage` control request (the data behind
 asked for again after a turn once `harness-provider-claude--quota-ttl`
 (60 s) has passed.  With no CLI process running, a short-lived probe
 process answers instead, sending no message.
+
+The Claude provider's models are what the CLI says they are.  Every
+`initialize` answer (each new process's, the quota probe's, and a
+probe's started when a refresh asks) lists what its /model picker
+offers: aliases such as `opus` and `sonnet[1m]`, their labels and effort
+levels and, from Claude Code 2.1.197 on, the model each resolves to.
+Every result's `modelUsage` gives the context window the CLI ran each
+model with, and the name a process was started with takes the window
+of the model it ran.  With an Anthropic API key
+(`harness-provider-claude-api-key`, else ANTHROPIC_API_KEY or
+auth-source), `GET /v1/models` adds every model the API serves, with
+its window, output limit and effort levels.  What was learned is kept
+in `claude-models.json` in the state directory;
+`harness-provider-claude-models` only seeds the catalogue and gives
+prices.  An alias or a name nothing lists is resolved
+(`harness-provider-claude--resolve`): a learned window, a `[1m]`
+variant's million tokens, the window of the model it resolves to, else
+the window of its family's newest listed model, flagged as an estimate.
 
 Each result's `total_cost_usd` is a running total for the process,
 seeded on `--resume` with the session's restored spend.  A turn
@@ -765,6 +907,16 @@ model), and the echoed `tool_result` a `tool-result`.  The process
 records which tools it was started with, so a request that turns
 WebSearch on or off restarts it with `--resume`.
 
+The CLI asks for the harness's tools (MCP `tools/list`) once, in a
+handshake that follows the harness's `initialize`, and keeps the list
+for the life of the process.  That handshake can come while no turn is
+in flight: a request whose trailing messages are only tool results
+spawns the process and ends at once ("No user message to send"), as
+the first step after a mid-turn switch to Claude Code did.  So the
+process record keeps the tool set of its last request after the turn
+(`tools` slot) and `tools/list` answers from it, never with an empty
+list for want of a running turn.
+
 Every `assistant` message and tool-result echo of the CLI carries the
 uuid of its entry in the CLI session's chain; messages of a sub-agent's
 chain (`parent_tool_use_id`) do not count.  The provider reports them
@@ -776,7 +928,9 @@ which spawns `--resume ID --fork-session --resume-session-at UUID`: the
 CLI keeps the chain up to and including that entry (print mode only,
 which the provider uses).  A running process is reused only when it was
 started with the request's settings and holds the CLI session the
-request's state names; a `:fork-pending` state always gets a new one.
+request's state names -- a session whose state was dropped, because it
+went on with another provider, starts a new CLI session rather than
+carry on a stale one; a `:fork-pending` state always gets a new one.
 `session/provider-state-changed` to a state naming another CLI session,
 or none, closes the session's idle process.
 
@@ -817,14 +971,56 @@ Converse API: one ConverseStream request per call, its binary event
 stream decoded into `text`, `thinking`, `usage` and `tool-call` events.
 Each entry of `harness-bedrock-endpoints` is a provider (default
 `bedrock`); model ids are `ID:MODEL-ID`.  Its catalogue comes from
-ListFoundationModels and ListInferenceProfiles; context windows and
-prices, which Bedrock does not report, come from
-`harness-bedrock--model-defaults`.  Usage events carry tokens and
+ListFoundationModels and ListInferenceProfiles, cached an hour per
+endpoint; a refresh lists again, and a listing that fails keeps the
+models listed before.  Context windows and prices, which Bedrock does
+not report, come from `harness-bedrock--model-defaults`; a family's
+catch-all window there is flagged as a guess, which the same model's
+window at another provider replaces, or else that of the endpoint's
+closest model by name that the defaults size.  A model no default knows gets
+the endpoint's `:default-context`, else an estimate, and a name the
+listing lacks (an application inference profile ARN) is described from
+the defaults by its `:resolve`.  Usage events carry tokens and
 `:billing api` but no cost, so `session/usage-add` prices them from the
 catalogue.  Claude and Nova requests carry prompt cache points; Claude
 reasoning returned with tool calls is kept and sent back with them while
 the tool loop lasts.  `harness-http-request` takes `:binary t` for such
 framings: the response then reaches `:on-chunk` as unibyte strings.
+
+An endpoint can point at a gateway in front of Bedrock instead.  Its
+`:endpoint-url` holds the prefix that Bedrock's paths go under, and a
+query that every request keeps (`harness-bedrock--url`).  Listing
+follows a runtime URL whose host is not AWS's
+(`harness-bedrock--control-url`), so a gateway's keys and headers never
+go to AWS.  Requests are authenticated in one of three ways:
+
+- An API key in the header the endpoint names.  It comes from a
+  variable, auth-source, or `:bearer-token-command`, whose output is
+  kept until the key expires.  The command runs again once when the
+  gateway refuses the key, for a chat request or a listing.
+- SigV4 for the gateway's own URL.
+- SigV4 for Bedrock's own URL, with `:sign-for-aws`, for a gateway that
+  passes requests on unchanged.  The AWS host is signed but not sent.
+
+`${NAME}` in `:headers` is read from the environment and kept out of
+every message.  Saving the setting re-registers the providers.  It also
+forgets the cached models, quirks and kept keys of each endpoint whose
+entry changed (`harness-bedrock--forget-endpoint`), so an edit shows
+at once, and a listing that fails after it does not bring back the
+models of the old setup.  The tests run a stub gateway from harness-bedrock-mock.el
+(`:prefix` and `:checks`), and nothing else is reachable while they
+run.
+
+The OpenAI-compatible provider (`provider-openai`) makes a provider of
+each entry of `harness-openai-endpoints`.  Its models are what the
+server lists at /models, asked again after an hour or when a refresh
+asks; a listing that fails keeps the models listed before.  The window
+comes from whichever field the server names it with (`context_length`
+and `top_provider.context_length` of OpenRouter and others,
+`context_window` of Groq, `max_context_length` of Mistral and LM
+Studio, `max_model_len` of vLLM, `max_input_tokens` of LiteLLM), else
+the endpoint's `:default-context`, else the catalogue's estimate:
+plain OpenAI lists ids alone.
 
 The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
 OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
@@ -848,7 +1044,13 @@ still gets it (even when it names `:flavor openai'), so its tool loops
 do not 400, and the cache fields it reports are split so cached input is
 billed at the cache-hit rate, while OpenAI and OpenRouter hosts still
 drop thinking.
-`harness-deepseek-*` adds registration and prices.
+`harness-deepseek-*` adds registration and prices.  Its models are
+what DeepSeek's /models lists (names, windows, output limits,
+modalities, effort levels), asked in the background once the listing
+is an hour old, so the catalogue never waits on the network;
+`harness-deepseek-model-specs` adds prices and labels, and is what is
+listed before /models answered or when it cannot be reached.  A model
+DeepSeek adds is priced by the tier its name says (flash or pro).
 The provider is created only while a key is found
 (`harness-deepseek-api-key`, DEEPSEEK_API_KEY, or auth-source), so
 nothing uncallable is listed; see `harness-deepseek-always-register`.
@@ -924,7 +1126,9 @@ additional usage is on.  Quota comes from `account.getQuota`
 comes from `models.list` (context window, image input, reasoning
 efforts, token prices as `:pricing`), or before `copilot login` from
 `models.getBuiltInCatalog`, asked of a short-lived probe process when
-no session process runs.
+no session process runs.  `copilot:default` resolves to
+`harness-provider-copilot-default-model`, with that model's window,
+levels and prices.
 
 ### tools
 
@@ -984,13 +1188,16 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   or deny; a denial carries `:message`, the text `tools/execute` would
   have returned.
 - Corporate mode (`harness-corporate-mode`) turns off the tools of kind
-  `net`.  No session gets them, so `tools/builtin` never picks a
-  provider's own web search either; the list without a session still
-  has them.  `tools/execute` and `tools/authorize` deny a call to one
-  before the `permission/decide` chain, whatever the mode and the
-  standing rules: reason "corporate mode: network tools are off", a
-  hint to work with the project and the tools the session has,
+  `net` other than web search (`harness-tools--corporate-net-tools`:
+  web_search).  No session gets them; the list without a session still
+  has them.  `tools/execute` and `tools/authorize` deny a call of kind
+  `net` to any other tool (one the harness lacks included) before the
+  `permission/decide` chain, whatever the mode and the standing rules:
+  reason "corporate mode: network tools other than web search are
+  off", a hint to work with the project and the tools the session has,
   `:denied t`, and `permission/decided` as for any decision.
+  web_search stays, and so does a provider's own search standing in
+  for it (`tools/builtin`); their calls go to the chain as in any mode.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.
@@ -1040,6 +1247,26 @@ non-interactive session it stays a denial.
   everything below the directories it matches.  A grant of `DIR/**` is
   kept as the directory DIR/, so default grants read as before; a grant
   narrowed to one file keeps its name.
+- What a shell command reaches: the bash tool's `:paths` is where it
+  runs, which is all the jail checks (the sandbox confines the command,
+  and the mode and the judge read it whole).  For an `exec` call with a
+  `:command`, `harness-perms--command-paths` reads the paths the
+  command line names: a best-effort word scan (quotes, backslashes,
+  comments, `;` `&` `|` `(` `$(` and backquotes, redirections) that
+  keeps words that are absolute, start with `~` or `$HOME`, or with
+  `./` or `../`, and the values of `--option=…` and `NAME=…` words;
+  not the programs it runs (the first word of a command, after
+  assignments, keywords and prefixes such as `sudo` or `xargs`), not
+  `/dev/null` and the like, and on this machine not an absolute word
+  whose first directory does not exist, so a `/api/v1` in a grep is no
+  path (on a remote host nothing is looked up, and `~` words are left
+  out).  The call is about its subject paths
+  (`harness-perms--subject-paths`): the ones it names outside the
+  session's directories, or, when it names none there, where it runs,
+  as before.  The tool prompt shows and builds its pattern from them,
+  so `ls -la ~/.claude/projects/x` run in the project is answered for
+  `~/.claude/projects/x/**` and not for every command run in the
+  project, and the rules weigh them (below).
 - The jail asks instead of denying when a path lies outside the roots
   and someone can answer: a pending `permission` request whose payload
   carries `:dir`, `:pattern` and the options allow-once (this call may
@@ -1093,8 +1320,12 @@ non-interactive session it stays a denial.
   `harness-perms-rules`.  A rule with a `:path` (absolute, or relative to
   the session's cwd) applies to calls with paths only: an allow rule when
   the pattern holds every path of the call, a deny rule when it holds
-  any.  The mode stage checks them first, before the auto-allow list and
-  the mode.  A tool prompt for a call with paths offers its `:pattern`,
+  any.  For a shell command an allow rule needs every subject path (the
+  ones it names outside the session's directories, else where it runs),
+  so a rule for the project no longer lets `rm -rf ~` run in it; a deny
+  rule holds when any path it names, inside or out, or where it runs
+  lies in the pattern.  The mode stage checks them first, before the
+  auto-allow list and the mode.  A tool prompt for a call with paths offers its `:pattern`,
   and its allow-session / allow-always / deny-always answers record
   `(:tool NAME :path PATTERN :behavior B)` rather than a rule for the
   tool everywhere; a call without paths records `(:tool NAME :behavior B)`
@@ -1102,7 +1333,9 @@ non-interactive session it stays a denial.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
   `:pattern` for a call with paths and `:dir` and `:reason` for a
-  directory prompt; UIs offer only the listed `:options`),
+  directory prompt; a tool prompt's `:paths` are its subject paths, and
+  a shell command's prompt has `:cwd`, where it runs; UIs offer only
+  the listed `:options`),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
@@ -1125,6 +1358,12 @@ non-interactive session it stays a denial.
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
   `web_fetch` reaches any URL and stays with the mode (the judge in auto).
+- Switching a session that waits on a `permission` prompt into `yolo`
+  answers the prompt (a `session/updated` handler): answering it
+  allow-once lets the call run, since yolo would have allowed it without
+  asking.  Only what the mode stage now allows is answered, so a
+  standing deny rule still decides; a directory prompt keeps waiting,
+  because not even yolo grants a directory without the user.
 - The judge is a safety check, not the agent's manager.  Its prompt
   (`harness-perms--judge-system`) has it decide one thing: whether the
   call risks serious harm that is hard to undo.  That means destroying
@@ -1257,7 +1496,15 @@ non-interactive session it stays a denial.
   `tools/builtin`); async filter `agent/before-turn` (value
   `(:proceed t :reason)`, args session) — budgets, merge holds and
   compaction hook in here; async filter `agent/step` at every step
-  boundary (same value shape) — merge holds pause here.
+  boundary (same value shape) — merge holds pause here; async filter
+  `agent/step-error` when a provider request fails (value `(:retry
+  nil)`, args session and FAILURE `(:error TEXT :error-kind KIND
+  :resets FLOAT :model MODEL-ID :step N)`, the `done` event's keys plus
+  the model the step ran on) — a handler that returns `(:retry t)`
+  has the step run again, on the session's model as it is then: the
+  fallback module switches the model and retries.  A turn retries at
+  most `harness-agent--max-error-retries` (8) times; otherwise, and
+  without a handler, the turn ends with `error` as before.
 - Events `agent/turn-started SID`, `agent/turn-ended SID REASON`,
   `agent/stream SID NODE-ID KIND DELTA` (kind text|thinking),
   `agent/tool-call SID NODE`, `agent/tool-result SID NODE`,
@@ -1284,6 +1531,26 @@ non-interactive session it stays a denial.
   turns (`agent/before-turn'), not inside one, so a native-provider
   turn that outgrows the window reaches the provider's own error;
   budgets refuse new turns.
+- Each step reads the session's model afresh: a model switch reaches a
+  running turn at its next step, never mid-step.  The step sends only
+  the provider state its model can continue and drops one of another
+  provider (see "provider", Provider state); what the step writes (the
+  `:meta` `:model` of its nodes, the provider state it reports) is the
+  step's model's.
+- Every node a model produces (assistant, thinking, tool-call) records
+  that model in `:meta :model`.
+- Handoff to a hosted loop: a hosted provider only gets the trailing
+  user message, its own conversation being the rest.  When the
+  transcript holds output of another provider's model after this
+  provider's last (a fallback, or a model switched by hand), what that
+  conversation missed -- from there, or from the last compaction --
+  is rendered as text at the head of the trailing user message:
+  messages, tool calls and results, each cut to
+  `harness-agent--handoff-item-chars`, the oldest left out beyond
+  `harness-agent--handoff-max-chars`; thinking is left out.  A request
+  that ends in tool results (a step retried mid-turn) closes the text
+  by asking the model to carry on, since a hosted provider drops tool
+  results it did not ask for.
 - Streaming updates of the live node are not persisted one by one; on
   exit (`kill-emacs-hook`) and shutdown the text streamed so far is.
 - Provider conversation and head: before a turn's gate,
@@ -1358,13 +1625,94 @@ non-interactive session it stays a denial.
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
   count billed cost, so calls a subscription covers spend none; a
   baseline counts toward both.
+- The Budget setting (`harness-budget`, `(:amount F :hard BOOL)`) is
+  one implicit budget, id "settings", for all sessions together: it
+  counts every recorded call and applies to every session, after the
+  explicit ones in `usage/session-budgets`.  `usage/budget-status
+  "settings"` gives its status while it is set; `usage/budgets` lists
+  only the explicit ones.  Sessions no longer copy it into their own
+  `:budget`; the session module drops the copies saved before, once
+  (marker `session-budget-copies-dropped.json`).
 - Pricing: `usage/price MODEL-ID USAGE` → cost using the model's pricing.
+
+### fallback
+
+When a provider runs out of quota or money, its sessions carry on with
+another.  `harness-fallback-models` (global, *Models and services*) is
+the order of preference, first used to last: each entry a provider id,
+standing for that provider's model of similar ability (the tier of the
+session's model, see `provider/model-tier`), or a model id used as it
+is.  nil turns the switching off; running out is still noticed, shown
+and hinted.
+
+- Marks: a provider that ran out is marked, the whole provider (key
+  `"deepseek"`) or one model (key `"claude:claude-fable-5-1"`, when only
+  a window scoped to a model is used up).  MARK = `(:key :provider
+  :model :kind quota|billing :reason TEXT :since F :until F :source
+  error|quota)`.  `:until` is when the limit resets, when known, else
+  an hour on (`harness-fallback--retry-after`); a mark ends then, or
+  when the user clears it, and a timer announces it.  Marks persist in
+  fallback.json.
+- What counts: a failed step whose FAILURE (see `agent/step-error`)
+  has `:error-kind` `quota` or `billing`, or, without a kind, whose
+  error text reads as running out of quota or money (HTTP 402,
+  "insufficient balance", "usage limit", "hit your limit",
+  `insufficient_quota`...; `harness-fallback-error-kind`).  A
+  rate limit, an outage or a refused login never does.  Also
+  `provider/quota-updated`: a plan window used up (used >= 1, resetting
+  later), unless the plan's extra usage pays for calls, marks the
+  provider until it resets (a window scoped to a model, that model);
+  such marks follow the quota and go when it says calls work again.
+- Choosing: a session's own model comes first; a session moved by the
+  fallback remembers its own (`:original`).  When it is out, the first
+  entry of `harness-fallback-models` whose model is neither marked nor
+  that of an unregistered provider wins.  `harness-fallback-choose
+  SESSION` returns `(:model ID :entry ENTRY :reason …)`, or nil.
+- Switching: `agent/before-turn` (priority 10, before compaction)
+  moves a session whose model is out to the chosen one, and back to its
+  own once that works again; `agent/step-error` marks what ran out,
+  moves the session and retries the step, so a turn, and a task, carry
+  on.  The model changes through `session/update` (`:silent`) with a
+  hint of its own ("Claude Code is out of quota until 19:00: carrying
+  on with DeepSeek-V4-Pro"), and `fallback/switched SID FROM TO WHY`
+  (WHY `out` or `back`).  A model changed by anyone else forgets the
+  session's own; a fork takes over its parent's.  With nothing left the
+  turn ends with its error and a hint naming every provider that is
+  out and when it resets.
+- Notifications (`notification/send`, source "fallback"): low urgency
+  when a provider runs out and sessions move on, normal when nothing is
+  left.
+- `fallback/status` → `(:models (ENTRY …) :marks (MARK …) :moved
+  ((:session SID :original MODEL :model MODEL) …) :enabled BOOL)`,
+  ENTRY = `(:entry STRING :provider ID :model MODEL-OR-NIL :label
+  :provider-label :registered BOOL :mark MARK-OR-NIL :tiers
+  ((:tier "cheap" :model ID :label …) …))`, `:tiers` for a provider
+  entry only.  `fallback/clear KEY` forgets the mark KEY (a provider's
+  forgets its models' marks too); → non-nil when one went.
+  `fallback/mark KEY &rest (:kind :until :reason)` marks by hand.
+  Event `fallback/changed` after any mark or session record changes.
 
 ### compaction
 
-- `compaction/compact SESSION-ID` → promise; summarises the transcript
-  with the session's model, appends a `compaction` node whose `:meta`
-  points at the compacted head, sets it as head, hints before/after.
+- `compaction/compact SESSION-ID &optional OPTS` → promise; summarises
+  the transcript with the session's model (OPTS `:model` another),
+  appends a `compaction` node whose `:meta` points at the compacted
+  head, records the summariser (`:model`), what it was given
+  (`:context`) and the size compacted, sets it as head, hints
+  before/after.  `session/messages` starts at the node, as a user
+  message ("Summary of the conversation so far: ..."), followed by the
+  unanswered user messages carried over after it.  OPTS `:context` is
+  `full` (the default) or `sample`, which keeps only the first and last
+  few messages (`harness-compaction--sample-head`/`-tail`) with a user
+  message saying how many were left out: a bound on what a summariser
+  sent the conversation as text costs.  A summariser whose provider
+  keeps the conversation and can fork it (a hosted loop) works on a
+  fork of the session's provider state, so it summarises the real
+  conversation and leaves the session's own alone; one whose provider
+  is sent the transcript anyway (an API provider) gets it as messages.
+  A summariser that keeps the conversation and has no state of this
+  session (the target of a switch) is sent only the newest user
+  messages, so the context goes inside one message as structured text.
 - Auto: `agent/before-turn` compacts when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
   reports `:compaction hosted`.  The window is the session's
@@ -1372,6 +1720,66 @@ non-interactive session it stays a denial.
   `:context-window-limit'), so a session capped below its model's
   window compacts at the cap, which is how task sessions compact
   earlier (`harness-tasks-context-limit', 256k tokens by default).
+  It judges the session as it is then, read again: the fallback,
+  earlier in the chain, may have moved it to another model.
+
+### handoff
+
+Switching a session to a hosted loop (Claude Code, Copilot) of another
+provider starts a new conversation there, which is sent only the user
+messages after the model's last reply: without a handoff the new model
+knows nothing of the task.  An API provider is sent the whole transcript
+and a provider that still holds the session's conversation resumes it,
+so switching to either loses nothing.
+
+- `handoff/check SESSION-ID MODEL` → `(:id :name :from :from-label :to
+  :to-label :to-provider :lossy :history :running :reason :risks
+  :cache-cost)`.  Lossy when MODEL's provider differs from the
+  session's, runs a hosted loop, cannot continue the session's state
+  (`session/provider-state`), and the session has history it would
+  miss (anything a model or tool wrote since the last compaction) with
+  no handoff already waiting for it.  `:reason` says why or why not.
+  For a lossy switch `:risks` are `harness-handoff-risks`: a cold prompt
+  cache (cache writes where carrying on would read), reduced fidelity
+  (the model explores again; tool calls and thinking reach it as text),
+  provider state left behind (resume, the provider's own compaction,
+  its built-in tools), and that it takes effect at the next step, not
+  mid-step; `:cache-cost` prices the session's context at MODEL's
+  cache-write and cache-read list prices.
+- `handoff/check-all MODEL &optional FILTER` → the checks of the
+  sessions `session/set-all` would change.
+- `handoff/switch SESSION-ID MODEL &optional MODE` → promise of `(:id
+  :model :from :lossy :mode :summarizer :context :deferred :file :node
+  :fallback :error)`.
+  The model changes at once (`session/update`); a lossy switch then
+  hands over as MODE says, any other is a plain switch.  `compact`
+  summarises on the old model (`compaction/compact` with `:model`, the
+  warm cache) and `compact-new` has the *new* model summarise instead,
+  from a bounded context (`:context sample`: the first and last few
+  messages): use it when the old provider cannot answer -- its plan ran
+  out, it is down -- or to keep the job small.  The compaction node,
+  marked `:handoff` with the mode, summariser and context, opens the new
+  conversation, ending in a harness note that the handoff is lossy and
+  the model should re-investigate rather than trust it.  When no summary
+  can be made (the summariser fails or its plan ran out) the transcript
+  goes over instead (`:fallback` says why).  `transcript` writes
+  `session/transcript-text` to `CWD/.harness/handoff/ID-TIME.md` -- in
+  the session's directory, which its tools may read and the new
+  provider's prompt cache holds as it reads, unlike the state directory,
+  and kept out of git by a `.gitignore` of `*` there -- and appends a
+  user message from the harness (`:source "model handoff"`, `:meta
+  :handoff`) telling the new model to read it before it answers, with
+  the same lossy warning.  `none` only switches.
+- `handoff/switch-all MODEL &optional FILTER MODE` → the ids switched;
+  MODE applies to the lossy ones.
+- A handoff must land in the trailing user messages.  An idle
+  session's starts at once and a turn started meanwhile waits for it;
+  a running session's waits for the turn's next step: the
+  `agent/before-turn` and `agent/step` gates (priority 10, before
+  automatic compaction) run it and hold the step until it is done, and
+  a turn that ends first has it run right after.  A handoff waiting for
+  a provider the session has left again is dropped.  Event
+  `handoff/done SESSION-ID RESULT`.
 
 ### naming
 
@@ -1468,12 +1876,21 @@ non-interactive session it stays a denial.
   refuses, changing nothing, when it would overwrite uncommitted or
   untracked work there or a merge is already in progress (the merge
   fails; a HEAD that moved meanwhile is merged again).  On conflict the
-  parent is untouched and the lock passes on at once: the child session
-  receives a steering message (from `harness-sender-system "merge
-  queue"`) naming the files and the parent's commit to `git merge` into
-  its own branch, in its own worktree.  A merged child's worktree loses
+  parent is untouched and the lock passes on at once, and the parent's
+  commit is to be `git merge`d into the child's branch, in its own
+  worktree.  By default (`harness-merge-conflict-resolver` `fresh`) the
+  harness starts a fresh `subagent` session for it -- a child of the
+  child session, in its worktree, with its settings and
+  `harness-merge-resolver-model` or its model -- prompted (from
+  `harness-sender-system "merge queue"`) with only the files, both
+  sides' commits and what to do: a child that waited long in the queue
+  would pay for its whole history on a cold prompt cache.  Its turn
+  ending without `merge_done` fails the merge (event `merge/resolver
+  CHILD PARENT RESOLVER`; `merge/queue` items carry `:resolver`).  With
+  `child`, the child session itself gets that as a steering message.  A merged child's worktree loses
   the harness's lock (`worktree/unlock`; see worktree).
-- `merge/status CHILD-SID`; the `merge_done` tool checks the child's
+- `merge/status CHILD-SID`; the `merge_done` tool (called by the child
+  or its resolver) checks the child's
   worktree contains the parent's commit, merged and committed, and
   queues the branch again.
 - Events `merge/queued CHILD PARENT POSITION`, `merge/started`,
@@ -1648,7 +2065,13 @@ verdict.
   `:ids', `:except' and `:cwd', and review, done and archived tasks are
   never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
   steering; reopens; in review it sends the task back, as above), `task/refine ID &optional TEXT`,
-  `task/merge ID` (retry; not in review), `task/verify ID`,
+  `task/merge ID` (retry; not in review), `task/retry ID` (have a task
+  that stopped carry on where it stopped: a failed merge is queued
+  again, a stopped write-up is written again, a pending task starts, a
+  stopped turn is prompted with `harness-tasks--retry-prompt` from
+  `harness-sender-system "tasks"`, and a task whose work never began is
+  started over; it refuses a task that is working, blocked on a
+  question, in review or done), `task/verify ID`,
   `task/reject ID FEEDBACK &optional ATTACHMENTS` (both in review only),
   `task/complete ID` (counts as verified), `task/archive ID &optional
   RESTORE` (deactivates the session; removes a merged task's worktree and
@@ -1660,7 +2083,17 @@ verdict.
   of a report popout has the task already) and
   `task/hand-in ID REPORT` (record `:summary` and `:evidence` as the
   work ID handed in; the write-up tool's `:end-turn` ends its turn, which
-  the review step then picks up).
+  the review step then picks up).  A round of work whose turn ends
+  without a hand-in -- the model replied instead, or had no tools to
+  call -- gets a `:report` marked `:missing t` instead
+  (`harness-tasks--missing-report`): no evidence, and as `:summary` the
+  session's last message of the round.  A round starts at `:started`,
+  at each round of `:feedback`, and at `:reopened` (new work on a task
+  in review or done); a report handed in before the round started
+  speaks for earlier work, so a round that ends without a hand-in of
+  its own replaces it.  The board's button for such a report reads
+  [No report], its popout says "Not handed in", and the session's
+  review banner says so in a line.
 - Events `task/changed TASK`, `task/deleted ID`, `task/review TASK` (its
   work waits for the user's review), `task/done TASK HOW` (it became
   done; HOW is `merged` when the merge queue merged its branch,
@@ -1705,6 +2138,144 @@ verdict.
   it got; a write-up cut short is written again by its session (with
   nil: `:outcome interrupted`).  Merges in flight are queued again, and
   tasks in review wait on for the user.
+
+### tasks-search
+
+The task board's search: a query in words ("did I have a task about the
+question button?", "restart the errored tasks") finds tasks and may act
+on them, answered by a cheap model that returns JSON only.
+
+- `task/search CWD QUERY &optional (:shown IDS)` → promise of
+  `(:query QUERY :ids IDS :actions ACTIONS :model MODEL :looked LOOKED)`.
+  Nothing changes yet.  IDS are the tasks QUERY is about, best match
+  first, archived ones included; ACTIONS are what QUERY orders, each
+  `(:task ID :action NAME :text TEXT :title TITLE :confirm BOOL)`, NAME
+  one of `harness-tasks-search-actions` (`archive`, `restore`, `stop`,
+  `retry`, `start`, `verify`, `complete`, `message`, `reject`), TEXT the
+  words a message or a send-back carries, and `:confirm` t for an action
+  that interrupts work, merges it or sends words to an agent (stop,
+  verify, complete, message, reject, and archive of a working task),
+  false for the rest.  `:shown` is what the board shows now, which
+  "them" in QUERY means.  `:looked` says what the model read besides the
+  board.
+- The message to the model carries a compact dump of the board: for
+  every task (newest first, at most `harness-tasks-search--max-tasks`)
+  its id, column and state, title, the request it was asked in, the todo
+  it is on, what it waits for the user on, the summary it handed in, its
+  branch, times and errors.  The system prompt
+  (`harness-tasks-search--system`) is constant, and the model must
+  answer one line of JSON `{"show":[ID…],"do":[{"task":ID,"action":…}]}`.
+  Unknown ids are dropped and acted-on tasks are always shown.  When the
+  model asks to look further instead of answering -- `{"grep":TEXT}` over
+  the sessions' transcript logs (`sessions/*.nodes.jsonl` under the state
+  directory, searched in a subprocess) or `{"read":[ID…]}` for the latest
+  transcript, at most `harness-tasks-search--read-limit` tasks -- it gets
+  one more round (`harness-tasks-search--final-text` closes it) and must
+  answer then.
+- The model is `harness-tasks-search-model`: `auto` (the default) takes
+  the provider of the task model's `cheap` tier (`provider/tier-model`),
+  nil uses the task model itself, a string forces one.
+  `harness-tasks-search-thinking` (nil) is its thinking level, the
+  output budget is `harness-tasks-search--max-tokens`, and a call taking
+  longer than `harness-tasks-search--timeout` fails.
+  `harness-tasks-search--request` runs it as a side session in
+  `task-search/` under the state directory, so the project's Claude
+  history and CLAUDE.md stay out of it.  Every search gets its own
+  session id, and its process is closed when it ends
+  (`provider/close`).
+- `task/search-warm CWD` → `(:model MODEL :warm BOOL)`: start the model
+  process the next search of CWD's board will use (`provider/warm`), so
+  the answer comes sooner; a process left unused is closed after
+  `harness-tasks-search--warm-idle` seconds.
+- `task/search-apply ACTIONS` → promise of one result per action,
+  `(:task :action :title :ok :error :undo)`, run in order: archive stops
+  a working task first and archives it once it stopped
+  (`harness-tasks-search--stop-wait`), stop never drops a task that has
+  not started, retry is `task/retry`, message is a follow-up to the
+  task's session (or words added to the prompt of a task with no session
+  yet), and the rest are the tasks methods.  ARCHIVE and RESTORE carry
+  `:undo`, the action that undoes them.
+- Searches are not sessions: their cost is recorded with `usage/record`
+  under the board's project with `:session nil`.
+- Settings `harness-tasks-search-model`, `harness-tasks-search-thinking`;
+  the demo provider answers search requests heuristically (word match
+  plus action verbs), so the dev daemon, the tests and the screenshots
+  work offline.
+
+### pet
+
+A companion pet, after the ones Claude Code hatched for April Fools'
+Day 2026 (`/buddy`): an egg hatches into a creature with random bones,
+a cheap model names it and gives it a personality, and later, now and
+then, lends it a line about the user's work.  One pet per harness.
+
+- Bones are rolled, never stored: Mulberry32 seeded with the 32-bit
+  FNV-1a of the seed and `harness-pet--salt` draws, in order, the rarity
+  (`harness-pet-rarities`: common 60, uncommon 25, rare 10, epic 4,
+  legendary 1 in 100, with 1 to 5 stars), the species (18 in
+  `harness-pet-species`), the eyes, a hat (none for a common one), shiny
+  (1 in 100), then the stats DEBUGGING, PATIENCE, CHAOS, WISDOM and
+  SNARK (`harness-pet-stats`): from the rarity's floor, one peak stat
+  (floor+50 to floor+79, at most 100), one dump stat (floor−10 to
+  floor+4, at least 1), the rest floor to floor+39.  A last draw seeds
+  the inspiration words the model names it after.  `harness-pet-roll
+  SEED` → `(:rarity :species :eye :hat :shiny :stats :inspiration)`.
+- The record, `pet.json` under the state directory: `(:seed :name
+  :personality :hatched :xp :pets :muted :said)`, SAID its last
+  `harness-pet--memory` sayings.  A change it makes while growing is
+  saved `harness-pet--save-delay` seconds later (`harness-pet-flush` at
+  shutdown and on `kill-emacs-hook`); other changes at once.
+- `pet/get` → the VIEW: `(:hatched :hatching :reactions :watching
+  :model)`, and once hatched also `:seed :name :personality :hatched-at
+  :rarity :stars :species :eye :hat :shiny :stats :level :xp :level-xp
+  :next-xp :pets :muted :thinking :said`.  Booleans are t or `:false`;
+  `:thinking` is t while it waits for a line; LEVEL is
+  `max(1, floor((1 + sqrt(1 + 0.8·xp)) / 2))`, a level L starting at
+  `5L(L−1)` xp.
+- `pet/hatch` → promise of the VIEW once it hatched (the one hatching is
+  shared; one that hatched already is returned).  A new seed is rolled
+  and the model asked for `{"name":…,"personality":…}`
+  (`harness-pet--hatch-system`); with no model, a failed or late call,
+  or an answer without them, it hatches all the same with a name from
+  `harness-pet--fallback-names` and a plain personality.  Its first
+  words follow, as for a petting.
+- `pet/pet` (counts, +1 xp at most once a minute, and it answers),
+  `pet/rename NAME` (one line, at most `harness-pet--max-name`
+  characters), `pet/set-muted BOOL`, `pet/release` (forgets it; the next
+  egg brings a new seed) → the VIEW.  `pet/watch CLIENT ON` → the VIEW:
+  CLIENT, an id the UI makes up, shows the pet now or not.
+- It speaks only while some client watches it, it is not muted and
+  `harness-pet-reactions` is on; never two lines within
+  `harness-pet--min-gap` seconds, never two at once.  Asked -- a message
+  of the user's that names it, a petting, hatching, a level gained --
+  it answers every time.  Unasked, at most once every
+  `harness-pet-cooldown` seconds (60): on a message the user writes, by
+  chance (`harness-pet-chance`, 0.3), and at the end of a turn of the
+  user's that failed tests (a command's output, `test-fail`), failed
+  otherwise (`error`) or changed more than `harness-pet--large-diff`
+  lines (`large-diff`), see `harness-pet-turn-reason`.  It reads the
+  session's name, its project and the last nodes of the transcript (at
+  most about 3000 characters).  The line is one line, without a leading
+  "NAME:" or quotes, at most `harness-pet--max-saying` characters
+  (`harness-pet-sanitise`); "..." is silence.
+- Every call is `provider/complete` with `:ephemeral t` and `:no-thinking
+  t`, a session id of its own (closed with `provider/close` when it
+  ends) and `pet/` under the state directory as its directory, so no
+  project instructions, memory or history reach it; a call taking
+  longer than `harness-pet--timeout` is cancelled.  Its cost is recorded
+  with `usage/record` with `:session nil`, under the project of the
+  session it spoke about.
+- Model: `harness-pet-model`, `auto` (the default) the cheap tier
+  (`provider/tier-model`) of the session's model, or of `harness-model`
+  for a hatching or a petting; nil that model itself; a string forces
+  one.
+- Growing: +2 xp for every message the user writes, +1 for every turn
+  of theirs that ends well.  Event `pet/changed VIEW` after any change
+  (growing only while watched or when it gains a level), `pet/said
+  SAYING` with `(:text :ts :reason :session :session-name)`.  Both are
+  forwarded to clients; the methods are `_harness/pet/...` over ACP.
+- The demo provider names pets and speaks their lines from a script,
+  so the dev daemon and the tests run offline.
 
 ### notifications
 
@@ -1902,6 +2473,8 @@ has WebSearch, Copilot its web_search).  tools-web's filter on
 search provider cannot search, so searching works before anything is
 set up; `always`; or `never`.  The session then has no `web_search` of
 the harness's, and the provider's searches show as `web_search` calls.
+Corporate mode leaves both searches on and turns `web_fetch` off (see
+tools).
 
 The session and task tools (`tools-sessions`) let an agent coordinate the
 rest of the harness.  Sessions are named by id, a unique id prefix or a
@@ -2019,8 +2592,9 @@ change), `_harness/node` (a finalised or updated node), `_harness/hint`,
 `_harness/activity` (`activity`: what the running turn does, as
 `agent/activity` returns it; null once the turn ends).
 Requests agent → client: `session/request_permission {sessionId, toolCall,
-options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, dir,
-pattern, reason}}` → `{outcome:{outcome:"selected",optionId}}`, plus
+options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
+pattern, reason}}` (`cwd`: where a shell command runs; `paths`: what
+the call is about, see perms) → `{outcome:{outcome:"selected",optionId}}`, plus
 `_harness:{pattern}` when the client answers a request about paths for
 another glob pattern than its `_harness.pattern` (see perms),
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
@@ -2030,8 +2604,8 @@ options have them, holds one per option, `{type: "ascii", text}` or
 the image data, since the pending question is saved with the session.
 
 Extension methods: any bus method whose name starts with `session/`,
-`agent/`, `provider/`, `tools/list`, `usage/`, `worktree/`, `merge/`,
-`config/`, `skills/`, `permission/`, `question/`, `compaction/`, `naming/`, `task/`,
+`agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
+`config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`, `task/`,
 `notification/`, `sandbox/status`, `harness-dev/`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
@@ -2231,7 +2805,8 @@ fetched once per connection and again after `harness/reloaded`;
 `harness-ui-fetch-tools`), through which views name every tool by its
 label (`harness-ui-tool-label`, `harness-ui-tool-title`), window
 positions (`harness-ui-display-session SID &optional POSITION`; presets
-`right`, `bottom`, `full`, `other`; one session per position, replacing),
+`right`, `left`, `bottom`, `full`, `other`, `fullscreen`; one session
+per position, replacing),
 the global keymap and the transient menu `harness-menu` (with a group for
 the commands of the buffer it is opened from, which each mode lists in
 its `harness-menu-group` property; opened from a side window it gets a
@@ -2266,7 +2841,12 @@ the chat) to change it in the minibuffer, more or less specific;
 `M-n` offers patterns around the request's own, and the answer carries
 the edited pattern (see perms).  For a call with paths the line also
 says which answers remember the pattern ("s, a, N remember the answer
-for it").
+for it").  The facts above it say what the pattern is made of
+(`harness-ui-pending--permission-facts`): `kind: write   paths:
+~/proj/lisp/a.el` on one line for most calls; for a shell command
+`kind: exec   runs in: ~/proj`, where it runs, and below it `paths:
+~/.claude/projects/x`, what it is about: the paths it names outside
+the session's directories (left out when that is just where it runs).
 
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting
@@ -2292,6 +2872,23 @@ branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
 the language's major mode, lists, quotes, links).  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
+Thinking between two calls of a run does not break it but folds in
+with them, since a model that thinks before every call would never
+have a run otherwise; thinking before a run's first call or after its
+last stays out.  Only the newest block joins a run as the transcript
+grows, and a loaded transcript is grouped as a whole.  Two calls of a
+coalescable tool stay out of runs: one whose result shows a picture or
+a video, which a group would hide, and one the session waits on, whose
+permission prompt is open (the pending record names the call), until
+the user answers it.  Such a call leaving its run, or coming back to it
+once answered, has the transcript grouped anew, as a load groups it:
+other calls of its step may have come after it meanwhile.  A group
+with a call of a group the user had opened is open too, and no other.
+A page of history can start with the result of a
+call on the page before it: the result shows alone, as the result of
+an earlier tool call, until that page loads, then joins its call
+(`harness-chat--adopt-orphans`), so the run folds as it would in a
+single load.
 A tool call's header says how it went, marked the way a Japanese table
 marks it (`harness-ui-level-icon`), each ending on a background of
 its own: a green circle when it ran (`harness-tool-face`), a yellow
@@ -2317,10 +2914,16 @@ Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
 title), a summary block counts the calls by label ("5 tool calls: Read
-file ×3, Search files, Find files"), and so do the permission panel,
+file ×3, Search files, Find files", then " · thinking ×2" for the
+thinking folded in with them), and so do the permission panel,
 the activity line and the mode line.  A title recorded before tools had
 labels starts with the tool's name ("read_file x.el"), which the label
-replaces, so old transcripts read the same.
+replaces, so old transcripts read the same.  Under a folded call's
+header one dim line sums up the input its title leaves out
+(`harness-ui-tool-input-summary`): a list reads as its labels,
+comma-separated, and a list of other objects, such as the items of a
+todo list, as how many there are, never as a Lisp form; a todo_write,
+whose title already counts its items, has no such line.
 Auto-scroll follows unless the user scrolled up.  While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a
@@ -2364,7 +2967,7 @@ line, in a window shorter than the buffer too, a board under a BTW say,
 by scrolling that never moves point out of the box), a prompt that is a
 field of its own (`C-a` stops after it, so
 `C-a C-k` clears the line), the placeholder, @file and /skill
-completion, attachments (`C-c C-a`, clipboard `C-c C-v`, drag and
+completion, attachments (`C-c C-a`, pasting `C-y`, drag and
 drop), skill expansion (`harness-compose-with-expanded-text`) and ACP
 attachment blocks.  `harness-compose-insert` takes `:face`, the box's
 background (`harness-compose-face` by default) and `:accent`, the face
@@ -2395,17 +2998,63 @@ Media on the clipboard is read without touching `kill-ring`: `C-y` in a
 compose box attaches the image, or the files a file manager copied, and
 pushes captures on the media ring (`harness-ui-media-ring`), a ring of
 its own under `harness-state-directory/clips/` deduplicated by the
-SHA-1 of the bytes, which `M-y` goes back through and `C-u C-c C-v`
-picks from; `yank-media` attaches them too (`harness-compose-yank-media`).
+SHA-1 of the bytes, which `M-y` goes back through and
+`C-u M-x harness-compose-attach-clipboard` picks from; `yank-media`
+attaches them too (`harness-compose-yank-media`).  The box binds no
+`C-c C-v`: in a chat that is the review banner's [Verify], so the two
+never fight, and other MIME types are chosen from with
+`M-x harness-compose-attach-clipboard`.
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
 when the buffer changed since the last key, and a host changes all the
 time (a chat streams, a board follows its tasks): once the token stops
-changing, the box asks them again (`harness-compose--popup`).  `C-c C-a`
-reads a project file by part of its name over the same list, never
-listing while you wait; `C-u C-c C-a`, or a directory that is no
-project, reads any file.
+changing, the box asks them again (`harness-compose--popup`).  @ and
+`C-c C-a` find files through one table (`harness-compose--file-table`):
+part of a name matches the project's files, never listing while you
+wait, and a path -- starting with `/`, `~`, `./` or `../`, the relative
+ones against the box's project root -- completes over the file system
+directory by directory in the `file` category, with file name handlers
+off so that a remote name never opens a connection.  A completed path
+attaches only a regular file; a directory stays in the box for its
+files to complete.  `C-c C-a` ignores a leading @, and a directory
+chosen there reads again from inside it; `C-u C-c C-a`, or a directory
+that is no project, browses with `read-file-name`.  An @
+reference typed out in full, or pasted, names its file all the same:
+`harness-compose-take` attaches the regular files the references in the
+text name (`@skill:` ones and missing files aside, trailing punctuation
+tolerated) and leaves the references in the text.  An answer to a
+question, on the board or in a popout, carries no attachment: there a
+file the text names goes as its reference
+(`harness-compose-without-references`).
+
+Dragging images out (`harness-ui-drag`): the images the UI shows -- the
+transcript's (`harness-chat--image-string`, `harness-ui-image-string`),
+a compose chip's thumbnail and name, a report's and the image popout's
+-- drag into another application as a file.  `harness-ui-drag-source`
+(a string), `harness-ui-drag-region` (buffer text) and
+`harness-ui-drag-props` (a plist of text properties about to be put on
+text, the image strings' click properties, so that an image drawn in
+pieces, line-high strips say, drags from each) set the
+`harness-ui-drag` property, the file or t for the image displayed
+there, lay `harness-ui-drag-map` (down-mouse-1) over the keymap the
+text already has, and add a word to its `help-echo`.
+`harness-ui-drag-start` follows the mouse with `track-mouse` while the
+button is down: a release before it moved `harness-ui-drag-threshold`
+pixels goes back to `unread-command-events` as a mouse-1 click, so
+links, buttons and `follow-link` work as before; further, it is
+`dnd-begin-file-drag`, whose drop on the source frame itself is
+ignored, so letting go over Emacs cancels.  An image held only as
+`:data` is written to the session's own temporary directory
+(`session/tmp-dir`) as `image-SHA.EXT`, SHA the start of its bytes'
+SHA-1, so a second drag writes nothing; the directory is asked for when
+such an image is drawn and again on the press, and never waited for:
+until it is known, and for a buffer of no session, the file goes to a
+private directory of this Emacs (mode 700), deleted when Emacs exits.
+Nothing is made draggable where `x-begin-drag` is missing (only X,
+macOS and Haiku start drags), nor is a remote file, which the drag
+would copy here while the UI waits; on a text terminal's frame a press
+is a plain press.
 
 Views share positions with sessions: the task board, session list,
 usage dashboard, worktree list, conversation tree and log open through
@@ -2413,6 +3062,22 @@ usage dashboard, worktree list, conversation tree and log open through
 returning to the position they had last); a session opened from a view
 (`harness-ui-session-opener`) replaces the view.  Menus, help and the
 BTW overlay keep their own windows.
+
+Fullscreen layout (`harness-fullscreen`, `F` on an overview, `C-c h F`):
+an overview -- a view that sets `harness-ui-overview-function`, the
+task board and the session list -- takes the left of the frame in a
+side window (`harness-ui-fullscreen-width`), and every other window but
+one, the slot, makes way for it.  The slot shows the session in sight,
+else the one the overview function names (at point, else the most
+recent).  While the layout lasts the `fullscreen` position is the
+default: sessions and views shown without a position take the slot, and
+an overview takes the left.  The layout is kept per frame in a weak
+table (`harness-ui--fullscreen-layouts`), with the window configuration
+from before it.  `harness-ui-bury` (`C-c C-z` in a chat, where plain
+keys type) puts the slot's buffer away and brings back the last buffer
+of the user's the slot showed, keeping the layout; `q` on the overview
+(`harness-ui-quit-view`) ends it, restoring the configuration, but for
+a buffer of the user's left in the slot, which stays in sight.
 
 Settings page (`harness-ui-config`, `C-c h S`, `harness-settings`):
 every harness option on one page, like a customize buffer, about the
@@ -2424,8 +3089,8 @@ project).  Session defaults, the layered settings, come first in both
 scopes; the other options are listed by module in the Global scope and
 folded into one line in the Project scope.  Each setting is a
 `wid-edit` widget built from its customize type, with its doc and
-where its value in effect comes from; toggles and menus save at once,
-text saves with RET (C-x C-s saves every edit).  A type whose plist
+where its value in effect comes from; toggles, menus and models save
+at once, text saves with RET (C-x C-s saves every edit).  A type whose plist
 names its keys (`:options`) is drawn as a form: one line per key,
 `[X] Base URL: …` with the key's help under it, the key's name width
 aligned, and a key the value does not set greyed out with the value it
@@ -2434,8 +3099,16 @@ values it accepts do not change).  In a list, each record folds into a
 line summing it up, `[Edit]` opens it into the form and `[Hide]` folds
 it again; `[INS]` adds a record, open, from the type's starting value.
 [More] unfolds a long documentation, whose first line shows with the
-keys' help doing the rest.  A string key of a `*-model` setting
-completes model ids, menus included.  [Remove override]
+keys' help doing the rest.  A string whose customize type says what it
+names, with `:names` (`model` for PROVIDER:MODEL, `provider` for a
+provider id, and `:provider ID` for the names provider ID gives its own
+models; see `harness-model`), is a dropdown, `harness-ui-config-model`,
+alone or with the constants of its menu, in a list too: a button naming
+the model, then its id and context window.  The button opens a picker
+(`completing-read`) of the UI's catalogue of `provider/models`, grouped
+by provider and annotated with context window and price.  Text that
+matches no candidate is taken as typed, and a model no provider lists
+gets a warning line.  [Remove override]
 deletes a project value, [Reset to default] a customized global one.
 Secrets show as set or not and are set through `read-passwd`; long
 texts open in `string-edit`.  The page reloads on `config/changed`,
@@ -2448,6 +3121,25 @@ id, or a settings plist with its setter -- and otherwise the current
 session.  The menu's `i` entry says whether that is non-interactive
 ("Non-interactive: on"), and has no state where the command would
 ask for a session.
+
+A model switch asks the harness first (`handoff/check`, or
+`handoff/check-all` for `harness-set-model-all`, which asks once for the
+whole batch).  A lossy one asks how to hand over through
+`harness-ui-switch-function`: with the `ui-switch` module the question is
+a banner above the session's compose box -- the chat panel the review
+banner uses (`harness-chat-panel-functions`) -- with the two models, the
+reason, the risks, the cache cost and the running turn as labelled rows,
+and one button per choice (current model summarises, new model
+summarises a limited context, full transcript, no handoff, cancel).  Its
+keys answer while point is on the banner and a click answers from
+anywhere; the banner says the handoff is lossy and the new model is told
+to re-investigate.  Without a chat buffer to show it in (a switch asked
+for outside the UI, or over ACP) the minibuffer question of
+`harness-ui--read-handoff` asks instead.  The answer goes to
+`handoff/switch` (`handoff/switch-all`); cancelling changes nothing, not
+even the default for new sessions.  A switch that loses nothing goes
+through `session/set_model` (`session/set-all`) as before, and so does
+any switch when the harness cannot check.
 
 Desktop notifications: `harness-ui` answers `_harness/client/notify` by
 showing the notification on this Emacs's desktop
@@ -2578,6 +3270,54 @@ branch joined it; pending is the queue, in the order its tasks start,
 with the backlog among it (oldest first; only queued tasks have a place
 in line).
 
+The board's search (`harness-ui-tasks-search`, `/` on the board,
+[Search] in its header, `C-c h /` anywhere, which opens the project's
+board first) reads a line in the minibuffer and sends it to
+`_harness/task/search`; the board then shows only the tasks the answer is
+about, archived ones included, under a banner that says the line, how
+many tasks it shows and what the model looked at besides the board.
+`harness-ui-tasks-filter` carries that: `:show` a predicate over a task,
+`:banner` a function returning the text above the columns, `:clear` the
+function that drops it, which `C-g` on the board runs when the compose
+box has nothing to leave ([Clear] does too).  The columns left without a
+task are hidden.  An action the answer does not need confirmed runs at
+once, and the banner and the echo area say what it did (the toast), with
+[Undo] when it can be undone (archive and restore undo each other);
+`task/search-apply` runs them.  An action that interrupts work, merges
+it or sends words to an agent is proposed instead: the banner asks, with
+a button that does it and [Skip], and `/` then RET on an empty line does
+it too (the prompt names what an empty line would do).  The header's
+[Search] segment spins while the model works, and each search opens with
+`_harness/task/search-warm` so its process is started before the line is
+typed; the model's name shows while it answers.  The best match gets
+point once the board shows it (`harness-ui-tasks--focus`).
+
+Companion pet (`harness-ui-pet`, `C-c h z`, `harness-pet`, menu `z`):
+the buffer `*harness pet*`, the only place the pet shows.  Before it
+hatches: the egg, [Hatch it] (`h`) and what hatching does.  After: a
+card with its stars, rarity and species, the creature in its rarity's
+colour (`harness-ui-pet-art SPECIES EYE HAT FRAME`, five lines, three
+frames per species, the hat centred on the head) beside its five stats
+as meters, below it in a window too narrow for both, its name (gold
+when shiny) and personality, its level with an experience meter, and
+what it said last on a band of its own (`harness-pet-speech-face`,
+the action between asterisks in `harness-pet-action-face`), then the
+two before it and a footer saying whether and through which model it
+speaks.  Prose is filled to the window and drawn again when its width
+changes.  The header line has [Pet] (`p`, `SPC`), [Rename] (`r`),
+[Mute]/[Unmute] (`m`) and [Release] (`R`, asks first), or [Hatch], and
+`g`, `q`.  The buffer tells the harness whether it is on screen
+(`_harness/pet/watch`, client `HOST:PID`) from
+`window-buffer-change-functions` while it lives, as it is killed and
+after every connect, so the pet only speaks while someone can see it.
+It follows `pet/changed` and `pet/said`, and `config/changed` of a
+`harness-pet-` option.  Animations -- the egg wobbling then cracking
+and sparkles as it hatches, hearts as it is petted, a fidget as it
+speaks (after the sparkles, when its first words come while it
+hatches) -- are a few frames each on one timer that stops with the
+last frame or as soon as the buffer is off screen, so nothing runs
+while nothing happens; `harness-ui-pet-animations` nil keeps it still.
+
 Cost display: whatever shows what a session cost goes through
 `harness-ui-format-spend`.  That is a price when calls are billed per
 token, and the plan's name (`Max`) when a subscription pays, after any
@@ -2588,7 +3328,15 @@ and opens the usage dashboard.  The dashboard's Plan section shows
 every quota window with its reset time and the plan's extra usage,
 and its chart stacks what a plan covered on top of the billed cost.
 The UI keeps each provider's QUOTA from `provider/quota` and
-`provider/quota-updated` (`harness-ui-quota`).
+`provider/quota-updated` (`harness-ui-quota`).  Under the Plan section
+the dashboard's Fallback section edits `harness-fallback-models` (from
+`fallback/status`, saved with `config/set`, global): the entries in
+order, each with whether it is available, out of quota until when, out
+of money, or not set up, and [try now] (`fallback/clear`), [up],
+[down] and [remove]; [add] (`f`) offers each provider ("model of
+similar ability") and each model.  `M-<up>`/`M-<down>` move the entry
+at point, `d` removes it (or the budget at point), `c` clears its mark.
+It follows `fallback/changed` and `config/changed`.
 
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; SPC on a session pops out what it
@@ -2668,7 +3416,12 @@ the feedback that sends it back (`harness-tasks--on-message'), so
 those two keys over the buffer's own, only for as long as it shows; it
 follows the task events of its session and draws again only when what
 it shows changes, finding the chat buffer by session id with `equal`,
-since an id from the harness process is a fresh string), and the
+since an id from the harness process is a fresh string), the switch
+banner of a session (`harness-ui-switch`: the chat panel that asks how
+to hand the conversation over when a lossy model switch needs it -- the
+models, the reason, the risks and costs as labelled rows, and a button
+and a key per way to hand over, falling back to the minibuffer question
+when no chat buffer shows; see "Switching model or provider"), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images as wide as the popout and up to
 `harness-ui-report-image-max-height` of the frame high, the popout

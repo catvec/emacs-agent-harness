@@ -4,7 +4,7 @@ Emacs Agent Harness runs AI coding agents in GNU Emacs. It is written
 in Emacs Lisp and supports Claude, GitHub Copilot, DeepSeek,
 OpenAI-compatible APIs and AWS Bedrock.
 
-![A session beside the code it wrote: the agent read the project, added rate limiting, ran the tests and summed up](docs/media/chat.png)
+![The task board in the fullscreen layout, a task's session beside it: the feedback the task was sent back with, its fix, and the report it handed in again, waiting to be verified or sent back](docs/media/chat.png)
 
 ## Features
 
@@ -41,6 +41,9 @@ OpenAI-compatible APIs and AWS Bedrock.
   on your phone, paired by scanning a QR code.
 - **Modular and reloadable.** Every feature is a module, and the whole
   harness reloads in place without losing running sessions.
+- **A companion pet.** Hatch a small creature of a random species and
+  rarity that keeps you company in a buffer of its own and now and
+  then has a word to say about your work.
 
 ## Screenshots
 
@@ -52,16 +55,16 @@ OpenAI-compatible APIs and AWS Bedrock.
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
 | A task's report: verify it or send it back from there | An image of the report, clicked: shown larger |
-| ![The usage dashboard: a month of cost per day, cost by model, the plan's quota and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
-| Usage: cost per day and model, plan quota, budgets | Settings, here as one project overrides them |
+| ![The usage dashboard: a month of cost per day, cost by model, the plan's quota, the fallback list and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
+| Usage: cost per day and model, plan quota, fallback list, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
 | The session list | The worktrees of a project and their sessions |
 | ![The session list with a permission request popped out, its allow and deny buttons under it](docs/media/popout-permission.png) | ![The task board with a question popped out, its options and a box to type another answer under it](docs/media/popout-question.png) |
 | A request popped out of the session list, answered there | A question popped out of the task board, answered there |
 | ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
 | A BTW side conversation under its session | The menu, with the chat's own commands |
-| ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) | |
-| Messaging a task's session: the box says so, in its colours | |
+| ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) | ![The task board filtered by a search in words: the query, one task matches, the archive it did and [Undo]](docs/media/tasks-search.png) |
+| Messaging a task's session: the box says so, in its colours | A search in words: the board shows what it is about, and acts |
 
 ## Requirements
 
@@ -134,6 +137,36 @@ Then add it to your init file:
 (require 'harness)
 (harness-start)
 ```
+
+### Updating
+
+`M-x harness-update` (`U` in the `C-c h ?` menu) updates the harness
+and reloads it in place, keeping running sessions. It updates the git
+checkout the harness runs from: the clone of a manual installation, or
+the clone that straight.el keeps for a Doom Emacs or straight.el
+installation. It fetches the checkout's upstream branch and, when there
+are new commits, first checks the newest one in a separate Emacs,
+outside the checkout: `harness.el` must load, and every file must
+compile with no merge conflict marker in its code. Only then does it
+fast-forward the checkout and run `harness-reload`, which loads the
+update in your Emacs and in the harness process. A commit that fails
+the check is never installed, and a fast-forward cannot conflict, so
+the harness keeps running what it ran until a fixed commit arrives.
+The update also changes nothing when the checkout has local changes or
+commits of its own. Git and the checking Emacs run in the background,
+so Emacs stays responsive. The harness log (`C-c h L`) lists the
+commits an update brought in.
+
+The harness has no numbered releases: it follows its `main` branch, so
+the commit is the version. `harness-update` names it: the commits it
+moved between, or the one it is at when nothing is new.
+
+Package managers can update the harness too, with `doom sync -u` or
+`M-x straight-pull-package`. The harness loads its files from the
+package manager's git clone rather than from its build directory, so
+an update takes effect at the next `harness-reload` or restart, with no
+rebuild. A Doom package pinned with `:pin` follows no branch:
+`harness-update` refuses it, and you update it by changing the pin.
 
 ## Getting started
 
@@ -222,6 +255,8 @@ the menu's Version entry says so.
 | `C-c h l` | `harness-sessions` | Show the session list |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `C-c h a` | `harness-tasks` | Show the task board |
+| `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
+| `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board or session list on the left, a session beside it |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation |
@@ -237,6 +272,7 @@ the menu's Version entry says so.
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
 | `C-c h S` | `harness-settings` | Show the settings page |
+| `C-c h z` | `harness-pet` | Show your companion pet, or the egg it hatches from |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
 | `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
@@ -249,7 +285,8 @@ The menu (`C-c h ?`) also renames the session (`r`).
 
 With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
-`harness-ui-default-position`), `left`, `bottom`, `full` or `other`.
+`harness-ui-default-position`), `left`, `bottom`, `full`, `other` or
+`fullscreen` (see [Fullscreen overviews](#fullscreen-overviews)).
 
 ### Chat buffers
 
@@ -263,12 +300,11 @@ the `[menu]` button in the header line.
 | `C-c C-c` | Send the message; while the agent is working, it steers the current turn |
 | `C-c C-q` | Queue the message for the next turn |
 | `RET` | Insert a newline |
-| `@` | Complete a project file to attach; part of a name finds a file in any subdirectory |
+| `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. An `@path` typed out in full attaches its file when the message is sent, and stays in the text |
 | `/` | Complete a skill |
-| `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
+| `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system) |
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
-| `C-c C-v` | Attach what the clipboard holds (`C-u C-c C-v` picks an earlier capture) |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
 | `C-c C-p` | Edit the pattern the newest permission request about paths is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
@@ -279,6 +315,7 @@ the `[menu]` button in the header line.
 | `C-c C-w` | Copy the last reply |
 | `C-c C-e` | Jump to the bottom |
 | `C-c C-r` | Redraw the buffer |
+| `C-c C-z` | Bury the session: its window shows the buffer it showed before (a side window closes) |
 
 Drag a file from your file browser onto a chat or the task board and it
 attaches. Drag a *link* — an image from a web page, a video, any address
@@ -290,13 +327,28 @@ usually what you wanted. Images and videos show a thumbnail in the
 attachment chip (`harness-compose-thumbnail-lines`; videos need
 `ffmpeg`), so you can see what you are about to send.
 
+Images drag *out* too: press on an image in the transcript, on an
+attachment chip's thumbnail or name, or on an image of a report or its
+larger popout, move the mouse, and drop it on a file manager, a browser
+or a chat app, which receives it as a file. A click without moving
+still opens the image as before, and letting go over Emacs again
+cancels. An image that only exists in the conversation, like a pasted
+screenshot, is first written to the session's temporary directory (see
+below). Dragging works on a graphical frame where Emacs can start
+drags (X, macOS, Haiku), and the hover text says when an image can be
+dragged.
+
 Copied an image (in a browser, or with a screenshot tool)? `C-y` in a
 compose box attaches it instead of yanking text: it goes on the *media
 ring*, a kill ring of its own that only compose boxes read, so no other
 mode ever yanks a picture as raw bytes. `M-y` right after goes back
 through earlier captures, their thumbnails showing in the box, and
-`C-u C-c C-v` picks one by name. Files copied in a file manager attach
-the same way. `yank-media` finds them too. Set
+`C-u M-x harness-compose-attach-clipboard` picks one by name. Files
+copied in a file manager attach the same way, `yank-media` finds them
+too, and `M-x harness-compose-attach-clipboard` chooses among the
+clipboard's other MIME types. The box binds no `C-c C-v`: in a chat
+that key is the review banner's `[Verify]`, so a screenshot never has
+to fight the banner's key. Set
 `harness-compose-yank-media` to nil to leave `C-y` and `M-y` alone.
 
 Permission requests and questions from the agent appear inline above
@@ -335,6 +387,20 @@ pattern: once, for the session, or always (as an entry of
 for session*, *Always allow* and *Always deny* hold for that tool on the
 pattern only, not for every call of the tool.
 
+A shell command is about what its command line names, not only the
+directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
+run in the project, says `runs in: ~/proj` and, below it, `paths:
+~/.claude/projects/x`, and offers `~/.claude/projects/x/**`, so the
+answer you remember is about that directory and not about every command
+run in the project. A command that names nothing outside the session's
+directories is about where it runs, as before. Paths are read from the
+command line on a best-effort basis: absolute paths, `~` and `$HOME`
+paths, and `./` or `../` paths, but not the program being run or
+`/dev/null`. An allowing rule must cover every path the command names
+outside the session's directories, so allowing commands in the project
+does not let one that reaches elsewhere through. A denying rule stops
+a command that names any path it covers.
+
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
 the picture; so does an SVG, read as text and shown as an image, and a
@@ -365,7 +431,9 @@ The header line shows the session's status, name, todo progress while
 it has one, model, permission mode, whether it is `non-interactive` or
 `interactive`, thinking level, context and cost. Click the model, the
 permission mode, the non-interactive switch or the thinking level to
-change it. A
+change it. Switching a session that waits on a permission prompt to
+YOLO answers the prompt, since yolo would have allowed the call
+anyway; a directory prompt still waits for your answer. A
 non-interactive session never waits for you, which suits a session you
 leave to work while you are away. Whatever would ask you for
 permission, the auto-mode judge decides instead, whatever the
@@ -505,7 +573,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   `V` again to turn review back on.
 - A verified task waits in *Merging* while its branch goes through the
   merge queue: queued for the queue's turn, merging, or, when the merge
-  conflicts, its session resolving them. The card says where it stands;
+  conflicts, a fresh session the harness starts in its worktree
+  resolving them (`harness-merge-conflict-resolver`; it spares the
+  task's long, long-cold session). The card says where it stands;
   the task moves to *Completed* once the branch is in.
 - A task's session finishes by *handing its work in* (`hand_in`): the
   agent gives a final summary and the evidence for it -- an image or a
@@ -519,7 +589,7 @@ your checkout itself can be submitted to the **main tree** instead (the
   in the box, `C-c C-c` sends it) and `[Report]`, which pops it out, so
   you can read the work and accept it without going back to the board.
   The two keys work only while the banner shows; otherwise `C-c C-v`
-  attaches the clipboard as usual.
+  is nothing there, the box pasting with `C-y`.
 - `[Report]` on a card that has one, or on the banner, pops the
   handed-in summary and evidence out beside the board: images large, as
   wide as the popout, videos as thumbnails, files as buttons, and each
@@ -540,13 +610,55 @@ your checkout itself can be submitted to the **main tree** instead (the
   permission prompt or the question, with its options and diagrams --
   and answers it there. The card offers the same as [Answer…] or
   [Request…] next to [Allow] and [Deny].
+- `/` searches the board in words: a question ("did I have a task about
+  the question button?") or an order ("restart the errored tasks", "get
+  rid of the pagination task"). The line goes with a dump of the board
+  to a quick, cheap model (`harness-tasks-search-model`, the provider's
+  cheapest tier by default), which answers with the tasks it is about
+  and what to do, never with prose. The board then shows only those
+  tasks, archived ones included, under a banner that says what it shows;
+  `C-g` or `[Clear]` shows every task again. An order that is easily
+  undone or does no harm -- archive of a task not at work, restore,
+  retry, start -- runs at once and the banner says so, with `[Undo]`;
+  one that interrupts work, merges it or sends words to an agent --
+  stop, archive of a working task, verify, mark done, message, send
+  back -- is offered instead, and an empty `/` then `RET` runs it. The
+  model may look further once, in the sessions' transcripts, when the
+  board alone does not say enough. `[Search]` in the header does the
+  same, and `C-c h /` from anywhere opens the project's board first.
 - `RET` opens the session of the task at point. From that session,
-  `C-c h a` leads back to the board.
+  `C-c h a` leads back to the board. `F` lays the board out fullscreen,
+  with that session beside it (see
+  [Fullscreen overviews](#fullscreen-overviews)).
 - A task's session shows in the session list (`C-c h l`) under the
   task's title, of kind task, until the model names it.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
+
+### Fullscreen overviews
+
+The task board and the session list can take the whole frame: press `F`
+on either, or `C-c h F` from anywhere. The overview stays on the left
+and a session shows on the right: the one already in sight, else the
+task or session at point, else the most recent one. Every session you
+open from the overview takes the right side in turn, and so does
+anything else the harness shows while the layout lasts.
+
+- `C-c C-z` in the session on the right buries it: the buffer that was
+  there before comes back, such as the file the session took the place
+  of, and the layout stays, so the next session you open takes the
+  right side again. It is a key chord because plain keys in a session
+  type into its compose box.
+- `q` on the overview (or `F` again) ends the layout, and the windows
+  come back as they were. A file you visited on the right stays in
+  sight.
+- Opening the other overview while the layout is on (`C-c h l` beside
+  the board, say) puts it on the left instead.
+- `harness-ui-fullscreen-width` sets the width of the overview: a
+  fraction of the frame (half, by default) or a number of columns.
+- `fullscreen` is a position too, so `C-u C-c h a` and then `fullscreen`
+  opens the board in the layout.
 
 ### Notifications
 
@@ -582,6 +694,30 @@ test notification and says what each provider did with it.
   work you asked for has finished. Clicking such a notification opens
   the session.
 
+### Companion pet
+
+`C-c h z` (`M-x harness-pet`) opens the pet's buffer, the only place it
+shows. The first time there is an egg: press `h` to hatch it. It hatches
+into one of 18 species, from common to legendary (one in a hundred),
+sometimes with a hat and, rarely, shiny, with five stats. The cheapest
+model of your provider names it and gives it a personality.
+
+While its buffer is on screen, it now and then says a line about the
+message you just sent, a test run that failed or a big change, and it
+always answers when you call it by name in a message or pet it (`p`).
+It grows a level as you work. `r` renames it, `m` mutes it and `R` lets
+it go, after which the next egg hatches another.
+
+It costs little: it never asks a model anything while its buffer is
+hidden or while it is muted, comments unasked at most once a minute
+(`harness-pet-cooldown`), on your messages only by chance
+(`harness-pet-chance`), and then asks for one short line from a cheap
+model (`harness-pet-model`) with no thinking and none of your project's
+context but the last few messages. Nothing runs while nothing happens.
+To keep it quiet, set
+`harness-pet-reactions` to nil; to remove it, add `pet` and `ui-pet` to
+`harness-disabled-modules`.
+
 ## Configuration
 
 `C-c h S` (`M-x harness-settings`) opens the settings page, which edits
@@ -592,7 +728,8 @@ shows where its effective value comes from.
 
 The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
-non-interactive, budget), **Files and safety** (directory access,
+non-interactive), **Spending** (the budget, one for all sessions
+together), **Files and safety** (directory access,
 sandbox policy, standing permission rules), **Task board** (what task
 sessions start with, and when their work counts as done),
 **Notifications** (which task events notify you, and through which
@@ -614,7 +751,6 @@ project's, and a project's over the global value.
 - `harness-btw-thinking`
 - `harness-permission-mode`
 - `harness-allowed-directories`
-- `harness-budget`
 - `harness-sandbox-policy`
 - `harness-non-interactive`
 
@@ -632,7 +768,15 @@ endpoints, Bedrock's per-model defaults, the standing permission rules
 Context window, Thinking…), has a value of its own kind, and says what
 it is for. Each record in a list folds to one line; `Edit` opens it and
 `INS` adds one, filled in from what that kind of record starts as.
-Model fields complete model ids.
+
+Settings that name a model (the default model, the task, refine, recap,
+search and auto-mode judge models, Copilot's default model, and the
+fallback list) are dropdowns rather than text fields. The button names
+the model (`Fable 5.1 (Claude) ▾`), next to its id and context window,
+and opens a picker of the models the configured providers list, grouped
+by provider, with their context window and price. A pick saves at once.
+An id no provider lists can still be typed in the picker, and the page
+then warns that the harness does not know that model's context window.
 
 ## Providers and billing
 
@@ -711,6 +855,73 @@ the thinking menu offers exactly those levels and never a `medium` or
 profile or a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`). See
 `harness-bedrock-endpoints` for the configuration.
 
+#### Through a gateway
+
+A gateway or proxy in front of Bedrock gets an endpoint of its own. On
+the settings page (`C-c h S`), under **Models and services**, add one
+with `INS` to the **Endpoints** described as "AWS Bedrock endpoints"
+(the **Endpoints** above it is for OpenAI-compatible APIs). Its **ID**
+names its models (`ID:MODEL`). Set **Runtime URL** to the gateway's
+URL, path prefix included. For example,
+`https://gateway.example.com/bedrock` sends ConverseStream to
+`https://gateway.example.com/bedrock/model/MODEL/converse-stream`. A
+query in the URL is added to every request.
+
+Models are listed at the same URL (`…/foundation-models` and
+`…/inference-profiles`), and never at AWS with the gateway's keys.
+If the gateway lists them somewhere else, set **Listing URL**. If it
+does not list them at all, set **Models** to name them.
+
+What to set depends on how the gateway authenticates:
+
+| The gateway takes | Set |
+|---|---|
+| A key of its own as `Authorization: Bearer KEY` | **Authentication** API key, and **API key variable**: the environment variable that holds the key |
+| The key in another header, such as `x-api-key` | The same, plus **API key header** `x-api-key` |
+| A short-lived token that a command prints | **Authentication** API key, and **API key command** (see below) |
+| More headers, such as a team or project id | **Headers**. `${NAME}` in a value is replaced by environment variable `NAME`, so secrets stay out of the settings |
+| AWS keys signed for its own URL (API Gateway, a VPC endpoint) | **Authentication** AWS keys, and a **Profile**. For API Gateway, also set **Signing service** to `execute-api` |
+| AWS keys signed for Bedrock, because it passes requests on unchanged | **Authentication** AWS keys, and **Sign for Bedrock's own URL** |
+| Nothing the harness sends (mutual TLS, a VPN) | **Authentication** None |
+
+The token is the last line the API key command prints; a leading
+`Bearer ` is dropped. It is kept until it expires (the `exp` claim of
+a JWT), or for an hour otherwise. When the gateway refuses it, the
+command runs again and the request is retried once. While a command or
+**API key variable** is set, `AWS_BEARER_TOKEN_BEDROCK` is not sent to
+the gateway. If the setup is incomplete, the first request names what
+is missing.
+
+For example, here is a gateway that takes a key of its own in
+`x-api-key` and lists models under its own prefix:
+
+```elisp
+(:id gateway :label "Gateway" :auth bearer
+ :endpoint-url "https://gateway.example.com/bedrock"
+ :bearer-token-env "GATEWAY_API_KEY" :bearer-token-header "x-api-key")
+```
+
+And here is one whose token comes from a login command, with its
+models named:
+
+```elisp
+(:id gateway :label "Gateway" :auth bearer
+ :endpoint-url "https://gateway.example.com/bedrock"
+ :bearer-token-command "gateway-login --print-token"
+ :models ("us.anthropic.claude-sonnet-4-5-20250929-v1:0"))
+```
+
+Requests go through curl, so curl's own settings apply:
+
+- `CURL_CA_BUNDLE` for a gateway whose certificate a private CA signs
+- `HTTPS_PROXY` and `NO_PROXY` for a proxy
+- `~/.curlrc` for anything else, such as `cacert = /path/to/ca.pem`
+
+The harness process takes its environment from Emacs when it starts.
+Set the variables before it starts, or restart it after setting them.
+Saving the endpoint re-registers its provider and clears what was
+cached for it, so a changed URL or model list shows at once.
+
 ### Switching model or provider
 
 `C-c h m` (`harness-set-model`) chooses the model for the current
@@ -720,10 +931,47 @@ session to it; `C-c h H` (`harness-set-thinking-all`) does the same for
 the thinking level. Both make the choice the default for new sessions
 too, unless a prefix argument (`C-u C-c h M`) says otherwise. Only idle,
 running and blocked sessions change — deactivated ones are history and
-are left alone — no running turn is cancelled, each session records the
-change as a hint, and provider state is kept so switching back can
-still resume it. Use them when a plan runs out of credit, a provider
-fails, or a cheaper model should take over work already in flight.
+are left alone — no running turn is cancelled (it takes the new model at
+its next step), and each session records the change as a hint. Use them
+when a plan runs out of credit, a provider fails, or a cheaper model
+should take over work already in flight.
+
+Claude Code and Copilot keep the conversation themselves and are sent
+only your newest message, so switching a session to one of them from
+another provider would start a conversation that knows nothing of the
+work so far. Such a switch asks first — once for all of them with
+`C-c h M` — and lists the risks: a cold prompt cache (with what the
+session's context costs to write), lower fidelity (the model explores
+again; tool calls and thinking reach it only as text), the old
+provider's own state left behind, and that a running turn finishes its
+current step first. The question shows as a banner over the session's
+message box — the models, the risks and the costs, then one button and
+key per way to hand over — and as a minibuffer question when the session
+has no chat buffer open. Then choose:
+
+- **`c` current model summarises**: it summarises the conversation,
+  whose cache is warm, and the new one starts from that summary;
+- **`n` new model summarises** (advanced): the new model writes the
+  summary itself, from only the first and last messages of the session,
+  so the whole conversation never runs through it. Use this when the
+  current provider cannot answer at all — its plan ran out, it is down —
+  or to keep the job cheap. The middle of the conversation is left out,
+  so the summary is a lossy one;
+- **`t` full transcript**: the whole transcript is written to
+  `.harness/handoff/` in the session's directory (git ignores it), and
+  the new model is told to read it before it answers; its prompt cache
+  holds it as it reads;
+- **`s` no handoff**, or **`q` cancel**.
+
+If the summariser fails, the transcript goes over instead. Whichever
+handoff you choose, the message that opens the new conversation says the
+context may be lossy and tells the model to re-investigate anything it
+is unsure of — read the files, check the state — before it acts.
+
+A switch to an API provider (which is sent the whole conversation), to
+another model of the same provider, or back to a provider before any
+other ran a step in the session (it resumes its own conversation) loses
+nothing and does not ask.
 
 The task board has the same thing scoped to its tasks: turn on bulk edit
 (`B`, or `[Bulk edit: N tasks]` in the board's header) and the model,
@@ -736,7 +984,14 @@ archived tasks are history and are left alone.
 
 The usage dashboard (`C-c h u`) lists every quota window with its reset
 time, the plan's extra usage, and the value at API prices that the plan
-covered.
+covered.  Its Fallback section says where sessions carry on when a
+provider runs out of quota or money: the list is tried in order, each
+entry a provider id (that provider's model of similar ability) or one
+model id, set by `harness-fallback-models`.  There `f` adds an entry,
+`c` forgets that one ran out so it is tried again, `M-<up>` and
+`M-<down>` move the entry at point, and `d` removes it.  A session's
+own model always comes first, and it goes back to it once it works
+again.
 
 Grouped by project, every task's git worktree is folded under the
 project it belongs to: one line per project, with the total and how many
@@ -755,8 +1010,9 @@ offers the month's API cost minus what the harness recorded.
 ## Corporate mode
 
 Corporate mode turns off the harness features that could carry data off
-your machine. It is meant for work machines whose policy lets code and
-data go to the model provider in use and nowhere else.
+your machine, except web search. It is meant for work machines whose
+policy lets code and data go to the model provider in use, and search
+queries to a search engine, and nowhere else.
 
 Turn it on in `config.el` (Doom) or your init file, before
 `(harness-start)`:
@@ -771,14 +1027,21 @@ It turns off:
   ignores `harness-acp-allow-remote`. Pairing phones and other devices
   is refused, and the UI cannot connect to a harness elsewhere
   (`harness-connect-remote`).
-- Network tools. Sessions do not get `web_fetch`, `web_search` or the
-  web search that Claude Code and Copilot run themselves. When a model
-  calls one anyway, the call is denied and the model is told why.
+- Network tools other than web search. Sessions do not get
+  `web_fetch`, which reaches any URL. When a model calls it anyway, the
+  call is denied and the model is told why.
 
 It leaves alone:
 
 - The model provider. The provider you choose still receives what
   sessions send it.
+- Web search. `web_search` sends its queries to the search provider
+  (`harness-websearch-provider`, Brave by default), and Claude Code and
+  Copilot run their own web search on their side (see
+  `harness-websearch-builtin`). Both are `web_search` calls, which the
+  permission rules decide as usual: if your policy rules out web search
+  too, add `(:tool "web_search" :behavior deny)` to
+  `harness-perms-rules`.
 - Shell commands. They follow the permission mode and the sandbox, as
   always, so a command can still reach the network. Use a permission
   mode that asks before commands run (Ask or Accept edits), and set
@@ -893,7 +1156,7 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |

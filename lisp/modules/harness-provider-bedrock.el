@@ -9,9 +9,17 @@
 ;; and turned into harness events.  The agent runs the tool loop.
 ;;
 ;; Models come from ListFoundationModels and ListInferenceProfiles,
-;; cached for `harness-bedrock--models-ttl'.  Bedrock reports neither
-;; context windows nor prices, so `harness-bedrock--model-defaults'
-;; supplies them by model family.
+;; cached for `harness-bedrock--models-ttl'; a refresh lists them
+;; again, and a listing that fails keeps the models listed before.
+;; Bedrock reports neither context windows nor prices, so
+;; `harness-bedrock--model-defaults' supplies them by model family.  A
+;; family's catch-all window is flagged as an estimate, which the window
+;; another provider lists for the same model replaces, or else that of
+;; the endpoint's closest model by name that the defaults size (see
+;; `harness-provider--with-estimate'); a model no default knows gets
+;; the endpoint's `:default-context', else the catalogue's estimate.  A model the
+;; listing lacks (an application inference profile ARN, say) is still
+;; described from the defaults when a session names it.
 ;;
 ;; Claude and Nova requests carry prompt cache points.  Claude thinks
 ;; adaptively or within a token budget, by model, at the session's
@@ -81,6 +89,9 @@ prices."
                  :options
                  ((:context-window (integer :tag "Context window" :value 128000
                                             :doc "Tokens the model accepts: input plus output."))
+                  (:context-window-estimated
+                   (const :tag "The window is a guess for the family" t
+                          :doc "The same model's window elsewhere, or a close model's, replaces it."))
                   (:max-output (integer :tag "Max output" :value 8192
                                         :doc "Most output tokens per request."))
                   (:input-modalities ,harness-provider-modalities-type)
@@ -162,8 +173,8 @@ prices."
     ("claude-3-opus" :context-window 200000 :max-output 4096
      :input-modalities ("text" "image")
      :pricing (:input 15.0 :output 75.0 :cache-read 15.0 :cache-write 15.0))
-    ("anthropic\\.claude" :context-window 200000 :max-output 32000 :prompt-caching t
-     :input-modalities ("text" "image"))
+    ("anthropic\\.claude" :context-window 200000 :context-window-estimated t :max-output 32000
+     :prompt-caching t :input-modalities ("text" "image"))
     ("nova-premier" :context-window 1000000 :max-output 32000 :prompt-caching t
      :input-modalities ("text" "image")
      :pricing (:input 2.5 :output 12.5 :cache-read 0.625 :cache-write 2.5))
@@ -175,12 +186,13 @@ prices."
      :pricing (:input 0.06 :output 0.24 :cache-read 0.015 :cache-write 0.06))
     ("nova-micro" :context-window 128000 :max-output 10000 :prompt-caching t
      :pricing (:input 0.035 :output 0.14 :cache-read 0.00875 :cache-write 0.035))
-    ("amazon\\.nova" :context-window 300000 :max-output 10000 :prompt-caching t)
-    ("meta\\.llama4" :context-window 128000 :max-output 8192)
-    ("meta\\.llama3" :context-window 128000 :max-output 2048)
+    ("amazon\\.nova" :context-window 300000 :context-window-estimated t :max-output 10000
+     :prompt-caching t)
+    ("meta\\.llama4" :context-window 128000 :context-window-estimated t :max-output 8192)
+    ("meta\\.llama3" :context-window 128000 :context-window-estimated t :max-output 2048)
     ("mistral\\.\\(mistral-large-2407\\|pixtral\\)" :context-window 128000 :max-output 8192)
-    ("mistral\\." :context-window 32000 :max-output 8192)
-    ("deepseek\\." :context-window 128000 :max-output 32768)
+    ("mistral\\." :context-window 32000 :context-window-estimated t :max-output 8192)
+    ("deepseek\\." :context-window 128000 :context-window-estimated t :max-output 32768)
     ("openai\\.gpt-oss" :context-window 128000 :max-output 32768))
   "What Bedrock does not report about its models, by model family.
 Each entry is (REGEXP . PLIST); the first REGEXP matching a model id
@@ -188,6 +200,11 @@ Each entry is (REGEXP . PLIST); the first REGEXP matching a model id
 keys:
 
   :context-window   input plus output tokens the model accepts
+  :context-window-estimated non-nil when that window is a guess for the
+                    family rather than the model's own; the window
+                    another provider lists for the same model replaces
+                    it, or else that of the closest model by name
+                    sized here (see `harness-provider--with-estimate')
   :max-output       most output tokens per request
   :input-modalities (\"text\") or (\"text\" \"image\")
   :thinking         `adaptive' (effort levels), `adaptive-only' (the
@@ -201,8 +218,9 @@ keys:
                     per million tokens; approximate list prices
   :request-fields   plist merged into additionalModelRequestFields
 
-Models nothing matches get the endpoint's `:default-context' and no
-price, so their calls are recorded without a cost.")
+Models nothing matches get the endpoint's `:default-context', else a
+window the catalogue estimates (see `harness-provider--estimate'), and
+no price, so their calls are recorded without a cost.")
 
 (defvar harness-bedrock--registered nil
   "Provider ids registered from `harness-bedrock-endpoints'.")
@@ -253,18 +271,30 @@ profile's region, then us-east-1."))
                     (const :tag "API key" :menu-tag "Bedrock API key (bearer token)" bearer)
                     (const :tag "None" :menu-tag "None: the gateway authenticates (see Headers)" none)))
      (:bearer-token-env (string :tag "API key variable" :value "AWS_BEARER_TOKEN_BEDROCK"
-                                :doc "Environment variable that holds a Bedrock API key."))
+                                :doc "Environment variable that holds the API key: a Bedrock API key, or
+a gateway's.  AWS_BEARER_TOKEN_BEDROCK when not set, unless an API key
+command is."))
+     (:bearer-token-command (string :tag "API key command" :value "print-gateway-token"
+                                    :doc "Shell command that prints the API key, a gateway's token say, on
+its last line.  The key is kept until it expires (a JWT's exp claim)
+or for an hour, and asked for again when a request is refused."))
+     (:bearer-token-header (string :tag "API key header" :value "x-api-key"
+                                   :doc "Header the API key goes in instead of Authorization (which
+carries \"Bearer KEY\"), for a gateway that wants it elsewhere: this
+header carries the key alone."))
      (:endpoint-url (string :tag "Runtime URL" :value "https://bedrock-runtime.us-east-1.amazonaws.com"
                             :doc "For a gateway, proxy or VPC endpoint: where requests go instead
-of https://bedrock-runtime.REGION.amazonaws.com.  A path prefix is
-kept.  AWS_ENDPOINT_URL_BEDROCK_RUNTIME when not set."))
+of https://bedrock-runtime.REGION.amazonaws.com.  A path prefix and a
+query are kept.  AWS_ENDPOINT_URL_BEDROCK_RUNTIME when not set."))
      (:control-url (string :tag "Listing URL" :value "https://bedrock.us-east-1.amazonaws.com"
                            :doc "Where models are listed instead of
-https://bedrock.REGION.amazonaws.com.  AWS_ENDPOINT_URL_BEDROCK when
-not set."))
+https://bedrock.REGION.amazonaws.com.  When not set: the runtime URL
+when that is a gateway's (its host is not AWS's), else
+AWS_ENDPOINT_URL_BEDROCK."))
      (:headers (alist :tag "Headers" :key-type (string :tag "Header") :value-type (string :tag "Value")
                       :doc "Extra request headers.  They replace headers of the same name and
-are not signed."))
+are not signed.  ${NAME} in a value stands for environment variable
+NAME, so a gateway's key need not be written here."))
      (:auth-source-host (string :tag "auth-source host" :value "bedrock-runtime.us-east-1.amazonaws.com"
                                 :doc "Host the keys are looked up under in auth-source; the runtime URL's
 host when not set."))
@@ -276,6 +306,7 @@ or (:bearer-token TOKEN)."))
                                :doc "Service name of Signature Version 4."))
      (:signing-region (string :tag "Signing region" :value "us-east-1"
                               :doc "Region of Signature Version 4; the endpoint's region when not set."))
+     (:sign-for-aws (const :tag "Sign for Bedrock's own URL (a gateway that passes requests on unchanged)" t))
      (:models (repeat :tag "Models"
                       :doc "Models to offer instead of listing the account's: model ids,
 inference profile ids or ARNs."
@@ -321,23 +352,37 @@ Every entry is a plist with these keys, all optional but `:id':
                     Naming one here makes it win over the environment
   :endpoint-url     runtime URL used instead of
                     https://bedrock-runtime.REGION.amazonaws.com, for a
-                    gateway, proxy or VPC endpoint; a path prefix is kept.
-                    AWS_ENDPOINT_URL_BEDROCK_RUNTIME is the default
+                    gateway, proxy or VPC endpoint; a path prefix and a
+                    query are kept.  AWS_ENDPOINT_URL_BEDROCK_RUNTIME is
+                    the default
   :control-url      URL for listing models instead of
-                    https://bedrock.REGION.amazonaws.com
-                    (AWS_ENDPOINT_URL_BEDROCK is the default)
+                    https://bedrock.REGION.amazonaws.com; by default the
+                    runtime URL when that is a gateway's (its host is not
+                    AWS's), else AWS_ENDPOINT_URL_BEDROCK
   :auth             nil (automatic), `sigv4', `bearer' or `none' (the
                     gateway authenticates some other way, see :headers)
-  :bearer-token-env environment variable holding a Bedrock API key;
-                    default AWS_BEARER_TOKEN_BEDROCK
+  :bearer-token-env environment variable holding the API key, a Bedrock
+                    API key or a gateway's; default AWS_BEARER_TOKEN_BEDROCK
+                    unless there is an API key command
+  :bearer-token-command shell command printing the API key on its last
+                    line, a gateway's token say; the key is kept until it
+                    expires (a JWT's exp claim) or for an hour, and asked
+                    for again when a request is refused
+  :bearer-token-header header the API key goes in instead of Authorization
+                    (which carries \"Bearer KEY\"), \"x-api-key\" say; it
+                    carries the key alone
   :auth-source-host host looked up in auth-source; default the runtime host
   :credentials      function returning, or returning a promise of, a plist
                     (:access-key-id :secret-access-key :session-token
                     :expiration) or (:bearer-token TOKEN)
   :signing-service  Signature Version 4 service name; default \"bedrock\"
   :signing-region   Signature Version 4 region; default the region
+  :sign-for-aws     non-nil to sign for Bedrock's own URL rather than the
+                    gateway's, for a gateway that passes requests on to
+                    Bedrock unchanged
   :headers          extra request headers, an alist of (NAME . VALUE); they
-                    replace headers of the same name and are not signed
+                    replace headers of the same name and are not signed.
+                    ${NAME} in a value stands for environment variable NAME
   :models           model ids or model plists offered instead of listing
                     the account's models, for example
                     (\"us.anthropic.claude-sonnet-4-5-20250929-v1:0\"
@@ -352,15 +397,30 @@ Every entry is a plist with these keys, all optional but `:id':
   :request-fields   plist merged into additionalModelRequestFields
   :capabilities     static capability plist
 
-A Bedrock gateway with its own URL and profile, for instance:
+A gateway that takes a key of its own in an x-api-key header, the key
+read from the environment, and lists models under the same prefix:
 
-  (:id gateway :label \"Gateway\" :region \"us-east-1\" :profile \"work\"
-   :endpoint-url \"https://bedrock.gateway.example.com/runtime\"
+  (:id gateway :label \"Gateway\" :auth bearer
+   :endpoint-url \"https://gateway.example.com/bedrock\"
+   :bearer-token-env \"GATEWAY_API_KEY\" :bearer-token-header \"x-api-key\")
+
+One whose token a command prints, with its models named:
+
+  (:id gateway :label \"Gateway\" :auth bearer
+   :endpoint-url \"https://gateway.example.com/bedrock\"
+   :bearer-token-command \"gateway-login --print-token\"
+   :models (\"us.anthropic.claude-sonnet-4-5-20250929-v1:0\"))
+
+And a proxy or VPC endpoint that takes the AWS keys of a profile:
+
+  (:id proxy :label \"Proxy\" :region \"us-east-1\" :profile \"work\"
+   :endpoint-url \"https://bedrock.proxy.example.com/runtime\"
    :models (\"us.anthropic.claude-sonnet-4-5-20250929-v1:0\"))
 
 Keys and tokens never go in this variable: the provider reads them from
-the environment, the AWS profile, auth-source or `:credentials'.
-Changing it through customize re-registers the providers."
+the environment, the AWS profile, auth-source, a command or
+`:credentials'.  Changing it through customize re-registers the
+providers and forgets what was learnt about the endpoints changed."
   :type `(repeat ,harness-bedrock--endpoint-type)
   :set #'harness-bedrock--custom-set
   ;; Loading the file again (a reload) keeps the value; the file
@@ -485,6 +545,28 @@ PORT is nil unless URL names one; QUERY is nil without a `?'."
 (defun harness-bedrock--host-of (url)
   "Return the host name of URL, or nil."
   (ignore-errors (nth 1 (harness-bedrock--split-url url))))
+
+(defconst harness-bedrock--aws-host-regexp
+  "\\(?:\\`\\|\\.\\)\\(?:amazonaws\\.com\\(?:\\.cn\\)?\\|api\\.aws\\)\\'"
+  "Matches the host names of AWS's own endpoints, VPC endpoints included.")
+
+(defun harness-bedrock--aws-url-p (url)
+  "Non-nil when URL's host is one of AWS's own, not a gateway's."
+  (let ((host (harness-bedrock--host-of url)))
+    (and host (string-match-p harness-bedrock--aws-host-regexp host))))
+
+(defun harness-bedrock--url (base path)
+  "Return the URL of PATH under BASE.
+PATH starts with a slash and may carry a query.  A query BASE carries,
+a gateway's say, stays, its parameters before PATH's."
+  (let* ((q (string-search "?" base))
+         (root (string-remove-suffix "/" (if q (substring base 0 q) base)))
+         (p (string-search "?" path))
+         (query (string-join (delq nil (list (and q (harness-bedrock--nonempty (substring base (1+ q))))
+                                             (and p (harness-bedrock--nonempty (substring path (1+ p))))))
+                             "&")))
+    (concat root (if p (substring path 0 p) path)
+            (if (string-empty-p query) "" (concat "?" query)))))
 
 ;;;; Signature Version 4
 
@@ -790,12 +872,42 @@ REGION, when given, saves looking it up."
 
 (defun harness-bedrock--control-url (endpoint &optional region)
   "Return the URL ENDPOINT lists models at, without a trailing slash.
-REGION, when given, saves looking it up."
-  (string-remove-suffix
-   "/" (or (harness-bedrock--nonempty (plist-get endpoint :control-url))
-           (harness-bedrock--env "AWS_ENDPOINT_URL_BEDROCK")
-           (let ((region (or region (harness-bedrock--region endpoint))))
-             (format "https://bedrock.%s.%s" region (harness-bedrock--dns-suffix region))))))
+That is its `:control-url'; else its `:endpoint-url' when that is a
+gateway's (not an AWS host), so a gateway's keys and headers go to the
+gateway alone; else AWS_ENDPOINT_URL_BEDROCK; else
+AWS_ENDPOINT_URL_BEDROCK_RUNTIME, when the runtime URL comes from it
+and is a gateway's; else Bedrock's regional URL.  REGION, when given,
+saves looking it up."
+  (let ((own (harness-bedrock--nonempty (plist-get endpoint :endpoint-url)))
+        (env-runtime (harness-bedrock--env "AWS_ENDPOINT_URL_BEDROCK_RUNTIME")))
+    (string-remove-suffix
+     "/" (or (harness-bedrock--nonempty (plist-get endpoint :control-url))
+             (and own (not (harness-bedrock--aws-url-p own)) own)
+             (harness-bedrock--env "AWS_ENDPOINT_URL_BEDROCK")
+             (and (not own) env-runtime (not (harness-bedrock--aws-url-p env-runtime)) env-runtime)
+             (let ((region (or region (harness-bedrock--region endpoint))))
+               (format "https://bedrock.%s.%s" region (harness-bedrock--dns-suffix region)))))))
+
+(defun harness-bedrock--aws-url (endpoint plane region)
+  "Return Bedrock's own URL of PLANE for ENDPOINT in REGION.
+PLANE is `runtime' or `control'; the region is the endpoint's signing
+region when it names one."
+  (let ((region (or (harness-bedrock--nonempty (plist-get endpoint :signing-region)) region)))
+    (format "https://%s.%s.%s" (if (eq plane 'control) "bedrock" "bedrock-runtime")
+            region (harness-bedrock--dns-suffix region))))
+
+(defun harness-bedrock--sign-for-aws-p (endpoint)
+  "Non-nil when ENDPOINT's requests are signed for Bedrock's own URL."
+  (not (memq (plist-get endpoint :sign-for-aws) '(nil :false))))
+
+(defun harness-bedrock--signing-url (endpoint url path plane region)
+  "Return the URL a request to URL, for PATH of PLANE, is signed for.
+That is URL, unless ENDPOINT is signed for AWS (`:sign-for-aws'), for
+a gateway that passes requests on to Bedrock unchanged: then PATH under
+Bedrock's own URL of PLANE (see `harness-bedrock--aws-url') in REGION."
+  (if (harness-bedrock--sign-for-aws-p endpoint)
+      (harness-bedrock--url (harness-bedrock--aws-url endpoint plane region) path)
+    url))
 
 ;;;; Credentials
 ;;
@@ -804,21 +916,26 @@ REGION, when given, saves looking it up."
 ;;
 ;; 1. a Bedrock API key in AWS_BEARER_TOKEN_BEDROCK (or the endpoint's
 ;;    `:bearer-token-env'), sent as a bearer token;
-;; 2. the endpoint's `:credentials' function;
-;; 3. AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN,
+;; 2. the API key the endpoint's `:bearer-token-command' prints, a
+;;    gateway's token say (with such a command, AWS_BEARER_TOKEN_BEDROCK
+;;    is only read when `:bearer-token-env' names it);
+;; 3. the endpoint's `:credentials' function;
+;; 4. AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN,
 ;;    unless the endpoint names a `:profile';
-;; 4. the keys of the AWS profile, in the shared credentials file or
+;; 5. the keys of the AWS profile, in the shared credentials file or
 ;;    the config file;
-;; 5. auth-source, for the runtime host: user "apikey" (or "bearer")
+;; 6. auth-source, for the runtime host: user "apikey" (or "bearer")
 ;;    holds an API key, any other user is an access key id whose
 ;;    password is the secret key;
-;; 6. the profile's `credential_process';
-;; 7. `aws configure export-credentials' for the profile (see
+;; 7. the profile's `credential_process';
+;; 8. `aws configure export-credentials' for the profile (see
 ;;    `harness-bedrock--aws-program').
 ;;
 ;; Commands run asynchronously, at most one at a time per endpoint,
-;; and what they print is kept until it expires.  Keys 2 to 7 are used
-;; to sign with Signature Version 4.  The
+;; and what they print is kept until it expires.  An API key goes in
+;; the endpoint's `:bearer-token-header' (Authorization by default);
+;; the other keys sign with Signature Version 4, for the URL a request
+;; goes to or, with `:sign-for-aws', for Bedrock's own.  The
 ;; endpoint's `:auth' restricts the choice to `bearer' or `sigv4', or
 ;; turns authentication off (`none').
 
@@ -826,11 +943,28 @@ REGION, when given, saves looking it up."
 
 (define-error 'harness-bedrock-no-credentials "No AWS credentials" 'harness-error)
 
+(defun harness-bedrock--api-key-variable (endpoint)
+  "Return the environment variable ENDPOINT's API key is read from, or nil.
+That is its `:bearer-token-env', else AWS_BEARER_TOKEN_BEDROCK unless
+an API key command (`:bearer-token-command') takes its place: an AWS
+key meant for Bedrock itself is not sent to a gateway that has a key
+of its own."
+  (or (harness-bedrock--nonempty (plist-get endpoint :bearer-token-env))
+      (unless (harness-bedrock--nonempty (plist-get endpoint :bearer-token-command))
+        "AWS_BEARER_TOKEN_BEDROCK")))
+
 (defun harness-bedrock--bearer-env (endpoint)
   "Return (VARIABLE . TOKEN) when ENDPOINT's API key variable is set."
-  (let* ((var (or (plist-get endpoint :bearer-token-env) "AWS_BEARER_TOKEN_BEDROCK"))
+  (let* ((var (harness-bedrock--api-key-variable endpoint))
          (token (harness-bedrock--env var)))
     (and token (cons var token))))
+
+(defun harness-bedrock--api-key-header (endpoint token)
+  "Return the header (NAME . VALUE) that carries the API key TOKEN for ENDPOINT.
+The header is its `:bearer-token-header', Authorization by default,
+which carries \"Bearer TOKEN\"; any other header carries TOKEN alone."
+  (let ((name (or (harness-bedrock--nonempty (plist-get endpoint :bearer-token-header)) "Authorization")))
+    (cons name (if (string-equal-ignore-case name "authorization") (concat "Bearer " token) token))))
 
 (defun harness-bedrock--env-keys ()
   "Return keys from the AWS_* environment variables, or nil."
@@ -905,27 +1039,80 @@ logins, assumed roles and instance roles.  nil never runs it.")
   "Seconds a command that prints keys may run.")
 
 (defvar harness-bedrock--kept-keys (make-hash-table :test 'equal)
-  "\"ENDPOINT/PROFILE\" -> keys a command printed, kept until `:expires'.")
+  "Keys a command printed, kept until `:expires'.
+AWS keys are under \"ENDPOINT/PROFILE\", an API key under
+\"ENDPOINT/api-key/HASH\" (see `harness-bedrock--api-key-cache-key').")
 
 (defvar harness-bedrock--command-pending (make-hash-table :test 'equal)
-  "\"ENDPOINT/PROFILE/SOURCE\" -> promise of a command still running.")
+  "\"CACHE-KEY/SOURCE\" -> promise of a command still running.")
+
+(defconst harness-bedrock--api-key-ttl 3600
+  "Seconds an API key that `:bearer-token-command' printed is kept.
+A key that is a JWT naming its expiry is kept until then instead, and
+a key a request is refused with is dropped at once.")
 
 (defun harness-bedrock--keys-cache-key (endpoint)
   "Return the key ENDPOINT's command keys are kept under."
   (format "%s/%s" (plist-get endpoint :id) (harness-bedrock--profile-name endpoint)))
+
+(defun harness-bedrock--api-key-cache-key (endpoint)
+  "Return the key the API key ENDPOINT's command printed is kept under.
+It names the command, so a key printed by a command since replaced is
+never used."
+  (format "%s/api-key/%s" (plist-get endpoint :id)
+          (secure-hash 'sha1 (or (plist-get endpoint :bearer-token-command) ""))))
 
 (defun harness-bedrock--fresh-p (keys)
   "Non-nil when KEYS do not expire within five minutes."
   (let ((expires (plist-get keys :expires)))
     (or (null expires) (> (- expires (float-time)) 300))))
 
-(defun harness-bedrock--command-keys (endpoint source command)
+(defun harness-bedrock--process-keys (stdout source)
+  "Return the AWS keys in STDOUT, JSON in the credential_process format, or nil.
+SOURCE names the command that printed it."
+  (let ((json (ignore-errors (harness-json-parse stdout))))
+    (when (and (listp json) (plist-get json :AccessKeyId) (plist-get json :SecretAccessKey))
+      (list :type 'sigv4
+            :access-key-id (plist-get json :AccessKeyId)
+            :secret-access-key (plist-get json :SecretAccessKey)
+            :session-token (plist-get json :SessionToken)
+            :expires (or (harness-bedrock--parse-time (plist-get json :Expiration))
+                         (+ (float-time) 3600))
+            :source source :command t))))
+
+(defun harness-bedrock--jwt-expiry (token)
+  "Return the expiry of TOKEN as a float time when it is a JWT naming one.
+That is the `exp' claim of its payload; any other TOKEN gives nil."
+  (let ((parts (split-string token "\\.")))
+    (when (= (length parts) 3)
+      (let* ((json (ignore-errors
+                     (harness-json-parse
+                      (decode-coding-string (base64-decode-string (nth 1 parts) t) 'utf-8))))
+             (exp (and (listp json) (plist-get json :exp))))
+        (and (numberp exp) (float exp))))))
+
+(defun harness-bedrock--printed-api-key (stdout source)
+  "Return the API key in STDOUT, what an API key command printed, or nil.
+The key is the last line that is not blank, without a leading
+\"Bearer \".  It is kept until it expires when it is a JWT, else for
+`harness-bedrock--api-key-ttl'.  SOURCE names the command."
+  (let* ((line (car (last (split-string stdout "[\r\n]+" t "[ \t]+"))))
+         (token (and line (replace-regexp-in-string "\\`[Bb]earer[ \t]+" "" line))))
+    (when (and token (not (string-empty-p token)))
+      (list :type 'bearer :token token
+            :expires (or (harness-bedrock--jwt-expiry token) (+ (float-time) harness-bedrock--api-key-ttl))
+            :source source :command t))))
+
+(defun harness-bedrock--command-keys (endpoint source command &optional parse cache-key)
   "Return a promise of the keys COMMAND (a list) prints for ENDPOINT.
-COMMAND prints JSON in the credential_process format; SOURCE names it
-in messages.  At most one such command runs per endpoint and source at
-a time, and what it prints is kept until it expires.  The output never
-reaches a message or the log."
-  (let* ((key (harness-bedrock--keys-cache-key endpoint))
+PARSE, a function of the output and SOURCE, returns the keys printed,
+or nil when there are none; by default it reads the credential_process
+format (`harness-bedrock--process-keys').  SOURCE names the command in
+messages.  At most one such command runs per CACHE-KEY (by default the
+endpoint's profile, see `harness-bedrock--keys-cache-key') and source
+at a time, and the keys it prints are kept under CACHE-KEY until they
+expire.  The output never reaches a message or the log."
+  (let* ((key (or cache-key (harness-bedrock--keys-cache-key endpoint)))
          (pending-key (concat key "/" source))
          (pending (gethash pending-key harness-bedrock--command-pending)))
     (or (and pending (not (harness-promise-settled-p pending)) pending)
@@ -937,8 +1124,9 @@ reaches a message or the log."
                 (lambda (result)
                   (remhash pending-key harness-bedrock--command-pending)
                   (let* ((exit (plist-get result :exit))
-                         (json (and (eq exit 0)
-                                    (ignore-errors (harness-json-parse (plist-get result :stdout))))))
+                         (keys (and (eq exit 0)
+                                    (funcall (or parse #'harness-bedrock--process-keys)
+                                             (or (plist-get result :stdout) "") source))))
                     (cond
                      ((not (eq exit 0))
                       (harness-rejected
@@ -946,29 +1134,36 @@ reaches a message or the log."
                                             (if (eq exit 'timeout) "timed out" (format "failed (exit %s)" exit))
                                             (harness-truncate-end
                                              (string-trim (or (plist-get result :stderr) "")) 300)))))
-                     ((not (and (listp json) (plist-get json :AccessKeyId) (plist-get json :SecretAccessKey)))
+                     ((null keys)
                       (harness-rejected (list 'error (format "%s printed no keys" source))))
                      (t
-                      (let ((keys (list :type 'sigv4
-                                        :access-key-id (plist-get json :AccessKeyId)
-                                        :secret-access-key (plist-get json :SecretAccessKey)
-                                        :session-token (plist-get json :SessionToken)
-                                        :expires (or (harness-bedrock--parse-time (plist-get json :Expiration))
-                                                     (+ (float-time) 3600))
-                                        :source source :command t)))
-                        (puthash key keys harness-bedrock--kept-keys)
-                        keys)))))
+                      (puthash key keys harness-bedrock--kept-keys)
+                      keys))))
                 (lambda (err)
                   (remhash pending-key harness-bedrock--command-pending)
                   (harness-rejected err)))))
           (puthash pending-key promise harness-bedrock--command-pending)
           promise))))
 
+(defun harness-bedrock--api-key-from-command (endpoint)
+  "Return ENDPOINT's kept API key, or a promise of what its command prints.
+The command is the endpoint's `:bearer-token-command', run by the shell."
+  (let* ((key (harness-bedrock--api-key-cache-key endpoint))
+         (kept (gethash key harness-bedrock--kept-keys)))
+    (if (and kept (harness-bedrock--fresh-p kept))
+        kept
+      (harness-bedrock--command-keys
+       endpoint "the API key command"
+       (list shell-file-name shell-command-switch (plist-get endpoint :bearer-token-command))
+       #'harness-bedrock--printed-api-key key))))
+
 (defun harness-bedrock--configured-p (endpoint)
   "Non-nil when anything says ENDPOINT should have AWS keys.
 Without that, listing models in the background stays quiet."
   (or (plist-get endpoint :profile)
       (plist-get endpoint :credentials)
+      (harness-bedrock--nonempty (plist-get endpoint :bearer-token-command))
+      (harness-bedrock--nonempty (plist-get endpoint :bearer-token-env))
       (memq (plist-get endpoint :auth) '(sigv4 bearer none))
       (harness-bedrock--env "AWS_PROFILE")
       (harness-bedrock--env "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
@@ -992,6 +1187,8 @@ command line runs only when ENDPOINT looks configured."
                 (lambda ()
                   (when-let* ((found (harness-bedrock--bearer-env endpoint)))
                     (list :type 'bearer :token (cdr found) :source (car found)))))
+           (and bearer (harness-bedrock--nonempty (plist-get endpoint :bearer-token-command))
+                (lambda () (harness-bedrock--api-key-from-command endpoint)))
            (when-let* ((fn (plist-get endpoint :credentials)))
              (lambda ()
                (let ((value (funcall fn)))
@@ -1038,11 +1235,24 @@ ERRORS collects why sources failed, newest first."
        (t (harness-bedrock--try-sources (cdr sources) errors))))))
 
 (defun harness-bedrock--no-keys-message (endpoint errors)
-  "Explain that ENDPOINT has no keys; ERRORS are what the sources said."
-  (format "no AWS credentials for %s: set AWS_BEARER_TOKEN_BEDROCK, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or AWS_PROFILE (now profile %s), or add an auth-source entry for %s%s"
-          (plist-get endpoint :id) (harness-bedrock--profile-name endpoint)
-          (or (harness-bedrock--auth-source-host endpoint) "the runtime host")
-          (if errors (concat " (" (string-join errors "; ") ")") "")))
+  "Explain that ENDPOINT has no keys; ERRORS are what the sources said.
+The ways named are those the endpoint's `:auth' allows: its API key
+variable, AWS keys, and auth-source."
+  (let* ((mode (plist-get endpoint :auth))
+         (variable (harness-bedrock--api-key-variable endpoint))
+         (settable (append (and (memq mode '(nil bearer)) variable (list variable))
+                           (and (memq mode '(nil sigv4))
+                                (list "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"
+                                      (format "AWS_PROFILE (now profile %s)"
+                                              (harness-bedrock--profile-name endpoint))))))
+         (ways (append (and settable (list (concat "set " (string-join settable ", or "))))
+                       (list (format "add an auth-source entry for %s%s"
+                                     (or (harness-bedrock--auth-source-host endpoint) "the runtime host")
+                                     (if (eq mode 'bearer) " (user apikey)" ""))))))
+    (format "no %s for %s: %s%s"
+            (if (eq mode 'bearer) "API key" "AWS credentials") (plist-get endpoint :id)
+            (string-join ways ", or ")
+            (if errors (concat " (" (string-join errors "; ") ")") ""))))
 
 (defun harness-bedrock--auth (endpoint &optional quiet)
   "Return a promise of the keys ENDPOINT's requests are authenticated with.
@@ -1063,44 +1273,94 @@ configures resolves to nil instead of rejecting."
                         endpoint (and (eq (car-safe err) 'harness-bedrock-no-credentials) (cadr err))))))))))
 
 (defun harness-bedrock--forget-keys (endpoint)
-  "Drop the command keys kept for ENDPOINT."
-  (remhash (harness-bedrock--keys-cache-key endpoint) harness-bedrock--kept-keys))
+  "Drop the command keys kept for ENDPOINT: its AWS keys and its API key."
+  (remhash (harness-bedrock--keys-cache-key endpoint) harness-bedrock--kept-keys)
+  (remhash (harness-bedrock--api-key-cache-key endpoint) harness-bedrock--kept-keys))
 
 (defun harness-bedrock-forget-credentials ()
   "Forget every key a command printed, so the next request runs it again."
   (interactive)
   (clrhash harness-bedrock--kept-keys))
 
-(defun harness-bedrock--redact (text auth)
-  "Return TEXT with the secrets of AUTH replaced by [redacted]."
+(defconst harness-bedrock--header-variable-regexp "\\${\\([A-Za-z_][A-Za-z0-9_]*\\)}"
+  "Matches ${NAME}, a reference to an environment variable in a header value.")
+
+(defun harness-bedrock--header-variables (endpoint)
+  "Return the environment variables ENDPOINT's `:headers' refer to as ${NAME}."
+  (let (names)
+    (dolist (h (plist-get endpoint :headers))
+      (let ((value (cdr-safe h)) (start 0))
+        (while (and (stringp value) (string-match harness-bedrock--header-variable-regexp value start))
+          (cl-pushnew (match-string 1 value) names :test #'equal)
+          (setq start (match-end 0)))))
+    (nreverse names)))
+
+(defun harness-bedrock--expand-headers (endpoint)
+  "Return ENDPOINT's `:headers' with every ${NAME} replaced by variable NAME.
+So a gateway's key can sit in the environment rather than in the
+setting.  Signal an error naming the variable, never a value, when one
+is unset."
+  (mapcar (lambda (h)
+            (if (not (stringp (cdr-safe h)))
+                h
+              (cons (car h)
+                    (replace-regexp-in-string
+                     harness-bedrock--header-variable-regexp
+                     (lambda (match)
+                       (let ((var (match-string 1 match)))
+                         (or (harness-bedrock--env var)
+                             (error "Header %s of %s needs environment variable %s, which is not set"
+                                    (car h) (plist-get endpoint :id) var))))
+                     (cdr h) t t))))
+          (plist-get endpoint :headers)))
+
+(defun harness-bedrock--redact (text auth &optional endpoint)
+  "Return TEXT with the secrets of AUTH replaced by [redacted].
+With ENDPOINT, so are the values of the environment variables its
+`:headers' refer to."
   (let ((text (or text "")))
-    (dolist (secret (list (plist-get auth :secret-access-key) (plist-get auth :session-token)
-                          (plist-get auth :token))
+    (dolist (secret (append (list (plist-get auth :secret-access-key) (plist-get auth :session-token)
+                                  (plist-get auth :token))
+                            (mapcar #'harness-bedrock--env (harness-bedrock--header-variables endpoint)))
                     text)
       (when (and (stringp secret) (>= (length secret) 8))
         (setq text (string-replace secret "[redacted]" text))))))
 
-(defun harness-bedrock--request-headers (endpoint auth method url payload region &optional headers)
+(defun harness-bedrock--request-headers (endpoint auth method url payload region &optional headers signing-url)
   "Return the headers of a METHOD request to URL with PAYLOAD for ENDPOINT.
 AUTH are the keys, REGION the region, HEADERS the request's own
-headers, signed along with Host and X-Amz-Date.  The endpoint's
-`:headers' come last and replace headers of the same name."
+headers, signed along with Host and X-Amz-Date.  SIGNING-URL, when it
+differs from URL, is the URL the request is signed for (see
+`harness-bedrock--signing-url'): its host is signed but not sent, so
+the gateway at URL gets a Host of its own.  An API key goes in the
+header `harness-bedrock--api-key-header' names.  The endpoint's
+`:headers' come last, their ${NAME} references expanded, and replace
+headers of the same name."
   (let* ((sigv4 (eq (plist-get auth :type) 'sigv4))
-         (own (if sigv4 (cons (cons "Host" (harness-bedrock--host-header url)) headers) headers))
+         (signing-url (or signing-url url))
+         (passthrough (not (equal signing-url url)))
+         (own (if (and sigv4 (not passthrough))
+                  (cons (cons "Host" (harness-bedrock--host-header url)) headers)
+                headers))
          (auth-headers
           (pcase (plist-get auth :type)
-            ('bearer (list (cons "Authorization" (concat "Bearer " (plist-get auth :token)))))
+            ('bearer (list (harness-bedrock--api-key-header endpoint (plist-get auth :token))))
             ('sigv4
-             (plist-get (harness-bedrock-sigv4
-                         :method method :url url :headers own :body payload
-                         :access-key-id (plist-get auth :access-key-id)
-                         :secret-access-key (plist-get auth :secret-access-key)
-                         :session-token (plist-get auth :session-token)
-                         :region (or (plist-get endpoint :signing-region) region)
-                         :service (or (plist-get endpoint :signing-service) "bedrock"))
-                        :headers))
+             (let ((signed (plist-get
+                            (harness-bedrock-sigv4
+                             :method method :url signing-url :headers own :body payload
+                             :access-key-id (plist-get auth :access-key-id)
+                             :secret-access-key (plist-get auth :secret-access-key)
+                             :session-token (plist-get auth :session-token)
+                             :region (or (harness-bedrock--nonempty (plist-get endpoint :signing-region)) region)
+                             :service (or (harness-bedrock--nonempty (plist-get endpoint :signing-service))
+                                          "bedrock"))
+                            :headers)))
+               (if passthrough
+                   (cl-remove-if (lambda (h) (string-equal-ignore-case (car h) "host")) signed)
+                 signed)))
             (_ nil)))
-         (custom (plist-get endpoint :headers)))
+         (custom (harness-bedrock--expand-headers endpoint)))
     (append (cl-remove-if (lambda (h) (assoc-string (car h) custom t)) (append own auth-headers))
             custom)))
 
@@ -1130,8 +1390,13 @@ inference profile and MODALITIES the input modalities Bedrock lists."
          (modalities (or modalities (plist-get defaults :input-modalities) '("text")))
          (style (plist-get defaults :thinking))
          (model (list :name id :label (or label id))))
-    (when-let* ((context (or (plist-get defaults :context-window) (plist-get endpoint :default-context))))
-      (setq model (plist-put model :context-window context)))
+    (cond ((plist-get defaults :context-window)
+           (setq model (plist-put model :context-window (plist-get defaults :context-window)))
+           (when (plist-get defaults :context-window-estimated)
+             (setq model (plist-put (plist-put model :context-window-estimated t)
+                                    :context-window-basis "Bedrock's defaults for the model's family"))))
+          ((plist-get endpoint :default-context)
+           (setq model (plist-put model :context-window (plist-get endpoint :default-context)))))
     (dolist (key '(:max-output :pricing :request-fields :thinks-by-default))
       (when (plist-get defaults key)
         (setq model (plist-put model key (plist-get defaults key)))))
@@ -1154,6 +1419,9 @@ inference profile and MODALITIES the input modalities Bedrock lists."
             (let* ((plist (if (stringp m) (list :name m) m))
                    (entry (harness-bedrock--model-entry endpoint (plist-get plist :name)
                                                         (plist-get plist :label) (plist-get plist :base))))
+              ;; A window given here is the model's own, not a family's guess.
+              (when (plist-get plist :context-window)
+                (setq entry (harness-plist-remove entry :context-window-estimated :context-window-basis)))
               (harness-plist-merge entry
                                    (harness-plist-remove plist :capabilities)
                                    (list :capabilities (harness-plist-merge (plist-get entry :capabilities)
@@ -1196,22 +1464,27 @@ profiles appears as its profiles."
     (sort (nreverse models) (lambda (a b) (string< (downcase (plist-get a :label))
                                                    (downcase (plist-get b :label)))))))
 
-(defun harness-bedrock--get-json (endpoint auth url region)
-  "Return a promise of the JSON answer to an authenticated GET of URL for ENDPOINT.
-AUTH are the keys and REGION the region."
-  (harness-http-request-json
-   url :headers (harness-bedrock--request-headers endpoint auth "GET" url "" region
-                                                  '(("Accept" . "application/json")))
-   :timeout 60))
+(defun harness-bedrock--get-json (endpoint auth path region)
+  "Return a promise of the JSON answer to ENDPOINT's GET of PATH.
+PATH, with its query, is under ENDPOINT's control URL.  AUTH are the
+keys the request is authenticated with and REGION the region."
+  (let* ((url (harness-bedrock--url (harness-bedrock--control-url endpoint region) path))
+         (signing-url (harness-bedrock--signing-url endpoint url path 'control region)))
+    (condition-case err
+        (harness-http-request-json
+         url :headers (harness-bedrock--request-headers endpoint auth "GET" url "" region
+                                                        '(("Accept" . "application/json"))
+                                                        signing-url)
+         :timeout 60)
+      (error (harness-rejected err)))))
 
 (defun harness-bedrock--list-profiles (endpoint auth region type &optional token acc pages)
   "Return a promise of every inference profile of TYPE at ENDPOINT.
 AUTH and REGION authenticate the requests; TOKEN, ACC and PAGES carry
 the pagination."
-  (let ((url (concat (harness-bedrock--control-url endpoint region)
-                     "/inference-profiles?maxResults=1000&type=" type
-                     (if token (concat "&nextToken=" (harness-bedrock--uri-encode token)) ""))))
-    (harness-then (harness-bedrock--get-json endpoint auth url region)
+  (let ((path (concat "/inference-profiles?maxResults=1000&type=" type
+                      (if token (concat "&nextToken=" (harness-bedrock--uri-encode token)) ""))))
+    (harness-then (harness-bedrock--get-json endpoint auth path region)
                   (lambda (json)
                     (let ((acc (append acc (plist-get json :inferenceProfileSummaries)))
                           (next (plist-get json :nextToken)))
@@ -1241,56 +1514,76 @@ the pagination."
     (`(harness-bedrock-no-credentials ,errors) (string-join (or errors '("no credentials")) "; "))
     (_ (harness-error-message err))))
 
-(defun harness-bedrock--fetch-models (endpoint)
+(defun harness-bedrock--refused-p (err)
+  "Non-nil when ERR, a rejected request, was refused for its keys."
+  (pcase err (`(http-error ,status . ,_) (memql status '(401 403)))))
+
+(defun harness-bedrock--fetch-models (endpoint &optional refreshed)
   "List ENDPOINT's models through the Bedrock API.
-Return a promise of model plists.  Failures resolve to nil after a
-warning, so one bad endpoint never hides the others."
+Return a promise of model plists, nil when there are no credentials to
+list with.  A failure resolves to `failed' after a warning, so one bad
+endpoint never hides the others.  When every listing is refused with
+keys a command printed, they are forgotten and the listing asked for
+once more, unless REFRESHED."
   (let ((id (plist-get endpoint :id))
         (region (harness-bedrock--region endpoint)))
     (harness-then
      (harness-bedrock--auth endpoint t)
      (lambda (auth)
        (if (null auth)
-           (progn (harness-log 'debug "bedrock %s: no AWS credentials configured; no models listed" id)
+           (progn (harness-log 'debug "bedrock %s: no credentials configured; no models listed" id)
                   nil)
-         (let* ((warn (lambda (what)
-                        (lambda (err)
-                          (harness-log 'warn "bedrock %s: %s failed: %s" id what
-                                       (harness-bedrock--redact (harness-bedrock--describe-error err) auth))
-                          'failed)))
-                (foundation (harness-catch
-                             (harness-bedrock--get-json
-                              endpoint auth
-                              (concat (harness-bedrock--control-url endpoint region)
-                                      "/foundation-models?byOutputModality=TEXT")
-                              region)
-                             (funcall warn "ListFoundationModels")))
+         (let* ((call (lambda (what promise)
+                        (harness-then promise
+                                      (lambda (value) (list 'ok value))
+                                      (lambda (err) (list 'failed what err)))))
+                (foundation (funcall call "ListFoundationModels"
+                                     (harness-bedrock--get-json
+                                      endpoint auth "/foundation-models?byOutputModality=TEXT" region)))
                 (profiles (unless (and (plist-member endpoint :inference-profiles)
                                        (memq (plist-get endpoint :inference-profiles) '(nil :false)))
-                            (list (harness-catch
-                                   (harness-bedrock--list-profiles endpoint auth region "SYSTEM_DEFINED")
-                                   (funcall warn "ListInferenceProfiles"))
-                                  (harness-catch
-                                   (harness-bedrock--list-profiles endpoint auth region "APPLICATION")
-                                   (funcall warn "ListInferenceProfiles (application)"))))))
-           (harness-then (harness-all (cons foundation profiles))
-                         (lambda (results)
-                           (if (cl-every (lambda (r) (eq r 'failed)) results)
-                               nil
-                             (harness-bedrock--catalogue
-                              endpoint
-                              (if (eq (car results) 'failed) nil (car results))
-                              (cl-loop for r in (cdr results) unless (eq r 'failed) append r))))))))
+                            (list (funcall call "ListInferenceProfiles"
+                                           (harness-bedrock--list-profiles
+                                            endpoint auth region "SYSTEM_DEFINED"))
+                                  (funcall call "ListInferenceProfiles (application)"
+                                           (harness-bedrock--list-profiles
+                                            endpoint auth region "APPLICATION"))))))
+           (harness-then
+            (harness-all (cons foundation profiles))
+            (lambda (results)
+              (let ((failures (cl-remove-if-not (lambda (r) (eq (car r) 'failed)) results)))
+                (if (and (= (length failures) (length results)) (not refreshed)
+                         (plist-get auth :command)
+                         (cl-some (lambda (f) (harness-bedrock--refused-p (nth 2 f))) failures))
+                    (progn (harness-bedrock--forget-keys endpoint)
+                           (harness-bedrock--fetch-models endpoint t))
+                  (dolist (f failures)
+                    (harness-log 'warn "bedrock %s: %s failed: %s" id (nth 1 f)
+                                 (harness-bedrock--redact (harness-bedrock--describe-error (nth 2 f))
+                                                          auth endpoint)))
+                  (if (= (length failures) (length results))
+                      (let ((url (harness-bedrock--control-url endpoint region)))
+                        (unless (harness-bedrock--aws-url-p url)
+                          (harness-log 'warn "bedrock %s: %s lists no models; when the gateway does not list them, name them in Models (:models), or set its Listing URL (:control-url)"
+                                       id url))
+                        'failed)
+                    (harness-bedrock--catalogue
+                     endpoint
+                     (and (eq (car (car results)) 'ok) (nth 1 (car results)))
+                     (cl-loop for r in (cdr results) when (eq (car r) 'ok) append (nth 1 r)))))))))))
      (lambda (err)
-       (harness-log 'warn "bedrock %s: listing models failed: %s" id (harness-bedrock--describe-error err))
-       nil))))
+       (harness-log 'warn "bedrock %s: listing models failed: %s" id
+                    (harness-bedrock--redact (harness-bedrock--describe-error err) nil endpoint))
+       'failed))))
 
-(defun harness-bedrock--models (endpoint)
-  "Return a promise of ENDPOINT's models, cached for `harness-bedrock--models-ttl'."
+(defun harness-bedrock--models (endpoint &optional refresh)
+  "Return a promise of ENDPOINT's models, cached for `harness-bedrock--models-ttl'.
+REFRESH non-nil lists them again however fresh the cache is.  When the
+listing fails the models listed before stay, if there are any."
   (let* ((id (plist-get endpoint :id))
          (cached (gethash id harness-bedrock--models-cache)))
     (cond
-     ((and cached (< (- (float-time) (car cached)) harness-bedrock--models-ttl))
+     ((and cached (not refresh) (< (- (float-time) (car cached)) harness-bedrock--models-ttl))
       (harness-resolved (cdr cached)))
      ((or (plist-get endpoint :models)
           (and (plist-member endpoint :list-models)
@@ -1301,9 +1594,14 @@ warning, so one bad endpoint never hides the others."
      (t
       (harness-then (harness-bedrock--fetch-models endpoint)
                     (lambda (models)
-                      (when models
-                        (puthash id (cons (float-time) models) harness-bedrock--models-cache))
-                      models))))))
+                      (cond ((not (eq models 'failed))
+                             (when models
+                               (puthash id (cons (float-time) models) harness-bedrock--models-cache))
+                             models)
+                            ((cdr cached)
+                             (harness-log 'warn "bedrock %s: keeping the %d models listed before"
+                                          id (length (cdr cached)))
+                             (cdr cached)))))))))
 
 (defun harness-bedrock-clear-models-cache ()
   "Forget every listed model catalogue so the next listing asks Bedrock again."
@@ -1312,7 +1610,9 @@ warning, so one bad endpoint never hides the others."
 
 (defun harness-bedrock--model-info (endpoint name)
   "Return the model plist of model NAME at ENDPOINT.
-The listed catalogue is used when it knows the model, else the defaults."
+The listed catalogue is used when it knows the model, else the defaults.
+It is also the provider's `:resolve', which describes a model the
+listing lacks."
   (or (cl-find name (cdr (gethash (plist-get endpoint :id) harness-bedrock--models-cache))
                :key (lambda (m) (plist-get m :name)) :test #'equal)
       (cl-find name (harness-bedrock--static-models endpoint)
@@ -1893,7 +2193,8 @@ Usage comes first, then the tool calls, then `done'."
     (harness-bedrock--emit stream (if error
                                       (list :type 'done :stop-reason reason
                                             :error (harness-bedrock--redact
-                                                    error (harness-bedrock--stream-auth stream)))
+                                                    error (harness-bedrock--stream-auth stream)
+                                                    (harness-bedrock--stream-endpoint stream)))
                                     (list :type 'done :stop-reason reason)))))
 
 (defconst harness-bedrock--stop-errors
@@ -1957,7 +2258,9 @@ scheduled."
        stream (list :type 'hint
                     :text (format "Bedrock: %s; retrying in %d s (%d of %d)"
                                   (harness-truncate-end
-                                   (harness-bedrock--redact message (harness-bedrock--stream-auth stream)) 200)
+                                   (harness-bedrock--redact message (harness-bedrock--stream-auth stream)
+                                                            (harness-bedrock--stream-endpoint stream))
+                                   200)
                                   delay retry harness-bedrock--max-retries)))
       (setf (harness-bedrock--stream-timer stream)
             (run-at-time delay nil (lambda ()
@@ -2002,14 +2305,22 @@ at all (`:no-tools')."
                  harness-bedrock--quirks)
         (harness-log 'info "bedrock: %s rejected the request (%s); asking again with %s"
                      (harness-bedrock--stream-name stream)
-                     (harness-truncate-end (harness-bedrock--redact message auth) 200) adjust)
+                     (harness-truncate-end
+                      (harness-bedrock--redact message auth (harness-bedrock--stream-endpoint stream))
+                      200)
+                     adjust)
         (setf (harness-bedrock--stream-options stream)
               (plist-put (copy-sequence (harness-bedrock--stream-options stream)) adjust t))
         (harness-bedrock--attempt stream)))
-     ((and (memql status '(400 401 403))
-           (not (harness-bedrock--stream-refreshed stream))
+     ((and (not (harness-bedrock--stream-refreshed stream))
            (plist-get auth :command)
-           (string-match-p "expired\\|security token included in the request is invalid" message))
+           ;; A command's keys may have gone stale before their time:
+           ;; ask once more with fresh ones.  A gateway's refusal of
+           ;; its token says little, so any 401 or 403 counts.
+           (or (and (eq (plist-get auth :type) 'bearer) (memql status '(401 403)))
+               (and (memql status '(400 401 403))
+                    (string-match-p "expired\\|security token included in the request is invalid"
+                                    message))))
       (setf (harness-bedrock--stream-refreshed stream) t)
       (harness-bedrock--forget-keys (harness-bedrock--stream-endpoint stream))
       (harness-bedrock--start stream))
@@ -2061,13 +2372,14 @@ at all (`:no-tools')."
                                             (harness-bedrock--stream-request stream) options))
                (streaming (not (plist-get options :no-stream)))
                (region (harness-bedrock--stream-region stream))
-               (url (concat (harness-bedrock--runtime-url endpoint region) "/model/"
-                            (harness-bedrock--uri-encode (harness-bedrock--stream-name stream))
-                            (if streaming "/converse-stream" "/converse")))
+               (path (concat "/model/" (harness-bedrock--uri-encode (harness-bedrock--stream-name stream))
+                             (if streaming "/converse-stream" "/converse")))
+               (url (harness-bedrock--url (harness-bedrock--runtime-url endpoint region) path))
                (payload (harness-bedrock--bytes (harness-json-encode body)))
                (headers (harness-bedrock--request-headers
                          endpoint (harness-bedrock--stream-auth stream) "POST" url payload region
-                         '(("Content-Type" . "application/json"))))
+                         '(("Content-Type" . "application/json"))
+                         (harness-bedrock--signing-url endpoint url path 'runtime region)))
                (decoder (harness-bedrock-eventstream-decoder
                          (lambda (message) (harness-bedrock--on-message stream message)))))
           (harness-bedrock--reset-attempt stream)
@@ -2152,14 +2464,32 @@ at all (`:no-tools')."
       :label (or (plist-get endpoint :label) (symbol-name id))
       :doc (format "AWS Bedrock Converse API at %s"
                    (or (ignore-errors (harness-bedrock--runtime-url endpoint)) "?"))
-      :models (lambda () (harness-bedrock--models (harness-bedrock-endpoint id)))
+      :models (lambda (&optional refresh) (harness-bedrock--models (harness-bedrock-endpoint id) refresh))
+      :resolve (lambda (name) (harness-bedrock--model-info (harness-bedrock-endpoint id) name))
       :complete (lambda (request) (harness-bedrock--complete (harness-bedrock-endpoint id) request))
       :capabilities (or (plist-get endpoint :capabilities) '(:vision t :thinking t))
       :tiers (or (plist-get endpoint :tiers) harness-bedrock-tiers))
     id))
 
+(defvar harness-bedrock--registered-entries (make-hash-table :test 'eq)
+  "Endpoint id -> the entry of `harness-bedrock-endpoints' it was registered from.")
+
+(defun harness-bedrock--forget-endpoint (id)
+  "Forget what was learnt about endpoint ID: its models, quirks and kept keys.
+So an endpoint set up anew, with another gateway URL or other models
+say, is asked again rather than answered from its old setup."
+  (remhash id harness-bedrock--models-cache)
+  (let ((prefix (format "%s/" id)))
+    (dolist (table (list harness-bedrock--quirks harness-bedrock--kept-keys))
+      (let (stale)
+        (maphash (lambda (key _) (when (and (stringp key) (string-prefix-p prefix key)) (push key stale)))
+                 table)
+        (dolist (key stale) (remhash key table))))))
+
 (defun harness-bedrock--register-all ()
-  "Register a provider for every endpoint; drop providers of removed ones."
+  "Register a provider for every endpoint; drop providers of removed ones.
+What was learnt about an endpoint whose entry changed, or that is gone,
+is forgotten (see `harness-bedrock--forget-endpoint')."
   (let ((ids nil))
     (dolist (endpoint harness-bedrock-endpoints)
       (let ((id (plist-get endpoint :id)))
@@ -2171,11 +2501,16 @@ at all (`:no-tools')."
           (harness-log 'warn "bedrock: endpoint id %s must be lower-case letters, digits, - or _" id))
          ((and (harness-provider-get id) (not (memq id harness-bedrock--registered)))
           (harness-log 'warn "bedrock: endpoint id %s is already another provider's" id))
-         (t (push (harness-bedrock--register endpoint) ids)))))
+         (t
+          (unless (equal (gethash id harness-bedrock--registered-entries) endpoint)
+            (harness-bedrock--forget-endpoint id)
+            (puthash id endpoint harness-bedrock--registered-entries))
+          (push (harness-bedrock--register endpoint) ids)))))
     (dolist (old harness-bedrock--registered)
       (unless (memq old ids)
-        (remhash old harness-providers)
-        (remhash old harness-bedrock--models-cache)))
+        (harness-provider-unregister old)
+        (harness-bedrock--forget-endpoint old)
+        (remhash old harness-bedrock--registered-entries)))
     (setq harness-bedrock--registered ids)))
 
 (harness-bedrock--register-all)

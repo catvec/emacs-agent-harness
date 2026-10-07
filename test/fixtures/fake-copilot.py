@@ -28,6 +28,8 @@ Behaviour is chosen by the prompt text:
                    with "hang ignore", to exercise the kill path)
   "die"         -> makes one model call, then exits with status 3
   "fail"        -> reports a session.error, then goes idle
+  "out of quota" -> reports a session.error of type quota, with the
+                   date the allowance resets, then goes idle
   "long"        -> the model stops at its output limit
   "compact"     -> Copilot compacts the context first
   "subagent"    -> a sub-agent streams, fails and goes idle first
@@ -339,6 +341,12 @@ class Fake:
             self.event(sid, "session.error", {"errorType": "query", "message": "sub-agent trouble"},
                        agent="agent-1")
             self.event(sid, "session.idle", {"mode": "interactive"}, ephemeral=True, agent="agent-1")
+        if "out of quota" in text:
+            self.event(sid, "session.error", {"errorType": "quota",
+                                              "message": "You have used all of your premium requests",
+                                              "resetDate": "2030-01-01T00:00:00Z"})
+            self.idle(sid)
+            return
         if "fail" in text:
             self.event(sid, "session.error", {"errorType": "quota", "message": "You have no AI credits left",
                                               "statusCode": 402})

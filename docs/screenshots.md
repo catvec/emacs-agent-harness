@@ -43,11 +43,12 @@ The pictures, by the name `scripts/media.sh` takes:
 
 | Name | Shows | Function |
 |---|---|---|
-| `chat` | `acme/ratelimit.py` beside a finished turn: reads, edits, a test run, a summary | `harness-media-shot-chat` |
+| `chat` | The task board in the fullscreen layout, the session of the task in review beside it: the feedback it was sent back with, the fix, the report it handed in again and the review banner | `harness-media-shot-chat` |
 | `chat-permission` | A chat waiting for permission to run `pip install` | `harness-media-shot-chat-permission` |
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `attachments` | A compose box holding a picture and a video, their thumbnails in the chips, and a link still downloading with its progress | `harness-media-shot-attachments` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
+| `tasks-search` | The board searched in words: one task matches the query, the archive it did and `[Undo]` | `harness-media-shot-tasks-search` |
 | `tasks-long` | That board after weeks of merges, its completed list held back to keep the box in the window | `harness-media-shot-tasks-long` |
 | `tasks-message` | The task board writing a message to a task's session: the box in its message colours | `harness-media-shot-tasks-message` |
 | `report` | The board with a task's report popped out, at its end: the chart it handed in, the test run it quotes, the review banner and the feedback box | `harness-media-shot-report` |
@@ -56,12 +57,12 @@ The pictures, by the name `scripts/media.sh` takes:
 | `popout-permission` | The session list with a session's permission request popped out under it | `harness-media-shot-popout-permission` |
 | `popout-question` | The task board with a task's question popped out under it | `harness-media-shot-popout-question` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
-| `usage` | The usage dashboard over 30 days, by model | `harness-media-shot-usage` |
+| `usage` | The usage dashboard over 30 days, by model, with the fallback list beneath the plan | `harness-media-shot-usage` |
 | `usage-projects` | The usage dashboard by project, the tasks' worktrees folded under the demo project | `harness-media-shot-usage-projects` |
 | `usage-worktrees` | The same, the demo project's worktrees unfolded | `harness-media-shot-usage-worktrees` |
 | `worktrees` | The worktrees of the demo project | `harness-media-shot-worktrees` |
 | `settings` | The settings page for the demo project, which overrides two settings | `harness-media-shot-settings` |
-| `btw` | A BTW under the first picture's chat | `harness-media-shot-btw` |
+| `btw` | A BTW under the rate-limit session's chat, `acme/ratelimit.py` beside it | `harness-media-shot-btw` |
 | `menu` | The menu, opened from that chat | `harness-media-shot-menu` |
 | `version` | The version page of a harness straight.el installed from GitHub, behind GitHub and its development checkout: the commits it lacks and how to pull them | `harness-media-shot-version` |
 
@@ -75,8 +76,10 @@ Everything else is in `scripts/harness-media.el`, which
 **The look** (`harness-media--setup-look`): no menu, tool or scroll
 bars, the theme `modus-vivendi-tinted`, the Hack font at 12 pt when it
 is installed, and a frame of 160 columns by at most 54 lines.  The
-constants at the top of the file (`harness-media-theme`,
-`harness-media-font`, `harness-media-columns`, ...) change them all.
+first picture is 180 columns wide (`harness-media-hero-columns`), so the
+board and the session beside it get 90 each.  The constants at the top
+of the file (`harness-media-theme`, `harness-media-font`,
+`harness-media-columns`, ...) change them all.
 
 **The harness** (`harness-media--setup-harness`): the harness of the
 checkout, started in this Emacs (`harness-process` nil), its state
@@ -119,15 +122,17 @@ calls a model or the network.
 - `harness-media--build-tasks` submits tasks and drives them, as a user
   would, into every column of the board: two verified and merged, one
   verified and waiting in the merge queue, one in review (sent back
-  once), one asking a question, two working
-  (their turns held half way), two written up for the backlog.  They
-  run in real worktrees, commit and merge.  The pagination task, in
-  review, hands its work in (`hand_in`): a latency chart it writes,
-  `docs/orders-latency.svg`, and its real test run, which the report
-  pictures show.
-- `harness-media--build-sessions` runs the conversations: the first
-  picture's session, a fork of it and a BTW over it, the permission and
-  question chats, and two older sessions, closed since.
+  once: the first picture shows its session), one asking a question,
+  two working (their turns held half way), two written up for the
+  backlog.  They run in real worktrees, commit and merge.  Every round
+  of work ends with `hand_in`, as a task session is told to (a round
+  without it would put `[No report]` on its card).  The pagination task
+  hands in a latency chart it writes, `docs/orders-latency.svg`, and
+  its real test run, which the report pictures show.
+- `harness-media--build-sessions` runs the conversations: the rate-limit
+  session, a fork of it and a BTW over it (the tree, BTW, menu and
+  attachments pictures), the permission and question chats, and two
+  older sessions, closed since.
 - `harness-media--age` moves the times of the tasks, the sessions and
   the tree's nodes back, so the pictures read "done 2h ago" and "took
   14m" rather than "just now".
@@ -169,8 +174,11 @@ it.
 
 Requests that are not a conversation get answers of their own: the
 auto-mode judge always allows, session titles come from
-`harness-media--titles` (matched against the first message), and
-backlog write-ups from `harness-media--write-ups`.
+`harness-media--titles` (matched against the first message), backlog
+write-ups from `harness-media--write-ups`, and the task board's search
+from `harness-media--search-answer`, which reads the query in the board
+dump and answers the JSON the search asks for (the `tasks-search`
+picture archives the pagination task that way).
 
 ## Adding or changing a picture
 
@@ -194,12 +202,17 @@ the world as below.
   frame to the view's text.  Its optional THEN runs in the view's buffer
   first (to pick a period or a grouping, say), and MOST caps the height.
 - `harness-media--chat-shot` shows a project file beside a session's
-  chat and fits the frame to both; `harness-media--hero-layout` is the
-  first picture's layout, which the BTW and menu pictures start from.
+  chat and fits the frame to both; `harness-media--code-layout` is the
+  rate-limit session beside `acme/ratelimit.py`, which the BTW and menu
+  pictures start from.
+- `harness-media--fullscreen-layout` is the first picture's layout: it
+  opens the board in the `fullscreen` position and a task's session from
+  its card, as a user would, and fits the frame to the session's last
+  round, from the message that started it to the compose box.
 - `harness-media--expand` unfolds a tool call in a chat and
   `harness-media--to-bottom` scrolls a chat to its compose box.
 - `harness-media--world` holds the ids of what the world made: the
-  sessions `:hero`, `:fork`, `:btw`, `:permission`, `:question`,
+  sessions `:ratelimit`, `:fork`, `:btw`, `:permission`, `:question`,
   `:guide` and `:flaky`, and `:tasks`, a plist of task ids.
 
 Then show it in the README's gallery, next to a picture of about the
@@ -260,9 +273,10 @@ Before committing, check that
 - **Times.**  Anything a view shows as "N ago" needs a time in
   `harness-media--age`, or it reads "just now".
 - **Bugs.**  When a picture shows the UI doing something wrong, fix the
-  UI rather than the picture.  Taking these pictures found three so
+  UI rather than the picture.  Taking these pictures found four so
   far: the chat header dropped the % of quota windows, Markdown tables
-  with inline code did not line up, and a budget had "1 days left".
+  with inline code did not line up, a budget had "1 days left", and a
+  report's file evidence gave its link count for its size ("1 B").
 - **Old pictures on GitHub.**  GitHub caches images by their URL, so a
   picture taken again under the same name can show the old one for a
   while after the push.  Reload without the cache, or wait.

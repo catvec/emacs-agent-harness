@@ -84,12 +84,14 @@ nil sends them where `harness-notifications-providers' says."
 (defun harness-tasks-notify--last-reply (session-id)
   "Return the text SESSION-ID's last turn ended on, or nil.
 That is its last assistant message after the last message the user
-sent; steering messages within the turn do not end the search."
+sent; steering messages within the turn, and a note handing the
+conversation over to another model after it, do not end the search."
   (catch 'found
     (dolist (node (reverse (harness-call 'session/nodes session-id)))
       (pcase (plist-get node :kind)
         ((or 'assistant "assistant") (throw 'found (plist-get node :content)))
-        ((or 'user "user") (unless (plist-get (plist-get node :meta) :steering) (throw 'found nil)))))
+        ((or 'user "user") (unless (or (plist-get (plist-get node :meta) :steering) (harness-node-handoff node))
+                             (throw 'found nil)))))
     nil))
 
 (defun harness-tasks-notify--squash (text max)

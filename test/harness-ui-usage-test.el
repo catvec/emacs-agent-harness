@@ -10,13 +10,16 @@
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
-       (dolist (m '(store project config provider provider-demo tools session agent usage worktree acp ui ui-usage))
+       (dolist (m '(store project config provider provider-demo tools session agent usage fallback worktree acp ui ui-usage))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-ui--sessions)
      (setq harness-usage-budgets nil)
+     ;; The fallback list is a global option; a test that edits it must not
+     ;; change what the next one renders.
+     (setq harness-fallback-models nil)
      (let ((harness-provider-demo--delay 0.005)
            (harness-acp-token nil)
            (default-directory dir))
@@ -274,6 +277,35 @@ their sum; TAB, RET, w and the heading's button show and hide them."
         (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
           (harness-ui-usage-remove-budget))
         (harness-test-wait (lambda () (null (harness-call 'usage/budgets))) 5 "budget removed")))))
+
+(defvar harness-budget)
+
+(ert-deftest harness-ui-usage-budget-setting-is-one-line ()
+  "The Budget setting shows as one budget for all sessions, however many
+there are, and d on it says where to change it."
+  (harness-ui-usage-test-with
+    (let ((harness-budget '(:amount 10 :hard t)))
+      (dotimes (_ 3)
+        (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"))
+      (harness-test-wait (let (done) (harness-ui-refresh-sessions (lambda (_) (setq done t))) (lambda () done))
+                         5 "sessions cached")
+      (should (= 3 (length (harness-ui-sessions))))
+      (harness-ui-usage-test-record (float-time) (file-name-as-directory dir) "demo:scripted" 2.5)
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage--buffer-name
+        (let ((lines (split-string (harness-ui-usage-test-text) "\n")))
+          (should (= 1 (cl-count-if (lambda (l) (string-match-p "all sessions (setting)" l)) lines)))
+          (should (cl-some (lambda (l) (string-match-p "all sessions (setting) .* 25%  \\$2\\.50 / \\$10\\.00" l))
+                           lines))
+          (should-not (cl-some (lambda (l) (string-match-p "\\`  session " l)) lines)))
+        (harness-ui-usage-test-goto "all sessions (setting)")
+        (should (string-match-p "M-x harness-settings"
+                                (cadr (should-error (harness-ui-usage-remove-budget) :type 'user-error))))))
+    ;; Unset, it is gone.
+    (with-current-buffer harness-ui-usage--buffer-name
+      (harness-ui-usage-refresh)
+      (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
+      (should-not (string-match-p "all sessions" (harness-ui-usage-test-text))))))
 
 (ert-deftest harness-ui-usage-add-budget-wizard-and-plan ()
   (harness-ui-usage-test-with
@@ -570,6 +602,67 @@ Two lines would grow the echo area and move the chart under the mouse."
             (setq pos (1+ pos)))
           (should found)
           (should-not offenders))))))
+
+(ert-deftest harness-ui-usage-fallback-section-shows-and-clears-marks ()
+  "The fallback section lists the entries and says what ran out."
+  (harness-ui-usage-test-with
+    (setq harness-fallback-models '("demo"))
+    (let ((text (harness-ui-usage-test-open)))
+      (should (string-match-p "Fallback" text))
+      (should (string-match-p "1\\. Demo" text))
+      (should (string-match-p "available" text))
+      (should-not (string-match-p "out of quota" text)))
+    ;; A mark shows what ran out, and [try now] clears it.
+    (harness-call 'fallback/mark "demo" :kind 'quota :reason "hit the limit")
+    (harness-ui-usage-refresh)
+    (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5 "reloaded")
+    (let ((text (harness-ui-usage-test-text)))
+      (should (string-match-p "out of quota" text))
+      (should (string-match-p "\\[try now\\]" text)))
+    (with-current-buffer harness-ui-usage--buffer-name
+      (goto-char (point-min))
+      (search-forward "Demo")
+      (harness-ui-usage-fallback-try))
+    (harness-test-wait (lambda () (null (plist-get (harness-call 'fallback/status) :marks))) 5 "mark cleared")
+    (harness-ui-usage-refresh)
+    (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5 "reloaded")
+    (let ((text (harness-ui-usage-test-text)))
+      (should (string-match-p "available" text))
+      (should-not (string-match-p "out of quota" text)))))
+
+(ert-deftest harness-ui-usage-fallback-add-move-and-remove ()
+  "Adding, moving and removing entries saves the option through config/set."
+  (harness-ui-usage-test-with
+    (setq harness-fallback-models '("demo:scripted"))
+    (harness-ui-usage-test-open)
+    ;; Add a provider through the prompt: it lands at the end.
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "demo")))
+      (harness-ui-usage-add-fallback))
+    (harness-test-wait (lambda () (equal '("demo:scripted" "demo") harness-fallback-models)) 5 "added")
+    (harness-test-wait (lambda () (string-match-p "2\\. Demo  " (harness-ui-usage-test-text))) 5 "shown last")
+    ;; Move it to the front with M-<up> (the command behind the key).
+    (with-current-buffer harness-ui-usage--buffer-name
+      (goto-char (point-min))
+      (search-forward "2. Demo")
+      (harness-ui-usage-fallback-up))
+    (harness-test-wait (lambda () (equal '("demo" "demo:scripted") harness-fallback-models)) 5 "moved")
+    (harness-test-wait (lambda () (string-match-p "1\\. Demo  " (harness-ui-usage-test-text))) 5 "shown first")
+    ;; Remove it again through `d': the provider entry, then the model one.
+    (with-current-buffer harness-ui-usage--buffer-name
+      (goto-char (point-min))
+      (search-forward "1. Demo")
+      (harness-ui-usage-remove))
+    (harness-test-wait (lambda () (equal '("demo:scripted") harness-fallback-models)) 5 "removed")
+    (harness-test-wait (lambda () (string-match-p "1\\. Demo scripted" (harness-ui-usage-test-text))) 5 "shown alone")
+    (should-not (string-match-p "2\\." (harness-ui-usage-test-text)))
+    (with-current-buffer harness-ui-usage--buffer-name
+      (goto-char (point-min))
+      (search-forward "1. Demo scripted")
+      (harness-ui-usage-remove))
+    (harness-test-wait (lambda () (null harness-fallback-models)) 5 "empty")
+    (harness-test-wait (lambda () (string-match-p "sessions stop when their provider runs out"
+                                                  (harness-ui-usage-test-text)))
+                       5 "empty list shown")))
 
 (provide 'harness-ui-usage-test)
 ;;; harness-ui-usage-test.el ends here

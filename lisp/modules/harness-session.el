@@ -70,6 +70,7 @@
 (require 'harness-util)
 
 (defvar harness-state-directory)
+(defvar harness-provider-fallback-context-window)
 
 (defconst harness-session--save-delay 0.3
   "Seconds of quiet before a changed session record is written to disk.")
@@ -374,13 +375,17 @@ taken anywhere but at the head of its parent starts off it."
     (and (boundp key) (symbol-value key))))
 
 (defun harness-session--model-window (model)
-  "Return the context window the provider catalogue gives MODEL."
+  "Return the context window the provider catalogue gives MODEL.
+The catalogue gives every model one, estimated where no provider says
+\(see `provider/model'); without a catalogue the window is
+`harness-provider-fallback-context-window'."
   (or (and (harness-method-exists-p 'provider/model)
            (condition-case err
                (plist-get (harness-call 'provider/model model) :context-window)
              (error (harness-log 'debug "session: no context window for %s: %S" model err)
                     nil)))
-      128000))
+      (bound-and-true-p harness-provider-fallback-context-window)
+      200000))
 
 (defun harness-session--context-window-limit-value (v)
   "Return V when it is a usable limit on a context window, else nil.
@@ -548,7 +553,9 @@ configured at `:cwd'."
           (harness-session-context-window s) (plist-get plist :context-window)
           (harness-session-context-window-limit s)
           (harness-session--context-window-limit-value (plist-get plist :context-window-limit))
-          (harness-session-budget s) (or (plist-get plist :budget) (harness-session--config 'harness-budget cwd))
+          ;; Only a budget given to this session: the Budget setting
+          ;; (`harness-budget') is one budget for all sessions together.
+          (harness-session-budget s) (plist-get plist :budget)
           (harness-session-provider-state s) (plist-get plist :provider-state)
           (harness-session-loaded s) t)
     (puthash (harness-session-id s) s harness-sessions)
@@ -737,6 +744,38 @@ serves the old conversation can let it go."
       (harness-session--touch s))
     state))
 
+(defun harness-session--last-model (s)
+  "Return the model that answered last in the transcript of S, or nil.
+That is the `:meta' `:model' of the newest assistant or thinking node."
+  (cl-loop for n in (reverse (harness-session--path s))
+           for model = (and (memq (plist-get n :kind) '(assistant thinking))
+                            (plist-get (plist-get n :meta) :model))
+           when (and (stringp model) (not (string-empty-p model))) return model))
+
+(defun harness-session--state-owner (s state)
+  "Return the provider, a symbol, that provider STATE of session S belongs to.
+A state names its provider (see `harness-tag-provider-state').  One
+written before states did belongs to the provider that answered last in
+S's transcript: had another provider answered since, the state's own
+would not have seen those turns.  With no answer to go by, it is the
+provider of S's model.  Nil means no provider can vouch for STATE."
+  (or (harness-provider-state-owner state)
+      (harness-model-provider (or (harness-session--last-model s) (harness-session-model s)))))
+
+(harness-defmethod session/provider-state (id &optional model)
+  "Return the provider state of session ID that MODEL can continue, or nil.
+MODEL defaults to the session's model.  A state belongs to the provider
+it names (`:provider'), and only that provider's models continue it: a
+model of another provider gets nil, as if the session had no state.  A
+state written before states named their provider is attributed as
+`harness-session--state-owner' says."
+  (let* ((s (harness-session--get id))
+         (state (harness-session-provider-state s))
+         (provider (harness-model-provider (or model (harness-session-model s)))))
+    (and state provider
+         (eq provider (harness-session--state-owner s state))
+         state)))
+
 (harness-defmethod session/set-provider-node (id node-id)
   "Record NODE-ID as the node the provider conversation of session ID reached.
 The agent records the head when a turn ends; `session/provider-continuation'
@@ -816,10 +855,12 @@ parent's, and holds exactly that transcript, nothing after it (see
 parent's whole provider conversation; at an earlier node, a fork of it
 cut at the last provider checkpoint up to the node; and none when no
 checkpoint precedes the node, or the provider cannot fork the state,
-so that the provider starts a new conversation from the transcript.
-It is never the parent's own state, which would carry on the parent's
-provider conversation: for Claude Code, resume and write into the
-parent's CLI session.  A BTW is no fork; see `session/btw'."
+or the fork's model is of another provider, which cannot continue the
+parent's state (`session/provider-state'), so that the provider starts
+a new conversation from the transcript.  It is never the parent's own
+state, which would carry on the parent's provider conversation: for
+Claude Code, resume and write into the parent's CLI session.  A BTW is
+no fork; see `session/btw'."
   (let* ((parent (harness-session--get id))
          (node (or (plist-get plist :node) (harness-session-head parent)))
          (path (progn (harness-session--load-nodes parent)
@@ -859,7 +900,7 @@ parent's CLI session.  A BTW is no fork; see `session/btw'."
      (if (and (harness-method-exists-p 'provider/fork)
               (not (eq (plist-get continuation :mode) 'fresh)))
          (harness-catch (apply #'harness-call 'provider/fork (harness-session-model cs)
-                               (harness-session-provider-state parent)
+                               (harness-call 'session/provider-state id (harness-session-model cs))
                                (and (eq (plist-get continuation :mode) 'checkpoint)
                                     (list (plist-get continuation :checkpoint))))
                         (lambda (e)
@@ -1371,6 +1412,31 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
         (error (harness-log 'warn "session %s: could not settle its interrupted turn: %S"
                             (harness-session-id (car entry)) err))))))
 
+(defconst harness-session--budget-copies-marker "session-budget-copies-dropped.json"
+  "Store document written once the copies of the Budget setting are dropped.")
+
+(defun harness-session--drop-budget-copies ()
+  "Drop the copies of the Budget setting from the loaded sessions, once.
+Sessions used to copy `harness-budget' into a budget of their own when
+they were made, so the setting became one budget per session instead of
+one for them all.  Nothing else gave a session a budget then, so every
+session budget saved before the marker document exists is such a copy.
+After that, a budget a session has was given to it, and stays."
+  (unless (harness-call 'store/load harness-session--budget-copies-marker)
+    (let ((n 0))
+      (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
+        (let ((s (gethash (file-name-base name) harness-sessions)))
+          (when (and s (harness-session-budget s))
+            (setf (harness-session-budget s) nil)
+            (harness-session--save (harness-session-id s))
+            (harness-session--announce s)
+            (cl-incf n))))
+      (harness-call 'store/save harness-session--budget-copies-marker
+                    (list :dropped n :date (format-time-string "%F")))
+      (when (> n 0)
+        (harness-log 'info "session: dropped the copy of the Budget setting from %d session%s"
+                     n (if (= n 1) "" "s"))))))
+
 (defun harness-session--on-kill-emacs () (harness-session-flush))
 
 (defun harness-session--on-models-updated (&rest _)
@@ -1384,6 +1450,7 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
 
 (defun harness-session--init ()
   (harness-session--load-all)
+  (harness-session--drop-budget-copies)
   (harness-on 'provider/models-updated #'harness-session--on-models-updated)
   (add-hook 'kill-emacs-hook #'harness-session--on-kill-emacs))
 
@@ -1400,6 +1467,11 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
 (unless harness-session--window-slot-holds-overrides
   (maphash (lambda (_ s) (setf (harness-session-context-window s) nil)) harness-sessions)
   (setq harness-session--window-slot-holds-overrides t))
+
+;; Nor does it drop the copies of the Budget setting the loaded sessions
+;; may hold: this does, the first time.
+(when (harness-module-ready-p 'session)
+  (harness-session--drop-budget-copies))
 
 (dolist (ev '((session/created . "(ID SESSION)")
               (session/changed . "(ID SESSION) after any change")

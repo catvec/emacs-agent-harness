@@ -29,11 +29,20 @@
 ;; a button for the rest; whole in the session), and [Open in the
 ;; session], which shows the session and takes point to the call.
 ;;
+;; A round of work whose turn ended without `hand_in' -- the model
+;; replied instead, or could not call the tool -- gets a report from
+;; the harness marked `:missing' (`harness-tasks--missing-report').  It
+;; draws as what it is: "Not handed in", with no evidence, the
+;; session's last message under it and [Open the session], where the
+;; work has to be checked.  The board's button for it reads [No report].
+;;
 ;; Images are the evidence most worth seeing, so they show large: the
 ;; popout's width and much of the frame's height, the popout growing
 ;; taller than others for them (`harness-ui-report-max-height').
 ;; Clicking one, or RET on it, shows it larger still in a popout of its
 ;; own (`harness-ui-popout-image'), which q closes, back to the report.
+;; Dragging one, from either, drops its file into another application,
+;; a chat app or a browser, to pass the evidence on (harness-ui-drag.el).
 ;;
 ;; Other modules add to the popout as they add to a chat:
 ;; `harness-ui-report-panel-functions' draws a panel at the end of the
@@ -51,6 +60,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-ui-drag)
 (require 'harness-ui-markdown)
 (require 'harness-ui-popout)
 (require 'harness-ui-tasks)
@@ -156,7 +166,7 @@ feedback to `:feedback'."
                          (and (stringp m) (not (string= m "application/octet-stream")) m))
                      (error nil))
                    "application/octet-stream"))
-         (size (nth 1 (file-attributes path))))
+         (size (file-attribute-size (file-attributes path))))
     (list :path path :mime mime :size size :name (file-name-nondirectory path))))
 
 (defun harness-ui-report--insert-media (path)
@@ -203,8 +213,10 @@ TITLE names the task.  Closing it shows the report again."
   "Insert the image PATH as large as the popout lets it be.
 It takes the popout's width and up to `harness-ui-report-image-max-height';
 clicking it, or RET on it, shows it larger still, in a popout of its
-own.  Without image support, and for a remote file, which reading here
-would block on, a button opening the file is inserted instead."
+own, and dragging it drops the file into another application
+\(`harness-ui-drag-source').  Without image support, and for a remote
+file, which reading here would block on, a button opening the file is
+inserted instead."
   (let* ((label (format "[image %s]" (abbreviate-file-name path)))
          (task harness-ui-report--task)
          (image (and (display-images-p) (not (file-remote-p path)) (file-readable-p path)
@@ -216,9 +228,11 @@ would block on, a button opening the file is inserted instead."
         (let ((view (let ((id (plist-get task :id))
                           (title (harness-ui-report--title task)))
                       (lambda () (interactive) (harness-ui-report--view-image path id title)))))
-          (insert (propertize label 'display image 'pointer 'hand
-                              'help-echo (format "%s\nmouse-1 or RET: view it larger" (abbreviate-file-name path))
-                              'keymap (harness-ui-mouse-keymap view))
+          (insert (harness-ui-drag-source
+                   (propertize label 'display image 'pointer 'hand
+                               'help-echo (format "%s\nmouse-1 or RET: view it larger" (abbreviate-file-name path))
+                               'keymap (harness-ui-mouse-keymap view))
+                   path)
                   "\n"))
       (harness-ui-button label (lambda () (harness-ui-report--open-file path))
                          :help "Open the image")
@@ -324,13 +338,58 @@ The renderer drops the last newline; what follows starts a line of its own."
       (insert (propertize (concat "  " caption "\n") 'face 'harness-dim-face
                           'wrap-prefix "  ")))))
 
+(defun harness-ui-report-missing-p (report)
+  "Non-nil when REPORT says its round of work handed no report in.
+The harness records one such when a task's turn ends without `hand_in'
+\(`harness-tasks--missing-report'): no evidence, and as its summary the
+last message the session wrote."
+  (harness-json-true-p (plist-get report :missing)))
+
+(defun harness-ui-report--insert-missing (report task)
+  "Insert REPORT of TASK, recorded for a round that handed no report in.
+It says so first, so nobody verifies the work on the strength of a
+report it never wrote, then shows the session's last message, all there
+is to read, and a button to the session, where the work is."
+  (insert (propertize "Not handed in" 'face 'warning)
+          (if-let* ((at (plist-get report :at)))
+              (propertize (format "  %s" (format-time-string "%Y-%m-%d %H:%M" at)) 'face 'harness-dim-face)
+            "")
+          "\n\n"
+          (propertize (concat "Its turn ended without hand_in, so there is no summary and no evidence. "
+                              "Check the work in its session before you verify it.")
+                      'face 'harness-dim-face)
+          "\n  ")
+  ;; `harness-ui-button' inserts the button itself, at point.
+  (harness-ui-button "[Open the session]"
+                     (lambda () (harness-ui-report--open-session task))
+                     :help "Show the session that did the work")
+  (insert "\n\n")
+  (let ((summary (plist-get report :summary)))
+    (if (and (stringp summary) (not (harness-string-blank-p summary)))
+        (progn (insert (propertize "Its last message\n" 'face 'harness-label-face) "\n")
+               (harness-ui-report--insert-markdown summary))
+      (insert (propertize "It wrote no message either.\n" 'face 'harness-dim-face)))))
+
+(defun harness-ui-report--open-session (task)
+  "Show the session of TASK."
+  (let ((sid (plist-get task :session)))
+    (unless (and (stringp sid) (fboundp 'harness-ui-display-session))
+      (user-error "The session of this task is not known here"))
+    (harness-ui-display-session sid)))
+
 (defun harness-ui-report--insert (task)
-  "Insert TASK's report: when it was handed in, the summary, the evidence."
+  "Insert TASK's report: when it was handed in, the summary, the evidence.
+A report recorded for a round that handed none in says so instead
+\(`harness-ui-report--insert-missing')."
   (setq harness-ui-report--task task)
   (let* ((report (harness-ui-report--report task))
          (evidence (append (and report (plist-get report :evidence)) nil)))
-    (if (not report)
-        (insert (propertize "This task has not handed a report in.\n" 'face 'harness-dim-face))
+    (cond
+     ((not report)
+      (insert (propertize "This task has not handed a report in.\n" 'face 'harness-dim-face)))
+     ((harness-ui-report-missing-p report)
+      (harness-ui-report--insert-missing report task))
+     (t
       (insert (propertize "Handed in" 'face 'harness-label-face)
               (if-let* ((at (plist-get report :at)))
                   (propertize (format "  %s" (format-time-string "%Y-%m-%d %H:%M" at)) 'face 'harness-dim-face)
@@ -346,7 +405,7 @@ The renderer drops the last newline; what follows starts a line of its own."
           (cl-loop for item in evidence for first = t then nil
                    do (unless first (insert "\n"))
                    (harness-ui-report--insert-item item task))
-        (insert (propertize "  none\n" 'face 'harness-dim-face))))
+        (insert (propertize "  none\n" 'face 'harness-dim-face)))))
     ;; A report drawn among a view's own text -- the review banner shows the
     ;; report in the session -- already has its panel there, so the panels
     ;; are the popout's only.

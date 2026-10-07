@@ -352,8 +352,9 @@ when it is forked to a model of a provider that cannot."
                                   (should (equal (plist-get child :provider-state) (plist-get stored :provider-state)))
                                   (plist-get stored :provider-state)))))
               (harness-call 'session/set-provider-state id state)
-              ;; A provider that forks: the fork has the state it derives.
-              (should (equal '(:forked-from "parent-cli") (funcall fork-state id)))
+              ;; A provider that forks: the fork has the state it derives,
+              ;; which names the provider it belongs to.
+              (should (equal '(:forked-from "parent-cli" :provider "test-forky") (funcall fork-state id)))
               ;; Forked to the model of a provider that cannot fork: none.
               (should-not (funcall fork-state id :model "test-plain:m"))
               ;; A provider that cannot fork, or whose fork fails: none.
@@ -366,6 +367,32 @@ when it is forked to a model of a provider that cannot."
         (dolist (p '(test-plain test-broken test-forky))
           (remhash p harness-providers))))))
 
+(ert-deftest harness-session-provider-state-belongs-to-its-provider ()
+  "Only models of the provider a state belongs to can continue it.
+A state names its provider.  One from before states did belongs to the
+provider that answered last: another provider answering since means
+the state's own never saw those turns, so it counts as no state."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "claude:a") :id)))
+      (should-not (harness-call 'session/provider-state id))
+      (harness-call 'session/set-provider-state id '(:cli-session-id "x" :provider "claude"))
+      (should (equal '(:cli-session-id "x" :provider "claude") (harness-call 'session/provider-state id)))
+      (should (harness-call 'session/provider-state id "claude:b"))
+      (should-not (harness-call 'session/provider-state id "deepseek:flash"))
+      ;; A state that does not say: nothing answered yet, so the session's provider's.
+      (harness-call 'session/set-provider-state id '(:cli-session-id "old"))
+      (should (equal '(:cli-session-id "old") (harness-call 'session/provider-state id)))
+      ;; Claude answered last: still Claude's, after a switch away too.
+      (harness-call 'session/append id '(:kind assistant :content "from claude" :meta (:model "claude:a")))
+      (harness-call 'session/update id :model "deepseek:flash" :silent t)
+      (should-not (harness-call 'session/provider-state id))
+      (should (harness-call 'session/provider-state id "claude:a"))
+      ;; Another provider answered since, which Claude's conversation never
+      ;; saw: Claude cannot continue it.
+      (harness-call 'session/append id '(:kind assistant :content "from deepseek" :meta (:model "deepseek:flash")))
+      (should-not (harness-call 'session/provider-state id "claude:a"))
+      ;; The record itself is left as it is.
+      (should (equal '(:cli-session-id "old") (plist-get (harness-call 'session/get id) :provider-state))))))
 (defmacro harness-session-test-with-cut-provider (&rest body)
   "Run BODY with the provider `test-cut', which can fork at a checkpoint.
 Its fork of a whole state is (:whole CLI-SESSION-ID), of a checkpoint
@@ -410,11 +437,11 @@ too, even at its head."
                                               :id)))))
         (pcase-let ((`(,u1 ,a1 ,u2 ,a2) ids))
           (let ((at-head (funcall fork)))
-            (should (equal '(:whole "S") (plist-get at-head :provider-state)))
+            (should (equal '(:whole "S" :provider "test-cut") (plist-get at-head :provider-state)))
             (should (equal a2 (plist-get at-head :fork-node)))
             (should (equal a2 (plist-get at-head :provider-node))))
           (let ((at-u2 (funcall fork u2)))
-            (should (equal '(:cut (:at "c1")) (plist-get at-u2 :provider-state)))
+            (should (equal '(:cut (:at "c1") :provider "test-cut") (plist-get at-u2 :provider-state)))
             (should (equal u2 (plist-get at-u2 :head)))
             (should (equal u2 (plist-get at-u2 :fork-node)))
             (should (equal u2 (plist-get at-u2 :provider-node)))
@@ -427,7 +454,7 @@ too, even at its head."
           (should (equal '(:cli-session-id "S") (plist-get (harness-call 'session/get id) :provider-state)))
           ;; Its head moved back to the first reply: a fork at the head is cut.
           (harness-call 'session/set-head id a1)
-          (should (equal '(:cut (:at "c1")) (plist-get (funcall fork) :provider-state))))))))
+          (should (equal '(:cut (:at "c1") :provider "test-cut") (plist-get (funcall fork) :provider-state))))))))
 
 (ert-deftest harness-session-provider-continuation-follows-the-head ()
   "Where the head is says how the provider conversation goes on.
@@ -901,6 +928,7 @@ itself is left alone."
 
 (defvar harness-providers)
 (defvar harness-session--window-slot-holds-overrides)
+(defvar harness-provider-fallback-context-window)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider--forget "harness-provider")
 
@@ -950,6 +978,24 @@ announced, so the UI does not keep showing the old one."
             (harness-call 'provider/models)
             (harness-test-wait (lambda () updated) 2 "provider/models-updated")
             (should-not changed)))
+      (harness-session-test-drop-provider))))
+
+(ert-deftest harness-session-window-of-a-model-nobody-lists ()
+  "A session on a model its provider does not list gets an estimate, not a small stand-in.
+The bug once was a new slug the catalogue did not know, which got a
+small window and compacted far too early."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("claude-opus-5-5" . 1000000) ("claude-haiku-4-5" . 200000)))
+          (let ((newer (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                :model "test-win:claude-opus-5-6")
+                                  :id))
+                (gone (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                               :model "nobody:some-model")
+                                 :id)))
+            (should (= 1000000 (harness-session-test-window newer)))
+            (should (= harness-provider-fallback-context-window (harness-session-test-window gone)))))
       (harness-session-test-drop-provider))))
 
 (ert-deftest harness-session-window-set-for-the-session ()
@@ -1057,6 +1103,43 @@ set for sessions."
             (harness-test-load-module 'session)
             (should (= 9000 (harness-session-test-window id)))))
       (harness-session-test-drop-provider))))
+
+(defvar harness-budget)
+
+(ert-deftest harness-session-budget-setting-copies-dropped-once ()
+  "Sessions used to copy the Budget setting into a budget of their own:
+one budget per session, where the setting is one for them all.  A new
+session no longer does, and the next start drops the copies saved, once:
+a budget given to a session after that stays."
+  (harness-session-test-with
+    (let* ((harness-budget '(:amount 5.0 :hard t))
+           (fresh (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           ;; Sessions as the old version saved them, each with its copy.
+           (old (cl-loop repeat 2
+                         collect (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                          :budget harness-budget)
+                                            :id))))
+      (should-not (plist-get (harness-call 'session/get fresh) :budget))
+      ;; The old version left no marker.
+      (harness-call 'store/delete harness-session--budget-copies-marker)
+      (clrhash harness-sessions)
+      (harness-session--init)
+      (dolist (id (cons fresh old))
+        (should-not (plist-get (harness-call 'session/get id) :budget))
+        (should-not (plist-get (harness-call 'store/load (format "sessions/%s.json" id)) :budget)))
+      (should (= 2 (plist-get (harness-call 'store/load harness-session--budget-copies-marker) :dropped)))
+      ;; Once only: a budget given to a session from now on stays.
+      (harness-call 'session/update (car old) :budget '(:amount 2.0) :silent t)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--init)
+      (should (equal '(:amount 2.0) (plist-get (harness-call 'session/get (car old)) :budget)))
+      ;; Loaded over the old version in a running harness, this one drops
+      ;; the copies the loaded sessions hold.
+      (harness-call 'store/delete harness-session--budget-copies-marker)
+      (harness-test-load-module 'session)
+      (should-not (plist-get (harness-call 'session/get (car old)) :budget))
+      (should (harness-call 'store/load harness-session--budget-copies-marker)))))
 
 ;;;; The thinking level of a BTW
 

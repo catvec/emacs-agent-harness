@@ -32,6 +32,7 @@
 (defvar harness-ui--sessions)
 (defvar harness-compose-start)
 (defvar harness-compose-end)
+(defvar harness-compose-map)
 (defvar harness-chat--loading)
 (defvar harness-chat--transcript-end)
 (defvar harness-compose-redraw-function)
@@ -76,11 +77,15 @@
   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"180\"><rect width=\"320\" height=\"180\" fill=\"#1f3a22\"/></svg>\n"
   "The image the fixture's task hands in, as shot.svg in its directory.")
 
+(defvar harness-ui-review-test--script nil
+  "The script of the fixture's provider, or nil for the one handing in.")
+
 (defmacro harness-ui-review-test-with (&rest body)
   "Like the board tests, with review on and a task that hands a report in.
 The provider's script makes the task call hand_in, so the task reaches
 review with a report, an image among its evidence; BODY gets `board',
-`id' and `sid'."
+`id' and `sid'.  `harness-ui-review-test--script', bound around it,
+gives the task another script."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -97,14 +102,15 @@ review with a report, an image among its evidence; BODY gets `board',
      (harness-test-load-module 'tools-handin)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override
-            '((:type text :delta "All done.\n")
-              (:type tool-call :id "h1" :name "hand_in"
-                     :input (:summary "# Done\n\nThe flaky test is fixed."
-                             :evidence ("a note" (:code "(fix-flaky)" :language "elisp"
-                                             :caption "the fix")
-                                        (:image "shot.svg" :caption "the board, fixed")
-                                        (:tool_call "h1"))))
-              (:type text :delta " this must not matter")))
+            (or harness-ui-review-test--script
+                '((:type text :delta "All done.\n")
+                  (:type tool-call :id "h1" :name "hand_in"
+                         :input (:summary "# Done\n\nThe flaky test is fixed."
+                                 :evidence ("a note" (:code "(fix-flaky)" :language "elisp"
+                                                 :caption "the fix")
+                                            (:image "shot.svg" :caption "the board, fixed")
+                                            (:tool_call "h1"))))
+                  (:type text :delta " this must not matter"))))
            (harness-naming-auto nil)
            (harness-tasks-max-running 3)
            (harness-tasks-require-verification t)
@@ -195,16 +201,21 @@ review with a report, an image among its evidence; BODY gets `board',
         (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
         (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-x"))))
         (should (eq 'harness-chat-redraw (key-binding (kbd "C-c C-r"))))
+        ;; C-c C-v is the banner's and no longer the box's too: pasting
+        ;; an image is C-y.
+        (should (eq 'harness-compose-yank (key-binding (kbd "C-y"))))
+        (should-not (lookup-key harness-compose-map (kbd "C-c C-v")))
         (call-interactively (key-binding (kbd "C-c C-v"))))
       (harness-test-wait (lambda () (not (eq 'review (plist-get (harness-call 'task/get id) :state))))
                          10 "the task to leave review")
       (harness-test-wait (lambda () (not (string-match-p "Ready for review"
                                                          (harness-ui-review-test--text chat))))
                          5 "the banner to go")
-      ;; With the banner gone, so are its keys: C-c C-v attaches the clipboard again.
+      ;; With the banner gone, so are its keys: C-c C-v is nothing there,
+      ;; the box pasting with C-y.
       (with-current-buffer chat
         (should-not harness-ui-review-minor-mode)
-        (should (eq 'harness-compose-attach-clipboard (key-binding (kbd "C-c C-v"))))
+        (should-not (key-binding (kbd "C-c C-v")))
         (should-not (key-binding (kbd "C-c C-x")))))))
 
 (ert-deftest harness-ui-review-banner-sends-back-with-the-box ()
@@ -535,9 +546,12 @@ report opens anew."
 
 (ert-deftest harness-ui-review-report-image-shows-larger ()
   "An image of a report is as wide as the popout and much of the frame
-high; RET on it shows it larger in a popout of its own, and q goes back."
+high; RET on it shows it larger in a popout of its own, and q goes back.
+It drags its file into other applications (the popout's image does too:
+see harness-ui-drag-test.el)."
   (harness-ui-review-test-with
-    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+              ((symbol-function 'harness-ui-drag-available-p) (lambda () t)))
       (let* ((popout (harness-ui-review-test--report board id))
              (window (get-buffer-window popout))
              (file (expand-file-name "shot.svg" dir)))
@@ -556,6 +570,8 @@ high; RET on it shows it larger in a popout of its own, and q goes back."
               (should (= (harness-ui-report--image-width) (plist-get image :max-width)))
               (should (= (harness-ui-report--image-max-height) (plist-get image :max-height))))
             (should (string-match-p "view it larger" (get-text-property (point) 'help-echo)))
+            (should (equal file (get-text-property (point) 'harness-ui-drag)))
+            (should (eq 'harness-ui-drag-start (lookup-key (get-text-property (point) 'keymap) [down-mouse-1])))
             (execute-kbd-macro (kbd "RET"))))
         (let ((viewer (harness-ui-popout-buffer (list 'image file))))
           (should viewer)
@@ -673,6 +689,60 @@ It follows the task back to review, and closes once that review is decided."
                                          (plist-get (gethash key harness-ui-report--reports) :archived))))
                          5 "the popout to follow the task")
       (should (harness-ui-popout-buffer key)))))
+
+(ert-deftest harness-ui-review-missing-report-says-so ()
+  "A task whose turn ended without hand_in says so wherever it is reviewed.
+Its card offers [No report] where [Report] would be, never a review
+with nothing to read; the popout says it was not handed in, shows the
+session's last message and still verifies; the session's banner says it
+in a line, the message being right above, with no [Report]."
+  (let ((harness-ui-review-test--script
+         '((:type text :delta "I think the flaky test passes now.\n")
+           (:type done :stop-reason end-turn))))
+    (harness-ui-review-test-with
+      (let ((key (list 'report id)))
+        (with-current-buffer board
+          (harness-ui-tasks--render)
+          (harness-ui-review-test--wait-text board "\\[No report\\]")
+          (should-not (string-search "[Report]" (buffer-string))))
+        (harness-ui-review-test--push board "[No report]")
+        (should (harness-ui-popout-buffer key))
+        (let ((popout (harness-ui-popout-buffer key)))
+          (harness-ui-review-test--wait-text popout "Not handed in")
+          (let ((text (harness-ui-review-test--text popout)))
+            (should (string-search "Its turn ended without hand_in" text))
+            (should (string-search "Its last message" text))
+            (should (string-search "I think the flaky test passes now." text))
+            (should (string-search "[Open the session]" text))
+            (should-not (string-search "Handed in" text))
+            (should-not (string-search "Evidence (" text))
+            ;; It is reviewed from there as any report.
+            (should (string-search "Ready for review" text))
+            (should (string-search "[Verify]" text)))
+          (harness-ui-popout-close key))
+        (let ((chat (harness-ui-review-test--open-session sid)))
+          (harness-ui-review-test--wait-text chat "Ready for review")
+          (harness-test-wait (lambda () (string-search "It handed no report in"
+                                                       (harness-ui-review-test--tail chat)))
+                             5 "the banner to say no report was handed in")
+          (let ((tail (harness-ui-review-test--tail chat)))
+            (should-not (string-search "[Report]" tail))
+            (should-not (string-search "Not handed in" tail))
+            (should (string-search "[Verify]" tail))))))))
+
+;;;; Evidence files
+
+(declare-function harness-ui-report--file-attachment "harness-ui-report")
+
+(ert-deftest harness-ui-review-evidence-file-has-its-size ()
+  "An evidence file's chip says how big the file is, not how many links it has."
+  (require 'harness-ui-report)
+  (let ((file (make-temp-file "harness-evidence-" nil ".txt" "twelve bytes")))
+    (unwind-protect
+        (let ((attachment (harness-ui-report--file-attachment file)))
+          (should (= 12 (plist-get attachment :size)))
+          (should (equal (file-name-nondirectory file) (plist-get attachment :name))))
+      (delete-file file))))
 
 (provide 'harness-ui-review-test)
 ;;; harness-ui-review-test.el ends here

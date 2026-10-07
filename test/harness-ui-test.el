@@ -265,6 +265,9 @@ KEYS default to C-g, which closes the menu."
       (should (string-match-p "C-c C-q +Queue for next turn" text))
       (should (string-match-p "C-c C-k +Cancel turn" text))
       (should (string-match-p "C-c C-a +Attach file" text))
+      ;; Pasting is C-y; C-c C-v is the review banner's [Verify].
+      (should (string-match-p "C-y +Paste; an image attaches" text))
+      (should-not (string-match-p "C-c C-v" text))
       (should-not (string-match-p "Task board" text)))))
 
 (ert-deftest harness-ui-menu-in-a-btw-shows-its-keys-over-the-chats ()
@@ -279,7 +282,7 @@ KEYS default to C-g, which closes the menu."
 (ert-deftest harness-ui-menu-in-review-shows-its-keys-over-the-chats ()
   "While a task's review banner shows, C-c C-v verifies and C-c C-x sends
 it back, in the buffer and so in the menu; the chat's C-c C-r still
-redraws.  With the banner gone, C-c C-v attaches the clipboard again."
+redraws.  With the banner gone, C-c C-v is nothing: the box pastes with C-y."
   (harness-ui-test-with-menu-buffer (lambda () (harness-chat-mode) (harness-ui-review-minor-mode 1))
     (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
     (should (eq 'harness-ui-review-reject (key-binding (kbd "C-c C-x"))))
@@ -291,9 +294,9 @@ redraws.  With the banner gone, C-c C-v attaches the clipboard again."
       (should (string-match-p "C-c C-r +Redraw" text))
       (should-not (string-match-p "Attach clipboard" text)))
     (harness-ui-review-minor-mode -1)
-    (should (eq 'harness-compose-attach-clipboard (key-binding (kbd "C-c C-v"))))
+    (should-not (key-binding (kbd "C-c C-v")))
     (let ((text (harness-ui-test-menu)))
-      (should (string-match-p "C-c C-v +Attach clipboard" text))
+      (should-not (string-match-p "C-c C-v" text))
       (should-not (string-match-p "Review\\|Send back" text)))))
 
 (ert-deftest harness-ui-menu-shows-the-board-commands-on-the-task-board ()
@@ -303,6 +306,8 @@ redraws.  With the banner gone, C-c C-v attaches the clipboard again."
       (should (string-match-p "\\. s +Start now" text))
       (should (string-match-p "\\. RET +Open its session" text))
       (should (string-match-p "C-c C-c +Submit" text))
+      (should (string-match-p "C-y +Paste; an image attaches" text))
+      (should-not (string-match-p "C-c C-v" text))
       (should-not (string-match-p "^Chat$" text)))))
 
 (ert-deftest harness-ui-menu-runs-buffer-commands-in-the-buffer ()
@@ -376,7 +381,14 @@ leave free.  None is left out by the menu."
                 (if dotted
                     (should (= 2 (length events)))
                   (should (memq 'control (event-modifiers (aref events 0)))))
-                (should (cl-some (lambda (map) (eq command (lookup-key map own))) maps)))))))))
+                (should (cl-some (lambda (map)
+                                   (or (eq command (lookup-key map own))
+                                       ;; Or the key's global command, remapped:
+                                       ;; the compose box's C-y, `yank' remapped.
+                                       (let ((global (lookup-key global-map own)))
+                                         (and global (symbolp global)
+                                              (eq command (lookup-key map (vector 'remap global)))))))
+                                 maps)))))))))
   ;; What every harness buffer offers is checked above; here, that each mode is there.
   (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-sessions-mode harness-ui-tree-mode
                   harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode
@@ -463,6 +475,191 @@ bottom side window and leaves the other windows alone."
         (should (eq window (selected-window)))
         (should-not (get-buffer-window view))))))
 
+;;;; The fullscreen layout of an overview
+
+(defmacro harness-ui-test-with-fullscreen (&rest body)
+  "Run BODY with the user's buffer `file' alone in the frame, an overview
+`view' that names session \"one\", and the buffers of sessions \"one\"
+and \"two\", `one' and `two'."
+  (declare (indent 0))
+  `(let* ((file (get-buffer-create "fullscreen test file"))
+          (view (get-buffer-create "*harness fullscreen test view*"))
+          (one (get-buffer-create "*harness: fullscreen one*"))
+          (two (get-buffer-create "*harness: fullscreen two*"))
+          (harness-ui-default-position 'right)
+          (harness-ui-open-session-function
+           (lambda (id) (pcase id ("one" one) ("two" two)))))
+     (unwind-protect
+         (progn
+           (clrhash harness-ui--position-buffers)
+           (clrhash harness-ui--fullscreen-layouts)
+           (delete-other-windows)
+           (switch-to-buffer file)
+           (with-current-buffer view
+             (setq-local harness-ui-overview-function (lambda () "one")))
+           ,@body)
+       (clrhash harness-ui--fullscreen-layouts)
+       (clrhash harness-ui--position-buffers)
+       (let ((ignore-window-parameters t))
+         (ignore-errors (delete-other-windows (harness-ui--main-window))))
+       (mapc #'kill-buffer (list file view one two)))))
+
+(ert-deftest harness-ui-fullscreen-shows-the-overview-left-and-a-session-beside ()
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'right)
+      (should (eq 'right (window-parameter (get-buffer-window view) 'window-side)))
+      ;; F in the overview.
+      (harness-fullscreen)
+      (let ((overview (get-buffer-window view)))
+        (should (harness-ui--fullscreen-layout))
+        (should (eq 'left (window-parameter overview 'window-side)))
+        (should (window-parameter overview 'no-delete-other-windows))
+        (should (eq overview (selected-window)))
+        ;; The session the overview names takes the window the frame kept;
+        ;; the side window the overview was in made way.
+        (should (eq one (window-buffer main)))
+        (should (= 2 (length (window-list))))
+        (should (eq 'fullscreen (buffer-local-value 'harness-ui-position view)))
+        (should (eq 'fullscreen (buffer-local-value 'harness-ui-position one)))))))
+
+(ert-deftest harness-ui-fullscreen-starts-with-the-overview-shown-last ()
+  "Run from a buffer that is not an overview, the command picks one."
+  (harness-ui-test-with-fullscreen
+    (harness-ui-display-view view 'right)
+    (quit-window nil (get-buffer-window view))
+    (should-not (get-buffer-window view))
+    (with-current-buffer file (harness-fullscreen))
+    (should (harness-ui--overview-window-p (get-buffer-window view)))))
+
+(ert-deftest harness-ui-fullscreen-sessions-take-the-slot ()
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'fullscreen)
+      (let ((overview (get-buffer-window view))
+            (open (with-current-buffer view (harness-ui-session-opener))))
+        (should (eq one (window-buffer main)))
+        ;; A session opened from the overview takes the slot, and is selected.
+        (funcall open "two")
+        (should (eq two (window-buffer main)))
+        (should (eq main (selected-window)))
+        (should (eq view (window-buffer overview)))
+        ;; So does anything shown without a position, views that are no
+        ;; overview included, whatever position they had.
+        (harness-ui-display-buffer one)
+        (should (eq one (window-buffer main)))
+        (let ((log (get-buffer-create "*harness fullscreen test log*")))
+          (unwind-protect
+              (progn
+                (with-current-buffer log (setq-local harness-ui-position 'bottom))
+                (harness-ui-display-view log)
+                (should (eq log (window-buffer main))))
+            (kill-buffer log)))
+        ;; A position of its own leaves the layout's windows alone.
+        (harness-ui-display-buffer two 'bottom)
+        (should (eq 'bottom (window-parameter (get-buffer-window two) 'window-side)))
+        (should (eq view (window-buffer overview)))
+        ;; C-x 1 beside the overview keeps it.
+        (select-window main)
+        (delete-other-windows)
+        (should (window-live-p overview))
+        (should (harness-ui--fullscreen-layout))))))
+
+(ert-deftest harness-ui-fullscreen-bury-brings-back-the-users-buffer ()
+  "Burying the session beside the overview keeps the layout."
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'fullscreen)
+      (funcall (with-current-buffer view (harness-ui-session-opener)) "two")
+      (should (eq two (window-buffer main)))
+      ;; C-c C-z: back to the file, past the sessions shown since.
+      (harness-ui-bury)
+      (should (eq file (window-buffer main)))
+      (should (harness-ui--fullscreen-layout))
+      (should (harness-ui--overview-window-p (get-buffer-window view)))
+      ;; The next session opened from the overview takes the window back.
+      (select-window (get-buffer-window view))
+      (funcall (with-current-buffer view (harness-ui-session-opener)) "one")
+      (should (eq one (window-buffer main))))))
+
+(ert-deftest harness-ui-fullscreen-quitting-the-overview-ends-it ()
+  "q on the overview buries it and puts the windows back."
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'right)
+      (harness-fullscreen)
+      (should (eq one (window-buffer main)))
+      (harness-ui-quit-view)
+      (should-not (harness-ui--fullscreen-layout))
+      (should (equal (list main) (window-list)))
+      (should (eq file (window-buffer main)))
+      (should-not (get-buffer-window view))
+      ;; Opened again, it goes where it was before the layout.
+      (should (eq 'right (buffer-local-value 'harness-ui-position view))))))
+
+(ert-deftest harness-ui-fullscreen-ends-keeping-a-file-visited-beside ()
+  "Ended, the layout puts the windows back but the user's buffer stays in sight."
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window))
+          (other-file (get-buffer-create "fullscreen test other file")))
+      (unwind-protect
+          (progn
+            (harness-ui-display-view view 'right)
+            (harness-fullscreen)
+            (select-window main)
+            (switch-to-buffer other-file)
+            ;; From a buffer that is not an overview, the command ends the layout.
+            (harness-fullscreen)
+            (should-not (harness-ui--fullscreen-layout))
+            (should (eq 'right (window-parameter (get-buffer-window view) 'window-side)))
+            (should (eq other-file (window-buffer main))))
+        (kill-buffer other-file)))))
+
+(ert-deftest harness-ui-fullscreen-another-overview-takes-the-left ()
+  (harness-ui-test-with-fullscreen
+    (let ((list (get-buffer-create "*harness fullscreen test list*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer list (setq-local harness-ui-overview-function #'ignore))
+            (harness-ui-display-view view 'fullscreen)
+            (let ((overview (get-buffer-window view)))
+              (harness-ui-display-view list)
+              (should (eq list (window-buffer overview)))
+              (should (eq 'side (window-dedicated-p overview)))
+              (should (harness-ui--overview-window-p overview))
+              (should (eq overview (selected-window)))
+              (harness-ui-quit-view)
+              (should-not (harness-ui--fullscreen-layout))
+              ;; Both had no position before the layout, and have none after.
+              (should-not (buffer-local-value 'harness-ui-position list))
+              (should-not (buffer-local-value 'harness-ui-position view))))
+        (kill-buffer list)))))
+
+(ert-deftest harness-ui-fullscreen-ends-with-the-overviews-window ()
+  (harness-ui-test-with-fullscreen
+    (harness-ui-display-view view 'fullscreen)
+    (delete-window (get-buffer-window view))
+    (should-not (harness-ui--fullscreen-layout))
+    (harness-ui-display-buffer two)
+    (should (eq 'right (window-parameter (get-buffer-window two) 'window-side)))))
+
+(ert-deftest harness-ui-bury-outside-the-fullscreen-layout ()
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      ;; In a window of the frame's own, back to the user's buffer.
+      (harness-ui-display-buffer one 'full)
+      (harness-ui-display-buffer two 'full)
+      (should (eq two (window-buffer main)))
+      (harness-ui-bury)
+      (should (eq file (window-buffer main)))
+      ;; A side window quits.
+      (harness-ui-display-buffer one 'right)
+      (let ((side (selected-window)))
+        (should (window-parameter side 'window-side))
+        (harness-ui-bury)
+        (should-not (window-live-p side))
+        (should (eq file (window-buffer main)))))))
+
 (ert-deftest harness-ui-unowned-requests-stay-pending-without-prompting ()
   "A question or permission no buffer owns is declined, never prompted for."
   (let (responses (harness-ui-question-functions nil) (harness-ui-permission-functions nil))
@@ -494,6 +691,16 @@ bottom side window and leaves the other windows alone."
     (should (equal '("Ask" "Accept Edits" "Auto" "YOLO") (car offered)))
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
+
+(ert-deftest harness-ui-model-window-says-when-it-is-estimated ()
+  "The model picker marks a window the catalogue estimated with a tilde."
+  (should (equal "1.00M" (harness-ui-format-model-window '(:context-window 1000000))))
+  (should (equal "~200k" (harness-ui-format-model-window '(:context-window 200000 :context-window-estimated t))))
+  ;; JSON's false is no estimate.
+  (should (equal "200k" (harness-ui-format-model-window '(:context-window 200000 :context-window-estimated :false))))
+  ;; Unknown windows still get a face, against the harness's fallback window.
+  (should (eq 'harness-context-ok-face (harness-ui-context-face 100000 nil)))
+  (should (eq 'harness-context-critical-face (harness-ui-context-face 175000 nil))))
 
 (ert-deftest harness-ui-thinking-menu-follows-the-model ()
   "The thinking menu offers a model's own levels, weakest first, so a
@@ -939,6 +1146,147 @@ once, and a change made with `setopt' reaches it."
     (should-not (assoc "_harness/config/set" calls))
     (should (equal "deepseek:deepseek-flash"
                    (plist-get (plist-get (cdr (assoc "_harness/session/set-all" calls)) :settings) :model)))))
+
+;;;; Switches that lose the conversation
+
+(defun harness-ui-test--lossy-check (id name &optional running)
+  "Return a `handoff/check' answer saying that switching session ID loses it.
+NAME is the session's name; RUNNING says a turn runs."
+  (list :id id :name name :lossy t :history t :running running
+        :from "deepseek:deepseek-flash" :from-label "DeepSeek V4.1 Flash"
+        :to "claude:claude-opus-5-5" :to-label "Claude Opus 5.5" :to-provider "Claude Code"
+        :reason "Claude Code keeps its own conversation and is sent only the user messages after the model's last reply."
+        :risks '("Cold prompt cache: written, not read."
+                 "Reduced fidelity: explored again."
+                 "Old provider state: a conversation it could resume, compaction it did itself and its built-in tools stay behind."
+                 "Timing: takes effect at the next step, not mid-step.")
+        :cache-cost "120k tokens: $0.60 to write, $0.02 to read"))
+
+(defmacro harness-ui-test-with-switch (answers key &rest body)
+  "Run BODY switching models with the harness answering from ANSWERS.
+ANSWERS maps a method to its result.  The user picks the first model
+and, asked about a lossy switch, KEY.  BODY sees CALLS, the requests
+made, newest first, and ASKED, the arguments of each question asked."
+  (declare (indent 2))
+  `(let ((calls nil) (asked nil))
+     (cl-letf (((symbol-function 'harness-ui-refresh-models)
+                (lambda (&optional callback)
+                  (funcall callback (list (list :id "claude:claude-opus-5-5" :label "Claude Opus 5.5"
+                                                :provider-label "Claude Code" :context-window 1000000)))))
+               ((symbol-function 'harness-ui-call)
+                (lambda (method params &optional callback _on-error)
+                  (push (cons method params) calls)
+                  (when callback (funcall callback (cdr (assoc method ,answers))))))
+               ((symbol-function 'completing-read) (lambda (_prompt table &rest _) (caar table)))
+               ((symbol-function 'read-multiple-choice)
+                (lambda (prompt choices &optional help show &rest _)
+                  (push (list prompt choices help show) asked)
+                  (assq ,key choices))))
+       ,@body)))
+
+(ert-deftest harness-ui-set-model-asks-before-losing-the-conversation ()
+  "A lossy switch states its risks first and hands over as the user chooses."
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check" (harness-ui-test--lossy-check "s1" "Fix the parser" t))
+            (cons "_harness/handoff/switch" '(:mode "transcript" :file "/tmp/p/.harness/handoff/s1.md")))
+      ?t
+    (harness-set-model "s1")
+    (should (= 1 (length asked)))
+    (pcase-let ((`(,_prompt ,choices ,help ,show) (car asked)))
+      ;; Shown at once: the switch, the risks, the choices -- as tables.
+      (should show)
+      (should (equal '(?c ?n ?t ?s ?q) (mapcar #'car choices)))
+      (should (string-match-p (concat "^MODEL SWITCH → "
+                                      (regexp-quote (harness-ui-model-label "claude:claude-opus-5-5")) "$")
+                              help))
+      (should (string-match-p "^  Session  “Fix the parser”$" help))
+      (should (string-match-p (concat "^  From     " (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash")) "$")
+                              help))
+      (should (string-match-p "sent only the user[ \n]+messages after the model's last reply" help))
+      (should (string-match-p "^  Cache    120k tokens: \\$0\\.60 to write, \\$0\\.02 to read (list prices)$" help))
+      (should (string-match-p "^  Turn     running; the switch takes effect at its next step$" help))
+      ;; The risks table: a heading, a header row, the four labelled risks.
+      (should (string-match-p "^RISKS$" help))
+      (should (string-match-p "^  RISK\\( +\\)WHAT IT MEANS$" help))
+      (dolist (risk '("Cold prompt cache" "Reduced fidelity" "Old provider state" "Timing"))
+        (should (string-match-p (format "^  %s +." (regexp-quote risk)) help)))
+      ;; Short, one line each, easy to scan: key, name, what it does.
+      (should (string-match-p "^  c  current model summarises[ ]+warm cache; summary from the whole conversation$" help))
+      (should (string-match-p "^  n  new model summarises[ ]+only the first and last messages; small, but lossy$" help))
+      (should (string-match-p "^  t  full transcript[ ]+whole conversation as a file the new model reads$" help))
+      (should (string-match-p "^  s  no handoff[ ]+no context; the new model starts from your next message$" help))
+      (should (string-match-p "^  q  cancel[ ]+keep the current model$" help))
+      (should (string-match-p "^HAND OVER$" help))
+      (should (string-match-p "^  lossy; the new model is told to re-investigate$" help)))
+    (let ((check (cdr (assoc "_harness/handoff/check" calls)))
+          (switch (cdr (assoc "_harness/handoff/switch" calls))))
+      (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5") check))
+      (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5" :mode "transcript") switch)))
+    (should-not (assoc "session/set_model" calls))))
+
+(ert-deftest harness-ui-set-model-compacts-with-the-new-model ()
+  "The advanced choice has the new model summarise a limited context."
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check" (harness-ui-test--lossy-check "s1" "Fix the parser" t))
+            (cons "_harness/handoff/switch"
+                  '(:mode "compact-new" :summarizer "claude:claude-opus-5-5" :context "sample")))
+      ?n
+    (harness-set-model "s1")
+    (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5" :mode "compact-new")
+                   (cdr (assoc "_harness/handoff/switch" calls))))))
+
+(ert-deftest harness-ui-set-model-cancel-or-plain ()
+  "Cancelling leaves the model alone; a switch that loses nothing just happens."
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check" (harness-ui-test--lossy-check "s1" "Fix the parser")))
+      ?q
+    (harness-set-model "s1")
+    (should (= 1 (length asked)))
+    (should-not (assoc "_harness/handoff/switch" calls))
+    (should-not (assoc "session/set_model" calls)))
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check" '(:id "s1" :lossy nil :reason "The new model is of the same provider.")))
+      ?q
+    (harness-set-model "s1")
+    (should-not asked)
+    (should (equal '(:sessionId "s1" :modelId "claude:claude-opus-5-5")
+                   (cdr (assoc "session/set_model" calls))))))
+
+(ert-deftest harness-ui-set-model-all-asks-once ()
+  "Switching every session asks once, for all those that would lose their conversation."
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check-all"
+                  (list (harness-ui-test--lossy-check "s1" "Fix the parser" t)
+                        (harness-ui-test--lossy-check "s2" nil)
+                        '(:id "s3" :lossy nil :reason "Same provider.")))
+            (cons "_harness/handoff/switch-all" '("s1" "s2" "s3")))
+      ?c
+    (harness-set-model-all)
+    (should (= 1 (length asked)))
+    (let ((help (nth 2 (car asked))))
+      (should (string-match-p "^  Sessions  2 of 3 start a new conversation there$" help))
+      (should (string-match-p (concat "^MODEL SWITCH → "
+                                      (regexp-quote (harness-ui-model-label "claude:claude-opus-5-5")) "$")
+                              help))
+      (should (string-match-p "^  SESSION +\\(FROM +TURN +CACHE COST\\)$" help))
+      (let ((from (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash"))))
+        (should (string-match-p (concat "^  “Fix the parser” +" from " +running +120k tokens: \\$0\\.60 to write, \\$0\\.02 to read$")
+                                help))
+        (should (string-match-p (concat "^  s2 +" from " +- +120k tokens: \\$0\\.60 to write, \\$0\\.02 to read$")
+                                help)))
+      (should (string-match-p "The choice applies to each session listed; the others just switch" help)))
+    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t))
+                   (cdr (assoc "_harness/handoff/check-all" calls))))
+    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t) :mode "compact")
+                   (cdr (assoc "_harness/handoff/switch-all" calls))))
+    (should-not (assoc "_harness/session/set-all" calls))
+    (should (equal "claude:claude-opus-5-5" (plist-get (cdr (assoc "_harness/config/set" calls)) :value))))
+  ;; Cancelled: nothing changes, not even the default for new sessions.
+  (harness-ui-test-with-switch
+      (list (cons "_harness/handoff/check-all" (list (harness-ui-test--lossy-check "s1" "Fix the parser"))))
+      ?q
+    (harness-set-model-all)
+    (should (equal '("_harness/handoff/check-all") (mapcar #'car calls)))))
 
 (ert-deftest harness-ui-one-line-collapses-hover-help ()
   "Hover help becomes one line: a second line grows the echo area.
