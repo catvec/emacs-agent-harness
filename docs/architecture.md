@@ -1184,13 +1184,16 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   or deny; a denial carries `:message`, the text `tools/execute` would
   have returned.
 - Corporate mode (`harness-corporate-mode`) turns off the tools of kind
-  `net`.  No session gets them, so `tools/builtin` never picks a
-  provider's own web search either; the list without a session still
-  has them.  `tools/execute` and `tools/authorize` deny a call to one
-  before the `permission/decide` chain, whatever the mode and the
-  standing rules: reason "corporate mode: network tools are off", a
-  hint to work with the project and the tools the session has,
+  `net` other than web search (`harness-tools--corporate-net-tools`:
+  web_search).  No session gets them; the list without a session still
+  has them.  `tools/execute` and `tools/authorize` deny a call of kind
+  `net` to any other tool (one the harness lacks included) before the
+  `permission/decide` chain, whatever the mode and the standing rules:
+  reason "corporate mode: network tools other than web search are
+  off", a hint to work with the project and the tools the session has,
   `:denied t`, and `permission/decided` as for any decision.
+  web_search stays, and so does a provider's own search standing in
+  for it (`tools/builtin`); their calls go to the chain as in any mode.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.
@@ -2466,6 +2469,8 @@ has WebSearch, Copilot its web_search).  tools-web's filter on
 search provider cannot search, so searching works before anything is
 set up; `always`; or `never`.  The session then has no `web_search` of
 the harness's, and the provider's searches show as `web_search` calls.
+Corporate mode leaves both searches on and turns `web_fetch` off (see
+tools).
 
 The session and task tools (`tools-sessions`) let an agent coordinate the
 rest of the harness.  Sessions are named by id, a unique id prefix or a

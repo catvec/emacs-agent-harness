@@ -944,6 +944,49 @@ for a request without a session record."
       (should (eq 'deny (plist-get d :behavior)))
       (should (string-match-p "\\`Denied: denied by a standing rule for web_search" (plist-get d :message))))))
 
+(ert-deftest harness-perms-corporate-mode-searches-the-web ()
+  ;; Corporate mode leaves web search on: an unattended task session
+  ;; searches with web_search or its provider's own search, as the rules
+  ;; for web_search decide, standing rules included.  web_fetch is
+  ;; refused before the chain, so not even the judge is asked about it.
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-test-load-module 'tools-web)
+  (let ((probe (harness-perms-test--judge-provider
+                '((:type text :delta "{\"decision\":\"allow\",\"reason\":\"fine\"}")
+                  (:type done :stop-reason end-turn))))
+        (harness-perms-auto-model "judge:small")
+        (harness-corporate-mode t)
+        (harness-websearch-providers nil)
+        (harness-websearch-provider 'fake))
+    (harness-register-method 'agent/prompt (lambda (&rest _) (harness-resolved nil)))
+    (harness-websearch-register-provider
+     'fake (lambda (query _count) (list (list :title (concat "About " query) :url "https://example.org/"))))
+    (cl-letf (((symbol-function 'harness-http-request)
+               (lambda (&rest _) (error "Nothing may reach the web"))))
+      (let ((r (harness-test-await (harness-call 'tools/execute "s1"
+                                                 '(:id "c1" :name "web_search" :input (:query "emacs"))))))
+        (should-not (plist-get r :is-error))
+        (should (string-match-p "About emacs" (plist-get r :content))))
+      (should (eq 'allow (plist-get (harness-test-await
+                                     (harness-call 'tools/authorize "s1"
+                                                   '(:id "c2" :name "web_search" :input (:query "emacs"))))
+                                    :behavior)))
+      (let ((r (harness-test-await (harness-call 'tools/execute "s1"
+                                                 '(:id "c3" :name "web_fetch" :input (:url "https://example.org/"))))))
+        (should (plist-get r :denied))
+        (should (string-match-p "\\`Denied: corporate mode: network tools other than web search are off"
+                                (plist-get r :content))))
+      (should (null (funcall probe 'requests)))
+      (let ((harness-perms-rules '((:tool "web_search" :behavior deny))))
+        (should (plist-get (harness-test-await
+                            (harness-call 'tools/execute "s1"
+                                          '(:id "c4" :name "web_search" :input (:query "emacs"))))
+                           :denied))
+        (should (eq 'deny (plist-get (harness-test-await
+                                      (harness-call 'tools/authorize "s1"
+                                                    '(:id "c5" :name "web_search" :input (:query "emacs"))))
+                                     :behavior)))))))
+
 ;;;; Asking the user
 
 (ert-deftest harness-perms-ask-path-pending-and-answer ()
