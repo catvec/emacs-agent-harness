@@ -962,7 +962,9 @@ an agent's own directory request has no \"Allow once\"."
   "Ask the connected clients to decide PENDING permission request of SID.
 A request about paths carries the glob pattern it is answered for in
 `_harness.pattern'; a client may answer for another one with
-`_harness.pattern' in its result, next to the outcome."
+`_harness.pattern' in its result, next to the outcome.  A shell
+command's request carries where it runs in `_harness.cwd', and in
+`_harness.paths' what it is about."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -976,6 +978,7 @@ A request about paths carries the glob pattern it is answered for in
            :_harness (list :pendingId pid
                            :tool (plist-get payload :tool)
                            :paths (plist-get payload :paths)
+                           :cwd (plist-get payload :cwd)
                            :dir (plist-get payload :dir)
                            :pattern (plist-get payload :pattern)
                            :reason (plist-get payload :reason)))

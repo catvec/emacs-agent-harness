@@ -1023,6 +1023,50 @@ It is never added to the running turn."
         (harness-test-wait (lambda () recorded) 5 "answered through the method")
         (should (equal (list sid "w1" '(:option "allow-always" :pattern "~/proj/**")) (car recorded)))))))
 
+(ert-deftest harness-ui-chat-command-permission-says-where-it-runs ()
+  "A shell command's prompt says where it runs and what it reaches, which the pattern is for."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (proj (expand-file-name "~/proj/"))
+           (params (lambda (pid command paths pattern)
+                     (list :sessionId sid
+                           :toolCall (list :toolCallId pid :title (concat "Bash: " command) :kind "execute"
+                                           :rawInput (list :command command))
+                           :options harness-acp--permission-options
+                           :_harness (list :pendingId pid :tool "bash" :cwd proj :paths paths :pattern pattern
+                                           :reason "The permission judge would deny this call: it reads other projects")))))
+      ;; The command names a path outside: that is the pattern's.
+      (should (harness-chat--on-permission
+               (funcall params "p1" "ls -la ~/.claude/projects/x" (vector (expand-file-name "~/.claude/projects/x/"))
+                        (expand-file-name "~/.claude/projects/x/**"))
+               #'ignore))
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "kind: execute   runs in: ~/proj/\n   paths: ~/.claude/projects/x/\n"))
+        (should (harness-ui-chat-test-find buf "pattern: ~/.claude/projects/x/**  [Edit] e"))
+        (harness-chat-deny-newest))
+      ;; It names none: it is about where it runs, said once.
+      (should (harness-chat--on-permission
+               (funcall params "p2" "git status" (list (directory-file-name proj)) (concat proj "**"))
+               #'ignore))
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "kind: execute   runs in: ~/proj/\n"))
+        (should-not (harness-ui-chat-test-find buf "paths:"))
+        (should (harness-ui-chat-test-find buf "pattern: ~/proj/**  [Edit] e"))
+        (harness-chat-deny-newest))
+      ;; Any other call's paths stay on the line of its kind.
+      (should (harness-chat--on-permission
+               (list :sessionId sid
+                     :toolCall (list :toolCallId "w1" :title "Write file: lisp/a.el" :kind "edit"
+                                     :rawInput '(:path "lisp/a.el"))
+                     :options harness-acp--permission-options
+                     :_harness (list :pendingId "w1" :tool "write_file" :paths (list (concat proj "lisp/a.el"))
+                                     :pattern (concat proj "lisp/**")))
+               #'ignore))
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "kind: edit   paths: ~/proj/lisp/a.el\n"))
+        (should-not (harness-ui-chat-test-find buf "runs in:"))))))
+
 (ert-deftest harness-ui-chat-question-panel ()
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))

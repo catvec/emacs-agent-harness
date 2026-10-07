@@ -55,8 +55,9 @@ A record is a plist: `:id' `:kind' (\"permission\" or \"question\"),
 `:respond' (the ACP callback, when a client owns the request, else nil),
 `:connection' (the UI connection it came on, so an answer still goes out
 on it), `:created', and what its panel draws: `:title' `:tool' `:tool-kind'
-`:input' `:paths' `:pattern' `:dir' `:reason' `:options' for a
-permission (`:pattern' is the glob the answer holds for, and
+`:input' `:paths' `:cwd' `:pattern' `:dir' `:reason' `:options' for a
+permission (`:paths' are what the call is about, `:cwd' where a shell
+command runs, `:pattern' the glob the answer holds for, and
 `:edited-pattern' the one the user typed), `:question' `:options'
 `:diagrams' for a question.  A permission also has the `:call-id' of
 the tool call that waits on it.")
@@ -191,7 +192,7 @@ ITEM is (:id :kind :payload) in the wire shape."
             :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
             :call-id (plist-get payload :call-id)
             :tool (plist-get payload :tool) :tool-kind (harness-ui-pending--str (plist-get payload :kind))
-            :input (plist-get payload :input) :paths (plist-get payload :paths)
+            :input (plist-get payload :input) :paths (plist-get payload :paths) :cwd (plist-get payload :cwd)
             :dir (plist-get payload :dir) :pattern (plist-get payload :pattern)
             :reason (plist-get payload :reason)
             :options (plist-get payload :options)))))
@@ -535,6 +536,25 @@ the pattern is for: those that remember the answer."
             "\n")
     (put-text-property start (point) 'harness-ui-pending-pattern pid)))
 
+(defun harness-ui-pending--permission-facts (r)
+  "Return the lines of facts the panel of permission record R states.
+The first says its kind and, for a shell command, where it runs (`runs
+in:').  The paths the call is about (`paths:') follow on that line, or
+for a shell command on a line of their own: there they are the paths
+the command names outside the session's directories, which the pattern
+is made of, and they are left out when they are just where it runs."
+  (let* ((cwd (plist-get r :cwd))
+         (paths (mapcar (lambda (p) (format "%s" p)) (append (plist-get r :paths) nil)))
+         (only-cwd (and cwd paths (null (cdr paths))
+                        (equal (file-name-as-directory (car paths)) (file-name-as-directory cwd))))
+         (about (and paths (not only-cwd)
+                     (format "paths: %s" (mapconcat #'abbreviate-file-name paths " "))))
+         (first (delq nil (list (and (plist-get r :tool-kind) (format "kind: %s" (plist-get r :tool-kind)))
+                                (and cwd (format "runs in: %s" (abbreviate-file-name cwd)))
+                                (and (not cwd) about)))))
+    (delq nil (list (and first (string-join first "   "))
+                    (and cwd about)))))
+
 (defun harness-ui-pending--decorate (start end pid map)
   "Make START..END the panel of request PID, with keymap MAP."
   (add-text-properties start end (list 'harness-ui-pending pid))
@@ -550,10 +570,8 @@ the pattern is for: those that remember the answer."
     (insert (propertize (concat " " (harness-ui-icon 'harness-icon-blocked) " Permission  ") 'face 'harness-label-face)
             (harness-ui-tool-title-string (plist-get r :tool) (plist-get r :title))
             "\n")
-    (let ((facts (delq nil (list (and (plist-get r :tool-kind) (format "kind: %s" (plist-get r :tool-kind)))
-                                 (and (plist-get r :paths)
-                                      (format "paths: %s" (mapconcat #'abbreviate-file-name (plist-get r :paths) " ")))))))
-      (when facts (insert (propertize (concat "   " (string-join facts "   ") "\n") 'face 'harness-dim-face))))
+    (dolist (line (harness-ui-pending--permission-facts r))
+      (insert (propertize (concat "   " line "\n") 'face 'harness-dim-face)))
     (when-let* ((input (plist-get r :input)))
       (insert (propertize (concat "   " (harness-ui-tool-input-summary input) "\n") 'face 'harness-dim-face)))
     (when-let* ((reason (plist-get r :reason)))
@@ -790,7 +808,7 @@ clients, or the session's own pending list, answer it."
                :title (or (plist-get tc :title) (plist-get extra :tool) "tool call")
                :call-id (plist-get tc :toolCallId)
                :tool (plist-get extra :tool) :tool-kind (format "%s" (plist-get tc :kind))
-               :input (plist-get tc :rawInput) :paths (plist-get extra :paths)
+               :input (plist-get tc :rawInput) :paths (plist-get extra :paths) :cwd (plist-get extra :cwd)
                :dir (plist-get extra :dir) :pattern (plist-get extra :pattern)
                :reason (plist-get extra :reason)
                :options (plist-get params :options))))
