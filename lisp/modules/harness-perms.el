@@ -10,9 +10,11 @@
 ;;    5 dir-request      request_directory_access: the user's answer decides
 ;;    7 sandbox-guard    shell commands the sandbox would make destructive
 ;;                       (`git worktree prune' and the like) are refused
-;;   10 jail             every path must lie inside an allowed root;
+;;   10 jail             every path must lie inside an allowed root, or,
+;;                       for a call that only reads, in the harness itself;
 ;;                       otherwise the user is asked for the directory
 ;;   20 mode             ask / accept-edits / auto / yolo, plus standing rules
+;;                       and the tools and reads that never need approval
 ;;   30 auto             a cheap model judges what is still undecided, in
 ;;                       auto mode and in every non-interactive session;
 ;;                       a denial is put to the user when one is present
@@ -69,6 +71,28 @@
 ;; Roots and rules alike are directories or patterns (see
 ;; `harness-perms--within-p').
 ;;
+;; A shell command's only path is where it runs, which is all the jail
+;; checks; what it reaches is read off the command line (see "What a
+;; shell command reaches").  Its prompt is about the paths it names
+;; outside the session's directories, and its pattern is theirs, so
+;; `ls ~/.claude/projects' run in the project is answered for
+;; ~/.claude/projects/**, not for every command run in the project; a
+;; command that names nothing outside is about where it runs, as
+;; before.
+;;
+;; Inspecting the harness itself is one of the things that make it
+;; powerful, so no mode, no judge and no jail stands in its way: the
+;; tools that only look at the harness or the user's live Emacs
+;; (`harness-perms--inspection-tools') never need approval, and a call
+;; that only reads may read the harness's code and its state directory
+;; wherever they lie (`harness-perms-inspection-dirs').  They are no
+;; roots: writing there, or running a command there, stays jailed.  The
+;; credentials in the state directory (`harness-perms--private-files')
+;; are left out, since what a tool reads goes to the model's provider.
+;; The judge's prompt says the same for the calls it sees, such as Emacs
+;; Lisp that reads the state directory.  Standing rules still come
+;; first, so a user's deny rule holds.
+;;
 ;; Switching a session that is waiting on a prompt into yolo mode answers
 ;; the prompt: the call was open only because the old mode asked, and
 ;; yolo would have allowed it.  A standing rule still decides, and a
@@ -88,13 +112,13 @@
 (require 'harness-tools)
 
 (defvar harness-state-directory)
+(defvar harness-directory)
 
 ;;;; Customisation
 
 (defconst harness-perms--auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
-    "emacs_buffers" "emacs_windows" "emacs_describe" "emacs_messages" "web_search" "notify"
-    "hand_in" "open_harness")
+    "web_search" "notify" "hand_in" "open_harness")
   "Tools that never need approval, in every permission mode.
 `web_search' is included because it only sends its query to the
 configured `harness-websearch-provider', so even unattended task
@@ -106,8 +130,41 @@ report and ends the turn: whether the work is ready is the user's
 call when they review it, never the judge's.  `open_harness' only
 starts an Emacs running a checkout of this project's harness, in a
 state directory of its own, so verifying harness work live needs no
-prompt.  Standing rules in `harness-perms-rules' are checked first
-and can still deny any of these tools.")
+prompt.  The tools that inspect the harness are in
+`harness-perms--inspection-tools'.  Standing rules in
+`harness-perms-rules' are checked first and can still deny any of
+these tools.")
+
+(defconst harness-perms--inspection-tools
+  '("emacs_buffers" "emacs_buffer" "emacs_windows" "emacs_describe" "emacs_messages"
+    "session_info" "session_list" "session_read" "session_search" "session_wait"
+    "task_list" "task_wait" "notification_providers")
+  "Tools that only inspect the harness itself or the user's live Emacs.
+Inspecting its own harness is one of the things that make the harness
+powerful, so these never need approval, in every permission mode and
+whether the user is present or not: they read the buffers, windows,
+messages and documentation of the user's Emacs, the sessions with
+their transcripts, the task boards and the notification setup, and
+change nothing.  Reading the harness's files is allowed by
+`harness-perms-inspection-dirs'.  Standing rules in
+`harness-perms-rules' are checked first and can still deny any of
+these tools.")
+
+(defconst harness-perms--private-files '("acp-token" "server-config.el")
+  "Files in `harness-state-directory' that hold credentials.
+acp-token is the token of the harness's ACP server (see
+harness-acp.el), and server-config.el the settings the UI forwards to
+the harness process (see harness-server.el), API keys among them.
+Inspecting the harness never covers them: what a tool reads goes to
+the model's provider, so reading them would hand the user's secrets
+over.  A call that reads them is jailed like any other outside the
+allowed directories.")
+
+(defconst harness-perms--listing-tools '("list_dir" "glob" "file_info")
+  "Tools that, given a directory, only read the names and metadata in it.
+They may look at a directory of the harness that holds one of
+`harness-perms--private-files'; a tool that may read the contents of
+the files below a directory, such as grep, may not.")
 
 (defcustom harness-perms-rules nil
   "Standing permission rules that apply to every session.
@@ -118,9 +175,12 @@ to calls with paths: a glob (`*' within a name, `**' across
 directories) or a directory, which stands for everything in it,
 absolute or relative to the session's working directory.  An allow
 rule then needs every path of the call to match it, a deny rule any
-one.  The first matching rule wins.  Rules are added here when a
-permission request is answered with scope `always'; for a call with
-paths, they hold for the pattern of the prompt."
+one.  A shell command's paths, for an allow rule, are the ones its
+command line names outside the session's directories, or where it
+runs when it names none there; a deny rule weighs every path it names
+and where it runs.  The first matching rule wins.  Rules are added
+here when a permission request is answered with scope `always'; for a
+call with paths, they hold for the pattern of the prompt."
   :type '(repeat
           (plist
            :tag "Rule"
@@ -402,6 +462,109 @@ the tool output directory."
   (cl-find-if (lambda (p) (not (cl-some (lambda (r) (harness-perms--within-p r p)) roots)))
               paths))
 
+;;;; The harness itself, which every session may inspect
+
+(defun harness-perms--harness-code-dirs ()
+  "Return the directories the running harness's code lives in.
+That is `harness-directory', and the checkout its harness.el leads to
+when that is a symbolic link, as in a straight.el build directory,
+whose files link into the package's repository."
+  (when (and (boundp 'harness-directory) (stringp harness-directory))
+    (let* ((dir (file-name-as-directory (expand-file-name harness-directory)))
+           (self (expand-file-name "harness.el" dir))
+           (real (and (not (file-remote-p dir)) (file-exists-p self)
+                      (file-name-directory (file-truename self)))))
+      (if (and real (not (equal real dir))) (list dir real) (list dir)))))
+
+(defun harness-perms-inspection-dirs ()
+  "Return the directories of the harness itself as (:dir DIR :source SOURCE).
+SOURCE is `harness' for the directories of its code (see
+`harness-perms--harness-code-dirs') and `state' for
+`harness-state-directory', which holds the sessions with their
+transcripts, the task boards and the usage records.  Every session may
+read them, in every mode, since inspecting the harness is part of what
+it is for (see `harness-perms--inspectable-p'); they are no roots, so
+writing there or running a command there stays jailed, and the
+credentials in `harness-perms--private-files' stay out of reach."
+  (cl-remove-duplicates
+   (append (mapcar (lambda (d) (list :dir d :source 'harness)) (harness-perms--harness-code-dirs))
+           (and (stringp harness-state-directory)
+                (list (list :dir (file-name-as-directory (expand-file-name harness-state-directory))
+                            :source 'state))))
+   :test #'equal :key (lambda (e) (plist-get e :dir)) :from-end t))
+
+(defun harness-perms--private-paths ()
+  "Return the absolute paths of `harness-perms--private-files'."
+  (and (stringp harness-state-directory)
+       (mapcar (lambda (f) (expand-file-name f harness-state-directory)) harness-perms--private-files)))
+
+(defun harness-perms--private-p (tool path)
+  "Non-nil when TOOL at PATH would reach the harness's credentials.
+That is when PATH is one of `harness-perms--private-files', or, for a
+tool that may read the files below a directory (any tool but those of
+`harness-perms--listing-tools'), when PATH holds one of them."
+  (let ((listing (member tool harness-perms--listing-tools)))
+    (cl-some (lambda (private)
+               (or (harness-perms--within-p private path)
+                   (and (not listing) (harness-perms--within-p path private))))
+             (harness-perms--private-paths))))
+
+(defun harness-perms--inspectable-p (request path)
+  "Non-nil when REQUEST may read PATH because it is part of the harness itself.
+REQUEST must only read (its kind is `read'), PATH must lie in one of
+`harness-perms-inspection-dirs' and the call must not reach the
+harness's credentials (`harness-perms--private-p').  Symbolic links
+are resolved first, as the jail resolves them, so a link elsewhere
+does not lead into the harness, nor one in the harness out of it."
+  (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
+       (stringp path)
+       (not (file-remote-p path))
+       (cl-some (lambda (e) (harness-perms--within-p (plist-get e :dir) path))
+                (harness-perms-inspection-dirs))
+       (not (harness-perms--private-p (plist-get request :tool) path))))
+
+(defun harness-perms--inspection-hint (request path)
+  "Return what REQUEST's agent may still do with PATH in the harness, or \"\".
+PATH is outside the session's roots.  When it lies in the harness
+itself (see `harness-perms-inspection-dirs'), a call that does more
+than read, or a request for the directory, learns that reading it
+needs no grant, and a read refused for reaching the credentials
+learns which files those are."
+  (cond
+   ((or (file-remote-p path)
+        (not (cl-some (lambda (e) (harness-perms--within-p (plist-get e :dir) path))
+                      (harness-perms-inspection-dirs))))
+    "")
+   ((not (eq (harness-perms--sym (plist-get request :kind)) 'read))
+    (if (harness-perms--inspectable-p (list :kind 'read :tool "list_dir") path)
+        " It is part of the harness itself, which the tools that only read (read_file, list_dir, glob, grep, file_info) may read without a grant."
+      ""))
+   (t
+    (format " No tool may read the harness's credentials (%s); the rest of the harness needs no grant, so read or search the files and directories beside them instead."
+            (mapconcat #'abbreviate-file-name (harness-perms--private-paths) ", ")))))
+
+(defun harness-perms--unreachable (request roots)
+  "Return the first path of REQUEST it may not reach, or nil.
+A path is reachable when it lies inside one of ROOTS, or, for a call
+that only reads, inside the harness itself (`harness-perms--inspectable-p')."
+  (cl-find-if (lambda (p) (and (harness-perms--outside (list p) roots)
+                               (not (harness-perms--inspectable-p request p))))
+              (plist-get request :paths)))
+
+(defun harness-perms--reads-harness-p (request)
+  "Non-nil when REQUEST reads the harness itself outside the session's roots.
+That is a call the jail lets through (see `harness-perms--unreachable')
+with a path outside the roots, and the mode stage allows it in every
+mode."
+  (let ((paths (plist-get request :paths)))
+    (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
+         paths
+         (let ((roots (append (harness-perms-roots (plist-get request :session))
+                              (plist-get request :jail-once))))
+           (and (not (harness-perms--unreachable request roots))
+                (harness-perms--outside paths roots)
+                t)))))
+
 (defun harness-perms--dir-of (path)
   "Return the directory to grant so that PATH becomes reachable.
 Symbolic links are resolved first: the jail compares resolved paths,
@@ -428,6 +591,215 @@ it carries on there instead of stopping.  Otherwise return \"\"."
         (format " For scratch files use your own temporary directory, %s: it is already allowed, bash included."
                 (abbreviate-file-name tmp))
       "")))
+
+;;;; What a shell command reaches
+;;
+;; The jail knows where a shell command runs, its `:paths' (the bash
+;; tool's working directory), not what the command does there: `ls
+;; ~/.claude' runs in the project and reads elsewhere.  A prompt about
+;; it and the rules about paths need what it reaches, so that is read
+;; off the command line: the words that are paths, as
+;; `harness-perms--command-paths' finds them.  It is a best-effort
+;; reading, not a shell parser, and the jail does not use it: a command
+;; is confined by the sandbox and decided by the mode and the judge,
+;; which read it whole.
+;;
+;; What the call is about, its subject (`harness-perms--subject-paths'),
+;; is then the paths it names outside the session's directories, or,
+;; when it names none there, where it runs, as for every other call.  A
+;; prompt shows those and offers their directory as its pattern, and an
+;; allow rule must hold every one of them; a deny rule applies to any
+;; path the call names or runs in.
+
+(defconst harness-perms--shell-keywords
+  '("!" "{" "}" "if" "then" "else" "elif" "fi" "do" "done" "while" "until"
+    "for" "in" "case" "esac" "select" "function" "time")
+  "Shell words after which a command, not an argument, comes.")
+
+(defconst harness-perms--shell-prefixes
+  '("sudo" "doas" "env" "exec" "command" "builtin" "nohup" "nice" "ionice" "xargs"
+    "stdbuf" "chronic" "unbuffer")
+  "Programs that run the command following them and their options.")
+
+(defconst harness-perms--pseudo-files
+  "\\`/\\(?:dev/\\(?:null\\|zero\\|full\\|random\\|urandom\\|tty\\|stdin\\|stdout\\|stderr\\|fd/[0-9]+\\)\\|proc/self/fd/[0-9]+\\)\\'"
+  "Regexp of the files a command names that hold nothing of anyone's.")
+
+(defun harness-perms--shell-words (command)
+  "Return the words of shell COMMAND as (WORD . PROGRAM) pairs, in order.
+Quotes and backslashes are undone and comments left out.  PROGRAM is
+non-nil for the word a command starts with, the program it runs: the
+first word of the line or after an operator (`;', `&', `|', `(', `$(',
+`<(', an opening backquote), after NAME=VALUE assignments and keywords
+such as `then', and after a prefix such as `sudo' or `xargs' and its
+options.  A word after a redirection (`>', `<') is no program, and
+neither is one after the end of a substitution or a subshell.  It is
+a best-effort reading, not a parser: $HOME and other expansions stay
+as written, and a here-document's lines are read as commands."
+  (let ((i 0) (n (length command))
+        (word nil)                      ; the word being read
+        (program t)                     ; t, `prefix' or nil: a command comes next
+        (target nil)                    ; the next word follows a redirection
+        (backquoted nil)                ; inside `...`
+        (words nil))
+    (cl-labels ((finish ()
+                  (when word
+                    (cond
+                     (target (push (cons word nil) words) (setq target nil))
+                     ((not program) (push (cons word nil) words))
+                     ((or (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" word)
+                          (and (eq program 'prefix) (string-prefix-p "-" word)))
+                      ;; An assignment, or an option of a prefix: the
+                      ;; command is still to come.
+                      (push (cons word nil) words))
+                     ((member word harness-perms--shell-keywords) (push (cons word t) words))
+                     (t (push (cons word t) words)
+                        (setq program (and (member word harness-perms--shell-prefixes) 'prefix))))
+                    (setq word nil)))
+                (add (s) (setq word (concat word s)))
+                (peek (k) (and (< (+ i k) n) (aref command (+ i k))))
+                (command-starts () (finish) (setq program t target nil)))
+      (while (< i n)
+        (let ((c (aref command i)))
+          (cond
+           ((memq c '(?\s ?\t)) (finish))
+           ((eq c ?\n) (command-starts))
+           ((eq c ?\\)
+            (unless (eq (peek 1) ?\n) (add (string (or (peek 1) ?\\))))
+            (setq i (1+ i)))
+           ((eq c ?')
+            (let ((end (or (cl-position ?' command :start (1+ i)) n)))
+              (add (substring command (1+ i) end))
+              (setq i end)))
+           ((eq c ?\")
+            (setq i (1+ i))
+            (add "")
+            (while (and (< i n) (not (eq (aref command i) ?\")))
+              (if (and (eq (aref command i) ?\\) (memq (peek 1) '(?\" ?\\ ?$ ?` ?\n)))
+                  (progn (unless (eq (peek 1) ?\n) (add (string (peek 1))))
+                         (setq i (+ i 2)))
+                (add (string (aref command i)))
+                (setq i (1+ i)))))
+           ((and (eq c ?#) (null word))
+            (setq i (1- (or (cl-position ?\n command :start i) n))))
+           ((or (memq c '(?> ?<)) (and (eq c ?&) (eq (peek 1) ?>)))
+            ;; A redirection: >, >>, >|, >&, &>, &>>, <, <<, <<<, <&.
+            ;; <( and >( are process substitutions, which run a command.
+            (finish)
+            (if (eq (peek 1) ?\()
+                (setq program t i (1+ i))
+              (when (eq c ?&) (setq i (1+ i)))
+              (while (memq (peek 1) '(?> ?< ?| ?&)) (setq i (1+ i)))
+              (setq target t)))
+           ((and (eq c ?$) (eq (peek 1) ?\())
+            (command-starts)
+            (setq i (1+ i)))
+           ;; What follows a substitution or a subshell is an argument,
+           ;; or an operator that starts a command again.
+           ((or (eq c ?\)) (and (eq c ?`) backquoted))
+            (finish)
+            (setq program nil target nil backquoted nil))
+           ((eq c ?`) (command-starts) (setq backquoted t))
+           ((memq c '(?\; ?& ?| ?\()) (command-starts))
+           (t (add (string c)))))
+        (setq i (1+ i)))
+      (finish))
+    (nreverse words)))
+
+(defun harness-perms--path-word (word)
+  "Return the path shell WORD names, as written, or nil.
+That is WORD, or the value of a NAME=VALUE or --option=VALUE word, when
+it is absolute, starts with ~ or $HOME, or is . or .. or starts with ./
+or ../: other relative words could as well be no path at all."
+  (let ((value (if (string-match "\\`-*[A-Za-z0-9_.-]*=" word) (substring word (match-end 0)) word)))
+    (cond ((string-match "\\`\\(?:\\$HOME\\|\\${HOME}\\)\\(/\\|\\'\\)" value)
+           (concat "~" (substring value (match-beginning 1))))
+          ((string-match-p "\\`\\(?:/\\|~\\|\\.\\.?/\\|\\.\\.?\\'\\)" value) value))))
+
+(defun harness-perms--command (request)
+  "Return the shell command REQUEST runs, or nil.
+That is the `:command' of an exec call, such as the bash tool's."
+  (let* ((input (plist-get request :input))
+         (command (and (listp input) (plist-get input :command))))
+    (and (stringp command)
+         (eq (harness-perms--sym (plist-get request :kind)) 'exec)
+         command)))
+
+(defun harness-perms--command-dir (request)
+  "Return the directory REQUEST's shell command runs in."
+  (or (car (plist-get request :paths))
+      (harness-perms--with-host (or (plist-get (plist-get request :session) :cwd) default-directory)
+                                (plist-get (plist-get request :session) :host))))
+
+(defun harness-perms--command-paths (request)
+  "Return the paths REQUEST's shell command names, absolute, or nil.
+They are the words `harness-perms--path-word' takes for paths, other
+than the programs the command runs (see `harness-perms--shell-words')
+and files such as /dev/null; relative ones are relative to where the
+command runs.  On this machine an absolute word counts only when its
+first directory exists, so a pattern such as /api/v1 in a grep is no
+path; on a remote host none is looked up, and words starting with ~
+are left out, since only that host knows its home."
+  (when-let* ((command (harness-perms--command request)))
+    (condition-case err
+        (let* ((host (plist-get (plist-get request :session) :host))
+               (dir (harness-perms--command-dir request))
+               (remote (or host (file-remote-p dir)))
+               (local-dir (or (file-remote-p dir 'localname) dir))
+               paths)
+          (pcase-dolist (`(,word . ,program) (harness-perms--shell-words command))
+            (let ((value (and (not program) (harness-perms--path-word word))))
+              (when (and value (not (string-match-p "\n" value)))
+                (let ((path (cond ((not remote) (expand-file-name value dir))
+                                  ((string-prefix-p "~" value) nil)
+                                  (t (harness-perms--with-host (expand-file-name value local-dir)
+                                                               (or host (file-remote-p dir)))))))
+                  (when (and path
+                             (not (string-match-p harness-perms--pseudo-files (cdr (harness-perms--split path))))
+                             (or remote
+                                 (not (string-prefix-p "/" value))
+                                 (file-exists-p (concat "/" (car (split-string path "/" t)))))
+                             (not (member path paths)))
+                    (push path paths))))))
+          (nreverse paths))
+      (error (harness-log 'warn "perms: could not read the paths of a command: %S" err)
+             nil))))
+
+(defun harness-perms--named-paths (request)
+  "Return the paths REQUEST's command names (see `harness-perms--command-paths').
+A request `harness-perms--with-reach' worked them out for carries them."
+  (if (plist-member request :named-paths)
+      (plist-get request :named-paths)
+    (harness-perms--command-paths request)))
+
+(defun harness-perms--subject-paths (request)
+  "Return the paths REQUEST's call is about, for its prompt and its rules.
+A shell command is about the paths it names (`harness-perms--named-paths')
+outside the session's directories; when it names none there, it is about
+where it runs, its `:paths', as every other call is."
+  (if (plist-member request :subject-paths)
+      (plist-get request :subject-paths)
+    (let* ((named (harness-perms--named-paths request))
+           (roots (and named (harness-perms-roots (plist-get request :session)))))
+      (or (cl-remove-if (lambda (p) (cl-some (lambda (r) (harness-perms--within-p r p)) roots)) named)
+          (plist-get request :paths)))))
+
+(defun harness-perms--every-path (request)
+  "Return every path REQUEST's call runs in or names."
+  (cl-remove-duplicates (append (plist-get request :paths) (harness-perms--named-paths request))
+                        :test #'equal :from-end t))
+
+(defun harness-perms--with-reach (request)
+  "Return REQUEST with what its call reaches worked out once.
+The copy carries `:named-paths' and `:subject-paths', which the
+functions above take instead of reading the command again for every
+rule."
+  (if (plist-member request :subject-paths)
+      request
+    (let ((named (harness-perms--command-paths request)))
+      (append (list :named-paths named
+                    :subject-paths (harness-perms--subject-paths (append (list :named-paths named) request)))
+              request))))
 
 ;;;; Patterns a prompt about paths is answered for
 ;;
@@ -482,16 +854,18 @@ the prompt offered; nil for a prompt about no path."
 
 (defun harness-perms--jail (decision next request)
   "Pass REQUEST on when its paths lie inside the session's roots.
-Otherwise ask the user for access to the directory, or deny when
-nobody can answer or a rule denies the call anyway.  DECISION is the
-current value and NEXT continues the chain.  Roots in the request's
-`:jail-once' were allowed for this call only."
+A call that only reads may also read the harness itself (see
+`harness-perms--inspectable-p').  Otherwise ask the user for access to
+the directory, or deny when nobody can answer or a rule denies the
+call anyway.  DECISION is the current value and NEXT continues the
+chain.  Roots in the request's `:jail-once' were allowed for this call
+only."
   (let ((paths (plist-get request :paths)))
     (if (null paths)
         (funcall next decision)
       (let* ((session (plist-get request :session))
              (roots (append (harness-perms-roots session) (plist-get request :jail-once)))
-             (bad (harness-perms--outside paths roots))
+             (bad (harness-perms--unreachable request roots))
              (rule (and bad (harness-perms--find-rule request))))
         (cond
          ((null bad) (funcall next decision))
@@ -506,10 +880,11 @@ current value and NEXT continues the chain.  Roots in the request's
           (funcall next
                    (list :behavior 'deny :final t
                          :reason (format "%s is outside the allowed directories" bad)
-                         :hint (format "Allowed roots: %s. Work inside them, or ask the user to grant access to %s with the allow-dir command.%s"
+                         :hint (format "Allowed roots: %s. Work inside them, or ask the user to grant access to %s with the allow-dir command.%s%s"
                                        (mapconcat #'abbreviate-file-name roots ", ")
                                        (abbreviate-file-name (harness-perms--dir-of bad))
-                                       (harness-perms--scratch-hint session bad))))))))))
+                                       (harness-perms--scratch-hint session bad)
+                                       (harness-perms--inspection-hint request bad))))))))))
 
 (defun harness-perms--pend-dir (request next dir reason options &rest waiting)
   "Ask the user of REQUEST's session for access to DIR.
@@ -664,10 +1039,11 @@ grants a directory."
                                             (if (harness-perms--non-interactive-p session)
                                                 "the session is non-interactive and the user is away"
                                               "no user is available"))
-                            :hint (format "Work inside the allowed directories (%s). If the task cannot be done without %s, finish what you can and say so in your answer; the user can grant it with M-x harness-directories.%s"
+                            :hint (format "Work inside the allowed directories (%s). If the task cannot be done without %s, finish what you can and say so in your answer; the user can grant it with M-x harness-directories.%s%s"
                                           (mapconcat #'abbreviate-file-name roots ", ")
                                           (abbreviate-file-name dir)
-                                          (harness-perms--scratch-hint session dir)))))
+                                          (harness-perms--scratch-hint session dir)
+                                          (harness-perms--inspection-hint request dir)))))
        (t
         ;; The prompt shows the directory and the agent's reason; the
         ;; input keeps only the path so the reason is not shown twice.
@@ -803,25 +1179,34 @@ can name a part of every project, such as docs/**."
 (defun harness-perms--rule-matches-p (rule request)
   "Non-nil when RULE applies to REQUEST.
 A rule with a `:path' pattern applies to calls with paths only: an
-allow rule when the pattern covers every one of them, a deny rule
-when it covers any (see `harness-perms--within-p')."
-  (let ((tool (plist-get rule :tool))
-        (kind (harness-perms--sym (plist-get rule :kind)))
-        (pattern (harness-perms--rule-pattern rule (plist-get request :session)))
-        (paths (plist-get request :paths)))
+allow rule when the pattern covers every path the call is about (see
+`harness-perms--subject-paths'), a deny rule when it covers any path
+the call runs in or names (see `harness-perms--within-p').  For a shell
+command an allow rule so holds the paths it names outside the
+session's directories, or where it runs when it names none there; a
+deny rule also stops it for a path it names inside them."
+  (let* ((tool (plist-get rule :tool))
+         (kind (harness-perms--sym (plist-get rule :kind)))
+         (deny (eq (harness-perms--sym (plist-get rule :behavior)) 'deny))
+         (pattern (harness-perms--rule-pattern rule (plist-get request :session))))
     (and (or (null tool) (equal tool (plist-get request :tool)))
          (or (null kind) (eq kind (harness-perms--sym (plist-get request :kind))))
          (or (null pattern)
-             (and paths
-                  (funcall (if (eq (harness-perms--sym (plist-get rule :behavior)) 'deny) #'cl-some #'cl-every)
-                           (lambda (p) (harness-perms--within-p pattern p))
-                           paths))))))
+             (let ((paths (if deny (harness-perms--every-path request) (harness-perms--subject-paths request))))
+               (and paths
+                    (funcall (if deny #'cl-some #'cl-every)
+                             (lambda (p) (harness-perms--within-p pattern p))
+                             paths)))))))
 
 (defun harness-perms--find-rule (request)
   "Return the first session or global rule that applies to REQUEST."
-  (let ((sid (plist-get (plist-get request :session) :id)))
-    (cl-find-if (lambda (r) (harness-perms--rule-matches-p r request))
-                (append (gethash sid harness-perms--session-rules) harness-perms-rules))))
+  (let* ((sid (plist-get (plist-get request :session) :id))
+         (rules (append (gethash sid harness-perms--session-rules) harness-perms-rules))
+         ;; A command is read once, not once per rule about paths.
+         (request (if (cl-some (lambda (r) (plist-get r :path)) rules)
+                      (harness-perms--with-reach request)
+                    request)))
+    (cl-find-if (lambda (r) (harness-perms--rule-matches-p r request)) rules)))
 
 (defun harness-perms--rule-decision (rule)
   "Return the decision RULE makes, with a reason that names what it is for."
@@ -865,6 +1250,13 @@ DECISION is returned unchanged when the mode leaves the question open."
      (rule (harness-perms--rule-decision rule))
      ((member tool harness-perms--auto-allow-tools)
       (list :behavior 'allow :reason (format "%s never needs approval" tool)))
+     ;; Inspecting the harness itself never needs approval, whatever
+     ;; the mode: its tools, and reads of its code and state.
+     ((member tool harness-perms--inspection-tools)
+      (list :behavior 'allow
+            :reason (format "%s only inspects the harness or the user's Emacs, which never needs approval" tool)))
+     ((harness-perms--reads-harness-p request)
+      (list :behavior 'allow :reason "reading the harness itself never needs approval"))
      ((eq mode 'yolo) (list :behavior 'allow :reason "yolo mode"))
      ((and (eq mode 'accept-edits) (memq kind '(read write)))
       (list :behavior 'allow :reason (format "%ss inside the allowed directories are accepted" kind)))
@@ -927,7 +1319,13 @@ Deny only what clearly risks serious harm:
 The harness's own tools are ordinary work: spawning and answering sub-agents,
 reading, messaging and controlling other sessions of the harness, reading and
 writing the task board, and reading or writing the harness's own files inside
-the allowed roots.
+the allowed roots.  So is inspecting the harness itself wherever it lives,
+inside the allowed roots or not: reading its code, its state directory
+(sessions and their transcripts, task boards, usage) and the user's live Emacs
+(buffers, the harness's log among them, windows, messages, variables,
+documentation), with any tool, Emacs Lisp included.  Its credentials are the
+one exception: deny reading the files acp-token and server-config.el in its
+state directory, which hold its secrets.
 
 When in doubt, allow: a needless denial stops work the user wants done.  Reply
 with exactly one line of JSON and nothing else:
@@ -940,7 +1338,11 @@ rules on the task, its scope or the project's workflow, and it is given
 nothing to rule on them with: `harness-perms--judge-text' describes the
 call alone, and the request is `:ephemeral', so the provider brings no
 earlier conversation and no project instructions (CLAUDE.md and the
-like) either.")
+like) either.  Inspecting the harness is ordinary work to it, as it is
+to the rules that allow it before the judge is asked (see
+`harness-perms--inspection-tools' and `harness-perms-inspection-dirs'):
+the judge only sees such inspection done by other means, such as Emacs
+Lisp, and is told where the harness lives.")
 
 (defun harness-perms--what-it-does (description)
   "Return what a tool does: the first sentence of its DESCRIPTION.
@@ -967,21 +1369,40 @@ replacement string is truncated ... that would corrupt the file\")."
                       " its first %d and cut the rest; the call is not missing anything):\n%s")
               (length json) limit (substring json 0 limit)))))
 
+(defun harness-perms--judge-harness ()
+  "Return the block of the judge's message that says where the harness lives.
+The judge sees inspection of the harness only when it is done by other
+means than the tools and reads the rules allow, such as Emacs Lisp;
+told where the harness is, it can tell such a call for what it is."
+  (let ((dirs (harness-perms-inspection-dirs)))
+    (if (null dirs)
+        ""
+      (format "\nThe harness itself (inspecting it is ordinary work; reading its credentials, %s, is not):\n%s\n"
+              (mapconcat #'identity (harness-perms--private-paths) " and ")
+              (mapconcat (lambda (e)
+                           (format "- %s (%s)" (plist-get e :dir)
+                                   (if (eq (plist-get e :source) 'state)
+                                       "its state: sessions and their transcripts, task boards, usage"
+                                     "its code")))
+                         dirs "\n")))))
+
 (defun harness-perms--judge-text (request)
   "Return the user message describing REQUEST for the judge.
-That is the call alone: the tool, what it does, its input, and where
-the agent works.  The input goes in as text, not bytes: the provider
-encodes the whole message as JSON again, and the bytes of non-ASCII
-input would make that fail."
+That is the call alone: the tool, what it does, its input, where the
+agent works and where the harness lives (`harness-perms--judge-harness').
+The input goes in as text, not bytes: the provider encodes the whole
+message as JSON again, and the bytes of non-ASCII input would make
+that fail."
   (let* ((tool (plist-get request :tool))
          (spec (and (harness-method-exists-p 'tools/get) (harness-call 'tools/get tool)))
          (session (plist-get request :session)))
-    (format "Tool: %s\nKind: %s\nWhat it does: %s\n\n%s\n\nWorking directory: %s\nAllowed roots (where the agent's own work lives):\n%s\n\nIs this one call safe?  Answer with one line of JSON: {\"decision\":\"allow\"|\"deny\",\"reason\":\"...\"}"
+    (format "Tool: %s\nKind: %s\nWhat it does: %s\n\n%s\n\nWorking directory: %s\nAllowed roots (where the agent's own work lives):\n%s\n%s\nIs this one call safe?  Answer with one line of JSON: {\"decision\":\"allow\"|\"deny\",\"reason\":\"...\"}"
             tool (plist-get request :kind)
             (harness-perms--what-it-does (plist-get spec :description))
             (harness-perms--judge-input (plist-get request :input))
             (or (plist-get session :cwd) default-directory)
-            (mapconcat (lambda (r) (concat "- " r)) (harness-perms-roots session) "\n"))))
+            (mapconcat (lambda (r) (concat "- " r)) (harness-perms-roots session) "\n")
+            (harness-perms--judge-harness))))
 
 (defconst harness-perms-judge-deny-hint
   "The permission judge found this call unsafe for the reason given. Reach the goal another way that avoids that risk."
@@ -1238,28 +1659,35 @@ DECISION is the current value and NEXT continues the chain once
 `permission/answer' arrives.  Without a session module the call is
 denied because nobody can answer."
   (let* ((session (plist-get request :session))
-         (sid (plist-get session :id))
-         (paths (plist-get request :paths)))
+         (sid (plist-get session :id)))
     (cond
      ((not (eq (plist-get decision :behavior) 'ask)) (funcall next decision))
      ((not (harness-method-exists-p 'session/pending-add))
       (funcall next (list :behavior 'deny :reason "no user available")))
      (t
       ;; A call with paths is remembered for a pattern, by default
-      ;; everything in the directory that holds them.
-      (let* ((pattern (and paths (harness-perms--default-pattern (harness-perms--paths-dir paths))))
+      ;; everything in the directory that holds them.  A shell command
+      ;; is about the paths it names outside the session's directories,
+      ;; else where it runs (see `harness-perms--subject-paths'), and the
+      ;; prompt says where that is.
+      (let* ((request (harness-perms--with-reach request))
+             (paths (harness-perms--subject-paths request))
+             (cwd (and (harness-perms--command request) (harness-perms--command-dir request)))
+             (pattern (and paths (harness-perms--default-pattern (harness-perms--paths-dir paths))))
              (pending (list :kind 'permission
                             :payload (append (list :tool (plist-get request :tool)
                                                    :input (plist-get request :input)
                                                    :kind (plist-get request :kind)
                                                    :paths paths
                                                    :call-id (plist-get request :call-id))
+                                             (and cwd (list :cwd cwd))
                                              (and pattern (list :pattern pattern))
                                              (list :title (harness-perms-describe-request request)
                                                    :reason (harness-perms--judge-prompt-reason decision)
                                                    :options harness-perms-options))))
              (pid (harness-call 'session/pending-add sid pending)))
-        (puthash pid (list :session-id sid :request request :next next :pattern pattern) harness-perms--waiting)
+        (puthash pid (list :session-id sid :request request :next next :pattern pattern :paths paths :cwd cwd)
+                 harness-perms--waiting)
         (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid)))))))
 
 (defun harness-perms--parse-answer (answer)
@@ -1457,14 +1885,19 @@ is a session grant or comes from the global `harness-allowed-directories'."
 (harness-defmethod permission/rules (session-id)
   "Return the effective permission rules of SESSION-ID for display.
 The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
-:session RULES :always RULES :roots DIRS)."
+:session RULES :always RULES :roots DIRS :inspect DIRS).  TOOLS are
+the tools that never need approval, those that inspect the harness
+included; `:inspect' lists the directories of the harness itself,
+which every call that only reads may read (see
+`harness-perms-inspection-dirs')."
   (let ((session (harness-perms--session session-id)))
     (list :mode (harness-perms--mode-of session)
           :non-interactive (and (harness-perms--non-interactive-p session) t)
-          :auto-allow harness-perms--auto-allow-tools
+          :auto-allow (append harness-perms--auto-allow-tools harness-perms--inspection-tools)
           :session (gethash session-id harness-perms--session-rules)
           :always harness-perms-rules
-          :roots (harness-perms-roots session))))
+          :roots (harness-perms-roots session)
+          :inspect (mapcar (lambda (e) (plist-get e :dir)) (harness-perms-inspection-dirs)))))
 
 (harness-defmethod permission/pending (session-id)
   "Return the permission requests of SESSION-ID still waiting for an answer."
@@ -1477,7 +1910,10 @@ The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
                    (let ((r (plist-get w :request)))
                      (push (list :id pid :kind 'permission
                                  :payload (list :tool (plist-get r :tool) :input (plist-get r :input)
-                                                :kind (plist-get r :kind) :paths (plist-get r :paths)
+                                                :kind (plist-get r :kind)
+                                                :paths (if (plist-member w :paths) (plist-get w :paths)
+                                                         (plist-get r :paths))
+                                                :cwd (plist-get w :cwd)
                                                 :dir (plist-get w :dir) :pattern (plist-get w :pattern)
                                                 :title (harness-perms-describe-request r)
                                                 :options harness-perms-options))

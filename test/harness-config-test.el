@@ -65,26 +65,33 @@ reaching a custom file."
   (skip-unless (executable-find "git"))
   (harness-config-test-with
     (harness-config-test--write root '((nil . ((harness-permission-mode . yolo) (harness-thinking . nil)
-                                               (harness-budget . 5)))))
+                                               (harness-sandbox-policy . 5) (harness-budget . (:amount 5))))))
     (harness-config-test--write sub '((nil . ((harness-permission-mode . auto)))))
     (let* ((d (harness-call 'config/describe sub))
            (mode (harness-config-test--setting d "harness-permission-mode"))
            (thinking (harness-config-test--setting d "harness-thinking"))
            (model (harness-config-test--setting d "harness-model"))
+           (policy (harness-config-test--setting d "harness-sandbox-policy"))
            (budget (harness-config-test--setting d "harness-budget")))
       ;; A value that does not fit its type is flagged by layer.
-      (should (equal '("project") (plist-get budget :invalid)))
+      (should (equal '("project") (plist-get policy :invalid)))
       (should (null (plist-get mode :invalid)))
+      ;; The Budget is one budget for all sessions: a project's value is
+      ;; not one of its layers.
+      (should (eq :false (plist-get budget :layered)))
+      (should (equal "global" (plist-get budget :source)))
+      (should (null (plist-get budget :project)))
+      (should (equal "spending" (plist-get budget :section)))
       (should (equal root (plist-get d :root)))
       (should (equal sub (plist-get d :cwd)))
       (should (eq t (plist-get d :in-project)))
       (should (eq t (plist-get (plist-get d :files) :project-exists)))
       ;; The settings of the sections come first, in their order, here
-      ;; all of them layered: no other module is loaded.
+      ;; the layered ones and the Budget: no other module is loaded.
       (let ((placed (cl-loop for (_ . props) in harness-config-sections
                              append (cl-remove-if-not #'boundp (plist-get props :keys)))))
         (should (equal (sort (copy-sequence placed) #'string<)
-                       (sort (copy-sequence harness-config-keys) #'string<)))
+                       (sort (cons 'harness-budget (copy-sequence harness-config-keys)) #'string<)))
         (should (equal (mapcar #'symbol-name placed)
                        (mapcar (lambda (s) (plist-get s :key))
                                (seq-take (plist-get d :settings) (length placed))))))
@@ -249,11 +256,12 @@ reaching a custom file."
            (settings (plist-get d :settings))
            (section (lambda (key) (plist-get (harness-config-test--setting d key) :section))))
       ;; Sections with settings, in order; one whose module is not loaded is left out.
-      (should (equal '("sessions" "safety")
+      (should (equal '("sessions" "spending" "safety")
                      (mapcar (lambda (s) (plist-get s :name)) (plist-get d :sections))))
       (should (equal "New sessions" (plist-get (car (plist-get d :sections)) :title)))
       (should (string-match-p "dir-locals" (plist-get (car (plist-get d :sections)) :doc)))
       (should (equal "sessions" (funcall section "harness-model")))
+      (should (equal "spending" (funcall section "harness-budget")))
       (should (equal "safety" (funcall section "harness-sandbox-policy")))
       ;; The tasks module is not loaded, so its settings and section are absent.
       (should (null (funcall section "harness-tasks-model")))

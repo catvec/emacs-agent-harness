@@ -36,6 +36,10 @@ Each is a plist with these keys:
   "A number option for the tests, an advanced one: no section shows it."
   :type 'integer :group 'harness)
 
+(defcustom harness-ui-config-test-hours '((1 . 4))
+  "Hours, whose type has numbers among its arguments, like DeepSeek's peak windows."
+  :type '(repeat (cons (integer 0 23) (integer 1 24))) :group 'harness)
+
 (defcustom harness-ui-config-test-judge-model nil
   "A model or none, a menu for the tests."
   :type '(choice (const :tag "The session's model" nil) (string :tag "Model" :names model))
@@ -214,16 +218,17 @@ state directory, as they would the user's."
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
     (with-temp-file (expand-file-name ".dir-locals.el" root)
-      (insert "((nil . ((harness-permission-mode . yolo) (harness-budget . 5))))"))
+      (insert "((nil . ((harness-permission-mode . yolo) (harness-sandbox-policy . 5))))"))
     (harness-ui-config-test-open root)
     (should (derived-mode-p 'harness-ui-config-mode))
-    (should-not (string-match-p "does not fit" (harness-ui-config-test-block "harness-budget")))
+    (should-not (string-match-p "does not fit" (harness-ui-config-test-block "harness-sandbox-policy")))
     (should (equal (format "*harness settings: %s*" (file-name-nondirectory (directory-file-name root)))
                    (buffer-name)))
     (should (eq 'global harness-ui-config--scope))
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
       ;; The common settings come in sections named by what they are for.
       (should (string-match-p "^ New sessions$" text))
+      (should (string-match-p "^ Spending$" text))
       (should (string-match-p "^ Files and safety$" text))
       ;; The tasks module is not loaded here, so its section is absent.
       (should-not (string-match-p "^ Task board$" text))
@@ -258,7 +263,9 @@ state directory, as they would the user's."
       (should (string-match-p "Remove override" mode)))
     (should (string-match-p "uses the global value" (harness-ui-config-test-block "harness-model")))
     ;; A project value the harness finds invalid is edited as Lisp, with a warning.
-    (should (string-match-p "does not fit" (harness-ui-config-test-block "harness-budget")))
+    (should (string-match-p "does not fit" (harness-ui-config-test-block "harness-sandbox-policy")))
+    ;; The Budget is one for all sessions, set globally only.
+    (should-not (harness-ui-config--setting-start "harness-budget"))
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
       (should (string-match-p "more settings have a global value only" text))
       (should-not (string-match-p "Advanced" text))
@@ -469,6 +476,21 @@ state directory, as they would the user's."
                                              when (consp item) collect (nth 2 item)))))
       (should (memq 'harness-ui-config-toggle-advanced commands))
       (should (memq 'harness-ui-config-customize-interface commands)))))
+
+(ert-deftest harness-ui-config-draws-types-with-numbers-in-them ()
+  "A type with numbers among its arguments draws, and so does the rest.
+DeepSeek's peak windows are (repeat (cons (integer 0 23) (integer 1
+24))): looking a number up as a widget type signalled, so the page
+stopped drawing at that setting and never set its widgets up."
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (harness-ui-config-test-open root)
+    (should-not (harness-ui-config--form-p '(repeat (cons (integer 0 23) (integer 1 24)))))
+    (harness-ui-config-toggle-advanced)
+    (should (string-match-p "Hours" (harness-ui-config-test-block "harness-ui-config-test-hours")))
+    ;; The page goes on to its end.
+    (should (string-match-p "Customize the interface"
+                            (buffer-substring-no-properties (point-min) (point-max))))))
 
 (ert-deftest harness-ui-config-entry-points ()
   (harness-ui-config-test-with

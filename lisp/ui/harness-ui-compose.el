@@ -11,17 +11,25 @@
 ;;     the box jumps into it, a placeholder shows while it is empty;
 ;;   - a prompt that is a field of its own: C-a stops after it, as in
 ;;     the minibuffer, so C-a C-k clears the box's first line;
-;;   - @file completion over the project's files (each completed file
-;;     becomes an attachment) and /skill completion at its start; a
-;;     popup that shows as you type (corfu, company) shows for them even
-;;     while the host redraws around the box;
-;;   - attachments: C-c C-a finds a project file by part of its name
-;;     (C-u C-c C-a: any file), C-y pastes what the clipboard holds (an
+;;   - @file completion over the project's files, or over the file
+;;     system for a path (/, ~/, ./, ../); each completed file becomes
+;;     an attachment, and so does the file an @ reference typed out in
+;;     full names, once the message is sent; /skill completion at its
+;;     start; a popup that shows as you type (corfu, company) shows for
+;;     them even while the host redraws around the box;
+;;   - attachments: C-c C-a finds a file the same way, by part of a
+;;     project file's name or by path (C-u C-c C-a: browse the file
+;;     system), C-y pastes what the clipboard holds (an
 ;;     image or copied files go on the media ring; M-x
 ;;     harness-compose-attach-clipboard for other MIME types), files
 ;;     dropped on the window attach;
 ;;   - the text and attachments, kept across redraws of the host;
 ;;   - long lines that wrap under the text, never scrolling sideways;
+;;   - the attachments above the box, which a host draws with
+;;     `harness-compose-insert-attachments': one a line, each fitted to
+;;     the narrowest window showing them (a long name shortened in the
+;;     middle, its whole path in the tooltip) and fitted again when the
+;;     windows change size;
 ;;   - optionally, the box at the bottom of the window: a buffer shorter
 ;;     than its window is padded at the top so it ends on the last line;
 ;;   - optionally, colours of its own: a host passes `:face' for the
@@ -68,6 +76,8 @@
 (defvar-local harness-compose--files-at nil "Start of the @ token whose completion last refreshed the files.")
 (defvar-local harness-compose--last-token nil "The @file or /skill token at point after the last command.")
 (defvar-local harness-compose--popup-timer nil "Timer asking the completion UI to show the token's completions.")
+(defvar-local harness-compose--fit-room nil
+  "Pixels the attachment lines were last fitted to (`harness-compose--room').")
 (defvar-local harness-compose--face 'harness-compose-face
   "Face the box's background is drawn in, set by `harness-compose-insert'.")
 (defvar-local harness-compose--accent nil
@@ -132,6 +142,7 @@ window the ones that must stay on one line."
               word-wrap t
               truncate-partial-width-windows nil)
   (add-hook 'pre-redisplay-functions #'harness-compose-unscroll nil t)
+  (add-hook 'window-size-change-functions #'harness-compose--on-resize nil t)
   (setq-local hl-line-range-function #'harness-compose-hl-line-range)
   (harness-compose--setup-drops)
   (when (fboundp 'yank-media-handler)
@@ -164,22 +175,136 @@ window the ones that must stay on one line."
   (let ((p (or pos (point))))
     (and (harness-compose-live-p) (>= p harness-compose-start) (<= p harness-compose-end))))
 
-(defun harness-compose-insert-attachments ()
-  "Insert the attachment chips at point (nothing without attachments).
+(defvar harness-compose--progress)
+
+(defun harness-compose-insert-attachments (&optional prefix)
+  "Insert the attachments at point, one a line (nothing without attachments).
+The paperclip leads the first line, and the names below line up with
+its name.  Every line fits the narrowest window showing the buffer
+\(`harness-compose--room'): a name too long for it is shortened in the
+middle, its whole path in the tooltip, and once a window changes size
+the host draws the lines again (`harness-compose--on-resize').  Files,
+images, captures and downloads are laid out alike.  PREFIX, a string,
+starts every line, such as the bar of a box with an accent
+\(`harness-compose-bar').
+
 An image shows its thumbnail, and so does a video once one is made; a
 link still downloading shows its progress, which an overlay redraws, so
 the text is left alone while it ticks."
   (dolist (p harness-compose--progress) (delete-overlay (cdr p)))
-  (setq harness-compose--progress nil)
+  (setq harness-compose--progress nil
+        harness-compose--fit-room (harness-compose--room))
   (when harness-compose-attachments
-    (insert " " (propertize (harness-ui-icon 'harness-icon-attach) 'face 'harness-dim-face) " ")
-    (dolist (att harness-compose-attachments)
-      (if (plist-get att :pending)
-          (harness-compose--insert-pending-chip att)
-        (insert (harness-compose--chip att)))
-      (insert "  "))
-    (insert "\n")
-    (harness-compose--start-progress)))
+    (let* ((prefix (or prefix ""))
+           (lead (concat " " (propertize (harness-ui-icon 'harness-icon-attach) 'face 'harness-dim-face) " "))
+           ;; As wide as the paperclip's lead, whatever the icon's size.
+           (indent (propertize " " 'display `(space :width (,(harness-compose--pixels lead)))))
+           (room (- harness-compose--fit-room (harness-compose--pixels (concat prefix lead)))))
+      (cl-loop for att in harness-compose-attachments
+               for first = t then nil
+               do (let ((start (point)))
+                    (insert prefix (if first lead indent))
+                    (if (plist-get att :pending)
+                        (harness-compose--insert-pending-chip att room)
+                      (insert (harness-compose--chip att room)))
+                    (insert "\n")
+                    ;; Should a line wrap all the same (a window narrower
+                    ;; than any name), it goes on under the names.
+                    (put-text-property start (point) 'wrap-prefix (concat prefix indent))))
+      (harness-compose--start-progress))))
+
+(defun harness-compose--room ()
+  "Return how wide an attachment line may show, in pixels.
+That is the body of the narrowest window showing the buffer, so that
+the lines fit in every one, less a column for the continuation glyph of
+a window without fringes.  A window of the initial frame, which a
+daemon never shows, counts only when there is no other (batch mode).
+Windows compare in columns, which frames of another font or a text
+terminal share, and the result is in pixels of the selected frame,
+where the lines are measured (`harness-compose--pixels').  With no
+window, the width the lines were last fitted to, else the selected
+frame's."
+  (let* ((all (get-buffer-window-list nil nil t))
+         (windows (or (cl-remove-if (lambda (w) (harness-compose--initial-frame-p (window-frame w))) all)
+                      all)))
+    (if windows
+        (* (frame-char-width) (apply #'min (mapcar (lambda (w) (1- (window-body-width w))) windows)))
+      (or harness-compose--fit-room (* (frame-char-width) (1- (frame-width)))))))
+
+(defun harness-compose--initial-frame-p (frame)
+  "Non-nil when FRAME is the initial frame, which a daemon never shows."
+  (if (fboundp 'frame-initial-p)
+      (frame-initial-p frame)
+    ;; Before Emacs 31.
+    (equal (terminal-name (frame-terminal frame)) "initial_terminal")))
+
+(defun harness-compose--pixels (string)
+  "Return how wide STRING shows in this buffer, in pixels.
+Its images and faces count, and so does the buffer's face remapping."
+  (string-pixel-width string (current-buffer)))
+
+(defun harness-compose--on-resize (_window)
+  "Have the attachment lines fitted again once the windows settle.
+A window showing the buffer appeared or changed size: when that changes
+the room the lines have (`harness-compose--room'), the host draws them
+again, once the resizing has stopped.  Runs from
+`window-size-change-functions'."
+  (when (and harness-compose-attachments (not (eql harness-compose--fit-room (harness-compose--room))))
+    ;; Later than a host's own refit (the board's), which makes this one moot.
+    (harness-debounce (list 'harness-compose-refit (current-buffer)) 0.2 #'harness-compose--refit (current-buffer))))
+
+(defun harness-compose--refit (buffer)
+  "Draw BUFFER's attachments again unless they fit its windows already."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and harness-compose-attachments (not (eql harness-compose--fit-room (harness-compose--room))))
+        (harness-compose-redraw)))))
+
+(defconst harness-compose--min-name 10
+  "Columns an attachment's name keeps, however narrow the window.
+In a window too narrow for the line with that much of the name, the
+line wraps instead.")
+
+(defun harness-compose--shorten (name width)
+  "Return NAME in at most WIDTH columns, its middle elided with \"…\".
+A path keeps its file name whole when that leaves a few columns of the
+directories in front, so the file still reads at a glance; a name with
+no directory keeps as much of its start as of its end, extension and
+all."
+  (if (<= (string-width name) width)
+      name
+    (let* ((keep (max 0 (1- width)))
+           (slash (string-match-p "/[^/]+\\'" name))
+           (file (and slash (string-width (substring name slash))))
+           (tail (if (and file (<= (+ file 4) keep)) file (/ keep 2))))
+      (concat (truncate-string-to-width name (- keep tail)) "…"
+              (harness-compose--last-columns name tail)))))
+
+(defun harness-compose--last-columns (string width)
+  "Return the longest end of STRING that takes at most WIDTH columns."
+  (let ((start (length string)) (used 0))
+    (while (and (> start 0) (<= (+ used (char-width (aref string (1- start)))) width))
+      (setq start (1- start)
+            used (+ used (char-width (aref string start)))))
+    (substring string start)))
+
+(defun harness-compose--fit (name room render)
+  "Return NAME, shortened in the middle as much as ROOM pixels need.
+RENDER makes the text that shows a name, which is what must fit in
+ROOM.  NAME keeps `harness-compose--min-name' columns at least."
+  (if (<= (harness-compose--pixels (funcall render name)) room)
+      name
+    ;; The longest shortening that fits: a binary search over its width.
+    (let ((low harness-compose--min-name)
+          (high (1- (string-width name)))
+          (best nil))
+      (while (<= low high)
+        (let* ((mid (/ (+ low high) 2))
+               (short (harness-compose--shorten name mid)))
+          (if (<= (harness-compose--pixels (funcall render short)) room)
+              (setq best short low (1+ mid))
+            (setq high (1- mid)))))
+      (or best (harness-compose--shorten name harness-compose--min-name)))))
 
 (defun harness-compose-bar (&optional accent face)
   "Return the bar of a compose box in ACCENT on background FACE, and a space.
@@ -401,14 +526,18 @@ commands, rather than scroll."
 
 (defun harness-compose-take ()
   "Return (TEXT . ATTACHMENTS) from the box, or signal when both are empty.
-A link still downloading signals too: the message waits for it."
+The files that @ references typed out in TEXT name are attached too,
+after the box's own attachments (`harness-compose--references'); the
+references stay in TEXT.  A link still downloading signals too: the
+message waits for it."
   (let ((text (string-trim (harness-compose-text)))
         (atts harness-compose-attachments))
     (when (and (string-empty-p text) (null atts)) (user-error "Nothing to send"))
     (when-let* ((pending (cl-find-if (lambda (a) (plist-get a :pending)) atts)))
       (user-error "%s is still downloading: wait for it, or remove it (×)"
                   (or (plist-get pending :name) "An attachment")))
-    (cons text atts)))
+    (cons text (append atts (cl-remove-if (lambda (a) (harness-compose--attached-p (plist-get a :path)))
+                                          (harness-compose--references text))))))
 
 (defun harness-compose-newline ()
   "Insert a newline in the box, or jump there from elsewhere."
@@ -447,6 +576,126 @@ A link still downloading signals too: the message waits for it."
             :name (or (plist-get att :name) (file-name-nondirectory path))
             :size (plist-get att :size) :mimeType mime))))
 
+;;;; Finding files
+
+;; @ references and the attach command find a file the same way.  Part
+;; of a name finds a project file in any subdirectory, among the files
+;; listed from the projectile cache (`harness-compose--files').  A path
+;; finds any file of this machine: one starting with / or ~ (absolute,
+;; or in a home directory), or with ./ or ../, relative to the root the
+;; project's files are named from, so ../other-repo/README.md is the
+;; README next door.  Paths complete directory by directory, the way
+;; `read-file-name' does, but only on this machine: completing as you
+;; type must never open a connection to a remote host.
+
+(defun harness-compose--root ()
+  "Return the directory the box's file names are relative to.
+That is the project's root (`harness-compose-project-function'), as a
+directory name."
+  (file-name-as-directory (expand-file-name (or (harness-compose--project) default-directory))))
+
+(defun harness-compose--path-p (name)
+  "Non-nil when NAME is a path rather than part of a project file's name.
+A path starts with / or ~, or with ./ or ../, or is just \"..\"."
+  (string-match-p "\\`\\(?:[/~]\\|\\.\\.?/\\|\\.\\.\\'\\)" name))
+
+(defun harness-compose--complete-path (root string pred action)
+  "Complete the path STRING, relative to ROOT, for completion ACTION with PRED.
+Only files of this machine complete: file name handlers are off, so a
+remote name, which TRAMP would connect for, completes to nothing.  A
+directory's ./ and ../ are offered only once a name starting with a dot
+is typed, so a popup lists what the directory holds."
+  (let* ((default-directory root)
+         (file-name-handler-alist nil)
+         (non-essential t)
+         (found (completion-file-name-table string pred action)))
+    (if (and (eq action t) (not (string-prefix-p "." (file-name-nondirectory string))))
+        (cl-remove-if (lambda (name) (member name '("./" "../"))) found)
+      found)))
+
+(defun harness-compose--file-table ()
+  "Return the completion table @ references and the attach command find files in.
+Part of a name completes over the project's files, in the
+`harness-compose-file' category, which matches with `flex' unless
+configured otherwise.  A path (`harness-compose--path-p') completes
+over the file system, relative to the box's root, directory by
+directory, in the `file' category: the styles and the UI (vertico,
+marginalia) of file names apply to it."
+  (let ((files (harness-compose--table 'harness-compose--files 'harness-compose-file))
+        (root (harness-compose--root)))
+    (lambda (string pred action)
+      (if (harness-compose--path-p string)
+          (harness-compose--complete-path root string pred action)
+        (funcall files string pred action)))))
+
+(defun harness-compose--attach-table ()
+  "Return the table the attach command reads a file with.
+That of @ references (`harness-compose--file-table'), but a leading @,
+typed out of the habit of the box, is ignored: \"@notes\" finds what
+\"notes\" does."
+  (let ((table (harness-compose--file-table)))
+    (lambda (string pred action)
+      (if (not (string-prefix-p "@" string))
+          (funcall table string pred action)
+        (let ((name (substring string 1)))
+          (pcase action
+            ;; The @ is out of the field being completed.
+            (`(boundaries . ,_)
+             (let ((inner (funcall table name pred action)))
+               `(boundaries ,(1+ (or (cadr inner) 0)) . ,(cddr inner))))
+            ('nil (let ((found (funcall table name pred nil)))
+                    (if (stringp found) (concat "@" found) found)))
+            (_ (funcall table name pred action))))))))
+
+(defun harness-compose--local-file (name root)
+  "Return NAME, relative to ROOT, absolute when it is a regular file here, or nil.
+A remote name is never looked at, as completing it never is."
+  (let* ((file-name-handler-alist nil)
+         (path (expand-file-name name root)))
+    (and (file-regular-p path) path)))
+
+;; An @ reference typed out in full, or pasted, rather than completed
+;; names its file all the same: sending the message attaches it
+;; (`harness-compose-take'), and the reference stays in the text, where
+;; it says what the file is for.
+
+(defconst harness-compose--reference-regexp "\\(?:\\`\\|[ \t\n]\\)@\\([^ \t\n]+\\)"
+  "An @ reference: an @ starting a word, then the name up to a space.
+That is the token @ completes in the box (`harness-compose--capf-bounds').")
+
+(defun harness-compose--reference-file (name root)
+  "Return the absolute name of the file the @ reference NAME means, or nil.
+NAME is what follows the @: a file the project lists, or a path
+relative to ROOT, absolute or under ~, of a regular file of this
+machine.  Punctuation ending a sentence or a bracket after it is no
+part of it (\"see @notes.txt.\"), and an @skill: reference names a
+skill, not a file."
+  (unless (string-prefix-p "skill:" name)
+    (cl-some (lambda (candidate)
+               (cond ((string-empty-p candidate) nil)
+                     ((member candidate harness-compose--files) (expand-file-name candidate root))
+                     (t (harness-compose--local-file candidate root))))
+             (delete-dups (list name (replace-regexp-in-string "[]),.;:!?'\"`>}]+\\'" "" name))))))
+
+(defun harness-compose--references (text)
+  "Return the attachments of the files the @ references in TEXT name.
+In the order of TEXT, each file once; see
+`harness-compose--reference-file' for what a reference may name."
+  (let ((root (harness-compose--root)) (start 0) (paths nil))
+    (while (string-match harness-compose--reference-regexp text start)
+      (setq start (match-end 0))
+      (when-let* ((path (harness-compose--reference-file (match-string 1 text) root)))
+        (cl-pushnew path paths :test #'equal)))
+    (mapcar #'harness-compose--file-attachment (nreverse paths))))
+
+(defun harness-compose-without-references (atts text)
+  "Return ATTS without the files the @ references in TEXT name.
+ATTS are the attachments `harness-compose-take' returned with TEXT.
+For what can only be text, an answer to a question say: a file the text
+names goes as its reference, while any other attachment cannot go."
+  (let ((named (mapcar (lambda (att) (plist-get att :path)) (harness-compose--references text))))
+    (cl-remove-if (lambda (att) (member (plist-get att :path) named)) atts)))
+
 ;;;; Attachments
 
 (defun harness-compose--mime-of (path)
@@ -455,26 +704,37 @@ A link still downloading signals too: the message waits for it."
 
 (defun harness-compose-read-file (&optional any)
   "Read a file to attach and return its absolute name.
-Part of a name finds a project file in any subdirectory: the files are
-those @ completes, in the `harness-compose-file' category, which
-matches with `flex' unless configured otherwise.  With ANY, or when the
-project lists no files, browse the file system instead.  The project is
-never listed while you wait: a listing still running fills the
-candidates in when it returns."
-  (let ((root (harness-compose--project))
+Part of a name finds a project file in any subdirectory, and a path any
+file: absolute, under ~, or relative to the project with ./ or ../,
+completing directory by directory.  It is what @ completes in the box
+\(`harness-compose--file-table'), so the project's files match with
+`flex' unless configured otherwise, and a leading @ is ignored.  A
+directory is no file to attach: choosing one reads again, from inside
+it, and so does an empty answer.  With ANY, or when the project lists
+no files, browse the file system instead.  The project is never listed
+while you wait: a listing still running fills the candidates in when it
+returns."
+  (let ((root (harness-compose--root))
         (listing (harness-compose-fetch-files)))
     (expand-file-name
      (if (or any (and (harness-promise-settled-p listing) (null harness-compose--files)))
          (read-file-name "Attach file: " root nil t)
-       (completing-read "Attach project file (C-u: any file): "
-                        (harness-compose--table 'harness-compose--files 'harness-compose-file)
-                        nil t))
+       (let ((table (harness-compose--attach-table)) (initial nil) (name nil))
+         (while (progn
+                  (setq name (string-remove-prefix
+                              "@" (completing-read "Attach a project file, or a path (/ ~/ ../): "
+                                                   table nil t initial)))
+                  (let ((file-name-handler-alist nil))
+                    (file-directory-p (expand-file-name name root))))
+           (setq initial (and (not (string-empty-p name)) (file-name-as-directory name))))
+         name))
      root)))
 
 (defun harness-compose-add-attachment (path &optional mime)
   "Attach the file PATH (with MIME) to the next message.
 Interactively, part of its name finds a project file in any
-subdirectory; with a prefix argument, any file is read instead (see
+subdirectory, and a path (/, ~/, ./, ../) any file; with a prefix
+argument, the file system is browsed instead (see
 `harness-compose-read-file')."
   (interactive (list (harness-compose-read-file current-prefix-arg)))
   (let ((path (expand-file-name path)))
@@ -593,13 +853,32 @@ one did offers it once it has."
         (complete-with-action action (and (buffer-live-p buf) (buffer-local-value var buf))
                               string pred)))))
 
+(defun harness-compose--attach-token (name root)
+  "Attach the file the @ token NAME, just completed before point, names.
+The token goes, its file taking its place among the attachments.  A
+project file's name attaches its file; a path (relative to ROOT) only a
+regular file of this machine: a directory stays in the box, for its
+files to complete next."
+  (when-let* ((path (if (harness-compose--path-p name)
+                        (harness-compose--local-file name root)
+                      (expand-file-name name root))))
+    (let* ((end (point))
+           (start (- end (length name) 1)))
+      (when (and (harness-compose-in-p start)
+                 (equal (buffer-substring-no-properties start end) (concat "@" name)))
+        (delete-region start end)))
+    (harness-compose-add-attachment path)))
+
 (defun harness-compose-completion-at-point ()
   "Complete @files and /skills in the box.
-The sigil is what starts completion, the way an LSP trigger character
-does: popups that wait for a few characters show right after it."
+An @ completes a project file by part of its name, or any file by its
+path (see `harness-compose--file-table'); a completed file becomes an
+attachment.  The sigil is what starts completion, the way an LSP
+trigger character does: popups that wait for a few characters show
+right after it."
   (let ((file (harness-compose--capf-bounds ?@))
         (skill (harness-compose--capf-bounds ?/))
-        (root (harness-compose--project)))
+        (root (harness-compose--root)))
     (cond
      (file
       ;; A new @ token refreshes the list, so files created since the
@@ -608,15 +887,14 @@ does: popups that wait for a few characters show right after it."
         (setq harness-compose--files-at (car file))
         (harness-compose-fetch-files))
       (list (car file) (cdr file)
-            (harness-compose--table 'harness-compose--files 'harness-compose-file)
+            (harness-compose--file-table)
             :exclusive 'no
             :company-prefix-length t
+            :company-kind (lambda (name) (if (string-suffix-p "/" name) 'folder 'file))
             :exit-function
             (lambda (str status)
               (when (memq status '(finished sole))
-                (let ((end (point)))
-                  (delete-region (- end (length str) 1) end)
-                  (harness-compose-add-attachment (expand-file-name str root)))))))
+                (harness-compose--attach-token str root)))))
      ((and skill (= (1- (car skill)) harness-compose-start))
       (list (car skill) (cdr skill)
             (harness-compose--table 'harness-compose--skills 'harness-compose-skill)
@@ -674,34 +952,44 @@ download of the harness by its name, any other file by its path."
            (or (plist-get att :name) (file-name-nondirectory path)))
           (t (harness-relative-path (harness-compose--project) path)))))
 
-(defun harness-compose--chip (att)
+(defun harness-compose--chip (att &optional room)
   "Return the chip of attachment ATT: its thumbnail, name and size, and ×.
-The thumbnail and the name drag the file into another application
-\(`harness-ui-drag-source')."
+ROOM, in pixels, is how wide the chip may show: the name is shortened
+in the middle as much as that needs, and a thumbnail takes a third of
+it at most.  Without ROOM the name is whole.  The tooltip leads with
+the file's whole path.  The thumbnail and the name drag the file into
+another application (`harness-ui-drag-source')."
   (let* ((path (plist-get att :path))
+         (size (harness-format-bytes (plist-get att :size)))
          (help (harness-ui-one-line
-                (concat (abbreviate-file-name path) "\n"
-                        (harness-format-bytes (plist-get att :size)) ", " (or (plist-get att :mime) "")
-                        (if (plist-get att :url) (concat "\nfrom " (plist-get att :url)) "")
-                        "\nmouse-1: open")))
+                (string-join (delq nil (list (abbreviate-file-name path) size (plist-get att :mime)
+                                             (and (plist-get att :url) (concat "from " (plist-get att :url)))
+                                             "mouse-1: open"))
+                             " · ")))
          (open (lambda (&rest _) (interactive) (harness-compose-open-attachment att)))
-         (thumb (harness-compose--thumbnail att)))
-    (concat
-     (if thumb
-         (concat (harness-ui-drag-source
-                  (propertize thumb 'help-echo help 'pointer 'hand
-                              'keymap (harness-ui-mouse-keymap open))
-                  path)
-                 " ")
-       "")
-     (harness-ui-drag-source
-      (buttonize (format "%s (%s)" (harness-truncate-middle (harness-compose--chip-name att) 40)
-                         (harness-format-bytes (plist-get att :size)))
-                 open nil help)
-      path)
-     (propertize (buttonize "×" (lambda (_) (harness-compose-remove-attachment path)) nil
-                            "Remove this attachment")
-                 'face 'harness-dim-face))))
+         (thumb (harness-compose--thumbnail att (and room (/ room 3))))
+         (head (if thumb
+                   (concat (harness-ui-drag-source
+                            (propertize thumb 'help-echo help 'pointer 'hand
+                                        'keymap (harness-ui-mouse-keymap open))
+                            path)
+                           " ")
+                 ""))
+         (remove (concat " " (propertize (buttonize "×" (lambda (_) (harness-compose-remove-attachment path)) nil
+                                                    "Remove this attachment")
+                                         'face 'harness-dim-face)))
+         (label (lambda (name) (buttonize (format "%s (%s)" name size) open nil help)))
+         ;; One line each, whatever a file is called.
+         (name (replace-regexp-in-string "[\n\r\t]" " " (harness-compose--chip-name att))))
+    (concat head
+            (harness-ui-drag-source
+             (funcall label (if room
+                                (harness-compose--fit name (- room (harness-compose--pixels head)
+                                                              (harness-compose--pixels remove))
+                                                      label)
+                              name))
+             path)
+            remove)))
 
 (defun harness-compose-open-attachment (att)
   "Open attachment ATT: a video or a sound in the player, anything else in Emacs."
@@ -717,56 +1005,80 @@ The thumbnail and the name drag the file into another application
   (and (display-images-p) (> harness-compose-thumbnail-lines 0)
        (round (* harness-compose-thumbnail-lines (frame-char-height)))))
 
-(defun harness-compose--image (file height)
-  "Return a string showing the image FILE at most HEIGHT pixels high, or nil."
+(defun harness-compose--image (file height &optional width)
+  "Return a string showing the image FILE, or nil.
+It is at most HEIGHT pixels high and WIDTH wide, three times HEIGHT by
+default."
   (when (and file (file-readable-p file) (ignore-errors (image-supported-file-p file)))
-    (when-let* ((image (ignore-errors (create-image file nil nil :max-height height :max-width (* 3 height)
+    (when-let* ((image (ignore-errors (create-image file nil nil :max-height height
+                                                    :max-width (or width (* 3 height))
                                                     :ascent 'center))))
       (propertize " " 'display image))))
 
-(defun harness-compose--thumbnail (att)
+(defun harness-compose--thumbnail (att &optional max-width)
   "Return a string showing a thumbnail of attachment ATT, or nil.
-A video's is made by the media module, in the background: the box is
-redrawn once it is there."
+MAX-WIDTH, in pixels, narrows it further than its usual three times
+its height.  A video's is made by the media module, in the background:
+the box is redrawn once it is there."
   (when-let* ((height (harness-compose--thumbnail-height))
               (path (plist-get att :path)))
-    (let ((mime (or (plist-get att :mime) "")))
-      (cond ((string-prefix-p "image/" mime) (harness-compose--image path height))
+    (let ((mime (or (plist-get att :mime) ""))
+          (width (min (* 3 height) (or max-width (* 3 height)))))
+      (cond ((string-prefix-p "image/" mime) (harness-compose--image path height width))
             ((and (string-prefix-p "video/" mime) (fboundp 'harness-ui-media-video-thumbnail))
              (let ((buf (current-buffer)))
                (harness-compose--image
                 (harness-ui-media-video-thumbnail
                  path (lambda () (when (buffer-live-p buf)
                                    (with-current-buffer buf (harness-compose-redraw)))))
-                height)))))))
+                height width)))))))
 
 (defconst harness-compose--spinner ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
   "Frames of the spinner of a pending download.")
 
-(defun harness-compose--insert-pending-chip (att)
-  "Insert the chip of ATT, a download under way, and the overlay drawing it."
-  (let ((id (plist-get att :id))
-        (start (point)))
+(defun harness-compose--insert-pending-chip (att &optional room)
+  "Insert the chip of ATT, a download under way, and the overlay drawing it.
+ROOM, in pixels, is how wide the chip may show, as for
+`harness-compose--chip'; the overlay keeps it for the ticks."
+  (let* ((id (plist-get att :id))
+         (start (point))
+         (stop (concat " " (propertize (buttonize "×" (lambda (_) (harness-compose-cancel-download id)) nil
+                                                  "Stop this download")
+                                       'face 'harness-dim-face)))
+         (room (and room (- room (harness-compose--pixels stop)))))
     (insert (propertize " " 'harness-compose-pending id))
     (let ((ov (make-overlay start (point) nil t nil)))
-      (overlay-put ov 'display (harness-compose--progress-string att))
+      (overlay-put ov 'harness-compose-room room)
+      (overlay-put ov 'display (harness-compose--progress-string att room))
       (overlay-put ov 'help-echo (concat "Downloading " (plist-get att :url)))
       (push (cons id ov) harness-compose--progress))
-    (insert (propertize (buttonize "×" (lambda (_) (harness-compose-cancel-download id)) nil
-                                   "Stop this download")
-                        'face 'harness-dim-face))))
+    (insert stop)))
 
-(defun harness-compose--progress-string (att)
-  "Return what the chip of ATT, a download under way, shows now."
+(defconst harness-compose--widest-progress (concat " " (make-string 10 ?━) " 100% of 1023.9 MiB")
+  "The progress of a download at its widest, which its chip keeps room for.")
+
+(defun harness-compose--progress-string (att &optional room)
+  "Return what the chip of ATT, a download under way, shows now.
+ROOM, in pixels, is how wide it may show: the name is shortened to
+leave room for the progress at its widest, so that it keeps its length
+while the download goes on."
   (let* ((dl (plist-get att :download))
          (received (if dl (harness-http-download-received dl) 0))
          (total (and dl (harness-download-total dl)))
          (fraction (and total (> total 0) (min 1.0 (/ (float received) total))))
          (frame (aref harness-compose--spinner
-                      (mod (truncate (* 8 (float-time))) (length harness-compose--spinner)))))
+                      (mod (truncate (* 8 (float-time))) (length harness-compose--spinner))))
+         (head (concat (propertize frame 'face 'harness-dim-face) " "))
+         (name (replace-regexp-in-string "[\n\r\t]" " " (or (plist-get att :name) "download"))))
     (concat
-     (propertize frame 'face 'harness-dim-face) " "
-     (harness-truncate-middle (or (plist-get att :name) "download") 40) " "
+     head
+     (if room
+         (harness-compose--fit name (- room (harness-compose--pixels head)
+                                       (harness-compose--pixels
+                                        (propertize harness-compose--widest-progress 'face 'harness-dim-face)))
+                               #'identity)
+       name)
+     " "
      (if fraction
          (let ((filled (round (* 10 fraction))))
            (concat (propertize (make-string filled ?━) 'face 'harness-compose-progress-face)
@@ -774,8 +1086,7 @@ redrawn once it is there."
                    (propertize (format " %d%% of %s" (floor (* 100 fraction)) (harness-format-bytes total))
                                'face 'harness-dim-face)))
        (propertize (if (> received 0) (format "%s so far" (harness-format-bytes received)) "connecting…")
-                   'face 'harness-dim-face))
-     " ")))
+                   'face 'harness-dim-face)))))
 
 (defun harness-compose--start-progress ()
   "Animate the chips of pending downloads until there are none."
@@ -795,7 +1106,8 @@ redrawn once it is there."
       (let ((att (harness-compose--pending (car p))))
         (when (and att (overlay-buffer (cdr p)))
           (setq live t)
-          (overlay-put (cdr p) 'display (harness-compose--progress-string att)))))
+          (overlay-put (cdr p) 'display
+                       (harness-compose--progress-string att (overlay-get (cdr p) 'harness-compose-room))))))
     (unless live
       (cancel-timer timer)
       (when (eq timer harness-compose--progress-timer)
@@ -1439,11 +1751,13 @@ Runs from `post-command-hook'."
         (setq harness-compose--last-token token))
     (error (harness-log 'warn "compose: following the token failed: %S" err))))
 
-;; Boxes set up before a reload follow their tokens too.
+;; Boxes set up before a reload follow their tokens, and fit their
+;; attachments to their windows, too.
 (dolist (buf (buffer-list))
   (with-current-buffer buf
     (when (memq #'harness-compose-completion-at-point completion-at-point-functions)
-      (add-hook 'post-command-hook #'harness-compose--after-command nil t))))
+      (add-hook 'post-command-hook #'harness-compose--after-command nil t)
+      (add-hook 'window-size-change-functions #'harness-compose--on-resize nil t))))
 
 (add-to-list 'completion-category-defaults '(harness-compose-file (styles flex)))
 (add-to-list 'completion-category-defaults '(harness-compose-skill (styles basic flex)))

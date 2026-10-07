@@ -95,6 +95,16 @@
 ;; nothing lists is resolved (`harness-provider-claude--resolve') or
 ;; estimated, never given a small window.  See "Model catalogue" below.
 ;;
+;; Context.  A session's CLI loads the CLAUDE.md files, as `claude'
+;; does on its own, but not Claude Code's auto memory unless
+;; `harness-provider-claude-auto-memory' asks for it (the process gets
+;; CLAUDE_CODE_DISABLE_AUTO_MEMORY otherwise).  That memory's index,
+;; MEMORY.md, lists notes kept under ~/.claude/projects/, and with it
+;; before the conversation the model went to read them with the
+;; harness's tools, outside the allowed directories, so every session
+;; asked the user for that directory.  The setting is part of the spawn
+;; key, so changing it restarts a process in its conversation.
+;;
 ;; One-off questions (a request with `:ephemeral', the permission
 ;; judge's) are the exception to one process per session: each gets a
 ;; CLI process of its own, started for it under a key of its own and
@@ -184,6 +194,27 @@ the harness's say; managed settings may forbid it."
                  (repeat :tag "Other arguments" string))
   :group 'harness)
 
+(defcustom harness-provider-claude-auto-memory nil
+  "Whether sessions get Claude Code's auto memory.
+Claude Code keeps notes of its own on each repository in its auto
+memory directory (~/.claude/projects/PROJECT/memory/), and the `claude'
+CLI puts their index, MEMORY.md, before every conversation so that the
+model opens the notes it lists.  A harness session has neither Claude
+Code's file tools nor its instructions for those notes: the model
+would open them with the harness's tools, outside the allowed
+directories, so each session would ask for that directory or, when
+unattended, be refused it.
+
+Off (nil), the default, the CLI loads no auto memory
+\(CLAUDE_CODE_DISABLE_AUTO_MEMORY).  On (t) it loads it as `claude'
+does, and reading a note asks for its directory, which the prompt's
+\"Always allow\" grants every session.  CLAUDE.md files load either
+way.  A change reaches each session at its next turn: its CLI process
+restarts in the same conversation."
+  :type '(choice (const :tag "Off: the CLI loads no auto memory" nil)
+                 (const :tag "On: the CLI loads its auto memory" t))
+  :group 'harness)
+
 (defconst harness-provider-claude--quota-ttl 60
   "Seconds after which the plan's quota report counts as stale.
 A stale report is fetched again after a turn and when `provider/quota'
@@ -270,7 +301,7 @@ auto-mode judge, for one, runs on the `cheap' one.")
   (buffer "")        ; unparsed tail of stdout
   cli-session-id     ; Claude Code session id, from system/init
   model              ; model name reported by the CLI
-  spawn-key          ; (MODEL EFFORT SYSTEM) the process was started with
+  spawn-key          ; settings it was started with, see `harness-provider-claude--spawn-key'
   ;; Per-turn state
   request            ; the current request plist, nil when idle
   on-event           ; the current :on-event callback
@@ -422,11 +453,19 @@ resumes the CLI session in a new one."
                         (max (point-min) (- (point-max) 2000)) (point-max))))
       "")))
 
+(defconst harness-provider-claude--no-auto-memory "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"
+  "Environment entry that has the CLI load no auto memory.
+Claude Code's documented switch; a CLI too old to know it ignores it.")
+
 (defun harness-provider-claude--environment (&optional effort)
-  "Return `process-environment' without the CLAUDECODE nesting marker.
-With EFFORT `off' it also turns the CLI's extended thinking off (see
+  "Return `process-environment' for a CLI process.
+The CLAUDECODE nesting marker goes, and auto memory is off unless
+`harness-provider-claude-auto-memory' is on.  With EFFORT `off' it
+also turns the CLI's extended thinking off (see
 `harness-provider-claude--effort')."
   (append (and (eq effort 'off) (list "MAX_THINKING_TOKENS=0"))
+          (and (not harness-provider-claude-auto-memory)
+               (list harness-provider-claude--no-auto-memory))
           (cl-remove-if (lambda (e) (string-prefix-p "CLAUDECODE=" e)) process-environment)))
 
 (defun harness-provider-claude--effort (request)
@@ -548,16 +587,18 @@ They stand in for the harness tools its `:builtin-tools' names."
 
 (defun harness-provider-claude--spawn-key (request)
   "Return the settings a CLI process must have been started with to serve REQUEST.
-That is (MODEL EFFORT SYSTEM BUILTIN PCT): EFFORT `off' for no
+That is (MODEL EFFORT SYSTEM BUILTIN PCT MEMORY): EFFORT `off' for no
 extended thinking (see `harness-provider-claude--effort'), the CLI
-tools it turns on (nil when none) and the auto-compact percentage it
-was given (nil without one).  A process started otherwise is
-restarted."
+tools it turns on (nil when none), the auto-compact percentage it was
+given (nil without one) and whether it loads its auto memory
+\(`harness-provider-claude-auto-memory').  A process started otherwise
+is restarted."
   (list (cdr (harness-provider-parse-model (plist-get request :model)))
         (harness-provider-claude--effort request)
         (plist-get request :system)
         (harness-provider-claude--cli-tools request)
-        (harness-provider-claude--autocompact-pct request)))
+        (harness-provider-claude--autocompact-pct request)
+        (and harness-provider-claude-auto-memory t)))
 
 (defun harness-provider-claude--builtin-name (entry name)
   "Return the harness tool that the CLI's tool NAME stands in for on ENTRY, or nil.
@@ -2656,14 +2697,15 @@ and takes images, and the catalogue estimates its window."
 ;;;; One-off requests
 
 (defconst harness-provider-claude--ephemeral-environment
-  '("CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"
-    "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"
-    "CLAUDE_CODE_SKIP_PROMPT_HISTORY=1")
+  (list "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"
+        harness-provider-claude--no-auto-memory
+        "CLAUDE_CODE_SKIP_PROMPT_HISTORY=1")
   "Environment added to the CLI process of a one-off request.
 The process loads no CLAUDE.md (neither the user's, nor the project's,
-nor auto memory) and saves no transcript, so its answer comes from the
-request alone.  These are documented environment variables of Claude
-Code: a CLI too old to know one ignores it.")
+nor auto memory, whatever `harness-provider-claude-auto-memory' says)
+and saves no transcript, so its answer comes from the request alone.
+These are documented environment variables of Claude Code: a CLI too
+old to know one ignores it.")
 
 (defvar harness-provider-claude--ephemeral-count 0
   "Counter that keeps the process keys of one-off requests apart.")

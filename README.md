@@ -264,9 +264,9 @@ the `[menu]` button in the header line.
 | `C-c C-c` | Send the message; while the agent is working, it steers the current turn |
 | `C-c C-q` | Queue the message for the next turn |
 | `RET` | Insert a newline |
-| `@` | Complete a project file to attach; part of a name finds a file in any subdirectory |
+| `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. An `@path` typed out in full attaches its file when the message is sent, and stays in the text |
 | `/` | Complete a skill |
-| `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
+| `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system) |
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
@@ -289,7 +289,9 @@ name when it arrives, and sending waits for it. A link to a web page is
 not downloaded: its address goes into the message as text, which is
 usually what you wanted. Images and videos show a thumbnail in the
 attachment chip (`harness-compose-thumbnail-lines`; videos need
-`ffmpeg`), so you can see what you are about to send.
+`ffmpeg`), so you can see what you are about to send. Each attachment
+has a line of its own above the box, fitted to the window: a long name
+is shortened in the middle, and hovering over it shows the whole path.
 
 Images drag *out* too: press on an image in the transcript, on an
 attachment chip's thumbnail or name, or on an image of a report or its
@@ -350,6 +352,20 @@ pattern: once, for the session, or always (as an entry of
 *Always deny*). For a tool call such as a file edit or a command, *Allow
 for session*, *Always allow* and *Always deny* hold for that tool on the
 pattern only, not for every call of the tool.
+
+A shell command is about what its command line names, not only the
+directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
+run in the project, says `runs in: ~/proj` and, below it, `paths:
+~/.claude/projects/x`, and offers `~/.claude/projects/x/**`, so the
+answer you remember is about that directory and not about every command
+run in the project. A command that names nothing outside the session's
+directories is about where it runs, as before. Paths are read from the
+command line on a best-effort basis: absolute paths, `~` and `$HOME`
+paths, and `./` or `../` paths, but not the program being run or
+`/dev/null`. An allowing rule must cover every path the command names
+outside the session's directories, so allowing commands in the project
+does not let one that reaches elsewhere through. A denying rule stops
+a command that names any path it covers.
 
 An image the agent reads (`read_file`) shows in the transcript, under
 the call's header and outside its fold, so a collapsed call still shows
@@ -678,7 +694,8 @@ shows where its effective value comes from.
 
 The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
-non-interactive, budget), **Files and safety** (directory access,
+non-interactive), **Spending** (the budget, one for all sessions
+together), **Files and safety** (directory access,
 sandbox policy, standing permission rules), **Task board** (what task
 sessions start with, and when their work counts as done),
 **Notifications** (which task events notify you, and through which
@@ -700,7 +717,6 @@ project's, and a project's over the global value.
 - `harness-btw-thinking`
 - `harness-permission-mode`
 - `harness-allowed-directories`
-- `harness-budget`
 - `harness-sandbox-policy`
 - `harness-non-interactive`
 
@@ -740,6 +756,16 @@ billed depends on how it is logged in:
 - With a Claude subscription (Pro, Max or Team), turns cost nothing per
   token. Sessions show the plan and its quota instead, for example `Max`
   with the 5-hour and weekly windows in the chat header.
+
+Sessions get your CLAUDE.md files, as `claude` loads them, but not
+Claude Code's auto memory, the notes Claude Code keeps on each
+repository in `~/.claude/projects/`. Harness sessions cannot use those
+notes as Claude Code does: the model would read them from outside the
+session's allowed directories, so every session would ask you for
+access. To give sessions that memory anyway, turn on
+`harness-provider-claude-auto-memory` (Claude Code, under Advanced on
+the settings page). Reading a note then asks for its directory: answer
+Always allow and no session asks again.
 
 ### GitHub Copilot
 
@@ -949,19 +975,26 @@ worktrees it holds. `TAB`, `RET` or a click on a project shows its main
 checkout's usage and each worktree's, and hides them again; `w` (or
 `[show worktrees]`) does it for every project at once.
 
-Budgets count billed cost only. A budget created partway through a
-month can start from what was already spent outside the harness: press
-`s` on its line in the dashboard (or use the add-budget wizard) to set
-that baseline, which counts until the period rolls over. Organisations
-billed per token can fetch the baseline instead: with an Anthropic Admin
-API key (`harness-anthropic-admin-api-key`), `I` on a monthly budget
-offers the month's API cost minus what the harness recorded.
+Budgets count billed cost only. A budget over everything (a day, week
+or month budget for no one project) also counts what providers report
+they billed in its period beyond what the harness recorded, so one
+created partway through a month does not start at $0: a plan's extra
+usage this month (Claude Code's usage credits, Copilot's additional
+requests) and, with an Anthropic Admin API key
+(`harness-anthropic-admin-api-key`), what Anthropic billed per token,
+fetched again every ten minutes (`I` fetches it now). The budget's line
+says how much, as "incl. $5.00 reported by Claude Code". What was spent
+outside the harness that no provider reports, such as a project
+budget's spending, which no provider can single out, is a baseline:
+press `s` on the budget's line in the dashboard (or use the add-budget
+wizard) to set it; it counts until the period rolls over.
 
 ## Corporate mode
 
 Corporate mode turns off the harness features that could carry data off
-your machine. It is meant for work machines whose policy lets code and
-data go to the model provider in use and nowhere else.
+your machine, except web search. It is meant for work machines whose
+policy lets code and data go to the model provider in use, and search
+queries to a search engine, and nowhere else.
 
 Turn it on in `config.el` (Doom) or your init file, before
 `(harness-start)`:
@@ -976,14 +1009,21 @@ It turns off:
   ignores `harness-acp-allow-remote`. Pairing phones and other devices
   is refused, and the UI cannot connect to a harness elsewhere
   (`harness-connect-remote`).
-- Network tools. Sessions do not get `web_fetch`, `web_search` or the
-  web search that Claude Code and Copilot run themselves. When a model
-  calls one anyway, the call is denied and the model is told why.
+- Network tools other than web search. Sessions do not get
+  `web_fetch`, which reaches any URL. When a model calls it anyway, the
+  call is denied and the model is told why.
 
 It leaves alone:
 
 - The model provider. The provider you choose still receives what
   sessions send it.
+- Web search. `web_search` sends its queries to the search provider
+  (`harness-websearch-provider`, Brave by default), and Claude Code and
+  Copilot run their own web search on their side (see
+  `harness-websearch-builtin`). Both are `web_search` calls, which the
+  permission rules decide as usual: if your policy rules out web search
+  too, add `(:tool "web_search" :behavior deny)` to
+  `harness-perms-rules`.
 - Shell commands. They follow the permission mode and the sandbox, as
   always, so a command can still reach the network. Use a permission
   mode that asks before commands run (Ask or Accept edits), and set

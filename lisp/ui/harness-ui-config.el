@@ -12,13 +12,14 @@
 ;;            directory), which overrides the global value there.
 ;;
 ;; The page leads with the settings most people change, in the sections
-;; the harness names (`harness-config-sections'): new sessions, files
-;; and safety, the task board, notifications, models and services.
+;; the harness names (`harness-config-sections'): new sessions,
+;; spending, files and safety, the task board, notifications, models and
+;; services.
 ;; Everything else is advanced: the Global scope folds it into one line
 ;; saying how many there are and how many were changed, and `a' (or the
 ;; button there) shows them, by module.  The Project scope shows only
 ;; the settings that layer (model, permission mode, thinking, allowed
-;; directories, budget, sandbox policy, non-interactive), in their
+;; directories, sandbox policy, non-interactive), in their
 ;; sections, and folds the rest, which have a global value
 ;; only, into one line.  The options of the interface itself live in
 ;; this Emacs, not the harness: a button at the end opens Customize on
@@ -511,7 +512,9 @@ The page draws such a type as a form."
         (or (cl-some (lambda (o) (and (consp o) (harness-ui-config--form-p (cadr o))))
                      (plist-get props :options))
             (and (not (harness-ui-config--type-is type 'const 'item))
-                 (cl-some (lambda (a) (and (or (consp a) (get a 'widget-type)) (harness-ui-config--form-p a)))
+                 ;; Not every argument is a type: (integer 0 23) has numbers.
+                 (cl-some (lambda (a) (and (or (consp a) (and (symbolp a) (get a 'widget-type)))
+                                           (harness-ui-config--form-p a)))
                           args))))))
 
 (defun harness-ui-config--untagged-format (type)

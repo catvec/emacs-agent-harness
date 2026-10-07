@@ -22,6 +22,11 @@
      (setq harness-fallback-models nil)
      (let ((harness-provider-demo--delay 0.005)
            (harness-acp-token nil)
+           ;; A budget over everything fetches Anthropic's cost report in
+           ;; the background: no key may reach a real one.
+           (harness-anthropic-admin-api-key nil)
+           (auth-sources nil)
+           (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment))
            (default-directory dir))
        (unwind-protect
            (progn ,@body)
@@ -278,6 +283,35 @@ their sum; TAB, RET, w and the heading's button show and hide them."
           (harness-ui-usage-remove-budget))
         (harness-test-wait (lambda () (null (harness-call 'usage/budgets))) 5 "budget removed")))))
 
+(defvar harness-budget)
+
+(ert-deftest harness-ui-usage-budget-setting-is-one-line ()
+  "The Budget setting shows as one budget for all sessions, however many
+there are, and d on it says where to change it."
+  (harness-ui-usage-test-with
+    (let ((harness-budget '(:amount 10 :hard t)))
+      (dotimes (_ 3)
+        (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"))
+      (harness-test-wait (let (done) (harness-ui-refresh-sessions (lambda (_) (setq done t))) (lambda () done))
+                         5 "sessions cached")
+      (should (= 3 (length (harness-ui-sessions))))
+      (harness-ui-usage-test-record (float-time) (file-name-as-directory dir) "demo:scripted" 2.5)
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage--buffer-name
+        (let ((lines (split-string (harness-ui-usage-test-text) "\n")))
+          (should (= 1 (cl-count-if (lambda (l) (string-match-p "all sessions (setting)" l)) lines)))
+          (should (cl-some (lambda (l) (string-match-p "all sessions (setting) .* 25%  \\$2\\.50 / \\$10\\.00" l))
+                           lines))
+          (should-not (cl-some (lambda (l) (string-match-p "\\`  session " l)) lines)))
+        (harness-ui-usage-test-goto "all sessions (setting)")
+        (should (string-match-p "M-x harness-settings"
+                                (cadr (should-error (harness-ui-usage-remove-budget) :type 'user-error))))))
+    ;; Unset, it is gone.
+    (with-current-buffer harness-ui-usage--buffer-name
+      (harness-ui-usage-refresh)
+      (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)
+      (should-not (string-match-p "all sessions" (harness-ui-usage-test-text))))))
+
 (ert-deftest harness-ui-usage-add-budget-wizard-and-plan ()
   (harness-ui-usage-test-with
     (harness-ui-usage-test-open)
@@ -368,65 +402,54 @@ their sum; TAB, RET, w and the heading's button show and hide them."
         (cl-letf (((symbol-function 'read-number) (lambda (&rest _) -3)))
           (should-error (harness-ui-usage-set-baseline) :type 'user-error))))))
 
-(ert-deftest harness-ui-usage-import-api-cost-offers-a-baseline ()
-  "With an Admin API key, the month's Anthropic cost is offered as a month budget's baseline."
+(ert-deftest harness-ui-usage-import-api-cost-counts-in-budgets-over-everything ()
+  "I fetches what Anthropic billed now; a budget over everything counts it, beyond what was recorded."
   (harness-ui-usage-test-with
-    (let ((harness-anthropic-admin-api-key nil)
-          (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment))
-          (messages nil)
-          (requests 0))
-      (cl-letf (((symbol-function 'auth-source-search) (lambda (&rest _) nil))
-                ((symbol-function 'harness-http-request-json)
-                 (lambda (&rest _)
-                   (cl-incf requests)
+    (let ((messages nil)
+          (requests nil))
+      (cl-letf (((symbol-function 'harness-http-request-json)
+                 (lambda (url &rest _)
+                   (push url requests)
                    (harness-resolved '(:data ((:results ((:amount "1234" :currency "USD")))) :has_more :false))))
                 ((symbol-function 'message)
                  (lambda (format &rest args) (when format (push (apply #'format-message format args) messages)))))
         (harness-ui-usage-test-request "_harness/usage/set-budget"
                                        (list :budget (list :scope "period" :period "month" :amount 100 :label "monthly cap")))
         (harness-ui-usage-test-request "_harness/usage/set-budget"
-                                       (list :budget (list :scope "period" :period "week" :amount 30 :label "weekly cap")))
+                                       (list :budget (list :scope "project" :target (file-name-as-directory dir)
+                                                           :amount 30 :label "project cap")))
         (harness-ui-usage-test-open)
         (with-current-buffer harness-ui-usage--buffer-name
-          ;; Only a month budget can take a month's cost.
-          (goto-char (point-min))
-          (search-forward "weekly cap")
-          (should-error (harness-ui-usage-import-api-cost) :type 'user-error)
-          ;; Without a key the step is skipped and says why.
-          (goto-char (point-min))
-          (search-forward "monthly cap")
+          ;; Without a key nothing is fetched, in the background or now, and I says why.
+          (harness-ui-usage-test-goto "monthly cap")
           (harness-ui-usage-import-api-cost)
           (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "No Anthropic Admin API key" m)) messages))
                              5 "no key")
-          (should (= 0 requests))
-          (should-not harness-ui-usage--api-cost)
-          ;; With one, the cost shows under the budget with a button.
+          (should-not requests)
+          (should-not (string-match-p "reported by" (harness-ui-usage-test-text)))
+          ;; What an account was billed says nothing of one project.
+          (harness-ui-usage-test-goto "project cap")
+          (should-error (harness-ui-usage-import-api-cost) :type 'user-error)
+          ;; With a key, the month's cost counts in the month budget at once.
           (setq harness-anthropic-admin-api-key "sk-ant-admin01-test")
-          (goto-char (point-min))
-          (search-forward "monthly cap")
+          (harness-ui-usage-test-goto "monthly cap")
           (harness-ui-usage-import-api-cost)
-          (harness-test-wait (lambda () (string-match-p "Anthropic billed \\$12\\.34 this month" (harness-ui-usage-test-text)))
-                             5 "offer shown")
-          (should (= 1 requests))
-          (should (string-match-p "monthly cap.*\n +Anthropic billed \\$12\\.34 this month  \\[use \\$12\\.34 as baseline\\] \\[dismiss\\]"
-                                  (harness-ui-usage-test-text)))
-          (goto-char (point-min))
-          (search-forward "[use $12.34")
-          (push-button)
-          (harness-test-wait (lambda () (string-match-p "incl\\. \\$12\\.34 baseline" (harness-ui-usage-test-text)))
-                             5 "baseline from the API cost")
-          (should-not (string-match-p "Anthropic billed" (harness-ui-usage-test-text)))
-          (let ((b (cl-find "monthly cap" (harness-call 'usage/budgets) :key (lambda (b) (plist-get b :label)) :test #'equal)))
-            (should (< (abs (- 12.34 (or (plist-get b :baseline) 0))) 1e-9))
-            (should (equal (harness-usage--date-key (car (harness-usage-period-bounds 'month)))
-                           (plist-get b :baseline-period-start))))
-          ;; An offer can be dismissed.
-          (goto-char (point-min))
-          (search-forward "monthly cap")
-          (harness-ui-usage-import-api-cost)
-          (harness-test-wait (lambda () (string-match-p "\\[dismiss\\]" (harness-ui-usage-test-text))) 5 "offer again")
-          (harness-ui-usage-dismiss-api-cost)
-          (should-not (string-match-p "Anthropic billed" (harness-ui-usage-test-text))))))))
+          (harness-test-wait (lambda () (string-match-p "incl\\. \\$12\\.34 reported by Anthropic" (harness-ui-usage-test-text)))
+                             5 "reported cost counted")
+          (should (= 1 (length requests)))
+          (should (cl-some (lambda (m) (string-match-p "\\`Anthropic billed \\$12\\.34 this month; \\$12\\.34 of it counts" m))
+                           messages))
+          (should (string-match-p
+                   "monthly cap .* 12%  \\$12\\.34 / \\$100\\.00  incl\\. \\$12\\.34 reported by Anthropic  \\$87\\.66 left"
+                   (harness-ui-usage-test-text)))
+          (should-not (string-match-p "project cap.*reported" (harness-ui-usage-test-text)))
+          (harness-ui-usage-test-goto "monthly cap")
+          (should (harness-ui-usage-test-line-help
+                   "\\`Anthropic reports \\$12\\.34 billed per token (UTC days) this month, as of .*; \\$0 of it was recorded here, so \\$12\\.34 more counts\\.\\'"))
+          ;; It is no baseline: the budget itself is unchanged.
+          (should-not (plist-get (cl-find "monthly cap" (harness-call 'usage/budgets)
+                                          :key (lambda (b) (plist-get b :label)) :test #'equal)
+                                 :baseline)))))))
 
 (defun harness-ui-usage-test-max-quota (now)
   "Return a Claude Max quota plist as the provider reports it at NOW."
