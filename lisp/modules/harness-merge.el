@@ -23,10 +23,20 @@
 ;; harness that stops mid-merge leaves the checkout as it was.
 ;;
 ;; A conflict never reaches the parent's checkout.  The lock goes at
-;; once and the child is told to merge the parent's HEAD into its own
-;; branch, in its own worktree, resolve the conflicts there and commit;
-;; its `merge_done' tool then queues the branch again.  A safety timer
+;; once and the parent's HEAD has to be merged into the child's branch,
+;; in the child's worktree, the conflicts resolved there and committed;
+;; the `merge_done' tool then queues the branch again.  A safety timer
 ;; gives up on a conflict nobody resolves.
+;;
+;; Who resolves them is `harness-merge-conflict-resolver'.  By default
+;; the harness starts a fresh session for it (a `subagent' child of the
+;; child session, in the child's worktree) with only the conflict to go
+;; on: a child that finished long ago and waited in a queue has a cold
+;; prompt cache and a long context, so waking it up to resolve a few
+;; files would pay for its whole history again.  When that session's
+;; turn ends without `merge_done' having queued the branch again, the
+;; merge fails.  With `child', the child session itself is steered to
+;; resolve them, as before.
 ;;
 ;; The harness locks the worktrees it makes so that `git worktree
 ;; prune' keeps them (see harness-worktree.el).  Once a child's branch
@@ -45,6 +55,24 @@
 (require 'harness-util)
 (require 'harness-tools)
 
+;;;; Options
+
+(defcustom harness-merge-conflict-resolver 'fresh
+  "Who resolves the conflicts of a merge the merge queue cannot make.
+`fresh': a new session the harness starts in the child's worktree,
+told only about the conflict; its context is small, so it does not
+pay for the child's whole history on a cold prompt cache.
+`child': the child session itself, steered to resolve them."
+  :type '(choice (const :tag "A fresh session" fresh)
+                 (const :tag "The child session itself" child))
+  :group 'harness)
+
+(defcustom harness-merge-resolver-model nil
+  "Model of the fresh session that resolves merge conflicts.
+Nil means the child session's model."
+  :type '(choice (const :tag "The child's model" nil) (string :tag "Model" :names model))
+  :group 'harness)
+
 ;;;; Constants
 
 (defconst harness-merge--hold-timeout 1800
@@ -55,7 +83,8 @@
 (defvar harness-merge--queues (make-hash-table :test 'equal)
   "Parent session id -> list of queue entries, oldest first.
 An entry is (:child ID :parent ID :status queued|merging|conflict
-:requested FLOAT :message STRING :branch NAME :files (…)).")
+:requested FLOAT :message STRING :branch NAME :files (…) :resolver ID).
+`:resolver' is the fresh session resolving the entry's conflicts.")
 
 (defvar harness-merge--locks (make-hash-table :test 'equal)
   "Parent session id -> child session id holding the merge lock.")
@@ -101,6 +130,16 @@ An entry is (:child ID :parent ID :status queued|merging|conflict
              harness-merge--queues)
     found))
 
+(defun harness-merge--entry-of (session-id)
+  "Return the queue entry SESSION-ID is the child or the conflict resolver of."
+  (or (harness-merge--entry session-id)
+      (let (found)
+        (maphash (lambda (_ entries)
+                   (unless found
+                     (setq found (cl-find session-id entries :key (lambda (e) (plist-get e :resolver)) :test #'equal))))
+                 harness-merge--queues)
+        found)))
+
 (defun harness-merge--set (entry &rest props)
   "Set PROPS on the queue ENTRY in place (it is shared with the queue)."
   (cl-loop for (k v) on props by #'cddr do (plist-put entry k v))
@@ -126,7 +165,7 @@ An entry is (:child ID :parent ID :status queued|merging|conflict
   "Return the public plist of queue ENTRY at POSITION."
   (list :child (plist-get entry :child) :parent (plist-get entry :parent)
         :position position :status (plist-get entry :status)
-        :requested (plist-get entry :requested)))
+        :requested (plist-get entry :requested) :resolver (plist-get entry :resolver)))
 
 ;;;; Methods
 
@@ -161,7 +200,7 @@ the 1-based queue position.  Emits `merge/queued'."
 
 (harness-defmethod merge/queue (parent-id)
   "Return the merge queue of PARENT-ID.
-Each item is (:child :parent :position :status :requested)."
+Each item is (:child :parent :position :status :requested :resolver)."
   (cl-loop for e in (gethash parent-id harness-merge--queues) for i from 1
            collect (harness-merge--public e i)))
 
@@ -220,11 +259,18 @@ filter core would adopt a returned promise as the gate value."
       (funcall next value))
     nil))
 
-(defun harness-merge--on-turn-ended (session-id _reason)
-  "Serve the merge queue of SESSION-ID now that it is idle."
+(defun harness-merge--on-turn-ended (session-id reason)
+  "Serve the merge queue of SESSION-ID now that it is idle.
+When SESSION-ID resolves a conflict and its turn ended (for REASON)
+without the branch queued again, the merge fails."
   (when (and (gethash session-id harness-merge--queues)
              (not (gethash session-id harness-merge--locks)))
-    (harness-run-soon #'harness-merge--pump session-id)))
+    (harness-run-soon #'harness-merge--pump session-id))
+  (let ((entry (harness-merge--entry-of session-id)))
+    (when (and entry (equal (plist-get entry :resolver) session-id)
+               (eq (plist-get entry :status) 'conflict))
+      (harness-merge--finish entry 'failed
+                             (format "the session resolving the conflicts stopped (%s) without merge_done" reason)))))
 
 ;;;; The merge
 
@@ -368,31 +414,81 @@ MESSAGE is the commit message."
                             (directory-file-name parent-cwd) (harness-merge--out ff)))))))))))))))))
 
 (defun harness-merge--conflict (entry parent-cwd branch head target files)
-  "Hand ENTRY's conflicts in FILES to its child; the parent is untouched.
-BRANCH would have merged into PARENT-CWD at commit HEAD.
-The parent's lock goes at once; the child merges HEAD (the tip of the
-branch TARGET) into its own branch and calls merge_done."
+  "Hand ENTRY's conflicts in FILES to be resolved; the parent is untouched.
+BRANCH would have merged into PARENT-CWD at commit HEAD, the tip of the
+branch TARGET.  The parent's lock goes at once; HEAD is merged into
+the child's branch in its worktree, by a fresh session or the child
+itself (`harness-merge-conflict-resolver'), and merge_done is called."
   (let* ((child-id (plist-get entry :child))
          (parent-id (plist-get entry :parent))
-         (child-cwd (plist-get (harness-merge--session child-id) :cwd))
-         (short (substring head 0 (min 12 (length head)))))
-    (harness-merge--set entry :status 'conflict :files files)
+         (child (harness-merge--session child-id))
+         (child-cwd (directory-file-name (or (plist-get child :cwd) "")))
+         (short (substring head 0 (min 12 (length head))))
+         (instructions
+          (format "run `git merge %s` (the tip of %s), resolve the conflicts, `git add` the files and commit the merge with `git commit --no-edit`. Keep both sides' work. Do not touch %s. When the merge is committed, call the merge_done tool and the branch is merged again."
+                  short (if (string-empty-p target) "the parent" target) (directory-file-name parent-cwd)))
+         (listing (mapconcat (lambda (f) (concat "- " f)) files "\n")))
+    (harness-merge--set entry :status 'conflict :files files :resolver nil)
     (when (equal (gethash parent-id harness-merge--locks) child-id)
       (remhash parent-id harness-merge--locks))
     (harness-emit 'merge/conflict child-id parent-id files)
-    (harness-merge--hint parent-id (format "Merge from %s has conflicts in %s; it resolves them in its worktree"
-                                           (harness-merge--label child-id) (string-join files ", ")))
-    (harness-merge--steer
-     child-id
-     (format "Merging your branch %s into %s would conflict in these files:\n%s\n\nNothing was changed there. Bring the parent's work into your branch instead, in your own worktree %s: run `git merge %s` (the tip of %s), resolve the conflicts, `git add` the files and commit the merge with `git commit --no-edit`. Keep both sides' work. Do not touch %s. When the merge is committed, call the merge_done tool and your branch is merged again."
-             branch (directory-file-name parent-cwd)
-             (mapconcat (lambda (f) (concat "- " f)) files "\n")
-             (directory-file-name (or child-cwd "")) short (if (string-empty-p target) "the parent" target)
-             (directory-file-name parent-cwd)))
     (puthash child-id
              (run-at-time harness-merge--hold-timeout nil #'harness-merge--timeout entry)
              harness-merge--timers)
+    (let ((resolver (and (eq harness-merge-conflict-resolver 'fresh)
+                         (harness-merge--start-resolver
+                          entry child
+                          (format "You resolve merge conflicts for the merge queue of the agent harness.\n\nThe branch %s, in the git worktree %s (your working directory), was to be merged into %s, but that would conflict in these files:\n%s\n\nNothing was changed there. Bring the parent's work into the branch instead, in the worktree %s: %s\n\nYou start fresh: read both sides first (`git log --oneline %s..HEAD` is the branch's own work, `git log --oneline HEAD..%s` the parent's) and understand what each change is for before you resolve. Change nothing beyond the merge itself.%s"
+                                  branch child-cwd (directory-file-name parent-cwd) listing child-cwd instructions
+                                  short short
+                                  (if (plist-get entry :message)
+                                      (format "\n\nThe branch's merge request said: %s" (plist-get entry :message))
+                                    ""))))))
+      (if resolver
+          (progn
+            (harness-merge--hint parent-id (format "Merge from %s has conflicts in %s; a fresh session resolves them in its worktree"
+                                                   (harness-merge--label child-id) (string-join files ", ")))
+            (harness-merge--hint child-id (format "Merge into %s has conflicts in %s; session %s resolves them in this worktree"
+                                                  (harness-merge--label parent-id) (string-join files ", ")
+                                                  (harness-merge--label resolver))))
+        (harness-merge--hint parent-id (format "Merge from %s has conflicts in %s; it resolves them in its worktree"
+                                               (harness-merge--label child-id) (string-join files ", ")))
+        (harness-merge--steer
+         child-id
+         (format "Merging your branch %s into %s would conflict in these files:\n%s\n\nNothing was changed there. Bring the parent's work into your branch instead, in your own worktree %s: %s"
+                 branch (directory-file-name parent-cwd) listing child-cwd instructions))))
     (harness-run-soon #'harness-merge--pump parent-id)))
+
+(defun harness-merge--start-resolver (entry child prompt)
+  "Start a fresh session resolving ENTRY's conflicts with PROMPT; return its id.
+The session works in the worktree of CHILD (the child's session plist),
+with its settings, as its `subagent' child.  Return nil when it cannot
+start; the child is then steered instead."
+  (when (and (harness-method-exists-p 'session/create) (harness-method-exists-p 'agent/prompt))
+    (condition-case err
+        (let* ((child-id (plist-get child :id))
+               (session (harness-call 'session/create
+                                      :cwd (plist-get child :cwd) :kind 'subagent :parent-id child-id
+                                      :name (format "Merge %s" (or (plist-get entry :branch) (harness-merge--label child-id)))
+                                      :model (or harness-merge-resolver-model (plist-get child :model))
+                                      :host (plist-get child :host)
+                                      :permission-mode (plist-get child :permission-mode)
+                                      :thinking (plist-get child :thinking)
+                                      :allowed-dirs (plist-get child :allowed-dirs)
+                                      :non-interactive (if (harness-json-true-p (plist-get child :non-interactive)) t :false)))
+               (id (plist-get session :id)))
+          (harness-merge--set entry :resolver id)
+          (harness-emit 'merge/resolver child-id (plist-get entry :parent) id)
+          (harness-catch (harness-call-async 'agent/prompt id prompt (list :from (harness-sender-system "merge queue")))
+                         (lambda (e)
+                           (harness-log 'warn "merge: the conflict resolver %s failed: %s" id (harness-error-message e))
+                           (when (and (equal (plist-get entry :resolver) id) (eq (plist-get entry :status) 'conflict))
+                             (harness-merge--finish entry 'failed (format "the session resolving the conflicts failed: %s"
+                                                                          (harness-error-message e))))
+                           nil))
+          id)
+      (error (harness-log 'warn "merge: could not start a conflict resolver: %s" (error-message-string err))
+             nil))))
 
 (defun harness-merge--timeout (entry)
   "Give up on the unresolved conflict of ENTRY after `harness-merge--hold-timeout'."
@@ -420,8 +516,13 @@ Releases the lock, dequeues, hints both sessions and serves the queue.
 A merged child's worktree loses the harness's lock."
   (let* ((child-id (plist-get entry :child))
          (parent-id (plist-get entry :parent))
+         (resolver (plist-get entry :resolver))
          (timer (gethash child-id harness-merge--timers)))
     (when (eq status 'merged) (harness-merge--unlock-worktree entry))
+    ;; A resolver given up on stops; one that finished is left to end its turn.
+    (when (and resolver (memq status '(aborted cancelled))
+               (harness-method-exists-p 'agent/cancel))
+      (ignore-errors (harness-call 'agent/cancel resolver)))
     (when timer (cancel-timer timer) (remhash child-id harness-merge--timers))
     (puthash parent-id (cl-remove entry (gethash parent-id harness-merge--queues))
              harness-merge--queues)
@@ -445,7 +546,7 @@ A merged child's worktree loses the harness's lock."
          (parent-id (plist-get entry :parent))
          (timer (gethash child-id harness-merge--timers)))
     (when timer (cancel-timer timer) (remhash child-id harness-merge--timers))
-    (harness-merge--set entry :status 'queued :files nil)
+    (harness-merge--set entry :status 'queued :files nil :resolver nil)
     (harness-emit 'merge/queued child-id parent-id
                   (1+ (or (cl-position entry (gethash parent-id harness-merge--queues)) 0)))
     (unless (harness-merge--parent-running-p parent-id)
@@ -453,10 +554,11 @@ A merged child's worktree loses the harness's lock."
 
 (defun harness-merge--done (_input ctx)
   "Handler of the merge_done tool.
-Check that the session in CTX merged the parent's HEAD into its branch
-and committed, then queue its branch again."
-  (let* ((child-id (plist-get ctx :session-id))
-         (entry (harness-merge--entry child-id)))
+Check that the child's worktree merged the parent's HEAD into its branch
+and committed, then queue its branch again.  The session in CTX is the
+child or the fresh session resolving its conflicts."
+  (let* ((entry (harness-merge--entry-of (plist-get ctx :session-id)))
+         (child-id (plist-get entry :child)))
     (cond
      ((null entry) (harness-tool-error "No merge is in progress for this session"))
      ((not (eq (plist-get entry :status) 'conflict))
@@ -487,7 +589,7 @@ and committed, then queue its branch again."
                  (harness-tool-error (format "The merge is %s, not waiting for conflict resolution" (plist-get entry :status))))
                 (t
                  (harness-merge--requeue entry)
-                 (harness-tool-ok "Your branch is queued to merge again; you will hear how it went."))))))))))))
+                 (harness-tool-ok "The branch is queued to merge again; the merge queue takes it from here."))))))))))))
 
 (harness-define-tool "merge_done"
   :label "Finish merge"
@@ -509,7 +611,8 @@ and committed, then queue its branch again."
 
 (harness-declare-event 'merge/queued "(CHILD-ID PARENT-ID POSITION) after a merge was requested.")
 (harness-declare-event 'merge/started "(CHILD-ID PARENT-ID) when a merge takes the parent's lock.")
-(harness-declare-event 'merge/conflict "(CHILD-ID PARENT-ID FILES) when a merge would conflict; the child resolves them in its worktree.")
+(harness-declare-event 'merge/conflict "(CHILD-ID PARENT-ID FILES) when a merge would conflict; they are resolved in the child's worktree.")
+(harness-declare-event 'merge/resolver "(CHILD-ID PARENT-ID RESOLVER-ID) when a fresh session starts resolving a merge's conflicts.")
 (harness-declare-event 'merge/finished "(CHILD-ID PARENT-ID STATUS) merged, failed, aborted or cancelled.")
 
 (harness-define-module 'merge
