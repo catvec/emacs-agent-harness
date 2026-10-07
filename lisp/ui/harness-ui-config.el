@@ -12,13 +12,14 @@
 ;;            directory), which overrides the global value there.
 ;;
 ;; The page leads with the settings most people change, in the sections
-;; the harness names (`harness-config-sections'): new sessions, files
-;; and safety, the task board, notifications, models and services.
+;; the harness names (`harness-config-sections'): new sessions,
+;; spending, files and safety, the task board, notifications, models and
+;; services.
 ;; Everything else is advanced: the Global scope folds it into one line
 ;; saying how many there are and how many were changed, and `a' (or the
 ;; button there) shows them, by module.  The Project scope shows only
 ;; the settings that layer (model, permission mode, thinking, allowed
-;; directories, budget, sandbox policy, non-interactive), in their
+;; directories, sandbox policy, non-interactive), in their
 ;; sections, and folds the rest, which have a global value
 ;; only, into one line.  The options of the interface itself live in
 ;; this Emacs, not the harness: a button at the end opens Customize on
@@ -27,8 +28,8 @@
 ;; Each setting is a `wid-edit' widget built from the option's customize
 ;; type, its documentation, and a line saying where the value in effect
 ;; here comes from (global, project or a directory below the root).
-;; Toggles and menus save at once; text, numbers and lists save with
-;; RET or C-c C-c, and C-x C-s saves every edit of the scope.  In the
+;; Toggles, menus and models save at once; text, numbers and lists save
+;; with RET or C-c C-c, and C-x C-s saves every edit of the scope.  In the
 ;; Project scope an overridden setting offers [Remove override]; in the
 ;; Global scope a customized one offers [Reset to default].  Secrets
 ;; never reach the page: they show as set or not, and are set through
@@ -41,6 +42,14 @@
 ;; a list, each record folds into a line that sums it up, [Edit] opens
 ;; it and [Hide] folds it again; a record added with [INS] starts open,
 ;; from the type's starting value.  See `harness-ui-config--present'.
+;;
+;; A setting that names a model (its type says so with `:names'; see
+;; `harness-model') is a dropdown rather than a text field: a button
+;; naming the model, then its id and context window.  The button opens
+;; a picker of the models the providers list (`provider/models'), by
+;; provider, with their context and price; text that matches none is
+;; taken as typed, so a model no provider lists can still be named, and
+;; the page then warns that the harness does not know it.
 ;;
 ;; The page computes nothing itself.  It asks the harness with
 ;; `_harness/config/describe', saves with `_harness/config/set' and
@@ -91,7 +100,7 @@
     ("merge" . "Merge queue") ("naming" . "Session naming") ("perms" . "Permissions")
     ("provider" . "Models") ("provider-claude" . "Claude Code") ("provider-copilot" . "GitHub Copilot")
     ("provider-openai" . "OpenAI-compatible providers") ("provider-bedrock" . "AWS Bedrock")
-    ("provider-demo" . "Demo provider")
+    ("provider-demo" . "Demo provider") ("pet" . "Companion pet")
     ("sandbox" . "Sandbox") ("session" . "Sessions") ("skills" . "Skills") ("tasks" . "Task mode")
     ("tools" . "Tools") ("tools-fs" . "File tools") ("tools-sessions" . "Session tools")
     ("tools-shell" . "Shell tools") ("tools-web" . "Web tools") ("tools-agent" . "Agent tools")
@@ -171,11 +180,14 @@ with [INS], starts open.")
   (memq (car-safe type) '(choice radio menu-choice radio-button-choice)))
 
 (defun harness-ui-config--discrete-p (type)
-  "Non-nil when every value of TYPE is picked rather than typed."
+  "Non-nil when every value of TYPE is picked rather than typed.
+A model is picked too, from a picker that takes a name typed into it
+as a pick (`harness-ui-config--picker')."
   (or (memq (if (consp type) (car type) type) '(boolean toggle))
       (and (harness-ui-config--choice-p type)
            (let ((args (harness-ui-config--type-args type)))
-             (and args (cl-every (lambda (a) (memq (car-safe a) '(const item))) args))))))
+             (and args (cl-every (lambda (a) (memq (car-safe a) '(const item))) args))))
+      (and (harness-ui-config--picker type) t)))
 
 (defun harness-ui-config--fits-p (type value)
   "Non-nil when VALUE fits TYPE."
@@ -190,14 +202,25 @@ with [INS], starts open.")
              when (and (eq (car-safe arg) 'const) (cdr arg) (equal (car (last arg)) value))
              return (or (plist-get (cdr arg) :tag) (format "%s" value)))))
 
+(defun harness-ui-config--show-models (type value)
+  "Return VALUE of customize TYPE by the names of the models in it, or nil.
+That is when its strings name models (`harness-ui-config--picker'),
+alone, in a menu or in a list: claude:claude-fable-5-1 is
+\"Fable 5.1 (Claude)\"."
+  (let ((picker (harness-ui-config--picker type))
+        (entry (and (harness-ui-config--type-is type 'editable-list)
+                    (harness-ui-config--picker (car (nth 2 (harness-ui-config--type-split type)))))))
+    (cond ((and picker (stringp value) (not (string-empty-p value)))
+           (harness-ui-config--model-label picker value))
+          ((and entry (consp value) (cl-every #'stringp value))
+           (mapconcat (lambda (v) (harness-ui-config--model-label entry v)) value ", ")))))
+
 (defun harness-ui-config--show (value setting)
   "Return VALUE of SETTING the way the page writes it in a sentence."
   (let ((type (harness-ui-config--type setting)))
     (or (harness-ui-config--const-label type value)
+        (harness-ui-config--show-models type value)
         (cond ((eq type 'boolean) (if value "on" "off"))
-              ((and (stringp value) (string-suffix-p "-model" (plist-get setting :key))
-                    (string-search ":" value))
-               (harness-ui-model-label value))
               ((null value) "none")
               ;; Records by name, rather than as Lisp.
               ((and (harness-ui-config--form-p type) (harness-ui-config--fits-p type value))
@@ -423,8 +446,11 @@ open."
 ;;   key to the constant, and the constant's tag says what that means.
 ;; - The records of a list fold into one line each: their first key's
 ;;   value, then the others in brief, and [Edit].
-;; - Booleans read on and off, and the text fields of a model setting
-;;   complete model ids.
+;; - Booleans read on and off.
+;; - A string whose type says it names a model (`:names', as in
+;;   `harness-model'), alone or in a menu of constants, is a dropdown:
+;;   a button naming the model, which opens a picker of the models the
+;;   providers list (`harness-ui-config-model').
 
 (defun harness-ui-config--type-split (type)
   "Return (NAME PROPS ARGS) of customize TYPE, PROPS a plist."
@@ -537,11 +563,10 @@ The value then follows a name the page writes itself."
                                                        (block (string-remove-prefix "\n" format))
                                                        (t format))))))
 
-(defun harness-ui-config--present-record (props model &optional width)
+(defun harness-ui-config--present-record (props &optional width)
   "Return a record type, the plist type with PROPS as the page draws it.
-MODEL is as for `harness-ui-config--present'; WIDTH, when given, is the
-least width of the names."
-  (let* ((options (mapcar (lambda (o) (list (car o) (harness-ui-config--present (cadr o) model)))
+WIDTH, when given, is the least width of the names."
+  (let* ((options (mapcar (lambda (o) (list (car o) (harness-ui-config--present (cadr o))))
                           (harness-ui-config--options props)))
          (width (max (or width 0) (harness-ui-config--label-width options)))
          (rest props) kept)
@@ -556,22 +581,20 @@ least width of the names."
       ;; Keys the type does not name: shown to be removed, never offered.
       (editable-list :inline t :format "%v" :entry-format "%d %v" :offset 6
                      (group :inline t :format "%v"
-                            ,(harness-ui-config--present (or (plist-get props :key-type) '(symbol :tag "Other key")) model)
-                            ,(harness-ui-config--present (or (plist-get props :value-type) '(sexp :tag "Value")) model))))))
+                            ,(harness-ui-config--present (or (plist-get props :key-type) '(symbol :tag "Other key")))
+                            ,(harness-ui-config--present (or (plist-get props :value-type) '(sexp :tag "Value"))))))))
 
-(defun harness-ui-config--present-entry (type model)
-  "Return TYPE, an entry of a list, as the page draws it: a record folds.
-MODEL is as for `harness-ui-config--present'."
-  (let ((presented (harness-ui-config--present type model)))
+(defun harness-ui-config--present-entry (type)
+  "Return TYPE, an entry of a list, as the page draws it: a record folds."
+  (let ((presented (harness-ui-config--present type)))
     (if (harness-ui-config--record-p type)
         ;; The line the record folds into names it: no tag above the form.
         `(harness-ui-config-fold :entry-type ,type ,(harness-ui-config--type-put presented :format "%v"))
       presented)))
 
-(defun harness-ui-config--present-cons (props args model)
+(defun harness-ui-config--present-cons (props args)
   "Return a cons type with PROPS of ARGS, a name and a record, lined up.
-The name's value starts where the record's values do.  MODEL is as for
-`harness-ui-config--present'."
+The name's value starts where the record's values do."
   (pcase-let* ((`(,car-type ,cdr-type) args)
                (tag (harness-ui-config--type-prop car-type :tag))
                (record-props (nth 1 (harness-ui-config--type-split cdr-type)))
@@ -581,42 +604,39 @@ The name's value starts where the record's values do.  MODEL is as for
      'cons props
      (list (if (and tag (equal (harness-ui-config--untagged-format car-type) "%v"))
                (harness-ui-config--type-put
-                (harness-ui-config--type-put (harness-ui-config--present car-type model)
+                (harness-ui-config--type-put (harness-ui-config--present car-type)
                                              :format (concat "%{%t%}:" (make-string (- (+ width 4) (string-width tag)) ?\s)
                                                              " %v"))
                 :sample-face 'harness-settings-label-face)
-             (harness-ui-config--present car-type model))
+             (harness-ui-config--present car-type))
            ;; The record's keys follow the name, without a tag of their own.
-           (harness-ui-config--type-put (harness-ui-config--present-record record-props model width)
+           (harness-ui-config--type-put (harness-ui-config--present-record record-props width)
                                         :format "%v")))))
 
-(defun harness-ui-config--present (type &optional model)
+(defun harness-ui-config--present (type)
   "Return customize TYPE the way the settings page draws it.
-MODEL non-nil completes model ids in its text fields.  The type accepts
-the same values: only the look changes (see the commentary of this
-section)."
+The type accepts the same values: only the look changes (see the
+commentary of this section)."
   (pcase-let ((`(,name ,props ,args) (harness-ui-config--type-split type)))
     (cond
+     ((harness-ui-config--picker type))
      ((and (harness-ui-config--type-is type 'plist) (plist-get props :options))
-      (harness-ui-config--present-record props model))
+      (harness-ui-config--present-record props))
      ((and (eq name 'cons) (= (length args) 2) (not (harness-ui-config--record-p (car args)))
            (harness-ui-config--record-p (cadr args)))
-      (harness-ui-config--present-cons props args model))
+      (harness-ui-config--present-cons props args))
      ((harness-ui-config--type-is type 'editable-list)
-      (harness-ui-config--type-join name props (mapcar (lambda (a) (harness-ui-config--present-entry a model))
-                                                       args)))
+      (harness-ui-config--type-join name props (mapcar #'harness-ui-config--present-entry args)))
      ((harness-ui-config--type-is type 'plist 'alist)
       (let ((props (copy-sequence props)))
         (dolist (k '(:key-type :value-type))
           (when (plist-get props k)
-            (setq props (plist-put props k (harness-ui-config--present (plist-get props k) model)))))
+            (setq props (plist-put props k (harness-ui-config--present (plist-get props k))))))
         (harness-ui-config--type-join name props args)))
      ((harness-ui-config--type-is type 'boolean)
       (harness-ui-config--type-join name (append (list :on "on" :off "off") props) args))
-     ((and model (harness-ui-config--type-is type 'string) (not (plist-get props :completions)))
-      (harness-ui-config--type-put type :completions (harness-ui-config--model-ids)))
      ((harness-ui-config--type-is type 'menu-choice 'radio-button-choice 'group 'checklist)
-      (harness-ui-config--type-join name props (mapcar (lambda (a) (harness-ui-config--present a model)) args)))
+      (harness-ui-config--type-join name props (mapcar #'harness-ui-config--present args)))
      (t type))))
 
 ;;;;; Records
@@ -847,6 +867,302 @@ the other scope's page), what was noted before stays."
                    collect (cons (harness-ui-config--setting-key-of fold)
                                  (condition-case nil (widget-value fold) (error nil))))
           harness-ui-config--folds nil)))
+
+;;;;; Models
+;;
+;; A string that names a model says so in its type, with `:names' (see
+;; `harness-model'), and the page draws it as a dropdown rather than a
+;; text field, whose typo would go unnoticed until a session ran on a
+;; model no provider knows, with a context window guessed.  The picker
+;; offers what the providers list, from the UI's catalogue of
+;; `provider/models' (`harness-ui--models'), so it opens at once; text
+;; that matches nothing it offers is taken as typed, for a model a
+;; provider does not list.
+
+(defvar harness-ui-config--model-history nil
+  "Models picked or typed on the settings page.")
+
+(define-widget 'harness-ui-config-model 'default
+  "A model on the settings page: a button naming it, which opens a picker.
+`:names' lists what the value may name: `model', an id PROVIDER:MODEL,
+and `provider', a provider id.  `:provider' is a provider whose models
+are named without it.  `:choices' are constants the picker offers first,
+as (TAG . VALUE).  Made by `harness-ui-config--picker'."
+  :format "%{%t%}: %v\n"
+  :tag "Model"
+  :value ""
+  :value-create #'harness-ui-config--model-value-create
+  :value-delete #'widget-children-value-delete
+  :value-get #'widget-value-value-get
+  :match #'harness-ui-config--model-match
+  :validate #'harness-ui-config--model-validate)
+
+(defun harness-ui-config--names (type)
+  "Return what the strings of customize TYPE name, as a list, or nil.
+A string type says so with `:names': `model', or a list such as
+\(provider model); see `harness-model'."
+  (when (harness-ui-config--type-is type 'string)
+    (let ((names (harness-ui-config--type-prop type :names)))
+      (if (listp names) names (list names)))))
+
+(defun harness-ui-config--picker (type)
+  "Return the model picker that draws customize TYPE, or nil.
+That is for a string that names models (`harness-ui-config--names'),
+alone or in a menu whose other alternatives are constants, which the
+picker offers first.  The picker takes the same values."
+  (pcase-let* ((`(,_ ,props ,args) (harness-ui-config--type-split type))
+               (menu (and (harness-ui-config--type-is type 'menu-choice 'radio-button-choice) args))
+               (string (if menu (cl-find-if #'harness-ui-config--names menu)
+                         (and (harness-ui-config--names type) type)))
+               (consts (remq string menu)))
+    (when (and string (cl-every (lambda (a) (harness-ui-config--type-is a 'item)) consts))
+      (let* ((sprops (nth 1 (harness-ui-config--type-split string)))
+             (names (harness-ui-config--names string))
+             (value-of (lambda (c) (widget-get (widget-convert c) :value)))
+             (tag (or (and menu (plist-get props :tag)) (plist-get sprops :tag)
+                      (if (memq 'provider names) "Provider or model" "Model"))))
+        `(harness-ui-config-model
+          :tag ,tag
+          ,@(when-let* ((doc (or (plist-get props :doc) (plist-get sprops :doc)))) (list :doc doc))
+          :names ,names
+          ,@(when-let* ((provider (plist-get sprops :provider))) (list :provider provider))
+          ,@(when consts
+              (list :choices (mapcar (lambda (c)
+                                       (let ((v (funcall value-of c)))
+                                         (cons (or (harness-ui-config--type-prop c :tag) (format "%s" v)) v)))
+                                     consts)))
+          ;; What a new one starts from, as the type has it.
+          :value ,(if (and menu (not (eq (car menu) string)))
+                      (funcall value-of (car menu))
+                    (or (plist-get sprops :value) "")))))))
+
+(defun harness-ui-config--model-match (widget value)
+  "Non-nil when VALUE fits model WIDGET: a string, or one of its choices."
+  (or (stringp value) (and (rassoc value (widget-get widget :choices)) t)))
+
+(defun harness-ui-config--model-validate (widget)
+  "Return model WIDGET, with the error to show, when it names nothing yet."
+  (let ((value (widget-get widget :value)))
+    (when (and (equal value "") (not (rassoc value (widget-get widget :choices))))
+      (widget-put widget :error (if (memq 'provider (widget-get widget :names))
+                                    "Pick a provider or a model"
+                                  "Pick a model"))
+      widget)))
+
+(defun harness-ui-config--catalogue-providers ()
+  "Return the providers of the UI's catalogue as (ID . LABEL), in its order."
+  (let (out)
+    (maphash (lambda (id m)
+               (let ((pid (car (split-string id ":"))))
+                 (unless (assoc pid out)
+                   (push (cons pid (or (plist-get m :provider-label) (capitalize pid))) out))))
+             harness-ui--models)
+    (nreverse out)))
+
+(defun harness-ui-config--model-note (model)
+  "Return what the page says of MODEL, a catalogue plist: its id and context."
+  (let ((context (plist-get model :context-window)))
+    (concat (plist-get model :id)
+            (if (numberp context) (format " · %s context" (harness-format-tokens context)) ""))))
+
+(defun harness-ui-config--model-annotation (model)
+  "Return what the picker says of MODEL, a catalogue plist: context and price."
+  (let* ((context (plist-get model :context-window))
+         (pricing (plist-get model :pricing))
+         (in (and (consp pricing) (plist-get pricing :input)))
+         (out (and (consp pricing) (plist-get pricing :output))))
+    (string-join (delq nil (list (and (numberp context)
+                                      (format "%s context" (harness-format-tokens context)))
+                                 (and (numberp in) (numberp out)
+                                      (format "$%g/$%g per M tokens" in out))))
+                 " · ")))
+
+(defun harness-ui-config--model-problem (value names provider)
+  "Return why VALUE, which no provider lists, looks wrong, or nil.
+NAMES and PROVIDER are as `harness-ui-config-model' has them.  Nothing
+looks wrong while the providers' models are not known."
+  (let ((providers (harness-ui-config--catalogue-providers)))
+    (cond
+     ((null providers) nil)
+     (provider
+      (when-let* ((label (cdr (assoc (format "%s" provider) providers))))
+        (format "%s lists no model by this name" label)))
+     ((string-search ":" value) "No provider lists this model, so its context window is a guess")
+     ((memq 'provider names) "No provider has this id, and a model id reads PROVIDER:MODEL")
+     (t "No provider lists this model: a model id reads PROVIDER:MODEL"))))
+
+(defun harness-ui-config--model-about (value names provider choices)
+  "Return what the page says of VALUE, which a model setting holds.
+NAMES, PROVIDER and CHOICES are as `harness-ui-config-model' has them.
+The answer is a plist: `:label' names VALUE, `:note' says more of it,
+and `:problem' why it looks wrong, when it does."
+  (cond
+   ((rassoc value choices) (list :label (car (rassoc value choices))))
+   ((not (stringp value)) (list :label (format "%S" value)))
+   ((string-empty-p value)
+    (list :label (if (memq 'provider names) "Choose a provider or model" "Choose a model")))
+   (t
+    (let* ((id (if provider (format "%s:%s" provider value) value))
+           (model (gethash id harness-ui--models))
+           (provider-label (and (memq 'provider names)
+                                (cdr (assoc value (harness-ui-config--catalogue-providers))))))
+      (cond
+       (model (list :label (harness-ui-model-label id) :note (harness-ui-config--model-note model)))
+       (provider-label
+        (list :label provider-label
+              :note (format "%s · that provider's model of similar ability" value)))
+       (t (list :label value :problem (harness-ui-config--model-problem value names provider))))))))
+
+(defun harness-ui-config--model-label (picker value)
+  "Return the name the model PICKER, a widget type, gives VALUE."
+  (plist-get (harness-ui-config--model-about value
+                                             (harness-ui-config--type-prop picker :names)
+                                             (harness-ui-config--type-prop picker :provider)
+                                             (harness-ui-config--type-prop picker :choices))
+             :label))
+
+(defun harness-ui-config--model-value-create (widget)
+  "Insert model WIDGET: a button naming its value, then what is known of it."
+  (let* ((about (harness-ui-config--model-about (widget-get widget :value) (widget-get widget :names)
+                                                (widget-get widget :provider) (widget-get widget :choices)))
+         (problem (plist-get about :problem)))
+    (widget-put widget :buttons
+                (list (widget-create-child-and-convert
+                       widget 'push-button
+                       :help-echo "Pick from what the providers list; text that matches none is used as typed"
+                       :notify #'harness-ui-config--model-pick
+                       (concat (plist-get about :label) " ▾"))))
+    (when-let* ((note (plist-get about :note)))
+      (insert "  " (propertize note 'face 'harness-settings-doc-face)))
+    (when problem
+      (let ((column (+ 3 (save-restriction (widen) (current-indentation)))))
+        (insert "\n" (make-string column ?\s)
+                (propertize (concat (harness-ui-icon 'harness-icon-warning) " " problem) 'face 'warning))))))
+
+(defun harness-ui-config--model-rows (names provider choices)
+  "Return what the picker of a model setting offers, as rows.
+NAMES, PROVIDER and CHOICES are as `harness-ui-config-model' has them:
+the choices come first, then the providers when it names them, then the
+models of the UI's catalogue, by provider.  A row is (TEXT GROUP VALUE
+NOTE LABEL ID): the candidate, its group, the value it stands for, its
+annotation, and the name and id the candidate shows."
+  (let* ((provider (and provider (format "%s" provider)))
+         (items                         ; (LABEL ID GROUP VALUE NOTE)
+          (append
+           (when (memq 'provider names)
+             (mapcar (lambda (p) (list (cdr p) (car p) "Providers" (car p) "its model of similar ability"))
+                     (harness-ui-config--catalogue-providers)))
+           (when (memq 'model names)
+             (let (out)
+               (maphash (lambda (id m)
+                          (let ((pid (car (split-string id ":"))))
+                            (when (or (null provider) (equal pid provider))
+                              (push (list (harness-ui-model-label id) id
+                                          (or (plist-get m :provider-label) (capitalize pid))
+                                          (if provider (substring id (1+ (length pid))) id)
+                                          (harness-ui-config--model-annotation m))
+                                    out))))
+                        harness-ui--models)
+               (nreverse out)))))
+         ;; Names, ids and notes in columns, but for the longest few,
+         ;; which would push the others out of the window.
+         (width (min 40 (apply #'max 0 (mapcar (lambda (i) (string-width (car i))) items))))
+         (id-width (min 32 (apply #'max 0 (mapcar (lambda (i) (string-width (nth 1 i))) items)))))
+    (append
+     (mapcar (lambda (c) (list (car c) "Choices" (cdr c) nil (car c) nil)) choices)
+     (mapcar (lambda (i)
+               (pcase-let ((`(,label ,id ,group ,value ,note) i))
+                 (list (concat label (make-string (max 2 (- (+ width 2) (string-width label))) ?\s)
+                               (propertize id 'face 'completions-annotations))
+                       group value
+                       (and (not (string-empty-p note))
+                            (concat (make-string (max 0 (- id-width (string-width id))) ?\s) note))
+                       label id)))
+             items))))
+
+(defun harness-ui-config--model-input (input rows provider)
+  "Return (VALUE) for INPUT, read by a picker offering ROWS, or nil for none.
+INPUT is the text of a row, its name, id or value alone, or else a
+value as typed.  PROVIDER is as `harness-ui-config-model' has it: an id
+typed with it is taken without it."
+  (let ((text (string-trim input))
+        (prefix (and provider (format "%s:" provider)))
+        row)
+    (cond
+     ((string-empty-p text) nil)
+     ((setq row (assoc input rows)) (list (nth 2 row)))
+     ((setq row (cl-find-if (lambda (r) (member text (list (nth 4 r) (nth 5 r) (nth 2 r)))) rows))
+      (list (nth 2 row)))
+     ((and prefix (string-prefix-p prefix text)) (list (substring text (length prefix))))
+     (t (list text)))))
+
+(defun harness-ui-config--model-read (widget)
+  "Read a value for model WIDGET in the minibuffer; return (VALUE), or nil.
+The picker offers the models the providers list, grouped by provider,
+with their context and price.  Text that matches none is the value as
+typed; empty text picks nothing."
+  (let* ((names (widget-get widget :names))
+         (provider (widget-get widget :provider))
+         (choices (widget-get widget :choices))
+         (value (widget-get widget :value))
+         (rows (harness-ui-config--model-rows names provider choices))
+         (current (car (cl-find value rows :key (lambda (r) (nth 2 r)) :test #'equal)))
+         (empty (zerop (hash-table-count harness-ui--models)))
+         (table (lambda (string pred action)
+                  (if (eq action 'metadata)
+                      `(metadata
+                        (category . harness-model)
+                        (group-function . ,(lambda (text transform)
+                                             (if transform text (nth 1 (assoc text rows)))))
+                        (annotation-function . ,(lambda (text)
+                                                  (when-let* ((note (nth 3 (assoc text rows))))
+                                                    (concat "  " (propertize note 'face 'completions-annotations)))))
+                        (display-sort-function . identity)
+                        (cycle-sort-function . identity))
+                    (complete-with-action action rows string pred)))))
+    ;; Not known yet (the harness is starting): ask, and take what is typed.
+    (when empty (ignore-errors (harness-ui-refresh-models)))
+    (harness-ui-config--model-input
+     (completing-read (format-prompt (concat (or (widget-get widget :tag) "Model")
+                                             (if empty " (no models listed yet: type an id)" ""))
+                                     (plist-get (harness-ui-config--model-about value names provider choices)
+                                                :label))
+                      table nil nil nil 'harness-ui-config--model-history
+                      (delq nil (list current (and (stringp value) (not (string-empty-p value)) value))))
+     rows provider)))
+
+(defun harness-ui-config--live-p (widget setting)
+  "Non-nil when WIDGET, part of SETTING, is still drawn on the page."
+  (let ((from (widget-get widget :from)))
+    (and (markerp from) (marker-buffer from)
+         (or (null setting) (eq setting (harness-ui-config--widget (widget-get setting :key)))))))
+
+(defun harness-ui-config--model-set (widget value)
+  "Give model WIDGET the VALUE picked, and tell its setting."
+  (widget-value-set widget value)
+  (widget-setup)
+  (widget-apply widget :notify widget))
+
+(defun harness-ui-config--model-pick (button &rest _)
+  "Pick a value for the model widget of BUTTON, in the minibuffer.
+A pick of a setting saves it at once, like a menu's; one of an entry of
+a list is an edit, saved with the list.  Should the page be drawn again
+while the picker is open, a setting's pick goes to the setting drawn."
+  (let* ((widget (widget-get button :parent))
+         (setting (harness-ui-config--setting-of widget))
+         (whole (and setting (eq widget (car (widget-get setting :children)))))
+         (buffer (current-buffer))
+         (picked (harness-ui-config--model-read widget)))
+    (when (and picked (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (let ((target (cond ((harness-ui-config--live-p widget setting) widget)
+                            (whole
+                             (when-let* ((now (harness-ui-config--widget (widget-get setting :key)))
+                                         (child (car (widget-get now :children))))
+                               (and (eq (widget-type child) 'harness-ui-config-model) child))))))
+          (if target
+              (harness-ui-config--model-set target (car picked))
+            (message "The page changed meanwhile: pick again")))))))
 
 ;;;;; Summaries
 
@@ -1120,8 +1436,7 @@ ORIGINAL is the value saved in the page's scope."
   (let* ((key (plist-get setting :key))
          ;; The saved value picks the editor, so an edit never changes it.
          (fits (harness-ui-config--fits-p type original))
-         ;; M-TAB completes model ids from the catalogue in a model setting.
-         (edit-type (if fits (harness-ui-config--present type (string-suffix-p "-model" key)) 'sexp))
+         (edit-type (if fits (harness-ui-config--present type) 'sexp))
          (widget (let ((harness-ui-config--drawing t))
                    (widget-create 'harness-ui-config-setting
                                   :key key :tag label :edit-type edit-type
@@ -1846,12 +2161,6 @@ buffer to the session's working directory.  SCOPE, `global' or
     buf))
 
 ;;;; Live refresh
-
-(defun harness-ui-config--model-ids ()
-  "Return the ids of the models in the UI's catalogue."
-  (let (ids)
-    (maphash (lambda (id _) (push id ids)) harness-ui--models)
-    (sort ids #'string<)))
 
 (defun harness-ui-config--on-event (event _args)
   "Reload every settings page after a setting changed (EVENT)."

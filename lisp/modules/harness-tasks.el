@@ -193,7 +193,8 @@ own setting, from the board or `task/submit', wins over both."
 
 (defcustom harness-tasks-model nil
   "Model of task sessions, or nil for the configured default."
-  :type '(choice (const :tag "Configured default" nil) (string :tag "Model")) :group 'harness)
+  :type '(choice (const :tag "Configured default" nil) (string :tag "Model" :names model))
+  :group 'harness)
 
 (defcustom harness-tasks-thinking nil
   "Thinking level of task sessions, or nil for the configured default."
@@ -241,7 +242,8 @@ how to coordinate with their sessions.")
 
 (defcustom harness-tasks-refine-model nil
   "Model that writes backlog tasks up, or nil for the task's own model."
-  :type '(choice (const :tag "The task's model" nil) (string :tag "Model")) :group 'harness)
+  :type '(choice (const :tag "The task's model" nil) (string :tag "Model" :names model))
+  :group 'harness)
 
 (defcustom harness-tasks-refine-thinking "low"
   "Thinking level of refining a backlog task, or nil for the task's own.
@@ -291,7 +293,7 @@ Whichever comes first of this, `harness-tasks-recap-turns' and
 to the session's own model; nil uses the session's own model."
   :type '(choice (const :tag "Provider's cheap tier" auto)
                  (const :tag "The task's model" nil)
-                 (string :tag "Model"))
+                 (string :tag "Model" :names model))
   :group 'harness)
 
 (defcustom harness-tasks-recap-thinking nil

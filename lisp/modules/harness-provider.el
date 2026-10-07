@@ -11,9 +11,22 @@
 ;; The catalogue is cached per provider.  Defining a provider again, as
 ;; every reload does, forgets that provider's models and no other's,
 ;; and the harness asks for them again on its own: `provider/model'
-;; asks a provider whose models are not cached.  A static catalogue
-;; (Claude Code's, say) answers at once, so its models are always
-;; found; nothing waits for a client to ask `provider/models' first.
+;; asks a provider whose models are not cached.  A provider that
+;; answers at once (Claude Code's, from what its CLI last listed) has
+;; its models found from the first lookup; nothing waits for a client
+;; to ask `provider/models' first.  A provider that learns more later
+;; (a new listing, the window a model really has) lists again with
+;; `harness-provider-relist'.
+;;
+;; No model gets a context window silently.  One its provider sizes
+;; has that size; one it does not (a listing of bare ids, a name it
+;; does not list) gets an estimate, flagged `:context-window-estimated'
+;; with what it is based on in `:context-window-basis': the same model
+;; as another provider lists it, else the closest model of its own
+;; provider, else the window its provider's models mostly have, else
+;; `harness-provider-fallback-context-window'.  A provider can say
+;; more about a name it does not list (an alias, a variant) through
+;; its `:resolve' function.
 
 ;;; Code:
 
@@ -97,6 +110,16 @@ reads besides those of every model."
 (defvar harness-providers (make-hash-table :test 'eq)
   "Provider id -> `harness-provider'.")
 
+(defcustom harness-provider-fallback-context-window 200000
+  "Context window, in tokens, of a model nothing else gives a size to.
+A model whose provider does not say how large its window is gets the
+window of the same model at another provider, else that of the closest
+model its provider lists, else the window most of its provider's
+models have; this is what is left when the harness knows none of
+them.  Such a window is an estimate: the model says so with
+`:context-window-estimated', and the harness logs it."
+  :type '(integer :tag "Tokens") :group 'harness)
+
 ;;;; Model catalogue cache
 
 (defvar harness-provider--models nil
@@ -106,7 +129,14 @@ reads besides those of every model."
 
 (defvar harness-provider--models-by-provider (make-hash-table :test 'eq)
   "Provider id -> its normalised model list, filled as each provider answers.
-A provider whose listing failed maps to nil; one not asked yet is absent.")
+A provider whose listing failed maps to nil; one not asked yet is absent.
+A model its provider does not size has no window here; the catalogue
+\(`harness-provider--catalogue') holds it with an estimate.")
+
+(defvar harness-provider--catalogue (make-hash-table :test 'eq)
+  "Provider id -> its models as the catalogue gives them, estimates filled in.
+Rebuilt from `harness-provider--models-by-provider' whenever a listing
+changes, so estimates follow what the other providers list.")
 
 (defvar harness-provider--model-index (make-hash-table :test 'equal)
   "Model id -> its plist in `harness-provider--models'.")
@@ -114,12 +144,30 @@ A provider whose listing failed maps to nil; one not asked yet is absent.")
 (defvar harness-provider--fetching (make-hash-table :test 'eq)
   "Provider id -> promise of its model listing, while one is in flight.")
 
+(defvar harness-provider--lookups (make-hash-table :test 'equal)
+  "Model id -> the plist `provider/model' made for a model nobody lists.
+Forgotten whenever the catalogue changes, as the estimate may change too.")
+
+(defvar harness-provider--estimate-index nil
+  "What estimates are drawn from, made once per catalogue: see
+`harness-provider--estimate-index'.  Nil until needed after a change.")
+
+(defvar harness-provider--warned (make-hash-table :test 'equal)
+  "Keys of the estimates the log has already told about.")
+
 (defun harness-provider--rebuild-cache ()
-  "Rebuild `harness-provider--models' and its index from the cached listings."
+  "Rebuild `harness-provider--models' and its index from the cached listings.
+A model without a window gets its estimate here, from every listing
+cached now (see `harness-provider--estimate')."
+  (setq harness-provider--estimate-index nil)
+  (clrhash harness-provider--lookups)
+  (clrhash harness-provider--catalogue)
   (let (all)
     (maphash (lambda (id models)
                (when (gethash id harness-providers)
-                 (setq all (append all models))))
+                 (let ((filled (harness-provider--fill-windows id models)))
+                   (puthash id filled harness-provider--catalogue)
+                   (setq all (append all filled)))))
              harness-provider--models-by-provider)
     (setq harness-provider--models all)
     (clrhash harness-provider--model-index)
@@ -127,6 +175,162 @@ A provider whose listing failed maps to nil; one not asked yet is absent.")
       (let ((id (plist-get m :id)))
         (unless (gethash id harness-provider--model-index)
           (puthash id m harness-provider--model-index))))))
+
+;;;; Estimated context windows
+
+(defun harness-provider--window-p (value)
+  "Non-nil when VALUE is a usable context window: a positive number."
+  (and (numberp value) (> value 0)))
+
+(defun harness-provider--sized-p (model)
+  "Non-nil when MODEL's window comes from its provider, not from an estimate."
+  (and (harness-provider--window-p (plist-get model :context-window))
+       (not (plist-get model :context-window-estimated))))
+
+(defun harness-provider-model-key (name)
+  "Return model NAME reduced to what names the model whoever serves it.
+The vendor or region a provider puts before it goes (\"openai/\",
+\"us.anthropic.\"), and so do a release date and a Bedrock version
+\(\"-20251001\", \"@20251001\", \"-v1:0\"); dots become dashes, so
+\"anthropic/claude-opus-4.5\" and \"claude-opus-4-5-20251101\" have one
+key.  A variant suffix such as \"[1m]\" stays: it is another window."
+  (let ((key (downcase (or name ""))))
+    (setq key (replace-regexp-in-string "\\`.*/" "" key))
+    (setq key (replace-regexp-in-string
+               "\\`\\(?:\\(?:us\\|eu\\|apac\\|global\\|jp\\|au\\|ca\\|us-gov\\)\\.\\)?\\(?:[a-z0-9-]+\\.\\)?\\([a-z]\\)"
+               "\\1" key))
+    (setq key (replace-regexp-in-string "\\(?:-v[0-9]+\\)?:[0-9]+\\'" "" key))
+    (setq key (replace-regexp-in-string "[-@]20[0-9][0-9]-?[01][0-9]-?[0-3][0-9]\\'" "" key))
+    (setq key (replace-regexp-in-string "-latest\\'" "" key))
+    (replace-regexp-in-string "[._ ]" "-" key)))
+
+(defun harness-provider--key-words (key)
+  "Return the words of model KEY, split at its dashes."
+  (split-string key "-" t))
+
+(defun harness-provider--most-common (windows)
+  "Return the window most of WINDOWS have; the largest of the most common."
+  (let ((counts nil))
+    (dolist (w windows)
+      (let ((cell (assoc w counts)))
+        (if cell (cl-incf (cdr cell)) (push (cons w 1) counts))))
+    (car (car (sort counts (lambda (a b) (or (> (cdr a) (cdr b))
+                                             (and (= (cdr a) (cdr b)) (> (car a) (car b))))))))))
+
+(defun harness-provider--estimate-index ()
+  "Return what estimates are drawn from, made from the cached listings.
+The value is (BY-KEY . BY-PROVIDER): BY-KEY maps a model key (see
+`harness-provider-model-key') to the (WINDOW . ID) of the models with
+that key, BY-PROVIDER a provider id to the (WORDS WINDOW ID) of its
+models.  Only windows the providers gave count; no estimate is drawn
+from another."
+  (or harness-provider--estimate-index
+      (let ((by-key (make-hash-table :test 'equal))
+            (by-provider (make-hash-table :test 'eq)))
+        (maphash (lambda (pid models)
+                   (when (gethash pid harness-providers)
+                     (dolist (m models)
+                       (when (harness-provider--sized-p m)
+                         (let ((key (harness-provider-model-key (plist-get m :name)))
+                               (window (plist-get m :context-window))
+                               (id (plist-get m :id)))
+                           (push (cons window id) (gethash key by-key))
+                           (push (list (harness-provider--key-words key) window id)
+                                 (gethash pid by-provider)))))))
+                 harness-provider--models-by-provider)
+        (setq harness-provider--estimate-index (cons by-key by-provider)))))
+
+(defun harness-provider--common-words (a b)
+  "Return how many leading words the word lists A and B share."
+  (let ((n 0))
+    (while (and a b (equal (car a) (car b)))
+      (setq n (1+ n) a (cdr a) b (cdr b)))
+    n))
+
+(defun harness-provider--same-model-window (pid name)
+  "Return (WINDOW . BASIS) of model NAME of PID as other listings size it, or nil.
+The models of the same key (see `harness-provider-model-key') that a
+provider sizes count, PID's own first; of several, the window most of
+them have wins, and BASIS is the id of one that has it."
+  (when-let* ((same (gethash (harness-provider-model-key name) (car (harness-provider--estimate-index)))))
+    (let* ((mine (cl-remove-if-not
+                  (lambda (cell) (equal (car (harness-provider-parse-model (cdr cell))) pid))
+                  same))
+           (pool (or mine same))
+           (window (harness-provider--most-common (mapcar #'car pool))))
+      (cons window (cdr (cl-find window pool :key #'car))))))
+
+(defun harness-provider--closest-window (pid name)
+  "Return (WINDOW . BASIS) of the models of PID closest to NAME by name, or nil.
+Closest are those sharing the most leading words with NAME's key, two
+at least, so \"claude-opus-5-6\" takes after \"claude-opus-5-5\" but
+not after \"claude-haiku-4-5\".  Only models PID sizes count; of
+several as close, the window most of them have wins, and BASIS is the
+id of one that has it."
+  (let ((words (harness-provider--key-words (harness-provider-model-key name)))
+        (best 1) pool)
+    (dolist (entry (gethash pid (cdr (harness-provider--estimate-index))))
+      (let ((n (harness-provider--common-words words (car entry))))
+        (cond ((> n best) (setq best n pool (list entry)))
+              ((and (= n best) (> n 1)) (push entry pool)))))
+    (when pool
+      (let ((window (harness-provider--most-common (mapcar #'cadr pool))))
+        (cons window (nth 2 (cl-find window pool :key #'cadr)))))))
+
+(defun harness-provider--estimate (pid name)
+  "Return (WINDOW . BASIS), the context window to assume for model NAME of PID.
+BASIS says what the window comes from: the id of the same model at a
+provider that sizes it (its own first, see
+`harness-provider--same-model-window'), else of the model of PID
+closest to it by name (see `harness-provider--closest-window'), else
+\"PID's models\" for the window most of PID's models have, else
+\"default\" for `harness-provider-fallback-context-window'."
+  (or (harness-provider--same-model-window pid name)
+      (harness-provider--closest-window pid name)
+      (when-let* ((own (gethash pid (cdr (harness-provider--estimate-index)))))
+        (cons (harness-provider--most-common (mapcar #'cadr own)) (format "%s's models" pid)))
+      (cons harness-provider-fallback-context-window "default")))
+
+(defun harness-provider--with-estimate (pid model)
+  "Return MODEL of provider PID with a context window: its own, else an estimate.
+An estimated window comes with `:context-window-estimated' t and
+`:context-window-basis', what it was drawn from.  A window PID itself
+flags as an estimate (one it guessed from the model's family, say)
+gives way to the window the same model has where it is sized, or else
+to that of PID's models closest to it by name; a broader estimate does
+not replace it."
+  (let* ((window (plist-get model :context-window))
+         (name (plist-get model :name))
+         (estimate (cond ((not (harness-provider--window-p window))
+                          (harness-provider--estimate pid name))
+                         ((plist-get model :context-window-estimated)
+                          (or (harness-provider--same-model-window pid name)
+                              (harness-provider--closest-window pid name))))))
+    (if (not estimate)
+        model
+      (append (list :context-window (car estimate) :context-window-estimated t
+                    :context-window-basis (cdr estimate))
+              (harness-plist-remove model :context-window :context-window-estimated
+                                    :context-window-basis)))))
+
+(defun harness-provider--fill-windows (pid models)
+  "Return MODELS of provider PID, each with a context window.
+Models PID lists without a size get an estimate, and those it sizes by
+an estimate of its own may get a better one (see
+`harness-provider--with-estimate'); how many came without a size is
+logged when that number changes."
+  (let ((unsized 0))
+    (prog1 (mapcar (lambda (m)
+                     (unless (harness-provider--window-p (plist-get m :context-window))
+                       (cl-incf unsized))
+                     (harness-provider--with-estimate pid m))
+                   models)
+      (let ((key (list 'unsized pid)))
+        (unless (eql unsized (gethash key harness-provider--warned 0))
+          (puthash key unsized harness-provider--warned)
+          (when (> unsized 0)
+            (harness-log 'info "provider %s: %d of its %d models come without a context window; estimated"
+                         pid unsized (length models))))))))
 
 (defun harness-provider--listed-p (id)
   "Non-nil when the models of provider ID are cached; a failed listing counts."
@@ -139,38 +343,46 @@ A provider whose listing failed maps to nil; one not asked yet is absent.")
   (harness-provider--rebuild-cache))
 
 (defvar harness-provider--lifecycle (make-hash-table :test 'eq)
-  "Provider id -> (:warm FN :close FN), the hooks `harness-define-provider' got.
-Kept beside the provider records rather than in them, so records made
-before a reload need no slots they lack.")
+  "Provider id -> (:warm FN :close FN :resolve FN).
+These are the hooks `harness-define-provider' got, kept beside the
+provider records rather than in them, so records made before a reload
+need no slots they lack.")
 
 (cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities tiers
-                                      warm close)
+                                      warm close resolve)
   "Register provider ID.
 LABEL and DOC describe it.  MODELS is a function returning a promise of
-model plists.  COMPLETE takes a request plist and returns a handle
-plist with `:cancel'.  FORK, when given, takes (MODEL-ID STATE) and
-returns a promise of a new provider state.  QUOTA takes an optional
-REFRESH flag and returns a promise of billing and quota information
-\(see `provider/quota').  CAPABILITIES is the static capability plist.
-TIERS names a model per user-facing tier (see `harness-model-tiers'
-and `harness-provider-tier-model') so the harness can pick a model on
-its own.  WARM, when given, takes a request plist without messages and
-prepares what such a request will need, a process say, so it answers
-sooner (`provider/warm'); CLOSE takes a session id and frees what the
-provider keeps for it (`provider/close').  Defining ID again replaces
-it and forgets the models it listed, which it is asked for again when
-needed; other providers' models stay cached."
+model plists; one that takes an argument is passed non-nil when a
+refresh asks (`provider/models'), so it can ask its source again rather
+than answer from a cache.  A model without `:context-window' is one the
+provider does not size: the catalogue gives it an estimate (see
+`harness-provider--estimate').  COMPLETE takes a request plist and
+returns a handle plist with `:cancel'.  FORK, when given, takes
+\(MODEL-ID STATE) and returns a promise of a new provider state.  QUOTA
+takes an optional REFRESH flag and returns a promise of billing and
+quota information \(see `provider/quota').  CAPABILITIES is the static
+capability plist.  TIERS names a model per user-facing tier (see
+`harness-model-tiers' and `harness-provider-tier-model') so the harness
+can pick a model on its own.  WARM, when given, takes a request plist
+without messages and prepares what such a request will need, a process
+say, so it answers sooner (`provider/warm'); CLOSE takes a session id
+and frees what the provider keeps for it (`provider/close').  RESOLVE,
+when given, takes a model NAME its listing lacks (an alias, a variant,
+a model it knows another way) and the provider's listed models, and
+returns a model plist for it or nil (see `provider/model').  Defining ID
+again replaces it and forgets the models it listed, which it is asked
+for again when needed; other providers' models stay cached."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
                                      :capabilities capabilities :tiers tiers)
            harness-providers)
-  (puthash id (list :warm warm :close close) harness-provider--lifecycle)
+  (puthash id (list :warm warm :close close :resolve resolve) harness-provider--lifecycle)
   (harness-provider--forget id)
   id)
 
 (defun harness-provider--hook (id key)
-  "Return provider ID's lifecycle hook KEY (`:warm' or `:close'), or nil."
+  "Return provider ID's hook KEY (`:warm', `:close' or `:resolve'), or nil."
   (plist-get (gethash id harness-provider--lifecycle) key))
 
 (defun harness-provider-get (id)
@@ -204,7 +416,9 @@ Return non-nil when a provider was registered under ID."
     (sort out (lambda (a b) (string< (symbol-name (plist-get a :id)) (symbol-name (plist-get b :id)))))))
 
 (defun harness-provider--normalise-model (provider model)
-  "Fill defaults into MODEL from PROVIDER."
+  "Fill defaults into MODEL from PROVIDER.
+A window that is not a positive number goes: the model is one its
+provider does not size, which the catalogue gives an estimate."
   (let* ((name (plist-get model :name))
          (pid (harness-provider-id provider))
          (m (copy-sequence model)))
@@ -212,7 +426,8 @@ Return non-nil when a provider was registered under ID."
     (setq m (plist-put m :id (or (plist-get m :id) (format "%s:%s" pid name))))
     (setq m (plist-put m :label (or (plist-get m :label) name)))
     (setq m (plist-put m :provider-label (harness-provider-label provider)))
-    (setq m (plist-put m :context-window (or (plist-get m :context-window) 128000)))
+    (unless (harness-provider--window-p (plist-get m :context-window))
+      (setq m (harness-plist-remove m :context-window)))
     (setq m (plist-put m :input-modalities (or (plist-get m :input-modalities) '("text"))))
     (setq m (plist-put m :capabilities (harness-plist-merge (harness-provider-capabilities provider)
                                                             (plist-get m :capabilities))))
@@ -243,18 +458,26 @@ non-nil.  Return non-nil when models were cached."
         (harness-emit 'provider/models-updated harness-provider--models)))
     (and current ok)))
 
-(defun harness-provider--fetch (p &optional lookup)
+(defun harness-provider--list (p refresh)
+  "Call provider P's models function, passing REFRESH when it takes an argument."
+  (let ((fn (harness-provider-models-fn p)))
+    (if (and refresh (harness-provider--accepts-arg-p fn))
+        (funcall fn t)
+      (funcall fn))))
+
+(defun harness-provider--fetch (p &optional lookup refresh)
   "Ask provider P for its models; return a promise settled once they are cached.
 A listing still in flight is shared, not asked for again.  A provider
 that lists its models at once (a static catalogue) has them cached
 before this returns.  The promise resolves to non-nil when they were
 cached; see `harness-provider--settle'.  LOOKUP non-nil means a lookup
 asks: one answered at once is then announced from the command loop, so
-the lookup calls no subscriber."
+the lookup calls no subscriber.  REFRESH non-nil is passed on to a
+models function that takes it (see `harness-define-provider')."
   (let ((id (harness-provider-id p)))
     (or (gethash id harness-provider--fetching)
         (let ((listing (condition-case err
-                           (harness-as-promise (funcall (harness-provider-models-fn p)))
+                           (harness-as-promise (harness-provider--list p refresh))
                          (error (harness-rejected err)))))
           (if (harness-promise-settled-p listing)
               (harness-resolved (harness-provider--settle p listing lookup))
@@ -262,6 +485,18 @@ the lookup calls no subscriber."
                                       (lambda (_) (harness-provider--settle p listing))
                                       (lambda (_) (harness-provider--settle p listing)))
                      harness-provider--fetching))))))
+
+(defun harness-provider-relist (id)
+  "Have provider ID list its models again, as it knows more now.
+A provider calls this when it learned something its listing should
+show: a new list from its source, the window a model really has.  What
+it lists is cached and announced as `provider/models-updated' (from
+the command loop when it answers at once), and the windows sessions
+show follow.  Return a promise like `harness-provider--fetch', or nil
+when ID is not registered or lists nothing."
+  (when-let* ((p (harness-provider-get id)))
+    (when (harness-provider-models-fn p)
+      (harness-provider--fetch p t))))
 
 (defun harness-provider--complete-p ()
   "Non-nil when every registered provider that lists models has them cached."
@@ -275,8 +510,11 @@ the lookup calls no subscriber."
 (harness-defmethod provider/models (&optional refresh)
   "Return a promise of every model from every provider.
 Results are cached per provider as soon as that provider answers, so a
-slow endpoint never hides a fast one; REFRESH forces a new query.  A
-provider that fails is logged and skipped."
+slow endpoint never hides a fast one; REFRESH forces a new query, and
+is passed on to the providers whose models function takes it.  A
+provider that fails is logged and skipped.  Every model has a
+`:context-window'; one its provider does not size has an estimate,
+flagged `:context-window-estimated' (see `harness-provider--estimate')."
   (cond
    ((and (not refresh) (harness-provider--complete-p))
     (harness-resolved harness-provider--models))
@@ -288,31 +526,68 @@ provider that fails is logged and skipped."
       (maphash (lambda (id p)
                  (when (and (harness-provider-models-fn p)
                             (or refresh (not (harness-provider--listed-p id))))
-                   (push (harness-provider--fetch p) promises)))
+                   (push (harness-provider--fetch p nil refresh) promises)))
                harness-providers)
       (setq harness-provider--models-promise
             (harness-then (harness-all (nreverse promises))
                           (lambda (_) harness-provider--models)))))))
 
+(defun harness-provider--resolve (p name)
+  "Return what provider P's `:resolve' function says of model NAME, or nil.
+It is passed NAME and P's listed models when it takes both.  A failure
+is logged and counts as nothing said."
+  (when-let* ((fn (harness-provider--hook (harness-provider-id p) :resolve)))
+    (condition-case err
+        (let ((m (if (harness-provider--accepts-args-p fn 2)
+                     (funcall fn name (gethash (harness-provider-id p) harness-provider--catalogue))
+                   (funcall fn name))))
+          (and (consp m) m))
+      (error (harness-log 'warn "provider %s: resolving %s failed: %s"
+                          (harness-provider-id p) name (harness-error-message err))
+             nil))))
+
+(defun harness-provider--unlisted (model-id pid name p)
+  "Return the model plist for MODEL-ID, NAME of PID, which no listing holds.
+P is the provider, nil when none is registered.  What P's `:resolve'
+says of NAME comes first; a window still missing is estimated, and an
+estimate for a model of a provider that has listed its models is
+logged once, as it may well be wrong."
+  (let* ((resolved (and p (harness-provider--resolve p name)))
+         (m (if p
+                (harness-provider--normalise-model
+                 p (append (list :id model-id :name name) (harness-plist-remove resolved :id :name)))
+              (list :id model-id :provider pid :name name :label (or name "?")
+                    :input-modalities '("text") :capabilities nil)))
+         (m (harness-provider--with-estimate pid m)))
+    (when (and (plist-get m :context-window-estimated)
+               (or (null p) (harness-provider--listed-p pid))
+               (not (gethash model-id harness-provider--warned)))
+      (puthash model-id t harness-provider--warned)
+      (harness-log 'warn "provider/model: %s is %s; assuming a context window of %d tokens (from %s)"
+                   model-id (if p (format "not in %s's catalogue" pid) "of no registered provider")
+                   (plist-get m :context-window) (plist-get m :context-window-basis)))
+    m))
+
 (harness-defmethod provider/model (model-id)
-  "Return the model plist for MODEL-ID from the catalogue, or a minimal one.
+  "Return the model plist for MODEL-ID from the catalogue, or one made for it.
 A provider whose models are not cached is asked for them first.  One
-that lists them at once (a static catalogue) has them cached before
-this returns, so its models are always found.  Until one that answers
-later has, and for a model its provider does not list, a minimal plist
-stands in, with a context window of 128000."
+that lists them at once has them cached before this returns, so its
+models are found from the first lookup.  A model no listing holds (one
+a provider answering later has not listed yet, an alias, a model of a
+provider that is gone) gets a plist made for it: from what its
+provider's `:resolve' says of it, with an estimated context window
+when that says no size (see `harness-provider--estimate'), never a
+silent small one."
   (or (gethash model-id harness-provider--model-index)
+      (gethash model-id harness-provider--lookups)
       (pcase-let* ((`(,pid . ,name) (harness-provider-parse-model model-id))
                    (p (and pid (harness-provider-get pid))))
-        (cond
-         ((null p)
-          (list :id model-id :provider pid :name name :label (or name "?")
-                :context-window 128000 :input-modalities '("text") :capabilities nil))
-         ((and (harness-provider-models-fn p)
-               (not (harness-provider--listed-p pid))
-               (progn (harness-provider--fetch p t)
-                      (gethash model-id harness-provider--model-index))))
-         (t (harness-provider--normalise-model p (list :name name)))))))
+        (or (and p (harness-provider-models-fn p)
+                 (not (harness-provider--listed-p pid))
+                 (progn (harness-provider--fetch p t)
+                        (gethash model-id harness-provider--model-index)))
+            (puthash model-id (harness-provider--unlisted model-id pid name p)
+                     harness-provider--lookups)))))
 
 (harness-defmethod provider/capabilities (model-id)
   "Return the capability plist for MODEL-ID."
@@ -330,8 +605,9 @@ does not name is taken from its own models sorted by price.")
 
 (defun harness-provider--cached-models (id)
   "Return the models cached for provider ID, or nil.
-Nil means the provider has not answered yet, or listed nothing."
-  (gethash id harness-provider--models-by-provider))
+Nil means the provider has not answered yet, or listed nothing.  Each
+has a context window, estimated where the provider gave none."
+  (gethash id harness-provider--catalogue))
 
 (defun harness-provider--price-score (model)
   "Return a comparable price for MODEL, or nil without a usable one.
