@@ -773,6 +773,73 @@ the thinking menu offers exactly those levels and never a `medium` or
 profile or a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`). See
 `harness-bedrock-endpoints` for the configuration.
 
+#### Through a gateway
+
+A gateway or proxy in front of Bedrock gets an endpoint of its own. On
+the settings page (`C-c h S`), under **Models and services**, add one
+with `INS` to the **Endpoints** described as "AWS Bedrock endpoints"
+(the **Endpoints** above it is for OpenAI-compatible APIs). Its **ID**
+names its models (`ID:MODEL`). Set **Runtime URL** to the gateway's
+URL, path prefix included. For example,
+`https://gateway.example.com/bedrock` sends ConverseStream to
+`https://gateway.example.com/bedrock/model/MODEL/converse-stream`. A
+query in the URL is added to every request.
+
+Models are listed at the same URL (`…/foundation-models` and
+`…/inference-profiles`), and never at AWS with the gateway's keys.
+If the gateway lists them somewhere else, set **Listing URL**. If it
+does not list them at all, set **Models** to name them.
+
+What to set depends on how the gateway authenticates:
+
+| The gateway takes | Set |
+|---|---|
+| A key of its own as `Authorization: Bearer KEY` | **Authentication** API key, and **API key variable**: the environment variable that holds the key |
+| The key in another header, such as `x-api-key` | The same, plus **API key header** `x-api-key` |
+| A short-lived token that a command prints | **Authentication** API key, and **API key command** (see below) |
+| More headers, such as a team or project id | **Headers**. `${NAME}` in a value is replaced by environment variable `NAME`, so secrets stay out of the settings |
+| AWS keys signed for its own URL (API Gateway, a VPC endpoint) | **Authentication** AWS keys, and a **Profile**. For API Gateway, also set **Signing service** to `execute-api` |
+| AWS keys signed for Bedrock, because it passes requests on unchanged | **Authentication** AWS keys, and **Sign for Bedrock's own URL** |
+| Nothing the harness sends (mutual TLS, a VPN) | **Authentication** None |
+
+The token is the last line the API key command prints; a leading
+`Bearer ` is dropped. It is kept until it expires (the `exp` claim of
+a JWT), or for an hour otherwise. When the gateway refuses it, the
+command runs again and the request is retried once. While a command or
+**API key variable** is set, `AWS_BEARER_TOKEN_BEDROCK` is not sent to
+the gateway. If the setup is incomplete, the first request names what
+is missing.
+
+For example, here is a gateway that takes a key of its own in
+`x-api-key` and lists models under its own prefix:
+
+```elisp
+(:id gateway :label "Gateway" :auth bearer
+ :endpoint-url "https://gateway.example.com/bedrock"
+ :bearer-token-env "GATEWAY_API_KEY" :bearer-token-header "x-api-key")
+```
+
+And here is one whose token comes from a login command, with its
+models named:
+
+```elisp
+(:id gateway :label "Gateway" :auth bearer
+ :endpoint-url "https://gateway.example.com/bedrock"
+ :bearer-token-command "gateway-login --print-token"
+ :models ("us.anthropic.claude-sonnet-4-5-20250929-v1:0"))
+```
+
+Requests go through curl, so curl's own settings apply:
+
+- `CURL_CA_BUNDLE` for a gateway whose certificate a private CA signs
+- `HTTPS_PROXY` and `NO_PROXY` for a proxy
+- `~/.curlrc` for anything else, such as `cacert = /path/to/ca.pem`
+
+The harness process takes its environment from Emacs when it starts.
+Set the variables before it starts, or restart it after setting them.
+Saving the endpoint re-registers its provider and clears what was
+cached for it, so a changed URL or model list shows at once.
+
 ### Switching model or provider
 
 `C-c h m` (`harness-set-model`) chooses the model for the current

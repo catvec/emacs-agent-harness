@@ -15,8 +15,19 @@
 ;;
 ;;   (harness-bedrock-mock-start #'harness-bedrock-mock-agent-handler)
 ;;
+;; It can stand in for a gateway in front of Bedrock too: one that
+;; serves Bedrock's paths under a prefix of its own and checks keys of
+;; its own (an API key in a header of its choosing, a team header), or
+;; checks the signature the way Bedrock would once it passed the
+;; request on:
+;;
+;;   (harness-bedrock-mock-start
+;;    #'harness-bedrock-mock-agent-handler
+;;    :prefix "/gateway/bedrock"
+;;    :checks (list (harness-bedrock-mock-key-check "x-api-key" "gateway-key-EXAMPLE")))
+;;
 ;; The keys are the example keys of the AWS documentation, not real
-;; ones.
+;; ones, and the gateway's are made up.
 
 ;;; Code:
 
@@ -35,8 +46,10 @@
   "Bearer token the mock accepts.")
 
 (cl-defstruct (harness-bedrock-mock (:constructor harness-bedrock-mock--make) (:copier nil))
-  "A running mock endpoint."
-  server port handler (requests nil) (connections nil))
+  "A running mock endpoint.
+PREFIX is the path a gateway serves Bedrock's paths under, CHECKS the
+functions that authenticate requests in place of Bedrock's own check."
+  server port handler (requests nil) (connections nil) prefix checks)
 
 ;;;; Event stream encoding
 
@@ -136,13 +149,16 @@ ID is the tool use id and INPUT its input (a plist); USAGE is
                      (string-to-number (substring amz-date 0 4))
                      nil nil t)))
 
-(defun harness-bedrock-mock--check-auth (mock request)
-  "Return nil when REQUEST to MOCK is authenticated, else what is wrong with it."
+(defun harness-bedrock-mock--check-auth (mock request &optional aws-host)
+  "Return nil when REQUEST to MOCK is authenticated, else what is wrong with it.
+A signature is checked for the URL the request was sent to or, with
+AWS-HOST, for https://AWS-HOST and the path after the gateway's prefix:
+what Bedrock sees of a request a gateway passed on unchanged."
   (let* ((headers (plist-get request :headers))
          (auth (cdr (assoc "authorization" headers))))
     (cond
      ((null auth) "no Authorization header")
-     ((string-prefix-p "Bearer " auth)
+     ((and (not aws-host) (string-prefix-p "Bearer " auth))
       (unless (equal auth (concat "Bearer " harness-bedrock-mock-api-key)) "wrong API key"))
      ((string-match "\\`AWS4-HMAC-SHA256 Credential=\\([^/]+\\)/[0-9]+/\\([^/]+\\)/\\([^/]+\\)/aws4_request, SignedHeaders=\\([^,]+\\), Signature=\\([0-9a-f]+\\)\\'"
                     auth)
@@ -151,14 +167,21 @@ ID is the tool use id and INPUT its input (a plist); USAGE is
              (service (match-string 3 auth))
              (signature (match-string 5 auth))
              (signed (split-string (match-string 4 auth) ";"))
+             (headers (if aws-host
+                          (cons (cons "host" aws-host) (cl-remove "host" headers :key #'car :test #'equal))
+                        headers))
              (date (cdr (assoc "x-amz-date" headers)))
              (missing (cl-remove-if (lambda (h) (assoc h headers)) signed))
+             (url (if aws-host
+                      (concat "https://" aws-host (plist-get request :target))
+                    (format "http://127.0.0.1:%d%s" (harness-bedrock-mock-port mock)
+                            (or (plist-get request :full-target) (plist-get request :target)))))
              (expected
               (and date (null missing)
                    (plist-get
                     (harness-bedrock-sigv4
                      :method (plist-get request :method)
-                     :url (format "http://127.0.0.1:%d%s" (harness-bedrock-mock-port mock) (plist-get request :target))
+                     :url url
                      :headers (cl-remove-if (lambda (h) (or (not (member (car h) signed))
                                                             (member (car h) '("x-amz-date" "x-amz-security-token"))))
                                             headers)
@@ -174,6 +197,54 @@ ID is the tool use id and INPUT its input (a plist); USAGE is
               ((not (member "host" signed)) "Host is not signed")
               ((not (equal signature expected)) "signature mismatch"))))
      (t "unknown authorization scheme"))))
+
+;;;; Gateway checks
+;;
+;; Each check takes the mock and a request and returns nil when the
+;; request passes, else what is wrong with it.
+
+(defun harness-bedrock-mock-key-check (header key)
+  "Return a check that a request carries a gateway's KEY in HEADER.
+KEY is a string, or a function returning the key accepted now.  In
+Authorization it must come as \"Bearer KEY\", in any other header alone."
+  (let ((name (downcase header)))
+    (lambda (_mock request)
+      (let ((value (cdr (assoc name (plist-get request :headers))))
+            (key (if (functionp key) (funcall key) key)))
+        (cond ((null value) (format "no %s header" header))
+              ((not (equal value (if (equal name "authorization") (concat "Bearer " key) key)))
+               (format "wrong key in %s" header)))))))
+
+(defun harness-bedrock-mock-header-check (header value)
+  "Return a check that a request has HEADER set to VALUE."
+  (lambda (_mock request)
+    (unless (equal value (cdr (assoc (downcase header) (plist-get request :headers))))
+      (format "%s is not %s" header value))))
+
+(defun harness-bedrock-mock-no-header-check (header)
+  "Return a check that a request does not carry HEADER."
+  (lambda (_mock request)
+    (when (assoc (downcase header) (plist-get request :headers))
+      (format "unexpected %s header" header))))
+
+(defun harness-bedrock-mock-sigv4-check (&optional aws-host)
+  "Return a check of a request's Signature Version 4 signature.
+Without AWS-HOST it must be signed for the URL it was sent to, prefix
+included, as a gateway or VPC endpoint that checks signatures itself
+wants.  With AWS-HOST it must be signed for Bedrock's own URL there,
+as a gateway that passes requests on unchanged needs; AWS-HOST is a
+host name, or `bedrock', which picks the runtime's or the control
+plane's regional host (us-east-1) by the request's path."
+  (lambda (mock request)
+    (let ((auth (or (cdr (assoc "authorization" (plist-get request :headers))) ""))
+          (host (if (eq aws-host 'bedrock)
+                    (if (string-prefix-p "/model/" (plist-get request :path))
+                        "bedrock-runtime.us-east-1.amazonaws.com"
+                      "bedrock.us-east-1.amazonaws.com")
+                  aws-host)))
+      (if (string-prefix-p "AWS4-HMAC-SHA256 " auth)
+          (harness-bedrock-mock--check-auth mock request host)
+        "not signed with Signature Version 4"))))
 
 (defun harness-bedrock-mock--respond (proc response)
   "Send RESPONSE, a plist, on connection PROC.
@@ -203,19 +274,46 @@ at a time, `:delay' seconds apart), or `:hang' to never answer."
                         (run-at-time delay nil #'next (cdr rest))))))
         (next chunks)))))
 
+(defun harness-bedrock-mock--strip-prefix (mock request)
+  "Return REQUEST to MOCK with the gateway's prefix taken off its path, or nil.
+nil means the request is not under the prefix.  `:full-target' keeps
+the target as sent."
+  (let ((prefix (harness-bedrock-mock-prefix mock))
+        (target (plist-get request :target)))
+    (setq request (plist-put request :full-target target))
+    (cond
+     ((null prefix) request)
+     ((string-prefix-p (concat prefix "/") (plist-get request :path))
+      (let ((n (length prefix)))
+        (plist-put (plist-put request :path (substring (plist-get request :path) n))
+                   :target (substring target n)))))))
+
 (defun harness-bedrock-mock--handle (mock proc request)
   "Answer REQUEST, received by MOCK on PROC."
-  (let ((problem (harness-bedrock-mock--check-auth mock request)))
+  (let* ((routed (harness-bedrock-mock--strip-prefix mock request))
+         (request (or routed request))
+         (checks (harness-bedrock-mock-checks mock))
+         (problem (cond
+                   ((not routed) (format "%s is not under %s" (plist-get request :path)
+                                         (harness-bedrock-mock-prefix mock)))
+                   (checks (cl-some (lambda (check) (funcall check mock request)) checks))
+                   (t (harness-bedrock-mock--check-auth mock request)))))
     (setq request (plist-put request :auth-problem problem))
     (push request (harness-bedrock-mock-requests mock))
     (harness-bedrock-mock--respond
      proc
-     (if problem
-         (list :status 403 :headers '(("x-amzn-ErrorType" . "UnrecognizedClientException:http://internal.amazon.com/coral/com.amazon.coral.service/"))
-               :body (harness-json-encode (list :message (format "Mock: %s" problem))))
+     (cond
+      ((not routed)
+       (list :status 404 :body (harness-json-encode (list :message (format "Mock gateway: %s" problem)))))
+      ((and problem checks)
+       (list :status 401 :body (harness-json-encode (list :message (format "Mock gateway: %s" problem)))))
+      (problem
+       (list :status 403 :headers '(("x-amzn-ErrorType" . "UnrecognizedClientException:http://internal.amazon.com/coral/com.amazon.coral.service/"))
+             :body (harness-json-encode (list :message (format "Mock: %s" problem)))))
+      (t
        (condition-case err
            (funcall (harness-bedrock-mock-handler mock) request)
-         (error (list :status 500 :body (harness-json-encode (list :message (format "Mock handler failed: %S" err))))))))))
+         (error (list :status 500 :body (harness-json-encode (list :message (format "Mock handler failed: %S" err)))))))))))
 
 (defun harness-bedrock-mock--filter (mock proc data)
   "Collect DATA arriving on connection PROC of MOCK; answer complete requests."
@@ -243,12 +341,20 @@ at a time, `:delay' seconds apart), or `:hang' to never answer."
                    :headers headers :body (substring body 0 length)
                    :json (ignore-errors (harness-json-parse (decode-coding-string (substring body 0 length) 'utf-8)))))))))))
 
-(defun harness-bedrock-mock-start (handler)
+(cl-defun harness-bedrock-mock-start (handler &key prefix checks)
   "Start a mock Bedrock endpoint on 127.0.0.1 answering with HANDLER.
 HANDLER takes a request plist (:method :path :query :headers :body
 :json) and returns a response plist (see `harness-bedrock-mock--respond').
+
+To stand in for a gateway, PREFIX is the path Bedrock's paths are
+served under (others get a 404), and CHECKS are the functions that
+authenticate a request instead of Bedrock's check of its signature or
+API key (see `harness-bedrock-mock-key-check' and its neighbours).
+The handler sees paths without the prefix; a refused request gets a
+401.
+
 Return the mock; `harness-bedrock-mock-url' gives its URL."
-  (let* ((mock (harness-bedrock-mock--make :handler handler))
+  (let* ((mock (harness-bedrock-mock--make :handler handler :prefix prefix :checks checks))
          (server (make-network-process
                   :name "harness-bedrock-mock" :server t :host "127.0.0.1" :service t
                   :family 'ipv4 :coding 'binary :noquery t
@@ -262,8 +368,8 @@ Return the mock; `harness-bedrock-mock-url' gives its URL."
     mock))
 
 (defun harness-bedrock-mock-url (mock)
-  "Return the base URL of MOCK."
-  (format "http://127.0.0.1:%d" (harness-bedrock-mock-port mock)))
+  "Return the base URL of MOCK, its gateway prefix included."
+  (format "http://127.0.0.1:%d%s" (harness-bedrock-mock-port mock) (or (harness-bedrock-mock-prefix mock) "")))
 
 (defun harness-bedrock-mock-stop (mock)
   "Stop MOCK and close its connections."
