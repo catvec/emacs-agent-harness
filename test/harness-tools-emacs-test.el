@@ -3,9 +3,19 @@
 
 (require 'harness-test-helpers)
 
+(require 'trace)
+(require 'find-func)
+
 (defvar harness-acp--clients)
 (defvar harness-acp--server-enabled)
+(defvar harness-tools-max-output-chars)
+(defvar harness-test--option)
+(defvar harness-test-traced-var)
 (declare-function harness-acp-drop-client "harness-acp" (client))
+(declare-function harness-emacs-endpoint-handle "harness-emacs-endpoint" (name params))
+(declare-function harness-provider-demo--script "harness-provider-demo" (request))
+(declare-function harness-test-traced "harness-tools-emacs-test")
+(declare-function harness-test-trace-caller "harness-tools-emacs-test")
 
 (defun harness-tools-emacs-test--allow (_decision next &rest _)
   "Permissive permission filter for tests."
@@ -281,6 +291,255 @@ Emacs it connected itself, once."
       (should (string-search "No symbol" (plist-get r :content))))
     (should (plist-get (harness-tools-emacs-test--call "emacs_describe") :is-error))))
 
+(ert-deftest harness-tools-emacs-describe-debugging ()
+  "emacs_describe says what debugging needs, as describe-function and
+describe-variable do: how a function is defined and where, its keys,
+aliases and advice; a variable's value in a buffer, where it is
+buffer-local, whether it left its standard value, and its watchers."
+  (harness-tools-emacs-test--setup)
+  (harness-test-with-temp-state
+    (eval '(progn
+             (defun harness-test--described (x) "Return X." x)
+             (defalias 'harness-test--described-alias #'harness-test--described)
+             (defun harness-test--watcher (&rest _) nil)
+             (defvar harness-test--watched 1 "A variable a test watches.")
+             (defcustom harness-test--option 1 "An option a test changes."
+               :type 'integer :group 'harness))
+          t)
+    (let ((buf (generate-new-buffer "harness-test-describe-local")))
+      (unwind-protect
+          (progn
+            ;; A command: how it is defined, where, and its keys.
+            (let ((c (plist-get (harness-tools-emacs-test--call "emacs_describe" :symbol "find-file") :content)))
+              (should (string-match-p "^\\(native\\|byte\\)-compiled command in .*/files\\.elc?$" c))
+              (should (string-match-p "^keys: .*C-x C-f" c))
+              ;; The usage line the docstring ends with is the signature's.
+              (should (string-prefix-p "command: (find-file filename &optional wildcards)\n" c))
+              (should-not (string-search "(fn FILENAME" c)))
+            (should (string-search "\nbuilt-in function in C source\n"
+                                   (plist-get (harness-tools-emacs-test--call "emacs_describe" :symbol "car") :content)))
+            ;; Advice, also on what an alias names.
+            (advice-add 'harness-test--described :around (lambda (f &rest args) (apply f args))
+                        '((name . harness-test-advice)))
+            (let ((c (plist-get (harness-tools-emacs-test--call "emacs_describe" :symbol "harness-test--described-alias")
+                                :content)))
+              (should (string-prefix-p "function: (harness-test--described-alias x)\ninterpreted function\n" c))
+              (should (string-search "\nalias for: harness-test--described\n" c))
+              (should (string-search "\nadvice: :around harness-test-advice\n" c)))
+            ;; A buffer-local value, in the buffer named, and the global one.
+            (with-current-buffer buf (setq-local fill-column 33))
+            (let ((c (plist-get (harness-tools-emacs-test--call "emacs_describe" :symbol "fill-column"
+                                                                :buffer "harness-test-describe-local")
+                                :content)))
+              (should (string-search "\nvalue: 33 (local to harness-test-describe-local)\n" c))
+              (should (string-match-p (format "^global value: %d$" (default-value 'fill-column)) c))
+              (should (string-match-p "^buffer-local in [0-9]+ buffers?: .*harness-test-describe-local" c))
+              (should (string-search "\nin C source\n" c)))
+            (let ((r (harness-tools-emacs-test--call "emacs_describe" :symbol "fill-column"
+                                                     :buffer "harness-test-no-such-buffer")))
+              (should (plist-get r :is-error))
+              (should (string-search "No buffer named \"harness-test-no-such-buffer\"" (plist-get r :content))))
+            ;; Watchers, and an option changed from its standard value.
+            (add-variable-watcher 'harness-test--watched #'harness-test--watcher)
+            (should (string-search "\nwatched by: harness-test--watcher\n"
+                                   (plist-get (harness-tools-emacs-test--call "emacs_describe" :symbol "harness-test--watched")
+                                              :content)))
+            (setq harness-test--option 2)
+            (let ((c (plist-get (harness-tools-emacs-test--call "emacs_describe" :symbol "harness-test--option") :content)))
+              (should (string-prefix-p "user option: harness-test--option\nvalue: 2\n" c))
+              (should (string-search "\nchanged from its standard value: 1\n" c)))
+            (should (equal "Describe symbol: fill-column in b"
+                           (harness-tool-title "emacs_describe" '(:symbol "fill-column" :buffer "b")))))
+        (advice-remove 'harness-test--described 'harness-test-advice)
+        (remove-variable-watcher 'harness-test--watched #'harness-test--watcher)
+        (kill-buffer buf)))))
+
+(ert-deftest harness-tools-emacs-find-definition ()
+  "emacs_find_definition gives where a definition is and its text, read
+from the source without visiting it, or from the buffer visiting it."
+  (harness-tools-emacs-test--setup)
+  (harness-test-with-temp-state
+    (let* ((root (harness-test-temp-dir))
+           (file (expand-file-name "harness-test-defs.el" root)))
+      (unwind-protect
+          (progn
+            (write-region
+             (concat ";;; harness-test-defs.el --- Definitions to find  -*- lexical-binding: t; -*-\n"
+                     "\n"
+                     "(defvar harness-test-defs-var 3\n"
+                     "  \"A variable to find.\")\n"
+                     "\n"
+                     "(defun harness-test-defs-fn (a)\n"
+                     "  \"Return A in a list.\"\n"
+                     "  ;; A comment with a stray paren (\n"
+                     "  (list a))\n"
+                     "\n"
+                     "(defun harness-test-defs-long ()\n"
+                     (mapconcat (lambda (n) (format "  (ignore %d \"%s\")\n" n (make-string 50 ?x)))
+                                (number-sequence 1 150) "")
+                     "  nil)\n")
+             nil file)
+            (load file nil t)
+            (let* ((r (harness-tools-emacs-test--call "emacs_find_definition" :symbol "harness-test-defs-fn"))
+                   (c (plist-get r :content)))
+              (should-not (plist-get r :is-error))
+              (should (string-prefix-p "function harness-test-defs-fn: interpreted function\nloaded from " c))
+              (should (string-search (format "defined in %s, lines 6-9:\n\n" (abbreviate-file-name file)) c))
+              (should (string-search "     6\t(defun harness-test-defs-fn (a)\n" c))
+              (should (string-suffix-p "     9\t  (list a))" c))
+              ;; Read, never visited.
+              (should-not (find-buffer-visiting file)))
+            (let ((c (plist-get (harness-tools-emacs-test--call "emacs_find_definition" :symbol "harness-test-defs-var")
+                                :content)))
+              (should (string-prefix-p "variable harness-test-defs-var: variable\n" c))
+              (should (string-search ", lines 3-4:" c)))
+            ;; A buffer visiting the source is read as it stands.
+            (let ((buf (find-file-noselect file)))
+              (unwind-protect
+                  (progn
+                    (with-current-buffer buf (goto-char (point-min)) (insert ";; one\n;; two\n"))
+                    (let ((c (plist-get (harness-tools-emacs-test--call "emacs_find_definition"
+                                                                        :symbol "harness-test-defs-fn")
+                                        :content)))
+                      (should (string-search ", lines 8-11 (as its buffer in the user's Emacs has it" c))
+                      (should (string-search "     8\t(defun harness-test-defs-fn (a)\n" c))))
+                (with-current-buffer buf (set-buffer-modified-p nil))
+                (kill-buffer buf)))
+            ;; A long definition stops at the read limit, two thirds of
+            ;; the output limit as for emacs_buffer.
+            (let ((harness-tools-max-output-chars 3000))
+              (let ((c (plist-get (harness-tools-emacs-test--call "emacs_find_definition" :symbol "harness-test-defs-long")
+                                  :content)))
+                (should (string-search ", lines 11-162:" c))
+                (should (string-search "    11\t(defun harness-test-defs-long ()\n" c))
+                (should (string-match-p "\\[stopped at 2000 characters, at line [0-9]+; the definition ends at line 162\\]\\'" c))))
+            ;; An alias is followed to what it names.
+            (defalias 'harness-test-defs-alias #'harness-test-defs-fn)
+            (let ((c (plist-get (harness-tools-emacs-test--call "emacs_find_definition" :symbol "harness-test-defs-alias")
+                                :content)))
+              (should (string-prefix-p "harness-test-defs-alias is an alias for harness-test-defs-fn, an interpreted function\n" c))
+              (should (string-search "     6\t(defun harness-test-defs-fn (a)" c)))
+            ;; A function evaluated outside any file is printed as Emacs holds it.
+            (eval '(defun harness-test-defs-evaluated (x) "Double X." (* 2 x)) t)
+            (let ((c (plist-get (harness-tools-emacs-test--call "emacs_find_definition" :symbol "harness-test-defs-evaluated")
+                                :content)))
+              (should (string-search "No file defines harness-test-defs-evaluated" c))
+              (should (string-search "(defun harness-test-defs-evaluated (x)" c))
+              (should (string-search "\"Double X.\"" c)))
+            ;; Built in, with no C source on this machine.
+            (let ((find-function-C-source-directory nil))
+              (let ((c (plist-get (harness-tools-emacs-test--call "emacs_find_definition" :symbol "car") :content)))
+                (should (string-prefix-p "function car: built-in function\n" c))
+                (should (string-search "\nfile: src/data.c\n" c))
+                (should (string-search "C source is not on this machine" c))))
+            ;; Refusals.
+            (let ((r (harness-tools-emacs-test--call "emacs_find_definition" :symbol "harness-no-such-symbol-qqq")))
+              (should (plist-get r :is-error))
+              (should (string-search "No symbol" (plist-get r :content))))
+            (let ((r (harness-tools-emacs-test--call "emacs_find_definition" :symbol "car" :type "macro")))
+              (should (plist-get r :is-error))
+              (should (string-search "type must be" (plist-get r :content))))
+            (should (plist-get (harness-tools-emacs-test--call "emacs_find_definition") :is-error))
+            (should (equal "Find definition: variable x"
+                           (harness-tool-title "emacs_find_definition" '(:symbol "x" :type "variable")))))
+        (let ((buf (find-buffer-visiting file))) (when buf (kill-buffer buf)))
+        (delete-directory root t)))))
+
+(defun harness-tools-emacs-test--trace-output ()
+  "Return the text of *trace-output*, or \"\" when there is none."
+  (if (get-buffer "*trace-output*")
+      (with-current-buffer "*trace-output*" (buffer-string))
+    ""))
+
+(ert-deftest harness-tools-emacs-trace ()
+  "emacs_trace records the calls of a function and the changes of a
+variable into *trace-output*, with their callers when asked, stops a
+trace at its limit or on request, and refuses what it cannot trace."
+  (harness-tools-emacs-test--setup)
+  (harness-test-with-temp-state
+    (eval '(progn
+             (defun harness-test-traced (x) (* 2 x))
+             (defun harness-test-trace-caller () (harness-test-traced 2))
+             (defvar harness-test-traced-var 0))
+          t)
+    (when (get-buffer "*trace-output*") (kill-buffer "*trace-output*"))
+    (unwind-protect
+        (progn
+          (let* ((r (harness-tools-emacs-test--call "emacs_trace" :symbol "harness-test-traced" :callers 1))
+                 (c (plist-get r :content)))
+            (should-not (plist-get r :is-error))
+            (should (string-prefix-p "Tracing function harness-test-traced in the user's Emacs" c))
+            (should (string-search "emacs_buffer (name *trace-output*, offset 1)" c))
+            (should (string-search " and the function that called it, " c))
+            (should (string-search "  function harness-test-traced: 0 of up to 100 calls, each with up to 1 caller" c)))
+          (harness-test-trace-caller)
+          (let ((c (plist-get (harness-tools-emacs-test--call "emacs_buffer" :name "*trace-output*") :content)))
+            (should (string-search "1 -> (harness-test-traced 2)  ; from harness-test-trace-caller\n" c))
+            (should (string-match-p "1 <- harness-test-traced: 4  ; [0-9.]+ ms" c)))
+          (should (string-search "advice: :around emacs_trace's trace, recording calls in *trace-output*"
+                                 (plist-get (harness-tools-emacs-test--call "emacs_describe" :symbol "harness-test-traced")
+                                            :content)))
+          ;; A variable is watched.
+          (should (string-prefix-p "Watching variable harness-test-traced-var"
+                                   (plist-get (harness-tools-emacs-test--call "emacs_trace" :symbol "harness-test-traced-var"
+                                                                              :type "variable")
+                                              :content)))
+          (setq harness-test-traced-var 5)
+          (with-temp-buffer (setq-local harness-test-traced-var 6))
+          (should (string-search "= harness-test-traced-var set to 5\n" (harness-tools-emacs-test--trace-output)))
+          (should (string-search "= harness-test-traced-var set to 6 in " (harness-tools-emacs-test--trace-output)))
+          (let ((c (plist-get (harness-tools-emacs-test--call "emacs_trace" :action "list") :content)))
+            (should (string-search "function harness-test-traced: 1 of up to 100 calls" c))
+            (should (string-search "variable harness-test-traced-var: 2 of up to 100 changes" c)))
+          ;; Stopping one removes its advice.
+          (should (string-search "Stopped:\n  function harness-test-traced: 1 of up to 100 calls"
+                                 (plist-get (harness-tools-emacs-test--call "emacs_trace" :action "stop"
+                                                                            :symbol "harness-test-traced")
+                                            :content)))
+          (should-not (advice-member-p trace-advice-name 'harness-test-traced))
+          ;; A trace stops itself at its limit.
+          (harness-tools-emacs-test--call "emacs_trace" :symbol "harness-test-traced" :limit 2)
+          (dotimes (_ 3) (harness-test-traced 7))
+          (harness-test-wait (lambda () (not (advice-member-p trace-advice-name 'harness-test-traced)))
+                             5 "the trace to stop at its limit")
+          (should (string-search "stopped tracing function harness-test-traced after 2 calls, its limit"
+                                 (harness-tools-emacs-test--trace-output)))
+          (should (= 2 (with-current-buffer "*trace-output*"
+                         (how-many (regexp-quote "-> (harness-test-traced 7)") (point-min) (point-max)))))
+          ;; What cannot be traced is refused.
+          (dolist (case '(("when" . "is a macro") ("if" . "special form") ("apply" . "tracing itself")
+                          ("harness-emacs-endpoint--trace-call" . "tracing itself")
+                          ("harness-no-such-symbol-qqq" . "No symbol")))
+            (let ((r (harness-tools-emacs-test--call "emacs_trace" :symbol (car case))))
+              (should (plist-get r :is-error))
+              (should (string-search (cdr case) (plist-get r :content)))))
+          (should (plist-get (harness-tools-emacs-test--call "emacs_trace") :is-error))
+          (should (plist-get (harness-tools-emacs-test--call "emacs_trace" :action "pause" :symbol "car") :is-error))
+          (should (plist-get (harness-tools-emacs-test--call "emacs_trace" :symbol "car" :limit 0) :is-error))
+          ;; Stopping with no symbol stops every trace.
+          (let ((c (plist-get (harness-tools-emacs-test--call "emacs_trace" :action "stop") :content)))
+            (should (string-search "variable harness-test-traced-var" c))
+            (should (string-search "No traces are running." c)))
+          (should-not (get-variable-watchers 'harness-test-traced-var))
+          (should (equal "Trace symbol: start find-file" (harness-tool-title "emacs_trace" '(:symbol "find-file")))))
+      (harness-emacs-endpoint-handle "trace" '(:action "stop"))
+      (when (get-buffer "*trace-output*") (kill-buffer "*trace-output*")))))
+
+(ert-deftest harness-tools-emacs-demo-debug-script ()
+  "The demo provider's `debug' script calls the debugging tools, each
+with input its tool takes, so they can be tried live without a model."
+  (harness-tools-emacs-test--setup)
+  (harness-test-load-module 'provider-demo)
+  (let* ((events (harness-provider-demo--script
+                  '(:messages ((:role user :content ((:type "text" :text "Debug find-file")))))))
+         (calls (cl-remove-if-not (lambda (e) (eq (plist-get e :type) 'tool-call)) events)))
+    (should (equal '("emacs_describe" "emacs_find_definition" "emacs_trace")
+                   (mapcar (lambda (e) (plist-get e :name)) calls)))
+    (dolist (call calls)
+      (let ((schema (harness-tool-schema (harness-tool-get (plist-get call :name)))))
+        (dolist (key (harness-plist-keys (plist-get call :input)))
+          (should (plist-member (plist-get schema :properties) key)))))))
+
 (ert-deftest harness-tools-emacs-messages ()
   (harness-tools-emacs-test--setup)
   (harness-test-with-temp-state
@@ -298,12 +557,13 @@ Emacs it connected itself, once."
 (ert-deftest harness-tools-emacs-kinds ()
   (harness-tools-emacs-test--setup)
   (dolist (name '("emacs_buffers" "emacs_windows" "emacs_buffer" "emacs_open"
-                  "emacs_describe" "emacs_messages"))
+                  "emacs_describe" "emacs_find_definition" "emacs_messages"))
     (let ((tool (harness-tool-get name)))
       (should tool)
       (should (eq 'read (harness-tool-kind tool)))
       (should (harness-tool-coalescable tool))))
-  (dolist (name '("emacs_insert" "emacs_save_buffer"))
+  ;; A trace changes the user's Emacs: it adds advice or a watcher.
+  (dolist (name '("emacs_insert" "emacs_save_buffer" "emacs_trace"))
     (let ((tool (harness-tool-get name)))
       (should tool)
       (should (eq 'write (harness-tool-kind tool)))

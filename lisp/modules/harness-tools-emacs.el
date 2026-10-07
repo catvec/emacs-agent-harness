@@ -5,7 +5,10 @@
 ;; Narrow windows into the user's Emacs so a model can help drive it:
 ;; the buffer and window lists, a buffer's text, showing a buffer or a
 ;; file where the user can see it, inserting text into a buffer, saving
-;; one, documentation and values of symbols, and the tail of *Messages*.
+;; one, the tail of *Messages*, and debugging its Lisp: what a symbol
+;; is and holds (its documentation, value, advice, watchers), where it
+;; is defined and the source of that definition, and tracing the calls
+;; of a function or the changes of a variable while the user works.
 ;; None of them evaluates code: model-written Lisp never runs in the
 ;; user's Emacs, and the elisp tool (tools-shell) evaluates in a
 ;; background Emacs instead.
@@ -380,46 +383,327 @@ Return nil when VALUE names none of them."
 
 ;;;; emacs_describe
 
+(defun harness-tools-emacs--where (file)
+  "Return where FILE, as the user's Emacs names it, says a definition is.
+FILE is a loaded file, \"C source\", or an autoload's library; nil when
+no file defined it."
+  (and (stringp file)
+       (concat "in " (if (file-name-absolute-p file) (abbreviate-file-name file) file))))
+
+(defun harness-tools-emacs--lines (&rest lines)
+  "Join LINES with newlines, leaving out the nil ones."
+  (string-join (delq nil lines) "\n"))
+
+(defun harness-tools-emacs--describe-function (fn doc)
+  "Return the function part of an emacs_describe result for FN.
+DOC is FN's documentation, as the result shows it."
+  (harness-tools-emacs--lines
+   (format "%s: %s" (plist-get fn :kind) (plist-get fn :signature))
+   (let ((what (delq nil (list (plist-get fn :definition)
+                               (harness-tools-emacs--where (plist-get fn :file))))))
+     (and what (string-join what " ")))
+   (when-let* ((aliases (plist-get fn :aliases)))
+     (format "alias for: %s" (string-join aliases " -> ")))
+   (when-let* ((keys (plist-get fn :keys)))
+     (format "keys: %s" (string-join keys ", ")))
+   (when-let* ((advice (plist-get fn :advice)))
+     (format "advice: %s" (string-join advice "; ")))
+   doc))
+
+(defun harness-tools-emacs--describe-variable (name var doc)
+  "Return the variable part of an emacs_describe result for NAME, from VAR.
+DOC is its documentation, as the result shows it."
+  (let* ((buffer (plist-get var :buffer))
+         (local (harness-json-true-p (plist-get var :local)))
+         (count (or (plist-get var :localCount) 0))
+         (locals (plist-get var :locals))
+         (where (and (> count 0)
+                     (format "buffer-local in %d buffer%s: %s%s"
+                             count (if (= count 1) "" "s") (string-join locals ", ")
+                             (if (> count (length locals)) ", ..." "")))))
+    (harness-tools-emacs--lines
+     (format "%s: %s" (plist-get var :kind) name)
+     (format "value: %s%s" (plist-get var :value)
+             (cond ((not (stringp buffer)) "")
+                   (local (format " (local to %s)" buffer))
+                   ((> count 0) (format " (global; %s has no local value)" buffer))
+                   (t "")))
+     (and local (stringp (plist-get var :global))
+          (format "global value: %s" (plist-get var :global)))
+     where
+     (when-let* ((standard (plist-get var :standard)))
+       (format "changed from its standard value: %s" standard))
+     (when-let* ((watchers (plist-get var :watchers)))
+       (format "watched by: %s" (string-join watchers ", ")))
+     (harness-tools-emacs--where (plist-get var :file))
+     doc)))
+
 (defun harness-tools-emacs--format-describe (name answer)
   "Return the emacs_describe result for the symbol NAME from ANSWER."
   (if (not (harness-json-true-p (plist-get answer :known)))
       (harness-tool-error (format "No symbol named %s is known to the user's Emacs" name))
-    (let* ((doc (lambda (part)
+    (let* ((name (string-trim name))
+           (doc (lambda (part)
                   (let ((d (plist-get part :doc)))
                     (if (and (stringp d) (not (string-empty-p d))) d "(no documentation)"))))
            (fn (plist-get answer :function))
            (var (plist-get answer :variable))
            (face (plist-get answer :face))
            (parts (delq nil
-                        (list (and fn (format "%s: %s\n%s" (plist-get fn :kind) (plist-get fn :signature)
-                                              (funcall doc fn)))
-                              (and var (format "%s: %s\nvalue: %s\n%s" (plist-get var :kind) (string-trim name)
-                                               (plist-get var :value) (funcall doc var)))
-                              (and face (format "face: %s\n%s" (string-trim name)
-                                                (or (plist-get face :doc) "")))))))
+                        (list (and fn (harness-tools-emacs--describe-function fn (funcall doc fn)))
+                              (and var (harness-tools-emacs--describe-variable name var (funcall doc var)))
+                              (and face (harness-tools-emacs--lines
+                                         (format "face: %s" name)
+                                         (harness-tools-emacs--where (plist-get face :file))
+                                         (or (plist-get face :doc) "")))))))
       (if parts
           (harness-tool-ok (string-join parts "\n\n"))
-        (harness-tool-error (format "%s is neither a function nor a variable" (string-trim name)))))))
+        (harness-tool-error (format "%s is neither a function nor a variable" name))))))
 
 (defun harness-tools-emacs--describe (input _ctx)
   "Handler for emacs_describe with INPUT."
-  (let ((name (plist-get input :symbol)))
-    (if (not (stringp name))
-        (harness-tool-error "Missing symbol")
+  (let ((name (plist-get input :symbol))
+        (buffer (plist-get input :buffer)))
+    (cond
+     ((not (stringp name)) (harness-tool-error "Missing symbol"))
+     ((and buffer (not (stringp buffer)))
+      (harness-tool-error "Buffer must be a buffer name, as emacs_buffers lists it"))
+     (t
       (harness-tools-emacs--ask
-       "describe" (list :symbol name :maxValueChars harness-tools-emacs--value-chars)
-       (lambda (answer) (harness-tools-emacs--format-describe name answer))))))
+       "describe" (list :symbol name
+                        :buffer (and (stringp buffer) (not (string-empty-p buffer)) buffer)
+                        :maxValueChars harness-tools-emacs--value-chars)
+       (lambda (answer) (harness-tools-emacs--format-describe name answer)))))))
 
 (harness-define-tool "emacs_describe"
   :label "Describe symbol"
-  :description "Describe an Emacs symbol: function signature and docstring, variable docstring and current value (truncated)."
+  :description "Describe an Emacs symbol in the user's live Emacs, as describe-function and describe-variable would. For a function: signature, how it is defined (byte-, native-compiled, interpreted, built-in, autoloaded) and the file it was loaded from, aliases, the keys that run a command, any advice on it (including traces), and its docstring. For a variable: its value in a buffer (truncated), whether it is buffer-local there and in which buffers, its global value, whether it was changed from its standard value, its variable watchers, its file and docstring. For a face: its file and docstring. Use emacs_find_definition for the source of a definition."
   :schema '(:type "object"
-            :properties (:symbol (:type "string" :description "The symbol name, e.g. find-file or fill-column"))
+            :properties (:symbol (:type "string" :description "The symbol name, e.g. find-file or fill-column")
+                         :buffer (:type "string" :description "Buffer whose value of a variable, and whose key bindings of a command, to show, as emacs_buffers lists it. Default: the buffer of the user's selected window"))
             :required ("symbol"))
   :kind 'read
   :coalescable t
-  :subject (lambda (input) (plist-get input :symbol))
+  :subject (lambda (input)
+             (when-let* ((name (plist-get input :symbol)))
+               (if-let* ((buffer (plist-get input :buffer))
+                         ((and (stringp buffer) (not (string-empty-p buffer)))))
+                   (format "%s in %s" name buffer)
+                 name)))
   :handler #'harness-tools-emacs--describe)
+
+;;;; emacs_find_definition
+
+(defun harness-tools-emacs--definition-head (name answer)
+  "Return the lines saying what the definition of NAME is, from ANSWER.
+ANSWER is what the user's Emacs found."
+  (let* ((real (or (plist-get answer :name) name))
+         (aliases (plist-get answer :aliases))
+         (kind (plist-get answer :kind)))
+    (harness-tools-emacs--lines
+     (if aliases
+         (format "%s is an alias for %s, %s %s"
+                 name (string-join aliases ", which is an alias for ")
+                 (if (string-match-p "\\`[aeiou]" (or kind "")) "an" "a") kind)
+       (format "%s %s: %s" (plist-get answer :type) real kind))
+     (when-let* ((loaded (plist-get answer :loaded)))
+       (format "loaded from %s" (abbreviate-file-name loaded)))
+     (when-let* ((native (plist-get answer :native)))
+       (format "native code in %s" (abbreviate-file-name native)))
+     (when-let* ((library (plist-get answer :autoload)))
+       (format "autoloaded from %s, not loaded yet: this is the source that will load" library))
+     (and (harness-json-true-p (plist-get answer :advised))
+          "advised: what runs differs from this source; emacs_describe lists the advice"))))
+
+(defun harness-tools-emacs--format-definition (name answer)
+  "Return the emacs_find_definition result for the symbol NAME from ANSWER."
+  (if (not (harness-json-true-p (plist-get answer :known)))
+      (harness-tool-error (format "No symbol named %s is known to the user's Emacs" name))
+    (let* ((name (string-trim name))
+           (head (harness-tools-emacs--definition-head name answer))
+           (file (plist-get answer :file))
+           (line (plist-get answer :line))
+           (end (plist-get answer :endLine))
+           (lines (plist-get answer :lines))
+           (note (plist-get answer :note))
+           (truncated (harness-json-true-p (plist-get answer :truncated))))
+      (cond
+       ((harness-json-true-p (plist-get answer :printed))
+        (harness-tool-ok
+         (format "%s\n%s\n\n%s%s" head (harness-tools-sentence note) (string-join lines "\n")
+                 (if truncated (format "\n[stopped at %d characters]" (harness-tools-emacs--buffer-chars)) ""))))
+       ((and line lines)
+        (let ((last (+ line (length lines) -1)))
+          (harness-tool-ok
+           (format "%s\ndefined in %s, lines %d-%d%s:\n\n%s%s"
+                   head (abbreviate-file-name file) line end
+                   (if (harness-json-true-p (plist-get answer :modified))
+                       " (as its buffer in the user's Emacs has it, with unsaved changes)"
+                     "")
+                   (string-join (cl-loop for text in lines for n from line
+                                         collect (format "%6d\t%s" n text))
+                                "\n")
+                   (if truncated
+                       (format "\n[stopped at %d characters, at line %d; the definition ends at line %d]"
+                               (harness-tools-emacs--buffer-chars) last end)
+                     "")))))
+       (t
+        (harness-tool-ok
+         (harness-tools-emacs--lines
+          head
+          (and (stringp file) (format "file: %s" (abbreviate-file-name file)))
+          (and (stringp note) (harness-tools-sentence note)))))))))
+
+(defun harness-tools-emacs--type (value types)
+  "Return VALUE, a type input, when it is one of TYPES or empty, else nil.
+Empty is nil: the user's Emacs then works out the type from the symbol."
+  (cond ((or (null value) (equal value "")) nil)
+        ((and (stringp value) (member (downcase value) types)) (downcase value))
+        (t :invalid)))
+
+(defun harness-tools-emacs--find-definition (input _ctx)
+  "Handler for emacs_find_definition with INPUT."
+  (let* ((name (plist-get input :symbol))
+         (types '("function" "variable" "face"))
+         (type (harness-tools-emacs--type (plist-get input :type) types)))
+    (cond
+     ((or (not (stringp name)) (string-empty-p (string-trim name)))
+      (harness-tool-error "Missing symbol"))
+     ((eq type :invalid)
+      (harness-tool-error (format "type must be function, variable or face, not %S"
+                                  (plist-get input :type))))
+     (t
+      (harness-tools-emacs--ask
+       "definition" (list :symbol name :type type :maxChars (harness-tools-emacs--buffer-chars))
+       (lambda (answer) (harness-tools-emacs--format-definition name answer))
+       "Search the sources with grep, or ask emacs_describe what the symbol is.")))))
+
+(harness-define-tool "emacs_find_definition"
+  :label "Find definition"
+  :description "Find where a function, variable or face is defined in the user's live Emacs, as find-function does: what it is, the file it was loaded from (and its native code), and the source file with the line range and text of its definition, numbered. An alias is followed to what it names, an autoload to the library it will load, and a buffer visiting the source is read as it stands, unsaved changes included. A function evaluated outside any file is printed as Emacs holds it. Nothing is visited, shown or run: the source is only read."
+  :schema '(:type "object"
+            :properties (:symbol (:type "string" :description "The symbol name, e.g. find-file or fill-column")
+                         :type (:type "string" :enum ("function" "variable" "face")
+                                :description "Which definition of the symbol to find. Default: the function when there is one, else the variable, else the face"))
+            :required ("symbol"))
+  :kind 'read
+  :coalescable t
+  :subject (lambda (input)
+             (when-let* ((name (plist-get input :symbol)))
+               (if-let* ((type (plist-get input :type))
+                         ((and (stringp type) (not (string-empty-p type)))))
+                   (format "%s %s" type name)
+                 name)))
+  :handler #'harness-tools-emacs--find-definition)
+
+;;;; emacs_trace
+
+(defconst harness-tools-emacs--trace-default-limit 100
+  "Records an emacs_trace trace makes before it stops itself, by default.")
+
+(defconst harness-tools-emacs--trace-max-limit 1000
+  "Most records an emacs_trace trace may make.")
+
+(defconst harness-tools-emacs--trace-max-callers 10
+  "Most calling functions an emacs_trace record may name.")
+
+(defun harness-tools-emacs--trace-row (trace)
+  "Return TRACE, a trace the user's Emacs described, as a line of text."
+  (format "%s %s: %s of up to %s %s%s"
+          (plist-get trace :type) (plist-get trace :symbol)
+          (or (plist-get trace :count) 0) (or (plist-get trace :limit) 0)
+          (if (equal (plist-get trace :type) "variable") "changes" "calls")
+          (let ((callers (or (plist-get trace :callers) 0)))
+            (if (> callers 0)
+                (format ", each with up to %d caller%s" callers (if (= callers 1) "" "s"))
+              ""))))
+
+(defun harness-tools-emacs--format-trace (action answer)
+  "Return the emacs_trace result for ACTION from ANSWER, the Emacs's report."
+  (let* ((buffer (or (plist-get answer :buffer) "*trace-output*"))
+         (traces (plist-get answer :traces))
+         (running (if traces
+                      (concat "Running traces:\n"
+                              (mapconcat (lambda (trace) (concat "  " (harness-tools-emacs--trace-row trace)))
+                                         traces "\n"))
+                    "No traces are running."))
+         (lines (or (plist-get answer :lines) 0)))
+    (harness-tool-ok
+     (pcase action
+       ("start"
+        (let* ((started (plist-get answer :started))
+               (variable (equal (plist-get started :type) "variable"))
+               (callers (or (plist-get started :callers) 0)))
+          (format "%s %s %s in the user's Emacs: from now on each %s is recorded in %s with %s%s, until the trace has recorded %s and stops itself.  Once the user has done what %ss it, read the records with emacs_buffer (name %s, offset %s).  Stop it sooner with action stop%s.\n\n%s"
+                  (if variable "Watching" "Tracing")
+                  (plist-get started :type) (plist-get started :symbol)
+                  (if variable "change" "call") buffer
+                  (if variable "its new value" "its arguments, value and time")
+                  (if (> callers 0)
+                      (if (= callers 1)
+                          " and the function that called it"
+                        (format " and the %d functions that led to it" callers))
+                    "")
+                  (format "%s %s" (plist-get started :limit) (if variable "changes" "calls"))
+                  (if variable "change" "call") buffer (or (plist-get answer :line) 1)
+                  (if variable "" " (M-x untrace-all stops it too)")
+                  running)))
+       ("stop"
+        (let ((stopped (plist-get answer :stopped)))
+          (format "%s\n\n%s\n%s has %d lines; read them with emacs_buffer."
+                  (if stopped
+                      (concat "Stopped:\n"
+                              (mapconcat (lambda (trace) (concat "  " (harness-tools-emacs--trace-row trace)))
+                                         stopped "\n"))
+                    "No such trace was running.")
+                  running buffer lines)))
+       (_ (format "%s\n%s has %d lines; read them with emacs_buffer." running buffer lines))))))
+
+(defun harness-tools-emacs--trace (input _ctx)
+  "Handler for emacs_trace with INPUT."
+  (let* ((action (let ((action (plist-get input :action)))
+                   (if (or (null action) (equal action "")) "start" (downcase (format "%s" action)))))
+         (name (let ((name (plist-get input :symbol)))
+                 (and (stringp name) (not (string-empty-p (string-trim name))) (string-trim name))))
+         (type (harness-tools-emacs--type (plist-get input :type) '("function" "variable")))
+         (limit (harness-tools-emacs--int (plist-get input :limit) harness-tools-emacs--trace-default-limit))
+         (callers (harness-tools-emacs--int (plist-get input :callers) 0)))
+    (cond
+     ((not (member action '("start" "stop" "list")))
+      (harness-tool-error (format "action must be start, stop or list, not %S" (plist-get input :action))))
+     ((eq type :invalid)
+      (harness-tool-error (format "type must be function or variable, not %S" (plist-get input :type))))
+     ((and (equal action "start") (not name))
+      (harness-tool-error "Missing symbol: name the function or variable to trace"))
+     ((and (equal action "start") (not (<= 1 limit harness-tools-emacs--trace-max-limit)))
+      (harness-tool-error (format "limit must be between 1 and %d" harness-tools-emacs--trace-max-limit)))
+     ((and (equal action "start") (not (<= 0 callers harness-tools-emacs--trace-max-callers)))
+      (harness-tool-error (format "callers must be between 0 and %d" harness-tools-emacs--trace-max-callers)))
+     (t
+      (harness-tools-emacs--ask
+       "trace" (list :action action :symbol name :type type :limit limit :callers callers)
+       (lambda (answer) (harness-tools-emacs--format-trace action answer))
+       :none)))))
+
+(harness-define-tool "emacs_trace"
+  :label "Trace symbol"
+  :description "Trace a function or watch a variable in the user's live Emacs while they work, to debug it: each call of the function is recorded with its arguments, return value (or non-local exit), nesting and time; each change of the variable (set, let-binding, made void) with its new value and the buffer it is local in. Each record can also name the functions that led to it (callers). Records go to the *trace-output* buffer, which you read with emacs_buffer; values are printed bounded, and a trace stops itself after limit records. action start (the default) starts a trace (replacing one of the same symbol), stop stops one, or every trace when no symbol is given, list lists them. Special forms, macros and the tracing's own functions cannot be traced."
+  :schema '(:type "object"
+            :properties (:action (:type "string" :enum ("start" "stop" "list")
+                                  :description "start (default), stop, or list the running traces")
+                         :symbol (:type "string" :description "The function or variable, e.g. find-file or fill-column. Required for start; for stop, none stops every trace")
+                         :type (:type "string" :enum ("function" "variable")
+                                :description "Trace the function or watch the variable of that name. Default: the function when there is one, else the variable")
+                         :callers (:type "integer" :description "How many calling functions each record names, 0-10. Default 0")
+                         :limit (:type "integer" :description "Records before the trace stops itself, 1-1000. Default 100")))
+  :kind 'write
+  :subject (lambda (input)
+             (let ((action (or (plist-get input :action) "start"))
+                   (name (plist-get input :symbol)))
+               (if (and (stringp name) (not (string-empty-p name)))
+                   (format "%s %s" action name)
+                 action)))
+  :handler #'harness-tools-emacs--trace)
 
 ;;;; emacs_messages
 
@@ -444,7 +728,7 @@ Return nil when VALUE names none of them."
   :handler #'harness-tools-emacs--messages)
 
 (harness-define-module 'tools-emacs
-  :doc "List buffers, List windows, Read buffer, Open buffer, Insert text, Save buffer, Describe symbol and Emacs messages: bounded tools into the user's Emacs, without evaluation."
+  :doc "List buffers, List windows, Read buffer, Open buffer, Insert text, Save buffer, Describe symbol, Find definition, Trace symbol and Emacs messages: bounded tools into the user's Emacs, without evaluation."
   :requires '(tools))
 
 (provide 'harness-tools-emacs)

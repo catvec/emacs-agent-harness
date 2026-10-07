@@ -223,10 +223,10 @@ call is about nothing in particular."
 ;; about the user's Emacs reaches that Emacs as a resource, the way the
 ;; file tools reach a TRAMP host: a client lends its Emacs to the
 ;; harness (see lisp/harness-emacs-endpoint.el), and the tool asks it
-;; for plain data, or, for the elisp tool when the user allows it, to
-;; evaluate code.  A client that lends no Emacs, such as a phone, is
-;; never asked, and a harness with none attached (headless) runs every
-;; other tool as usual.
+;; for plain data or a few bounded actions, never to evaluate code.  A
+;; client that lends no Emacs, such as a phone, is never asked, and a
+;; harness with none attached (headless) runs every other tool as
+;; usual.
 
 (defun harness-tools-reason (err)
   "Return the message of ERR, a rejection or an error, for the model to read.

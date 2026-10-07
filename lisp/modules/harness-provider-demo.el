@@ -13,6 +13,8 @@
 ;;                 in a worktree it also writes and commits notes/ID.md
 ;;   "ask"         calls ask_user
 ;;   "diagram"     calls ask_user with an ASCII diagram for each option
+;;   "debug"       describes find-file in the user's Emacs, finds its
+;;                 definition and traces find-file-noselect
 ;;   "status"      looks at the task board with task_list (a BTW over it)
 ;;   anything else echo the prompt back as markdown
 ;;
@@ -138,6 +140,16 @@ answers) gives a function.")
           (:type text :delta "Done: surveyed the project, made the change and checked it.")
           (:type usage :input 2400 :output 220 :cache-read 1800 :cost 0.006 :context 2600)
           (:type done :stop-reason end-turn))))
+     ((string-match-p "\\bdebug\\b" text)
+      `((:type text :delta "Let me see what `find-file` is in your Emacs, and where it is defined.\n")
+        (:type tool-call :id "demo-g1" :name "emacs_describe" :input (:symbol "find-file"))
+        (:type tool-call :id "demo-g2" :name "emacs_find_definition" :input (:symbol "find-file"))
+        (:type text :delta "Now I will trace `find-file-noselect`, which it calls.\n")
+        (:type tool-call :id "demo-g3" :name "emacs_trace"
+               :input (:symbol "find-file-noselect" :callers 2 :limit 20))
+        (:type text :delta "Open a file with `C-x C-f`: each call is recorded in `*trace-output*`, with the functions that led to it.")
+        (:type usage :input 1100 :output 90 :cost 0.0021 :context 1400)
+        (:type done :stop-reason end-turn)))
      ((string-match-p "\\bdiagrams?\\b" text)
       `((:type text :delta "A few layouts would work; have a look at each.\n")
         (:type tool-call :id "demo-d" :name "ask_user"
@@ -160,7 +172,7 @@ answers) gives a function.")
         (:type usage :input 700 :output 45 :cost 0.0012 :context 900)
         (:type done :stop-reason end-turn)))
      (t
-      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask` or `diagram`." text))
+      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `diagram` or `debug`." text))
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
 

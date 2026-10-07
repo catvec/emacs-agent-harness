@@ -18,7 +18,9 @@ OpenAI-compatible APIs and AWS Bedrock.
   OpenAI-compatible endpoints, and AWS Bedrock.
 - **Built-in tools.** Tools for files (read, write, edit, search), the
   shell, the user's Emacs (buffers, windows, showing and editing a
-  buffer, saving it, documentation, `*Messages*`), Emacs Lisp
+  buffer, saving it, documentation, `*Messages*`, and debugging its
+  Lisp: describing symbols, finding definitions, tracing functions
+  and variables), Emacs Lisp
   evaluation in a separate background Emacs, web search and fetch,
   sub-agents and skills, plus tools that let an agent inspect and
   drive other sessions and tasks.

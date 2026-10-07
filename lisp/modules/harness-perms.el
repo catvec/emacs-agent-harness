@@ -138,16 +138,16 @@ prompt.  The tools that inspect the harness are in
 these tools.")
 
 (defconst harness-perms--inspection-tools
-  '("emacs_buffers" "emacs_buffer" "emacs_windows" "emacs_describe" "emacs_messages"
+  '("emacs_buffers" "emacs_buffer" "emacs_windows" "emacs_describe" "emacs_find_definition" "emacs_messages"
     "session_info" "session_list" "session_read" "session_search" "session_wait"
     "task_list" "task_wait" "notification_providers")
   "Tools that only inspect the harness itself or the user's live Emacs.
 Inspecting its own harness is one of the things that make the harness
 powerful, so these never need approval, in every permission mode and
 whether the user is present or not: they read the buffers, windows,
-messages and documentation of the user's Emacs, the sessions with
-their transcripts, the task boards and the notification setup, and
-change nothing.  Reading the harness's files is allowed by
+messages, documentation and definitions of the user's Emacs, the
+sessions with their transcripts, the task boards and the notification
+setup, and change nothing.  Reading the harness's files is allowed by
 `harness-perms-inspection-dirs'.  Standing rules in
 `harness-perms-rules' are checked first and can still deny any of
 these tools.")
