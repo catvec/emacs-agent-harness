@@ -928,6 +928,7 @@ itself is left alone."
 
 (defvar harness-providers)
 (defvar harness-session--window-slot-holds-overrides)
+(defvar harness-provider-fallback-context-window)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider--forget "harness-provider")
 
@@ -977,6 +978,24 @@ announced, so the UI does not keep showing the old one."
             (harness-call 'provider/models)
             (harness-test-wait (lambda () updated) 2 "provider/models-updated")
             (should-not changed)))
+      (harness-session-test-drop-provider))))
+
+(ert-deftest harness-session-window-of-a-model-nobody-lists ()
+  "A session on a model its provider does not list gets an estimate, not a small stand-in.
+The bug once was a new slug the catalogue did not know, which got a
+small window and compacted far too early."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("claude-opus-5-5" . 1000000) ("claude-haiku-4-5" . 200000)))
+          (let ((newer (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                :model "test-win:claude-opus-5-6")
+                                  :id))
+                (gone (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                               :model "nobody:some-model")
+                                 :id)))
+            (should (= 1000000 (harness-session-test-window newer)))
+            (should (= harness-provider-fallback-context-window (harness-session-test-window gone)))))
       (harness-session-test-drop-provider))))
 
 (ert-deftest harness-session-window-set-for-the-session ()
@@ -1084,6 +1103,43 @@ set for sessions."
             (harness-test-load-module 'session)
             (should (= 9000 (harness-session-test-window id)))))
       (harness-session-test-drop-provider))))
+
+(defvar harness-budget)
+
+(ert-deftest harness-session-budget-setting-copies-dropped-once ()
+  "Sessions used to copy the Budget setting into a budget of their own:
+one budget per session, where the setting is one for them all.  A new
+session no longer does, and the next start drops the copies saved, once:
+a budget given to a session after that stays."
+  (harness-session-test-with
+    (let* ((harness-budget '(:amount 5.0 :hard t))
+           (fresh (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           ;; Sessions as the old version saved them, each with its copy.
+           (old (cl-loop repeat 2
+                         collect (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                          :budget harness-budget)
+                                            :id))))
+      (should-not (plist-get (harness-call 'session/get fresh) :budget))
+      ;; The old version left no marker.
+      (harness-call 'store/delete harness-session--budget-copies-marker)
+      (clrhash harness-sessions)
+      (harness-session--init)
+      (dolist (id (cons fresh old))
+        (should-not (plist-get (harness-call 'session/get id) :budget))
+        (should-not (plist-get (harness-call 'store/load (format "sessions/%s.json" id)) :budget)))
+      (should (= 2 (plist-get (harness-call 'store/load harness-session--budget-copies-marker) :dropped)))
+      ;; Once only: a budget given to a session from now on stays.
+      (harness-call 'session/update (car old) :budget '(:amount 2.0) :silent t)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--init)
+      (should (equal '(:amount 2.0) (plist-get (harness-call 'session/get (car old)) :budget)))
+      ;; Loaded over the old version in a running harness, this one drops
+      ;; the copies the loaded sessions hold.
+      (harness-call 'store/delete harness-session--budget-copies-marker)
+      (harness-test-load-module 'session)
+      (should-not (plist-get (harness-call 'session/get (car old)) :budget))
+      (should (harness-call 'store/load harness-session--budget-copies-marker)))))
 
 ;;;; The thinking level of a BTW
 
