@@ -397,6 +397,7 @@ initialize: one it let go of for another closes on purpose."
                     (harness-ui-refresh-sessions)
                     (harness-ui-refresh-models)
                     (harness-ui-refresh-quotas)
+                    (harness-ui-refresh-rates)
                     (run-hooks 'harness-ui-connected-hook))
                   (lambda (e)
                     (when (eq conn harness-ui-connection)
@@ -599,6 +600,8 @@ answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
          (harness-ui-refresh-models))
        (when (equal event "provider/quota-updated")
          (harness-ui--store-quota (car args) (cadr args)))
+       (when (equal event "usage/rate-updated")
+         (harness-ui--store-rate (car args) (cadr args)))
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
@@ -753,6 +756,7 @@ yet: it starts after the init file, with the value set there."
 
 (defun harness-ui--forget-session (id)
   (remhash id harness-ui--sessions)
+  (harness-ui--store-rate id nil)
   (run-hooks 'harness-ui-sessions-changed-hook))
 
 (defun harness-ui-session (id)
@@ -977,6 +981,44 @@ REFRESH non-nil asks each for fresh data."
   (when-let* ((provider (harness-ui-session-provider session)))
     (harness-ui-quota provider)))
 
+;;;; Output rate cache
+
+;; The harness measures how fast each session's model writes (see
+;; `usage/rate' in harness-usage.el); the UI keeps the latest figure of
+;; each session, fetched on connect and then updated from
+;; `usage/rate-updated' events.
+
+(defvar harness-ui--rates (make-hash-table :test 'equal)
+  "Session id -> its output rate, the plist `usage/rate' returns.")
+
+(defvar harness-ui-rate-functions nil
+  "Functions called with (SESSION-ID RATE) after a cached output rate changes.
+SESSION-ID is nil after the whole cache was fetched again.")
+
+(defun harness-ui-session-rate (id)
+  "Return the cached output rate of session ID, or nil if it was never measured.
+The plist is (:rate F :output N :seconds F :calls N :at FLOAT :model ID),
+as `usage/rate' returns it."
+  (gethash id harness-ui--rates))
+
+(defun harness-ui--store-rate (id rate)
+  "Cache RATE as session ID's output rate; run `harness-ui-rate-functions'."
+  (when (stringp id)
+    (if rate (puthash id rate harness-ui--rates) (remhash id harness-ui--rates))
+    (run-hook-with-args 'harness-ui-rate-functions id rate)))
+
+(defun harness-ui-refresh-rates (&optional callback)
+  "Fetch the output rate of every session into the cache, then call CALLBACK."
+  (harness-ui-call "_harness/usage/rates" nil
+                   (lambda (rates)
+                     (clrhash harness-ui--rates)
+                     (dolist (rate rates)
+                       (when-let* ((id (plist-get rate :session)))
+                         (puthash id (harness-plist-remove rate :session) harness-ui--rates)))
+                     (run-hook-with-args 'harness-ui-rate-functions nil nil)
+                     (when callback (funcall callback rates)))
+                   #'ignore))
+
 (defun harness-ui-session-billing (session)
   "Return how SESSION's calls are paid, a symbol or nil.
 The symbol is `api', `subscription' or `extra-usage'.  Its last
@@ -1174,6 +1216,41 @@ A window the catalogue estimated, as its provider does not give it,
 reads \"~200k\"."
   (concat (if (eq t (plist-get model :context-window-estimated)) "~" "")
           (harness-format-tokens (plist-get model :context-window))))
+
+(defun harness-ui-format-rate-number (rate)
+  "Return RATE, in tokens per second, as a short number: 4.8, 48 or 1.2k."
+  (cond ((< rate 9.95) (format "%.1f" rate))
+        ((< rate 999.5) (format "%d" (round rate)))
+        (t (format "%.1fk" (/ rate 1000.0)))))
+
+(defun harness-ui-rate-help (rate &optional live)
+  "Return the one-line tooltip of output RATE, a plist as `usage/rate' gives.
+LIVE non-nil says that the session is running, so RATE is its current one."
+  (let* ((calls (or (plist-get rate :calls) 1))
+         (at (plist-get rate :at))
+         (today (and at (equal (format-time-string "%F" at) (format-time-string "%F")))))
+    (harness-ui-one-line
+     (format "%s %s tokens per second, %s output tokens in %s of streaming over %s on %s%s. Waiting for the first token and running tools do not count."
+             (if live "Output rate:" "Last output rate:")
+             (harness-ui-format-rate-number (or (plist-get rate :rate) 0))
+             (harness-format-tokens (plist-get rate :output))
+             (harness-format-duration (or (plist-get rate :seconds) 0))
+             (if (= calls 1) "the latest model call" (format "the %d latest model calls" calls))
+             (harness-ui-model-label (plist-get rate :model))
+             (if at (format-time-string (if today ", measured at %H:%M" ", measured on %F %H:%M") at) "")))))
+
+(defun harness-ui-format-rate (session &optional bare)
+  "Return how fast SESSION's model writes, as \"48 tok/s\", or nil if unmeasured.
+BARE leaves out the unit.  While SESSION runs this is its current rate;
+otherwise it is the last one measured, dimmed.  The tooltip gives the
+details."
+  (when-let* ((id (plist-get session :id))
+              (rate (harness-ui-session-rate id))
+              (value (plist-get rate :rate)))
+    (let ((live (equal (plist-get session :status) "running")))
+      (propertize (concat (harness-ui-format-rate-number value) (if bare "" " tok/s"))
+                  'face (and (not live) 'harness-dim-face)
+                  'help-echo (harness-ui-rate-help rate live)))))
 
 (defun harness-ui--prettify-model-name (name)
   "Return a readable form of model slug NAME, or nil when it has no known shape.

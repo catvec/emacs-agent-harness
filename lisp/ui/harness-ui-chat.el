@@ -6,7 +6,7 @@
 ;;
 ;;   header line   status, name, todo progress, model, permission mode,
 ;;                 non-interactive or interactive, thinking, context,
-;;                 cost, menu, after what
+;;                 output rate (tokens per second), cost, menu, after what
 ;;                 `harness-chat-header-functions' put in front (a BTW's buttons)
 ;;   transcript    one block per node, rendered incrementally with markers
 ;;   activity      while a turn runs, what it does and for how long, on a
@@ -2582,6 +2582,14 @@ It reads \"non-interactive\" or \"interactive\"; clicking it toggles."
   "Redraw the header lines, which show the plan's quota."
   (force-mode-line-update t))
 
+(defun harness-chat--on-rate (id _rate)
+  "Redraw the header line of session ID's chat, which shows its output rate.
+ID nil, after every rate was fetched again, redraws them all."
+  (if (null id)
+      (force-mode-line-update t)
+    (when-let* ((buf (harness-chat--buffer-for id)))
+      (with-current-buffer buf (force-mode-line-update)))))
+
 (defvar harness-chat-header-functions nil
   "Functions putting segments in front of the chat header line.
 Each is called without arguments in the chat buffer whenever the header
@@ -2604,9 +2612,9 @@ conversation and gives it its [close] and [keep] buttons this way.")
 
 (defun harness-chat--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
-In a window too narrow for all of it, the spend goes first, then the
-thinking level, the context, the non-interactive mode, the model and
-the todos; the name shortens after those.  What
+In a window too narrow for all of it, the output rate goes first, then
+the spend, the thinking level, the context, the non-interactive mode,
+the model and the todos; the name shortens after those.  What
 `harness-chat-header-functions' put in front, the status, the
 permission mode, [menu] and the notice of new messages stay.  WIDTH is
 as `harness-ui-fit-header' takes it."
@@ -2614,6 +2622,7 @@ as `harness-ui-fit-header' takes it."
          (status (or (plist-get s :status) "idle"))
          (running (equal status "running"))
          (todos (harness-chat--todos-segment))
+         (rate (harness-ui-format-rate s))
          (name (or (plist-get s :name) "unnamed")))
     (harness-ui-fit-header
      (list
@@ -2644,6 +2653,7 @@ as `harness-ui-fit-header' takes it."
                                                 'harness-dim-face))
             20)
       (list (concat "  " (harness-ui-format-context s)) 30)
+      (and rate (list (concat "  " rate) 5))
       (list (concat "  " (harness-chat--spend-segment s)) 10)
       (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
             95)
@@ -2879,6 +2889,7 @@ Point moved onto an option of a question with diagrams shows its diagram."
   (add-hook 'harness-ui-update-functions #'harness-chat--on-update)
   (add-hook 'harness-ui-event-functions #'harness-chat--on-event)
   (add-hook 'harness-ui-quota-functions #'harness-chat--on-quota)
+  (add-hook 'harness-ui-rate-functions #'harness-chat--on-rate)
   ;; The pending module owns the requests themselves (it registers with
   ;; `harness-ui-permission-functions' and `harness-ui-question-functions');
   ;; a chat buffer drawing them makes them its own, and this mirror redraws.

@@ -14,6 +14,9 @@
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-usage--warned)
+     (clrhash harness-usage--meters)
+     (clrhash harness-usage--calls)
+     (clrhash harness-usage--rates)
      (let ((harness-provider-demo--delay 0.005)
            ;; A budget over everything fetches Anthropic's cost report in
            ;; the background: no key may reach a real one.
@@ -876,6 +879,220 @@ month budgets over everything, fetched in the background when due."
           (harness-call 'session/usage-add id '(:input 1000 :output 0))
           (should (harness-usage-test-near 0.001 (plist-get (harness-call 'usage/totals :session id) :cost)))
           (should (= 4 (length (harness-call 'store/read-all "usage/records.jsonl")))))))))
+
+;;;; Output rate
+
+(defvar harness-usage-test--now 1000.0
+  "What `float-time' answers inside `harness-usage-test-clock'.")
+
+(defmacro harness-usage-test-clock (&rest body)
+  "Run BODY with `float-time' answering `harness-usage-test--now', from 1000."
+  (declare (indent 0))
+  `(let ((harness-usage-test--now 1000.0))
+     (cl-letf (((symbol-function 'float-time) (lambda (&optional _) harness-usage-test--now)))
+       ,@body)))
+
+(defun harness-usage-test-at (seconds)
+  "Set the clock of `harness-usage-test-clock' SECONDS after it started."
+  (setq harness-usage-test--now (+ 1000.0 seconds)))
+
+(defun harness-usage-test-phase (id phase)
+  "Announce that session ID's turn is in activity PHASE; nil once it ended."
+  (harness-emit 'agent/activity-changed id (and phase (list :phase phase))))
+
+(ert-deftest harness-usage-rate-counts-streaming-time-only ()
+  "Output over the seconds the model streamed, not waited or ran tools."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)) (announced nil))
+        (harness-on 'usage/rate-updated (lambda (sid rate) (push (cons sid rate) announced)))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'waiting)
+        (harness-usage-test-at 2)         ; the first token after 2 s
+        (harness-usage-test-phase id 'thinking)
+        (harness-usage-test-at 3)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 4)
+        (harness-usage-test-phase id 'tool)
+        (harness-usage-test-at 9)         ; 5 s of tools
+        (harness-usage-test-phase id 'tool-input)
+        (harness-usage-test-at 10)
+        (harness-call 'session/usage-add id '(:input 10 :output 300))
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 100.0 (plist-get rate :rate)))
+          (should (= 300 (plist-get rate :output)))
+          (should (harness-usage-test-near 3.0 (plist-get rate :seconds)))
+          (should (= 1 (plist-get rate :calls)))
+          (should (equal "demo:scripted" (plist-get rate :model)))
+          (should (harness-usage-test-near 1010.0 (plist-get rate :at)))
+          (should (equal (list (cons id rate)) announced)))
+        ;; The stream still open counts on for the next call, from now.
+        (harness-usage-test-at 12)
+        (harness-call 'session/usage-add id '(:input 10 :output 100))
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 80.0 (plist-get rate :rate)))
+          (should (= 400 (plist-get rate :output)))
+          (should (= 2 (plist-get rate :calls))))
+        ;; The rows are the accounting's as ever.
+        (should (= 2 (plist-get (harness-call 'usage/totals :session id) :calls)))))))
+
+(ert-deftest harness-usage-rate-leaves-out-unmeasurable-calls ()
+  "Output that came at once, no output, and usage outside a turn give no rate."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)) (announced 0))
+        (harness-on 'usage/rate-updated (lambda (&rest _) (cl-incf announced)))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 0.1)
+        (harness-call 'session/usage-add id '(:input 10 :output 500))
+        (should-not (harness-call 'usage/rate id))
+        (harness-usage-test-at 2)
+        (harness-call 'session/usage-add id '(:input 10 :output 0))
+        (should-not (harness-call 'usage/rate id))
+        (harness-usage-test-phase id nil)
+        (harness-emit 'agent/turn-ended id 'end-turn)
+        ;; Compaction records usage between turns.
+        (harness-usage-test-at 30)
+        (harness-call 'session/usage-add id '(:input 1000 :output 200))
+        (should-not (harness-call 'usage/rate id))
+        (should-not (harness-call 'usage/rates))
+        (should (= 0 announced))))))
+
+(ert-deftest harness-usage-rate-follows-hosted-calls ()
+  "A hosted loop's calls are measured one by one; its turn's total is not measured again."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)) (announced 0))
+        (harness-on 'usage/rate-updated (lambda (&rest _) (cl-incf announced)))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'waiting)
+        (harness-usage-test-at 1)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 3)
+        (harness-emit 'agent/call-usage id '(:output 100))
+        (should (harness-usage-test-near 50.0 (plist-get (harness-call 'usage/rate id) :rate)))
+        (harness-usage-test-phase id 'tool)
+        (harness-usage-test-at 20)
+        (harness-usage-test-phase id 'thinking)
+        (harness-usage-test-at 21)
+        (harness-emit 'agent/call-usage id '(:output 80))
+        ;; The turn's total, which may count sub-agents too, at its end.
+        (harness-usage-test-at 22)
+        (harness-call 'session/usage-add id '(:input 900 :output 9000))
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 60.0 (plist-get rate :rate)))
+          (should (= 180 (plist-get rate :output)))
+          (should (harness-usage-test-near 3.0 (plist-get rate :seconds)))
+          (should (= 2 (plist-get rate :calls))))
+        (should (= 2 announced))
+        (should (= 9000 (plist-get (harness-call 'usage/totals :session id) :output)))
+        ;; The next turn's calls are measured afresh.
+        (harness-usage-test-phase id nil)
+        (harness-emit 'agent/turn-ended id 'end-turn)
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 24)
+        (harness-emit 'agent/call-usage id '(:output 120))
+        (should (= 3 (plist-get (harness-call 'usage/rate id) :calls)))
+        (should (harness-usage-test-near 60.0 (plist-get (harness-call 'usage/rate id) :rate)))))))
+
+(ert-deftest harness-usage-rate-averages-the-latest-calls ()
+  "The rate is over the newest calls that fill the window, on the current model."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session))
+            (harness-usage-rate-window 5))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        ;; Calls of 4 s each, at 10, 20 and 30 tokens per second.
+        (cl-loop for output in '(40 80 120) for at from 4 by 4
+                 do (harness-usage-test-at at)
+                    (harness-call 'session/usage-add id (list :input 1 :output output)))
+        ;; The newest two fill the 5 s window: (120 + 80) / 8.
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 25.0 (plist-get rate :rate)))
+          (should (= 2 (plist-get rate :calls)))
+          (should (harness-usage-test-near 8.0 (plist-get rate :seconds))))
+        ;; Calls on another model than the session's are dropped.
+        (puthash id (list (list 1000 1.0 "demo:other")) harness-usage--calls)
+        (harness-usage-test-at 14)
+        (harness-call 'session/usage-add id '(:input 1 :output 20))
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (harness-usage-test-near 10.0 (plist-get rate :rate)))
+          (should (= 1 (plist-get rate :calls))))))))
+
+(ert-deftest harness-usage-rate-outlives-the-turn ()
+  "An idle session keeps its last rate; a deleted one loses it."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((a (harness-usage-test-session)) (b (harness-usage-test-session)))
+        (dolist (id (list a b))
+          (harness-emit 'agent/turn-started id)
+          (harness-usage-test-phase id 'writing))
+        (harness-usage-test-at 2)
+        (harness-call 'session/usage-add a '(:input 1 :output 100))
+        (harness-usage-test-at 4)
+        (harness-call 'session/usage-add b '(:input 1 :output 100))
+        (dolist (id (list a b))
+          (harness-usage-test-phase id nil)
+          (harness-emit 'agent/turn-ended id 'end-turn))
+        (should-not (gethash a harness-usage--meters))
+        (harness-usage-test-at 600)
+        (should (harness-usage-test-near 50.0 (plist-get (harness-call 'usage/rate a) :rate)))
+        (should (harness-usage-test-near 25.0 (plist-get (harness-call 'usage/rate b) :rate)))
+        (let ((rates (harness-call 'usage/rates)))
+          (should (equal (list b a) (mapcar (lambda (r) (plist-get r :session)) rates)))
+          (should (equal (harness-call 'usage/rate b) (harness-plist-remove (car rates) :session))))
+        (harness-call 'session/delete a)
+        (should-not (harness-call 'usage/rate a))
+        (should (equal (list b) (mapcar (lambda (r) (plist-get r :session)) (harness-call 'usage/rates))))))))
+
+(ert-deftest harness-usage-rate-of-a-streamed-turn ()
+  "A turn the demo provider streams gets its rate from the turn's usage."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session))
+           (harness-provider-demo--delay 0.05)
+           (harness-provider-demo-script-override
+            (append (make-list 8 '(:type text :delta "word "))
+                    '((:type usage :input 100 :output 40 :cost 0.0001 :context 100)
+                      (:type done :stop-reason end-turn)))))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello")) :stop-reason)))
+      (let ((rate (harness-call 'usage/rate id)))
+        (should rate)
+        (should (= 40 (plist-get rate :output)))
+        (should (= 1 (plist-get rate :calls)))
+        ;; Eight deltas 0.05 s apart, then the usage: about 0.4 s.
+        (should (< 0.3 (plist-get rate :seconds) 5.0))
+        (should (harness-usage-test-near (plist-get rate :rate) (/ 40 (plist-get rate :seconds)))))
+      ;; The turn is over: the meter is gone, the rate stays.
+      (should-not (gethash id harness-usage--meters))
+      (should (harness-call 'usage/rate id)))))
+
+(ert-deftest harness-usage-rate-of-a-hosted-turn ()
+  "A provider's `call-usage' events give the rate; the turn's usage the accounting."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session))
+           (calls nil)
+           (words (make-list 8 '(:type text :delta "word ")))
+           (harness-provider-demo--delay 0.05)
+           (harness-provider-demo-script-override
+            (append words '((:type call-usage :output 24))
+                    words '((:type call-usage :output 16))
+                    ;; The turn's total, with a sub-agent's output in it.
+                    '((:type usage :input 100 :output 9000 :cost 0.0001 :context 100)
+                      (:type done :stop-reason end-turn)))))
+      (harness-on 'agent/call-usage (lambda (sid usage) (push (cons sid usage) calls)))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello")) :stop-reason)))
+      (should (equal (list (cons id '(:output 24)) (cons id '(:output 16))) (reverse calls)))
+      (let ((rate (harness-call 'usage/rate id)))
+        (should (= 40 (plist-get rate :output)))
+        (should (= 2 (plist-get rate :calls)))
+        (should (< 0.6 (plist-get rate :seconds) 10.0)))
+      ;; The calls were announced, not recorded: the turn is one row.
+      (let ((totals (harness-call 'usage/totals :session id)))
+        (should (= 1 (plist-get totals :calls)))
+        (should (= 9000 (plist-get totals :output)))))))
 
 (provide 'harness-usage-test)
 ;;; harness-usage-test.el ends here

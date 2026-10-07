@@ -174,6 +174,29 @@ Finished tasks are completed at once, without review, unless BODY turns
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 
+(ert-deftest harness-ui-tasks-card-shows-the-output-rate ()
+  "A card says how fast its session writes, once the harness measured it.
+The figure comes with the harness's `usage/rate-updated' event, which
+redraws the board by itself."
+  (harness-ui-tasks-test-with
+    ;; A turn that never ends keeps the task in progress.
+    (let ((harness-provider-demo-script-override '((:type text :delta "Working on it."))))
+      (unwind-protect
+          (progn
+            (harness-ui-tasks-test--type-and-submit board "Write quickly")
+            (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Write quickly")
+            (should-not (string-match-p "tok/s" (harness-ui-tasks-test--board-text board)))
+            (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
+              (should sid)
+              (harness-emit 'usage/rate-updated sid
+                            (list :rate 42.0 :output 420 :seconds 10.0 :calls 1
+                                  :at (float-time) :model "demo:scripted"))
+              (harness-test-wait (lambda () (string-match-p "Write quickly\\(.\\|\n\\)*42 tok/s"
+                                                            (harness-ui-tasks-test--board-text board)))
+                                 5 "the rate on the card")))
+        (dolist (task (harness-call 'task/list default-directory))
+          (harness-call 'task/cancel (plist-get task :id)))))))
+
 (ert-deftest harness-ui-tasks-stopped-task-needs-input ()
   (harness-ui-tasks-test-with
     (let ((harness-provider-demo-script-override

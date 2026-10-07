@@ -371,6 +371,12 @@ process told to resume that exits before it starts is replaced by a new
 CLI session, which gets the blocks again with the transcript.  Kept
 beside the session records, as `harness-provider-claude--blocks' is.")
 
+(defvar harness-provider-claude--call-output (make-hash-table :test 'equal)
+  "Harness session id -> output tokens of the streaming message reported so far.
+A `message_delta' counts the message's output so far; the part not
+reported yet goes out as a `call-usage' event, for the output rate.
+Kept beside the session records, as `harness-provider-claude--blocks' is.")
+
 (defvar harness-provider-claude--side-count 0
   "Counter that keeps the ids of side requests' CLI processes unique.")
 
@@ -422,6 +428,7 @@ resumes the CLI session in a new one."
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--builtin-calls)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--turn-failure)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-checkpoints)
+    (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output)
     (let ((fn (harness-provider-claude-session-on-event entry)))
       (setf (harness-provider-claude-session-active entry) nil
             (harness-provider-claude-session-cancel-timer entry) nil
@@ -993,16 +1000,35 @@ block has ended by then, so a report never follows the call it is about."
         (cancel-timer timer))
       (remhash sid harness-provider-claude--blocks))))
 
-(defun harness-provider-claude--handle-stream (entry event)
-  "Handle an Anthropic streaming EVENT on ENTRY."
+(defun harness-provider-claude--call-usage (entry usage)
+  "Report the output that USAGE, a `message_delta''s, adds on ENTRY.
+USAGE counts the output of the message so far; what was not reported
+yet goes out as a `call-usage' event, for the output rate.  The turn's
+`usage' event, from the result, counts it with the turn's other calls."
+  (let* ((sid (harness-provider-claude-session-id entry))
+         (output (plist-get usage :output_tokens))
+         (reported (gethash sid harness-provider-claude--call-output 0)))
+    (when (and (numberp output) (> output reported))
+      (puthash sid output harness-provider-claude--call-output)
+      (harness-provider-claude--emit entry (list :type 'call-usage :output (- output reported))))))
+
+(defun harness-provider-claude--handle-stream (entry event &optional sub-agent)
+  "Handle an Anthropic streaming EVENT on ENTRY.
+SUB-AGENT is non-nil for the stream of a sub-agent's message (its
+`parent_tool_use_id'), whose usage the main conversation's output rate
+leaves out."
   (pcase (plist-get event :type)
     ("message_start"
+     (unless sub-agent
+       (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output))
      (when-let* ((ctx (harness-provider-claude--usage-context
                        (plist-get (plist-get event :message) :usage))))
        (setf (harness-provider-claude-session-context entry) ctx)))
     ("message_delta"
      (when-let* ((ctx (harness-provider-claude--usage-context (plist-get event :usage))))
-       (setf (harness-provider-claude-session-context entry) ctx)))
+       (setf (harness-provider-claude-session-context entry) ctx))
+     (unless sub-agent
+       (harness-provider-claude--call-usage entry (plist-get event :usage))))
     ("content_block_start"
      (let ((block (plist-get event :content_block)))
        (harness-provider-claude--end-block entry)
@@ -1747,7 +1773,8 @@ It is no longer the probe: whoever needs one next starts another."
           (harness-provider-claude--emit
            entry '(:type hint :text "Context compacted by Claude Code")))
          (sub (harness-log 'debug "provider-claude: system/%s" sub))))
-      ("stream_event" (harness-provider-claude--handle-stream entry (plist-get msg :event)))
+      ("stream_event" (harness-provider-claude--handle-stream entry (plist-get msg :event)
+                                                               (plist-get msg :parent_tool_use_id)))
       ("assistant"
        (setf (harness-provider-claude-session-seen-output entry) t)
        (harness-provider-claude--handle-assistant entry (plist-get msg :message)

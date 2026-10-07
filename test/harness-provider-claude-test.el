@@ -28,6 +28,9 @@
 (defvar harness-provider-claude--listing)
 (declare-function harness-provider-claude--forget-listing "harness-provider-claude")
 (declare-function harness-provider--forget "harness-provider")
+(defvar harness-provider-claude--call-output)
+(declare-function harness-provider-claude--handle-stream "harness-provider-claude")
+(declare-function harness-provider-claude--finish "harness-provider-claude")
 (declare-function harness-provider-claude-close "harness-provider-claude")
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 (declare-function harness-provider-claude--command "harness-provider-claude")
@@ -421,6 +424,41 @@ That is the harness's shorter budget for a task's session."
                         (harness-provider-claude--environment-for
                          (funcall with-window 1000000))))))
 
+(ert-deftest harness-provider-claude-call-usage-follows-the-stream ()
+  "Each streamed message's output goes out as `call-usage', in parts.
+A `message_delta' counts its message's output so far, so only what it
+adds is reported; the next message counts from zero again, and a
+sub-agent's stream is left out."
+  (harness-provider-claude-test--setup)
+  (let* ((events nil)
+         (entry (harness-provider-claude--make-session
+                 :id "s-call-usage" :active t
+                 :on-event (lambda (ev) (push ev events))))
+         (stream (lambda (event &optional sub-agent)
+                   (harness-provider-claude--handle-stream entry event sub-agent)))
+         (reported (lambda ()
+                     (mapcar (lambda (e) (plist-get e :output))
+                             (cl-remove 'call-usage (reverse events)
+                                        :key (lambda (e) (plist-get e :type)) :test-not #'eq)))))
+    (funcall stream '(:type "message_start" :message (:usage (:input_tokens 10 :output_tokens 1))))
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 5)))
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 9)))
+    ;; A delta that adds nothing reports nothing.
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 9)))
+    (should (equal '(5 4) (funcall reported)))
+    ;; A sub-agent's message neither reports nor starts the count over.
+    (funcall stream '(:type "message_start" :message (:usage (:output_tokens 0))) "toolu_sub")
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 30)) "toolu_sub")
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 12)))
+    (should (equal '(5 4 3) (funcall reported)))
+    ;; The next message of the main conversation counts from zero.
+    (funcall stream '(:type "message_start" :message (:usage (:output_tokens 0))))
+    (funcall stream '(:type "message_delta" :usage (:output_tokens 2)))
+    (should (equal '(5 4 3 2) (funcall reported)))
+    ;; The end of the turn forgets the count.
+    (harness-provider-claude--finish entry '(:type done :stop-reason end-turn))
+    (should-not (gethash "s-call-usage" harness-provider-claude--call-output))))
+
 (ert-deftest harness-provider-claude-turn-with-hosted-tool-call ()
   (harness-provider-claude-test--setup)
   (let* ((argv-file (harness-provider-claude-test--argv-file))
@@ -460,6 +498,12 @@ That is the harness's shorter budget for a task's session."
       (should (= 2000 (plist-get usage :cache-read)))
       (should (= 100 (plist-get usage :cache-write)))
       (should (= 2112 (plist-get usage :context))))
+    ;; The streamed message's output was reported as it came, for the
+    ;; output rate, before the turn's usage counted it.
+    (should (equal '(7) (mapcar (lambda (e) (plist-get e :output))
+                                (cl-remove 'call-usage events
+                                           :key (lambda (e) (plist-get e :type)) :test-not #'eq))))
+    (should (< (cl-position 'call-usage types) (cl-position 'usage types)))
     (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
     ;; Quota windows were reported and remembered.
     (let ((q (harness-provider-claude-test--find events 'quota)))
