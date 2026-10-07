@@ -270,6 +270,7 @@ the menu's Version entry says so.
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
+| `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h z` | `harness-pet` | Show your companion pet, or the egg it hatches from |
@@ -1048,6 +1049,14 @@ outside the harness that no provider reports, such as a project
 budget's spending, which no provider can single out, is a baseline:
 press `s` on the budget's line in the dashboard (or use the add-budget
 wizard) to set it; it counts until the period rolls over.
+
+To delete a budget, click `[delete]` beside its name in the dashboard or
+press `d` on its line; from anywhere, `C-c h B` (Delete budget in the
+harness menu) asks for it by name. A session's own budget (a `session`
+line) is deleted from that session alone. The budget for all sessions
+together, the `all sessions (setting)` line, is the Budget setting
+(`harness-budget`, under Spending in the settings) and is removed
+there: choose No budget.
 
 ## Corporate mode
 

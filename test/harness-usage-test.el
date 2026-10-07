@@ -385,7 +385,9 @@ also once the worktree is gone; other groupings have no `:main'."
       (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello")) :stop-reason)))
       (let ((r (harness-await (harness-call 'agent/prompt id "again"))))
         (should (eq 'blocked (plist-get r :stop-reason)))
-        (should (string-match-p "Budget session exhausted" (plist-get r :error))))
+        (should (string-match-p "Budget session exhausted" (plist-get r :error)))
+        ;; It says where the budget is deleted.
+        (should (string-match-p "delete it in the usage dashboard" (plist-get r :error))))
       (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
       (should (cl-some (lambda (h) (string-match-p "Turn not started: Budget session exhausted: spent \\$0.0008 of \\$0.0005" h))
                        (harness-usage-test-hints id)))
@@ -427,7 +429,9 @@ once spent, stops them all; no session has a budget of its own."
       (dolist (sid (list a b))
         (let ((r (harness-await (harness-call 'agent/prompt sid "again"))))
           (should (eq 'blocked (plist-get r :stop-reason)))
-          (should (string-match-p "Budget all sessions (setting) exhausted" (plist-get r :error)))))
+          (should (string-match-p "Budget all sessions (setting) exhausted" (plist-get r :error)))
+          ;; It says where the setting is changed, not deleted.
+          (should (string-match-p "change it with M-x harness-settings to go on" (plist-get r :error)))))
       ;; It is no explicit budget, and without the setting there is none.
       (should-not (harness-call 'usage/budgets))
       (let ((harness-budget nil))
@@ -840,7 +844,7 @@ month budgets over everything, fetched in the background when due."
         (should (= 6.0 (plist-get st :reported)))
         (should (= 4.0 (plist-get st :baseline))))
       (should (string-match-p
-               "\\`Budget monthly cap exhausted: spent \\$10\\.00 (incl\\. \\$6\\.00 reported by Claude, \\$4\\.00 baseline) of \\$10\\.00\\'"
+               "\\`Budget monthly cap exhausted: spent \\$10\\.00 (incl\\. \\$6\\.00 reported by Claude, \\$4\\.00 baseline) of \\$10\\.00; delete it in the usage dashboard to go on\\'"
                (harness-usage--check (harness-call 'session/get id) now))))))
 
 ;;;; JSONL fallback

@@ -1222,7 +1222,11 @@ Return the reason a hard budget blocks the next turn, or nil."
         (cond
          ((and (plist-get st :hard) (>= fraction 1.0))
           (unless reason
-            (setq reason (format "Budget %s exhausted: spent %s of %s" label spent amount))))
+            (setq reason (format "Budget %s exhausted: spent %s of %s; %s to go on"
+                                 label spent amount
+                                 (if (equal (plist-get b :id) harness-usage-settings-budget-id)
+                                     "change it with M-x harness-settings"
+                                   "delete it in the usage dashboard")))))
          ((>= fraction 1.0)
           (harness-usage--warn sid b st 1.0 (format "Budget %s exceeded: spent %s of %s" label spent amount)))
          ((>= fraction harness-usage-warn-fraction)

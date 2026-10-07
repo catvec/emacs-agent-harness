@@ -273,15 +273,132 @@ their sum; TAB, RET, w and the heading's button show and hide them."
           (should (string-match-p "███░" text))))
       (with-current-buffer harness-ui-usage--buffer-name
         (goto-char (point-min))
-        (should (search-forward "[remove]" nil t))
+        (should (search-forward "[delete]" nil t))
         (let ((status (harness-ui-usage--budget-at-point)))
           (should status)
           (should (= 8.0 (plist-get status :amount)))
           (should (< (abs (- 0.25 (plist-get status :fraction))) 1e-6)))
-        ;; Removing through the command asks, then calls the method.
-        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
-          (harness-ui-usage-remove-budget))
+        ;; Deleting through the button asks, then calls the method.
+        (let ((asked nil))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (prompt) (setq asked prompt) t)))
+            (backward-char 2)
+            (push-button))
+          (should (string-match-p "\\`Delete budget harness-test-.+\\? \\'" asked)))
         (harness-test-wait (lambda () (null (harness-call 'usage/budgets))) 5 "budget removed")))))
+
+(defun harness-ui-usage-test-budget-lines ()
+  "Return (BUDGET . LINE) for each budget's line of the dashboard, in order."
+  (with-current-buffer harness-ui-usage--buffer-name
+    (save-excursion
+      (goto-char (point-min))
+      (let (lines)
+        (while (search-forward "[delete]" nil t)
+          (push (cons (plist-get (get-text-property (line-beginning-position) 'harness-ui-usage-budget) :budget)
+                      (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+                lines))
+        (nreverse lines)))))
+
+(defun harness-ui-usage-test-own-budget-session (name amount)
+  "Create a session NAME with a hard budget of its own of AMOUNT; return its id.
+The id is returned once the UI's session cache has the session."
+  (let ((sid (plist-get (harness-call 'session/create :cwd default-directory :model "demo:scripted"
+                                      :name name :budget (list :amount amount :hard t))
+                        :id)))
+    (harness-ui-refresh-sessions)
+    (harness-test-wait (lambda () (harness-ui-session sid)) 5 "session cached")
+    sid))
+
+(ert-deftest harness-ui-usage-budget-buttons-follow-its-name ()
+  "A budget's buttons come right after its name, [delete] first and in the
+same column on every line, so a window too narrow for the whole line,
+which is not wrapped, still shows them; the meters after them line up.
+A session's own budget has [delete] too, but no [baseline]."
+  (harness-ui-usage-test-with
+    (harness-ui-usage-test-own-budget-session "fix the login" 5)
+    (harness-ui-usage-test-record (float-time) (file-name-as-directory dir) "demo:scripted" 1.0)
+    (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                   (list :budget (list :scope "period" :period "month" :amount 100
+                                                       :baseline 20 :label "monthly cap")))
+    (harness-ui-usage-test-open)
+    (let* ((lines (harness-ui-usage-test-budget-lines))
+           (month (cdr (cl-find "monthly cap" lines :key (lambda (l) (plist-get (car l) :label)) :test #'equal)))
+           (own (cdr (cl-find-if (lambda (l) (plist-get (car l) :implicit)) lines))))
+      (should (= 2 (length lines)))
+      (should (string-match-p "\\`  monthly cap +\\[delete\\] \\[baseline\\] \\[plan\\]  " month))
+      (should (string-match-p "\\[delete\\] \\[plan\\]  " own))
+      (should-not (string-match-p "\\[baseline\\]" own))
+      (should (= (string-search "[delete]" month) (string-search "[delete]" own)))
+      ;; Every button fits in 60 columns; the whole line does not fit in 100.
+      (should (<= (+ (string-search "[plan]" month) (length "[plan]")) 60))
+      (should (> (length month) 100))
+      ;; The meters, and so the percentages after them, line up.
+      (should (= (string-search "%" month) (string-search "%" own))))))
+
+(ert-deftest harness-ui-usage-delete-a-sessions-own-budget ()
+  "A session's own budget is deleted on the dashboard like any other: d on
+its line asks, naming the session, and clears the budget on the session."
+  (harness-ui-usage-test-with
+    (let ((sid (harness-ui-usage-test-own-budget-session "fix the login" 5))
+          (asked nil))
+      (harness-ui-usage-test-open)
+      (with-current-buffer harness-ui-usage--buffer-name
+        (goto-char (point-min))
+        (search-forward "[delete]")
+        (should (equal (concat "session:" sid)
+                       (plist-get (plist-get (harness-ui-usage--budget-at-point) :budget) :id)))
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (prompt) (setq asked prompt) t)))
+          (harness-ui-usage-remove)))
+      (should (equal "Delete the budget of session fix the login? " asked))
+      (harness-test-wait (lambda () (null (plist-get (harness-call 'session/get sid) :budget))) 5 "budget cleared")
+      (harness-test-wait (lambda () (string-match-p "no budgets yet" (harness-ui-usage-test-text))) 5 "line gone")
+      ;; The session says so in its transcript.
+      (should (cl-some (lambda (n) (and (eq 'hint (plist-get n :kind))
+                                        (string-match-p "budget removed" (plist-get n :content))))
+                       (harness-call 'session/nodes sid))))))
+
+(ert-deftest harness-ui-usage-delete-budget-anywhere-reads-one-by-name ()
+  "`harness-delete-budget' (C-c h B) offers every budget by name, the
+sessions' own too, and deletes the one chosen; on a budget's line of the
+dashboard, that budget is the default."
+  (harness-ui-usage-test-with
+    (let ((sid (harness-ui-usage-test-own-budget-session "fix the login" 5))
+          (offered nil))
+      (should (eq 'harness-delete-budget (lookup-key harness-ui-map (kbd "B"))))
+      (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                     (list :budget (list :scope "period" :period "month" :amount 100 :label "monthly cap")))
+      (harness-ui-usage-test-request "_harness/usage/set-budget"
+                                     (list :budget (list :scope "period" :period "week" :amount 30 :label "weekly cap")))
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt table &rest _)
+                     (setq offered (mapcar #'car table))
+                     (cl-find-if (lambda (c) (string-prefix-p "weekly cap" c)) offered)))
+                  ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+          (call-interactively #'harness-delete-budget)
+          (harness-test-wait (lambda () (= 1 (length (harness-call 'usage/budgets)))) 5 "weekly cap deleted")))
+      (should (equal '("monthly cap  $0 / $100.00, soft" "weekly cap  $0 / $30.00, soft"
+                       "session fix the login  $0 / $5.00, hard")
+                     offered))
+      (should (equal "monthly cap" (plist-get (car (harness-call 'usage/budgets)) :label)))
+      (should (plist-get (harness-call 'session/get sid) :budget))
+      ;; On the dashboard, the budget on the current line is the default.
+      (harness-ui-usage-test-open)
+      (let (prompt default asked)
+        (with-current-buffer harness-ui-usage--buffer-name
+          (goto-char (point-min))
+          (search-forward "monthly cap")
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (p _table _pred _req _init _hist def &rest _)
+                       (setq prompt p default def)
+                       def))
+                    ((symbol-function 'yes-or-no-p) (lambda (p) (setq asked p) nil)))
+            (call-interactively #'harness-delete-budget)
+            (harness-test-wait (lambda () asked) 5 "asked")))
+        (should (equal "monthly cap  $0 / $100.00, soft" default))
+        (should (string-prefix-p "Delete budget (default monthly cap" prompt))
+        (should (equal "Delete budget monthly cap? " asked))
+        ;; Answering no deletes nothing.
+        (should (= 1 (length (harness-call 'usage/budgets))))))))
 
 (defvar harness-budget)
 
@@ -305,7 +422,7 @@ there are, and d on it says where to change it."
           (should-not (cl-some (lambda (l) (string-match-p "\\`  session " l)) lines)))
         (harness-ui-usage-test-goto "all sessions (setting)")
         (should (string-match-p "M-x harness-settings"
-                                (cadr (should-error (harness-ui-usage-remove-budget) :type 'user-error))))))
+                                (cadr (should-error (harness-ui-usage-remove) :type 'user-error))))))
     ;; Unset, it is gone.
     (with-current-buffer harness-ui-usage--buffer-name
       (harness-ui-usage-refresh)
