@@ -177,6 +177,7 @@ top, whole, and leaves them as they were."
 (require 'harness-ui-btw)
 (require 'harness-ui-media)
 (require 'harness-ui-review)
+(require 'harness-ui-version)
 
 (defvar harness-ui-test-ran nil "Commands the menu ran, newest first: (COMMAND BUFFER POINT).")
 
