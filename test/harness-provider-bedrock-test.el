@@ -879,14 +879,17 @@ Folded header lines continue the header above them."
               (should (equal '("low" "medium" "high") (plist-get sonnet :thinking-levels)))
               (should (equal '(:input 3.0 :output 15.0 :cache-read 0.3 :cache-write 3.75) (plist-get sonnet :pricing)))
               (should (equal "anthropic.claude-sonnet-4-5-20250929-v1:0" (plist-get sonnet :base)))
-              (should (eq t (plist-get (plist-get sonnet :capabilities) :prompt-caching))))
+              (should (eq t (plist-get (plist-get sonnet :capabilities) :prompt-caching)))
+              (should-not (plist-get sonnet :context-window-estimated)))
             (let ((opus (funcall by-name "global.anthropic.claude-opus-5-5")))
               (should (= 1000000 (plist-get opus :context-window)))
               (should (eq 'adaptive (plist-get opus :thinking-style))))
             (should (= 300000 (plist-get (funcall by-name "amazon.nova-pro-v1:0") :context-window)))
             (should (equal '("text" "image") (plist-get (funcall by-name "amazon.nova-pro-v1:0") :input-modalities)))
             (let ((llama (funcall by-name "meta.llama3-1-8b-instruct-v1:0")))
+              ;; The Llama 3 family's window, a guess for this one.
               (should (= 128000 (plist-get llama :context-window)))
+              (should (plist-get llama :context-window-estimated))
               (should (equal '("text") (plist-get llama :input-modalities)))
               (should-not (plist-get llama :thinking-levels))
               (should-not (plist-get (plist-get llama :capabilities) :vision)))
@@ -939,6 +942,106 @@ Folded header lines continue the header above them."
         (should (cl-some (lambda (w) (string-match-p "ListFoundationModels failed: HTTP 403: not allowed to list" w))
                          warnings))
         (should-not (gethash 'failing harness-bedrock--models-cache))))))
+
+(ert-deftest harness-provider-bedrock-model-catalogue-refresh-and-failure ()
+  ;; A refresh lists the models again however fresh the cache is, and a
+  ;; listing that fails keeps the models listed before.
+  (harness-bedrock-test-with-keys
+    (let ((endpoint '(:id refreshing :region "us-east-1" :inference-profiles nil))
+          (names (lambda (models) (mapcar (lambda (m) (plist-get m :name)) models))))
+      (remhash 'refreshing harness-bedrock--models-cache)
+      (unwind-protect
+          (let (listed)
+            (harness-bedrock-test-with-fake
+                (list (cons "/foundation-models"
+                            (list :status 200 :body (harness-json-encode harness-bedrock-mock-models))))
+              (setq listed (funcall names (harness-test-await (harness-bedrock--models endpoint))))
+              (should (equal '("meta.llama3-1-8b-instruct-v1:0" "amazon.nova-pro-v1:0") listed))
+              (harness-test-await (harness-bedrock--models endpoint))
+              (should (= 1 (length harness-bedrock-test--requests)))
+              (should (equal listed (funcall names (harness-test-await (harness-bedrock--models endpoint t)))))
+              (should (= 2 (length harness-bedrock-test--requests))))
+            (harness-bedrock-test-with-fake
+                '(("/foundation-models" . (:status 403 :body "{\"message\":\"not allowed to list\"}")))
+              (let* ((warnings nil)
+                     (models (let ((harness-log-hook
+                                    (list (lambda (level msg) (when (eq level 'warn) (push msg warnings))))))
+                               (harness-test-await (harness-bedrock--models endpoint t)))))
+                (should (= 1 (length harness-bedrock-test--requests)))
+                (should (equal listed (funcall names models)))
+                (should (cl-some (lambda (w) (string-match-p "keeping the 2 models listed before" w)) warnings)))))
+        (remhash 'refreshing harness-bedrock--models-cache)))))
+
+(ert-deftest harness-provider-bedrock-family-windows-are-estimates ()
+  ;; The window of a family's catch-all is flagged as a guess.
+  (let ((opus (harness-bedrock--model-entry '(:id e) "us.anthropic.claude-opus-9-v1:0")))
+    (should (= 200000 (plist-get opus :context-window)))
+    (should (plist-get opus :context-window-estimated))
+    (should (stringp (plist-get opus :context-window-basis)))
+    (should (eq t (plist-get (plist-get opus :capabilities) :prompt-caching)))
+    (should (equal '("text" "image") (plist-get opus :input-modalities))))
+  ;; Neither the window of a model the defaults know nor one given with a
+  ;; static model is.
+  (should-not (plist-get (harness-bedrock--model-entry '(:id e) harness-bedrock-test-sonnet)
+                         :context-window-estimated))
+  (let ((own (car (harness-bedrock--static-models
+                   '(:id e :models ((:name "anthropic.claude-new-v1:0" :context-window 500000)))))))
+    (should (= 500000 (plist-get own :context-window)))
+    (should-not (plist-get own :context-window-estimated))
+    (should-not (plist-get own :context-window-basis)))
+  ;; A model of no known family gets the endpoint's default context, else
+  ;; no window, for the catalogue to estimate.
+  (let ((default (harness-bedrock--model-entry '(:id e :default-context 64000) "acme.mystery-v1")))
+    (should (= 64000 (plist-get default :context-window)))
+    (should-not (plist-get default :context-window-estimated)))
+  (should-not (plist-get (harness-bedrock--model-entry '(:id e) "acme.mystery-v1") :context-window))
+  ;; A family's guess does not beat the endpoint's default either way round:
+  ;; the family knows the model better.
+  (should (= 200000 (plist-get (harness-bedrock--model-entry '(:id e :default-context 64000)
+                                                             "anthropic.claude-opus-9-v1:0")
+                               :context-window))))
+
+(ert-deftest harness-provider-bedrock-resolves-what-the-listing-lacks ()
+  "A model the endpoint does not list is described from the defaults.
+The window its family guesses gives way to the one another provider
+lists for the same model."
+  (harness-bedrock-test-with-env ()
+    (harness-test-reset-bus)
+    (dolist (m '(provider provider-bedrock))
+      (harness-test-load-module m))
+    (unwind-protect
+        (let ((harness-bedrock-endpoints
+               '((:id statrock :label "Static Bedrock" :region "us-east-1"
+                  :models ("us.anthropic.claude-sonnet-4-5-20250929-v1:0")))))
+          (harness-bedrock--register-all)
+          (harness-bedrock-clear-models-cache)
+          ;; The catalogue warms up from a timer once its module loads: let
+          ;; that run now, while these are the endpoints, not in a later test.
+          (harness-test-wait (let ((spun nil)) (lambda () (prog1 spun (setq spun t)))))
+          (let ((opus (harness-call 'provider/model "statrock:us.anthropic.claude-opus-9-v1:0"))
+                (arn (harness-call 'provider/model
+                                   "statrock:arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc")))
+            (should (equal "Static Bedrock" (plist-get opus :provider-label)))
+            (should (= 200000 (plist-get opus :context-window)))
+            (should (plist-get opus :context-window-estimated))
+            (should (equal '("text" "image") (plist-get opus :input-modalities)))
+            (should (plist-get (plist-get opus :capabilities) :prompt-caching))
+            ;; An ARN no default knows: an estimate from the endpoint's models.
+            (should (= 200000 (plist-get arn :context-window)))
+            (should (equal "statrock's models" (plist-get arn :context-window-basis))))
+          (harness-define-provider 'test-sizer
+            :complete #'ignore
+            :models (lambda () (harness-resolved '((:name "claude-opus-9" :context-window 2000000)))))
+          (harness-test-await (harness-call 'provider/models))
+          (let ((opus (harness-call 'provider/model "statrock:us.anthropic.claude-opus-9-v1:0")))
+            (should (= 2000000 (plist-get opus :context-window)))
+            (should (plist-get opus :context-window-estimated))
+            (should (equal "test-sizer:claude-opus-9" (plist-get opus :context-window-basis)))))
+      (remhash 'test-sizer harness-providers)
+      (harness-provider--forget 'test-sizer)
+      (harness-provider--forget 'statrock)
+      (harness-bedrock-clear-models-cache)
+      (harness-bedrock--register-all))))
 
 (ert-deftest harness-provider-bedrock-registration ()
   (should (harness-provider-get 'bedrock))

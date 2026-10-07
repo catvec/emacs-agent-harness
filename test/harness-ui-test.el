@@ -506,6 +506,16 @@ bottom side window and leaves the other windows alone."
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
 
+(ert-deftest harness-ui-model-window-says-when-it-is-estimated ()
+  "The model picker marks a window the catalogue estimated with a tilde."
+  (should (equal "1.00M" (harness-ui-format-model-window '(:context-window 1000000))))
+  (should (equal "~200k" (harness-ui-format-model-window '(:context-window 200000 :context-window-estimated t))))
+  ;; JSON's false is no estimate.
+  (should (equal "200k" (harness-ui-format-model-window '(:context-window 200000 :context-window-estimated :false))))
+  ;; Unknown windows still get a face, against the harness's fallback window.
+  (should (eq 'harness-context-ok-face (harness-ui-context-face 100000 nil)))
+  (should (eq 'harness-context-critical-face (harness-ui-context-face 175000 nil))))
+
 (ert-deftest harness-ui-thinking-menu-follows-the-model ()
   "The thinking menu offers a model's own levels, weakest first, so a
 DeepSeek model (low, high, max) is not offered a medium or an xhigh that

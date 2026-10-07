@@ -1123,10 +1123,16 @@ Signal unless NOERROR when none can be found."
   "Tokens the harness keeps free below a context window for compaction.
 The same as `harness-compaction--context-reserve' in the harness process.")
 
+(defconst harness-ui--fallback-context-window 200000
+  "Context window assumed while a session's is not known.
+The harness gives every session one, estimated where no provider sizes
+its model; this is the default of `harness-provider-fallback-context-window'
+there, which estimates fall back to.")
+
 (defun harness-ui-context-face (context window)
   "Return the warning face for CONTEXT tokens against WINDOW."
   (let* ((reserve harness-ui--context-reserve)
-         (limit (max 1 (- (or window 128000) reserve)))
+         (limit (max 1 (- (or window harness-ui--fallback-context-window) reserve)))
          (f (/ (float (or context 0)) limit)))
     (cond ((>= f 0.95) 'harness-context-critical-face)
           ((>= f 0.85) 'harness-context-urgent-face)
@@ -1156,6 +1162,13 @@ hard to click.  Build `help-echo' text from parts through this."
     (propertize (format "%s/%s" (harness-format-tokens context) (harness-format-tokens window))
                 'face (harness-ui-context-face context window)
                 'help-echo "Context tokens in use / context window")))
+
+(defun harness-ui-format-model-window (model)
+  "Return the context window of catalogue entry MODEL as text: \"200k\".
+A window the catalogue estimated, as its provider does not give it,
+reads \"~200k\"."
+  (concat (if (eq t (plist-get model :context-window-estimated)) "~" "")
+          (harness-format-tokens (plist-get model :context-window))))
 
 (defun harness-ui--prettify-model-name (name)
   "Return a readable form of model slug NAME, or nil when it has no known shape.
@@ -1450,11 +1463,16 @@ An option is a string or an object (a plist) with a `:label'."
 (defun harness-ui-summary-value (value)
   "Return VALUE on one line for a tool input summary.
 A list of strings, or of objects with labels such as the options of an
-ask_user call, reads as a comma-separated list, not a Lisp form."
+ask_user call, reads as a comma-separated list, and a list of other
+objects, such as the items of a todo list, as how many there are: not
+as a Lisp form."
   (harness-first-line
-   (if (and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
-       (mapconcat #'harness-ui-option-label value ", ")
-     (harness-ui-format-value value))
+   (cond ((and (or (consp value) (vectorp value)) (cl-every #'harness-ui-option-label value))
+          (mapconcat #'harness-ui-option-label value ", "))
+         ((and (or (consp value) (vectorp value)) (not (keywordp (car (append value nil))))
+               (cl-every (lambda (v) (and (consp v) (keywordp (car v)))) value))
+          (let ((n (length value))) (format "%d item%s" n (if (= n 1) "" "s"))))
+         (t (harness-ui-format-value value)))
    60))
 
 (defun harness-ui-tool-input-summary (input &optional title)
@@ -1758,7 +1776,7 @@ available is offered."
                      (let ((m (cdr (assoc choice table))))
                        (format "  %s · %s ctx%s"
                                (plist-get m :id)
-                               (harness-format-tokens (plist-get m :context-window))
+                               (harness-ui-format-model-window m)
                                (if-let* ((p (plist-get m :pricing)))
                                    (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
                                  ""))))))
@@ -2549,6 +2567,7 @@ leaves the buffer's commands out, never the whole menu."
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
+    ("z" "Companion pet" harness-pet :if (lambda () (harness-ui--command-available-p 'harness-pet)))
     ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
     ("P" "Remote control" harness-remote-control
      :if (lambda () (harness-ui--command-available-p 'harness-remote-control))

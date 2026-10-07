@@ -70,6 +70,7 @@
 (require 'harness-util)
 
 (defvar harness-state-directory)
+(defvar harness-provider-fallback-context-window)
 
 (defconst harness-session--save-delay 0.3
   "Seconds of quiet before a changed session record is written to disk.")
@@ -374,13 +375,17 @@ taken anywhere but at the head of its parent starts off it."
     (and (boundp key) (symbol-value key))))
 
 (defun harness-session--model-window (model)
-  "Return the context window the provider catalogue gives MODEL."
+  "Return the context window the provider catalogue gives MODEL.
+The catalogue gives every model one, estimated where no provider says
+\(see `provider/model'); without a catalogue the window is
+`harness-provider-fallback-context-window'."
   (or (and (harness-method-exists-p 'provider/model)
            (condition-case err
                (plist-get (harness-call 'provider/model model) :context-window)
              (error (harness-log 'debug "session: no context window for %s: %S" model err)
                     nil)))
-      128000))
+      (bound-and-true-p harness-provider-fallback-context-window)
+      200000))
 
 (defun harness-session--context-window-limit-value (v)
   "Return V when it is a usable limit on a context window, else nil.

@@ -91,7 +91,7 @@
     ("merge" . "Merge queue") ("naming" . "Session naming") ("perms" . "Permissions")
     ("provider" . "Models") ("provider-claude" . "Claude Code") ("provider-copilot" . "GitHub Copilot")
     ("provider-openai" . "OpenAI-compatible providers") ("provider-bedrock" . "AWS Bedrock")
-    ("provider-demo" . "Demo provider")
+    ("provider-demo" . "Demo provider") ("pet" . "Companion pet")
     ("sandbox" . "Sandbox") ("session" . "Sessions") ("skills" . "Skills") ("tasks" . "Task mode")
     ("tools" . "Tools") ("tools-fs" . "File tools") ("tools-sessions" . "Session tools")
     ("tools-shell" . "Shell tools") ("tools-web" . "Web tools") ("tools-agent" . "Agent tools")

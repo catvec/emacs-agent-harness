@@ -41,6 +41,9 @@ OpenAI-compatible APIs and AWS Bedrock.
   on your phone, paired by scanning a QR code.
 - **Modular and reloadable.** Every feature is a module, and the whole
   harness reloads in place without losing running sessions.
+- **A companion pet.** Hatch a small creature of a random species and
+  rarity that keeps you company in a buffer of its own and now and
+  then has a word to say about your work.
 
 ## Screenshots
 
@@ -203,6 +206,7 @@ named by `harness-server-init-file`.
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
 | `C-c h S` | `harness-settings` | Show the settings page |
+| `C-c h z` | `harness-pet` | Show your companion pet, or the egg it hatches from |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
 | `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
@@ -567,6 +571,30 @@ test notification and says what each provider did with it.
 - Agents can notify you with the `notify` tool, for example when long
   work you asked for has finished. Clicking such a notification opens
   the session.
+
+### Companion pet
+
+`C-c h z` (`M-x harness-pet`) opens the pet's buffer, the only place it
+shows. The first time there is an egg: press `h` to hatch it. It hatches
+into one of 18 species, from common to legendary (one in a hundred),
+sometimes with a hat and, rarely, shiny, with five stats. The cheapest
+model of your provider names it and gives it a personality.
+
+While its buffer is on screen, it now and then says a line about the
+message you just sent, a test run that failed or a big change, and it
+always answers when you call it by name in a message or pet it (`p`).
+It grows a level as you work. `r` renames it, `m` mutes it and `R` lets
+it go, after which the next egg hatches another.
+
+It costs little: it never asks a model anything while its buffer is
+hidden or while it is muted, comments unasked at most once a minute
+(`harness-pet-cooldown`), on your messages only by chance
+(`harness-pet-chance`), and then asks for one short line from a cheap
+model (`harness-pet-model`) with no thinking and none of your project's
+context but the last few messages. Nothing runs while nothing happens.
+To keep it quiet, set
+`harness-pet-reactions` to nil; to remove it, add `pet` and `ui-pet` to
+`harness-disabled-modules`.
 
 ## Configuration
 
