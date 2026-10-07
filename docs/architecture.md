@@ -2875,6 +2875,34 @@ reads a project file by part of its name over the same list, never
 listing while you wait; `C-u C-c C-a`, or a directory that is no
 project, reads any file.
 
+Dragging images out (`harness-ui-drag`): the images the UI shows -- the
+transcript's (`harness-chat--image-string`, `harness-ui-image-string`),
+a compose chip's thumbnail and name, a report's and the image popout's
+-- drag into another application as a file.  `harness-ui-drag-source`
+(a string), `harness-ui-drag-region` (buffer text) and
+`harness-ui-drag-props` (a plist of text properties about to be put on
+text, the image strings' click properties, so that an image drawn in
+pieces, line-high strips say, drags from each) set the
+`harness-ui-drag` property, the file or t for the image displayed
+there, lay `harness-ui-drag-map` (down-mouse-1) over the keymap the
+text already has, and add a word to its `help-echo`.
+`harness-ui-drag-start` follows the mouse with `track-mouse` while the
+button is down: a release before it moved `harness-ui-drag-threshold`
+pixels goes back to `unread-command-events` as a mouse-1 click, so
+links, buttons and `follow-link` work as before; further, it is
+`dnd-begin-file-drag`, whose drop on the source frame itself is
+ignored, so letting go over Emacs cancels.  An image held only as
+`:data` is written to the session's own temporary directory
+(`session/tmp-dir`) as `image-SHA.EXT`, SHA the start of its bytes'
+SHA-1, so a second drag writes nothing; the directory is asked for when
+such an image is drawn and again on the press, and never waited for:
+until it is known, and for a buffer of no session, the file goes to a
+private directory of this Emacs (mode 700), deleted when Emacs exits.
+Nothing is made draggable where `x-begin-drag` is missing (only X,
+macOS and Haiku start drags), nor is a remote file, which the drag
+would copy here while the UI waits; on a text terminal's frame a press
+is a plain press.
+
 Views share positions with sessions: the task board, session list,
 usage dashboard, worktree list, conversation tree and log open through
 `harness-ui-display-view`, replacing the session in their position (and

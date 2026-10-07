@@ -546,9 +546,12 @@ report opens anew."
 
 (ert-deftest harness-ui-review-report-image-shows-larger ()
   "An image of a report is as wide as the popout and much of the frame
-high; RET on it shows it larger in a popout of its own, and q goes back."
+high; RET on it shows it larger in a popout of its own, and q goes back.
+It drags its file into other applications (the popout's image does too:
+see harness-ui-drag-test.el)."
   (harness-ui-review-test-with
-    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+              ((symbol-function 'harness-ui-drag-available-p) (lambda () t)))
       (let* ((popout (harness-ui-review-test--report board id))
              (window (get-buffer-window popout))
              (file (expand-file-name "shot.svg" dir)))
@@ -567,6 +570,8 @@ high; RET on it shows it larger in a popout of its own, and q goes back."
               (should (= (harness-ui-report--image-width) (plist-get image :max-width)))
               (should (= (harness-ui-report--image-max-height) (plist-get image :max-height))))
             (should (string-match-p "view it larger" (get-text-property (point) 'help-echo)))
+            (should (equal file (get-text-property (point) 'harness-ui-drag)))
+            (should (eq 'harness-ui-drag-start (lookup-key (get-text-property (point) 'keymap) [down-mouse-1])))
             (execute-kbd-macro (kbd "RET"))))
         (let ((viewer (harness-ui-popout-buffer (list 'image file))))
           (should viewer)

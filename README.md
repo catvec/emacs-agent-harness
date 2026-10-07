@@ -261,6 +261,17 @@ usually what you wanted. Images and videos show a thumbnail in the
 attachment chip (`harness-compose-thumbnail-lines`; videos need
 `ffmpeg`), so you can see what you are about to send.
 
+Images drag *out* too: press on an image in the transcript, on an
+attachment chip's thumbnail or name, or on an image of a report or its
+larger popout, move the mouse, and drop it on a file manager, a browser
+or a chat app, which receives it as a file. A click without moving
+still opens the image as before, and letting go over Emacs again
+cancels. An image that only exists in the conversation, like a pasted
+screenshot, is first written to the session's temporary directory (see
+below). Dragging works on a graphical frame where Emacs can start
+drags (X, macOS, Haiku), and the hover text says when an image can be
+dragged.
+
 Copied an image (in a browser, or with a screenshot tool)? `C-y` in a
 compose box attaches it instead of yanking text: it goes on the *media
 ring*, a kill ring of its own that only compose boxes read, so no other
