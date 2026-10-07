@@ -150,7 +150,8 @@ non-interactive anyway."
      :keys (harness-tasks-model harness-tasks-thinking harness-tasks-permission-mode
             harness-tasks-non-interactive harness-tasks-context-limit
             harness-tasks-require-verification
-            harness-tasks-max-running harness-tasks-worktrees))
+            harness-tasks-max-running harness-tasks-worktrees
+            harness-merge-conflict-resolver harness-merge-resolver-model))
     (notifications
      :title "Notifications"
      :doc "When the harness tells you it needs you, and where."
