@@ -838,7 +838,9 @@ request is answered from the session's pending list instead.")
 A question is answered with the typed text; otherwise there is no box."
   (when (harness-ui-pending-question session-id)
     (lambda (text atts)
-      (when atts (user-error "Answers cannot carry attachments"))
+      ;; An answer mentioning a file with @ goes as the text it is.
+      (when (harness-compose-without-references atts text)
+        (user-error "Answers cannot carry attachments"))
       (let ((q (harness-ui-pending-question session-id)))
         (if q (harness-ui-pending-answer-question session-id (plist-get q :id) text)
           (user-error "No question is waiting"))))))

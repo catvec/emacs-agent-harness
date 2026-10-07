@@ -264,9 +264,9 @@ the `[menu]` button in the header line.
 | `C-c C-c` | Send the message; while the agent is working, it steers the current turn |
 | `C-c C-q` | Queue the message for the next turn |
 | `RET` | Insert a newline |
-| `@` | Complete a project file to attach; part of a name finds a file in any subdirectory |
+| `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. An `@path` typed out in full attaches its file when the message is sent, and stays in the text |
 | `/` | Complete a skill |
-| `C-c C-a` | Attach a project file found the same way (`C-u C-c C-a` attaches any file) |
+| `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system) |
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
