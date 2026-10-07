@@ -133,6 +133,36 @@ Then add it to your init file:
 (harness-start)
 ```
 
+### Updating
+
+`M-x harness-update` (`U` in the `C-c h ?` menu) updates the harness
+and reloads it in place, keeping running sessions. It updates the git
+checkout the harness runs from: the clone of a manual installation, or
+the clone that straight.el keeps for a Doom Emacs or straight.el
+installation. It fetches the checkout's upstream branch and, when there
+are new commits, first checks the newest one in a separate Emacs,
+outside the checkout: `harness.el` must load, and every file must
+compile with no merge conflict marker in its code. Only then does it
+fast-forward the checkout and run `harness-reload`, which loads the
+update in your Emacs and in the harness process. A commit that fails
+the check is never installed, and a fast-forward cannot conflict, so
+the harness keeps running what it ran until a fixed commit arrives.
+The update also changes nothing when the checkout has local changes or
+commits of its own. Git and the checking Emacs run in the background,
+so Emacs stays responsive. The harness log (`C-c h L`) lists the
+commits an update brought in.
+
+The harness has no numbered releases: it follows its `main` branch, so
+the commit is the version. `harness-update` names it: the commits it
+moved between, or the one it is at when nothing is new.
+
+Package managers can update the harness too, with `doom sync -u` or
+`M-x straight-pull-package`. The harness loads its files from the
+package manager's git clone rather than from its build directory, so
+an update takes effect at the next `harness-reload` or restart, with no
+rebuild. A Doom package pinned with `:pin` follows no branch:
+`harness-update` refuses it, and you update it by changing the pin.
+
 ## Getting started
 
 `harness-start` loads the UI, enables `harness-global-mode` and the

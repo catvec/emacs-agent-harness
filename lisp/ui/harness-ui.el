@@ -2899,6 +2899,7 @@ leaves the buffer's commands out, never the whole menu."
      :inapt-if harness-corporate-p)
     ("N" "Test notifications" harness-test-notifications)
     ("R" "Reload harness" harness-reload)
+    ("U" "Update harness" harness-update)
     ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes
   ;; list some in their `harness-menu-group'.
