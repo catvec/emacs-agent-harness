@@ -782,6 +782,52 @@ nothing about it and asks for nothing."
         (should (equal '((:non-interactive nil)) set))))
     (should-not sent)))
 
+(ert-deftest harness-ui-move-session-asks-the-harness ()
+  "C-c h W moves a session.  The harness gets the directory, absolute,
+and the project the UI sees there; a prefix argument keeps the old
+directory.  A remote session's directory goes as typed, a path on its
+host, and no TRAMP connection is opened for it."
+  (should (eq 'harness-move-session (lookup-key harness-ui-map (kbd "W"))))
+  (should (eq 'harness-move-session (lookup-key harness-global-mode-map (kbd "C-c h W"))))
+  (should (eq 'harness-move-session (symbol-function 'harness-session-move)))
+  (let* ((harness-ui--sessions (make-hash-table :test 'equal))
+         (harness-ui-sessions-changed-hook nil)
+         (base (file-name-as-directory (file-truename (harness-test-temp-dir))))
+         (repo (file-name-as-directory (expand-file-name "repo" base)))
+         (sub (file-name-as-directory (expand-file-name "sub" repo)))
+         (sent nil) (answer nil) (said nil))
+    (unwind-protect
+        (progn
+          (make-directory sub t)
+          (let ((default-directory repo)) (should (zerop (call-process "git" nil nil nil "init" "-q"))))
+          (harness-ui-cache-session (list :id "s-here" :name "Here" :cwd base :project base))
+          (harness-ui-cache-session (list :id "s-far" :name "Far" :cwd "/srv/app/" :host "/ssh:box:"))
+          (cl-letf (((symbol-function 'harness-ui-call)
+                     (lambda (method params callback &optional _on-error)
+                       (push (cons method params) sent)
+                       (funcall callback answer)))
+                    ((symbol-function 'message)
+                     (lambda (format &rest args) (push (apply #'format-message format args) said))))
+            ;; Moved at once: the cache has the session where it is now.
+            (setq answer (list :id "s-here" :name "Here" :cwd sub :project repo))
+            (harness-move-session (concat repo "sub") "s-here")
+            (should (equal (cons "_harness/session/move" (list :id "s-here" :dir sub :keep-old-dir :false :project repo))
+                           (pop sent)))
+            (should (equal sub (plist-get (harness-ui-session "s-here") :cwd)))
+            (should (string-match-p "\\`Moved .*Here to .*/repo/sub/\\'" (pop said)))
+            ;; Running a turn: it moves when the turn ends.
+            (setq answer (list :id "s-here" :name "Here" :cwd sub :project repo :move (list :cwd base)))
+            (harness-move-session base "s-here" t)
+            (should (eq t (plist-get (cdr (pop sent)) :keep-old-dir)))
+            (should (string-match-p "Here moves to .* when its turn ends\\'" (pop said)))
+            ;; A remote session's directory is for its host to resolve.
+            (setq answer (list :id "s-far" :name "Far" :cwd "/srv/other/" :host "/ssh:box:"))
+            (harness-move-session "../other" "s-far")
+            (should (equal (cons "_harness/session/move" (list :id "s-far" :dir "../other" :keep-old-dir :false))
+                           (pop sent)))
+            (should (string-match-p "Moved .*Far to /srv/other/\\'" (pop said)))))
+      (delete-directory base t))))
+
 (ert-deftest harness-ui-tool-outcome-tells-denied-from-failed ()
   "A refused call is `denied' whatever else its result says; one that
 ran and reported an error is `failed'.  Wire values: a call that was
