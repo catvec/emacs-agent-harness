@@ -190,6 +190,9 @@ open directory buffers are refreshed."
     (harness-ui-dirs--refresh-session nil)))
 
 (defun harness-ui-dirs--init ()
+  "Wire the directory buffers into the UI.
+Granting or revoking a directory, or changing the config, refreshes
+them, and d in `harness-ui-map' runs `harness-directories'."
   (add-hook 'harness-ui-event-functions #'harness-ui-dirs--on-event)
   (define-key harness-ui-map (kbd "d") #'harness-directories))
 

@@ -171,6 +171,9 @@ and a callback that waits synchronously cannot deadlock the rest."
       (harness--promise-dispatch promise cb))))
 
 (defun harness--promise-settle (promise state value)
+  "Settle PROMISE in STATE, resolved or rejected, with VALUE; return PROMISE.
+Its callbacks run in the order they were added.  A promise already
+settled is left as it is."
   (when (eq (harness-promise-state promise) 'pending)
     (setf (harness-promise-state promise) state
           (harness-promise-value promise) value)
@@ -181,6 +184,10 @@ and a callback that waits synchronously cannot deadlock the rest."
   promise)
 
 (defun harness--promise-dispatch (promise cb)
+  "Call the half of CB that fits settled PROMISE with the promise's value.
+CB is (ON-RESOLVED . ON-REJECTED); a nil half does nothing.  An error
+the callback signals is logged, with its backtrace when debugging, and
+goes no further."
   (let ((fn (if (eq (harness-promise-state promise) 'resolved) (car cb) (cdr cb))))
     (when fn
       (condition-case err
@@ -479,7 +486,8 @@ number of subscribers notified."
     n))
 
 (defun harness-emit-later (event &rest args)
-  "Like `harness-emit' but from the command loop, after the caller returns."
+  "Emit EVENT with ARGS as `harness-emit' does, but from the command loop.
+The subscribers run after the caller returns."
   (apply #'harness-run-soon #'harness-emit event args))
 
 (defun harness-events ()

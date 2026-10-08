@@ -404,8 +404,9 @@ directory, the directory, and its parent: what
 
 (defun harness-ui-pending-set-pattern (session-id pid pattern)
   "Make PATTERN, or the request's own when nil, the one PID is answered for.
-The hosts drawing the request are redrawn; point goes to the request's
-pattern line when this buffer shows it."
+PID is a request of SESSION-ID.  The hosts drawing the request are
+redrawn; point goes to the request's pattern line when this buffer
+shows it."
   (harness-ui-pending--put
    session-id
    (mapcar (lambda (r)
@@ -896,7 +897,8 @@ on it as the area is redrawn.  HELP is its tooltip, FACE its face."
               'harness-ui-pending-diagram-nav nav))
 
 (defun harness-ui-pending--diagram-area (session-id r shown)
-  "Return the diagram area of question record R showing option SHOWN's diagram."
+  "Return the diagram area of question record R of SESSION-ID.
+It shows option SHOWN's diagram."
   (let ((pid (plist-get r :id))
         (options (plist-get r :options)))
     (concat
@@ -917,7 +919,8 @@ on it as the area is redrawn.  HELP is its tooltip, FACE its face."
      (harness-ui-pending--diagram-string (nth shown (harness-ui-pending--diagrams r))))))
 
 (defun harness-ui-pending--option-line (session-id pid option i shown)
-  "Return the line of OPTION, the Ith of question PID; SHOWN: its diagram shows."
+  "Return the line of OPTION, the Ith of question PID of SESSION-ID.
+SHOWN is non-nil when its diagram shows."
   (propertize
    (concat (propertize "   " 'wrap-prefix "       ")
            (if (< i 9) (harness-ui-kbd (format " %d " (1+ i))) "   ")
@@ -1029,7 +1032,8 @@ buffer, as in a popout, which draws itself whole again instead."
         (harness-ui-pending--popout-changed session-id)))))
 
 (defun harness-ui-pending-step-diagram (session-id pid n)
-  "Show the diagram N options after the one question PID shows, counting round."
+  "Show the diagram N options after the one question PID of SESSION-ID shows.
+The count goes round the options."
   (harness-ui-pending-show-diagram session-id pid (+ (harness-ui-pending-shown-diagram session-id pid) n)))
 
 ;;;; Bringing the ACP requests in

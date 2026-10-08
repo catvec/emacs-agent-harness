@@ -202,7 +202,8 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
       status)))
 
 (defun harness-tools-sessions--list (input ctx)
-  "Handler of session_list."
+  "Handler of session_list.
+INPUT is the tool call's input plist and CTX its context."
   (let* ((scope (harness-tools-sessions--scope input ctx))
          (status (let ((s (plist-get input :status))) (and s (intern s))))
          (kind (let ((k (plist-get input :kind))) (and k (intern k))))
@@ -325,7 +326,8 @@ A line of STDOUT holds a whole node, which can be megabytes long:
     (nreverse hits)))
 
 (defun harness-tools-sessions--search (input ctx)
-  "Handler of session_search."
+  "Handler of session_search.
+INPUT is the tool call's input plist and CTX its context."
   (let* ((query (or (plist-get input :query) ""))
          (regexp (harness-json-true-p (plist-get input :regexp)))
          (scope (harness-tools-sessions--scope input ctx))
@@ -420,7 +422,8 @@ A line of STDOUT holds a whole node, which can be megabytes long:
 ;;;; session_read
 
 (defun harness-tools-sessions--read (input _ctx)
-  "Handler of session_read."
+  "Handler of session_read.
+INPUT is the tool call's input plist."
   (let* ((sid (harness-tools-sessions--resolve (plist-get input :session_id)))
          (s (harness-call 'session/get sid))
          (limit (or (plist-get input :limit) 20))
@@ -485,7 +488,8 @@ A line of STDOUT holds a whole node, which can be megabytes long:
     (harness-sender-session (or (ignore-errors (harness-call 'session/get sid)) (list :id sid)))))
 
 (defun harness-tools-sessions--send (input ctx)
-  "Handler of session_send."
+  "Handler of session_send.
+INPUT is the tool call's input plist and CTX its context."
   (let* ((sid (harness-tools-sessions--other (plist-get input :session_id) ctx "message"))
          (text (or (plist-get input :message) ""))
          (queue (equal (plist-get input :mode) "queue"))
@@ -531,7 +535,8 @@ A line of STDOUT holds a whole node, which can be megabytes long:
 ;;;; session_control
 
 (defun harness-tools-sessions--control (input ctx)
-  "Handler of session_control."
+  "Handler of session_control.
+INPUT is the tool call's input plist and CTX its context."
   (let* ((action (or (plist-get input :action) ""))
          (sid (harness-tools-sessions--other (plist-get input :session_id) ctx action)))
     (pcase action
@@ -652,7 +657,8 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                (mapcar (lambda (p) (plist-get p :id)) (plist-get s :pending))))))
 
 (defun harness-tools-sessions--session-wait (input ctx)
-  "Handler of session_wait."
+  "Handler of session_wait.
+INPUT is the tool call's input plist and CTX its context."
   (let* ((ids (mapcar (lambda (r) (harness-tools-sessions--other r ctx "wait on"))
                       (harness-tools-sessions--refs input :session_id :session_ids)))
          (until (or (plist-get input :until) "stopped"))
@@ -753,7 +759,8 @@ the line says \"(this task)\"."
      (if pending (format "\n    waiting on the user: %s" pending) ""))))
 
 (defun harness-tools-sessions--task-list (input ctx)
-  "Handler of task_list."
+  "Handler of task_list.
+INPUT is the tool call's input plist and CTX its context."
   (harness-tools-sessions--tasks-p)
   (let* ((cwd (unless (harness-json-true-p (plist-get input :all_projects)) (plist-get ctx :cwd)))
          (column (let ((c (plist-get input :column))) (and c (intern c))))
@@ -789,7 +796,8 @@ the line says \"(this task)\"."
   :handler #'harness-tools-sessions--task-list)
 
 (defun harness-tools-sessions--task-submit (input ctx)
-  "Handler of task_submit."
+  "Handler of task_submit.
+INPUT is the tool call's input plist and CTX its context."
   (harness-tools-sessions--tasks-p)
   (let* ((prompt (or (plist-get input :prompt) ""))
          (cwd (or (plist-get input :cwd) (plist-get ctx :cwd)))
@@ -822,7 +830,8 @@ the line says \"(this task)\"."
   :handler #'harness-tools-sessions--task-submit)
 
 (defun harness-tools-sessions--task-control (input _ctx)
-  "Handler of task_control."
+  "Handler of task_control.
+INPUT is the tool call's input plist."
   (harness-tools-sessions--tasks-p)
   (let* ((task (harness-tools-sessions--task (plist-get input :task_id)))
          (id (plist-get task :id))
@@ -883,7 +892,8 @@ the line says \"(this task)\"."
                    (and (eq (plist-get task :state) 'pending) (plist-get task :backlog) t))))))))
 
 (defun harness-tools-sessions--task-wait (input ctx)
-  "Handler of task_wait."
+  "Handler of task_wait.
+INPUT is the tool call's input plist and CTX its context."
   (harness-tools-sessions--tasks-p)
   (let* ((ids (mapcar (lambda (r) (plist-get (harness-tools-sessions--task r) :id))
                       (harness-tools-sessions--refs input :task_id :task_ids)))
