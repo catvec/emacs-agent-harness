@@ -549,9 +549,10 @@ your checkout itself can be submitted to the **main tree** instead (the
   one, like a warranty's months or miles (see
   `harness-tasks-recap-turns`, `harness-tasks-recap-seconds` and
   `harness-tasks-recap-tool-calls`). The recap shows by default where it
-  matters most, in *Requires your input* beside what the task waits for
-  and in *Merging* beside where its branch stands; elsewhere `TAB` on a
-  card, or a click on its chevron, shows it.
+  matters most, in *Requires your input* beside what the task waits for;
+  elsewhere `TAB` on a card, or a click on its chevron, shows it. A card
+  in *Merging* says on its one line when the merge is under way or in
+  conflict.
 - `C-c h m`, `C-c h T`, `C-c h p` and `C-c h i` set the model, thinking
   level, permission mode and non-interactive mode of the next task, or
   of the task at point. New tasks run in auto mode and are interactive

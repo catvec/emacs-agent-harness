@@ -127,7 +127,7 @@ Either way the toggle above the compose box switches it per board."
   "A message to the session of an existing task.")
 
 (defconst harness-ui-tasks--columns
-  '((needs-input "Requires your input" t) (review "Ready for review") (merging "Merging" t)
+  '((needs-input "Requires your input" t) (review "Ready for review") (merging "Merging")
     (active "In progress") (pending "Pending") (done "Completed"))
   "Columns in display order: (COLUMN HEADING &optional SUBTITLE-SHOWN).
 SUBTITLE-SHOWN is non-nil when the cards of the column show their
@@ -454,8 +454,10 @@ plain text: no list, heading or emphasis markers."
 ;; A card's second line is its subtitle: the recap a short model call
 ;; wrote (`harness-tasks-recap').  It is folded away on most cards -- you
 ;; see one line per task -- except where it matters most, on a task that
-;; needs your input or one whose branch holds a place in the merge
-;; queue, and on the cards you show it on yourself.
+;; needs your input, and on the cards you show it on yourself.  A branch
+;; in the merge queue is one line too: its section says what it is
+;; doing, and its facts say when the merge is under way or in conflict
+;; (`harness-ui-tasks--meta').
 
 (defun harness-ui-tasks--subtitle-shown-p (task)
   "Non-nil when TASK's card shows its subtitle now.
@@ -472,9 +474,9 @@ Your own choice for the task wins over its column's default."
 (defun harness-ui-tasks--subtitle (task column session position room)
   "The text under TASK's title, at most ROOM columns wide: its recap,
 else the old detail line.  In the needs-input and merging columns the
-detail stays after the recap, since those cards show their subtitle by
-default and the recap must not hide what the task waits for, or where
-its branch stands."
+detail stays after the recap, which must not hide what the task waits
+for, or where its branch stands: a needs-input card shows its subtitle
+by default, a merging card when you show it."
   (let* ((recap (plist-get task :recap))
          (recap (and (stringp recap) (not (harness-string-blank-p recap)) (string-trim recap)))
          (detail (harness-ui-tasks--detail task column session position))
@@ -539,6 +541,14 @@ card's title, so the prompt shows here."
          (parts
           (delq nil
                 (list (and (harness-json-true-p (plist-get task :main-tree)) "main tree")
+                      ;; Where a branch in the queue stands, past waiting
+                      ;; for its turn: the card is one line, and the same
+                      ;; working mark shows a merge under way and a
+                      ;; conflict being resolved.
+                      (and (eq column 'merging)
+                           (pcase (harness-ui-tasks--merge-status task)
+                             ("merging" "merging now")
+                             ("conflict" "conflict")))
                       (and todos (not (memq column '(done review merging)))
                            (format "%d/%d" (nth 0 todos) (nth 1 todos)))
                       (pcase column
@@ -2235,9 +2245,9 @@ By default it takes the board's own position, replacing the board."
 
 (defun harness-ui-tasks-toggle-subtitle ()
   "Show or hide the recap subtitle of the task card at point.
-A card's column decides by default -- folded in pending, in progress
-and ready for review, shown when a task requires your input -- and your
-choice for a card stays with it, whatever column it moves to."
+A card's column decides by default -- shown when a task requires your
+input, folded everywhere else -- and your choice for a card stays with
+it, whatever column it moves to."
   (interactive)
   (let ((id (get-text-property (point) 'harness-task-id)))
     (unless id (user-error "Point is not on a task card"))

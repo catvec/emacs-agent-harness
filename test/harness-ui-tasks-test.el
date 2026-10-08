@@ -1507,12 +1507,29 @@ argument says which way to turn it, and turning it on asks nothing."
 
 ;;;; In the merge queue
 
+(defun harness-ui-tasks-test--card-text (board text)
+  "The text of BOARD's card whose title shows TEXT, every line of it."
+  (with-current-buffer board
+    (save-excursion
+      (harness-ui-tasks-test--goto-card board text)
+      (buffer-substring-no-properties
+       (line-beginning-position)
+       (or (next-single-property-change (point) 'harness-task-id) (point-max))))))
+
+(defun harness-ui-tasks-test--card-lines (board text)
+  "How many lines BOARD's card whose title shows TEXT takes."
+  (length (split-string (harness-ui-tasks-test--card-text board text) "\n" t)))
+
 (ert-deftest harness-ui-tasks-merging-section ()
   "Tasks the merge queue holds get a section of their own, after review.
-They keep the queue's order, say what they are doing and count in the
-header; a conflict says which files its session is resolving."
+They keep the queue's order and count in the header.  A card there is
+one line, its recap folded as in review: the section says what the task
+is doing, and the line says when its merge is under way or in conflict.
+Shown, the subtitle says where the branch stands beside the recap, a
+conflict which files its session is resolving."
   (harness-ui-tasks-test-with
-    (let ((harness-tasks-max-running 0))
+    (let ((harness-tasks-max-running 0)
+          (harness-ui-tasks--subtitles nil))
       (harness-ui-tasks-test--type-and-submit board "First to merge")
       (harness-ui-tasks-test--type-and-submit board "Second to merge")
       (harness-ui-tasks-test--wait-text board "Pending  2")
@@ -1522,7 +1539,8 @@ header; a conflict says which files its session is resolving."
         ;; The first branch waits for the queue's turn; the second resolves
         ;; the conflicts the queue handed it (it joined later).
         (harness-ui-tasks-test--change board first :state "merging" :column "merging"
-                                       :merge-status "queued" :merge-queued (- now 120) :base "main")
+                                       :merge-status "queued" :merge-queued (- now 120) :base "main"
+                                       :recap "Paged the orders endpoint.")
         (harness-ui-tasks-test--change board second :state "merging" :column "merging"
                                        :merge-status "conflict" :merge-queued (- now 5) :base "main"
                                        :conflicts '("shared.txt" "settings.py"))
@@ -1539,15 +1557,43 @@ header; a conflict says which files its session is resolving."
                            "\\(.\\|\n\\)*Pending  0\\(.\\|\n\\)*Completed  0")
                    text))
           ;; The branch that joined first comes first.
-          (should (string-match-p (concat "First to merge\\(.\\|\n\\)*queued 2m ago"
-                                          "\\(.\\|\n\\)*queued to merge into main"
-                                          "\\(.\\|\n\\)*Second to merge\\(.\\|\n\\)*resolving merge conflicts in shared\\.txt, settings\\.py")
-                                  text)))
-        ;; A merge in flight says so.
+          (should (string-match-p "First to merge\\(.\\|\n\\)*Second to merge" text))
+          ;; Folded: neither the recap nor the detail line shows.
+          (should-not (string-match-p "Paged the orders" text))
+          (should-not (string-match-p "queued to merge into\\|resolving merge conflicts" text)))
+        ;; One line each, which says where the branch stands: waiting for
+        ;; the queue's turn, or in conflict.
+        (should (= 1 (harness-ui-tasks-test--card-lines board "First to merge")))
+        (let ((card (harness-ui-tasks-test--card-text board "First to merge")))
+          (should (string-match-p "queued 2m ago" card))
+          (should-not (string-match-p "conflict\\|merging now" card)))
+        (should (= 1 (harness-ui-tasks-test--card-lines board "Second to merge")))
+        (should (string-match-p "conflict · queued [0-9]+s ago"
+                                (harness-ui-tasks-test--card-text board "Second to merge")))
+        ;; Shown, a conflict says which files its session is resolving.
+        (harness-ui-tasks-test--show-subtitle board "Second to merge")
+        (should (= 2 (harness-ui-tasks-test--card-lines board "Second to merge")))
+        (should (string-match-p "resolving merge conflicts in shared\\.txt, settings\\.py"
+                                (harness-ui-tasks-test--card-text board "Second to merge")))
+        ;; A merge in flight says so on its line.
         (harness-ui-tasks-test--change board first :merge-status "merging")
         (with-current-buffer board (harness-ui-tasks--render))
-        (should (string-match-p "First to merge\\(.\\|\n\\)*merging into main…"
-                                (harness-ui-tasks-test--board-text board)))
+        (should (= 1 (harness-ui-tasks-test--card-lines board "First to merge")))
+        (should (string-match-p "merging now · queued 2m ago"
+                                (harness-ui-tasks-test--card-text board "First to merge")))
+        ;; TAB on the card shows its recap, with the merge beside it, and
+        ;; folds it away again.
+        (with-current-buffer board
+          (harness-ui-tasks-test--goto-card board "First to merge")
+          (harness-ui-tasks-tab))
+        (should (= 2 (harness-ui-tasks-test--card-lines board "First to merge")))
+        (should (string-match-p "Paged the orders endpoint\\. · merging into main…"
+                                (harness-ui-tasks-test--card-text board "First to merge")))
+        (with-current-buffer board
+          (harness-ui-tasks-test--goto-card board "First to merge")
+          (harness-ui-tasks-tab))
+        (should (= 1 (harness-ui-tasks-test--card-lines board "First to merge")))
+        (should-not (string-match-p "Paged the orders" (harness-ui-tasks-test--board-text board)))
         (let ((header (with-current-buffer board (harness-ui-tasks--header most-positive-fixnum))))
           (should (string-match-p "↣ 2\\|merge 2" header)))
         ;; Once it merged it shows under Completed, not in the queue.
