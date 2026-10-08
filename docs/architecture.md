@@ -2123,17 +2123,33 @@ so switching to either loses nothing.
   `:no-thinking t`, a 40-token budget and no provider state, so the
   hosted providers answer it apart from the session's conversation (a
   CLI process of its own for Claude Code, a throwaway session for
-  Copilot) and the question never lands in it.  A session still nameless
-  when a later turn starts (its naming failed) is named then; btw and
-  subagent sessions never are.  Without `:opening` the whole
+  Copilot) and the question never lands in it.  It fails after
+  `harness-naming--timeout` (60) seconds, cancelled, so a provider that
+  never answers does not keep a session nameless.  A session still
+  nameless when a later turn starts (its naming failed) is named then,
+  and so is a nameless session whose turn runs when the harness reloads
+  (`harness-naming--name-running`); btw and subagent sessions never are.
+  Without `:opening` the whole
   conversation is titled on the session's model, on a fork of its
   provider state when possible so the cached prefix is reused.  Hints
   "Naming session…" then the result; a session renamed while the model
   was asked keeps its new name.  Events `naming/done SID NAME`,
   `naming/failed SID MESSAGE`.
-- Sync filter `naming/system-prompt` (value string, args session) lets
-  modules add to `harness-naming--base-system-prompt` per session (tasks ask
-  for ticket titles).
+- `naming/title TEXT &optional OPTS` → promise of a title for TEXT, a
+  first message no session holds yet: the same request as `:opening`
+  naming, to `harness-naming-model` for OPTS' `:model`, under a pseudo
+  session id `naming-…` of its own (`:cwd`, `:host` from OPTS) that is
+  `provider/close`d once it settles.  Nothing is stored and no session
+  hears of it; it rejects with a message (blank TEXT, no model, provider
+  error, no usable title, timeout) and never signals.  Task mode names a
+  task from its prompt this way as it is submitted.
+- Sync filter `naming/system-prompt` (value string, args the session, or
+  `naming/title`'s OPTS) lets modules add to
+  `harness-naming--base-system-prompt` per session (tasks ask for ticket
+  titles, for a session of a task and for OPTS with `:task`).
+- Sync filter `naming/auto-p` (value the verdict, args session) can hold
+  the automatic naming of a session off: tasks do while the title of the
+  session's task is on its way, which then names the session.
 
 ### skills
 
@@ -2254,7 +2270,7 @@ so switching to either loses nothing.
 ### tasks
 
 Task mode: one session per task.  TASK =
-`(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…)
+`(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…) :name "title or nil"
 :state pending|refining|active|merging|review|done
 :column pending|needs-input|active|review|merging|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
@@ -2364,10 +2380,28 @@ verdict.
   there, with no branch to make and nothing to merge.  The worktree
   stays locked until its branch is merged; a follow-up to a merged task
   locks it again (see worktree).
-- The session's name is the task's title: `naming/system-prompt` adds
-  `harness-tasks--naming-instructions` (nil for none) so the model titles task
-  sessions like tickets, as soon as the task's first turn starts (see
-  naming), so the board shows the ticket title while the task works.
+- Titles: a task is named as soon as it is submitted, while it may wait
+  for a slot: `task/submit` sends its prompt (a backlog task's `:note`)
+  to `naming/title` with `:task ID` and the model its session will have,
+  and `naming/system-prompt` adds `harness-tasks--naming-instructions`
+  (nil for none), so the model titles it like a ticket.  The title
+  becomes the task's `:name`; the board, `task_list`, the session list,
+  search, notifications and insights show the session's name, else the
+  task's `:name`, else the prompt's first line.  The task's session is
+  created with `:name` (a backlog task's session, made at once, as it
+  starts its work when it has none), so it is not named again.  While
+  the request is out, the `naming/auto-p` filter keeps a session of the
+  task from being named as its turn starts, and the title names it when
+  it comes.  Nothing waits for a title: a failed request (or one that
+  times out) leaves the task untitled, and a nameless session of it
+  whose turn runs is then named from its first message (`naming/name`
+  with `:opening`).  At most `harness-tasks--naming-concurrency` (2)
+  requests are out at once, the rest queued; a queued request whose task
+  started meanwhile is dropped, as the start of its turn names its
+  session.  `task/update` clears `:name` and asks again when the text
+  named from changed; a title of an older prompt is dropped.  Tasks
+  found without a title (from before, or whose naming failed) are named
+  at start-up (`harness-tasks--pick-up`) and on reload.
 - With nothing to review (below), a turn ending `end-turn` queues
   `merge/enqueue SID TARGET`, TARGET being the project's root session
   named `harness-tasks--merge-session-name`
@@ -2419,7 +2453,7 @@ verdict.
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
-  hand), `task/set-all SETTINGS &optional FILTER` (apply `:model',
+  hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
   `:thinking', `:permission-mode' and `:non-interactive' to every task
   FILTER selects and, when started, its session; FILTER is `:columns'
   (default `harness-tasks-bulk-columns': running, pending and blocked),

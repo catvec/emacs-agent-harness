@@ -694,14 +694,15 @@ for every project, else the project's checkouts), `:series' and
 ;;;; Tasks
 
 (defun harness-insights--task-title (task)
-  "Return the title of TASK: its session's name, else its prompt's first line."
+  "Return the title of TASK: its session's name, else its own, else its prompt's.
+A task gets its own `:name' as soon as it is submitted; without one the
+title is its prompt's first line."
   (let* ((sid (plist-get task :session))
          (session (and sid (harness-method-exists-p 'session/get)
                        (ignore-errors (harness-call 'session/get sid))))
-         (name (plist-get session :name)))
-    (if (and (stringp name) (not (string-blank-p name)))
-        name
-      (harness-first-line (plist-get task :prompt) 80))))
+         (name (cl-find-if (lambda (n) (and (stringp n) (not (string-blank-p n))))
+                           (list (plist-get session :name) (plist-get task :name)))))
+    (or name (harness-first-line (plist-get task :prompt) 80))))
 
 (defun harness-insights--task-done-at (task)
   "Return when done TASK was completed, or nil when it is not done."

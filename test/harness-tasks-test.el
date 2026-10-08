@@ -11,6 +11,8 @@
 (defvar harness-agent--turns)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
+(defvar harness-tasks--naming)
+(defvar harness-tasks--naming-queue)
 (defvar harness-tasks--loaded)
 (defvar harness-tasks--dirty)
 (defvar harness-tasks-max-running)
@@ -47,10 +49,12 @@ turn `harness-tasks-require-verification' on themselves."
      (clrhash harness-agent--turns)
      (clrhash harness-tasks--table)
      (clrhash harness-tasks--starting)
+     (clrhash harness-tasks--naming)
      (harness-tasks--forget-stores)
      ;; Nothing of an earlier test waits to be written over this one's files.
      (setq harness-tasks--loaded t
            harness-tasks--dirty nil
+           harness-tasks--naming-queue nil
            harness-acp--clients nil)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override harness-tasks-test-script)
@@ -1250,9 +1254,10 @@ Written up all the same, it goes to the backlog."
       (harness-tasks-test-wait-state id 'done))))
 
 (ert-deftest harness-tasks-auto-named-like-tickets ()
-  "A task's session is named like a ticket as soon as the task starts.
+  "A task is named like a ticket as soon as it is submitted, and its session too.
 Its first turn usually lasts until the task is done: the board must
-not show the raw prompt as the task's title until then."
+not show the raw prompt as the task's title until then.  One request
+names both: the session's turn leaves its naming to the task's."
   (harness-tasks-test-with
     (harness-test-load-module 'naming)
     (let ((harness-naming-auto t)
@@ -1278,6 +1283,266 @@ not show the raw prompt as the task's title until then."
             (funcall on-event '(:type text :delta "Fixed it."))
             (funcall on-event '(:type done :stop-reason end-turn)))
           (harness-tasks-test-wait-state id 'done))))))
+
+;;;; Titles: a task is named as soon as it is submitted
+;;
+;; The tests below fake the provider: a naming request (`:ephemeral')
+;; waits for the test to answer it, unless `harness-tasks-test--title-answer'
+;; does, and a turn waits for `harness-tasks-test-release'.
+
+(declare-function harness-tasks--name-untitled "harness-tasks")
+
+(defvar harness-tasks-test--titles nil
+  "Naming requests the fake provider got, newest first.")
+
+(defvar harness-tasks-test--turns nil
+  "(SESSION-ID . ON-EVENT) of the turns the fake provider holds, newest first.")
+
+(defvar harness-tasks-test--title-answer nil
+  "Function of a naming request returning its title.
+Nil leaves the requests to the test, which answers them.")
+
+(defun harness-tasks-test--complete (request)
+  "Answer REQUEST as the fake provider of the title tests."
+  (let ((on-event (plist-get request :on-event)))
+    (if (plist-get request :ephemeral)
+        (progn
+          (push request harness-tasks-test--titles)
+          (when harness-tasks-test--title-answer
+            (run-at-time 0.005 nil #'harness-tasks-test-answer
+                         request (funcall harness-tasks-test--title-answer request))))
+      (push (cons (plist-get (plist-get request :session) :id) on-event) harness-tasks-test--turns)))
+  (list :cancel #'ignore))
+
+(defmacro harness-tasks-test-with-titles (answer &rest body)
+  "Run BODY as `harness-tasks-test-with' does, tasks named as they are submitted.
+ANSWER is the `harness-tasks-test--title-answer'."
+  (declare (indent 1))
+  `(harness-tasks-test-with
+     (harness-test-load-module 'naming)
+     (let ((harness-naming-auto t)
+           (harness-tasks-test--titles nil)
+           (harness-tasks-test--turns nil)
+           (harness-tasks-test--title-answer ,answer))
+       (cl-letf (((symbol-function 'harness-method/provider/complete) #'harness-tasks-test--complete))
+         ,@body))))
+
+(defun harness-tasks-test--quoted (request)
+  "The message naming REQUEST asks a title for."
+  (let ((text (plist-get (car (plist-get (car (plist-get request :messages)) :content)) :text)))
+    (and (string-match "<message>\n\\(\\(?:.\\|\n\\)*?\\)\n</message>" text)
+         (match-string 1 text))))
+
+(defun harness-tasks-test-title-request (text)
+  "The naming request for TEXT, the newest one."
+  (cl-find text harness-tasks-test--titles :key #'harness-tasks-test--quoted :test #'equal))
+
+(defun harness-tasks-test-answer (request title)
+  "Answer naming REQUEST with TITLE, or fail it when TITLE is (error MESSAGE)."
+  (let ((on-event (plist-get request :on-event)))
+    (if (stringp title)
+        (progn (funcall on-event (list :type 'text :delta title))
+               (funcall on-event '(:type done :stop-reason end-turn)))
+      (funcall on-event (list :type 'done :stop-reason 'error :error (cadr title))))))
+
+(defun harness-tasks-test-turn (sid)
+  "Wait for the fake provider to hold a turn of session SID."
+  (harness-test-wait (lambda () (assoc sid harness-tasks-test--turns)) 5 (format "a turn of %s" sid)))
+
+(defun harness-tasks-test-release (sid &optional text)
+  "End the turn of session SID the fake provider holds, saying TEXT."
+  (let ((held (harness-tasks-test-turn sid)))
+    (setq harness-tasks-test--turns (delq held harness-tasks-test--turns))
+    (funcall (cdr held) (list :type 'text :delta (or text "Done.")))
+    (funcall (cdr held) '(:type done :stop-reason end-turn))))
+
+(defun harness-tasks-test-name (id)
+  "Task ID's own name."
+  (plist-get (harness-tasks-test-task id) :name))
+
+(defun harness-tasks-test-session-name (sid)
+  (plist-get (harness-call 'session/get sid) :name))
+
+(defun harness-tasks-test-hints (sid)
+  (mapcar (lambda (n) (plist-get n :content))
+          (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'hint)) (harness-call 'session/nodes sid))))
+
+(ert-deftest harness-tasks-named-while-it-waits ()
+  "A task is named as soon as it is submitted, while it waits for a slot.
+Its prompt goes out in the request that names a session from its first
+message, asked for a ticket title.  When the task starts, its session
+takes the title: it is not named again."
+  (harness-tasks-test-with-titles
+      (lambda (request)
+        (if (string-prefix-p "fix" (harness-tasks-test--quoted request)) "Fix the parser" "Export orders as CSV"))
+    (let ((harness-tasks-max-running 1))
+      (let* ((first (harness-tasks-test-submit "fix the parser, it drops comments"))
+             (second (harness-tasks-test-submit "export the orders as CSV for finance"))
+             (first-sid (plist-get (harness-tasks-test-task first) :session)))
+        (should (eq 'pending (harness-tasks-test-state second)))
+        (harness-test-wait (lambda () (harness-tasks-test-name second)) 5 "the waiting task's name")
+        (should (equal "Export orders as CSV" (harness-tasks-test-name second)))
+        (should (eq 'pending (harness-tasks-test-state second)))
+        (should-not (plist-get (harness-tasks-test-task second) :session))
+        (let ((request (harness-tasks-test-title-request "export the orders as CSV for finance")))
+          (should (equal (concat harness-naming--base-system-prompt "\n\n" harness-tasks--naming-instructions)
+                         (plist-get request :system)))
+          (should (string-prefix-p "naming-" (plist-get (plist-get request :session) :id))))
+        ;; The task at work: its session was named by its task's title.
+        (harness-test-wait (lambda () (harness-tasks-test-session-name first-sid)) 5 "the first session's name")
+        (should (equal "Fix the parser" (harness-tasks-test-session-name first-sid)))
+        (should (equal "Fix the parser" (harness-tasks-test-name first)))
+        (harness-tasks-test-release first-sid)
+        (harness-tasks-test-wait-state first 'done)
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task second) :session)) 5 "the second to start")
+        (let ((sid (plist-get (harness-tasks-test-task second) :session)))
+          (should (equal "Export orders as CSV" (harness-tasks-test-session-name sid)))
+          (harness-tasks-test-turn sid)
+          ;; Two requests in all, one a task; no session asked for its own.
+          (should (= 2 (length harness-tasks-test--titles)))
+          (should-not (member "Naming session…" (harness-tasks-test-hints first-sid)))
+          (should-not (member "Naming session…" (harness-tasks-test-hints sid)))
+          (harness-tasks-test-release sid)
+          (harness-tasks-test-wait-state second 'done))))))
+
+(ert-deftest harness-tasks-title-on-its-way-names-the-session ()
+  "A task that starts before its title comes leaves its session to that title.
+The session's turn does not name it: the title does when it comes."
+  (harness-tasks-test-with-titles nil
+    (let* ((id (harness-tasks-test-submit "fix the parser, it drops comments"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (should (eq 'active (harness-tasks-test-state id)))
+      (harness-tasks-test-turn sid)
+      (should (= 1 (length harness-tasks-test--titles)))
+      (should-not (harness-tasks-test-session-name sid))
+      (harness-tasks-test-answer (car harness-tasks-test--titles) "Fix the parser")
+      (harness-test-wait (lambda () (harness-tasks-test-session-name sid)) 5 "the session's name")
+      (should (equal "Fix the parser" (harness-tasks-test-session-name sid)))
+      (should (equal "Fix the parser" (harness-tasks-test-name id)))
+      (should (= 1 (length harness-tasks-test--titles)))
+      (should (member "renamed to Fix the parser" (harness-tasks-test-hints sid)))
+      (harness-tasks-test-release sid)
+      (harness-tasks-test-wait-state id 'done))))
+
+(ert-deftest harness-tasks-failed-title-never-holds-the-task ()
+  "A task neither waits for its title nor fails with it.
+It starts at once; when the request fails, its session is named the
+usual way, from its first message."
+  (harness-tasks-test-with-titles nil
+    (let* ((id (harness-tasks-test-submit "fix the parser, it drops comments"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (should (eq 'active (harness-tasks-test-state id)))
+      (harness-tasks-test-turn sid)
+      (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
+      (harness-test-wait (lambda () (= 2 (length harness-tasks-test--titles))) 5 "the session's own request")
+      (let ((request (car harness-tasks-test--titles)))
+        (should (equal sid (plist-get (plist-get request :session) :id)))
+        (should (equal "fix the parser, it drops comments" (harness-tasks-test--quoted request)))
+        (harness-tasks-test-answer request "Fix the parser"))
+      (harness-test-wait (lambda () (harness-tasks-test-session-name sid)) 5 "the session's name")
+      (should (equal "Fix the parser" (harness-tasks-test-session-name sid)))
+      (should-not (harness-tasks-test-name id))
+      (should (eq 'active (harness-tasks-test-state id)))
+      (harness-tasks-test-release sid)
+      (harness-tasks-test-wait-state id 'done))))
+
+(ert-deftest harness-tasks-start-never-waits-for-the-title ()
+  "A waiting task starts as soon as a slot frees, its title come or not.
+The title names its session when it comes."
+  (harness-tasks-test-with-titles nil
+    (let ((harness-tasks-max-running 1))
+      (let* ((first (harness-tasks-test-submit "fix the parser"))
+             (second (harness-tasks-test-submit "export the orders as CSV"))
+             (first-sid (plist-get (harness-tasks-test-task first) :session)))
+        (should (= 2 (length harness-tasks-test--titles)))
+        (harness-tasks-test-release first-sid)
+        (harness-tasks-test-wait-state first 'done)
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task second) :session)) 5 "the second to start")
+        (let ((sid (plist-get (harness-tasks-test-task second) :session)))
+          (harness-tasks-test-turn sid)
+          (should-not (harness-tasks-test-session-name sid))
+          (harness-tasks-test-answer (harness-tasks-test-title-request "export the orders as CSV")
+                                     "Export orders as CSV")
+          (harness-test-wait (lambda () (harness-tasks-test-session-name sid)) 5 "the session's name")
+          (should (equal "Export orders as CSV" (harness-tasks-test-session-name sid)))
+          (should (= 2 (length harness-tasks-test--titles)))
+          (harness-tasks-test-release sid)
+          (harness-tasks-test-wait-state second 'done))))))
+
+(ert-deftest harness-tasks-backlog-task-named-from-its-request ()
+  "A task for the backlog is named from the words it was written up from.
+Its write-up's session takes the title, and keeps it through the
+write-up and the work."
+  (harness-tasks-test-with-titles (lambda (_request) "Handle nested quotes")
+    (let* ((id (harness-tasks-test-refine "the parser chokes on nested quotes"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-test-wait (lambda () (harness-tasks-test-session-name sid)) 5 "the write-up's name")
+      (should (equal "Handle nested quotes" (harness-tasks-test-name id)))
+      (should (equal "Handle nested quotes" (harness-tasks-test-session-name sid)))
+      (should (equal '("the parser chokes on nested quotes")
+                     (mapcar #'harness-tasks-test--quoted harness-tasks-test--titles)))
+      (should (string-prefix-p "naming-" (plist-get (plist-get (car harness-tasks-test--titles) :session) :id)))
+      (harness-tasks-test-release sid harness-tasks-test-write-up)
+      (harness-tasks-test-wait-state id 'pending)
+      (should (equal harness-tasks-test-write-up (plist-get (harness-tasks-test-task id) :prompt)))
+      (harness-call 'task/start id)
+      (harness-tasks-test-turn sid)
+      (should (equal "Handle nested quotes" (harness-tasks-test-session-name sid)))
+      (should (= 1 (length harness-tasks-test--titles)))
+      (harness-tasks-test-release sid)
+      (harness-tasks-test-wait-state id 'done))))
+
+(ert-deftest harness-tasks-edited-prompt-named-again ()
+  "A waiting task whose prompt is edited is named again from the new one.
+The old prompt's title, should it come after the edit, is dropped."
+  (harness-tasks-test-with-titles nil
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (should (= 1 (length harness-tasks-test--titles)))
+        (harness-call 'task/update id "export the orders as CSV")
+        (harness-tasks-test-answer (harness-tasks-test-title-request "fix the parser") "Fix the parser")
+        (harness-test-wait (lambda () (harness-tasks-test-title-request "export the orders as CSV")) 5
+                           "the request for the new prompt")
+        (should-not (harness-tasks-test-name id))
+        (harness-tasks-test-answer (harness-tasks-test-title-request "export the orders as CSV")
+                                   "Export orders as CSV")
+        (harness-test-wait (lambda () (harness-tasks-test-name id)) 5 "the new name")
+        (should (equal "Export orders as CSV" (harness-tasks-test-name id)))
+        ;; Edited once named: the name goes at once, and a new one comes.
+        (let ((harness-tasks-test--title-answer (lambda (_request) "Export orders as JSON")))
+          (should-not (plist-get (harness-call 'task/update id "export the orders as JSON") :name))
+          (harness-test-wait (lambda () (equal "Export orders as JSON" (harness-tasks-test-name id)))
+                             5 "the newest name"))
+        (should (= 3 (length harness-tasks-test--titles)))
+        ;; The same prompt again asks for nothing.
+        (harness-call 'task/update id "export the orders as JSON")
+        (should (= 3 (length harness-tasks-test--titles)))
+        (should (equal "Export orders as JSON" (harness-tasks-test-name id)))))))
+
+(ert-deftest harness-tasks-untitled-tasks-named-at-start-up ()
+  "The tasks found without a title when the harness starts or reloads are named.
+They come from before tasks were named as they were submitted, or their
+naming failed.  Two requests are out at a time.  Archived tasks and
+tasks with a title are left alone."
+  (harness-tasks-test-with-titles
+      (lambda (request) (capitalize (harness-tasks-test--quoted request)))
+    (let ((harness-tasks-max-running 0)
+          (ids nil))
+      (let ((harness-naming-auto nil))
+        (setq ids (mapcar #'harness-tasks-test-submit
+                          '("fix the parser" "export the orders" "page the orders" "log slow requests" "old work"))))
+      (harness-tasks--set (nth 3 ids) :name "Log slow requests")
+      (harness-tasks--set (nth 4 ids) :archived t)
+      (should-not harness-tasks-test--titles)
+      (harness-tasks--name-untitled)
+      (should (= 2 (length harness-tasks-test--titles)))
+      (should (= 1 (length harness-tasks--naming-queue)))
+      (harness-test-wait (lambda () (cl-every #'harness-tasks-test-name (seq-take ids 3))) 5 "the names")
+      (should (equal '("Fix The Parser" "Export The Orders" "Page The Orders" "Log slow requests" nil)
+                     (mapcar #'harness-tasks-test-name ids)))
+      (should (= 3 (length harness-tasks-test--titles)))
+      (harness-tasks--name-untitled)
+      (should (= 3 (length harness-tasks-test--titles))))))
 
 ;;;; Git: worktree, merge queue, done only when merged
 

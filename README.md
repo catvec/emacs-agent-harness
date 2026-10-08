@@ -296,7 +296,8 @@ the menu's Version entry says so.
 The menu (`C-c h ?`) also renames the session (`r`). A session you
 have not named gets a short title from a cheap model as soon as you
 send its first message, while the agent works on it (see
-`harness-naming-auto` and `harness-naming-model`).
+`harness-naming-auto` and `harness-naming-model`). A task gets its
+title as soon as you submit it (see [Task board](#task-board)).
 
 With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
@@ -695,10 +696,15 @@ your checkout itself can be submitted to the **main tree** instead (the
   letter that is not one of the board's keys, and a key for the task at
   point (`s`, `e`, `m`, `v`, ...) typed off a card, which has no task to
   act on.
-- A task's session shows in the session list (`C-c h l`) under the
-  task's title, of kind task. A cheap model titles it like a ticket as
-  soon as the task starts, so the board shows that title, not the raw
-  prompt, while the task works.
+- A cheap model titles a task like a ticket as soon as you submit it,
+  from its prompt, so the board and `task_list` show that title, not the
+  raw prompt, even while the task waits for a slot; the card's second
+  line then shows the prompt. A refined task is titled from what you
+  wrote, the same way. When the task starts, its session takes the
+  title rather than being named again, and shows in the session list
+  (`C-c h l`) under it, of kind task. Nothing waits for the title: a
+  task whose naming fails starts all the same, and its session is named
+  from its first message.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.

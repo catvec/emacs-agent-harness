@@ -33,9 +33,10 @@
 ;; listed with the main checkout that worktree belongs to.
 ;;
 ;; A session that works on a task is of kind task, and is called by its
-;; task's title, as on the board, until it has a name of its own.  A
-;; session is named after its first turn, and a task does its work in
-;; that turn, so without the title every task at work would read
+;; task's title, as on the board, until it has a name of its own.  A task
+;; is named as soon as it is submitted and its session takes that name,
+;; but a session made before the name came, or whose task's naming
+;; failed, has none for a while: without the title it would read
 ;; "unnamed".  The list asks the harness for the tasks when it opens, on
 ;; `g' and after a reload or reconnect (`_harness/task/list'), and
 ;; follows `task/changed' and `task/deleted' in between.
@@ -95,7 +96,8 @@ Remote roots are not looked at.  See `harness-files-owning-checkout'."
 
 (defun harness-ui-sessions--name (s)
   "Return what the list calls session S, or nil when it has no name.
-A task's session is called by its task's title until it is named."
+A task's session is called by its task's title until it is named: the
+task's own name, else its prompt's first line."
   (let* ((task (harness-ui-sessions--task s))
          (name (if task (harness-ui-task-title task s) (plist-get s :name))))
     (and (not (harness-string-blank-p name)) name)))

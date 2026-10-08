@@ -12,6 +12,7 @@
 (defvar harness-naming--running)
 (defvar harness-naming--base-system-prompt)
 (defvar harness-naming-model)
+(defvar harness-naming--timeout)
 (defvar harness-providers)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider--forget "harness-provider")
@@ -19,6 +20,8 @@
 (declare-function harness-naming-sanitise "harness-naming")
 (declare-function harness-naming--model "harness-naming")
 (declare-function harness-naming--init "harness-naming")
+(declare-function harness-naming--shutdown "harness-naming")
+(declare-function harness-naming--name-running "harness-naming")
 
 (defmacro harness-naming-test-with (&rest body)
   "Load the state layer with the demo provider and naming, run BODY."
@@ -90,18 +93,29 @@
 (defvar harness-naming-test--held nil
   "Event functions of the turns the `naming-held' provider holds, newest first.")
 
+(defvar harness-naming-test--closed nil
+  "Ids the `naming-held' provider was told to free, newest first.")
+
+(defvar harness-naming-test--cancelled 0
+  "How many requests of the `naming-held' provider were cancelled.")
+
+(defvar harness-naming-test--answer "Fix the parser"
+  "What the `naming-held' provider answers a request beside a turn with.
+A title, or `hold' for a model that never answers.")
+
 (defun harness-naming-test--held-complete (request)
   "Answer REQUEST as the `naming-held' provider.
-A request beside a turn (`:ephemeral') gets a title at once; a turn
-waits until `harness-naming-test-release' ends it."
+A request beside a turn (`:ephemeral') gets `harness-naming-test--answer'
+at once; a turn waits until `harness-naming-test-release' ends it."
   (push request harness-naming-test--requests)
-  (let ((on-event (plist-get request :on-event)))
-    (if (plist-get request :ephemeral)
-        (run-at-time 0.005 nil (lambda ()
-                                 (funcall on-event '(:type text :delta "Fix the parser"))
-                                 (funcall on-event '(:type done :stop-reason end-turn))))
-      (push on-event harness-naming-test--held)))
-  (list :cancel #'ignore))
+  (let ((on-event (plist-get request :on-event))
+        (answer harness-naming-test--answer))
+    (cond ((not (plist-get request :ephemeral)) (push on-event harness-naming-test--held))
+          ((stringp answer)
+           (run-at-time 0.005 nil (lambda ()
+                                    (funcall on-event (list :type 'text :delta answer))
+                                    (funcall on-event '(:type done :stop-reason end-turn)))))))
+  (list :cancel (lambda () (cl-incf harness-naming-test--cancelled))))
 
 (defun harness-naming-test-release ()
   "End the turn the `naming-held' provider has held the longest."
@@ -117,14 +131,17 @@ Its models are \"big\" and \"small\", its cheap tier; see
   (declare (indent 0))
   `(progn
      (setq harness-naming-test--requests nil
-           harness-naming-test--held nil)
+           harness-naming-test--held nil
+           harness-naming-test--closed nil
+           harness-naming-test--cancelled 0)
      (harness-define-provider 'naming-held
        :label "Held turns"
        :models (lambda () (harness-resolved
                            (list (list :name "big" :pricing '(:input 10.0 :output 50.0))
                                  (list :name "small" :pricing '(:input 1.0 :output 5.0)))))
        :tiers '(:cheap "small")
-       :complete #'harness-naming-test--held-complete)
+       :complete #'harness-naming-test--held-complete
+       :close (lambda (id) (push id harness-naming-test--closed) t))
      (unwind-protect (progn ,@body)
        (remhash 'naming-held harness-providers)
        (harness-provider--forget 'naming-held))))
@@ -421,6 +438,155 @@ That version subscribed to the end of turns; its subscription goes."
         (should (equal "Plain title" (harness-await (harness-call 'naming/name id))))
         (should (null (plist-get (car requests) :provider-state)))
         (should (= 3 (length (plist-get (car requests) :messages))))))))
+
+;;;; A title for a message alone
+
+(defun harness-naming-test-rejection (promise)
+  "Wait for PROMISE to settle; return why it was rejected, or fail."
+  (harness-test-wait (lambda () (harness-promise-settled-p promise)) 5 "the request to settle")
+  (should (eq 'rejected (harness-promise-state promise)))
+  (harness-error-message (harness-promise-value promise)))
+
+(ert-deftest harness-naming-title-of-a-message-alone ()
+  "`naming/title' titles a message no session holds, as a session's first one.
+That is how a task is named while it waits for a slot.  The request is
+the one that names a session from its first message: to the cheap
+model, ephemeral, without thinking, tools or provider state, the message
+quoted.  It goes under an id of its own, which the provider is told to
+free once it is answered, and its options go to the
+`naming/system-prompt' filters: nothing is stored, no session is made."
+  (harness-naming-test-with
+    (harness-naming-test-with-held
+      (harness-add-filter 'naming/system-prompt
+                          (lambda (prompt what)
+                            (if (plist-get what :task) (concat prompt "\n\nLike a ticket.") prompt)))
+      (should (equal "Fix the parser"
+                     (harness-await (harness-call 'naming/title "  fix the parser, it drops comments \n"
+                                                  (list :model "naming-held:big" :task "t-1")))))
+      (should (= 1 (length harness-naming-test--requests)))
+      (let* ((naming (car harness-naming-test--requests))
+             (id (plist-get (plist-get naming :session) :id)))
+        (should (equal "naming-held:small" (plist-get naming :model)))
+        (should (plist-get naming :ephemeral))
+        (should (plist-get naming :no-thinking))
+        (should (null (plist-get naming :tools)))
+        (should (null (plist-get naming :provider-state)))
+        (should (string-prefix-p "naming-" id))
+        (should (equal default-directory (plist-get (plist-get naming :session) :cwd)))
+        (should (equal (concat harness-naming--base-system-prompt "\n\nLike a ticket.")
+                       (plist-get naming :system)))
+        (should (string-search "<message>\nfix the parser, it drops comments\n</message>"
+                               (harness-naming-test-opening-text naming)))
+        (should (equal (list id) harness-naming-test--closed)))
+      (should (zerop (hash-table-count harness-sessions)))
+      ;; Another request, another id; without `:task', the plain prompt.
+      (harness-await (harness-call 'naming/title "add a CSV export" '(:model "naming-held:big")))
+      (should (equal harness-naming--base-system-prompt (plist-get (car harness-naming-test--requests) :system)))
+      (should (= 2 (length (delete-dups (copy-sequence harness-naming-test--closed))))))))
+
+(ert-deftest harness-naming-title-failures-reject ()
+  "`naming/title' never signals: its promise rejects, saying why.
+A blank message, no model to ask, a provider that fails at once or
+later, and a reply without a title; the request's id is freed anyway."
+  (harness-naming-test-with
+    (should (equal "there is no message to name it from"
+                   (harness-naming-test-rejection
+                    (harness-call 'naming/title "  \n " '(:model "demo:scripted")))))
+    (let ((harness-naming-model 'auto))
+      (should (equal "no model to ask for a title"
+                     (harness-naming-test-rejection (harness-call 'naming/title "fix it" nil)))))
+    (should (equal "No provider for model nobody:m"
+                   (harness-naming-test-rejection (harness-call 'naming/title "fix it" '(:model "nobody:m")))))
+    (let ((harness-provider-demo-script-override '((:type done :stop-reason error :error "overloaded"))))
+      (should (equal "overloaded"
+                     (harness-naming-test-rejection (harness-call 'naming/title "fix it" '(:model "demo:scripted"))))))
+    (let ((harness-provider-demo-script-override '((:type text :delta " \"\" ") (:type done :stop-reason end-turn))))
+      (should (equal "the model returned no usable title"
+                     (harness-naming-test-rejection (harness-call 'naming/title "fix it" '(:model "demo:scripted"))))))
+    (let ((closed nil))
+      (harness-define-provider 'naming-broken
+        :label "Broken"
+        :complete (lambda (_request) (error "No CLI to run"))
+        :close (lambda (id) (push id closed) t))
+      (unwind-protect
+          (progn
+            (should (equal "No CLI to run"
+                           (harness-naming-test-rejection
+                            (harness-call 'naming/title "fix it" '(:model "naming-broken:m")))))
+            (should (= 1 (length closed))))
+        (remhash 'naming-broken harness-providers)
+        (harness-provider--forget 'naming-broken)))))
+
+(ert-deftest harness-naming-gives-up-on-a-silent-model ()
+  "A request naming from a first message fails after `harness-naming--timeout'.
+It is cancelled, and a title's id freed: a model that never answers
+must not keep a session nameless, which its next turn names again."
+  (harness-naming-test-with
+    (harness-naming-test-with-held
+      (let ((harness-naming-test--answer 'hold)
+            (harness-naming--timeout 0.05))
+        (should (equal "the model took too long"
+                       (harness-naming-test-rejection
+                        (harness-call 'naming/title "fix the parser" '(:model "naming-held:big")))))
+        (should (= 1 harness-naming-test--cancelled))
+        (should (= 1 (length harness-naming-test--closed)))
+        (let ((id (harness-naming-test-session :model "naming-held:big")))
+          (harness-call 'session/append id '(:kind user :content "fix the parser"))
+          (should (equal "the model took too long"
+                         (harness-naming-test-rejection (harness-call 'naming/name id '(:opening t)))))
+          (should (null (harness-naming-test-name id)))
+          (should (member "Naming failed: the model took too long" (harness-naming-test-hints id)))
+          (should (= 2 harness-naming-test--cancelled))
+          (should (zerop (hash-table-count harness-naming--running))))))))
+
+;;;; Who is named
+
+(ert-deftest harness-naming-auto-p-filter-holds-naming-off ()
+  "A `naming/auto-p' filter keeps a session from being named as its turn starts.
+Task mode holds it off a session whose task's title is on its way."
+  (harness-naming-test-with
+    (let ((held (harness-naming-test-session))
+          (other (harness-naming-test-session))
+          (harness-provider-demo-script-override harness-naming-test-script)
+          (asked nil))
+      (harness-add-filter 'naming/auto-p
+                          (lambda (verdict session)
+                            (push (plist-get session :id) asked)
+                            (and verdict (not (equal held (plist-get session :id))))))
+      (harness-await (harness-call 'agent/prompt held "refactor the parser"))
+      (harness-await (harness-call 'agent/prompt other "refactor the parser"))
+      (harness-test-wait (lambda () (harness-naming-test-name other)) 5 "the other session's name")
+      (should (equal "Refactor the parser" (harness-naming-test-name other)))
+      (should (member held asked))
+      (should (null (harness-naming-test-name held)))
+      (should-not (member "Naming session…" (harness-naming-test-hints held))))))
+
+(ert-deftest harness-naming-reload-names-running-turns ()
+  "A nameless session whose turn runs as the harness reloads is named then.
+Its turn started before naming moved to the start of turns, and a
+task's first turn lasts until the task is done: it would stay nameless
+all that time.  A named session is left alone."
+  (harness-naming-test-with
+    (harness-naming-test-with-held
+      ;; Turns that started with nothing to name them.
+      (harness-naming--shutdown)
+      (let* ((id (harness-naming-test-session :model "naming-held:big"))
+             (named (harness-naming-test-session :model "naming-held:big" :name "Given name"))
+             (turn (harness-call 'agent/prompt id "fix the parser, it drops comments"))
+             (other (harness-call 'agent/prompt named "and the lexer")))
+        (harness-test-wait (lambda () (= 2 (length harness-naming-test--held))) 5 "the turns")
+        (harness-naming--init)
+        (should (null (harness-naming-test-name id)))
+        (harness-naming--name-running)
+        (harness-test-wait (lambda () (harness-naming-test-name id)) 5 "the name")
+        (should (harness-agent-running-p id))
+        (should (equal "Fix the parser" (harness-naming-test-name id)))
+        (should (equal "Given name" (harness-naming-test-name named)))
+        (should (= 1 (cl-count-if (lambda (r) (plist-get r :ephemeral)) harness-naming-test--requests)))
+        (harness-naming-test-release)
+        (harness-naming-test-release)
+        (harness-await turn)
+        (harness-await other)))))
 
 (provide 'harness-naming-test)
 ;;; harness-naming-test.el ends here

@@ -1903,6 +1903,26 @@ the desktop (stubbed here) and the click opens the board on the card."
           (call-interactively #'harness-ui-tasks-toggle-subtitle))
         (should-not (string-match-p "Wrote the pager" (harness-ui-tasks-test--board-text board)))))))
 
+(ert-deftest harness-ui-tasks-waiting-card-shows-the-task-name ()
+  "A task is named as soon as it is submitted, so a card waiting for a slot
+shows its title, not its raw prompt; the line under it says where it is
+in line, then what its prompt asks."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'naming)
+    (let ((harness-tasks-max-running 0)
+          (harness-naming-auto t)
+          (harness-provider-demo-script-override
+           (lambda (request)
+             (if (plist-get request :ephemeral)
+                 '((:type text :delta "Schedule the nightly export") (:type done :stop-reason end-turn))
+               '((:type text :delta "Working on it.") (:type done :stop-reason end-turn))))))
+      (harness-ui-tasks-test--type-and-submit board "make the export run every night at 2am")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Schedule the nightly export")
+      (should-not (string-match-p "make the export run" (harness-ui-tasks-test--board-text board)))
+      (harness-ui-tasks-test--show-subtitle board "Schedule the nightly export")
+      (should (string-match-p "#1 in line · make the export run every night at 2am"
+                              (harness-ui-tasks-test--card-text board "Schedule the nightly export"))))))
+
 (ert-deftest harness-ui-tasks-needs-input-shows-the-recap ()
   "The needs-input column shows the recap, with the request beside it."
   (harness-ui-tasks-test-with
