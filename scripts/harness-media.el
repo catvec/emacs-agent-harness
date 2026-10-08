@@ -104,6 +104,7 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-ui-tasks-requests "harness-ui-tasks")
 (declare-function harness-ui-tasks-open "harness-ui-tasks")
 (declare-function harness-ui-tasks-reply "harness-ui-tasks")
+(declare-function harness-ui-tasks-compose-reset "harness-ui-tasks")
 (declare-function harness-ui-tasks--find "harness-ui-tasks")
 (declare-function harness-ui-report-popout "harness-ui-report")
 (declare-function harness-ui-popout-buffer "harness-ui-popout")
@@ -1907,11 +1908,15 @@ the last line."
 (defun harness-media-shot-tasks-message ()
   "The task board writing a message to the session of a task at work.
 The compose box wears the message colours and names the session it
-sends to, so it cannot be taken for the one that writes a new task."
+sends to, so it cannot be taken for the one that writes a new task.
+After the picture the box describes a new task again, as [cancel]
+leaves it: the board is the same buffer in the shots that follow, and
+the report pictures would show it still writing to that session."
   (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
   (let* ((id (plist-get (plist-get harness-media--world :tasks) :settings))
-         (window (selected-window)))
-    (with-current-buffer (window-buffer window)
+         (window (selected-window))
+         (board (window-buffer window)))
+    (with-current-buffer board
       ;; The board draws its cards as they arrive and the shared helper
       ;; errors on a card that is not there yet.
       (harness-media--wait (lambda () (ignore-errors (harness-media--goto-task-card id) t))
@@ -1922,8 +1927,10 @@ sends to, so it cannot be taken for the one that writes a new task."
       (harness-compose-set "Keep the old settings module as a thin wrapper for one release, so the deploy can roll back.")
       (set-window-point window (point-max))
       (harness-media--settle 1)
-      (set-window-start window (point-min))))
-  (harness-media--capture "tasks-message"))
+      (set-window-start window (point-min)))
+    (harness-media--capture "tasks-message")
+    (with-current-buffer board
+      (harness-ui-tasks-compose-reset))))
 
 (defun harness-media--report-layout ()
   "Show the board the whole frame high, the pagination task's report over it.
