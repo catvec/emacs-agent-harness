@@ -18,7 +18,12 @@
 ;;   are shown read-only, at their own paths and under the sandbox's
 ;;   $HOME as under the real one, so `cat ~/.claude/skills/x/SKILL.md'
 ;;   works in there as it does outside.  Remote (TRAMP) directories run
-;;   the command on that host, unwrapped.
+;;   the command on that host, unwrapped, as the ssh tool does
+;;   (tools-ssh): through `harness-tools-shell-remote-command', with
+;;   bash, or sh on a host that has none, and standard input from
+;;   /dev/null.  TRAMP runs a remote process on a pty that never passes
+;;   the end of input on, so a command reading its input would wait for
+;;   its timeout.
 ;;
 ;; - `elisp' evaluates Emacs Lisp, the Emacs-native alternative to a
 ;;   shell: the value of the last form, anything printed to
@@ -49,6 +54,22 @@
 
 (defconst harness-tools-shell--max-timeout 3600
   "Upper bound for the timeout a model may request for a bash command.")
+
+(defconst harness-tools-shell--remote-script
+  "if command -v bash >/dev/null 2>&1; then exec bash -c \"$1\" </dev/null; fi; exec sh -c \"$1\" </dev/null"
+  "Script that runs its first argument on a remote host.
+It runs it with bash, or with sh on a host without bash, and standard
+input from /dev/null: TRAMP runs a remote process on a pty that never
+passes the end of input on, so a command that read it, such as `cat'
+or a `read', would wait until it was killed.")
+
+(defun harness-tools-shell-remote-command (command)
+  "Return the program and arguments that run shell COMMAND on a remote host.
+Run them with `harness-run-command' in a TRAMP directory, standard
+error mixed into the output (its MERGE-REMOTE-STDERR); see
+`harness-tools-shell--remote-script'.  The bash and ssh tools both
+run remote commands so."
+  (list "sh" "-c" harness-tools-shell--remote-script "sh" command))
 
 ;;;; bash
 
@@ -130,21 +151,24 @@ directories it may read."
      ((not (file-directory-p cwd))
       (harness-tool-error (format "Working directory does not exist: %s" cwd)))
      (t
-      (let ((cmd (condition-case err
-                     ;; Not a login shell: the harness already has the user's
-                     ;; environment, and a login profile's side effects (starting
-                     ;; an ssh-agent, importing keys) go wrong in a sandbox, whose
-                     ;; PID namespace hides the user's processes from it.
-                     (harness-tools-shell--wrap cwd (list harness-tools-shell--program "-c" command)
-                                                (delq nil (list (harness-tools-shell--tmp-dir ctx)))
-                                                (and (not (file-remote-p cwd))
-                                                     (harness-tools-shell--skill-dirs ctx)))
-                   (error (list :error (harness-error-message err))))))
+      (let* ((remote (file-remote-p cwd))
+             (cmd (condition-case err
+                      (if remote
+                          (harness-tools-shell-remote-command command)
+                        ;; Not a login shell: the harness already has the user's
+                        ;; environment, and a login profile's side effects (starting
+                        ;; an ssh-agent, importing keys) go wrong in a sandbox, whose
+                        ;; PID namespace hides the user's processes from it.
+                        (harness-tools-shell--wrap cwd (list harness-tools-shell--program "-c" command)
+                                                   (delq nil (list (harness-tools-shell--tmp-dir ctx)))
+                                                   (harness-tools-shell--skill-dirs ctx)))
+                    (error (list :error (harness-error-message err))))))
         (if (and (consp cmd) (eq (car cmd) :error))
             (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))
           (let ((started (float-time)))
             (harness-then
              (harness-run-command cmd :cwd cwd :timeout timeout :name "harness-bash"
+                                  :merge-remote-stderr t
                                   :on-output (and report (lambda (chunk) (funcall report chunk))))
              (lambda (r)
                (let ((exit (plist-get r :exit)))
@@ -152,7 +176,8 @@ directories it may read."
                           (harness-tools-shell--format-output r timeout)
                           :meta (list :exit exit :cwd cwd
                                       :duration (- (float-time) started)
-                                      :sandboxed (not (equal (car cmd) harness-tools-shell--program))))))))))))))
+                                      :sandboxed (and (not remote)
+                                                      (not (equal (car cmd) harness-tools-shell--program)))))))))))))))
 
 (harness-define-tool "bash"
   :label "Bash"

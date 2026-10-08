@@ -112,7 +112,8 @@ and nowhere else.  With it on:
 - This Emacs's UI connects to its own harness only, never to a harness
   elsewhere (`harness-connect-remote').
 - Network tools other than web search (web_fetch, which reaches any
-  URL) are not offered to sessions, and calls to them are denied.
+  URL), and ssh, which runs commands on other machines, are not offered
+  to sessions, and calls to them are denied.
 
 Web search stays on: web_search sends its queries to the search
 provider (`harness-websearch-provider'), and model providers that
