@@ -26,7 +26,9 @@
 ;; matched from the words of the query (`harness-provider-demo--search'),
 ;; and a request to name a session the first words of its opening
 ;; message (`harness-provider-demo--title').  The companion pet gets
-;; its name and its lines (`harness-provider-demo--pet').
+;; its name and its lines (`harness-provider-demo--pet'), and the
+;; Insights report a summary of its figures
+;; (`harness-provider-demo--insights').
 
 ;;; Code:
 
@@ -97,6 +99,8 @@ answers) gives a function.")
       (harness-provider-demo--search request))
      ((string-match-p "\\`You \\(?:name newly hatched\\|are a\\) coding companion" (or (plist-get request :system) ""))
       (harness-provider-demo--pet request))
+     ((string-prefix-p "You write the Insights report" (or (plist-get request :system) ""))
+      (harness-provider-demo--insights request))
      ((string-match-p "\\btour\\b" text)
       `((:type thinking :delta "The user wants a tour. ")
         (:type thinking :delta "I will read a file, then summarise.")
@@ -359,6 +363,40 @@ tasks whose lines hold them all (or, when none does, the most of them)."
       `((:type text :delta ,answer)
         (:type usage :input ,(/ (length text) 4) :output ,(/ (length answer) 4) :cost 0.0004 :context ,(/ (length text) 4))
         (:type done :stop-reason end-turn)))))
+
+(defun harness-provider-demo--insights (request)
+  "Write an Insights summary from REQUEST's figures, as a scripted model would.
+No model: the summary names the sessions and tools the figures name, in
+the JSON the report asks for."
+  (let* ((text (harness-provider-demo--last-user-text request))
+         (line (lambda (re) (and (string-match re text) (match-string 1 text))))
+         (sessions (or (funcall line "^Sessions: \\([0-9]+\\) worked") "no"))
+         (projects (funcall line "^Projects: \\([^(;\n]+\\)"))
+         (tool (funcall line "Most used: \\([^ ,.\n]+\\)"))
+         (failing (funcall line "^Most failing: \\([^ ,.\n]+\\)"))
+         (hours (funcall line "busiest hours \\([^;\n]+\\)"))
+         (named (let (out (start 0))
+                  (while (and (< (length out) 3)
+                              (string-match "^- [^,\n]+, \\([^:\n]+\\): \\(.*\\)$" text start))
+                    (push (format "%s: %s" (match-string 1 text) (match-string 2 text)) out)
+                    (setq start (match-end 0)))
+                  (nreverse out)))
+         (answer
+          (harness-json-encode-text
+           (list :summary (format "You ran %s %s%s, and most of the work went through %s."
+                                  sessions (if (equal sessions "1") "session" "sessions")
+                                  (if projects (format ", mostly in %s" (string-trim projects)) "")
+                                  (or tool "a handful of tools"))
+                 :themes (or named (list "No sessions named a theme."))
+                 :patterns (list (if hours (format "You work most around %s." hours)
+                                   "Your hours were too few to show a pattern."))
+                 :friction (list (if failing (format "%s failed more than any other tool." failing)
+                                   "Nothing failed often enough to stand out."))
+                 :suggestions (list "Hand the long-running work to tasks, and review it in one sitting."
+                                    "Name a project's habits in its instructions file, so every session starts with them.")))))
+    `((:type text :delta ,answer)
+      (:type usage :input ,(/ (length text) 4) :output ,(/ (length answer) 4) :cost 0.0011 :context ,(/ (length text) 4))
+      (:type done :stop-reason end-turn))))
 
 (defvar harness-provider-demo--continuations (make-hash-table :test 'equal)
   "Session id -> remaining script after a tool call, resumed on the next request.")

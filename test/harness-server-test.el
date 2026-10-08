@@ -299,5 +299,52 @@ place nor starts yet another."
       (should (eq 'acp-error
                   (car (should-error (harness-test-await (harness-acp-request conn "_harness/session/list" nil) 10))))))))
 
+;;;; The Insights report
+
+(defvar harness-ui-insights--buffer-name)
+(defvar harness-ui-insights--data)
+(defvar harness-ui-insights--loading)
+(defvar harness-ui-insights--writing)
+(defvar harness-ui-insights--narrative)
+(declare-function harness-insights "harness-ui-insights")
+
+(ert-deftest harness-server-insights-out-of-process ()
+  "The Insights report is made in the harness process and comes as JSON.
+Its child Emacs reads the transcript there, the demo model writes the
+summary, and this Emacs goes on meanwhile."
+  (harness-server-test-with-process
+    (let* ((now (float-time))
+           (sid (plist-get (harness-test-await (harness-ui-request "_harness/session/create"
+                                                                   (list :cwd harness-state-directory :name "Parser work"))
+                                               30)
+                           :id)))
+      (dolist (node (list (list :kind "user" :ts (- now 600) :content "Fix the parser")
+                          (list :kind "tool-call" :ts (- now 590) :tool "bash" :call-id "c1" :input (list :command "make"))
+                          (list :kind "tool-result" :ts (- now 580) :call-id "c1" :output "error" :is-error t)
+                          (list :kind "assistant" :ts (- now 570) :content "Fixed")))
+        (harness-test-await (harness-ui-request "_harness/session/append" (list :args (list sid node))) 30))
+      (let* ((ticks nil)
+             (timer (run-at-time 0 0.05 (lambda () (push (float-time) ticks)))))
+        (unwind-protect
+            (progn
+              (harness-insights)
+              (with-current-buffer harness-ui-insights--buffer-name
+                (should (string-match-p "Gathering insights" (buffer-string)))
+                (harness-test-wait (lambda () (and harness-ui-insights--data (not harness-ui-insights--loading)
+                                                   harness-ui-insights--narrative (not harness-ui-insights--writing)))
+                                   60 "the report and its summary")
+                (let ((data harness-ui-insights--data))
+                  (should (= 1 (plist-get (plist-get data :sessions) :active)))
+                  (should (= 1 (plist-get (plist-get data :tool-totals) :errors)))
+                  (should (equal "Parser work" (plist-get (car (plist-get data :busiest-sessions)) :name))))
+                (should (string-match-p "You ran 1 session," (buffer-string)))
+                (should (string-match-p "Fix the parser" (buffer-string)))))
+          (cancel-timer timer)
+          (when (get-buffer harness-ui-insights--buffer-name) (kill-buffer harness-ui-insights--buffer-name)))
+        (let ((gaps (cl-loop for (a b) on (nreverse ticks) while b collect (- b a))))
+          (should (> (length gaps) 2))
+          (should (< (apply #'max gaps) 0.5)))
+        (harness-server-test--settle)))))
+
 (provide 'harness-server-test)
 ;;; harness-server-test.el ends here

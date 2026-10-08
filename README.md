@@ -38,6 +38,10 @@ OpenAI-compatible APIs and AWS Bedrock.
   conversations compact automatically.
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
+- **Insights.** A report on how a day, a week or a month of work with
+  the agents went: sessions, tools, permissions, tasks, cost and the
+  hours you work, with a summary your own model writes. It is built from
+  the harness's own records, so it is the same for every provider.
 - **Remote control.** The harness speaks the Agent Client Protocol
   (ACP), so another Emacs or any ACP client can drive it, including one
   on your phone, paired by scanning a QR code.
@@ -67,6 +71,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A BTW side conversation under its session | The menu, with the chat's own commands |
 | ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) | ![The task board filtered by a search in words: the query, one task matches, the archive it did and [Undo]](docs/media/tasks-search.png) |
 | Messaging a task's session: the box says so, in its colours | A search in words: the board shows what it is about, and acts |
+| ![The Insights report over 30 days: the totals, the summary the model wrote, and the messages by hour of day and by weekday](docs/media/insights.png) | ![The Insights report further down: the busiest sessions, each tool's calls and failures, the permission decisions and the tasks](docs/media/insights-activity.png) |
+| Insights: a month of work, summed up by your model | The sessions, tools, permissions and tasks behind it |
 
 ## Requirements
 
@@ -272,6 +278,7 @@ the menu's Version entry says so.
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
+| `C-c h I` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
 | `C-c h S` | `harness-settings` | Show the settings page |
@@ -736,6 +743,62 @@ test notification and says what each provider did with it.
 - Agents can notify you with the `notify` tool, for example when long
   work you asked for has finished. Clicking such a notification opens
   the session.
+
+### Insights
+
+`C-c h I` (`M-x harness-insights`) opens the Insights report in a
+buffer of its own, `*harness insights*`. It shows how a period of your
+work with the agents went, like Claude Code's `/insights`. The report is
+built from the harness's own records: the transcripts, the usage log,
+the task board and a log of permission decisions. So it reads the same
+for Claude, Copilot, OpenAI-compatible APIs, DeepSeek, Bedrock and ACP
+agents. From the top:
+
+- **Totals**: the sessions that worked, the messages you wrote, active
+  time (pauses over ten minutes left out), cost, tool calls and tasks
+  done.
+- **Summary**: a few paragraphs a model writes from the figures: what
+  you worked on, how you work, where things went wrong and what to try.
+- **Activity**: your messages by hour of day and by weekday, the days
+  you worked and your streaks.
+- **Usage**: the usage dashboard's cost chart, then cost by model and by
+  provider. These are the dashboard's figures for the same period.
+- **Projects**, **Sessions** (by kind, and the busiest), **Tools**
+  (calls, failure and denial rates, time), **Permissions** (how often
+  you were asked, and what you answered) and **Tasks** (done, merged,
+  accepted the first time, sent back, failed, merge conflicts, and the
+  tasks worth a look).
+
+| Key | Action |
+|---|---|
+| `t` | Cycle the period: today, 7 days, 30 days, all |
+| `p` | Narrow the report to one project and its git worktrees, or widen it to every project |
+| `RET` | On a session or task line, open its session |
+| `n` | Write the summary again |
+| `g` | Compute the report again |
+
+The report opens on 30 days of every project
+(`harness-ui-insights-default-period`,
+`harness-ui-insights-default-scope`). It lives in its buffer only; there
+is no export. The harness process computes the figures, with a child
+Emacs reading the transcripts. Until they arrive, the buffer shows a
+placeholder, so your Emacs never waits.
+
+By default a cheap model of your provider writes the summary: the cheap
+tier of `harness-model`, or set `harness-insights-model`. Its input is
+the figures and each session's name and first request, never code or
+tool output. A summary is kept for a day for the same period and
+project (`harness-insights-narrative-max-age`). Set
+`harness-insights-narrative` to `manual` to write one only when you
+press `n`, or to nil for none at all. When no model can be reached, for
+example offline, the report shows without a summary.
+
+A transcript says when a call was denied, but not when you were asked.
+So the harness also logs every permission decision, to
+`insights/permissions-YYYY-MM.jsonl` under the state directory, and
+keeps two years of it. The Permissions section starts from the day you
+first ran a harness with Insights. Set
+`harness-insights-record-permissions` to nil to stop the log.
 
 ### Companion pet
 
