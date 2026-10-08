@@ -523,11 +523,18 @@ Folded header lines continue the header above them."
     (harness-bedrock-test-with-fake
         `(("converse-stream" . (:status 200 :headers (("content-type" . "application/vnd.amazon.eventstream"))
                                 :chunks ,(harness-bedrock-test--chunks (harness-bedrock-test--reasoning-tool-stream) 13))))
-      (let* ((events (car (harness-bedrock-test--complete
-                           harness-bedrock-test-endpoint
-                           (append (harness-bedrock-test--request "read /tmp/x") '(:thinking "low")))))
+      (let* ((all (car (harness-bedrock-test--complete
+                        harness-bedrock-test-endpoint
+                        (append (harness-bedrock-test--request "read /tmp/x") '(:thinking "low")))))
+             (progress (cl-remove 'activity all :key (lambda (e) (plist-get e :type)) :test-not #'eq))
+             (events (cl-remove 'activity all :key (lambda (e) (plist-get e :type))))
              (req (car harness-bedrock-test--requests))
              (headers (plist-get req :headers)))
+        ;; The tool call's input says how much of it streamed, from
+        ;; nothing as the call starts, before the call goes out.
+        (should (equal '(:type activity :phase tool-input :tool "read_file" :chars 0) (car progress)))
+        (should (< (cl-position 'activity (harness-bedrock-test--types all))
+                   (cl-position 'tool-call (harness-bedrock-test--types all))))
         (should (equal '(start thinking thinking text text usage tool-call done) (harness-bedrock-test--types events)))
         (should (equal "Let me think" (mapconcat (lambda (e) (or (and (eq (plist-get e :type) 'thinking) (plist-get e :delta)) ""))
                                                  events "")))
@@ -563,6 +570,40 @@ Folded header lines continue the header above them."
                            (:text "Hello world")
                            (:toolUse (:toolUseId "tooluse_abc" :name "read_file" :input (:path "/tmp/x"))))
                          (plist-get (nth 1 (plist-get (harness-bedrock--messages history) :messages)) :content))))))))
+
+(ert-deftest harness-provider-bedrock-reports-tool-input-progress ()
+  "A tool call's input says how much of it streamed, a few times a second.
+The call itself goes out once the response ends; until then these
+`tool-input' activities show the model writing it, and the live token
+count counts them.  Each call reports from nothing as it starts, then
+at most every `harness-bedrock--progress-interval' seconds."
+  (let* ((events nil)
+         (now 100.0)
+         (stream (make-harness-bedrock--stream :on-event (lambda (e) (push e events))))
+         (feed (lambda (event payload) (harness-bedrock--on-stream-event stream event payload)))
+         (input (lambda (index json)
+                  (funcall feed "contentBlockDelta" `(:contentBlockIndex ,index :delta (:toolUse (:input ,json)))))))
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now)))
+      (funcall feed "contentBlockStart" '(:contentBlockIndex 1 :start (:toolUse (:toolUseId "t1" :name "write_file"))))
+      (funcall input 1 "{\"path\": ")
+      (setq now 100.1)
+      (funcall input 1 "\"/tmp/x\", ")
+      ;; A quarter second on, the next fragment reports all so far.
+      (setq now 100.3)
+      (funcall input 1 "\"content\": \"hi\"}")
+      ;; A second call starts from nothing again.
+      (setq now 100.35)
+      (funcall feed "contentBlockStart" '(:contentBlockIndex 2 :start (:toolUse (:toolUseId "t2" :name "bash"))))
+      (funcall input 2 "{}"))
+    (should (equal `((:type activity :phase tool-input :tool "write_file" :chars 0)
+                     (:type activity :phase tool-input :tool "write_file"
+                            :chars ,(length "{\"path\": \"/tmp/x\", \"content\": \"hi\"}"))
+                     (:type activity :phase tool-input :tool "bash" :chars 0))
+                   (reverse events)))
+    ;; The calls themselves are whole.
+    (should (equal '((:type tool-call :id "t1" :name "write_file" :input (:path "/tmp/x" :content "hi") :respond nil)
+                     (:type tool-call :id "t2" :name "bash" :input nil :respond nil))
+                   (harness-bedrock--tool-calls stream)))))
 
 (ert-deftest harness-provider-bedrock-text-reply-and-usage ()
   (harness-bedrock-test-with-keys
@@ -1092,7 +1133,8 @@ lists for the same model."
                        (cdr (assoc "x-amz-security-token" (plist-get (car (harness-bedrock-mock-requests mock)) :headers)))))
         (should (equal "/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse-stream"
                        (plist-get (car (harness-bedrock-mock-requests mock)) :path)))
-        (should (equal '(start text usage tool-call done) (harness-bedrock-test--types first)))
+        (should (equal '(start text activity usage tool-call done)
+                       (cl-remove-duplicates (harness-bedrock-test--types first) :from-end t)))
         (should (equal "Calling list_dir.\n" (harness-bedrock-test--text first)))
         (should (equal "list_dir" (plist-get call :name)))
         (should (equal '(:path "/tmp/project/") (plist-get call :input)))

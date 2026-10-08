@@ -166,6 +166,7 @@ model, status, kind and permission mode."
            (harness-ui-model-label (plist-get s :model))
            (if-let* ((m (plist-get s :permission-mode))) (harness-ui-permission-mode-label m) "")
            (harness-ui-format-context s)
+           (or (harness-ui-format-output s t) "")
            (or (harness-ui-format-rate s t) "")
            (harness-ui-format-spend s)
            (harness-relative-time (or (plist-get s :updated) 0))
@@ -295,6 +296,14 @@ which is the session's too: RET opens it, SPC pops its request out."
     (let ((x (harness-ui-session (car a))) (y (harness-ui-session (car b))))
       (< (or (harness-plist-get-in x col) 0) (or (harness-plist-get-in y col) 0)))))
 
+(defun harness-ui-sessions--tokens< (key)
+  "Return a sorter ordering entries by their sessions' token figure KEY.
+KEY is `:context' or `:output', as `harness-ui-session-tokens' gives
+them: a running session's grow as its model streams."
+  (lambda (a b)
+    (< (plist-get (harness-ui-session-tokens (harness-ui-session (car a))) key)
+       (plist-get (harness-ui-session-tokens (harness-ui-session (car b))) key))))
+
 (defun harness-ui-sessions--rate< (a b)
   "Order entries A and B by their sessions' output rates, unmeasured first."
   (< (or (plist-get (harness-ui-session-rate (car a)) :rate) -1)
@@ -345,7 +354,8 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
                 (list "Kind" 9 t)
                 (list "Model" 26 t)
                 (list "Mode" 13 t)
-                (list "Context" 12 (harness-ui-sessions--number< '(:usage :context)))
+                (list "Context" 13 (harness-ui-sessions--tokens< :context))
+                (list "Output" 7 (harness-ui-sessions--tokens< :output) :right-align t)
                 (list "Tok/s" 6 #'harness-ui-sessions--rate< :right-align t)
                 (list "Cost" 10 #'harness-ui-sessions--spend<)
                 (list "Updated" 9 (harness-ui-sessions--number< '(:updated)))
@@ -422,6 +432,44 @@ whose session is gone goes to the first row."
   "Redraw the list, which shows output rates."
   (when (get-buffer harness-ui-sessions--buffer-name)
     (harness-ui-sessions--on-changed)))
+
+(defconst harness-ui-sessions--live-interval 0.5
+  "Least seconds between two redraws of the list for growing token figures.")
+
+(defvar harness-ui-sessions--live-timer nil
+  "Timer of the redraw the list's growing token figures wait for, or nil.")
+
+(defun harness-ui-sessions--tokens-shown-p (id)
+  "Non-nil when the list shows session ID's token figures as they are.
+That is when its Context and Output cells read as they would now, or
+the list does not show the session at all."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (let ((entry (cadr (assoc id (and (listp tabulated-list-entries) tabulated-list-entries))))
+          (session (harness-ui-session id))
+          (context (cl-position "Context" tabulated-list-format :key #'car :test #'equal))
+          (output (cl-position "Output" tabulated-list-format :key #'car :test #'equal)))
+      (or (not (and entry session context output))
+          (and (equal (substring-no-properties (aref entry context))
+                      (substring-no-properties (harness-ui-format-context session)))
+               (equal (substring-no-properties (aref entry output))
+                      (substring-no-properties (or (harness-ui-format-output session t) ""))))))))
+
+(defun harness-ui-sessions--live-redraw ()
+  "Redraw the list for the token figures that grew."
+  (setq harness-ui-sessions--live-timer nil)
+  (harness-ui-sessions--redraw))
+
+(defun harness-ui-sessions--on-live (id _live)
+  "Redraw the list soon if session ID's token figures read otherwise now.
+They grow a few times a second while its turn streams; the list redraws
+for them at most every `harness-ui-sessions--live-interval' seconds, all
+the sessions that grew meanwhile at once.  ID nil, after every session's
+figures were fetched again, redraws it as well."
+  (when (and (get-buffer harness-ui-sessions--buffer-name)
+             (not (timerp harness-ui-sessions--live-timer))
+             (or (null id) (not (harness-ui-sessions--tokens-shown-p id))))
+    (setq harness-ui-sessions--live-timer
+          (run-at-time harness-ui-sessions--live-interval nil #'harness-ui-sessions--live-redraw))))
 
 ;;;; Tasks
 
@@ -663,6 +711,7 @@ the list at once, before its session says it is no longer blocked."
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)
   (add-hook 'harness-ui-pending-changed-hook #'harness-ui-sessions--on-pending)
   (add-hook 'harness-ui-rate-functions #'harness-ui-sessions--on-rate)
+  (add-hook 'harness-ui-live-functions #'harness-ui-sessions--on-live)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--redraw)
   ;; After a reload or reconnect the tasks may be another harness's.
   (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--fetch-tasks)

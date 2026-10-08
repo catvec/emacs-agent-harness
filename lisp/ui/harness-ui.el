@@ -432,6 +432,7 @@ initialize: one it let go of for another closes on purpose."
                     (harness-ui-refresh-models)
                     (harness-ui-refresh-quotas)
                     (harness-ui-refresh-rates)
+                    (harness-ui-refresh-live)
                     (run-hooks 'harness-ui-connected-hook))
                   (lambda (e)
                     (when (eq conn harness-ui-connection)
@@ -636,6 +637,8 @@ answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
          (harness-ui--store-quota (car args) (cadr args)))
        (when (equal event "usage/rate-updated")
          (harness-ui--store-rate (car args) (cadr args)))
+       (when (equal event "usage/live-updated")
+         (harness-ui--store-live (car args) (cadr args)))
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
@@ -796,10 +799,13 @@ yet: it starts after the init file, with the value set there."
 (defvar harness-ui--sessions (make-hash-table :test 'equal)
   "Session id -> latest session plist (wire shape).")
 
+(defvar harness-ui--live)               ; The live token cache, below.
+
 (defun harness-ui-cache-session (session)
   "Record SESSION (a wire plist) in the cache and notify listeners."
   (when-let* ((id (plist-get session :id)))
     (puthash id session harness-ui--sessions)
+    (harness-ui--settle-live session)
     (run-hooks 'harness-ui-sessions-changed-hook)))
 
 (defalias 'harness-ui--cache-session #'harness-ui-cache-session)
@@ -807,6 +813,7 @@ yet: it starts after the init file, with the value set there."
 (defun harness-ui--forget-session (id)
   (remhash id harness-ui--sessions)
   (harness-ui--store-rate id nil)
+  (harness-ui--store-live id nil)
   (run-hooks 'harness-ui-sessions-changed-hook))
 
 (defun harness-ui-session (id)
@@ -825,6 +832,9 @@ yet: it starts after the init file, with the value set there."
                    (lambda (sessions)
                      (clrhash harness-ui--sessions)
                      (dolist (s sessions) (puthash (plist-get s :id) s harness-ui--sessions))
+                     (maphash (lambda (id _)
+                                (harness-ui--settle-live (or (gethash id harness-ui--sessions) (list :id id))))
+                              harness-ui--live)
                      (run-hooks 'harness-ui-sessions-changed-hook)
                      (when callback (funcall callback sessions)))))
 
@@ -1087,6 +1097,85 @@ as `usage/rate' returns it."
                      (run-hook-with-args 'harness-ui-rate-functions nil nil)
                      (when callback (funcall callback rates)))
                    #'ignore))
+
+;;;; Live token cache
+
+;; While a session's turn runs, the harness counts its tokens as they
+;; stream (see `usage/live' in harness-usage.el); the UI keeps each
+;; running session's latest figures, fetched on connect and then
+;; updated from `usage/live-updated' events, which come a few times a
+;; second at most.  The event that ends a turn's count can arrive before
+;; the session's new totals do (the harness pushes sessions after a
+;; short debounce), so the last figures stand in for those totals while
+;; the cache still shows the session running.
+
+(defvar harness-ui--live (make-hash-table :test 'equal)
+  "Session id -> its live token figures, the plist `usage/live' returns.
+An entry with `:ended' holds the last figures of a turn that ended, until
+the cache shows the session no longer running.")
+
+(defvar harness-ui-live-functions nil
+  "Functions called with (SESSION-ID LIVE) after live token figures change.
+LIVE is the session's new figures, nil once its turn ended.  SESSION-ID
+is nil after the whole cache was fetched again.")
+
+(defun harness-ui-session-live (id)
+  "Return the live token figures of session ID while its turn runs, or nil.
+The plist is (:context N :output N :estimated N), as `usage/live'
+returns it."
+  (let ((live (gethash id harness-ui--live)))
+    (and live (not (plist-get live :ended)) live)))
+
+(defun harness-ui--store-live (id live)
+  "Cache LIVE as session ID's live token figures; run `harness-ui-live-functions'.
+LIVE nil ends the count: the last figures stay while the cached session
+still runs, so its figures do not drop until its new totals arrive."
+  (when (stringp id)
+    (let ((last (gethash id harness-ui--live))
+          (session (gethash id harness-ui--sessions)))
+      (cond (live (puthash id live harness-ui--live))
+            ((and last (equal (plist-get session :status) "running"))
+             (puthash id (append (list :ended t) (harness-plist-remove last :ended)) harness-ui--live))
+            (t (remhash id harness-ui--live))))
+    (run-hook-with-args 'harness-ui-live-functions id live)))
+
+(defun harness-ui--settle-live (session)
+  "Forget the ended count of SESSION, a wire plist, once it no longer runs."
+  (let ((id (plist-get session :id)))
+    (when (and (plist-get (gethash id harness-ui--live) :ended)
+               (not (equal (plist-get session :status) "running")))
+      (remhash id harness-ui--live))))
+
+(defun harness-ui-refresh-live (&optional callback)
+  "Fetch the live token figures of every running session, then call CALLBACK."
+  (harness-ui-call "_harness/usage/live-all" nil
+                   (lambda (all)
+                     (clrhash harness-ui--live)
+                     (dolist (live all)
+                       (when-let* ((id (plist-get live :session)))
+                         (puthash id (harness-plist-remove live :session) harness-ui--live)))
+                     (run-hook-with-args 'harness-ui-live-functions nil nil)
+                     (when callback (funcall callback all)))
+                   #'ignore))
+
+(defun harness-ui-session-tokens (session)
+  "Return the token figures of SESSION, a wire plist.
+The value is (:context N :output N :estimated N).
+CONTEXT is the size of its conversation, the prompt of its latest
+request plus what that request wrote, and OUTPUT its output tokens.
+While its turn runs they grow as its model streams, ESTIMATED of them
+reckoned from what streamed since its provider last reported usage;
+otherwise they are its totals."
+  (let ((live (gethash (plist-get session :id) harness-ui--live)))
+    (if (and live (or (not (plist-get live :ended))
+                      (equal (plist-get session :status) "running")))
+        (list :context (or (plist-get live :context) 0)
+              :output (or (plist-get live :output) 0)
+              :estimated (or (plist-get live :estimated) 0))
+      (let ((usage (plist-get session :usage)))
+        (list :context (+ (or (plist-get usage :context) 0) (or (plist-get usage :last-output) 0))
+              :output (or (plist-get usage :output) 0)
+              :estimated 0)))))
 
 (defun harness-ui-session-billing (session)
   "Return how SESSION's calls are paid, a symbol or nil.
@@ -1392,14 +1481,46 @@ window in the frame and moves the button under the mouse until it is
 hard to click.  Build `help-echo' text from parts through this."
   (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim (or text ""))))
 
+(defun harness-ui-tokens-help (tokens &optional window)
+  "Return the one-line tooltip of a session's token figures TOKENS.
+TOKENS is what `harness-ui-session-tokens' returns; WINDOW the
+session's context window, when the context is shown against it."
+  (let ((estimated (plist-get tokens :estimated)))
+    (harness-ui-one-line
+     (concat (format "Context tokens in use: %s%s; output tokens: %s."
+                     (harness-format-tokens (plist-get tokens :context))
+                     (if window (format " of a %s window" (harness-format-tokens window)) "")
+                     (harness-format-tokens (plist-get tokens :output)))
+             (if (and (numberp estimated) (> estimated 0))
+                 (format " ~%s of them estimated from what streamed since the provider last reported usage, a token for every four characters."
+                         (harness-format-tokens estimated))
+               "")))))
+
 (defun harness-ui-format-context (session)
-  "Return \"12.3k/200k\" for SESSION with the warning face applied."
-  (let* ((usage (plist-get session :usage))
-         (context (or (plist-get usage :context) 0))
+  "Return \"12.3k/200k\" for SESSION with the warning face applied.
+The tokens in use are the size of SESSION's conversation.  While it runs
+they grow as its model streams; \"~\" marks a figure partly estimated
+from what streamed since its provider last reported usage."
+  (let* ((tokens (harness-ui-session-tokens session))
+         (context (plist-get tokens :context))
          (window (plist-get session :context-window)))
-    (propertize (format "%s/%s" (harness-format-tokens context) (harness-format-tokens window))
+    (propertize (format "%s%s/%s" (if (> (plist-get tokens :estimated) 0) "~" "")
+                        (harness-format-tokens context) (harness-format-tokens window))
                 'face (harness-ui-context-face context window)
-                'help-echo "Context tokens in use / context window")))
+                'help-echo (harness-ui-tokens-help tokens window))))
+
+(defun harness-ui-format-output (session &optional bare)
+  "Return SESSION's output tokens as \"3.4k out\", or nil when it wrote none.
+BARE leaves out the unit.  While SESSION runs the figure grows as its
+model streams; \"~\" marks it partly estimated, as in
+`harness-ui-format-context'."
+  (let* ((tokens (harness-ui-session-tokens session))
+         (output (plist-get tokens :output)))
+    (when (> output 0)
+      (propertize (concat (if (> (plist-get tokens :estimated) 0) "~" "")
+                          (harness-format-tokens output)
+                          (if bare "" " out"))
+                  'help-echo (harness-ui-tokens-help tokens)))))
 
 (defun harness-ui-format-model-window (model)
   "Return the context window of catalogue entry MODEL as text: \"200k\".

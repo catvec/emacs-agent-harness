@@ -150,9 +150,90 @@ Only a line of the session's own: the one saying what it waits on."
          (harness-ui-redraw-hook nil)
          (harness-ui-sessions-changed-hook nil)
          (harness-ui-pending-changed-hook nil)
-         (harness-ui-rate-functions nil))
+         (harness-ui-rate-functions nil)
+         (harness-ui-live-functions nil))
      (harness-ui-sessions--init)
-     ,@body))
+     (unwind-protect
+         (progn ,@body)
+       (when (timerp harness-ui-sessions--live-timer)
+         (cancel-timer harness-ui-sessions--live-timer))
+       (setq harness-ui-sessions--live-timer nil))))
+
+(ert-deftest harness-ui-sessions-show-token-figures ()
+  "The Context and Output columns show each session's token figures.
+They sort by the figures.  A running session's grow as its model
+streams: the list redraws for them at most every half second, all the
+sessions that grew at once, and not at all while they read the same.
+They do not drop when the count ends before the session's new totals
+arrive."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (let ((harness-ui--live (make-hash-table :test 'equal))
+            (redraws 0))
+        (harness-ui-sessions-test--add "busy" root :status "running"
+                                       :usage (list :cost 0 :context 1000 :last-output 200 :output 300))
+        (harness-ui-sessions-test--add "quiet" root :usage (list :cost 0 :context 50000 :output 9000))
+        (harness-ui-sessions-test--add "fresh" root)
+        (let ((default-directory root)) (harness-sessions))
+        (advice-add 'harness-ui-sessions--redraw :before (lambda () (cl-incf redraws))
+                    '((name . harness-ui-sessions-test-count)))
+        (unwind-protect
+            (with-current-buffer harness-ui-sessions--buffer-name
+              (let* ((column (lambda (name) (cl-position name tabulated-list-format :key #'car :test #'equal)))
+                     (cell (lambda (id name)
+                             (substring-no-properties
+                              (aref (cadr (assoc id tabulated-list-entries)) (funcall column name)))))
+                     (sorted (lambda (name)
+                               (mapcar #'car (sort (copy-sequence tabulated-list-entries)
+                                                   (nth 2 (aref tabulated-list-format (funcall column name))))))))
+                (should (equal "1.2k/200k" (funcall cell "busy" "Context")))
+                (should (equal "300" (funcall cell "busy" "Output")))
+                (should (equal "50.0k/200k" (funcall cell "quiet" "Context")))
+                (should (equal "9.0k" (funcall cell "quiet" "Output")))
+                (should (equal "0/200k" (funcall cell "fresh" "Context")))
+                (should (equal "" (funcall cell "fresh" "Output")))
+                (should (equal '("fresh" "busy" "quiet") (funcall sorted "Context")))
+                (should (equal '("fresh" "busy" "quiet") (funcall sorted "Output")))
+                ;; The count grows: one redraw, half a second later.
+                (harness-ui--store-live "busy" '(:context 1700 :output 800 :estimated 500))
+                (let ((timer harness-ui-sessions--live-timer))
+                  (should (timerp timer))
+                  (harness-ui--store-live "busy" '(:context 1900 :output 1000 :estimated 700))
+                  (should (eq timer harness-ui-sessions--live-timer)))
+                (should (equal "1.2k/200k" (funcall cell "busy" "Context")))
+                (should (= 0 redraws))
+                (harness-test-wait (lambda () (equal "~1.0k" (funcall cell "busy" "Output")))
+                                   5 "the list to show the live count")
+                (should (= 1 redraws))
+                (should (equal "~1.9k/200k" (funcall cell "busy" "Context")))
+                (should-not harness-ui-sessions--live-timer)
+                ;; It sorts by the live figures.
+                (harness-ui--store-live "busy" '(:context 60000 :output 10000 :estimated 0))
+                (harness-test-wait (lambda () (equal "10.0k" (funcall cell "busy" "Output")))
+                                   5 "the list to show the reported count")
+                (should (equal '("fresh" "quiet" "busy") (funcall sorted "Context")))
+                (should (equal '("fresh" "quiet" "busy") (funcall sorted "Output")))
+                ;; Figures that read the same redraw nothing.
+                (setq redraws 0)
+                (harness-ui--store-live "busy" '(:context 60010 :output 10010 :estimated 0))
+                (should-not harness-ui-sessions--live-timer)
+                ;; The count ends before the totals come: the figures stay.
+                (harness-ui--store-live "busy" nil)
+                (should-not harness-ui-sessions--live-timer)
+                (should (equal "10.0k" (funcall cell "busy" "Output")))
+                (should (equal '(:context 60010 :output 10010 :estimated 0)
+                               (harness-ui-session-tokens (harness-ui-session "busy"))))
+                (should (= 0 redraws))
+                ;; The totals come with the session idle, and count from then on.
+                (harness-ui-cache-session (append (list :status "idle"
+                                                        :usage (list :cost 0 :context 61000 :last-output 1200
+                                                                     :output 10200))
+                                                  (harness-ui-session "busy")))
+                (should-not (gethash "busy" harness-ui--live))
+                (harness-test-wait (lambda () (equal "62.2k/200k" (funcall cell "busy" "Context")))
+                                   5 "the list to show the totals")
+                (should (equal "10.2k" (funcall cell "busy" "Output")))))
+          (advice-remove 'harness-ui-sessions--redraw 'harness-ui-sessions-test-count))))))
 
 (ert-deftest harness-ui-sessions-show-output-rates ()
   "The Tok/s column shows each measured session's output rate and sorts by it.
