@@ -70,6 +70,9 @@ think adaptively at an effort level named like the thinking level.")
   "Times a throttled or unavailable request is retried before it fails.
 Only a request that has not streamed anything yet is retried.")
 
+(defconst harness-bedrock--progress-interval 0.25
+  "Seconds between reports of how much of a tool call's input has streamed.")
+
 (defcustom harness-bedrock-tiers
   '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
   "Model names or id regexps Bedrock names for the common tiers.
@@ -2012,15 +2015,33 @@ A missing block is created from INIT."
     (when (stringp redacted)
       (harness-bedrock--block-put cell :redacted (concat (or (plist-get (cdr cell) :redacted) "") redacted)))))
 
+(defun harness-bedrock--tool-input-progress (stream cell &optional force)
+  "Report the size of the input STREAM has received for the tool call in CELL.
+The calls themselves go out once the response ends, so this is all that
+shows a model writing a large input, and what the live token count
+counts it by.  At most one report every
+`harness-bedrock--progress-interval' seconds per call, unless FORCE."
+  (let ((block (cdr cell))
+        (now (float-time)))
+    (when (and (plist-get block :name)
+               (let ((sent (plist-get block :sent-at)))
+                 (or force (null sent) (>= (- now sent) harness-bedrock--progress-interval))))
+      (harness-bedrock--block-put cell :sent-at now)
+      (harness-bedrock--emit stream (list :type 'activity :phase 'tool-input :tool (plist-get block :name)
+                                          :chars (length (or (plist-get block :json) "")))))))
+
 (defun harness-bedrock--on-stream-event (stream event payload)
   "Handle a ConverseStream EVENT with its PAYLOAD for STREAM."
   (let ((index (or (plist-get payload :contentBlockIndex) 0)))
     (pcase event
       ("contentBlockStart"
        (when-let* ((tool (harness-plist-get-in payload '(:start :toolUse))))
-         (harness-bedrock--block stream index
-                                 (list :type 'tool :id (plist-get tool :toolUseId)
-                                       :name (plist-get tool :name) :json ""))))
+         (harness-bedrock--tool-input-progress
+          stream
+          (harness-bedrock--block stream index
+                                  (list :type 'tool :id (plist-get tool :toolUseId)
+                                        :name (plist-get tool :name) :json ""))
+          t)))
       ("contentBlockDelta"
        (let ((delta (plist-get payload :delta)))
          (cond
@@ -2030,7 +2051,8 @@ A missing block is created from INIT."
            (let ((cell (harness-bedrock--block stream index '(:type tool :json ""))))
              (harness-bedrock--block-put
               cell :json (concat (or (plist-get (cdr cell) :json) "")
-                                 (or (harness-plist-get-in delta '(:toolUse :input)) "")))))
+                                 (or (harness-plist-get-in delta '(:toolUse :input)) "")))
+             (harness-bedrock--tool-input-progress stream cell)))
           ((plist-get delta :reasoningContent)
            (harness-bedrock--add-reasoning stream index (plist-get delta :reasoningContent))))))
       ("messageStop"

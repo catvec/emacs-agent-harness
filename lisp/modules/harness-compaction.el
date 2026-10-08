@@ -577,7 +577,8 @@ over from the node (`harness-compaction--start-over')."
                         :cache-read (plist-get usage :cache-read)
                         :cache-write (plist-get usage :cache-write)
                         :cost (plist-get usage :cost)
-                        :context (harness-estimate-tokens content)
+                        ;; The compaction is all the conversation holds now.
+                        :context (harness-estimate-tokens content) :last-output 0
                         :model model
                         :cache-reset t))
     (harness-emit 'compaction/done session-id node)
