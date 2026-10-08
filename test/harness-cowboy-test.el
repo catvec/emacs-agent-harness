@@ -416,6 +416,180 @@ message goes all the same."
       (should (cl-some (lambda (h) (string-match-p "\\`No brief summary (.*): writing the conversation to a transcript file instead\\'" h))
                        (harness-cowboy-test--hints sid))))))
 
+;;;; Compacting unasked
+
+(defun harness-cowboy-test-fork ()
+  "Create a demo session with an answered exchange and no prompt cache of its own.
+That is what a fork of a long session starts as: the gate never finds
+it cold."
+  (let ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted") :id)))
+    (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
+    (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
+    sid))
+
+(defun harness-cowboy-test-decisions ()
+  "Start noting the `cowboy/decided' events; return the cell their args collect in.
+The newest comes first."
+  (let ((cell (list nil)))
+    (harness-on 'cowboy/decided (lambda (&rest args) (push args (car cell))))
+    cell))
+
+(ert-deftest harness-cowboy-compact-takes-the-default-and-compacts ()
+  "cowboy/compact does, unasked, what the gate does for a session nobody is asked about."
+  (harness-cowboy-test-with
+    (let ((sid (harness-cowboy-test-fork)))
+      (let ((promise (harness-call 'cowboy/compact sid)))
+        ;; There is no turn: the session is not shown at work, as the gate shows it.
+        (should-not (eq 'running (plist-get (harness-call 'session/get sid) :status)))
+        (should (eq 'brief (harness-test-await promise 10))))
+      (let ((node (car (harness-cowboy-test--compactions sid))))
+        (should (equal "brief" (harness-node-compaction-kind node)))
+        (should (string-prefix-p "SUMMARY TEXT" (plist-get node :content)))
+        (should (string-match-p "session_history" (plist-get node :content)))
+        (should (equal '(:choice "brief" :by "cold-start") (plist-get (plist-get node :meta) :cowboy))))
+      (should-not (harness-call 'question/pending sid))
+      ;; A session with no cache has no clock to say: the hint opens without one.
+      (should (cl-some (lambda (h)
+                         (string-match-p
+                          (concat "\\`No warm prompt cache holds this conversation: compacting into a brief summary"
+                                  " first, the default for a session no warm cache holds (harness-cowboy-default)\\'")
+                          h))
+                       (harness-cowboy-test--hints sid))))
+    ;; A session whose cache did lapse keeps the gate's opening.
+    (let ((sid (harness-cowboy-test-session)))
+      (should (eq 'brief (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (should (cl-some (lambda (h) (string-match-p "\\`Prompt cache cold since [^:]*:[0-9][0-9]: compacting into a brief summary first, the default for a session no warm cache holds (harness-cowboy-default)\\'" h))
+                       (harness-cowboy-test--hints sid))))))
+
+(ert-deftest harness-cowboy-compact-takes-the-default-whatever-it-is ()
+  "The default is `harness-cowboy-default', whichever of the choices; never `hold'."
+  (harness-cowboy-test-with
+    (let ((harness-cowboy-default 'fresh)
+          (sid (harness-cowboy-test-fork)))
+      (should (eq 'fresh (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (should (equal "fresh" (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid)))))
+      (should (cl-some (lambda (h) (string-match-p ": starting afresh, the default for a session no warm cache holds" h))
+                       (harness-cowboy-test--hints sid))))
+    ;; `hold' is only ever an answer: it is not a default, so the brief summary is.
+    (let ((harness-cowboy-default 'hold)
+          (sid (harness-cowboy-test-fork)))
+      (should (eq 'brief (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (should (equal "brief" (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid))))))))
+
+(ert-deftest harness-cowboy-compact-honours-the-minimum-context ()
+  "A context under `harness-cowboy-min-context' goes as it is: no decision, no hint."
+  (harness-cowboy-test-with
+    (let ((sid (harness-cowboy-test-session))
+          (decisions (harness-cowboy-test-decisions))
+          (hints nil))
+      (setq hints (harness-cowboy-test--hints sid))
+      ;; The session's context is 3020 tokens.
+      (let ((harness-cowboy-min-context 3021))
+        (should-not (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (should-not (harness-cowboy-test--compactions sid))
+      (should-not (car decisions))
+      (should (equal hints (harness-cowboy-test--hints sid)))
+      (let ((harness-cowboy-min-context 3020))
+        (should (eq 'brief (harness-test-await (harness-call 'cowboy/compact sid) 10))))
+      (should (= 1 (length (harness-cowboy-test--compactions sid))))
+      (should (= 1 (length (car decisions)))))
+    ;; With no usage to read the context is the transcript's own estimate.
+    (let ((sid (harness-cowboy-test-fork))
+          (harness-cowboy-min-context 100000))
+      (should-not (harness-test-await (harness-call 'cowboy/compact sid) 10))
+      (should-not (harness-cowboy-test--compactions sid)))))
+
+(ert-deftest harness-cowboy-compact-opens-its-hint-with-why ()
+  "WHY replaces the clock that a session with no cache of its own cannot give."
+  (harness-cowboy-test-with
+    (dolist (maker '(harness-cowboy-test-fork harness-cowboy-test-session))
+      (let ((sid (funcall maker)))
+        (should (eq 'brief (harness-test-await
+                            (harness-call 'cowboy/compact sid
+                                          :why "No prompt cache on demo:frontier holds this conversation")
+                            10)))
+        (let ((hints (harness-cowboy-test--hints sid)))
+          (should (member (concat "No prompt cache on demo:frontier holds this conversation: compacting into a brief"
+                                  " summary first, the default for a session no warm cache holds"
+                                  " (harness-cowboy-default)")
+                          hints))
+          (should-not (cl-some (lambda (h) (string-match-p "Prompt cache cold since" h)) hints)))))))
+
+(ert-deftest harness-cowboy-compact-announces-what-it-decided ()
+  "cowboy/decided fires with `cold-start', or with whom the caller names."
+  (harness-cowboy-test-with
+    (let ((decisions (harness-cowboy-test-decisions))
+          (sid (harness-cowboy-test-fork))
+          (other (harness-cowboy-test-fork)))
+      (harness-test-await (harness-call 'cowboy/compact sid) 10)
+      (should (equal (list (list sid 'brief 'cold-start)) (car decisions)))
+      (setcar decisions nil)
+      (harness-test-await (harness-call 'cowboy/compact other :by 'restart) 10)
+      (should (equal (list (list other 'brief 'restart)) (car decisions)))
+      (should (equal '(:choice "brief" :by "restart")
+                     (plist-get (plist-get (car (harness-cowboy-test--compactions other)) :meta) :cowboy)))
+      ;; The decision is the default for a session no warm cache holds, whoever named it.
+      (should (cl-some (lambda (h) (string-match-p "the default for a session no warm cache holds (harness-cowboy-default)\\'" h))
+                       (harness-cowboy-test--hints other))))))
+
+(ert-deftest harness-cowboy-compact-falls-back-as-the-gate-does ()
+  "A summary that cannot be made gives way to the transcript, and that to carrying on."
+  (harness-cowboy-test-with
+    (let ((harness-compaction-brief-model "nowhere:none")
+          (sid (harness-cowboy-test-fork)))
+      (should (eq 'brief (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (let* ((node (car (harness-cowboy-test--compactions sid)))
+             (cowboy (plist-get (plist-get node :meta) :cowboy)))
+        (should (equal "transcript" (harness-node-compaction-kind node)))
+        (should (equal "brief" (plist-get cowboy :choice)))
+        (should (equal "cold-start" (plist-get cowboy :by)))
+        (should (plist-get cowboy :fallback)))
+      (should (cl-some (lambda (h) (string-match-p "\\`No brief summary (.*): writing the conversation to a transcript file instead\\'" h))
+                       (harness-cowboy-test--hints sid))))
+    ;; Nothing can be made: the conversation stays as it is, and the caller goes on.
+    (harness-register-method 'compaction/compact (lambda (&rest _) (harness-rejected '(harness-error "no way"))))
+    (let ((sid (harness-cowboy-test-fork)))
+      (should (eq 'brief (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (should-not (harness-cowboy-test--compactions sid))
+      (let ((hints (harness-cowboy-test--hints sid)))
+        (should (cl-some (lambda (h) (string-match-p "\\`No brief summary (.*no way.*): writing the conversation to a transcript" h))
+                         hints))
+        (should (cl-some (lambda (h) (string-match-p "\\`No compaction (.*no way.*): carrying on with the whole conversation\\'" h))
+                         hints))))))
+
+(ert-deftest harness-cowboy-compact-carry-on-compacts-nothing ()
+  "With carrying on the default there is a decision and a hint, and no compaction."
+  (harness-cowboy-test-with
+    (let ((harness-cowboy-default 'carry-on)
+          (decisions (harness-cowboy-test-decisions))
+          (sid (harness-cowboy-test-session)))
+      (should (eq 'carry-on (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (should-not (harness-cowboy-test--compactions sid))
+      (should (equal (list (list sid 'carry-on 'cold-start)) (car decisions)))
+      (should (cl-some (lambda (h) (string-match-p ": carrying on with the whole conversation, ~[0-9.]+k? tokens uncached, the default for a session no warm cache holds (harness-cowboy-default)\\'" h))
+                       (harness-cowboy-test--hints sid))))))
+
+(ert-deftest harness-cowboy-compact-never-rejects ()
+  "Whatever goes wrong the promise resolves, with nil when nothing was done."
+  (harness-cowboy-test-with
+    ;; A session that is not there.
+    (should-not (harness-test-await (harness-call 'cowboy/compact "no-such-session") 10))
+    ;; No estimate: the session's own usage says how large the context is.
+    (let ((sid (harness-cowboy-test-fork)))
+      (harness-register-method 'compaction/estimate (lambda (&rest _) (error "no estimate")))
+      (should (eq 'brief (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (should (= 1 (length (harness-cowboy-test--compactions sid)))))
+    ;; A compaction that signals instead of rejecting.
+    (harness-register-method 'compaction/compact (lambda (&rest _) (error "boom")))
+    (let ((sid (harness-cowboy-test-fork)))
+      (should (eq 'brief (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (should-not (harness-cowboy-test--compactions sid)))
+    ;; A session that cannot take a hint: nothing is done.
+    (harness-register-method 'session/hint (lambda (&rest _) (error "no hints")))
+    (let ((sid (harness-cowboy-test-fork)))
+      (should-not (harness-test-await (harness-call 'cowboy/compact sid) 10))
+      (should-not (harness-cowboy-test--compactions sid)))))
+
 ;;;; Reading answers
 
 (ert-deftest harness-cowboy-reads-typed-answers ()

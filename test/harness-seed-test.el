@@ -490,6 +490,123 @@ the one the shared prompt names."
           (should (member "something slow" (harness-seed-test-user-texts (plist-get fork :id))))
           (should (eq 'assistant (plist-get (car (last (harness-call 'session/nodes (plist-get fork :id)))) :kind))))))))
 
+;;;; Asking whether a seed is warm
+
+(ert-deftest harness-seed-warm-p-is-nil-with-no-seed-and-makes-none ()
+  "Nothing is a seed before `seed/fork' made it, and asking makes none."
+  (harness-seed-test-with
+    (let ((source (harness-seed-test-source)))
+      (should-not (harness-call 'seed/warm-p source harness-seed-test-model))
+      (should-not (harness-call 'seed/warm-p source harness-seed-test-model
+                                (plist-get (harness-call 'session/get source) :head)))
+      (should-not (harness-call 'seed/list))
+      ;; Not a session, not a model: nil, never an error.
+      (should-not (harness-call 'seed/warm-p "no-such-session" harness-seed-test-model))
+      (should-not (harness-call 'seed/warm-p source nil))
+      (should-not (harness-call 'seed/warm-p nil nil)))))
+
+(ert-deftest harness-seed-warm-p-names-a-warm-seed ()
+  "A seed whose cache lasts is the answer, for the node it was made at and the head it is."
+  (harness-seed-test-with
+    (let* ((source (harness-seed-test-source))
+           (node (plist-get (harness-call 'session/get source) :head))
+           (seed (plist-get (harness-seed-test-fork source) :seed)))
+      (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model)))
+      (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model node)))
+      ;; The model nil is the source's own: the seed is for another.
+      (should-not (harness-call 'seed/warm-p source nil))
+      ;; Asking is only reading: no turn, no message, no seed more.
+      (should (= 1 (harness-seed-test-turns-of seed)))
+      (should (= 0 (harness-seed-test-count seed harness-seed-warm-message)))
+      (should (equal (list seed) (harness-seed-test-seeds)))
+      ;; A fork through the seed does not change the answer.
+      (harness-seed-test-fork source)
+      (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model))))))
+
+(ert-deftest harness-seed-warm-p-is-nil-once-the-cache-lapses ()
+  "A cache that is gone, or that lapses within the warm-up margin, is not warm; nothing is sent."
+  (harness-seed-test-with
+    (let* ((source (harness-seed-test-source))
+           (seed (plist-get (harness-seed-test-fork source) :seed)))
+      (harness-seed-test-chill seed 100)
+      (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model)))
+      ;; Within `harness-seed-warm-margin' seconds, as `seed/fork' reads it.
+      (harness-seed-test-chill seed 10)
+      (should-not (harness-call 'seed/warm-p source harness-seed-test-model))
+      (harness-seed-test-chill seed)
+      (should-not (harness-call 'seed/warm-p source harness-seed-test-model))
+      ;; The seed is left as it is: not warmed, not forgotten.
+      (should (= 1 (harness-seed-test-turns-of seed)))
+      (should (equal (list seed) (harness-seed-test-seeds)))
+      ;; No `:cache' at all is cold too.
+      (cl-letf* ((get (symbol-function 'harness-method/session/get))
+                 ((symbol-function 'harness-method/session/get)
+                  (lambda (id) (plist-put (funcall get id) :cache nil))))
+        (should-not (harness-call 'seed/warm-p source harness-seed-test-model)))
+      ;; Once a fork warmed it, it is the answer again.
+      (harness-seed-test-fork source)
+      (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model))))))
+
+(ert-deftest harness-seed-warm-p-holds-for-a-seed-at-work ()
+  "A seed that runs a turn is being primed or warmed: a fork would wait for it."
+  (harness-seed-test-with
+    (let* ((source (harness-seed-test-source))
+           (seed (plist-get (harness-seed-test-fork source) :seed)))
+      (harness-seed-test-chill seed)
+      (should-not (harness-call 'seed/warm-p source harness-seed-test-model))
+      (let ((turn (harness-call 'agent/prompt seed "something slow")))
+        (should (harness-call 'agent/running seed))
+        ;; Its cache has lapsed all the same, while the turn runs.
+        (should (harness-seed--cold-p seed))
+        (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model)))
+        (harness-test-await turn))
+      ;; The turn wrote the cache again.
+      (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model))))
+    ;; The seed being primed, before there is a cache: a fork waits for the priming turn.
+    (let* ((source (harness-seed-test-source "Another"))
+           (fork (harness-call 'seed/fork source harness-seed-test-model))
+           (seed (car (harness-seed-test-seeds))))
+      (harness-test-wait (lambda () (and seed (harness-call 'agent/running seed))) 5 "the priming turn")
+      (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model)))
+      (harness-test-await fork))))
+
+(ert-deftest harness-seed-warm-p-is-nil-for-another-model-or-node ()
+  "A seed is for one (source, node, model): nothing else is warm because of it."
+  (harness-seed-test-with
+    (let* ((source (harness-seed-test-source))
+           (node (plist-get (harness-call 'session/get source) :head))
+           (seed (plist-get (harness-seed-test-fork source) :seed)))
+      (should-not (harness-call 'seed/warm-p source "demo:balanced"))
+      (should-not (harness-call 'seed/warm-p source harness-seed-test-model "n-nowhere"))
+      (should-not (harness-call 'seed/warm-p "another-source" harness-seed-test-model))
+      ;; The source moved on: its head is another node than the seed's.
+      (harness-call 'session/append source '(:kind user :content "and then?"))
+      (should-not (harness-call 'seed/warm-p source harness-seed-test-model))
+      (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model node)))
+      ;; The seed moved to another model: its cache is not the model's, and it is forgotten.
+      (harness-call 'session/update seed :model "demo:scripted" :silent t)
+      (should-not (harness-call 'seed/warm-p source harness-seed-test-model node))
+      (should-not (gethash seed harness-seed--seeds)))))
+
+(ert-deftest harness-seed-warm-p-never-signals ()
+  "A seed that is gone, or a source that is, is no answer and no error."
+  (harness-seed-test-with
+    (let* ((source (harness-seed-test-source))
+           (seed (plist-get (harness-seed-test-fork source) :seed)))
+      (should (equal seed (harness-call 'seed/warm-p source harness-seed-test-model)))
+      ;; Gone without the event.
+      (remhash seed harness-sessions)
+      (should-not (harness-call 'seed/warm-p source harness-seed-test-model))
+      ;; Deleted.
+      (let ((other (plist-get (harness-seed-test-fork source) :seed)))
+        (should (equal other (harness-call 'seed/warm-p source harness-seed-test-model)))
+        (harness-call 'session/delete other)
+        (should-not (harness-call 'seed/warm-p source harness-seed-test-model)))
+      ;; Whatever the session methods do.
+      (cl-letf (((symbol-function 'harness-method/session/get)
+                 (lambda (&rest _) (error "No sessions today"))))
+        (should-not (harness-call 'seed/warm-p source harness-seed-test-model))))))
+
 ;;;; Concurrent calls
 
 (ert-deftest harness-seed-concurrent-calls-share-one-creation ()
